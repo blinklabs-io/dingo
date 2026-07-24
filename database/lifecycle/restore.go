@@ -38,7 +38,7 @@ import (
 // (re)opening it for real use.
 //
 // snapshotDir may instead be a cloud destination URI (s3://bucket/prefix
-// or gs://bucket/prefix; see RegisterCloudDestinationScheme) — Restore
+// or gcs://bucket/prefix; see RegisterCloudDestinationScheme) — Restore
 // downloads it into a local temp directory first, then proceeds exactly
 // as it would for a local snapshotDir. This is also how a snapshot
 // created on one node can be restored onto another, since the two never
@@ -54,19 +54,39 @@ func Restore(
 	ctx context.Context,
 	snapshotDir string,
 	targetDataDir string,
-) (m Manifest, err error) {
-	if _, ok := recognizedCloudScheme(snapshotDir); ok {
-		localSnapshotDir, cleanup, downloadErr := downloadCloudSnapshot(ctx, snapshotDir)
-		if downloadErr != nil {
-			return Manifest{}, downloadErr
-		}
-		defer cleanup()
-		snapshotDir = localSnapshotDir
-	}
+) (Manifest, error) {
+	return RestoreValidated(ctx, snapshotDir, targetDataDir, nil)
+}
 
-	manifest, err := ReadManifest(snapshotDir)
+// RestoreValidated is Restore, but — when validate is non-nil — calls
+// validate(manifest) immediately after resolving the snapshot's manifest
+// and before targetDataDir is touched in any way (not even the
+// empty/absent check), returning validate's error without doing anything
+// destructive if it fails.
+//
+// This is the hook an offline caller (see internal/dblifecycle.Service.
+// Restore) uses to run Manifest.CheckCompatibility against its own
+// configured plugins/network/storage mode before committing to a
+// restore, without paying for a second cloud download to re-resolve the
+// manifest it already checked: calling PeekManifest and then Restore
+// separately would download a cloud snapshotDir twice.
+func RestoreValidated(
+	ctx context.Context,
+	snapshotDir string,
+	targetDataDir string,
+	validate func(Manifest) error,
+) (m Manifest, err error) {
+	manifest, snapshotDir, cleanup, err := resolveManifest(ctx, snapshotDir)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err != nil {
 		return Manifest{}, err
+	}
+	if validate != nil {
+		if err := validate(manifest); err != nil {
+			return Manifest{}, err
+		}
 	}
 
 	if err := requireEmptyOrAbsent(targetDataDir); err != nil {
@@ -96,6 +116,53 @@ func Restore(
 	}
 
 	return manifest, nil
+}
+
+// PeekManifest resolves snapshotDir (a local path or a cloud destination
+// URI — see Restore's doc comment) and reads its manifest, without
+// restoring anything. Intended for a caller that needs to validate a
+// snapshot's recorded plugins/network/storage mode (Manifest.
+// CheckPluginMatch, or comparing StorageMode/Network directly) against a
+// target's actual configuration before Restore ever touches
+// targetDataDir — Restore's own validateRestoredDatabase only checks the
+// manifest against itself, since it opens the restored copy using the
+// manifest's own recorded plugins, not necessarily whatever the caller
+// actually intends to run it with afterward.
+func PeekManifest(ctx context.Context, snapshotDir string) (Manifest, error) {
+	manifest, _, cleanup, err := resolveManifest(ctx, snapshotDir)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	return manifest, err
+}
+
+// resolveManifest downloads snapshotDir first if it's a cloud destination
+// URI, then reads its manifest. Returns the manifest, the resolved local
+// snapshot directory to read backup files from (== snapshotDir itself
+// when it was already local), and a cleanup func for any downloaded temp
+// directory — nil when nothing was downloaded, so callers must nil-check
+// before deferring it.
+func resolveManifest(
+	ctx context.Context,
+	snapshotDir string,
+) (manifest Manifest, resolvedDir string, cleanup func(), err error) {
+	resolvedDir = snapshotDir
+	if _, ok := recognizedCloudScheme(snapshotDir); ok {
+		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(ctx, snapshotDir)
+		if downloadErr != nil {
+			return Manifest{}, "", nil, downloadErr
+		}
+		resolvedDir = localSnapshotDir
+		cleanup = cloudCleanup
+	}
+	manifest, err = ReadManifest(resolvedDir)
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return Manifest{}, "", nil, err
+	}
+	return manifest, resolvedDir, cleanup, nil
 }
 
 // requireEmptyOrAbsent returns an error if dir exists and already contains

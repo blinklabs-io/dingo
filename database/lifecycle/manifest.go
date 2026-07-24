@@ -150,8 +150,57 @@ func (m Manifest) CheckPluginMatch(blobPlugin, metadataPlugin string) error {
 	return nil
 }
 
+// CheckCompatibility returns an error if the manifest's recorded plugins,
+// storage mode, or network are incompatible with the target values given.
+// Offline restore call sites should call this (directly, or via
+// RestoreValidated) before targetDataDir is touched in any way: unlike the
+// live-node restore path, which always opens the restored copy through
+// database.New using the node's own real configured plugins (so
+// checkNodeSettings catches a mismatch immediately), an offline restore
+// has no such automatic check — Restore's own validateRestoredDatabase
+// only opens the result using the manifest's own recorded plugins, which
+// is a self-consistency check, not a check against what the caller
+// actually intends to run the restored store with.
+func (m Manifest) CheckCompatibility(
+	blobPlugin, metadataPlugin, storageMode, network string,
+) error {
+	if err := m.CheckPluginMatch(blobPlugin, metadataPlugin); err != nil {
+		return err
+	}
+	if m.StorageMode != storageMode {
+		return fmt.Errorf(
+			"manifest storage mode %q does not match target %q",
+			m.StorageMode,
+			storageMode,
+		)
+	}
+	if m.Network != network {
+		return fmt.Errorf(
+			"manifest network %q does not match target %q",
+			m.Network,
+			network,
+		)
+	}
+	return nil
+}
+
 // WriteManifest computes m's checksum and writes it as indented JSON to
 // dir/ManifestFileName. dir must already exist.
+//
+// Written via a same-directory temp file plus an atomic rename, not a
+// direct write to the final path: a direct write truncates any existing
+// file before writing the new content, so an interruption partway
+// through would leave a corrupt, partially-written manifest.json in its
+// place. That matters most for LabelSnapshot, which rewrites the
+// manifest of an already-complete snapshot purely to update its
+// Name/Description — a truncated manifest fails ReadManifest's checksum
+// validation, and catalog scanning (ListSnapshots) treats that
+// identically to "this snapshot doesn't exist," silently disappearing an
+// otherwise perfectly good snapshot from the catalog over what should
+// have been a harmless label update. Renaming a fully-written temp file
+// over the target is atomic on the same filesystem, so a reader always
+// observes either the complete old manifest or the complete new one,
+// never a partial one.
 func WriteManifest(dir string, m Manifest) error {
 	m.FormatVersion = ManifestFormatVersion
 	sum, err := m.checksum()
@@ -164,8 +213,48 @@ func WriteManifest(dir string, m Manifest) error {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
 	path := filepath.Join(dir, ManifestFileName)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write manifest %q: %w", path, err)
+
+	tmp, err := os.CreateTemp(dir, ManifestFileName+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp manifest in %q: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	renamed := false
+	// Best-effort: if anything below fails before the rename, don't leave
+	// the temp file behind for a future WriteManifest/directory listing
+	// to trip over. No-op once renamed, since tmpPath no longer exists.
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp manifest %q: %w", tmpPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp manifest %q: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp manifest %q: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename temp manifest to %q: %w", path, err)
+	}
+	renamed = true
+
+	// A file's own fsync does not guarantee its directory entry is
+	// persisted; sync dir itself so the rename above is durable too, not
+	// just atomic.
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %q for directory sync: %w", dir, err)
+	}
+	defer dirFile.Close()
+	if err := dirFile.Sync(); err != nil {
+		return fmt.Errorf("sync directory %q: %w", dir, err)
 	}
 	return nil
 }

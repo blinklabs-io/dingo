@@ -48,12 +48,24 @@ func newRebuildableRegisterer(inner prometheus.Registerer) *rebuildableRegistere
 }
 
 func (r *rebuildableRegisterer) Register(c prometheus.Collector) error {
+	// Registering with the underlying registerer and recording c in
+	// r.collectors must be atomic as a whole, not just the append: a
+	// concurrent unregisterAll call takes its own snapshot-and-clear of
+	// r.collectors under r.mu, and if that ran between this call's
+	// (unlocked) inner.Register succeeding and its append recording c,
+	// unregisterAll's snapshot would miss c even though c is genuinely
+	// registered against the real registry -- letting it "escape" that
+	// cleanup pass. The next rebuild cycle then tries to register a fresh
+	// collector under the same metric name and hits a duplicate-
+	// registration error, since most callers (chain.NewManager,
+	// ledger.NewLedgerState, mempool.New, ...) don't handle that
+	// gracefully the way database.go's size-metric gauges do.
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err := r.inner.Register(c); err != nil {
 		return err
 	}
-	r.mu.Lock()
 	r.collectors = append(r.collectors, c)
-	r.mu.Unlock()
 	return nil
 }
 

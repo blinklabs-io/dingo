@@ -15,6 +15,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -67,23 +68,44 @@ func ResolveTargetBySlot(db *database.Database, slot uint64) (models.Block, erro
 	if slot >= tipBlock.Slot {
 		return tipBlock, nil
 	}
-	// Binary search the contiguous internal-ID space (chronological order)
-	// for the highest ID whose Slot does not exceed the target slot.
+	// Binary search the internal-ID space (chronological order) for the
+	// highest ID whose Slot does not exceed the target slot. The ID space
+	// is not guaranteed contiguous — Mithril bootstrap/drain can leave
+	// gaps of never-imported IDs (see BlockAtOrAfterIndex's doc comment)
+	// — so a mid probe uses BlockAtOrAfterIndex, which seeks forward to
+	// the next actually-indexed block instead of failing outright,
+	// mirroring how Chain's forward iterator already recovers from the
+	// same kind of gap (nextPersistentBlockAfterSparseIndex).
 	lo, hi := uint64(1), tipBlock.ID
 	var best *models.Block
 	for lo <= hi {
 		mid := lo + (hi-lo)/2
-		block, err := db.BlockByIndex(mid, nil)
+		block, err := db.BlockAtOrAfterIndex(mid, nil)
 		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				// Nothing indexed at or after mid within the whole ID
+				// space: the remaining window has no candidate.
+				hi = mid - 1
+				continue
+			}
 			return models.Block{}, fmt.Errorf(
-				"resolve target by slot: look up block at index %d: %w",
+				"resolve target by slot: look up block at or after index %d: %w",
 				mid,
 				err,
 			)
 		}
+		if block.ID > hi {
+			// The seek jumped past the current window: [mid, hi] holds no
+			// indexed block, so any answer must be below mid.
+			hi = mid - 1
+			continue
+		}
 		if block.Slot <= slot {
 			best = &block
-			lo = mid + 1
+			// block.ID, not mid+1: block.ID may be > mid if mid landed in
+			// a gap, and re-probing anywhere in (mid, block.ID) would
+			// just re-find this same block again.
+			lo = block.ID + 1
 		} else {
 			hi = mid - 1
 		}
@@ -126,22 +148,34 @@ func ResolveTargetByNumber(
 			tipBlock.Number,
 		)
 	}
+	// See ResolveTargetBySlot's doc comment for why BlockAtOrAfterIndex,
+	// not BlockByIndex, is used here: a mid probe landing on a gap in a
+	// sparse (Mithril bootstrap/drain-imported) ID space must seek
+	// forward to the next actually-indexed block instead of failing.
 	lo, hi := uint64(1), tipBlock.ID
 	for lo <= hi {
 		mid := lo + (hi-lo)/2
-		block, err := db.BlockByIndex(mid, nil)
+		block, err := db.BlockAtOrAfterIndex(mid, nil)
 		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				hi = mid - 1
+				continue
+			}
 			return models.Block{}, fmt.Errorf(
-				"resolve target by number: look up block at index %d: %w",
+				"resolve target by number: look up block at or after index %d: %w",
 				mid,
 				err,
 			)
+		}
+		if block.ID > hi {
+			hi = mid - 1
+			continue
 		}
 		switch {
 		case block.Number == number:
 			return block, nil
 		case block.Number < number:
-			lo = mid + 1
+			lo = block.ID + 1
 		default:
 			hi = mid - 1
 		}
@@ -173,11 +207,22 @@ func ResolveTargetByNumber(
 // against a database not concurrently owned by a live Chain/LedgerState
 // (the offline CLI path, or the live path after quiescing the node).
 //
-// blocksRemoved is the number of blocks deleted: tipBlock.ID - target.ID,
-// valid because block IDs are assigned contiguously (see
-// ResolveTargetByNumber's doc comment) — every ID in (target.ID, tipBlock.ID]
-// is a block DeleteBlocksAfter actually removes, so no separate count is
-// needed.
+// blocksRemoved is the number of blocks DeleteBlocksAfter actually found
+// and deleted in (target.ID, tipBlock.ID] — not simply tipBlock.ID -
+// target.ID, since that range is only an upper bound: a chain
+// bootstrapped/drained from a Mithril snapshot can leave gaps of
+// never-imported IDs in it (see DeleteBlocksAfter's own doc comment), and
+// subtracting index values there would wildly overcount how many blocks
+// actually existed to remove.
+//
+// Known narrow limitation: DeleteBlocksAfter deletes blob-store blocks by
+// ID range, while database.TruncateAfterSlot deletes metadata by slot
+// cutoff. These agree for any normal chain (slots strictly increase with
+// ID) except same-slot blocks — notably Byron epoch boundary blocks — where
+// a higher-ID block sharing target's slot would be removed from the blob
+// store (ID > target.ID) but retained in metadata (slot not > target.Slot).
+// This is pre-Shelley and, in practice, almost always below any recorded
+// Mithril trust boundary; recovering from it is not implemented today.
 func Truncate(
 	ctx context.Context,
 	db *database.Database,
@@ -206,7 +251,53 @@ func Truncate(
 		)
 	}
 
-	mithrilFloor := db.MithrilTrustBoundarySlot(nil)
+	// Confirm target is genuinely the block occupying its ID on the
+	// current genesis-to-tip lineage, not just numerically within range.
+	// ResolveTargetBySlot/ResolveTargetByNumber get this for free (they
+	// binary-search the same contiguous ID space this reads), but
+	// ResolveTargetByHash resolves purely through the hash index and has
+	// no such structural guarantee -- a hash lookup and an ID lookup
+	// agreeing here is what's actually being relied on. DeleteBlocksAfter
+	// below deletes blob-store blocks by ID range, while TruncateAfterSlot
+	// deletes metadata by slot cutoff; both describe the same rollback
+	// only when target is truly an ancestor of tipBlock; if a caller
+	// somehow supplied a target block ID/hash pair that doesn't match
+	// what's actually stored at that ID, this would fail closed instead
+	// of quietly making blob and metadata history diverge.
+	onLineage, err := db.BlockByIndex(target.ID, nil)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%w: verify target is on the current chain: %w",
+			ErrTruncateNotStarted,
+			err,
+		)
+	}
+	if !bytes.Equal(onLineage.Hash, target.Hash) {
+		return 0, fmt.Errorf(
+			"%w: target hash %x does not match the block at id=%d on the "+
+				"current chain (found hash %x) -- target is not an "+
+				"ancestor of the current tip",
+			ErrTruncateNotStarted,
+			target.Hash,
+			target.ID,
+			onLineage.Hash,
+		)
+	}
+
+	// MithrilTrustBoundarySlotStrict, not MithrilTrustBoundarySlot: this
+	// check exists to refuse a truncate that would leave the database
+	// unable to validate the first block past the boundary, so a failed
+	// read must fail the truncate closed rather than being silently
+	// treated as "no boundary recorded" and letting an unverifiable
+	// truncate through.
+	mithrilFloor, err := db.MithrilTrustBoundarySlotStrict(nil)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%w: could not verify Mithril trust boundary: %w",
+			ErrTruncateNotStarted,
+			err,
+		)
+	}
 	if mithrilFloor > 0 && target.Slot < mithrilFloor {
 		return 0, fmt.Errorf(
 			"%w: target slot %d is before the Mithril trust boundary (%d); "+
@@ -223,7 +314,8 @@ func Truncate(
 	// error or context cancellation is noticed) — so an error from here on
 	// is deliberately NOT wrapped in ErrTruncateNotStarted, unlike the
 	// validation failures above.
-	if err := DeleteBlocksAfter(ctx, db, target.ID, tipBlock.ID, batchSize); err != nil {
+	blocksDeleted, err := DeleteBlocksAfter(ctx, db, target.ID, tipBlock.ID, batchSize)
+	if err != nil {
 		return 0, fmt.Errorf("truncate: delete blocks after target: %w", err)
 	}
 
@@ -231,5 +323,5 @@ func Truncate(
 	if _, _, err := db.TruncateAfterSlot(point, mithrilFloor, nil); err != nil {
 		return 0, fmt.Errorf("truncate: truncate metadata: %w", err)
 	}
-	return tipBlock.ID - target.ID, nil
+	return blocksDeleted, nil
 }

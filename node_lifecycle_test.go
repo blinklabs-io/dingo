@@ -430,6 +430,139 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(t *testing.T)
 	}
 }
 
+// TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode
+// guards against a real half-torn-down state this package used to leave
+// the node in: quiesceForLiveLifecycleOp attempts every one of its stop
+// calls regardless of an earlier one failing, so by the time either it or
+// closeStorageForLiveLifecycleOp returns a non-nil error (e.g. because
+// ctx's deadline passed), the node is already substantially quiesced —
+// forger/mempool/connections/APIs stopped. Truncate/Restore used to just
+// return that error without attempting to resume, leaving the process
+// running but silently unresponsive with no forging, mempool, or
+// networking and no indication a restart was needed. They must instead
+// attempt reinitializeAndResume and bring the node back up on its
+// untouched original data directory.
+//
+// closeStorageForLiveLifecycleOp's deferredIndexMaintenanceDone select is
+// used here as a deterministic failure trigger: setting that channel
+// without ever closing it, combined with a ctx that expires before the
+// select is reached, forces exactly one clean, reproducible error out of
+// closeStorageForLiveLifecycleOp without needing to fake any component's
+// Stop method.
+func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(t *testing.T) {
+	const numBlocks = 10
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	oldCtx := n.ctx
+	oldDB := n.db
+
+	n.deferredIndexMaintenanceDone = make(chan struct{})
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	targetSlot := points[len(points)/2].Slot
+	_, err := n.Truncate(shortCtx, dblifecycle.TruncateTarget{Slot: &targetSlot})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "close storage")
+
+	// n.ctx (the node's own long-lived context, distinct from shortCtx
+	// above) must survive untouched, and every subsystem quiesced during
+	// the failed attempt must have been rebuilt rather than left down.
+	require.Same(t, oldCtx, n.ctx)
+	require.NoError(t, n.ctx.Err())
+	require.NotSame(t, oldDB, n.db, "storage must be reopened fresh on resume")
+	require.NotNil(t, n.db)
+	require.NotNil(t, n.mempool)
+	require.NotNil(t, n.chainsyncState)
+	require.NotNil(t, n.connManager)
+	require.NotNil(t, n.peerGov)
+
+	// Nothing was actually truncated — the failure happened before the
+	// data directory was ever touched — so every original block must
+	// still be present.
+	tip, tipErr := n.db.GetTip(nil)
+	require.NoError(t, tipErr)
+	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
+	for _, p := range points {
+		_, blockErr := database.BlockByHash(n.db, p.Hash)
+		require.NoErrorf(
+			t, blockErr,
+			"block at slot %d missing after a resumed truncate failure", p.Slot,
+		)
+	}
+}
+
+// TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure guards against
+// a real storage-lock leak (comment-16): Truncate's tmpDB (opened purely
+// to resolve the truncate target) used to only be deferred-closed AFTER
+// checking database.New's error — but database.New can return a non-nil
+// *Database alongside a non-nil, recoverable CommitTimestampError (see
+// its own doc comment, "database is available for recovery, so return it
+// with error"), and an early return on that error before the defer
+// statement executes skips the deferred Close entirely. tmpDB's badger
+// directory lock would then still be held when reinitializeAndResume's
+// reinitializeCoreStorage tries to reopen that very same data directory a
+// moment later, turning what should be a gracefully recovered
+// CommitTimestampError into a hard lock-contention failure that brings
+// the whole node down instead of resuming it.
+//
+// This reproduces exactly that CommitTimestampError condition (metadata
+// commit timestamp set without a matching blob one, mirroring
+// TestCheckCommitTimestamp_MetadataOnly in the database package) via the
+// node's own already-open db handle, then invokes Truncate with a target
+// ahead of the tip so the resulting error is classified
+// lifecycle.ErrTruncateNotStarted (nothing on disk was touched, so resume
+// is expected to succeed). If tmpDB leaked its lock, reinitializeCoreStorage's
+// own reopen attempt fails with a lock error instead of gracefully
+// recovering the very same CommitTimestampError, and reinitializeAndResume
+// fails ("resume also failed"); with the fix, it must succeed and leave
+// the node fully usable.
+func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
+	const numBlocks = 10
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	// Corrupt the on-disk commit timestamps via the node's own already-open
+	// db handle: set metadata's without touching blob's, so the NEXT fresh
+	// database.New against this same data directory (Truncate's tmpDB, and
+	// later reinitializeCoreStorage's reopen) observes a mismatch and
+	// returns a recoverable CommitTimestampError.
+	metaTxn := n.db.Metadata().Transaction()
+	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
+	require.NoError(t, metaTxn.Commit())
+
+	oldCtx := n.ctx
+	// The target itself is never actually validated: the corrupted commit
+	// timestamp above makes Truncate's tmpDB open fail before
+	// dblifecycle.ResolveTarget is ever reached, so any in-range target
+	// exercises the same path.
+	targetSlot := points[len(points)/2].Slot
+
+	_, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+	require.NotContains(
+		t, err.Error(), "resume also failed",
+		"a leaked tmpDB lock must not turn a recoverable CommitTimestampError "+
+			"into a failed resume",
+	)
+
+	// The node must have come back up fully usable, not been torn down.
+	require.Same(t, oldCtx, n.ctx)
+	require.NoError(t, n.ctx.Err())
+	require.NotNil(t, n.mempool)
+	require.NotNil(t, n.chainsyncState)
+	require.NotNil(t, n.connManager)
+	require.NotNil(t, n.peerGov)
+
+	tip, tipErr := n.db.GetTip(nil)
+	require.NoError(t, tipErr)
+	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
+}
+
 // TestLiveRestoreRebuildsStorageAndKeepsNodeUsable verifies the Restore
 // path end to end: snapshot a node's database, then restore that same
 // snapshot back onto the running node, and confirm it comes back with the

@@ -17,6 +17,7 @@ package lifecycle_test
 import (
 	"bytes"
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -26,6 +27,23 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+// cancelAfterNErrChecks is a context.Context whose Err() returns nil for
+// the first n calls, then context.Canceled for every call after that —
+// used to simulate a cancellation landing partway through a single batch,
+// deterministically, without racing a real timer against real deletes.
+type cancelAfterNErrChecks struct {
+	context.Context
+	n     int64
+	count atomic.Int64
+}
+
+func (c *cancelAfterNErrChecks) Err() error {
+	if c.count.Add(1) > c.n {
+		return context.Canceled
+	}
+	return nil
+}
 
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
@@ -72,9 +90,11 @@ func TestDeleteBlocksAfterRemovesOnlyBlocksAboveThreshold(t *testing.T) {
 		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
 	}
 
-	require.NoError(t, lifecycle.DeleteBlocksAfter(
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
 		context.Background(), db, 2, 5, 0,
-	))
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), blocksDeleted)
 
 	for id := uint64(1); id <= 2; id++ {
 		_, err := db.BlockByIndex(id, nil)
@@ -95,11 +115,13 @@ func TestDeleteBlocksAfterNoopWhenTipAtOrBelowThreshold(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	require.NoError(t, lifecycle.DeleteBlocksAfter(
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
 		context.Background(), db, 5, 1, 0,
-	))
+	)
+	require.NoError(t, err)
+	require.Zero(t, blocksDeleted)
 
-	_, err := db.BlockByIndex(1, nil)
+	_, err = db.BlockByIndex(1, nil)
 	require.NoError(t, err)
 }
 
@@ -113,9 +135,11 @@ func TestDeleteBlocksAfterRespectsSmallBatchSize(t *testing.T) {
 
 	// batchSize=1 forces multiple transactions; the end result must be the
 	// same as a single large batch.
-	require.NoError(t, lifecycle.DeleteBlocksAfter(
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
 		context.Background(), db, 3, 10, 1,
-	))
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(7), blocksDeleted)
 
 	for id := uint64(1); id <= 3; id++ {
 		_, err := db.BlockByIndex(id, nil)
@@ -124,6 +148,48 @@ func TestDeleteBlocksAfterRespectsSmallBatchSize(t *testing.T) {
 	for id := uint64(4); id <= 10; id++ {
 		_, err := db.BlockByIndex(id, nil)
 		require.ErrorIs(t, err, models.ErrBlockNotFound)
+	}
+}
+
+// TestDeleteBlocksAfterNoticesCancellationMidBatch guards against
+// comment-18's original bug: ctx was only checked once per batch (before
+// entering that batch's transaction), so with the default 10,000-block
+// batch size, a cancellation landing partway through a single large batch
+// used to sit unnoticed until the entire batch finished deleting —
+// potentially a long delay for a disaster-recovery truncate an operator
+// just asked to cancel. This uses a single batch (batchSize larger than
+// the whole block range) and a context that reports "not yet cancelled"
+// for exactly the one check made before the batch starts, then
+// "cancelled" for every check after that: with only a once-per-batch
+// check, that single pre-batch check passes and the whole batch (all
+// blocks) completes with no error; with a per-block check, the very
+// first block inside the batch observes the cancellation, so the whole
+// batch's transaction rolls back and no blocks are deleted at all.
+func TestDeleteBlocksAfterNoticesCancellationMidBatch(t *testing.T) {
+	db := newTestDB(t)
+	const numBlocks = 20
+	for id := uint64(1); id <= numBlocks; id++ {
+		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
+	}
+
+	// batchSize=0 defaults to DefaultBlockDeleteBatchSize (10,000), well
+	// above numBlocks, so DeleteBlocksAfter processes every block in a
+	// single batch/transaction.
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 1}
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, numBlocks, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(
+		t, blocksDeleted,
+		"a rolled-back batch must not be counted as deleted",
+	)
+
+	for id := uint64(1); id <= numBlocks; id++ {
+		_, err := db.BlockByIndex(id, nil)
+		require.NoErrorf(
+			t, err,
+			"block %d must survive: the whole batch's transaction must "+
+				"roll back once cancellation is noticed mid-batch", id,
+		)
 	}
 }
 
@@ -136,6 +202,7 @@ func TestDeleteBlocksAfterCanceledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := lifecycle.DeleteBlocksAfter(ctx, db, 0, 2, 0)
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, 2, 0)
 	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, blocksDeleted)
 }

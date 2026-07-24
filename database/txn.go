@@ -67,13 +67,14 @@ type Txn struct {
 }
 
 // acquireCommitBarrier holds the shared (read) side of db.commitBarrier
-// for the lifetime of a read-write Txn, from construction through
-// Commit/Rollback/Release. It must be taken before the underlying
-// blob/metadata transactions are opened below, not just around the
-// eventual commit: the metadata plugin's write connection pool is sized
-// to exactly one connection (see sqlite.database.go), so an already-BEGUN
-// but not-yet-committed transaction holds that one connection regardless
-// of whether Commit() has been called yet. Database.PauseCommits (used by
+// for the lifetime of a read-write Txn that opens a metadata write
+// transaction, from construction through Commit/Rollback/Release. It
+// must be taken before the underlying transaction is opened below, not
+// just around the eventual commit: the metadata plugin's write
+// connection pool is sized to exactly one connection (see
+// sqlite.database.go), so an already-BEGUN but not-yet-committed
+// transaction holds that one connection regardless of whether Commit()
+// has been called yet. Database.PauseCommits (used by
 // database/lifecycle.Snapshot around its blob+metadata backup calls)
 // takes the exclusive side; if this barrier were only held during Commit,
 // PauseCommits could acquire its lock while such a transaction sits
@@ -81,8 +82,24 @@ type Txn struct {
 // which needs that same one connection) would then deadlock against it —
 // the writer can't reach Commit's RLock to finish, and Snapshot can't
 // release its Lock until the backup call returns.
-func acquireCommitBarrier(t *Txn) {
-	if t.readWrite && t.db != nil {
+//
+// hasMetadataWrite must be false for a blob-only Txn (NewBlobOnlyTxn):
+// unlike sqlite's metadata store, badger natively supports concurrent
+// read-write transactions, so a blob-only Txn never contends for the
+// single connection PauseCommits protects, and its own commit never
+// writes the commit timestamp PauseCommits keeps consistent (see
+// Txn.Commit — that update only runs when both blobTxn and metadataTxn
+// are set). Acquiring the barrier here anyway would be needless *and*
+// actively dangerous: several callers (e.g. deleteUtxoBlobs,
+// deleteTxBlobs) open batched blob-only Txns while already holding an
+// outer read-write Txn open on the same goroutine. Go's sync.RWMutex
+// isn't reentrant — once a PauseCommits caller's Lock() is queued, a
+// second RLock() from the same goroutine that already holds the first
+// blocks too, and the outer Txn can never reach Commit/Rollback to
+// release the first RLock. Skipping the barrier for blob-only Txns
+// avoids that self-deadlock entirely rather than trying to detect it.
+func acquireCommitBarrier(t *Txn, hasMetadataWrite bool) {
+	if t.readWrite && hasMetadataWrite && t.db != nil {
 		t.db.commitBarrier.RLock()
 		t.barrierHeld = true
 	}
@@ -99,7 +116,7 @@ func (t *Txn) releaseCommitBarrierLocked() {
 
 func NewTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(t)
+	acquireCommitBarrier(t, db.Metadata() != nil)
 	if bs := db.Blob(); bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
@@ -124,7 +141,7 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(t)
+	acquireCommitBarrier(t, false)
 	if bs := db.Blob(); bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
@@ -133,7 +150,7 @@ func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 
 func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(t)
+	acquireCommitBarrier(t, db.Metadata() != nil)
 	if ms := db.Metadata(); ms != nil {
 		if readWrite {
 			t.metadataTxn = ms.Transaction()

@@ -143,6 +143,35 @@ func setFakeCloudBackingDir(t *testing.T, dir string) {
 	fakeCloudMu.Lock()
 	fakeCloudDir = dir
 	fakeCloudMu.Unlock()
+	t.Cleanup(func() {
+		fakeCloudMu.Lock()
+		fakeCloudDir = ""
+		fakeCloudMu.Unlock()
+	})
+}
+
+// TestFakeCloudBackingDirResetsBetweenTests guards against a leaked global:
+// setFakeCloudBackingDir used to set fakeCloudDir with no corresponding
+// reset, so whichever test happened to set it last left that directory in
+// place for every subsequent test in the package — a test that forgot to
+// call setFakeCloudBackingDir (or was reordered/shuffled ahead of the one
+// that used to set it up) could silently resolve the "faketest://" scheme
+// against a leftover directory from an unrelated test instead of failing
+// loudly. The subtest's t.Cleanup (registered by setFakeCloudBackingDir)
+// runs synchronously before t.Run returns, so fakeCloudDir must already be
+// reset by the time this checks it.
+func TestFakeCloudBackingDirResetsBetweenTests(t *testing.T) {
+	t.Run("sets it", func(t *testing.T) {
+		setFakeCloudBackingDir(t, t.TempDir())
+	})
+
+	fakeCloudMu.Lock()
+	got := fakeCloudDir
+	fakeCloudMu.Unlock()
+	require.Empty(
+		t, got,
+		"fakeCloudDir must be reset via t.Cleanup once the test that set it finishes",
+	)
 }
 
 // TestParseCloudDestinationUnknownScheme verifies that a URI whose scheme
@@ -153,10 +182,17 @@ func TestParseCloudDestinationUnknownScheme(t *testing.T) {
 }
 
 // TestParseCloudDestinationMissingHost verifies that a URI with no host
-// (bucket) segment returns an error even for a registered scheme.
+// (bucket) segment returns an error even for a registered scheme, and that
+// the error's example URIs name schemes dingo actually registers: "s3" and
+// "gcs" (destination_gcs.go registers "gcs", not "gs" — see its own doc
+// comment on why — so an error telling an operator to try "gs://..." would
+// send them to a scheme ParseCloudDestination itself rejects).
 func TestParseCloudDestinationMissingHost(t *testing.T) {
 	_, err := lifecycle.ParseCloudDestination("faketest:///prefix")
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "s3://bucket/prefix")
+	require.Contains(t, err.Error(), "gcs://bucket/prefix")
+	require.NotContains(t, err.Error(), "gs://bucket/prefix")
 }
 
 // TestParseCloudDestinationMalformed verifies that an unparseable URI

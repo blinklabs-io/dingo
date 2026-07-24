@@ -64,6 +64,7 @@ func SnapshotToCloud(
 			dir, err,
 		)
 	}
+	defer closeCloudDestination(dest)
 	if err := dest.UploadDir(ctx, dir); err != nil {
 		return manifest, fmt.Errorf(
 			"snapshot written locally to %q, but upload to %q failed: %w",

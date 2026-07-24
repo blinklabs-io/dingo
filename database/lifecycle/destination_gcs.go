@@ -45,6 +45,7 @@ func init() {
 // Credentials — same convention as database/plugin/blob/gcs, no explicit
 // service-account config here.
 type gcsDestination struct {
+	client *storage.Client
 	bucket *storage.BucketHandle
 	prefix string
 }
@@ -62,9 +63,17 @@ func newGCSDestination(uri *url.URL) (CloudDestination, error) {
 		return nil, fmt.Errorf("gcs cloud destination: create storage client: %w", err)
 	}
 	return &gcsDestination{
+		client: client,
 		bucket: client.Bucket(bucketName),
 		prefix: prefix,
 	}, nil
+}
+
+// Close implements CloudDestinationCloser: it releases the gRPC connection
+// storage.NewGRPCClient opened, which client.Bucket's returned handle above
+// doesn't itself own or expose a way to close.
+func (d *gcsDestination) Close() error {
+	return d.client.Close()
 }
 
 func (d *gcsDestination) objectKey(fileName string) string {
@@ -81,7 +90,7 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 	if err != nil {
 		return fmt.Errorf("read snapshot directory %q: %w", localDir, err)
 	}
-	for _, entry := range entries {
+	for _, entry := range orderEntriesManifestLast(entries) {
 		if !entry.Type().IsRegular() {
 			continue
 		}
@@ -130,7 +139,7 @@ func (d *gcsDestination) DownloadDir(ctx context.Context, localDir string) error
 		if d.prefix != "" {
 			fileName = strings.TrimPrefix(fileName, d.prefix+"/")
 		}
-		if fileName == "" || strings.Contains(fileName, "/") {
+		if !IsSafeCloudObjectFileName(fileName) {
 			continue
 		}
 		localPath := filepath.Join(localDir, fileName)
@@ -171,6 +180,7 @@ func (d *gcsDestination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, er
 	}
 	it := d.bucket.Objects(ctx, &storage.Query{Prefix: listPrefix, Delimiter: "/"})
 	var entries []SnapshotEntry
+	var problems []error
 	for {
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
@@ -192,15 +202,28 @@ func (d *gcsDestination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, er
 		}
 		manifest, err := d.fetchManifest(ctx, snapshotID)
 		if err != nil {
-			// A sub-path without a valid manifest is a snapshot still
-			// being written, or one that failed partway through — skip
-			// it rather than failing the whole listing, same as the
-			// local lifecycle.ListSnapshots convention.
+			// A sub-path with no manifest.json object at all
+			// (ErrCloudSnapshotNotFound) is a snapshot still being
+			// written — skip it silently, same as the local
+			// lifecycle.ListSnapshots convention. Any other fetch/parse
+			// failure (corrupted manifest, checksum mismatch, a real
+			// storage error) is not that expected case and must not be
+			// swallowed the same way: it's accumulated and returned via
+			// errors.Join alongside whatever entries were found, so a
+			// caller can learn the catalog is missing something instead
+			// of it silently looking one snapshot smaller than it is.
+			if errors.Is(err, ErrCloudSnapshotNotFound) {
+				continue
+			}
+			problems = append(
+				problems,
+				fmt.Errorf("snapshot %q: %w", snapshotID, err),
+			)
 			continue
 		}
 		entries = append(entries, SnapshotEntry{ID: snapshotID, Manifest: manifest})
 	}
-	return entries, nil
+	return entries, errors.Join(problems...)
 }
 
 // fetchManifest downloads and parses just the manifest.json for
@@ -210,6 +233,12 @@ func (d *gcsDestination) fetchManifest(ctx context.Context, snapshotID string) (
 	key := d.objectKey(path.Join(snapshotID, ManifestFileName))
 	r, err := d.bucket.Object(key).NewReader(ctx)
 	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return Manifest{}, fmt.Errorf(
+				"open gcs object %q: %w: %w",
+				key, ErrCloudSnapshotNotFound, err,
+			)
+		}
 		return Manifest{}, fmt.Errorf("open gcs object %q: %w", key, err)
 	}
 	defer r.Close()

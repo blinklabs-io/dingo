@@ -94,9 +94,14 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestRestoreRejectsPluginMismatch verifies that a manifest's recorded
-// plugins must match the target plugins via CheckPluginMatch.
-func TestRestoreRejectsPluginMismatch(t *testing.T) {
+// TestManifestCheckPluginMatch verifies Manifest.CheckPluginMatch itself:
+// it accepts the plugins a snapshot was actually taken with, and rejects
+// any other combination. This is a unit test of the check in isolation —
+// see TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget for
+// the real call site (internal/dblifecycle.Service.Restore's validate
+// hook, via lifecycle.RestoreValidated) that actually enforces it during a
+// restore.
+func TestManifestCheckPluginMatch(t *testing.T) {
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -107,4 +112,41 @@ func TestRestoreRejectsPluginMismatch(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))
 	require.Error(t, m.CheckPluginMatch("gcs", "sqlite"))
+}
+
+// TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget exercises
+// the actual restore call site a plugin mismatch is meant to protect:
+// internal/dblifecycle.Service.Restore passes a validate func (calling
+// CheckPluginMatch/CheckCompatibility) into lifecycle.RestoreValidated,
+// which — per RestoreValidated's own doc comment — must run that check
+// before targetDataDir is touched in any way, "not even the empty/absent
+// check". Unlike the old, misleadingly-named version of this test (which
+// called Manifest.CheckPluginMatch directly and never invoked Restore or
+// RestoreValidated at all), this proves the mismatch actually aborts a
+// restore attempt, and that it does so before creating targetDir.
+func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T) {
+	src := newTestDB(t)
+	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	_, err := lifecycle.Snapshot(
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test",
+	)
+	require.NoError(t, err)
+
+	targetDir := filepath.Join(t.TempDir(), "restored")
+	_, err = lifecycle.RestoreValidated(
+		context.Background(), snapshotDir, targetDir,
+		func(m lifecycle.Manifest) error {
+			return m.CheckPluginMatch("gcs", "sqlite")
+		},
+	)
+	require.Error(t, err)
+
+	_, statErr := os.Stat(targetDir)
+	require.Truef(
+		t, os.IsNotExist(statErr),
+		"a rejected validate hook must run before targetDir is created, "+
+			"got stat error: %v", statErr,
+	)
 }

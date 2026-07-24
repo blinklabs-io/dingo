@@ -15,6 +15,7 @@
 package lifecycle_test
 
 import (
+	"bytes"
 	"context"
 	"strconv"
 	"testing"
@@ -49,6 +50,29 @@ func buildTestChain(t *testing.T, n uint64) *chainFixture {
 type chainFixture struct {
 	db     *database.Database
 	blocks []models.Block
+}
+
+// buildSparseTestChain creates blocks at the given, deliberately
+// non-contiguous internal IDs (Slot/Number scaled from each ID the same
+// way testBlock does) and sets the tip to the last one -- simulating the
+// real gap Mithril bootstrap/drain import can legitimately leave in the
+// block-ID space (see database.BlockAtOrAfterIndex's doc comment and its
+// own TestBlockAtOrAfterIndexSkipsSparseIndexes).
+func buildSparseTestChain(t *testing.T, ids []uint64) *chainFixture {
+	t.Helper()
+	db := newTestDB(t)
+	blocks := make([]models.Block, 0, len(ids))
+	for _, id := range ids {
+		block := testBlock(id, byte(id))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	last := blocks[len(blocks)-1]
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
+		BlockNumber: last.Number,
+	}, nil))
+	return &chainFixture{db: db, blocks: blocks}
 }
 
 // TestResolveTargetByHash verifies that a block hash resolves to the
@@ -106,6 +130,93 @@ func TestResolveTargetByNumberAheadOfTipErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestResolveTargetBySlotSkipsSparseIndexGap guards against comment-32's
+// original gap: the binary search used to treat any missing intermediate
+// block ID as fatal, immediately erroring out instead of adapting — but
+// Mithril bootstrap/drain import can legitimately leave large gaps in
+// the block-ID sequence. A target low in the surviving ID range forces
+// the search's very first probe to land inside the gap (with tip ID
+// 1002 and a target at ID 2, the first midpoint is ~501, squarely inside
+// the empty 4-999 range) — this alone only proves missing-ID probes
+// don't hard-fail; TestResolveTargetBySlotSkipsSparseIndexGapAboveGap
+// below additionally proves the search can still find a target *above*
+// the gap, which a naive "treat a miss as answer-must-be-lower" fallback
+// (without an actual seek-forward) would get wrong.
+func TestResolveTargetBySlotSkipsSparseIndexGap(t *testing.T) {
+	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
+
+	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[1].Slot)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[1].ID, target.ID)
+}
+
+// TestResolveTargetBySlotSkipsSparseIndexGapAboveGap targets a block
+// *above* the gap (ID 1001, out of 1000-1002). A fallback that merely
+// treats a missing-ID probe as "the answer must be below this point"
+// (shrinking hi without ever seeking forward) converges toward the low
+// 1-3 range and never finds this target at all; only an actual
+// seek-forward (BlockAtOrAfterIndex) resolves it correctly.
+func TestResolveTargetBySlotSkipsSparseIndexGapAboveGap(t *testing.T) {
+	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
+
+	target, err := lifecycle.ResolveTargetBySlot(f.db, f.blocks[4].Slot)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[4].ID, target.ID)
+}
+
+// TestResolveTargetByNumberSkipsSparseIndexGap is
+// TestResolveTargetBySlotSkipsSparseIndexGap's counterpart for
+// ResolveTargetByNumber, which has the identical binary-search structure.
+func TestResolveTargetByNumberSkipsSparseIndexGap(t *testing.T) {
+	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
+
+	target, err := lifecycle.ResolveTargetByNumber(f.db, f.blocks[1].Number)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[1].ID, target.ID)
+}
+
+// TestResolveTargetByNumberSkipsSparseIndexGapAboveGap is
+// TestResolveTargetBySlotSkipsSparseIndexGapAboveGap's counterpart for
+// ResolveTargetByNumber.
+func TestResolveTargetByNumberSkipsSparseIndexGapAboveGap(t *testing.T) {
+	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
+
+	target, err := lifecycle.ResolveTargetByNumber(f.db, f.blocks[4].Number)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[4].ID, target.ID)
+}
+
+// TestTruncateReportsActualDeletedCountForSparseIndex guards against
+// comment-36's original gap: blocksRemoved used to be computed as
+// tipBlock.ID - target.ID, which is only a valid count when every ID in
+// that range is a real block — for a chain with Mithril bootstrap/drain
+// gaps, that range is merely an upper bound, and subtracting index
+// values there wildly overcounts. With a gap of ~997 missing IDs between
+// target (ID 3) and tip (ID 1002), the old formula would report 999
+// blocks removed even though only 3 (IDs 1000-1002) actually exist and
+// get deleted.
+func TestTruncateReportsActualDeletedCountForSparseIndex(t *testing.T) {
+	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
+	target := f.blocks[2] // ID 3
+
+	blocksRemoved, err := lifecycle.Truncate(context.Background(), f.db, target, 0)
+	require.NoError(t, err)
+	require.Equal(
+		t, uint64(3), blocksRemoved,
+		"must count the 3 blocks (IDs 1000-1002) actually deleted, not "+
+			"tipBlock.ID-target.ID (999)",
+	)
+
+	for _, b := range f.blocks[:3] {
+		_, err := f.db.BlockByIndex(b.ID, nil)
+		require.NoError(t, err)
+	}
+	for _, b := range f.blocks[3:] {
+		_, err := f.db.BlockByIndex(b.ID, nil)
+		require.ErrorIs(t, err, models.ErrBlockNotFound)
+	}
+}
+
 // TestTruncateRemovesBlocksAndIsIdempotentAtTip verifies that Truncate
 // removes everything past the target and is a zero-block no-op if repeated.
 func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
@@ -147,6 +258,35 @@ func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
 	aheadTarget := testBlock(99, 0x63)
 	_, err := lifecycle.Truncate(context.Background(), f.db, aheadTarget, 0)
 	require.Error(t, err)
+}
+
+// TestTruncateRejectsTargetWithMismatchedHash guards against comment-24's
+// defense-in-depth gap: ResolveTargetBySlot/ResolveTargetByNumber return a
+// block found by binary-searching the blob store's own contiguous ID
+// space, so their result is structurally guaranteed to be the block
+// genuinely occupying that ID on the current chain — but a target built
+// some other way (e.g. by hash, via ResolveTargetByHash, which has no such
+// structural guarantee) could in principle carry an ID/hash pair that
+// doesn't actually match what's stored at that ID. Truncate must verify
+// this itself rather than trust the caller, since DeleteBlocksAfter
+// deletes blob-store blocks by ID range while database.TruncateAfterSlot
+// deletes metadata by slot cutoff — the two only describe the same
+// rollback when target is genuinely the block at its own ID.
+func TestTruncateRejectsTargetWithMismatchedHash(t *testing.T) {
+	f := buildTestChain(t, 5)
+
+	target := f.blocks[2]
+	target.Hash = bytes.Repeat([]byte{0xFF}, 32) // does not match what's stored at this ID
+
+	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+
+	// Nothing must have been touched: every original block still present.
+	for _, b := range f.blocks {
+		_, err := f.db.BlockByIndex(b.ID, nil)
+		require.NoError(t, err)
+	}
 }
 
 // TestTruncateRejectsTargetBeforeMithrilBoundary verifies that a target

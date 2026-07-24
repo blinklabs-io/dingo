@@ -17,6 +17,7 @@ package badger
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"testing"
@@ -79,6 +80,44 @@ func TestRestoreRecoversFromMalformedStreamPanic(t *testing.T) {
 	garbage := bytes.NewBufferString("not a valid badger backup stream")
 	err = db.Restore(context.Background(), garbage)
 	require.Error(t, err)
+}
+
+// TestRestoreRejectsOversizedRecordLength verifies that a corrupted or
+// malicious length prefix claiming more than maxLoadRecordSize is
+// rejected with a clear error before Badger's own Load ever sees it --
+// and therefore before Load would trust it for an allocation of that
+// size, which is what could exhaust process memory and take down a live
+// node before this check existed.
+func TestRestoreRejectsOversizedRecordLength(t *testing.T) {
+	// A length prefix alone, claiming more than maxLoadRecordSize, with
+	// no payload bytes following it at all: if this weren't rejected up
+	// front, Badger's Load would try to allocate a buffer of this size
+	// before ever noticing the payload is missing.
+	var buf bytes.Buffer
+	require.NoError(t, binary.Write(&buf, binary.LittleEndian, uint64(maxLoadRecordSize)+1))
+
+	t.Run("seekable input", func(t *testing.T) {
+		db, err := New(WithDataDir(t.TempDir()))
+		require.NoError(t, err)
+		defer db.Close()
+
+		err = db.Restore(context.Background(), bytes.NewReader(buf.Bytes()))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exceeds")
+	})
+
+	t.Run("non-seekable input", func(t *testing.T) {
+		db, err := New(WithDataDir(t.TempDir()))
+		require.NoError(t, err)
+		defer db.Close()
+
+		// bytes.Buffer (unlike bytes.Reader) does not implement
+		// io.Seeker, exercising Restore's spool-to-temp-file fallback.
+		nonSeekable := bytes.NewBuffer(buf.Bytes())
+		err = db.Restore(context.Background(), nonSeekable)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exceeds")
+	})
 }
 
 func TestRestoreCanceledContext(t *testing.T) {

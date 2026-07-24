@@ -35,11 +35,14 @@ const DefaultBlockDeleteBatchSize = 10_000
 // index, distinct from the chain's Number/height field) falls in
 // (afterID, tipID], deleting bp/bi/bh keys and their metadata companion via
 // BlobStore.DeleteBlock. Deletes are batched batchSize per blob transaction
-// instead of one transaction per block.
-//
-// IDs are assigned sequentially by BlockCreate (one higher than the
-// previous highest), so the range (afterID, tipID] is contiguous for any
-// chain built entirely through BlockCreate.
+// instead of one transaction per block. Returns the number of blocks
+// actually found and deleted, which may be far fewer than tipID-afterID:
+// IDs are assigned sequentially by BlockCreate for any chain built
+// entirely through it, but a chain bootstrapped/drained from a Mithril
+// snapshot can leave large gaps of never-imported IDs in that range (see
+// database.BlockAtOrAfterIndex's doc comment) — every ID in (afterID,
+// tipID] is only an upper bound on how many blocks exist there, not a
+// count of how many actually do.
 //
 // This is a bulk-performance variant of what Chain.Rollback already does
 // one block at a time via ChainManager.removeBlockByIndex — it performs no
@@ -52,24 +55,34 @@ func DeleteBlocksAfter(
 	afterID uint64,
 	tipID uint64,
 	batchSize int,
-) error {
+) (blocksDeleted uint64, err error) {
 	if batchSize <= 0 {
 		batchSize = DefaultBlockDeleteBatchSize
 	}
 	if tipID <= afterID {
-		return nil
+		return 0, nil
 	}
 	for start := afterID + 1; start <= tipID; {
 		if err := ctx.Err(); err != nil {
-			return err
+			return blocksDeleted, err
 		}
 		end := start + uint64(batchSize) - 1
 		if end > tipID {
 			end = tipID
 		}
+		var batchDeleted uint64
 		txn := db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			for n := start; n <= end; n++ {
+				// Checked every block, not just once per batch: batchSize
+				// defaults to 10,000, so a ctx cancellation landing mid-batch
+				// would otherwise sit unnoticed until the rest of the
+				// current batch finished deleting — a real, potentially
+				// long delay for a disaster-recovery truncate an operator
+				// just asked to cancel.
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				block, err := db.BlockByIndex(n, txn)
 				if err != nil {
 					if errors.Is(err, models.ErrBlockNotFound) {
@@ -88,13 +101,19 @@ func DeleteBlocksAfter(
 						err,
 					)
 				}
+				batchDeleted++
 			}
 			return nil
 		})
 		if err != nil {
-			return err
+			// batchDeleted only reflects this batch's own uncommitted
+			// attempt; txn.Do rolled it back on error, so none of it
+			// actually took effect and must not be added to the running
+			// total.
+			return blocksDeleted, err
 		}
+		blocksDeleted += batchDeleted
 		start = end + 1
 	}
-	return nil
+	return blocksDeleted, nil
 }

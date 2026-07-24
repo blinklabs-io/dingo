@@ -265,11 +265,6 @@ func (h *databaseServiceHandler) lookupOperation(id string) (*operation, error) 
 	return op, nil
 }
 
-// resolveSnapshotDir validates that snapshotID is a bare directory name —
-// no path separators, and not "." or ".." — and resolves it under the
-// configured SnapshotDir. snapshotID comes from an RPC request, so this
-// rejects a path-traversal attempt (e.g. "../../etc") rather than trusting
-// it to already be a safe single path component.
 // runProtected calls fn and recovers from any panic, converting it into a
 // regular error. This matters because Badger's DB.Load can panic (not
 // just return an error) on malformed input rather than the file it
@@ -286,6 +281,11 @@ func runProtected(fn func() error) (err error) {
 	return fn()
 }
 
+// resolveSnapshotDir validates that snapshotID is a bare directory name —
+// no path separators, and not "." or ".." — and resolves it under the
+// configured SnapshotDir. snapshotID comes from an RPC request, so this
+// rejects a path-traversal attempt (e.g. "../../etc") rather than trusting
+// it to already be a safe single path component.
 func (h *databaseServiceHandler) resolveSnapshotDir(snapshotID string) (string, error) {
 	if snapshotID == "" {
 		return "", connect.NewError(
@@ -579,22 +579,37 @@ func (h *databaseServiceHandler) ListAvailableSnapshots(
 
 // cloudSnapshotExists checks whether snapshotID exists at the configured
 // cloud destination — an empty SnapshotCloudDestination, an invalid one,
-// a destination type that doesn't implement CloudManifestFetcher, or the
-// snapshot simply not being there, all count as "no" here rather than an
-// error: this is a plain existence probe, not itself the operation that
-// should fail loudly. Callers needing to distinguish those cases (e.g. to
-// report a real communication error) should call
-// lifecycle.FetchCloudManifest directly instead.
+// or a destination type that doesn't implement CloudManifestFetcher all
+// count as "no" (exists=false, err=nil) here, since none of those are
+// really "no such snapshot," just "nothing to check." A confirmed-absent
+// manifest (errors.Is(fetchErr, lifecycle.ErrCloudSnapshotNotFound)) is
+// also exists=false, err=nil — that IS a real "no."
+//
+// Anything else — a real communication failure while trying to check
+// (auth, network, timeout, throttling) — is returned as a non-nil err,
+// not silently folded into exists=false: a caller that can't reach cloud
+// storage right now must not report "snapshot not found" for a snapshot
+// that may well still be there, since that's indistinguishable from
+// actual data loss to whoever reads the response.
 func (h *databaseServiceHandler) cloudSnapshotExists(
 	ctx context.Context,
 	snapshotID string,
-) (cloudURI string, exists bool) {
+) (cloudURI string, exists bool, err error) {
 	if h.bark.config.SnapshotCloudDestination == "" {
-		return "", false
+		return "", false, nil
 	}
 	cloudURI = lifecycle.JoinCloudURI(h.bark.config.SnapshotCloudDestination, snapshotID)
-	_, ok, err := lifecycle.FetchCloudManifest(ctx, cloudURI)
-	return cloudURI, ok && err == nil
+	_, ok, fetchErr := lifecycle.FetchCloudManifest(ctx, cloudURI)
+	if !ok {
+		return cloudURI, false, nil
+	}
+	if fetchErr != nil {
+		if errors.Is(fetchErr, lifecycle.ErrCloudSnapshotNotFound) {
+			return cloudURI, false, nil
+		}
+		return cloudURI, false, fetchErr
+	}
+	return cloudURI, true, nil
 }
 
 // resolveSnapshotSource resolves snapshotID to wherever it can actually be
@@ -630,7 +645,18 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 			),
 		)
 	}
-	if cloudURI, exists := h.cloudSnapshotExists(ctx, snapshotID); exists {
+	cloudURI, exists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
+	if cloudErr != nil {
+		return "", connect.NewError(
+			connect.CodeUnavailable,
+			fmt.Errorf(
+				"check cloud destination for snapshot %q: %w",
+				snapshotID,
+				cloudErr,
+			),
+		)
+	}
+	if exists {
 		return cloudURI, nil
 	}
 	return "", connect.NewError(
@@ -672,7 +698,17 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 		localExists = false
 	}
 
-	cloudURI, cloudExists := h.cloudSnapshotExists(ctx, snapshotID)
+	cloudURI, cloudExists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
+	if cloudErr != nil {
+		return nil, connect.NewError(
+			connect.CodeUnavailable,
+			fmt.Errorf(
+				"check cloud destination for snapshot %q: %w",
+				snapshotID,
+				cloudErr,
+			),
+		)
+	}
 
 	if !localExists && !cloudExists {
 		return nil, connect.NewError(
@@ -1015,13 +1051,12 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 	_ context.Context,
 	_ *connect.Request[databasev1alpha1.GetDatabaseInfoRequest],
 ) (*connect.Response[databasev1alpha1.GetDatabaseInfoResponse], error) {
-	db := h.bark.DB()
-	if db == nil {
-		return nil, connect.NewError(
-			connect.CodeUnavailable,
-			errors.New("database is not open"),
-		)
+	db, release, err := h.bark.Acquire()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
+	defer release()
+
 	tip, err := db.GetTip(nil)
 	if err != nil {
 		return nil, connect.NewError(

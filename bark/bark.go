@@ -42,6 +42,12 @@ type Bark struct {
 	server       *http.Server
 	config       BarkConfig
 	listenerAddr net.Addr
+	// dbGate guards config.DB across a live Restore/Truncate's close-and-
+	// replace window: PauseDB write-locks it before the old database is
+	// closed, ResumeDB publishes the replacement and unlocks it. Acquire
+	// read-locks it (via TryRLock, never blocking) for the duration of one
+	// request. See Acquire's doc comment for the full race this prevents.
+	dbGate sync.RWMutex
 }
 
 type BarkConfig struct {
@@ -72,32 +78,77 @@ type BarkConfig struct {
 	CORSAllowedOrigins []string
 }
 
-// SetDB updates the database instance the Archive service reads from.
-// Unlike a live Restore/Truncate's other API servers, Bark's own server
-// is never stopped/rebuilt across such an operation — its DatabaseService
-// handler (database.go) is exactly what a caller uses to poll that
-// operation's progress, so the server must stay reachable throughout —
-// this just repoints the Archive service at the freshly rebuilt database
-// afterward.
-func (b *Bark) SetDB(db *database.Database) {
+// ErrDBUnavailable is returned by Acquire when there is currently no
+// usable database to hand out — either none has been set yet, or a live
+// Restore/Truncate has paused access via PauseDB while it swaps the old
+// one out for a freshly rebuilt one. Handlers should map this to
+// connect.CodeUnavailable rather than surfacing it as an internal error.
+var ErrDBUnavailable = errors.New("bark: database temporarily unavailable")
+
+// Acquire pins the current database for the duration of one request:
+// callers must use the returned db for every call they make during the
+// request, then call release exactly once (typically via defer) when
+// done with it. Pinning matters because a live Restore/Truncate closes
+// the old database and opens a new one in place — without pinning, a
+// request that fetched the pointer at the top and kept calling methods
+// on it over its lifetime (as GetDatabaseInfo and FetchBlock both do)
+// could end up racing that close, anywhere from a confusing internal
+// error (sqlite queries against a closed *sql.DB) to an outright panic
+// (Badger panics opening a transaction against a closed DB). Acquire's
+// underlying dbGate stays read-locked for exactly as long as release is
+// unheld, so PauseDB's write-lock acquisition — and therefore the actual
+// database close it's guarding — waits for every in-flight Acquire to
+// finish first.
+//
+// Returns ErrDBUnavailable (with a nil db and release) if no database is
+// currently set, or if PauseDB currently has the gate held: Acquire never
+// blocks waiting for a pause to end, since that could be a long-running
+// Restore/Truncate — callers report unavailable immediately instead.
+func (b *Bark) Acquire() (db *database.Database, release func(), err error) {
+	if !b.dbGate.TryRLock() {
+		return nil, nil, ErrDBUnavailable
+	}
+	b.mu.Lock()
+	db = b.config.DB
+	b.mu.Unlock()
+	if db == nil {
+		b.dbGate.RUnlock()
+		return nil, nil, ErrDBUnavailable
+	}
+	return db, b.dbGate.RUnlock, nil
+}
+
+// PauseDB blocks new Acquire calls (which fail immediately with
+// ErrDBUnavailable rather than blocking behind it) and waits for every
+// currently in-flight Acquire to release, so the database it currently
+// points at can be safely closed once this returns. Must always be
+// followed by a later ResumeDB call — typically bracketing a live
+// Restore/Truncate's quiesce-close-reinitialize sequence — or Bark's
+// database access is left paused permanently.
+func (b *Bark) PauseDB() {
+	b.dbGate.Lock()
+}
+
+// ResumeDB publishes db as what Acquire hands out going forward, then
+// releases the pause PauseDB put in place. Call this only once the
+// replacement database is fully initialized and ready to serve — e.g.
+// from a live Restore/Truncate's reinitializeAPIServers step — so no
+// Acquire caller ever observes a database that's still mid-setup.
+func (b *Bark) ResumeDB(db *database.Database) {
 	b.mu.Lock()
 	b.config.DB = db
 	b.mu.Unlock()
-}
-
-// DB returns the database instance the Archive service currently reads
-// from.
-func (b *Bark) DB() *database.Database {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.config.DB
+	b.dbGate.Unlock()
 }
 
 // Addr returns the address the server is actually listening on (e.g.
 // "127.0.0.1:54321"), populated once Start has bound the listener — most
 // useful when Port was 0, letting a test or an operator discover the
 // OS-assigned port without a separate, racy net.Listen-then-close probe.
-// Returns "" before Start has been called.
+// Returns "" before Start has been called, and again once the server has
+// stopped (Stop, or the listener automatically shutting down when Start's
+// ctx is cancelled) — never a stale address for a listener that is no
+// longer actually open.
 func (b *Bark) Addr() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -248,6 +299,7 @@ func (b *Bark) Start(ctx context.Context) error {
 				)
 			}
 			b.server = nil
+			b.listenerAddr = nil
 		}
 		b.mu.Unlock()
 	}()
@@ -327,6 +379,7 @@ func (b *Bark) Stop(ctx context.Context) error {
 			return fmt.Errorf("failed to shutdown bark gRPC server: %w", err)
 		}
 		b.server = nil
+		b.listenerAddr = nil
 	}
 	return nil
 }

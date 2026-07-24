@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
 )
@@ -142,7 +143,39 @@ func (s *Service) Restore(
 	if s.liveNode != nil {
 		return s.liveNode.Restore(ctx, snapshotDir)
 	}
-	return lifecycle.Restore(ctx, snapshotDir, s.cfg.DatabasePath)
+	// database.New defaults an empty StorageMode to "core" before it ever
+	// opens a store, so s.cfg.StorageMode == "" means "core" too, not "no
+	// storage mode configured" -- comparing the raw, possibly-still-empty
+	// config value against the manifest's always-defaulted recorded value
+	// would otherwise reject a perfectly compatible restore just because
+	// the caller's config.Config was never explicitly defaulted.
+	storageMode := s.cfg.StorageMode
+	if storageMode == "" {
+		storageMode = types.StorageModeCore
+	}
+	manifest, err := lifecycle.RestoreValidated(
+		ctx,
+		snapshotDir,
+		s.cfg.DatabasePath,
+		func(m lifecycle.Manifest) error {
+			if err := m.CheckCompatibility(
+				s.cfg.BlobPlugin,
+				s.cfg.MetadataPlugin,
+				storageMode,
+				s.cfg.Network,
+			); err != nil {
+				return fmt.Errorf(
+					"snapshot is not compatible with the configured database: %w",
+					err,
+				)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	return manifest, nil
 }
 
 // TruncateTarget identifies a truncate target by exactly one of Slot,

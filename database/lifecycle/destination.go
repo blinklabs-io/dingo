@@ -16,12 +16,51 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 )
+
+// ErrCloudSnapshotNotFound is what a CloudManifestFetcher implementation
+// wraps around its underlying "object doesn't exist" error (e.g. S3's
+// NoSuchKey/NotFound, GCS's storage.ErrObjectNotExist) — the one case
+// where FetchCloudManifest's non-nil err genuinely means "confirmed
+// absent," as opposed to a real communication failure (auth, network,
+// timeout, throttling) that happens to occur while checking. Callers
+// distinguishing "no such snapshot" from "couldn't check right now" (see
+// bark's cloudSnapshotExists) should check errors.Is(err,
+// ErrCloudSnapshotNotFound) rather than treating every non-nil err the
+// same way.
+var ErrCloudSnapshotNotFound = errors.New("cloud snapshot not found")
+
+// orderEntriesManifestLast returns entries reordered so that any entry
+// named ManifestFileName sorts last, with every other entry keeping its
+// original relative order. Both destination_s3.go's and
+// destination_gcs.go's UploadDir use this: a concurrent lister/fetcher
+// treats a cloud-visible manifest.json as "this snapshot is fully there"
+// (see FetchCloudManifest/ListCloudSnapshots), so uploading it before
+// blob.bak/metadata.sqlite finish would let that caller download or
+// restore an incomplete snapshot. Uploading the manifest last, after
+// every other file has actually succeeded, makes it a true completion
+// marker instead of just another file in directory order.
+func orderEntriesManifestLast(entries []os.DirEntry) []os.DirEntry {
+	ordered := make([]os.DirEntry, 0, len(entries))
+	var manifest os.DirEntry
+	for _, e := range entries {
+		if e.Name() == ManifestFileName {
+			manifest = e
+			continue
+		}
+		ordered = append(ordered, e)
+	}
+	if manifest != nil {
+		ordered = append(ordered, manifest)
+	}
+	return ordered
+}
 
 // CloudDestination mirrors a snapshot directory to/from object storage, in
 // addition to (not instead of) the local copy Snapshot/Restore already
@@ -81,13 +120,36 @@ type CloudDeleter interface {
 	Delete(ctx context.Context) error
 }
 
+// CloudDestinationCloser is optionally implemented by a CloudDestination
+// that holds a resource needing explicit cleanup once a caller is done with
+// it — e.g. GCS's implementation owns a persistent gRPC connection
+// (storage.NewGRPCClient) that client.Bucket's returned handle doesn't
+// itself expose a way to close. S3's implementation has no such resource
+// and doesn't implement this. Every ParseCloudDestination call site in this
+// file (and SnapshotToCloud) closes the destination via
+// closeCloudDestination once it's done using it.
+type CloudDestinationCloser interface {
+	Close() error
+}
+
+// closeCloudDestination closes dest if it implements CloudDestinationCloser.
+// The close error is deliberately dropped: this runs as cleanup after the
+// destination's actual operation has already succeeded or failed on its own
+// terms, and a cleanup failure at that point shouldn't mask or replace that
+// result.
+func closeCloudDestination(dest CloudDestination) {
+	if closer, ok := dest.(CloudDestinationCloser); ok {
+		_ = closer.Close()
+	}
+}
+
 var (
 	cloudDestinationMu    sync.RWMutex
 	cloudDestinationTypes = map[string]CloudDestinationFactory{}
 )
 
 // RegisterCloudDestinationScheme registers factory as the constructor for
-// CloudDestination URIs with the given scheme (e.g. "s3", "gs"). Intended
+// CloudDestination URIs with the given scheme (e.g. "s3", "gcs"). Intended
 // to be called from a build-tag-gated file's init(), not directly by
 // callers. Panics on a duplicate scheme registration, matching the
 // fail-fast-at-init-time convention already used by database/plugin's
@@ -120,7 +182,7 @@ func recognizedCloudScheme(uri string) (scheme string, ok bool) {
 
 // ParseCloudDestination resolves uri to a CloudDestination. uri's scheme
 // must have a registered factory (built with the corresponding build tag,
-// e.g. dingo_extra_plugins for s3/gs) or this returns an error.
+// e.g. dingo_extra_plugins for s3/gcs) or this returns an error.
 func ParseCloudDestination(uri string) (CloudDestination, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
@@ -128,7 +190,7 @@ func ParseCloudDestination(uri string) (CloudDestination, error) {
 	}
 	if u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf(
-			"cloud destination %q must be a URI like s3://bucket/prefix or gs://bucket/prefix",
+			"cloud destination %q must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
 			uri,
 		)
 	}
@@ -156,6 +218,7 @@ func downloadCloudSnapshot(
 	if err != nil {
 		return "", nil, err
 	}
+	defer closeCloudDestination(dest)
 	tempDir, err := os.MkdirTemp("", "dingo-cloud-snapshot-*")
 	if err != nil {
 		return "", nil, fmt.Errorf(
@@ -170,6 +233,22 @@ func downloadCloudSnapshot(
 		)
 	}
 	return tempDir, cleanup, nil
+}
+
+// IsSafeCloudObjectFileName reports whether fileName is safe to join onto
+// a local restore directory (via filepath.Join/os.Create). A cloud object
+// key is attacker- or corruption-controlled input, not a trusted local
+// path component, so both destination_s3.go's and destination_gcs.go's
+// DownloadDir use this rather than only checking for "/": a bare ".."
+// resolves outside the target directory via filepath.Join's own cleaning
+// even with no separator present, and a literal "\" is a path separator
+// on Windows (but not Unix, where a "/"-only check would otherwise miss
+// it) regardless of which OS actually wrote the object.
+func IsSafeCloudObjectFileName(fileName string) bool {
+	if fileName == "" || fileName == "." || fileName == ".." {
+		return false
+	}
+	return !strings.ContainsAny(fileName, `/\`)
 }
 
 // JoinCloudURI appends sub as an additional path segment to base (e.g.
@@ -202,6 +281,7 @@ func ListCloudSnapshots(
 	if err != nil {
 		return nil, false, err
 	}
+	defer closeCloudDestination(dest)
 	lister, ok := dest.(SnapshotLister)
 	if !ok {
 		return nil, false, nil
@@ -219,8 +299,11 @@ func ListCloudSnapshots(
 // snapshot URI (a specific snapshot's own location — see JoinCloudURI,
 // not a base destination) and fetches its manifest, if that destination
 // type implements CloudManifestFetcher. ok=false (nil error) means the
-// destination type doesn't support this — distinct from the manifest
-// simply not existing there, which is a non-nil err.
+// destination type doesn't support this. ok=true with a non-nil err
+// means an actual fetch was attempted and failed — check errors.Is(err,
+// ErrCloudSnapshotNotFound) to tell "confirmed absent" apart from a real
+// communication failure (auth, network, timeout); only the former should
+// ever be treated as equivalent to "doesn't exist" by a caller.
 func FetchCloudManifest(
 	ctx context.Context,
 	snapshotURI string,
@@ -229,6 +312,7 @@ func FetchCloudManifest(
 	if err != nil {
 		return Manifest{}, false, err
 	}
+	defer closeCloudDestination(dest)
 	fetcher, ok := dest.(CloudManifestFetcher)
 	if !ok {
 		return Manifest{}, false, nil
@@ -247,6 +331,7 @@ func DeleteCloudSnapshot(ctx context.Context, snapshotURI string) (ok bool, err 
 	if err != nil {
 		return false, err
 	}
+	defer closeCloudDestination(dest)
 	deleter, ok := dest.(CloudDeleter)
 	if !ok {
 		return false, nil
