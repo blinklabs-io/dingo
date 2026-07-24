@@ -20,7 +20,7 @@ This release expands reward handling for full pot distribution and delegator ina
 * Refreshed the Mithril verification key defaults to point to the IntersectMBO hosted files.
 * Extended DevNet with a Dingo-only default, conformance mode, TCP LocalStateQuery access, and CIP-50 scenario coverage.
 * Strengthened reward crediting and snapshot handling with Mithril compatibility checks for inactivity processing.
-* Eliminated the issue close date workflow and its ORG_PROJECT_PAT dependency.
+* Eliminated the issue close date workflow and its project access token dependency.
 * Updated `google.golang.org/grpc` to `1.82.1`.
 * Bumped `gouroboros` to `v0.189.2`.
 
@@ -69,7 +69,7 @@ Thank you for trying!
 * 刷新しました Mithril verification key の既定値を IntersectMBO のホスト先ファイルへ向けます。
 * 強化しました DevNet を Dingo-only default、conformance mode、TCP LocalStateQuery access、CIP-50 scenario coverage 付きで動かします。
 * 整えました inactivity 処理に対して Mithril compatibility limit を適用し、reward crediting と snapshot handling を守ります。
-* 削除しました issue close date workflow と ORG_PROJECT_PAT dependency をなくします。
+* 削除しました issue close date workflow と project access token dependency をなくします。
 * 引き上げました `google.golang.org/grpc` を `1.82.1` に引き上げます。
 * 更新しました `gouroboros` を `v0.189.2` に更新します。
 
@@ -118,7 +118,7 @@ Esta versión amplía la gestión de recompensas para la distribución del full 
 * Renovó los valores predeterminados de las claves de verificación de Mithril para apuntar a los archivos alojados por IntersectMBO.
 * Extendió DevNet con un modo predeterminado que ejecuta solo Dingo, modo de conformance, acceso TCP a LocalStateQuery y cobertura del escenario CIP-50.
 * Reforzó el creditado de recompensas y el manejo de snapshots con límites de compatibilidad de Mithril para el procesamiento por inactividad.
-* Eliminó el workflow de fecha de cierre de issues y su dependencia de ORG_PROJECT_PAT.
+* Eliminó el workflow de fecha de cierre de issues y su dependencia del token de acceso del proyecto.
 * Ajustó `google.golang.org/grpc` a `1.82.1`.
 * Subió `gouroboros` a `v0.189.2`.
 
