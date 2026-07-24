@@ -98,6 +98,55 @@ Thank you for trying!
 
 ご利用ありがとうございます。
 
+### 🇪🇸 Español
+
+**Título:** Ampliar la gestión de recompensas, añadir un backend FIFO configurable y reforzar las protecciones del ledger
+
+**Fecha:** July 24, 2026
+
+**Versión:** v0.67.0
+
+Esta versión amplía la gestión de recompensas para la distribución del full pot y la inactividad de delegadores, añade un backend FIFO configurable para el mempool y refuerza el comportamiento de consenso, Ouroboros, ledger, Mithril, devnet, CI y dependencias en todo el nodo.
+
+### 💪 Mejoras
+
+* Agregó la distribución de recompensas del full pot bajo controles de configuración operados por el operador, con validación que bloquea ajustes inseguros en redes estándar.
+* Amplió la compatibilidad con la expiración por inactividad de delegadores con seguimiento de expiración de cuentas, reconstrucción histórica de stake y recompensas, integración de snapshots, límites de compatibilidad con Mithril y protecciones para el creditado de recompensas.
+* Introdujo un backend FIFO configurable para el mempool con selección neutral al backend a través de la configuración y de las interfaces del nodo.
+* Mejoró la selección de Genesis fast source al exigir corroboración antes de que esas fuentes impulsen la selección.
+* Actualizó la compilación de Antithesis para usar el build tag de Go de Antithesis.
+* Renovó los valores predeterminados de las claves de verificación de Mithril para apuntar a los archivos alojados por IntersectMBO.
+* Extendió DevNet con un modo predeterminado que ejecuta solo Dingo, modo de conformance, acceso TCP a LocalStateQuery y cobertura del escenario CIP-50.
+* Reforzó el creditado de recompensas y el manejo de snapshots con límites de compatibilidad de Mithril para el procesamiento por inactividad.
+* Eliminó el workflow de fecha de cierre de issues y su dependencia de ORG_PROJECT_PAT.
+* Ajustó `google.golang.org/grpc` a `1.82.1`.
+* Subió `gouroboros` a `v0.189.2`.
+
+### 🔧 Correcciones
+
+* Corrigió el registro de consumidores de txsubmission para que las conexiones no dejen consumidores filtrados.
+* Ajustó las lecturas del mempool para que los snapshots de transacciones sigan siendo inmutables entre la lectura y la caché.
+* Reestructuró la validación del mempool para que el pool libere bloqueos durante la validación y la revalidación.
+* Estabilizó el apagado del mempool para que el nodo rechace trabajo nuevo después de detenerse y reporte el estado detenido.
+* Fortaleció el bucle de rewind del ledger con una protección hold at tip y mensajes de advertencia más claros.
+* Reparó los desajustes de los inputs de reward stake al deduplicar los datos de live stake al iniciar y en memoria.
+* Alineó el drenaje principal del ledger de Mithril con índices dispersos para que la iteración continúe de forma fiable.
+* Terminó los lotes de blockfetch en el sentinel de rollback en lugar de transmitir bloques inválidos.
+* Habilitó consultas CBOR wrapped de stake snapshot y devolvió el estado de delegación para las solicitudes wrapped.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.66.2 (July 21, 2026)
 
 **Title:** Update core dependencies, add MySQL conformance coverage, and improve database stability
