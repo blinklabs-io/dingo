@@ -2,24 +2,24 @@
 
 ## v0.67.0 (July 24, 2026)
 
-**Title:** Expand reward handling, configurable mempool backend, and ledger safeguards
+**Title:** Expand reward handling, configurable FIFO mempool support, and ledger safeguards
 
 **Date:** July 24, 2026
 
 **Version:** v0.67.0
 
-This release expands reward handling for full pot distribution and delegator inactivity, adds a configurable FIFO mempool backend, and strengthens consensus, Ouroboros, ledger, Mithril, devnet, CI, and dependency behavior across the node.
+This release expands reward handling for full pot distribution and delegator inactivity, adds configurable FIFO mempool support, and strengthens consensus, Ouroboros, ledger, Mithril, devnet, CI, and dependency behavior across the node.
 
 ### 💪 Improvements
 
 * Added operator controlled full pot reward distribution behind configuration gates, with validation that blocks unsafe settings on standard networks.
 * Expanded delegator inactivity expiry support with account expiration tracking, historical stake and reward reconstruction, snapshot integration, Mithril compatibility limits, and reward crediting safeguards.
-* Introduced a configurable FIFO mempool backend with backend neutral selection through configuration and node interfaces.
+* Introduced a configurable FIFO mempool backend with selection handled independently of the backend through configuration and node interfaces.
 * Improved Genesis fast source selection by requiring corroboration before fast sources can drive selection.
 * Updated the Antithesis analysis build to use the Antithesis Go build tag.
 * Refreshed the Mithril verification key defaults to point to the IntersectMBO hosted files.
 * Extended DevNet with a Dingo-only default, conformance mode, TCP LocalStateQuery access, and CIP-50 scenario coverage.
-* Strengthened reward crediting and snapshot handling with Mithril compatibility limits for inactivity processing.
+* Strengthened reward crediting and snapshot handling with Mithril compatibility checks for inactivity processing.
 * Eliminated the issue close date workflow and its ORG_PROJECT_PAT dependency.
 * Updated `google.golang.org/grpc` to `1.82.1`.
 * Bumped `gouroboros` to `v0.189.2`.
