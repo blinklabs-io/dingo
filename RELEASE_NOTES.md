@@ -49,6 +49,55 @@ This release expands reward handling for full pot distribution and delegator ina
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** reward 処理を拡張し、設定可能な FIFO mempool backend と ledger 保護を強化
+
+**日付:** July 24, 2026
+
+**バージョン:** v0.67.0
+
+このリリースでは、full pot 配分と delegator inactivity の reward 処理を拡張し、設定可能な FIFO mempool backend を追加し、node 全体で consensus、Ouroboros、ledger、Mithril、devnet、CI、依存関係の挙動を強化します。
+
+### 💪 改善
+
+* 追加しました operator-controlled な設定ゲートの下で full pot reward distribution を有効にし、standard network では unsafe な設定を拒否します。
+* 拡張しました delegator inactivity expiry support を account expiration tracking、historical stake と reward の再構築、snapshot integration、Mithril compatibility limit、reward crediting safeguard とあわせて追加します。
+* 導入しました 設定と node interface を通じて backend を切り替えられる configurable FIFO mempool backend を追加します。
+* 改善しました Genesis fast source selection で、fast source を選ぶ前に corroboration を求めます。
+* 更新しました Antithesis analysis build を Antithesis Go build tag で実行します。
+* 刷新しました Mithril verification key の既定値を IntersectMBO のホスト先ファイルへ向けます。
+* 強化しました DevNet を Dingo-only default、conformance mode、TCP LocalStateQuery access、CIP-50 scenario coverage 付きで動かします。
+* 整えました inactivity 処理に対して Mithril compatibility limit を適用し、reward crediting と snapshot handling を守ります。
+* 削除しました issue close date workflow と ORG_PROJECT_PAT dependency をなくします。
+* 是正しました `google.golang.org/grpc` を `1.82.1` にします。
+* 修正しました `gouroboros` を `v0.189.2` にします。
+
+### 🔧 修正
+
+* 再構成しました txsubmission consumer registration で connection が consumer を漏らさないようにします。
+* 安定化しました mempool read で transaction snapshot が read と cache boundary をまたいで immutable のまま保たれます。
+* 強化しました mempool validation で、validation と revalidation の間に pool lock を解放します。
+* 修復しました mempool shutdown 後に node が新しい work を拒否し、stopped state を返します。
+* 整合しました ledger rewind loop に hold at tip guard とより明確な warning output を追加します。
+* 終了しました reward stake input mismatch を startup 時とメモリ内で live stake data を deduplicate して防ぎます。
+* 有効化しました Mithril primary ledger drain を sparse index に合わせ、iteration を安定して続けます。
+* 返しました rollback sentinel で blockfetch batch を閉じ、無効な block の streaming を防ぎます。
+* 更新しました CBOR wrapped stake snapshot query を返し、wrapped request で delegation state も返します。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ## v0.66.2 (July 21, 2026)
 
 **Title:** Update core dependencies, add MySQL conformance coverage, and improve database stability
