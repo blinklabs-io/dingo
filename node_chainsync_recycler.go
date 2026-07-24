@@ -203,6 +203,13 @@ func (n *Node) startChainsyncStallRecycler(
 	return recyclerCancel
 }
 
+// chainsyncStallRecyclerStartupHook runs immediately before the
+// recycler's one-time startup liveLifecycleMu.TryLock() attempt below --
+// a test seam so a test can deterministically wait for this code to
+// actually be reached instead of guessing with a fixed wall-clock window
+// before cancelling. No-op in production.
+var chainsyncStallRecyclerStartupHook = func() {}
+
 func (n *Node) runChainsyncStallRecycler(
 	ctx context.Context,
 	chainsyncCfg chainsync.Config,
@@ -240,6 +247,7 @@ func (n *Node) runChainsyncStallRecycler(
 			// nonzero localTipSlot resets the plateau baseline anyway (see
 			// processChainsyncRecyclerTick) — this can only make plateau
 			// detection more lenient at startup, never trigger it early.
+			chainsyncStallRecyclerStartupHook()
 			var lastProgressSlot uint64
 			if n.liveLifecycleMu.TryLock() {
 				if n.ledgerState != nil {

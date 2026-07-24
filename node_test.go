@@ -1174,6 +1174,21 @@ func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
 
+	// A deterministic test seam for "the recycler has reached its startup
+	// TryLock attempt", rather than guessing with a fixed wall-clock
+	// window: a scheduler-starved goroutine could still not have reached
+	// that line after any fixed delay (flaking under load), while a
+	// generous delay risks the outer loop's ctx.Err() check winning the
+	// race before the goroutine is ever scheduled there at all -- passing
+	// vacuously regardless of whether the bug this test guards against is
+	// present. reached is closed exactly once: this test cancels promptly
+	// after observing it, before the loop could restart and call the hook
+	// again.
+	reached := make(chan struct{})
+	origHook := chainsyncStallRecyclerStartupHook
+	chainsyncStallRecyclerStartupHook = func() { close(reached) }
+	t.Cleanup(func() { chainsyncStallRecyclerStartupHook = origHook })
+
 	ctx, cancel := context.WithCancel(context.Background())
 	recyclerCancel := n.startChainsyncStallRecycler(
 		ctx,
@@ -1182,6 +1197,14 @@ func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.
 		time.Second,
 		time.Second,
 	)
+	// Registered immediately after starting the recycler (before any
+	// assertion that could fail) so a failure below still cancels and
+	// waits for the goroutine instead of leaking it past this test.
+	t.Cleanup(func() {
+		recyclerCancel()
+		cancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
 
 	done := make(chan struct{})
 	go func() {
@@ -1189,14 +1212,10 @@ func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.
 		n.chainsyncStallRecyclerWG.Wait()
 	}()
 
-	// Give the recycler goroutine a real chance to actually start and reach
-	// (or, with the bug present, block on) its startup mutex acquisition
-	// before cancelling -- otherwise cancellation could race ahead of the
-	// goroutine ever being scheduled, letting the outer loop's own ctx.Err()
-	// check return early without ever reaching the code under test, which
-	// would make this pass vacuously regardless of the bug it guards
-	// against. 50ms is a large margin for the handful of non-blocking
-	// setup steps (ticker/map allocation, one mutex call) that precede it.
+	testutil.RequireReceive(
+		t, reached, time.Second,
+		"recycler must reach its startup mutex acquisition",
+	)
 	testutil.RequireNoReceive(
 		t, done, 50*time.Millisecond,
 		"recycler must not exit before being cancelled",

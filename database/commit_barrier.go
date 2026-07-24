@@ -43,6 +43,23 @@ type cancellableBarrier struct {
 	mu            sync.Mutex
 	readers       int
 	writerWaiting bool
+	// held is true only once a Lock/LockContext call has fully acquired
+	// the exclusive side (past the reader-drain wait below), until the
+	// matching Unlock call releases it -- unlike writerWaiting, which is
+	// also true while a waiter is still queued or draining readers, held
+	// and holder together identify one specific completed acquisition.
+	// This is what lets Unlock detect a call that doesn't correspond to
+	// the barrier's CURRENT holder (a duplicate/stale call, e.g. a
+	// resume func invoked twice) and panic instead of silently clearing
+	// whatever holder actually owns the exclusive side right now — which
+	// would incorrectly reopen a later, unrelated PauseCommits critical
+	// section to new read-write Txns.
+	held   bool
+	holder barrierToken
+	// nextToken is the barrierToken assigned to the next successful
+	// acquisition; monotonically increasing so no two acquisitions
+	// (even across the zero value's lifetime) ever share an identity.
+	nextToken barrierToken
 	// changed is closed and replaced every time a state transition might
 	// unblock a waiter (RUnlock reaching zero readers, Unlock clearing
 	// writerWaiting) — the standard "broadcast channel" pattern for a
@@ -52,6 +69,11 @@ type cancellableBarrier struct {
 	// value of cancellableBarrier needs no explicit construction.
 	changed chan struct{}
 }
+
+// barrierToken identifies one successful exclusive-side acquisition. It
+// is unexported and opaque to callers outside this package: the only
+// thing done with a returned token is passing it back to Unlock.
+type barrierToken uint64
 
 // changedLocked returns the current broadcast channel, initializing it on
 // first use. Callers must hold mu.
@@ -102,34 +124,58 @@ func (b *cancellableBarrier) RUnlock() {
 // Lock acquires the exclusive side unconditionally, exactly like
 // sync.RWMutex.Lock: waits its turn behind any other writer already
 // waiting or holding, then blocks until every current reader releases,
-// then blocks every new reader (and any other writer) until Unlock.
-func (b *cancellableBarrier) Lock() {
+// then blocks every new reader (and any other writer) until Unlock. The
+// returned token must be passed to the matching Unlock call.
+func (b *cancellableBarrier) Lock() barrierToken {
 	// context.Background() never cancels, so this is equivalent to an
 	// uncancellable Lock — but still shares lockContext's single
 	// implementation of the actual wait/claim logic below.
-	_ = b.lockContext(context.Background())
+	token, _ := b.lockContext(context.Background())
+	return token
 }
 
-// Unlock releases the exclusive side.
-func (b *cancellableBarrier) Unlock() {
+// Unlock releases the exclusive side acquired by the Lock/LockContext
+// call that returned token. It panics if token does not identify the
+// barrier's current holder — a duplicate Unlock call (e.g. a resume func
+// invoked twice), or a stale one whose own acquisition was already
+// cancelled or already released — rather than silently clearing
+// whatever holder (if any) currently owns the exclusive side, which
+// could otherwise reopen a different, still-in-progress PauseCommits
+// critical section to new read-write Txns. This matches the one-shot
+// contract PauseCommits/PauseCommitsContext's returned resume func()
+// documents: exactly one Unlock call per successful acquisition.
+func (b *cancellableBarrier) Unlock(token barrierToken) {
 	b.mu.Lock()
+	if !b.held || token != b.holder {
+		b.mu.Unlock()
+		panic(
+			"cancellableBarrier: Unlock called without holding the " +
+				"current Lock (duplicate or stale resume call)",
+		)
+	}
+	b.held = false
 	b.writerWaiting = false
 	b.notifyLocked()
 	b.mu.Unlock()
 }
 
 // LockContext is Lock, but ctx can abandon the wait: if ctx is cancelled
-// before the exclusive side is acquired, this returns ctx.Err() having
-// fully withdrawn its claim on the writer slot — unlike a sync.RWMutex-
-// based implementation, no phantom queued writer is left behind to block
-// new readers via writer preference (see the type's doc comment).
-func (b *cancellableBarrier) LockContext(ctx context.Context) error {
+// before the exclusive side is acquired, this returns ctx.Err() (and a
+// zero token, which Unlock always rejects) having fully withdrawn its
+// claim on the writer slot — unlike a sync.RWMutex-based implementation,
+// no phantom queued writer is left behind to block new readers via
+// writer preference (see the type's doc comment).
+func (b *cancellableBarrier) LockContext(
+	ctx context.Context,
+) (barrierToken, error) {
 	return b.lockContext(ctx)
 }
 
-func (b *cancellableBarrier) lockContext(ctx context.Context) error {
+func (b *cancellableBarrier) lockContext(
+	ctx context.Context,
+) (barrierToken, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	b.mu.Lock()
 	for b.writerWaiting {
@@ -138,7 +184,7 @@ func (b *cancellableBarrier) lockContext(ctx context.Context) error {
 		select {
 		case <-ch:
 		case <-ctx.Done():
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
 		b.mu.Lock()
 	}
@@ -153,10 +199,14 @@ func (b *cancellableBarrier) lockContext(ctx context.Context) error {
 			b.writerWaiting = false
 			b.notifyLocked()
 			b.mu.Unlock()
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
 		b.mu.Lock()
 	}
+	b.nextToken++
+	b.holder = b.nextToken
+	b.held = true
+	token := b.holder
 	b.mu.Unlock()
-	return nil
+	return token, nil
 }

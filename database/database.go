@@ -115,8 +115,8 @@ func (d *Database) Blob() blob.BlobStore {
 // checkCommitTimestamp's cross-check. Pausing commits for that window
 // keeps both backups describing the same set of committed writes.
 func (d *Database) PauseCommits() (resume func()) {
-	d.commitBarrier.Lock()
-	return d.commitBarrier.Unlock
+	token := d.commitBarrier.Lock()
+	return func() { d.commitBarrier.Unlock(token) }
 }
 
 // PauseCommitsContext is PauseCommits, but the wait for the barrier can
@@ -137,10 +137,11 @@ func (d *Database) PauseCommits() (resume func()) {
 func (d *Database) PauseCommitsContext(
 	ctx context.Context,
 ) (resume func(), err error) {
-	if err := d.commitBarrier.LockContext(ctx); err != nil {
+	token, err := d.commitBarrier.LockContext(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return d.commitBarrier.Unlock, nil
+	return func() { d.commitBarrier.Unlock(token) }, nil
 }
 
 // Config returns the config object used for the database instance

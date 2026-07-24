@@ -14,17 +14,23 @@
 
 //go:build !windows
 
-package lifecycle
+// Package fsyncdir syncs a directory's own entries (a new or renamed
+// file appearing in it) to disk, so that change is durable across a
+// crash, not just the changed file's own content -- a file's own fsync
+// does not guarantee its directory entry is persisted. This is shared by
+// database/plugin/metadata/sqlite and database/lifecycle, both of which
+// need this after writing a restored/renamed file into a directory,
+// rather than each keeping its own platform-specific copy to drift out
+// of sync.
+package fsyncdir
 
 import (
 	"fmt"
 	"os"
 )
 
-// syncDir opens and fsyncs the directory at path, so a prior change to
-// one of its entries (a new or renamed file appearing in it) is durable
-// on disk, not just the changed file's own content.
-func syncDir(path string) error {
+// Sync opens and fsyncs the directory at path.
+func Sync(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %q for directory sync: %w", path, err)
