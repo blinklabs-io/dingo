@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
@@ -235,10 +236,10 @@ func TestImportedEpochSummaryKeepsCurrentEpochMetadataWhenExisting(
 }
 
 func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	store := db.Metadata()
@@ -308,10 +309,10 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 }
 
 func TestPersistImportedActivePoolDistribution(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	poolKeyHash := make([]byte, 28)
@@ -360,10 +361,10 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 // fallback treats them as implicit no rather than freezing today's
 // delegation map into a historical boundary.
 func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	poolKeyHash := make([]byte, 28)
@@ -467,9 +468,9 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 // main correctness invariant from issue #2440: a missing pool row must not
 // produce an authoritative Resolved=true, AutoVote=None entry.
 func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := make([]byte, 28)
 	poolKeyHash[0] = 0x11
@@ -522,9 +523,9 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 //   - reward account present and active, delegated to AlwaysNoConfidence →
 //     Resolved=true, AutoVote=NoConfidence.
 func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
 	require.True(t, ok, "test requires the sqlite metadata backend")
@@ -630,9 +631,9 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 // persist a value that was changed after the boundary, so the row is left
 // unresolved and the tally treats it as implicit no.
 func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x20}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x30}, 28)
@@ -736,9 +737,9 @@ func TestCollectPoolsFromSnapshotsMarkWins(t *testing.T) {
 // an empty pool key set in the reconcile pass and retire the very pools the
 // fallback just imported.
 func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolHash := toFixed28([]byte("fallback pool for reconcile"))
 	vrfHash := bytes.Repeat([]byte{0x44}, 32)
@@ -793,9 +794,9 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 // (importPools runs before persistImportedSnapshot), the current-epoch snapshot
 // is correctly resolved rather than left with a false Resolved=true, AutoVote=None.
 func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := bytes.Repeat([]byte{0x42}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x43}, 28)
@@ -862,10 +863,10 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 }
 
 func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	pparamsCbor, err := cbor.Encode(testConwayPParams())
@@ -897,10 +898,10 @@ func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
 }
 
 func TestImportAccountsPreservesCredentialTag(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	stakeKey := bytes.Repeat([]byte{0xA4}, 28)
@@ -949,10 +950,10 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 // TestImportPoolsPreservesRewardAccountCredentialTag verifies snapshot
 // pool import stores reward account tags on Pool and PoolRegistration.
 func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	poolKeyHash := bytes.Repeat([]byte{0x51}, 28)
@@ -999,10 +1000,10 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 }
 
 func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 
 	txHash := bytes.Repeat([]byte{0x91}, 32)

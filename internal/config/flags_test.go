@@ -37,6 +37,12 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
+		"Plugins.Storage.Blob.Config":          {},
+		"Plugins.Storage.Metadata.Config":      {},
+		"Plugins.Mempool.Config":               {},
+		"Plugins.API.Blockfrost.Config":        {},
+		"Plugins.API.Mesh.Config":              {},
+		"Plugins.API.Utxorpc.Config":           {},
 		"Midnight.CNightPolicyID":              {},
 		"Midnight.CNightAssetName":             {},
 		"Midnight.MappingValidatorAddress":     {},
@@ -137,10 +143,35 @@ func TestFullPotRewardsEnvBinding(t *testing.T) {
 	}
 }
 
+func TestDatabasePathEnvironmentShortcut(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	want := t.TempDir()
+	t.Setenv("CARDANO_DATABASE_PATH", want)
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.DatabasePath != want {
+		t.Fatalf(
+			"expected CARDANO_DATABASE_PATH to set databasePath to %q, got %q",
+			want,
+			cfg.DatabasePath,
+		)
+	}
+}
+
 func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CARDANO_MEMPOOL_CAPACITY", "123456")
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_CONFIG_CAPACITY", "123456")
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_PROVIDER", "environment")
 	t.Setenv("DINGO_DATABASE_WORKERS", "9")
 	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
 	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "15m")
@@ -162,10 +193,12 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
-	if cfg.MempoolCapacity != 123456 {
+	cfg.ApplyDefaults()
+	capacity, _, _ := cfg.MempoolSettings()
+	if capacity != 123456 {
 		t.Fatalf(
 			"expected env var to set mempoolCapacity=123456, got %d",
-			cfg.MempoolCapacity,
+			capacity,
 		)
 	}
 	if cfg.DatabaseWorkers != 9 {
@@ -214,7 +247,7 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
 	if err := cmd.ParseFlags([]string{
-		"--mempool-capacity=7890",
+		"--mempool=default",
 		"--data-dir=/tmp/override",
 		"--backfill-batch-size=200",
 		"--history-expiry-enabled=true",
@@ -231,10 +264,14 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		t.Fatalf("failed to apply flags: %v", err)
 	}
 
-	if cfg.MempoolCapacity != 7890 {
+	if cfg.Plugins.Mempool.Provider != "default" {
+		t.Fatalf("expected CLI mempool provider override, got %q", cfg.Plugins.Mempool.Provider)
+	}
+	capacity, _, _ = cfg.MempoolSettings()
+	if capacity != 123456 {
 		t.Fatalf(
-			"expected flag to override env mempoolCapacity to 7890, got %d",
-			cfg.MempoolCapacity,
+			"expected environment mempool capacity to remain 123456, got %d",
+			capacity,
 		)
 	}
 	if cfg.DatabaseWorkers != 9 {
@@ -290,34 +327,29 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	}
 }
 
-func TestMempoolImplementationSourcePrecedence(t *testing.T) {
+func TestMempoolProviderSourcePrecedence(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CARDANO_MEMPOOL_IMPLEMENTATION", "fifo")
+	t.Setenv("DINGO_PLUGINS_MEMPOOL_PROVIDER", "environment")
 
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	require.NoError(
 		t,
 		os.WriteFile(
 			configFile,
-			[]byte("mempoolImplementation: priority\n"),
+			[]byte("plugins:\n  mempool:\n    provider: yaml\n"),
 			0o600,
 		),
 	)
 	cfg, err := LoadConfig(configFile)
 	require.NoError(t, err)
-	assert.Equal(t, "fifo", cfg.MempoolImplementation, "environment overrides YAML")
+	assert.Equal(t, "environment", cfg.Plugins.Mempool.Provider, "environment overrides YAML")
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
-	require.NoError(t, cmd.ParseFlags([]string{"--mempool-implementation=priority"}))
+	require.NoError(t, cmd.ParseFlags([]string{"--mempool=cli"}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
-	assert.Equal(t, "priority", cfg.MempoolImplementation, "CLI overrides environment")
-	require.ErrorContains(
-		t,
-		cfg.validate(cfg.RunMode, minUnprivilegedPort),
-		"invalid mempoolImplementation",
-	)
+	assert.Equal(t, "cli", cfg.Plugins.Mempool.Provider, "CLI overrides environment")
 }
 
 func TestDelegatorInactivityEnvBinding(t *testing.T) {
@@ -616,10 +648,11 @@ func TestPipeline_MempoolCapacityDefaultsFromFlagRunMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected validation error: %v", err)
 			}
-			if cfg.MempoolCapacity != tc.expected {
+			capacity, _, _ := cfg.MempoolSettings()
+			if capacity != tc.expected {
 				t.Errorf(
 					"MempoolCapacity = %d, want %d",
-					cfg.MempoolCapacity, tc.expected,
+					capacity, tc.expected,
 				)
 			}
 		})
@@ -741,7 +774,7 @@ func TestPipeline_NegativeHistoryExpiryFrequencyRejected(t *testing.T) {
 // so every problem must surface together in the single Validate pass.
 func TestPipeline_AggregatesErrorsAcrossSettings(t *testing.T) {
 	yaml := "runMode: \"bogus\"\n" +
-		"evictionWatermark: 2.0\n" +
+		"plugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 1048576\n      evictionWatermark: 2.0\n      rejectionWatermark: 0.95\n" +
 		"blockProducer: true\n" +
 		"chainsync:\n  strategy: \"fastest\"\n"
 	_, err := loadConfigThroughPipeline(t, yaml, nil)
@@ -750,7 +783,7 @@ func TestPipeline_AggregatesErrorsAcrossSettings(t *testing.T) {
 	}
 	for _, want := range []string{
 		"invalid runMode",
-		"invalid evictionWatermark",
+		"invalid plugins.mempool.config.evictionWatermark",
 		"blockProducer enabled but missing required key paths",
 		"invalid chainsync.strategy",
 	} {

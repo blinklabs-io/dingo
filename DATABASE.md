@@ -1,5 +1,22 @@
 # Dingo Database
 
+## Storage provider ownership
+
+Blob and metadata stores are constructed by the application plugin host and
+injected with `database.New(config, database.Stores{Blob: ..., Metadata: ...})`.
+The database drains only database-owned workers; the host closes providers
+after ledger/database shutdown. Selection and config live under
+`plugins.storage`. Schemas, relationships, blob keys, CBOR offsets, transaction
+behavior, and persisted formats are unchanged. Library callers of Mithril
+`Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
+local `badger` blob and `sqlite` metadata providers.
+
+`databasePath` (including its `CARDANO_DATABASE_PATH` environment binding and
+the `--data-dir` flag) is the shared data-directory shortcut for both local
+storage providers. `plugins.storage.blob.config.dataDir` and
+`plugins.storage.metadata.config.dataDir` may override the paths independently;
+when either is unset, that provider inherits `databasePath`.
+
 Dingo stores chain state in two sibling stores:
 
 - The metadata store is a relational SQL database managed by the metadata plugins in `database/plugin/metadata/`. The always-built plugin is `sqlite`; `postgres` and `mysql` are optional and are built only with the `dingo_extra_plugins` build tag.
@@ -408,6 +425,8 @@ process the same pointer unless the claim expires before a result is recorded.
 ## Blob Store Reference
 
 All blob plugins expose the same logical keys. Badger stores these binary keys directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may prepend the configured object prefix.
+
+S3 has two prefix input forms with deliberately different compatibility contracts. `New` normalizes a non-empty prefix parsed from `s3://<bucket>/<prefix>` to end in `/`, so `s3://bucket/foo` produces object names such as `foo/<hex-key>`. `WithPrefix`, used by the `plugins.storage` config `prefix` field, preserves the configured value verbatim: `foo` produces `foo<hex-key>`, while `foo/` produces `foo/<hex-key>`. An empty prefix in either form adds nothing. Keeping the option form literal preserves the object-key layout of existing deployments.
 
 ```mermaid
 flowchart LR

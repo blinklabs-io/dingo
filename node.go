@@ -18,10 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
@@ -40,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -50,6 +49,7 @@ import (
 	midnightserver "github.com/blinklabs-io/dingo/midnight/server"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
+	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
@@ -61,18 +61,16 @@ type Node struct {
 	chainsyncState                   *chainsync.State
 	chainSelector                    *chainselection.ChainSelector
 	eventBus                         *event.EventBus
-	mempool                          mempool.Pool
+	pluginHost                       *plugin.Host
+	mempool                          mempool.Service
 	chainManager                     *chain.ChainManager
 	db                               *database.Database
 	ledgerState                      *ledger.LedgerState
 	snapshotMgr                      *snapshot.Manager
 	leiosVoteManager                 *leios.VoteManager
 	leiosPipelineManager             *leios.PipelineManager
-	utxorpc                          *utxorpc.Utxorpc
 	bark                             *bark.Bark
 	historyExpiry                    *historyexpiry.Pruner
-	blockfrostAPI                    *blockfrost.Blockfrost
-	meshAPI                          *mesh.Server
 	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	midnightIndexer                  *midnightindexer.Indexer
@@ -93,8 +91,20 @@ type Node struct {
 }
 
 func New(cfg Config) (*Node, error) {
+	pluginHost, err := internalplugins.NewHost()
+	if err != nil {
+		return nil, fmt.Errorf("create plugin host: %w", err)
+	}
 	n := &Node{
-		config: cfg,
+		config:     cfg,
+		pluginHost: pluginHost,
+	}
+	for capability, selection := range cfg.pluginSelections {
+		if err := pluginHost.ValidateSelection(
+			capability, selection.Provider, selection.Config,
+		); err != nil {
+			return nil, fmt.Errorf("invalid plugin selection: %w", err)
+		}
 	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -116,6 +126,65 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
+func (n *Node) apiPluginSelection(
+	capability plugin.Capability,
+) (plugin.Selection, uint, error) {
+	selection, ok := n.config.pluginSelections[capability]
+	if !ok {
+		return selection, 0, fmt.Errorf(
+			"plugin selection is missing for capability %s",
+			capability,
+		)
+	}
+	if selection.Provider == "" {
+		return selection, 0, fmt.Errorf(
+			"plugin provider is empty for capability %s",
+			capability,
+		)
+	}
+	portValue, ok := selection.Config["port"]
+	if !ok {
+		defaultPorts := map[plugin.Capability]uint{
+			plugin.CapabilityAPIBlockfrost: 3000,
+			plugin.CapabilityAPIMesh:       8080,
+			plugin.CapabilityAPIUtxorpc:    9090,
+		}
+		return selection, defaultPorts[capability], nil
+	}
+	var port uint64
+	switch value := portValue.(type) {
+	case int:
+		if value < 0 {
+			return selection, 0, fmt.Errorf("negative port for capability %s", capability)
+		}
+		port = uint64(value)
+	case uint:
+		port = uint64(value)
+	case uint64:
+		port = value
+	case int64:
+		if value < 0 {
+			return selection, 0, fmt.Errorf("negative port for capability %s", capability)
+		}
+		port = uint64(value)
+	case float64:
+		if value < 0 || value != float64(uint64(value)) {
+			return selection, 0, fmt.Errorf("invalid port for capability %s: %v", capability, value)
+		}
+		port = uint64(value)
+	default:
+		return selection, 0, fmt.Errorf("invalid port type for capability %s: %T", capability, portValue)
+	}
+	if port > 65535 {
+		return selection, 0, fmt.Errorf(
+			"port for capability %s exceeds 65535: %d",
+			capability,
+			port,
+		)
+	}
+	return selection, uint(port), nil
+}
+
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
@@ -134,6 +203,22 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Track started components for cleanup on failure
 	var started []func()
+	stopPluginCapability := func(capability plugin.Capability) func() {
+		return func() {
+			if err := n.pluginHost.StopCapability(
+				context.Background(),
+				capability,
+			); err != nil {
+				n.config.logger.Error(
+					"failed to stop plugin capability during cleanup",
+					"capability",
+					capability,
+					"error",
+					err,
+				)
+			}
+		}
+	}
 	success := false
 	defer func() {
 		r := recover()
@@ -161,6 +246,36 @@ func (n *Node) Run(ctx context.Context) error {
 	// Close (not Stop): startup-failure cleanup is terminal, and Stop restarts
 	// the async-worker pool, leaking those goroutines.
 	started = append(started, func() { n.eventBus.Close() })
+	started = append(started, func() {
+		if err := n.pluginHost.Stop(context.Background()); err != nil {
+			n.config.logger.Error(
+				"failed to stop plugin host during cleanup",
+				"error",
+				err,
+			)
+		}
+	})
+
+	// Resolve provider-owned storage before constructing the database that uses
+	// it. The startup cleanup stack stops any provider that started before a
+	// later storage resolution failure.
+	stores, err := internalplugins.ResolveStorage(
+		n.ctx,
+		n.pluginHost,
+		internalplugins.StorageSelections{
+			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob],
+			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata],
+		},
+		internalplugins.StorageDependencies{
+			DataDir: n.config.dataDir, RunMode: n.config.runMode,
+			StorageMode:    string(n.config.storageMode),
+			MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+			Logger:         n.config.logger, PromRegistry: n.config.promRegistry,
+		},
+	)
+	if err != nil {
+		return err
+	}
 
 	// Load database
 	dbNeedsRecovery := false
@@ -168,10 +283,6 @@ func (n *Node) Run(ctx context.Context) error {
 		DataDir:              n.config.dataDir,
 		Logger:               n.config.logger,
 		PromRegistry:         n.config.promRegistry,
-		BlobPlugin:           n.config.blobPlugin,
-		RunMode:              n.config.runMode,
-		MetadataPlugin:       n.config.metadataPlugin,
-		MaxConnections:       n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		StorageMode:          string(n.config.storageMode),
 		Network:              n.config.network,
 		StrictUtxoValidation: n.config.strictUtxoValidation,
@@ -182,7 +293,7 @@ func (n *Node) Run(ctx context.Context) error {
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
 	}
-	db, err := database.New(dbConfig)
+	db, err := database.New(dbConfig, stores)
 	if db == nil {
 		if err != nil {
 			n.config.logger.Error(
@@ -455,7 +566,10 @@ func (n *Node) Run(ctx context.Context) error {
 				if n.chainsyncState == nil {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
-				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(connId, hash)
+				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(
+					connId,
+					hash,
+				)
 				if !ok {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
@@ -484,7 +598,10 @@ func (n *Node) Run(ctx context.Context) error {
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
-		return fmt.Errorf("failed to configure chain security parameter: %w", err)
+		return fmt.Errorf(
+			"failed to configure chain security parameter: %w",
+			err,
+		)
 	}
 
 	if n.config.barkBaseUrl != "" {
@@ -540,7 +657,10 @@ func (n *Node) Run(ctx context.Context) error {
 	// Ariadne/candidate rows.
 	if n.config.storageMode.IsAPI() {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
-			return fmt.Errorf("load epoch cache before Midnight indexer start: %w", err)
+			return fmt.Errorf(
+				"load epoch cache before Midnight indexer start: %w",
+				err,
+			)
 		}
 		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
 			EventBus:                n.eventBus,
@@ -567,7 +687,12 @@ func (n *Node) Run(ctx context.Context) error {
 				return epoch.EpochId, nil
 			},
 			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
-				return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
+				return database.ForEachBlockInRangeDB(
+					n.db,
+					startSlot,
+					endSlot,
+					fn,
+				)
 			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
@@ -581,7 +706,9 @@ func (n *Node) Run(ctx context.Context) error {
 			return fmt.Errorf("creating midnight indexer: %w", err)
 		}
 		n.midnightIndexer = midnightIdx
-		n.config.logger.Info("midnight indexer created, running backfill and subscribing to live events")
+		n.config.logger.Info(
+			"midnight indexer created, running backfill and subscribing to live events",
+		)
 		if err := n.midnightIndexer.Start(); err != nil {
 			return fmt.Errorf("starting midnight indexer: %w", err)
 		}
@@ -658,38 +785,29 @@ func (n *Node) Run(ctx context.Context) error {
 			"component", "node",
 		)
 	}
-	// Initialize mempool
-	n.mempool, err = mempool.New(
-		n.config.mempoolImplementation,
-		mempool.MempoolConfig{
-			MempoolCapacity:    n.config.mempoolCapacity,
-			EvictionWatermark:  n.config.evictionWatermark,
-			RejectionWatermark: n.config.rejectionWatermark,
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			PromRegistry:       n.config.promRegistry,
-			Validator:          n.ledgerState,
-			CurrentSlotFunc:    n.ledgerState.CurrentOrTipSlot,
+	// Resolve mempool only after ledger dependencies are available.
+	mempoolSelection := n.config.pluginSelections[plugin.CapabilityMempool]
+	n.mempool, err = plugin.Resolve[mempool.Service](
+		n.ctx,
+		n.pluginHost,
+		plugin.CapabilityMempool,
+		mempoolSelection.Provider,
+		mempoolSelection.Config,
+		mempool.ProviderDependencies{
+			PromRegistry:    n.config.promRegistry,
+			Validator:       n.ledgerState,
+			Logger:          n.config.logger,
+			EventBus:        n.eventBus,
+			CurrentSlotFunc: n.ledgerState.CurrentOrTipSlot,
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create mempool: %w", err)
+		return fmt.Errorf("resolve mempool: %w", err)
 	}
-	n.config.logger.Info(
-		"mempool initialized",
-		"component", "mempool",
-		"implementation", n.mempool.Implementation(),
-		"capacity_bytes", n.mempool.CapacityBytes(),
+	started = append(
+		started,
+		stopPluginCapability(plugin.CapabilityMempool),
 	)
-	started = append(started, func() { //nolint:contextcheck
-		if err := n.mempool.Stop(context.Background()); err != nil {
-			n.config.logger.Error(
-				"failed to stop mempool during cleanup",
-				"error",
-				err,
-			)
-		}
-	})
 	// Set mempool adapter in ledger state for block forging.
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 	n.ouroboros.Mempool = n.mempool
@@ -1068,33 +1186,33 @@ func (n *Node) Run(ctx context.Context) error {
 		recyclerCancel()
 		n.chainsyncStallRecyclerWG.Wait()
 	})
-	// Configure UTxO RPC (only in API mode with a non-zero port)
-	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
-		n.utxorpc = utxorpc.NewUtxorpc(
-			utxorpc.UtxorpcConfig{
-				Logger:             n.config.logger,
-				EventBus:           n.eventBus,
-				LedgerState:        n.ledgerState,
-				Mempool:            n.mempool,
+	// Resolve UTxO RPC only in API mode with a non-zero configured port.
+	utxorpcSelection, utxorpcPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIUtxorpc,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && utxorpcPort > 0 {
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
+			utxorpcSelection.Provider, utxorpcSelection.Config,
+			utxorpc.ProviderDependencies{
+				Logger: n.config.logger, EventBus: n.eventBus,
+				LedgerState: n.ledgerState, Mempool: n.mempool,
 				Host:               n.config.bindAddr,
-				Port:               n.config.utxorpcPort,
-				TlsCertFilePath:    n.config.tlsCertFilePath,
-				TlsKeyFilePath:     n.config.tlsKeyFilePath,
+				TLSCertFilePath:    n.config.tlsCertFilePath,
+				TLSKeyFilePath:     n.config.tlsKeyFilePath,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
-		if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
-			return fmt.Errorf("starting utxorpc: %w", err)
+		if err != nil {
+			return fmt.Errorf("resolve utxorpc API: %w", err)
 		}
-		started = append(started, func() { //nolint:contextcheck
-			if err := n.utxorpc.Stop(context.Background()); err != nil {
-				n.config.logger.Error(
-					"failed to stop utxorpc during cleanup",
-					"error",
-					err,
-				)
-			}
-		})
+		started = append(
+			started,
+			stopPluginCapability(plugin.CapabilityAPIUtxorpc),
+		)
 	}
 
 	if n.config.barkPort > 0 {
@@ -1117,7 +1235,11 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 		started = append(started, func() { //nolint:contextcheck
 			if err := n.bark.Stop(context.Background()); err != nil {
-				n.config.logger.Error("failed to stop bark during cleanup", "error", err)
+				n.config.logger.Error(
+					"failed to stop bark during cleanup",
+					"error",
+					err,
+				)
 			}
 		})
 	}
@@ -1167,12 +1289,14 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Configure Blockfrost API (only in API mode with a non-zero port)
-	if n.config.storageMode.IsAPI() && n.config.blockfrostPort > 0 {
-		listenAddr := net.JoinHostPort(
-			n.config.bindAddr,
-			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
-		)
+	// Resolve Blockfrost API only in API mode with a non-zero configured port.
+	blockfrostSelection, blockfrostPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIBlockfrost,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && blockfrostPort > 0 {
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
 			n.mempool,
@@ -1183,30 +1307,30 @@ func (n *Node) Run(ctx context.Context) error {
 				err,
 			)
 		}
-		n.blockfrostAPI = blockfrost.New(
-			blockfrost.BlockfrostConfig{
-				ListenAddress:      listenAddr,
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
+			blockfrostSelection.Provider, blockfrostSelection.Config,
+			blockfrost.ProviderDependencies{
+				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
-			adapter,
-			n.config.logger,
 		)
-		if err := n.blockfrostAPI.Start(n.ctx); err != nil { //nolint:contextcheck
-			return fmt.Errorf("starting blockfrost API: %w", err)
+		if err != nil {
+			return fmt.Errorf("resolve blockfrost API: %w", err)
 		}
-		started = append(started, func() { //nolint:contextcheck
-			if err := n.blockfrostAPI.Stop(context.Background()); err != nil {
-				n.config.logger.Error(
-					"failed to stop blockfrost API during cleanup",
-					"error",
-					err,
-				)
-			}
-		})
+		started = append(
+			started,
+			stopPluginCapability(plugin.CapabilityAPIBlockfrost),
+		)
 	}
 
-	// Configure Mesh API (only in API mode with a non-zero port)
-	if n.config.storageMode.IsAPI() && n.config.meshPort > 0 {
+	meshSelection, meshPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIMesh,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && meshPort > 0 {
 		var genesisHash string
 		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {
@@ -1221,19 +1345,16 @@ func (n *Node) Run(ctx context.Context) error {
 					"(Byron genesis hash and Shelley genesis)",
 			)
 		}
-		listenAddr := net.JoinHostPort(
-			n.config.bindAddr,
-			strconv.FormatUint(uint64(n.config.meshPort), 10),
-		)
-		var meshErr error
-		n.meshAPI, meshErr = mesh.NewServer(
-			mesh.ServerConfig{
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
+			meshSelection.Provider, meshSelection.Config,
+			mesh.ProviderDependencies{
 				Logger:              n.config.logger,
 				LedgerState:         n.ledgerState,
 				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
-				ListenAddress:       listenAddr,
+				Host:                n.config.bindAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
@@ -1241,24 +1362,16 @@ func (n *Node) Run(ctx context.Context) error {
 				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
 			},
 		)
-		if meshErr != nil {
+		if err != nil {
 			return fmt.Errorf(
-				"create mesh API server: %w",
-				meshErr,
+				"resolve mesh API: %w",
+				err,
 			)
 		}
-		if err := n.meshAPI.Start(n.ctx); err != nil { //nolint:contextcheck
-			return fmt.Errorf("starting mesh API: %w", err)
-		}
-		started = append(started, func() { //nolint:contextcheck
-			if err := n.meshAPI.Stop(context.Background()); err != nil {
-				n.config.logger.Error(
-					"failed to stop mesh API during cleanup",
-					"error",
-					err,
-				)
-			}
-		})
+		started = append(
+			started,
+			stopPluginCapability(plugin.CapabilityAPIMesh),
+		)
 	}
 
 	if n.config.storageMode.IsAPI() {
@@ -1299,14 +1412,20 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.blockProducer {
 		creds, err := n.validateBlockProducerStartup()
 		if err != nil {
-			return fmt.Errorf("block producer startup validation failed: %w", err)
+			return fmt.Errorf(
+				"block producer startup validation failed: %w",
+				err,
+			)
 		}
 		// Cross-check loaded credentials against ledger state. Mismatch
 		// against on-chain pool registration is fatal; "not yet
 		// registered" is a warning so operators can stage credentials
 		// before submitting the registration cert.
 		if err := n.validateBlockProducerLedger(creds); err != nil {
-			return fmt.Errorf("block producer credentials failed ledger check: %w", err)
+			return fmt.Errorf(
+				"block producer credentials failed ledger check: %w",
+				err,
+			)
 		}
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
 		if err := n.initBlockForger(n.ctx, creds); err != nil {
@@ -1422,7 +1541,8 @@ func (n *Node) startDeferredIndexMaintenance() func() {
 		case <-timer.C:
 			n.config.logger.Warn(
 				"timed out waiting for deferred-index maintenance; continuing cleanup",
-				"timeout", timeout,
+				"timeout",
+				timeout,
 			)
 		}
 	}

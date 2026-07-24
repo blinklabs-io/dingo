@@ -44,8 +44,9 @@ type flagSpec struct {
 // Ordering controls --help output and error reporting precedence.
 var flagSpecs = []flagSpec{
 	// Core
-	stringFlag("BlobPlugin", "blob", "b", "blob store plugin to use, 'list' to show available"),
-	stringFlag("MetadataPlugin", "metadata", "m", "metadata store plugin to use, 'list' to show available"),
+	stringFlag("Plugins.Storage.Blob.Provider", "blob", "b", "blob store provider"),
+	stringFlag("Plugins.Storage.Metadata.Provider", "metadata", "m", "metadata store provider"),
+	stringFlag("Plugins.Mempool.Provider", "mempool", "", "mempool provider"),
 	stringFlag("DatabasePath", "data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)"),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
@@ -84,9 +85,9 @@ var flagSpecs = []flagSpec{
 	boolPtrFlag("PeerSharing", "peer-sharing", "enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers; false for block producers)"),
 
 	// APIs
-	uintFlag("UtxorpcPort", "utxorpc-port", "UTxO RPC API port"),
-	uintFlag("BlockfrostPort", "blockfrost-port", "Blockfrost-compatible API port"),
-	uintFlag("MeshPort", "mesh-port", "Mesh API port"),
+	stringFlag("Plugins.API.Utxorpc.Provider", "utxorpc-provider", "", "UTxO RPC API provider"),
+	stringFlag("Plugins.API.Blockfrost.Provider", "blockfrost-provider", "", "Blockfrost API provider"),
+	stringFlag("Plugins.API.Mesh.Provider", "mesh-provider", "", "Mesh API provider"),
 	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
 	durationFlag("OffchainMetadata.Interval", "offchain-metadata-interval", "off-chain metadata fetch interval (0 = default)"),
 	durationFlag("OffchainMetadata.RequestTimeout", "offchain-metadata-request-timeout", "off-chain metadata HTTP request timeout (0 = default)"),
@@ -106,12 +107,6 @@ var flagSpecs = []flagSpec{
 	// History expiry
 	boolFlag("HistoryExpiry.Enabled", "history-expiry-enabled", "enable local immutable block history expiry"),
 	durationFlag("HistoryExpiry.Frequency", "history-expiry-frequency", "history expiry scan frequency"),
-
-	// Mempool
-	stringFlag("MempoolImplementation", "mempool-implementation", "", "mempool implementation: fifo"),
-	int64Flag("MempoolCapacity", "mempool-capacity", "mempool max bytes"),
-	float64Flag("EvictionWatermark", "eviction-watermark", "mempool eviction watermark"),
-	float64Flag("RejectionWatermark", "rejection-watermark", "mempool rejection watermark"),
 
 	// Peer governance
 	intFlag("TargetNumberOfKnownPeers", "target-known-peers", "target number of known peers"),

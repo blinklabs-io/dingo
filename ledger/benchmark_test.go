@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 var benchmarkDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -162,11 +163,11 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create a test address
 	paymentKey := make([]byte, 28) // dummy 28-byte key hash
@@ -194,11 +195,11 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks (sample from different parts of chain)
 	immDb := openImmutableTestDB(b)
@@ -234,11 +235,11 @@ func BenchmarkUtxoLookupByRefNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create a test transaction reference
 	testTxId := make([]byte, 32) // dummy 32-byte tx ID
@@ -267,11 +268,11 @@ func BenchmarkUtxoLookupByRefRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks (sample from different parts of chain)
 	immDb := openImmutableTestDB(b)
@@ -307,11 +308,11 @@ func BenchmarkBlockRetrievalByIndexNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Reset timer after setup
 	b.ResetTimer()
@@ -333,11 +334,11 @@ func BenchmarkBlockRetrievalByIndexRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -402,11 +403,11 @@ func BenchmarkTransactionHistoryQueriesNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create a test transaction hash
 	testTxHash := make([]byte, 32) // dummy 32-byte hash
@@ -435,11 +436,11 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks that contain transactions
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -515,11 +516,11 @@ func BenchmarkAccountLookupByStakeKeyNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create a test stake key
 	testStakeKey := make([]byte, 28) // 28-byte stake key hash
@@ -545,11 +546,11 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -622,11 +623,11 @@ func BenchmarkPoolLookupByKeyHashNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create a test pool key hash (28 bytes)
 	testPoolKeyHash := lcommon.PoolKeyHash(make([]byte, 28))
@@ -652,11 +653,11 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -729,11 +730,11 @@ func BenchmarkDRepLookupByKeyHashNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create a test DRep credential (32 bytes)
 	testDRepCredential := make([]byte, 32)
@@ -759,11 +760,11 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -836,11 +837,11 @@ func BenchmarkDatumLookupByHashNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create a test datum hash (32 bytes)
 	testDatumHash := lcommon.Blake2b256(make([]byte, 32))
@@ -868,11 +869,11 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -947,11 +948,11 @@ func BenchmarkProtocolParametersLookupByEpochNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create test epochs
 	testEpochs := []uint64{1, 10, 50, 100, 200}
@@ -975,11 +976,11 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1045,11 +1046,11 @@ func BenchmarkBlockNonceLookupNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create test points (slot, hash)
 	testPoints := make([]ocommon.Point, 10)
@@ -1083,11 +1084,11 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1163,11 +1164,11 @@ func BenchmarkStakeRegistrationLookupsNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create test stake keys
 	testStakeKeys := make([][]byte, 10)
@@ -1198,11 +1199,11 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1275,11 +1276,11 @@ func BenchmarkPoolRegistrationLookupsNoData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create test pool key hashes
 	testPoolKeyHashes := make([]lcommon.PoolKeyHash, 10)
@@ -1310,11 +1311,11 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1442,11 +1443,11 @@ func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Open immutable database
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1549,11 +1550,11 @@ func BenchmarkIndexBuildingTime(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Open the immutable database with real Cardano preview testnet data
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1666,11 +1667,11 @@ func BenchmarkRealBlockProcessing(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Open the immutable database with real Cardano preview testnet data
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1755,11 +1756,11 @@ func BenchmarkRealDataQueries(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Open the immutable database with real Cardano preview testnet data
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1826,11 +1827,11 @@ func BenchmarkChainSyncFromGenesis(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Open immutable database with real testdata
 	immDb, err := immutable.New("../database/immutable/testdata")
@@ -1909,11 +1910,11 @@ func BenchmarkTransactionValidation(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager
 	chainManager, err := chain.NewManager(db, nil)
@@ -2003,7 +2004,7 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 		b,
 		seedModels,
 	)
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	b.Logf("Loaded %d blocks for throughput testing", len(blocks))
 
@@ -2014,7 +2015,7 @@ func BenchmarkBlockProcessingThroughput(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		if blockIdx == len(blocks) {
 			b.StopTimer()
-			if err := db.Close(); err != nil {
+			if err := dbtest.CloseDatabase(db); err != nil {
 				b.Fatal(err)
 			}
 			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
@@ -2064,7 +2065,7 @@ func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
 		b,
 		seedModels,
 	)
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	b.Logf("Loaded %d blocks for near-tip blockfetch testing", len(blocks))
 
@@ -2075,7 +2076,7 @@ func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		if blockIdx == len(blocks) {
 			b.StopTimer()
-			if err := db.Close(); err != nil {
+			if err := dbtest.CloseDatabase(db); err != nil {
 				b.Fatal(err)
 			}
 			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
@@ -2132,7 +2133,7 @@ func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 		b,
 		seedModels,
 	)
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	b.Logf(
 		"Loaded %d predecoded blocks for near-tip blockfetch testing",
@@ -2146,7 +2147,7 @@ func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		if blockIdx == len(blocks) {
 			b.StopTimer()
-			if err := db.Close(); err != nil {
+			if err := dbtest.CloseDatabase(db); err != nil {
 				b.Fatal(err)
 			}
 			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
@@ -2195,7 +2196,7 @@ func BenchmarkBlockfetchNearTipFlushOnlyPredecoded(b *testing.B) {
 		b,
 		seedModels,
 	)
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	b.Logf(
 		"Loaded %d predecoded blocks for near-tip flush-only testing",
@@ -2209,7 +2210,7 @@ func BenchmarkBlockfetchNearTipFlushOnlyPredecoded(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		if blockIdx == len(blocks) {
 			b.StopTimer()
-			if err := db.Close(); err != nil {
+			if err := dbtest.CloseDatabase(db); err != nil {
 				b.Fatal(err)
 			}
 			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
@@ -2259,7 +2260,7 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 		b,
 		seedModels,
 	)
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	b.Logf(
 		"Loaded %d predecoded blocks for queued-header near-tip testing",
@@ -2273,7 +2274,7 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		if blockIdx == len(blocks) {
 			b.StopTimer()
-			if err := db.Close(); err != nil {
+			if err := dbtest.CloseDatabase(db); err != nil {
 				b.Fatal(err)
 			}
 			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
@@ -2381,15 +2382,19 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	testBlock := createTestBlock(b, [32]byte{0x42}, 0, tamperNone)
 
-	db, err := database.New(&database.Config{
-		DataDir: "",
-		Logger:  benchmarkDiscardLogger,
+	db, err := dbtest.NewDatabaseWithOptions(b, dbtest.Options{
+		Config: &database.Config{
+			DataDir: "",
+			Logger:  benchmarkDiscardLogger,
+		},
+		// Serve mode selects the compact-block-metadata storage path this
+		// near-tip dispatch benchmark is meant to measure.
 		RunMode: "serve",
 	})
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { _ = db.Close() })
+	b.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 
 	chainManager, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -2460,7 +2465,7 @@ func BenchmarkBlockProcessingThroughputPredecoded(b *testing.B) {
 		b,
 		seedModels,
 	)
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	b.Logf("Loaded %d predecoded blocks for throughput testing", len(blocks))
 
@@ -2471,7 +2476,7 @@ func BenchmarkBlockProcessingThroughputPredecoded(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		if blockIdx == len(blocks) {
 			b.StopTimer()
-			if err := db.Close(); err != nil {
+			if err := dbtest.CloseDatabase(db); err != nil {
 				b.Fatal(err)
 			}
 			db, ledgerState = newBlockProcessingBenchmarkLedgerState(
@@ -2514,11 +2519,11 @@ func BenchmarkBlockBatchProcessingThroughput(b *testing.B) {
 		db, ledgerState := newBatchBenchmarkLedgerState(b, seedModels)
 		b.StartTimer()
 		if err := ledgerState.Chain().AddBlocks(batchBlocks); err != nil {
-			_ = db.Close()
+			_ = dbtest.CloseDatabase(db)
 			b.Fatal(err)
 		}
 		b.StopTimer()
-		if err := db.Close(); err != nil {
+		if err := dbtest.CloseDatabase(db); err != nil {
 			b.Fatal(err)
 		}
 		b.StartTimer()
@@ -2542,11 +2547,11 @@ func BenchmarkRawBlockBatchProcessingThroughput(b *testing.B) {
 		db, ledgerState := newBatchBenchmarkLedgerState(b, seedModels)
 		b.StartTimer()
 		if err := ledgerState.Chain().AddRawBlocks(rawBlocks); err != nil {
-			_ = db.Close()
+			_ = dbtest.CloseDatabase(db)
 			b.Fatal(err)
 		}
 		b.StopTimer()
-		if err := db.Close(); err != nil {
+		if err := dbtest.CloseDatabase(db); err != nil {
 			b.Fatal(err)
 		}
 		b.StartTimer()
@@ -2689,20 +2694,20 @@ func newBatchBenchmarkLedgerState(
 ) (*database.Database, *LedgerState) {
 	b.Helper()
 
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(b, &database.Config{DataDir: ""})
 	if err != nil {
 		b.Fatal(err)
 	}
 	for _, blockModel := range seedModels {
 		tmpModel := blockModel
 		if err := db.BlockCreate(tmpModel, nil); err != nil {
-			_ = db.Close()
+			_ = dbtest.CloseDatabase(db)
 			b.Fatalf("seed batch benchmark block: %v", err)
 		}
 	}
 	chainManager, err := chain.NewManager(db, nil)
 	if err != nil {
-		_ = db.Close()
+		_ = dbtest.CloseDatabase(db)
 		b.Fatal(err)
 	}
 	ledgerState, err := NewLedgerState(LedgerStateConfig{
@@ -2710,7 +2715,7 @@ func newBatchBenchmarkLedgerState(
 		ChainManager: chainManager,
 	})
 	if err != nil {
-		_ = db.Close()
+		_ = dbtest.CloseDatabase(db)
 		b.Fatal(err)
 	}
 	return db, ledgerState
@@ -2722,9 +2727,13 @@ func newBlockProcessingBenchmarkLedgerState(
 ) (*database.Database, *LedgerState) {
 	b.Helper()
 
-	db, err := database.New(&database.Config{
-		DataDir: "",
-		Logger:  benchmarkDiscardLogger,
+	db, err := dbtest.NewDatabaseWithOptions(b, dbtest.Options{
+		Config: &database.Config{
+			DataDir: "",
+			Logger:  benchmarkDiscardLogger,
+		},
+		// Serve mode selects the compact-block-metadata storage path used by
+		// the block-processing benchmarks that build on this ledger state.
 		RunMode: "serve",
 	})
 	if err != nil {
@@ -2733,13 +2742,13 @@ func newBlockProcessingBenchmarkLedgerState(
 	for _, blockModel := range seedModels {
 		tmpModel := blockModel
 		if err := db.BlockCreate(tmpModel, nil); err != nil {
-			_ = db.Close()
+			_ = dbtest.CloseDatabase(db)
 			b.Fatalf("seed block processing benchmark block: %v", err)
 		}
 	}
 	chainManager, err := chain.NewManager(db, nil)
 	if err != nil {
-		_ = db.Close()
+		_ = dbtest.CloseDatabase(db)
 		b.Fatal(err)
 	}
 	ledgerState, err := NewLedgerState(LedgerStateConfig{
@@ -2747,7 +2756,7 @@ func newBlockProcessingBenchmarkLedgerState(
 		ChainManager: chainManager,
 	})
 	if err != nil {
-		_ = db.Close()
+		_ = dbtest.CloseDatabase(db)
 		b.Fatal(err)
 	}
 	return db, ledgerState
@@ -2760,11 +2769,11 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 	config := &database.Config{
 		DataDir: "", // in-memory
 	}
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabase(b, config)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Open immutable database
 	immDb := openImmutableTestDB(b)
@@ -2950,7 +2959,7 @@ func loadStorageModeBenchmarkFixture(
 		seedBlocks:    make([]storageModeBenchmarkBlock, 0, maxBlocks),
 		measureBlocks: make([]storageModeBenchmarkBlock, 0, maxBlocks),
 	}
-	fixtureDb, err := database.New(&database.Config{
+	fixtureDb, err := dbtest.NewDatabase(b, &database.Config{
 		DataDir:     "",
 		Logger:      benchmarkDiscardLogger,
 		StorageMode: types.StorageModeCore,
@@ -2958,7 +2967,7 @@ func loadStorageModeBenchmarkFixture(
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer fixtureDb.Close()
+	defer dbtest.CloseDatabase(fixtureDb)
 	seededTxs := 0
 	measuredTxs := 0
 	for len(ret.seedBlocks)+len(ret.measureBlocks) < maxBlocks &&
@@ -3126,7 +3135,7 @@ func BenchmarkStorageModeIngest(b *testing.B) {
 			totalTxs := 0
 			for b.Loop() {
 				b.StopTimer()
-				db, err := database.New(&database.Config{
+				db, err := dbtest.NewDatabase(b, &database.Config{
 					DataDir:     "",
 					Logger:      benchmarkDiscardLogger,
 					StorageMode: mode,
@@ -3138,7 +3147,7 @@ func BenchmarkStorageModeIngest(b *testing.B) {
 					db,
 					fixture.seedBlocks,
 				); err != nil {
-					_ = db.Close()
+					_ = dbtest.CloseDatabase(db)
 					b.Fatalf("seed storage mode benchmark blocks: %v", err)
 				}
 
@@ -3149,7 +3158,7 @@ func BenchmarkStorageModeIngest(b *testing.B) {
 				)
 
 				b.StopTimer()
-				closeErr := db.Close()
+				closeErr := dbtest.CloseDatabase(db)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -3185,7 +3194,7 @@ func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
 		b.Run(mode, func(b *testing.B) {
 			b.ReportAllocs()
 
-			db, err := database.New(&database.Config{
+			db, err := dbtest.NewDatabase(b, &database.Config{
 				DataDir:     "",
 				Logger:      benchmarkDiscardLogger,
 				StorageMode: mode,
@@ -3193,7 +3202,7 @@ func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer db.Close()
+			defer dbtest.CloseDatabase(db)
 
 			if _, err := ingestStorageModeBenchmarkBlocks(db, fixture.seedBlocks); err != nil {
 				b.Fatalf("seed steady-state storage mode benchmark blocks: %v", err)

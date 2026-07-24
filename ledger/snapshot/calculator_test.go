@@ -26,24 +26,22 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
 
-// setupTestDB creates a database.Database backed by in-memory SQLite for
-// testing. The caller should defer db.Close().
+// setupTestDB creates a database.Database backed by temporary Badger and
+// SQLite stores. Cleanup is registered with the test.
 func setupTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
 	})
 	require.NoError(t, err, "create database")
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 
 	return db
 }

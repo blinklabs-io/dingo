@@ -16,9 +16,7 @@ package blob
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -92,24 +90,4 @@ type BlobStore interface {
 	// DiskSize returns the on-disk size of the blob store in bytes.
 	// Returns 0 for cloud-backed stores where local size is not meaningful.
 	DiskSize() (int64, error)
-}
-
-// New returns the started blob plugin selected by name
-func New(pluginName string) (BlobStore, error) {
-	// Get and start the plugin
-	p, err := plugin.StartPlugin(plugin.PluginTypeBlob, pluginName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Type assert to BlobStore interface
-	blobStore, ok := p.(BlobStore)
-	if !ok {
-		return nil, fmt.Errorf(
-			"plugin '%s' does not implement BlobStore interface",
-			pluginName,
-		)
-	}
-
-	return blobStore, nil
 }

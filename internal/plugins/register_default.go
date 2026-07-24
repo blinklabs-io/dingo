@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,24 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package plugin
+//go:build !dingo_extra_plugins
 
-import "log/slog"
+package plugins
 
-// Logger provides a logging interface for plugins.
-type Logger interface {
-	Info(string, ...any)
-	Warn(string, ...any)
-	Debug(string, ...any)
-	Error(string, ...any)
+import "github.com/blinklabs-io/dingo/plugin"
 
-	// Deprecated
-	// Fatal(string, ...any) in favor of Error
-	// With slog Fatal is replaced with Error and os.Exit(1)
-}
-
-// LoggerSetter is implemented by plugins that can accept a logger after
-// construction.
-type LoggerSetter interface {
-	SetLogger(*slog.Logger)
-}
+func registerExtra(*plugin.Host) error { return nil }

@@ -161,12 +161,11 @@ func TestTieredCborCacheHotMissTx(t *testing.T) {
 }
 
 func TestResolveTxCborUsesCallerTxn(t *testing.T) {
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, db.Close())

@@ -55,7 +55,8 @@ func WithRegion(region string) BlobStoreS3OptionFunc {
 	}
 }
 
-// WithPrefix specifies the S3 object prefix
+// WithPrefix specifies the S3 object prefix. The prefix is used verbatim so
+// existing configurations retain their object-key layout.
 func WithPrefix(prefix string) BlobStoreS3OptionFunc {
 	return func(b *BlobStoreS3) {
 		b.prefix = prefix

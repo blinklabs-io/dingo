@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,16 +18,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 // loadBlockData loads real block data from testdata chunks for benchmarking
@@ -97,201 +94,86 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 	return blocks[:numBlocks], nil
 }
 
-// canCreateDatabase tests if a database configuration is actually usable
-func canCreateDatabase(config *database.Config) bool {
-	db, err := database.New(config)
-	if db != nil {
-		defer func() {
-			if closeErr := db.Close(); closeErr != nil {
-				// Close failure indicates config may not be fully usable
-				err = closeErr
-			}
-		}()
-	}
-	if err != nil {
-		return false
-	}
-	return true
+// storageBenchBackend is one storage backend under benchmark: a display name,
+// the dbtest options that compose its database, and whether it is a local
+// on-disk backend that should receive a fresh directory for each run.
+type storageBenchBackend struct {
+	name      string
+	opts      dbtest.Options
+	localDisk bool
 }
 
-type namer interface {
-	Name() string
-}
-
-// getTestBackends returns a slice of test backends for benchmarking
-func getTestBackends(b namer, diskDataDir string) []struct {
-	config *database.Config
-	name   string
-} {
-	backends := []struct {
-		config *database.Config
-		name   string
-	}{
+// getTestBackends returns the storage backends to benchmark. Memory and disk
+// (Badger) are always present; cloud backends are appended only in
+// dingo_extra_plugins builds when the matching credentials are configured.
+func getTestBackends(diskDataDir, benchName string) []storageBenchBackend {
+	backends := []storageBenchBackend{
 		{
 			name: "memory",
-			config: &database.Config{
-				BlobPlugin:     "badger",
-				DataDir:        "",
-				MetadataPlugin: "sqlite",
-			},
+			opts: dbtest.Options{Config: &database.Config{DataDir: ""}},
 		},
 		{
 			name: "disk",
-			config: &database.Config{
-				BlobPlugin:     "badger",
-				DataDir:        diskDataDir,
-				MetadataPlugin: "sqlite",
+			opts: dbtest.Options{
+				Config: &database.Config{DataDir: diskDataDir},
 			},
+			localDisk: true,
 		},
 	}
-
-	// Add cloud backends if credentials are available AND database can be created.
-	// Cloud blob plugins read bucket/prefix from plugin options, not DataDir, so
-	// DataDir is only consumed by the sqlite metadata plugin and must be a local
-	// filesystem path — using a "gcs://"/"s3://" URL would create a literal
-	// "gcs:/"/"s3:/" directory in the working tree.
-	if hasGCSCredentials() {
-		testBucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
-		if testBucket == "" {
-			testBucket = "dingo-test-bucket"
-		}
-		gcsConfig := &database.Config{
-			BlobPlugin:     "gcs",
-			DataDir:        filepath.Join(diskDataDir, "gcs-metadata"),
-			MetadataPlugin: "sqlite",
-		}
-
-		plugin.SetPluginOption(
-			plugin.PluginTypeBlob,
-			"gcs",
-			"bucket",
-			testBucket,
-		)
-
-		if canCreateDatabase(gcsConfig) {
-			backends = append(backends, struct {
-				config *database.Config
-				name   string
-			}{
-				name:   "GCS",
-				config: gcsConfig,
-			})
-		}
-	}
-
-	if hasS3Credentials() {
-		testBucket := os.Getenv("DINGO_TEST_S3_BUCKET")
-		if testBucket == "" {
-			testBucket = "dingo-test-bucket"
-		}
-		// Use path prefix for isolation instead of unique bucket names
-		testPrefix := strings.ReplaceAll(b.Name(), "/", "-") + "/"
-		s3Config := &database.Config{
-			BlobPlugin:     "s3",
-			DataDir:        filepath.Join(diskDataDir, "s3-metadata"),
-			MetadataPlugin: "sqlite",
-		}
-
-		plugin.SetPluginOption(
-			plugin.PluginTypeBlob,
-			"s3",
-			"bucket",
-			testBucket,
-		)
-
-		plugin.SetPluginOption(
-			plugin.PluginTypeBlob,
-			"s3",
-			"prefix",
-			testPrefix,
-		)
-
-		region := os.Getenv("AWS_REGION")
-		if region == "" {
-			region = "us-east-1"
-		}
-		plugin.SetPluginOption(
-			plugin.PluginTypeBlob,
-			"s3",
-			"region",
-			region,
-		)
-
-		if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
-			plugin.SetPluginOption(
-				plugin.PluginTypeBlob,
-				"s3",
-				"endpoint",
-				os.Getenv("AWS_ENDPOINT"),
-			)
-		}
-
-		if canCreateDatabase(s3Config) {
-			backends = append(backends, struct {
-				config *database.Config
-				name   string
-			}{
-				name:   "S3",
-				config: s3Config,
-			})
-		}
-	}
-
-	return backends
+	return append(
+		backends,
+		cloudStorageBenchmarkBackends(diskDataDir, benchName)...,
+	)
 }
 
 // BenchmarkStorageBackends benchmarks different storage backends
 func BenchmarkStorageBackends(b *testing.B) {
-	backends := getTestBackends(b, b.TempDir())
-
-	for _, backend := range backends {
+	for _, backend := range getTestBackends(b.TempDir(), b.Name()) {
 		b.Run(backend.name, func(b *testing.B) {
-			benchmarkStorageBackend(b, backend.name, backend.config)
+			benchmarkStorageBackend(b, backend)
 		})
 	}
 }
 
 // BenchmarkTestLoad benchmarks the equivalent of loading the first 200 blocks
 func BenchmarkTestLoad(b *testing.B) {
-	backends := getTestBackends(b, b.TempDir())
-
-	for _, backend := range backends {
+	for _, backend := range getTestBackends(b.TempDir(), b.Name()) {
 		b.Run(backend.name, func(b *testing.B) {
-			benchmarkTestLoad(b, backend.name, backend.config)
+			benchmarkTestLoad(b, backend)
 		})
 	}
 }
 
 func benchmarkStorageBackend(
 	b *testing.B,
-	backendName string,
-	config *database.Config,
+	backend storageBenchBackend,
 ) {
-	var tempDir string
-	var err error
-	// Create temporary directory for on-disk local backends
-	if config.BlobPlugin == "badger" && config.DataDir != "" {
-		tempDir, err = os.MkdirTemp(
+	opts := backend.opts
+	// Give a local on-disk backend a fresh directory for this run.
+	if backend.localDisk && opts.Config.DataDir != "" {
+		tempDir, err := os.MkdirTemp(
 			"",
-			fmt.Sprintf("dingo-bench-%s-", backendName),
+			fmt.Sprintf("dingo-bench-%s-", backend.name),
 		)
 		if err != nil {
 			b.Fatalf("failed to create temp dir: %v", err)
 		}
 		defer os.RemoveAll(tempDir)
-		config.DataDir = filepath.Join(tempDir, "data")
+		cfg := *opts.Config
+		cfg.DataDir = filepath.Join(tempDir, "data")
+		opts.Config = &cfg
 	}
 
 	// Create database with the specified backend
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabaseWithOptions(b, opts)
 	if err != nil {
 		b.Fatalf(
 			"failed to create database with %s backend: %v",
-			backendName,
+			backend.name,
 			err,
 		)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Pre-populate with 10 real blocks
 	blocks, err := loadBlockData(10)
@@ -340,34 +222,34 @@ func benchmarkStorageBackend(
 
 func benchmarkTestLoad(
 	b *testing.B,
-	backendName string,
-	config *database.Config,
+	backend storageBenchBackend,
 ) {
-	var tempDir string
-	var err error
-	// Create temporary directory for on-disk local backends
-	if config.BlobPlugin == "badger" && config.DataDir != "" {
-		tempDir, err = os.MkdirTemp(
+	opts := backend.opts
+	// Give a local on-disk backend a fresh directory for this run.
+	if backend.localDisk && opts.Config.DataDir != "" {
+		tempDir, err := os.MkdirTemp(
 			"",
-			fmt.Sprintf("dingo-testload-%s-", backendName),
+			fmt.Sprintf("dingo-testload-%s-", backend.name),
 		)
 		if err != nil {
 			b.Fatalf("failed to create temp dir: %v", err)
 		}
 		defer os.RemoveAll(tempDir)
-		config.DataDir = filepath.Join(tempDir, "data")
+		cfg := *opts.Config
+		cfg.DataDir = filepath.Join(tempDir, "data")
+		opts.Config = &cfg
 	}
 
 	// Create database with the specified backend
-	db, err := database.New(config)
+	db, err := dbtest.NewDatabaseWithOptions(b, opts)
 	if err != nil {
 		b.Fatalf(
 			"failed to create database with %s backend: %v",
-			backendName,
+			backend.name,
 			err,
 		)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Pre-populate with 200 real blocks
 	blocks, err := loadBlockData(200)

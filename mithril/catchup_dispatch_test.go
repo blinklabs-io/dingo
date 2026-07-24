@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,12 +37,10 @@ func seedCompleteDB(
 	setMarker bool,
 ) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		DataDir:        dataDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		StorageMode:    storageMode,
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StorageMode: storageMode,
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -55,7 +54,7 @@ func seedCompleteDB(
 	if setMarker {
 		require.NoError(t, setImmutableImportMarker(db, marker))
 	}
-	require.NoError(t, db.Close())
+	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
 // TestSyncCatchUpDispatch covers the two state-detected catch-up decisions that
@@ -76,8 +75,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			StorageMode:     "core",
 			Backend:         BackendV2,
 			AggregatorURL:   fix.server.URL,
-			BlobPlugin:      "badger",
-			MetadataPlugin:  "sqlite",
+			StoragePlugins:  testStoragePlugins(),
 			DatabaseWorkers: 1,
 			Logger:          discard,
 		})
@@ -94,8 +92,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			DataDir:         dataDir,
 			StorageMode:     "api",
 			Backend:         BackendV2,
-			BlobPlugin:      "badger",
-			MetadataPlugin:  "sqlite",
+			StoragePlugins:  testStoragePlugins(),
 			DatabaseWorkers: 1,
 			Logger:          discard,
 		})

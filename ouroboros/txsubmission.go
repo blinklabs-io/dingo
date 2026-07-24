@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -140,7 +140,7 @@ func (o *Ouroboros) txsubmissionClientStart(
 	}
 	// Register only after all required connection state has been verified. This
 	// avoids leaving a stale consumer behind when startup cannot proceed.
-	if consumer := o.Mempool.AddConsumer(connId); consumer == nil {
+	if consumer := o.Mempool.NewConsumer(connId); consumer == nil {
 		return mempool.ErrMempoolStopped
 	}
 	tx.Client.Init()
@@ -341,7 +341,7 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 ) ([]txsubmission.TxIdAndSize, error) {
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxIdAndSize{}
-	consumer := o.Mempool.Consumer(connId)
+	consumer := o.Mempool.FindConsumer(connId)
 	if consumer == nil {
 		return nil, fmt.Errorf(
 			"no mempool consumer for connection: %s",
@@ -415,7 +415,7 @@ func (o *Ouroboros) txsubmissionClientRequestTxs(
 ) ([]txsubmission.TxBody, error) {
 	connId := ctx.ConnectionId
 	ret := []txsubmission.TxBody{}
-	consumer := o.Mempool.Consumer(connId)
+	consumer := o.Mempool.FindConsumer(connId)
 	if consumer == nil {
 		return nil, fmt.Errorf(
 			"no mempool consumer for connection: %s",

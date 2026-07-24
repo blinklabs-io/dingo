@@ -28,7 +28,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	t *testing.T,
 ) {
 	config := &Config{DataDir: ""}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -111,7 +111,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	t *testing.T,
 ) {
 	config := &Config{DataDir: ""}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -203,7 +203,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	t *testing.T,
 ) {
 	config := &Config{DataDir: ""}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -263,7 +263,7 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 
 func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	config := &Config{DataDir: ""}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -329,7 +329,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	t *testing.T,
 ) {
 	config := &Config{DataDir: ""}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -414,7 +414,7 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 	t *testing.T,
 ) {
 	config := &Config{DataDir: ""}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -455,7 +455,7 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	t *testing.T,
 ) {
 	config := &Config{DataDir: ""}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
 	defer db.Close()
 

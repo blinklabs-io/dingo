@@ -211,6 +211,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	apiListeners := serving &&
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
+	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
+	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
+	meshPort := APIPluginPort(c.Plugins.API.Mesh)
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for most, privateBindAddr for the private
 	// listener, midnight.host for Midnight, and all interfaces for bark
@@ -227,9 +230,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
 		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
 		{"barkPort", "", c.BarkPort, serving, false},
-		{"utxorpcPort", c.BindAddr, c.UtxorpcPort, apiListeners, false},
-		{"blockfrostPort", c.BindAddr, c.BlockfrostPort, apiListeners, false},
-		{"meshPort", c.BindAddr, c.MeshPort, apiListeners, false},
+		{"plugins.api.utxorpc.config.port", c.BindAddr, utxorpcPort, apiListeners, false},
+		{"plugins.api.blockfrost.config.port", c.BindAddr, blockfrostPort, apiListeners, false},
+		{"plugins.api.mesh.config.port", c.BindAddr, meshPort, apiListeners, false},
 		{"midnight.port", c.Midnight.Host, c.Midnight.Port, apiListeners, false},
 	}
 	// Two active listeners contending for a port only fails at bind
@@ -285,41 +288,35 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 
 	// Mempool
-	if c.MempoolImplementation != "" &&
-		c.MempoolImplementation != "fifo" {
+	mempoolCapacity, evictionWatermark, rejectionWatermark := c.MempoolSettings()
+	if mempoolCapacity < 0 {
 		errs = append(errs, fmt.Errorf(
-			"invalid mempoolImplementation %q (must be \"fifo\")",
-			c.MempoolImplementation,
-		))
-	}
-	if c.MempoolCapacity < 0 {
-		errs = append(errs, fmt.Errorf(
-			"invalid mempoolCapacity: %d (must not be negative)",
-			c.MempoolCapacity,
+			"invalid plugins.mempool.config.capacity: %d (must not be negative)",
+			mempoolCapacity,
 		))
 	}
 	// NaN is checked explicitly: every ordered comparison with NaN is
 	// false, so a NaN watermark would slip through the range checks
 	// alone and reach mempool threshold arithmetic.
-	if math.IsNaN(c.EvictionWatermark) ||
-		c.EvictionWatermark <= 0 || c.EvictionWatermark >= 1.0 {
+	if math.IsNaN(evictionWatermark) ||
+		evictionWatermark <= 0 || evictionWatermark >= 1.0 {
 		errs = append(errs, fmt.Errorf(
-			"invalid evictionWatermark: %f (must be in range (0, 1))",
-			c.EvictionWatermark,
+			"invalid plugins.mempool.config.evictionWatermark: %f (must be in range (0, 1))",
+			evictionWatermark,
 		))
 	}
-	if math.IsNaN(c.RejectionWatermark) ||
-		c.RejectionWatermark <= 0 || c.RejectionWatermark > 1.0 {
+	if math.IsNaN(rejectionWatermark) ||
+		rejectionWatermark <= 0 || rejectionWatermark > 1.0 {
 		errs = append(errs, fmt.Errorf(
-			"invalid rejectionWatermark: %f (must be in range (0, 1])",
-			c.RejectionWatermark,
+			"invalid plugins.mempool.config.rejectionWatermark: %f (must be in range (0, 1])",
+			rejectionWatermark,
 		))
 	}
-	if c.EvictionWatermark >= c.RejectionWatermark {
+	if evictionWatermark >= rejectionWatermark {
 		errs = append(errs, fmt.Errorf(
-			"evictionWatermark (%f) must be less than rejectionWatermark (%f)",
-			c.EvictionWatermark,
-			c.RejectionWatermark,
+			"plugins.mempool.config.evictionWatermark (%f) must be less than rejectionWatermark (%f)",
+			evictionWatermark,
+			rejectionWatermark,
 		))
 	}
 

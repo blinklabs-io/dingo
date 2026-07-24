@@ -24,11 +24,8 @@ import (
 )
 
 func TestImportPoolRejectsTransactionWithoutMetadataWriteHandle(t *testing.T) {
-	db, err := New(&Config{DataDir: ""})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, db.Close())
-	})
 
 	newPool := func() (*models.Pool, *models.PoolRegistration) {
 		poolKeyHash := bytes.Repeat([]byte{0x42}, 28)

@@ -16,11 +16,9 @@ package metadata
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1826,24 +1824,4 @@ type BulkLoadOptimizer interface {
 // collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
 type PlannerStatsUpdater interface {
 	UpdatePlannerStats() error
-}
-
-// New creates a new metadata store instance using the specified plugin
-func New(pluginName string) (MetadataStore, error) {
-	// Get and start the plugin
-	p, err := plugin.StartPlugin(plugin.PluginTypeMetadata, pluginName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Type assert to MetadataStore interface
-	metadataStore, ok := p.(MetadataStore)
-	if !ok {
-		return nil, fmt.Errorf(
-			"plugin '%s' does not implement MetadataStore interface",
-			pluginName,
-		)
-	}
-
-	return metadataStore, nil
 }

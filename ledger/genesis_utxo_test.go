@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
@@ -45,14 +46,12 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 
 	// Create database
 	dbConfig := &database.Config{
-		DataDir:        tmpDir,
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		DataDir: tmpDir,
+		Logger:  logger,
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Load cardano config from embedded preview network
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(

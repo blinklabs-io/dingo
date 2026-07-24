@@ -170,7 +170,7 @@ func BenchmarkBlockByHashTxn_UnknownHash(b *testing.B) {
 func newBenchDB(b *testing.B) *Database {
 	b.Helper()
 	cfg := &Config{DataDir: ""}
-	db, err := New(cfg)
+	db, err := newTestDatabase(b, cfg)
 	require.NoError(b, err)
 	b.Cleanup(func() { _ = db.Close() })
 	return db

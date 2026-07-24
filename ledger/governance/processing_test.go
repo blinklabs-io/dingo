@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 func testHash32(seed string) []byte {
@@ -276,14 +277,12 @@ func TestExtractGovActionInfo_Info(t *testing.T) {
 }
 
 func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
-	db, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	proposalTxHash := testHash32("proposal")
 	returnAddress := append([]byte{0xE1}, testHash28("reward-account")...)
@@ -360,14 +359,12 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	const (
 		proposalEpoch     = uint64(100)
