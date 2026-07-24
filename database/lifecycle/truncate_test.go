@@ -130,14 +130,13 @@ func TestResolveTargetByNumberAheadOfTipErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestResolveTargetBySlotSkipsSparseIndexGap guards against comment-32's
-// original gap: the binary search used to treat any missing intermediate
-// block ID as fatal, immediately erroring out instead of adapting — but
-// Mithril bootstrap/drain import can legitimately leave large gaps in
-// the block-ID sequence. A target low in the surviving ID range forces
-// the search's very first probe to land inside the gap (with tip ID
-// 1002 and a target at ID 2, the first midpoint is ~501, squarely inside
-// the empty 4-999 range) — this alone only proves missing-ID probes
+// TestResolveTargetBySlotSkipsSparseIndexGap verifies the binary search
+// tolerates missing intermediate block IDs rather than treating a missing
+// probe as fatal — Mithril bootstrap/drain import can legitimately leave
+// large gaps in the block-ID sequence. A target low in the surviving ID
+// range forces the search's very first probe to land inside the gap (with
+// tip ID 1002 and a target at ID 2, the first midpoint is ~501, squarely
+// inside the empty 4-999 range) — this alone only proves missing-ID probes
 // don't hard-fail; TestResolveTargetBySlotSkipsSparseIndexGapAboveGap
 // below additionally proves the search can still find a target *above*
 // the gap, which a naive "treat a miss as answer-must-be-lower" fallback
@@ -186,15 +185,14 @@ func TestResolveTargetByNumberSkipsSparseIndexGapAboveGap(t *testing.T) {
 	require.Equal(t, f.blocks[4].ID, target.ID)
 }
 
-// TestTruncateReportsActualDeletedCountForSparseIndex guards against
-// comment-36's original gap: blocksRemoved used to be computed as
-// tipBlock.ID - target.ID, which is only a valid count when every ID in
-// that range is a real block — for a chain with Mithril bootstrap/drain
-// gaps, that range is merely an upper bound, and subtracting index
-// values there wildly overcounts. With a gap of ~997 missing IDs between
-// target (ID 3) and tip (ID 1002), the old formula would report 999
-// blocks removed even though only 3 (IDs 1000-1002) actually exist and
-// get deleted.
+// TestTruncateReportsActualDeletedCountForSparseIndex verifies that
+// blocksRemoved counts blocks actually deleted, not tipBlock.ID -
+// target.ID: that subtraction is only a valid count when every ID in the
+// range is a real block, but for a chain with Mithril bootstrap/drain gaps
+// that range is merely an upper bound. With a gap of ~997 missing IDs
+// between target (ID 3) and tip (ID 1002), an ID-subtraction count would
+// report 999 blocks removed even though only 3 (IDs 1000-1002) actually
+// exist and get deleted.
 func TestTruncateReportsActualDeletedCountForSparseIndex(t *testing.T) {
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 	target := f.blocks[2] // ID 3
@@ -260,23 +258,48 @@ func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestTruncateRejectsTargetWithMismatchedHash guards against comment-24's
-// defense-in-depth gap: ResolveTargetBySlot/ResolveTargetByNumber return a
-// block found by binary-searching the blob store's own contiguous ID
-// space, so their result is structurally guaranteed to be the block
-// genuinely occupying that ID on the current chain — but a target built
-// some other way (e.g. by hash, via ResolveTargetByHash, which has no such
-// structural guarantee) could in principle carry an ID/hash pair that
-// doesn't actually match what's stored at that ID. Truncate must verify
-// this itself rather than trust the caller, since DeleteBlocksAfter
-// deletes blob-store blocks by ID range while database.TruncateAfterSlot
-// deletes metadata by slot cutoff — the two only describe the same
-// rollback when target is genuinely the block at its own ID.
+// TestTruncateRejectsTargetWithMismatchedHash verifies Truncate defends
+// against a target whose ID/hash pair doesn't actually match what's stored
+// at that ID on the current chain. ResolveTargetBySlot/ResolveTargetByNumber
+// return a block found by binary-searching the blob store's own contiguous
+// ID space, so their result is structurally guaranteed to be the block
+// genuinely occupying that ID — but a target built some other way (e.g. by
+// hash, via ResolveTargetByHash, which has no such structural guarantee)
+// could in principle carry an ID/hash pair that doesn't actually match.
+// Truncate must verify this itself rather than trust the caller, since
+// DeleteBlocksAfter deletes blob-store blocks by ID range while
+// database.TruncateAfterSlot deletes metadata by slot cutoff — the two
+// only describe the same rollback when target is genuinely the block at
+// its own ID.
 func TestTruncateRejectsTargetWithMismatchedHash(t *testing.T) {
 	f := buildTestChain(t, 5)
 
 	target := f.blocks[2]
 	target.Hash = bytes.Repeat([]byte{0xFF}, 32) // does not match what's stored at this ID
+
+	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+
+	// Nothing must have been touched: every original block still present.
+	for _, b := range f.blocks {
+		_, err := f.db.BlockByIndex(b.ID, nil)
+		require.NoError(t, err)
+	}
+}
+
+// TestTruncateRejectsTargetWithMismatchedSlot verifies Truncate rejects a
+// target with a valid ID/Hash pair but a forged (or otherwise wrong) Slot,
+// not just a mismatched Hash. DeleteBlocksAfter cuts blob-store history by
+// target.ID, while database.TruncateAfterSlot cuts metadata history by
+// target.Slot directly (not by ID) — so a mismatched Slot would make the
+// two deletes cut at different points, silently diverging blob and
+// metadata history even though the Hash matched.
+func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
+	f := buildTestChain(t, 5)
+
+	target := f.blocks[2]
+	target.Slot = target.Slot + 1 // does not match what's stored at this ID
 
 	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0)
 	require.Error(t, err)

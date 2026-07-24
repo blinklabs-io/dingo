@@ -227,12 +227,26 @@ func (n *Node) runChainsyncStallRecycler(
 			// this one-time read can't land on a nil or mid-swap value if
 			// this loop happens to (re)start during a live lifecycle op
 			// (e.g. after a caught panic restarts it).
-			n.liveLifecycleMu.Lock()
+			//
+			// TryLock, not Lock: shutdown waits for this worker
+			// (chainsyncStallRecyclerWG) before tearing anything down, and
+			// a blocking Lock() here cannot be interrupted by ctx
+			// cancellation — if a recycler restart landed on this line
+			// while a live restore/truncate was holding liveLifecycleMu for
+			// its full quiesce-through-reinitialize duration, shutdown
+			// would hang behind it past its configured timeout. Skipping
+			// the read on contention is safe: lastProgressSlot just stays
+			// its zero value, and the first tick that successfully reads a
+			// nonzero localTipSlot resets the plateau baseline anyway (see
+			// processChainsyncRecyclerTick) — this can only make plateau
+			// detection more lenient at startup, never trigger it early.
 			var lastProgressSlot uint64
-			if n.ledgerState != nil {
-				lastProgressSlot = n.ledgerState.Tip().Point.Slot
+			if n.liveLifecycleMu.TryLock() {
+				if n.ledgerState != nil {
+					lastProgressSlot = n.ledgerState.Tip().Point.Slot
+				}
+				n.liveLifecycleMu.Unlock()
 			}
-			n.liveLifecycleMu.Unlock()
 			lastProgressAt := time.Now()
 			plateauRecoveryThreshold := plateauThreshold(
 				chainsyncCfg.StallTimeout,

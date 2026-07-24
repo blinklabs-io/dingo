@@ -256,14 +256,18 @@ func Truncate(
 	// ResolveTargetBySlot/ResolveTargetByNumber get this for free (they
 	// binary-search the same contiguous ID space this reads), but
 	// ResolveTargetByHash resolves purely through the hash index and has
-	// no such structural guarantee -- a hash lookup and an ID lookup
-	// agreeing here is what's actually being relied on. DeleteBlocksAfter
-	// below deletes blob-store blocks by ID range, while TruncateAfterSlot
-	// deletes metadata by slot cutoff; both describe the same rollback
-	// only when target is truly an ancestor of tipBlock; if a caller
-	// somehow supplied a target block ID/hash pair that doesn't match
-	// what's actually stored at that ID, this would fail closed instead
-	// of quietly making blob and metadata history diverge.
+	// no such structural guarantee -- a hash (and slot) lookup and an ID
+	// lookup agreeing here is what's actually being relied on.
+	// DeleteBlocksAfter below deletes blob-store blocks by ID range, while
+	// TruncateAfterSlot deletes metadata by target.Slot as the cutoff; the
+	// two only describe the same rollback when target's ID, Hash, AND Slot
+	// all genuinely match the same on-lineage block -- checking Hash alone
+	// leaves Slot unverified, and since TruncateAfterSlot trusts Slot
+	// directly (not ID), a target with a valid ID/Hash pair but a forged
+	// or otherwise-wrong Slot would still pass a hash-only check, then
+	// cut blob and metadata history at two different points, silently
+	// diverging them instead of failing closed the same way a hash
+	// mismatch does.
 	onLineage, err := db.BlockByIndex(target.ID, nil)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -272,14 +276,16 @@ func Truncate(
 			err,
 		)
 	}
-	if !bytes.Equal(onLineage.Hash, target.Hash) {
+	if onLineage.Slot != target.Slot || !bytes.Equal(onLineage.Hash, target.Hash) {
 		return 0, fmt.Errorf(
-			"%w: target hash %x does not match the block at id=%d on the "+
-				"current chain (found hash %x) -- target is not an "+
-				"ancestor of the current tip",
+			"%w: target at id=%d (slot=%d, hash=%x) does not match the "+
+				"block on the current chain at that id (slot=%d, hash=%x) "+
+				"-- target is not an ancestor of the current tip",
 			ErrTruncateNotStarted,
-			target.Hash,
 			target.ID,
+			target.Slot,
+			target.Hash,
+			onLineage.Slot,
 			onLineage.Hash,
 		)
 	}

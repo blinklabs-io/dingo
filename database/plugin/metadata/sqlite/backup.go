@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // BackupTo writes a standalone, defragmented copy of the store's current
@@ -74,7 +75,7 @@ func (d *MetadataStoreSqlite) RestoreFrom(ctx context.Context, srcPath string) e
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("sqlite restore: stat %q: %w", dstPath, err)
 	}
-	if err := os.MkdirAll(d.dataDir, 0o755); err != nil {
+	if err := createDirDurable(d.dataDir); err != nil {
 		return fmt.Errorf(
 			"sqlite restore: create data directory: %w",
 			err,
@@ -82,6 +83,45 @@ func (d *MetadataStoreSqlite) RestoreFrom(ctx context.Context, srcPath string) e
 	}
 	if err := copyFile(ctx, srcPath, dstPath); err != nil {
 		return fmt.Errorf("sqlite restore: %w", err)
+	}
+	return nil
+}
+
+// createDirDurable is os.MkdirAll(dir, 0o755), but additionally fsyncs the
+// parent of every directory component it actually had to create, so each
+// new directory's own entry is durable -- not just, per copyFile's own
+// directory-sync, the eventual contents placed inside it. A directory's
+// fsync only guarantees ITS children's directory entries are persisted; a
+// power loss right after mkdir could otherwise leave the newly created
+// directory itself unreachable (or entirely absent) from its parent after
+// a crash, even though metadata.sqlite was safely and durably written
+// inside it a moment later.
+func createDirDurable(dir string) error {
+	var created []string
+	for cur := dir; ; {
+		if _, err := os.Stat(cur); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stat %q: %w", cur, err)
+		}
+		created = append(created, cur)
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem root without finding an existing
+			// ancestor -- MkdirAll below will fail on this same path.
+			break
+		}
+		cur = parent
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create directory %q: %w", dir, err)
+	}
+	// Shallowest first: each level's own directory entry should be
+	// durable before its child's existence under it is relied upon.
+	for _, dir := range slices.Backward(created) {
+		if err := syncDir(filepath.Dir(dir)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -138,16 +178,7 @@ func copyFile(ctx context.Context, srcPath, dstPath string) error {
 	// persisted -- a power loss right after could leave the synced file
 	// unreachable (or absent) after a crash without also syncing the
 	// parent directory.
-	dstDir := filepath.Dir(dstPath)
-	dir, err := os.Open(dstDir)
-	if err != nil {
-		return fmt.Errorf("open %q for directory sync: %w", dstDir, err)
-	}
-	defer dir.Close()
-	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("sync directory %q: %w", dstDir, err)
-	}
-	return nil
+	return syncDir(filepath.Dir(dstPath))
 }
 
 // contextReader wraps an io.Reader, checking ctx before each Read so a

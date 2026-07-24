@@ -82,7 +82,15 @@ type Database struct {
 	// this guards, so it does not take part. Txn construction holds the
 	// read side (many concurrent read-write Txns proceed normally);
 	// PauseCommits/PauseCommitsContext hold the write side.
-	commitBarrier sync.RWMutex
+	//
+	// A cancellableBarrier, not a plain sync.RWMutex: PauseCommitsContext
+	// needs to be able to fully abandon a queued exclusive-acquire attempt
+	// when its ctx is cancelled, which sync.RWMutex cannot do (see that
+	// type's doc comment for why a bare "stop waiting on the result"
+	// workaround still leaves new read-write Txns blocked behind a
+	// phantom queued writer). Its zero value is directly usable, same as
+	// the sync.RWMutex it replaces, so no constructor change is needed.
+	commitBarrier cancellableBarrier
 }
 
 // Blob returns the underling blob store instance
@@ -120,36 +128,19 @@ func (d *Database) PauseCommits() (resume func()) {
 // cancelled.
 //
 // If ctx is cancelled before the barrier is acquired, this returns
-// ctx.Err() and a nil resume — but the in-flight acquisition attempt
-// itself is not abandoned, only this call's wait for it: sync.RWMutex
-// has no cancellable Lock, so the blocked Lock() call underneath keeps
-// running regardless, and if it eventually succeeds after this function
-// has already returned, that would leave the barrier permanently held
-// with no caller left to release it. To prevent that, a cancelled wait
-// hands the eventual lock straight back to Unlock the moment it's
-// acquired, so the barrier is never stranded held just because the
-// original caller stopped waiting for it.
+// ctx.Err() and a nil resume, having fully withdrawn its claim on the
+// barrier: unlike a plain sync.RWMutex (which has no cancellable Lock and
+// so would leave an abandoned Lock() call queued, blocking every new
+// read-write Txn behind it via writer preference until whatever it was
+// waiting on eventually releases — see cancellableBarrier's doc comment),
+// a cancelled wait here does not stall anything else.
 func (d *Database) PauseCommitsContext(
 	ctx context.Context,
 ) (resume func(), err error) {
-	if err := ctx.Err(); err != nil {
+	if err := d.commitBarrier.LockContext(ctx); err != nil {
 		return nil, err
 	}
-	acquired := make(chan struct{})
-	go func() {
-		d.commitBarrier.Lock()
-		close(acquired)
-	}()
-	select {
-	case <-acquired:
-		return d.commitBarrier.Unlock, nil
-	case <-ctx.Done():
-		go func() {
-			<-acquired
-			d.commitBarrier.Unlock()
-		}()
-		return nil, ctx.Err()
-	}
+	return d.commitBarrier.Unlock, nil
 }
 
 // Config returns the config object used for the database instance

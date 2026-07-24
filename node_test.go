@@ -1147,6 +1147,72 @@ func TestChainsyncStallRecyclerExitsOnCancel(t *testing.T) {
 	)
 }
 
+// TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu guards
+// against comment-49's original bug: the recycler's one-time startup read
+// of n.ledgerState.Tip() (run whenever the loop (re)starts, e.g. after a
+// caught panic restarts it) took n.liveLifecycleMu.Lock() unconditionally
+// -- a plain blocking Lock() that cancellation cannot interrupt. Since
+// shutdown waits for this worker (chainsyncStallRecyclerWG) before tearing
+// anything down, a recycler restart landing on that line while a live
+// restore/truncate held liveLifecycleMu for its full
+// quiesce-through-reinitialize duration could hang shutdown well past its
+// configured timeout. This holds the mutex on the test goroutine BEFORE
+// starting the recycler (simulating a restart racing an in-progress live
+// lifecycle op) and confirms the recycler still reaches its
+// cancellation-aware tick loop and exits promptly once cancelled --
+// proving the startup read never blocked on the held mutex.
+func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.T) {
+	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ledgerState: ledgerState,
+	}
+
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	recyclerCancel := n.startChainsyncStallRecycler(
+		ctx,
+		chainsync.Config{StallTimeout: time.Second},
+		5*time.Millisecond,
+		time.Second,
+		time.Second,
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.chainsyncStallRecyclerWG.Wait()
+	}()
+
+	// Give the recycler goroutine a real chance to actually start and reach
+	// (or, with the bug present, block on) its startup mutex acquisition
+	// before cancelling -- otherwise cancellation could race ahead of the
+	// goroutine ever being scheduled, letting the outer loop's own ctx.Err()
+	// check return early without ever reaching the code under test, which
+	// would make this pass vacuously regardless of the bug it guards
+	// against. 50ms is a large margin for the handful of non-blocking
+	// setup steps (ticker/map allocation, one mutex call) that precede it.
+	testutil.RequireNoReceive(
+		t, done, 50*time.Millisecond,
+		"recycler must not exit before being cancelled",
+	)
+
+	recyclerCancel()
+	cancel()
+
+	testutil.RequireReceive(
+		t, done, time.Second,
+		"the recycler must exit promptly once cancelled, even though "+
+			"liveLifecycleMu is held for its entire lifetime -- a blocking "+
+			"Lock() at startup would hang this wait instead",
+	)
+}
+
 // TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds guards
 // against comment-22's original bug: the recycler's tick handler
 // dereferenced n.ledgerState/n.chainsyncState many times (well past its
@@ -1215,12 +1281,14 @@ func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(t *testing.T)
 		n.chainsyncStallRecyclerWG.Wait()
 	})
 
-	// Well past stallTimeout, across many tick intervals: the client would
-	// certainly have been marked stalled by now if any tick had gone
-	// through while the mutex is held.
-	time.Sleep(150 * time.Millisecond)
-	require.False(
-		t, isStalled(),
+	// require.Never polls isStalled repeatedly across many tick intervals
+	// and fails the instant it ever becomes true, rather than sleeping
+	// once and checking a single snapshot at the end -- the direct way
+	// to express "this must not happen at any point during this window",
+	// which is what "no tick went through while the mutex is held"
+	// actually means.
+	require.Never(
+		t, isStalled, 150*time.Millisecond, 5*time.Millisecond,
 		"a tick must not reach CheckStalledClients while liveLifecycleMu is held",
 	)
 

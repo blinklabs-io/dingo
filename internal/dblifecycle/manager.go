@@ -147,23 +147,28 @@ func (m *Manager) Start(ctx context.Context) error {
 	// cancelled directly — unlike the old hand-rolled loop, which noticed
 	// ctx.Done() itself. This goroutine preserves Start's existing
 	// contract that cancelling the context passed to Start, without a
-	// separate call to Stop, still cleans up (resets running/cancel and
+	// separate call to Stop, still cleans up (resets running and
 	// unsubscribes) instead of leaving a stale subscription in place.
-	// Guarded by "not stopping" the same way the old loop's wrapper was,
-	// so a normal Stop() (which cancels childCtx itself) leaves this
-	// cleanup to Stop() instead of racing it.
+	//
+	// This goroutine is the SOLE owner of that cleanup, whichever of the
+	// two ways childCtx ends up cancelled: Stop() cancelling it directly,
+	// or the parent ctx passed to Start being cancelled externally.
+	// Unlike an earlier version that had Stop() race this goroutine to
+	// decide which of them was responsible for unsubscribing (guarded by
+	// "not stopping"), a single owner is what lets Stop() reliably wait
+	// for the actual cleanup via loopWg.Wait() below instead of via its
+	// own separate, potentially-redundant copy of the same logic: with
+	// two competing paths, Stop() could find m.running already false
+	// (because this goroutine's path won the race after an external ctx
+	// cancellation) and return immediately, while this goroutine was
+	// still blocked inside UnsubscribeAndWait waiting for an in-flight
+	// snapshot handler call to finish — reporting "stopped" to Stop's
+	// caller before an in-flight snapshot handler had actually exited
+	// (comment-50).
 	m.loopWg.Go(func() {
 		<-childCtx.Done()
 		m.mu.Lock()
-		if m.stopping {
-			m.mu.Unlock()
-			return
-		}
 		m.running = false
-		if m.cancel != nil {
-			m.cancel()
-			m.cancel = nil
-		}
 		subId := m.subscriptionId
 		m.subscriptionId = 0
 		m.mu.Unlock()
@@ -184,39 +189,33 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the manager.
+// Stop stops the manager, waiting for any in-flight snapshot handler call
+// to finish before returning — including when the context passed to
+// Start was already cancelled externally (in which case Start's own
+// cleanup goroutine may already be tearing things down concurrently; Stop
+// still reliably waits for that same goroutine via loopWg, rather than
+// racing it to separately decide the manager is already stopped and
+// returning early — see the comment on that goroutine in Start for why
+// two competing cleanup paths used to let Stop return before an in-flight
+// handler call had actually exited).
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	if !m.running {
+	if m.cancel == nil {
+		// Never started, or a previous Stop (or this same external-
+		// cancellation cleanup, already fully finished) already cleared
+		// it: nothing left to wait for.
 		m.mu.Unlock()
 		return nil
 	}
 	m.stopping = true
-	if m.cancel != nil {
-		m.cancel()
-	}
-	subId := m.subscriptionId
-	m.subscriptionId = 0
-	m.running = false
+	m.cancel()
+	m.cancel = nil
 	m.mu.Unlock()
-
-	if subId != 0 {
-		// UnsubscribeAndWait, not Unsubscribe: blocks until SubscribeFunc's
-		// dispatch goroutine has fully exited (including finishing any
-		// handleEpochTransitionEvent call already in flight), so Stop
-		// doesn't return while a snapshot it just asked to stop is still
-		// running.
-		m.eventBus.UnsubscribeAndWait(
-			event.EpochTransitionEventType,
-			subId,
-		)
-	}
 
 	m.loopWg.Wait()
 
 	m.mu.Lock()
 	m.stopping = false
-	m.cancel = nil
 	m.mu.Unlock()
 
 	m.logger.Info(

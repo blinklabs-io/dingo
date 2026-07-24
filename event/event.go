@@ -203,6 +203,17 @@ type channelSubscriber struct {
 	mu     sync.RWMutex
 	closed bool
 
+	// eventType is the type this subscriber was registered under —
+	// checked in unsubscribe against the eventType a caller passes in,
+	// since channelSubsById is keyed by subId alone (see its own doc
+	// comment for why) and subIds are never reused but are never scoped
+	// to a single eventType either: without this check, Unsubscribe or
+	// UnsubscribeAndWait called with a subId that's valid but for a
+	// DIFFERENT eventType than the one passed in would still find and
+	// close this subscriber via channelSubsById, silently tearing down
+	// an unrelated subscription instead of matching nothing.
+	eventType EventType
+
 	// done, when non-nil, is closed by SubscribeFuncWithBuffer's dispatch
 	// goroutine right before it exits -- including after it finishes any
 	// handler call already in flight when Close was called. It is nil for
@@ -213,12 +224,14 @@ type channelSubscriber struct {
 }
 
 func newChannelSubscriber(
+	eventType EventType,
 	buffer int,
 	logger *slog.Logger,
 ) *channelSubscriber {
 	return &channelSubscriber{
-		ch:     make(chan Event, buffer),
-		logger: logger,
+		ch:        make(chan Event, buffer),
+		logger:    logger,
+		eventType: eventType,
 	}
 }
 
@@ -312,7 +325,7 @@ func (e *EventBus) subscribeInternal(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Create channel-backed subscriber
-	chSub := newChannelSubscriber(buffer, e.Logger)
+	chSub := newChannelSubscriber(eventType, buffer, e.Logger)
 	// Increment subscriber ID
 	subId := e.lastSubId + 1
 	e.lastSubId = subId
@@ -511,7 +524,16 @@ func (e *EventBus) unsubscribe(
 	// for a subscriber with no such goroutine), so a second caller can
 	// still find and wait on it here regardless of who removed the
 	// e.subscribers entry.
+	//
+	// Guarded by chSub.eventType == eventType: channelSubsById is keyed
+	// by subId alone, with no eventType dimension, so a caller passing a
+	// subId that's valid but registered under a DIFFERENT eventType than
+	// the one it passed in must find nothing here -- without this check,
+	// such a call would still find and close that unrelated subscriber.
 	chSub := e.channelSubsById[subId]
+	if chSub != nil && chSub.eventType != eventType {
+		chSub = nil
+	}
 	if chSub != nil && chSub.done == nil {
 		// No dispatch goroutine will ever clean this one up itself.
 		delete(e.channelSubsById, subId)
@@ -842,6 +864,27 @@ func (e *EventBus) shutdown(restart bool) {
 
 	// Wait for SubscribeFunc goroutines to complete after closing their channels
 	e.subscriberWg.Wait()
+
+	// Every SubscribeFunc dispatch goroutine already removed its own
+	// channelSubsById entry as it exited above (subscriberWg.Wait() only
+	// returns once they all have), but a plain Subscribe/
+	// SubscribeWithBuffer subscriber (done == nil) has no such goroutine
+	// to do that for itself -- unsubscribe() only clears its entry when
+	// a caller explicitly calls Unsubscribe/UnsubscribeAndWait for it,
+	// which shutdown (called via Stop/Close) does not do on a caller's
+	// behalf. Left alone, every such subscriber ever created survives
+	// here in memory indefinitely; on an EventBus restarted and reused
+	// across repeated Stop()/Start() cycles (Stop supports exactly that
+	// via restart=true), each cycle's abandoned plain-Subscribe entries
+	// pile up without bound. Sweep them out now that they're all closed
+	// (sub.Close() above) and definitely never coming back.
+	e.mu.Lock()
+	for subId, chSub := range e.channelSubsById {
+		if chSub.done == nil {
+			delete(e.channelSubsById, subId)
+		}
+	}
+	e.mu.Unlock()
 
 	// Reset subscriber metrics if they exist
 	if e.metrics != nil {
