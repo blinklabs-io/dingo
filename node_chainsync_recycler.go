@@ -203,6 +203,13 @@ func (n *Node) startChainsyncStallRecycler(
 	return recyclerCancel
 }
 
+// chainsyncStallRecyclerStartupHook runs immediately before the
+// recycler's one-time startup liveLifecycleMu.TryLock() attempt below --
+// a test seam so a test can deterministically wait for this code to
+// actually be reached instead of guessing with a fixed wall-clock window
+// before cancelling. No-op in production.
+var chainsyncStallRecyclerStartupHook = func() {}
+
 func (n *Node) runChainsyncStallRecycler(
 	ctx context.Context,
 	chainsyncCfg chainsync.Config,
@@ -221,7 +228,33 @@ func (n *Node) runChainsyncStallRecycler(
 			defer ticker.Stop()
 			recycleAt := make(map[string]time.Time)
 			lastRecycled := make(map[string]time.Time)
-			lastProgressSlot := n.ledgerState.Tip().Point.Slot
+			// n.ledgerState is a plain, unsynchronized field that a live
+			// restore/truncate reassigns while holding n.liveLifecycleMu
+			// (see the tick handler below) -- take the same lock here so
+			// this one-time read can't land on a nil or mid-swap value if
+			// this loop happens to (re)start during a live lifecycle op
+			// (e.g. after a caught panic restarts it).
+			//
+			// TryLock, not Lock: shutdown waits for this worker
+			// (chainsyncStallRecyclerWG) before tearing anything down, and
+			// a blocking Lock() here cannot be interrupted by ctx
+			// cancellation — if a recycler restart landed on this line
+			// while a live restore/truncate was holding liveLifecycleMu for
+			// its full quiesce-through-reinitialize duration, shutdown
+			// would hang behind it past its configured timeout. Skipping
+			// the read on contention is safe: lastProgressSlot just stays
+			// its zero value, and the first tick that successfully reads a
+			// nonzero localTipSlot resets the plateau baseline anyway (see
+			// processChainsyncRecyclerTick) — this can only make plateau
+			// detection more lenient at startup, never trigger it early.
+			chainsyncStallRecyclerStartupHook()
+			var lastProgressSlot uint64
+			if n.liveLifecycleMu.TryLock() {
+				if n.ledgerState != nil {
+					lastProgressSlot = n.ledgerState.Tip().Point.Slot
+				}
+				n.liveLifecycleMu.Unlock()
+			}
 			lastProgressAt := time.Now()
 			plateauRecoveryThreshold := plateauThreshold(
 				chainsyncCfg.StallTimeout,
@@ -232,6 +265,33 @@ func (n *Node) runChainsyncStallRecycler(
 					return
 				case <-ticker.C:
 					n.runStallCheckerTick(func() {
+						// A live database restore/truncate briefly nils
+						// n.ledgerState and n.chainsyncState while it swaps
+						// in rebuilt ones, and holds n.liveLifecycleMu for
+						// its entire quiesce-through-reinitialize duration.
+						// TryLock, not Lock: this is a best-effort periodic
+						// check, so it must skip a contended tick rather
+						// than block waiting behind a possibly long-running
+						// truncate. Holding the lock for this whole tick
+						// (not just the nil-check) matters because
+						// processChainsyncRecyclerTick below dereferences
+						// n.ledgerState/n.chainsyncState many more times
+						// after the initial check — without holding the
+						// lock across all of them, a restore/truncate
+						// starting mid-tick could still race a later
+						// dereference even though the check up front
+						// passed. The two fields are also not nilled/
+						// reassigned atomically together — reinitializeCoreStorage
+						// rebuilds n.ledgerState before reinitializeNetworkingCore
+						// rebuilds n.chainsyncState — so both are checked
+						// even under the lock.
+						if !n.liveLifecycleMu.TryLock() {
+							return
+						}
+						defer n.liveLifecycleMu.Unlock()
+						if n.ledgerState == nil || n.chainsyncState == nil {
+							return
+						}
 						now := time.Now()
 						localTip := n.ledgerState.Tip()
 						localTipSlot := localTip.Point.Slot

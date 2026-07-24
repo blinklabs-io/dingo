@@ -51,7 +51,7 @@ func TestDeliverFailureUnregisters(t *testing.T) {
 // goroutines spawned by publishWithTimeout to leak.
 func TestChannelSubscriberDeliverNonBlocking(t *testing.T) {
 	const bufferSize = 5
-	sub := newChannelSubscriber(bufferSize, nil)
+	sub := newChannelSubscriber("test", bufferSize, nil)
 
 	// Fill the buffer completely
 	for i := range bufferSize {
@@ -99,7 +99,7 @@ func TestChannelSubscriberDeliverNonBlocking(t *testing.T) {
 // TestChannelSubscriberDeliverAfterClose verifies that Deliver to a closed
 // subscriber returns nil (not a panic) and does not block.
 func TestChannelSubscriberDeliverAfterClose(t *testing.T) {
-	sub := newChannelSubscriber(5, nil)
+	sub := newChannelSubscriber("test", 5, nil)
 	sub.Close()
 
 	done := make(chan error, 1)

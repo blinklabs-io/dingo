@@ -37,6 +37,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
@@ -66,6 +68,7 @@ type Node struct {
 	db                               *database.Database
 	ledgerState                      *ledger.LedgerState
 	snapshotMgr                      *snapshot.Manager
+	dbLifecycleMgr                   *dblifecycle.Manager
 	leiosVoteManager                 *leios.VoteManager
 	leiosPipelineManager             *leios.PipelineManager
 	utxorpc                          *utxorpc.Utxorpc
@@ -90,6 +93,29 @@ type Node struct {
 	chainsyncStallRecyclerWG         sync.WaitGroup
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
+
+	// EventBus subscriber IDs for handlers bound to components that a live
+	// database restore/truncate rebuilds from scratch (node_lifecycle.go).
+	// Every other Run()-registered handler is either a closure over n itself
+	// (self-healing — reads the current field value at call time) or bound
+	// to a component that lifecycle rebuild leaves untouched, so it needs no
+	// tracked ID. Captured here (rather than discarded, as Run() otherwise
+	// would) purely so node_lifecycle.go can unsubscribe the stale handler
+	// before rebuilding its component; Run()'s own behavior is unchanged.
+	chainManagerBlockProposedSubId event.EventSubscriberId
+	chainsyncClientRemoveSubId     event.EventSubscriberId
+	connManagerRecycleSubId        event.EventSubscriberId
+
+	// liveLifecycleMu serializes live database Restore/Truncate calls
+	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
+	liveLifecycleMu sync.Mutex
+
+	// rebuildableMetrics tracks every Prometheus collector registered by a
+	// component a live database restore/truncate rebuilds, so
+	// closeStorageForLiveLifecycleOp can unregister them before the
+	// rebuild re-registers fresh ones under the same names. See
+	// metrics_registerer.go.
+	rebuildableMetrics *rebuildableRegisterer
 }
 
 func New(cfg Config) (*Node, error) {
@@ -113,6 +139,17 @@ func New(cfg Config) (*Node, error) {
 	// validation failure would return a nil Node while leaving those goroutines
 	// running, with no handle for the caller to Stop() them.
 	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
+	// Everything registered above (build info, RTS gauges, the EventBus)
+	// lives for the node's entire lifetime and is never rebuilt, so it's
+	// registered directly against the pre-wrap registerer. Everything
+	// that reads n.config.promRegistry from here on — in Run() and in
+	// every node_lifecycle.go reinitialize call — goes through this
+	// wrapper instead, so a live restore/truncate can unregister and
+	// re-register it without a duplicate-collector panic.
+	if n.config.promRegistry != nil {
+		n.rebuildableMetrics = newRebuildableRegisterer(n.config.promRegistry)
+		n.config.promRegistry = n.rebuildableMetrics
+	}
 	return n, nil
 }
 
@@ -224,7 +261,10 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	n.chainManager = cm
 	primaryChain := n.chainManager.PrimaryChain()
-	n.eventBus.SubscribeFunc(
+	// Subscriber ID captured (rather than discarded) so a live database
+	// restore/truncate can unsubscribe this handler before rebuilding
+	// n.chainManager — see node_lifecycle.go.
+	n.chainManagerBlockProposedSubId = n.eventBus.SubscribeFunc(
 		chain.BlockProposedEventType,
 		primaryChain.HandleBlockProposedEvent,
 	)
@@ -631,6 +671,22 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
+	// Initialize and start automatic database-snapshot manager (distinct
+	// from the stake/reward snapshot manager above — see
+	// internal/dblifecycle.Manager doc comment).
+	n.dbLifecycleMgr = dblifecycle.NewManager(
+		n.db,
+		n.eventBus,
+		n.config.databaseLifecycle,
+		n.config.logger,
+	)
+	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf(
+			"failed to start database lifecycle manager: %w",
+			err,
+		)
+	}
+	started = append(started, func() { _ = n.dbLifecycleMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
 	if enableDijkstra {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context
@@ -717,7 +773,9 @@ func (n *Node) Run(ctx context.Context) error {
 		peergov.PeerEligibilityChangedEventType,
 		n.ouroboros.HandlePeerEligibilityChangedEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.chainsyncState is rebuilt during a live database restore/truncate.
+	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
 		chainsync.ClientRemoveRequestedEventType,
 		n.chainsyncState.HandleClientRemoveRequestedEvent,
 	)
@@ -876,7 +934,9 @@ func (n *Node) Run(ctx context.Context) error {
 			MaxInboundConns:     n.config.maxInboundConns,
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.connManager is rebuilt during a live database restore/truncate.
+	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
 		connmanager.ConnectionRecycleRequestedEventType,
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
@@ -1098,17 +1158,33 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.barkPort > 0 {
+		barkConfig := bark.BarkConfig{
+			Logger:             n.config.logger,
+			DB:                 db,
+			TlsCertFilePath:    n.config.tlsCertFilePath,
+			TlsKeyFilePath:     n.config.tlsKeyFilePath,
+			Port:               n.config.barkPort,
+			CORSAllowedOrigins: n.config.corsAllowedOrigins,
+		}
+		// Mount the DatabaseService only when a snapshot directory is
+		// configured — bark.NewBark requires one alongside Lifecycle, and
+		// an operator who enabled bark only for its Archive service
+		// shouldn't get a DatabaseService that fails on first call.
+		if n.config.databaseLifecycle.SnapshotDir != "" {
+			// cfg is never read: SetLiveNode below makes every Service
+			// method delegate straight to n's own Restore/Truncate/
+			// Snapshot rather than the offline path that would use it.
+			dbLifecycleService := dblifecycle.NewService(
+				&internalconfig.Config{},
+				n.config.logger,
+			)
+			dbLifecycleService.SetLiveNode(n)
+			barkConfig.Lifecycle = dbLifecycleService
+			barkConfig.SnapshotDir = n.config.databaseLifecycle.SnapshotDir
+			barkConfig.SnapshotCloudDestination = n.config.databaseLifecycle.SnapshotCloudDestination
+		}
 		var err error
-		n.bark, err = bark.NewBark(
-			bark.BarkConfig{
-				Logger:             n.config.logger,
-				DB:                 db,
-				TlsCertFilePath:    n.config.tlsCertFilePath,
-				TlsKeyFilePath:     n.config.tlsKeyFilePath,
-				Port:               n.config.barkPort,
-				CORSAllowedOrigins: n.config.corsAllowedOrigins,
-			},
-		)
+		n.bark, err = bark.NewBark(barkConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create bark server: %w", err)
 		}

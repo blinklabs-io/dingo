@@ -187,6 +187,33 @@ func (m *mockBlobTxn) Rollback() error {
 	return nil
 }
 
+// TestMithrilTrustBoundarySlotStrictPropagatesReadError guards against
+// comment-14's original bug: database/lifecycle.Truncate's safety check
+// against the Mithril trust boundary used MithrilTrustBoundarySlot, which
+// silently treats a failed sync-state read the same as "no boundary
+// recorded" (returns 0) — bypassing the safety check entirely on a
+// transient storage error instead of refusing the truncate. The strict
+// variant must instead propagate the read error so a caller enforcing a
+// safety check can fail closed.
+func TestMithrilTrustBoundarySlotStrictPropagatesReadError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(t, db.Close())
+
+	_, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.Error(t, err)
+}
+
+// TestMithrilTrustBoundarySlotSwallowsReadError confirms
+// MithrilTrustBoundarySlot's existing fail-open contract is unchanged for
+// its other caller (the consumed-UTxO recovery heuristic in this same
+// file): a failed read still returns 0, not an error.
+func TestMithrilTrustBoundarySlotSwallowsReadError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(t, db.Close())
+
+	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
+}
+
 func TestDeleteTxBlobsUsesCallerBlobTxn(t *testing.T) {
 	t.Parallel()
 

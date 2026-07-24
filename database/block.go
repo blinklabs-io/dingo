@@ -781,6 +781,94 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	return ret, nil
 }
 
+// CountBlocksAndOldestSlot iterates every block-content ("bp") key in the
+// blob store once, returning the total count of retained blocks and the
+// smallest slot among them. Block-content keys sort in ascending slot
+// order, so the oldest slot is simply whichever one is seen first — no
+// separate MIN pass is needed. A tombstoned entry (history-expiry pruned
+// its content, keeping only the bp key alive so hash/index lookups still
+// resolve — see TombstoneBlock) is excluded from both: its data isn't
+// actually retained, so counting it would misrepresent both how much
+// history is available and how far back it goes. The blob plugin's own
+// ValueCopy already turns a tombstoned entry's read into
+// types.ErrHistoryExpired (matching GetBlock's convention) rather than
+// handing back the raw marker bytes, so that error — not a hand-rolled
+// magic-byte check — is what this treats as "skip, don't count". Reading
+// each entry's value at all (to tell a tombstone from a real block) is
+// the dominant cost of this scan — negligible if history-expiry is
+// disabled (no block is ever tombstoned), non-trivial on a large chain
+// otherwise.
+//
+// There is no maintained counter for either value, so this is a genuine
+// full scan of the block-index keyspace: appropriate for an
+// operator-facing diagnostic (bark's GetDatabaseInfo RPC) called
+// occasionally, not a hot path.
+func (d *Database) CountBlocksAndOldestSlot(
+	txn *Txn,
+) (count uint64, oldestSlot uint64, err error) {
+	owned := false
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return 0, 0, types.ErrNilTxn
+	}
+	blob := d.Blob()
+	if blob == nil {
+		return 0, 0, types.ErrBlobStoreUnavailable
+	}
+
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: []byte(types.BlockBlobKeyPrefix),
+	}
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return 0, 0, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+
+	first := true
+	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if key == nil ||
+			strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		slot, _, parseErr := types.ParseBlockBlobKey(key)
+		if parseErr != nil {
+			continue
+		}
+		if _, valErr := item.ValueCopy(nil); valErr != nil {
+			if errors.Is(valErr, types.ErrHistoryExpired) {
+				continue
+			}
+			return count, oldestSlot, fmt.Errorf(
+				"read block content for count: %w", valErr,
+			)
+		}
+		count++
+		if first {
+			oldestSlot = slot
+			first = false
+		}
+	}
+	if err := it.Err(); err != nil {
+		return count, oldestSlot, err
+	}
+	return count, oldestSlot, nil
+}
+
 // BlockBlobKeyToPoint extracts slot and hash from a block blob key.
 // Key format: "bp" (2 bytes) + slot (8 bytes big-endian) + hash (32 bytes).
 func BlockBlobKeyToPoint(key []byte) (ocommon.Point, error) {

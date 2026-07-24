@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -1390,33 +1391,40 @@ func (ls *LedgerState) Close() error {
 		return nil
 	}
 
-	// Unsubscribe from event bus to stop receiving new events
+	// Unsubscribe from event bus to stop receiving new events. Use
+	// UnsubscribeAndWait, not Unsubscribe: several of these handlers read
+	// component fields (e.g. chainsyncState via GetActiveConnectionFunc)
+	// that callers of Close() go on to nil out or replace immediately
+	// after it returns (see node_lifecycle.go's live restore/truncate
+	// path). Plain Unsubscribe only stops future deliveries -- a handler
+	// goroutine that already dequeued an event before this loop runs could
+	// otherwise still be executing concurrently with that teardown.
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			ChainsyncEventType,
 			ls.chainsyncSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			ChainsyncAwaitReplyEventType,
 			ls.chainsyncAwaitReplySubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			BlockfetchEventType,
 			ls.blockfetchSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			chain.ChainUpdateEventType,
 			ls.chainUpdateSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			chainselection.ChainSwitchEventType,
 			ls.chainSwitchSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			ConnectionClosedEventType,
 			ls.connClosedSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			event.EpochTransitionEventType,
 			ls.rewardPrecomputeSubID,
 		)
@@ -1967,13 +1975,19 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
 	var newNonce []byte
-	// Start a transaction
+	// Start a transaction. The metadata+blob truncation sweep itself lives
+	// in database.TruncateAfterSlot, shared with offline/live database
+	// truncation (database/lifecycle) — this closure wraps it with the
+	// CIP-0163 reward-account expiration hooks (ledger-owned, since they
+	// need the epoch schedule) and captures the resulting tip/nonce for
+	// the in-memory cache reload below.
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		// CIP-0163: capture the reward-account credentials witnessed in the
-		// rolled-away blocks (added_slot > rollback slot) before the deletes
-		// below remove their certificate and reward-withdrawal rows. Their
-		// expiration_epoch is recomputed against the surviving chain once
-		// account state has been restored (see below). Gate off => skip.
+		// rolled-away blocks (added_slot > rollback slot) before
+		// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
+		// their rows. Their expiration_epoch is recomputed against the
+		// surviving chain once TruncateAfterSlot has restored account
+		// state (see below). Gate off => skip.
 		var expiryAffectedRefs []models.StakeCredentialRef
 		if ls.config.DelegatorInactivityEnabled {
 			var affErr error
@@ -1988,42 +2002,20 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				)
 			}
 		}
-		// Delete certificates first (they reference transactions)
-		if err := ls.db.DeleteCertificatesAfterSlot(
-			point.Slot,
+		var err error
+		newTip, newNonce, err = ls.db.TruncateAfterSlot(
+			point,
+			mithrilLedgerSlot,
 			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete certificates after rollback: %w",
-				err,
-			)
+		)
+		if err != nil {
+			return err
 		}
-		// Revert reward-account changes before account restoration can delete
-		// accounts registered after the rollback slot.
-		if err := ls.db.DeleteAccountRewardsAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete account reward deltas after rollback: %w",
-				err,
-			)
-		}
-		// Restore account delegation state
-		if err := ls.db.RestoreAccountStateAtSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"restore account state after rollback: %w",
-				err,
-			)
-		}
-		// CIP-0163: now that the rolled-away certificate/withdrawal rows are
-		// gone and the remaining account fields are restored, recompute the
-		// expiration_epoch of the affected reward accounts against the
-		// surviving chain (ledger-owned because it requires the epoch
-		// schedule). Gate off => no-op.
+		// CIP-0163: now that TruncateAfterSlot has deleted the rolled-away
+		// certificate/withdrawal rows and restored the remaining account
+		// fields (both ahead of its own pool/DRep/governance/etc. sweep),
+		// recompute the expiration_epoch of the affected reward accounts
+		// against the surviving chain. Gate off => no-op.
 		if err := ls.recomputeAccountExpirationsAfterRollback(
 			txn,
 			point.Slot,
@@ -2033,198 +2025,6 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				"recompute account expirations after rollback: %w",
 				err,
 			)
-		}
-		// Restore pool state
-		if err := ls.db.RestorePoolStateAtSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"restore pool state after rollback: %w",
-				err,
-			)
-		}
-		// Restore DRep state
-		if err := ls.db.RestoreDrepStateAtSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"restore DRep state after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back protocol parameters
-		if err := ls.db.DeletePParamsAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete protocol params after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back protocol parameter updates
-		if err := ls.db.DeletePParamUpdatesAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete protocol param updates after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back governance proposals
-		if err := ls.db.DeleteGovernanceProposalsAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete governance proposals after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back governance votes
-		if err := ls.db.DeleteGovernanceVotesAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete governance votes after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back constitutions
-		if err := ls.db.DeleteConstitutionsAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete constitutions after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back committee state
-		if err := ls.db.DeleteCommitteeMembersAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete committee state after rollback: %w",
-				err,
-			)
-		}
-		// Delete epoch entries whose nonces were computed from
-		// rolled-back blocks. Epochs starting after the rollback
-		// slot used blocks that no longer exist, so their nonces
-		// are stale and must be recomputed during re-sync.
-		if err := ls.db.DeleteEpochsAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete epochs after rollback: %w",
-				err,
-			)
-		}
-		// Delete reward-state rows captured at epoch boundaries that no
-		// longer exist on the selected chain.
-		if err := ls.db.DeleteRewardStateAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete reward state after rollback: %w",
-				err,
-			)
-		}
-		// Delete block nonce rows from the abandoned fork. Epoch
-		// nonces are derived from slot-range block_nonce lookups, so
-		// same-slot competitors and later fork rows must not survive
-		// rollback.
-		if err := ls.db.DeleteBlockNoncesAfterPoint(
-			point,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete block nonces after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back network state records
-		if err := ls.db.DeleteNetworkStateAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete network state after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back treasury donation records
-		if err := ls.db.DeleteNetworkDonationsAfterSlot(
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"delete network donations after rollback: %w",
-				err,
-			)
-		}
-		// Delete rolled-back UTxOs (blob offsets and metadata).
-		//
-		// Floor the deletion slot at mithrilLedgerSlot. UTxOs produced
-		// by gap blocks during Mithril bootstrap are written via
-		// SetGapBlockTransaction without advancing the ledger tip, so
-		// their added_slot values are well above the persisted ledger
-		// tip. A rollback whose target is below the Mithril boundary
-		// would otherwise bulk-delete every gap-block-produced UTxO,
-		// leaving the chain unable to validate the first post-gap
-		// block that consumes one of them. The Mithril snapshot is
-		// the trust anchor — we never rewind below it — so the
-		// authoritative deletion slot is the rollback target or the
-		// Mithril boundary, whichever is later.
-		deleteSlot := max(mithrilLedgerSlot, point.Slot)
-		err := ls.db.UtxosDeleteRolledback(deleteSlot, txn)
-		if err != nil {
-			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
-		}
-		// Delete rolled-back transaction offsets and metadata
-		err = ls.db.TransactionsDeleteRolledback(deleteSlot, txn)
-		if err != nil {
-			return fmt.Errorf("remove rolled-back transactions: %w", err)
-		}
-		// Restore spent UTxOs. Use the same floored slot as the
-		// delete calls above so gap-block transactions and the UTxOs
-		// they consumed stay in sync: preserving a tx at slot S while
-		// restoring its consumed UTxO at deleted_slot=S would leave
-		// the tx pointing at a live UTxO it claims to have spent.
-		err = ls.db.UtxosUnspend(deleteSlot, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"restore spent UTxOs after rollback: %w",
-				err,
-			)
-		}
-		// Build new tip value
-		newTip = ochainsync.Tip{
-			Point: point,
-		}
-		if point.Slot > 0 {
-			rollbackBlock, err := ls.chain.BlockByPoint(point, txn)
-			if err != nil {
-				return fmt.Errorf("failed to get rollback block: %w", err)
-			}
-			newTip.BlockNumber = rollbackBlock.Number
-			// Load nonce for rollback point
-			newNonce, err = ls.db.GetBlockNonce(point, txn)
-			if err != nil {
-				return fmt.Errorf("failed to get block nonce: %w", err)
-			}
-		}
-		// Write tip to DB
-		if err = ls.db.SetTip(newTip, txn); err != nil {
-			return fmt.Errorf("failed to set tip: %w", err)
 		}
 		return nil
 	}, true)
@@ -7319,6 +7119,41 @@ func (ls *LedgerState) forgeBlock() {
 		}
 	}
 
+	// Compute the real block body hash so the CBOR round-trip decode
+	// below (which validates the body hash against actual content)
+	// succeeds instead of failing on every forged block.
+	bodyHash, bodySize, err := forging.ComputeConwayBlockBodyHash(
+		transactionBodies,
+		transactionWitnessSets,
+		metadataSet,
+	)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to compute forged block body hash",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+	// blockSize (checked per-transaction above while filling the mempool
+	// candidate list) is only a running sum of each included transaction's
+	// own raw CBOR length -- an underestimate of the real assembled block
+	// body, which wraps separate arrays of transaction bodies, witness
+	// sets, and a metadata map (see ledger/forging/builder.go's identical
+	// final actualBlockBodySize check). Without this check here too, this
+	// dev-mode path could forge and append a block whose real body size
+	// exceeds MaxBlockBodySize despite every individual transaction having
+	// passed the earlier, coarser check.
+	if bodySize > maxBlockSize {
+		ls.config.Logger.Error(
+			"forged block body size exceeds MaxBlockBodySize, discarding block",
+			"component", "ledger",
+			"body_size", bodySize,
+			"max_block_size", maxBlockSize,
+		)
+		return
+	}
+
 	// Create Babbage block header body
 	headerBody := babbage.BabbageBlockHeaderBody{
 		BlockNumber: nextBlockNumber,
@@ -7329,8 +7164,8 @@ func (ls *LedgerState) forgeBlock() {
 		VrfResult: lcommon.VrfResult{
 			Output: lcommon.Blake2b256{}.Bytes(),
 		},
-		BlockBodySize: blockSize,
-		BlockBodyHash: lcommon.Blake2b256{},
+		BlockBodySize: bodySize,
+		BlockBodyHash: bodyHash,
 		OpCert:        babbage.BabbageOpCert{},
 		// Keep header-field changes in sync with ledger/forging/builder.go:
 		// this dev-mode path duplicates mempool iteration, ExUnits accounting,

@@ -238,6 +238,11 @@ func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
 			return config.RunModeSync
 		}
 		return config.RunModeMithril
+	case "database":
+		// `dingo database snapshot|restore|truncate` are offline
+		// maintenance commands against the local data directory; none of
+		// them start any listener.
+		return config.RunModeDatabase
 	default:
 		// No other non-informational top-level command exists today;
 		// fall back to full serving validation so a future command's
@@ -464,8 +469,18 @@ DSN Override:
 		// is resolved only now that the merged configuration is final and
 		// valid — resolving it earlier could reject a YAML/env value a
 		// CLI flag has since repaired.
-		if _, err := config.LoadTopologyConfig(); err != nil {
-			return fmt.Errorf("loading topology: %w", err)
+		//
+		// `dingo database snapshot|restore|truncate` never opens a peer
+		// connection (see RunModeDatabase's doc comment) and its --network
+		// is only used to validate the local data directory's own recorded
+		// settings, not to look up bootstrap peers — resolving topology for
+		// it would spuriously fail for any network without a bundled
+		// static topology.json (e.g. devnet, or any custom network name),
+		// even though the command never uses it.
+		if effectiveRunMode(cmd, cfg) != config.RunModeDatabase {
+			if _, err := config.LoadTopologyConfig(); err != nil {
+				return fmt.Errorf("loading topology: %w", err)
+			}
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
@@ -479,6 +494,7 @@ DSN Override:
 	rootCmd.AddCommand(versionCommand())
 	rootCmd.AddCommand(mithrilCommand())
 	rootCmd.AddCommand(syncCommand())
+	rootCmd.AddCommand(databaseCommand())
 
 	// Execute cobra command
 	exitCode := 0

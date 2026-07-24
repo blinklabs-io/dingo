@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -70,11 +71,77 @@ type Database struct {
 	sizeMetricsDone chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
+
+	// commitBarrier lets PauseCommits/PauseCommitsContext hold off every
+	// in-flight and new read-write Txn that opens a metadata write
+	// transaction, without a full quiesce, so database/lifecycle.Snapshot
+	// can back up the blob and metadata stores as of the same logical
+	// point. Only Txns holding the metadata store's single write
+	// connection participate (see acquireCommitBarrier) — a blob-only Txn
+	// never touches that connection and never writes the commit timestamp
+	// this guards, so it does not take part. Txn construction holds the
+	// read side (many concurrent read-write Txns proceed normally);
+	// PauseCommits/PauseCommitsContext hold the write side.
+	//
+	// A cancellableBarrier, not a plain sync.RWMutex: PauseCommitsContext
+	// needs to be able to fully abandon a queued exclusive-acquire attempt
+	// when its ctx is cancelled, which sync.RWMutex cannot do (see that
+	// type's doc comment for why a bare "stop waiting on the result"
+	// workaround still leaves new read-write Txns blocked behind a
+	// phantom queued writer). Its zero value is directly usable, same as
+	// the sync.RWMutex it replaces, so no constructor change is needed.
+	commitBarrier cancellableBarrier
 }
 
 // Blob returns the underling blob store instance
 func (d *Database) Blob() blob.BlobStore {
 	return d.blob
+}
+
+// PauseCommits blocks until every currently open read-write Txn that
+// participates in this barrier (see acquireCommitBarrier) has reached
+// Commit, Rollback, or Release — not merely until one already inside its
+// Commit call finishes, but until every such Txn opened before this call,
+// however far along it currently is, concludes one way or another — then
+// blocks any new one from being constructed until the returned resume
+// func is called. It does not stop reads, and it is not a quiesce —
+// nothing is torn down, no peers are disconnected, callers just see a new
+// read-write Txn's construction (not its eventual Commit) block briefly.
+//
+// database/lifecycle.Snapshot uses this to bracket its blob and metadata
+// backup calls: each backup is independently consistent as of whenever it
+// runs, but a commit landing between the two would write its timestamp to
+// one store's backup and not the other's, so the restored copy fails
+// checkCommitTimestamp's cross-check. Pausing commits for that window
+// keeps both backups describing the same set of committed writes.
+func (d *Database) PauseCommits() (resume func()) {
+	token := d.commitBarrier.Lock()
+	return func() { d.commitBarrier.Unlock(token) }
+}
+
+// PauseCommitsContext is PauseCommits, but the wait for the barrier can
+// be abandoned via ctx: if a long-running write transaction is currently
+// open, acquiring the exclusive side can block for as long as that
+// transaction takes to commit, and plain PauseCommits gives a caller like
+// lifecycle.Snapshot (which already accepts a ctx for the rest of its
+// work) no way to give up on that wait if its own operation is
+// cancelled.
+//
+// If ctx is cancelled before the barrier is acquired, this returns
+// ctx.Err() and a nil resume, having fully withdrawn its claim on the
+// barrier: unlike a plain sync.RWMutex (which has no cancellable Lock and
+// so would leave an abandoned Lock() call queued, blocking every new
+// read-write Txn behind it via writer preference until whatever it was
+// waiting on eventually releases — see cancellableBarrier's doc comment),
+// a cancelled wait here does not stall anything else.
+func (d *Database) PauseCommitsContext(
+	ctx context.Context,
+) (resume func(), err error) {
+	token, err := d.commitBarrier.LockContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func() { d.commitBarrier.Unlock(token) }, nil
 }
 
 // Config returns the config object used for the database instance
