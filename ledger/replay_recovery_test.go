@@ -38,6 +38,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pdata "github.com/blinklabs-io/plutigo/data"
 	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -550,6 +551,174 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		maxAtTipRecoveryAttempts,
 		ls.lastAtTipRecovery.Attempts,
 	)
+}
+
+// newAtTipDescentLedger builds a LedgerState sitting at a fixed tip with
+// at-tip validation enabled, for exercising the non-convergence guard in
+// recoverAtTipFromTxValidationError. The failing blocks fed in these tests are
+// synthetic and never added to the chain — recovery only ever rewinds to the
+// ledger tip, which is all the guard tests assert on.
+func newAtTipDescentLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
+	t.Helper()
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	parentBlock := testRawBlock("descent-parent", 100, 1, nil)
+	ledgerTipBlock := testRawBlock(
+		"descent-ledger-tip",
+		120,
+		2,
+		parentBlock.Hash,
+	)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(
+			[]chain.RawBlock{parentBlock, ledgerTipBlock},
+		),
+	)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	ledgerTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			ledgerTipBlock.Slot,
+			ledgerTipBlock.Hash,
+		),
+		BlockNumber: ledgerTipBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.currentTipBlockNonce = []byte("nonce-descent-tip")
+	ls.validationEnabled = true
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
+	return ls, ledgerTip
+}
+
+func atTipDescentFailure(slot uint64, tag string) *txValidationError {
+	return &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			slot,
+			testHashBytes("descent-block-"+tag),
+		),
+		TxHash: testHashBytes("descent-tx-" + tag),
+		Cause: errors.New(
+			"conway utxo validation: withdrawal not delegated to a drep",
+		),
+	}
+}
+
+// TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop verifies
+// that a descending series of distinct at-tip validation failures trips the
+// non-convergence guard: recovery holds at the ledger tip and records the
+// condition instead of rewinding the primary chain ever deeper (issue #2939).
+func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
+	t *testing.T,
+) {
+	ls, ledgerTip := newAtTipDescentLedger(t)
+
+	// Feed a descending series of DISTINCT failures. Each first appears
+	// (attempt 1: shallow rewind to ledger tip) then repeats (attempt 2:
+	// same block re-delivered), mirroring the field log in #2939.
+	for _, slot := range []uint64{500, 480, 460, 440} {
+		ferr := atTipDescentFailure(slot, fmt.Sprintf("%d", slot))
+		for range 2 {
+			recovered, err := ls.tryRecoverFromTxValidationError(ferr)
+			require.NoError(t, err)
+			require.True(t, recovered)
+		}
+	}
+
+	assert.True(
+		t,
+		ls.atTipRecoveryHolding,
+		"descending distinct failures should trip the non-convergence guard",
+	)
+	assert.GreaterOrEqual(
+		t,
+		promtestutil.ToFloat64(ls.metrics.atTipRecoveryNonConverging),
+		1.0,
+		"holding should be recorded via the non-convergence metric",
+	)
+	// The primary chain must never be rewound below the ledger tip.
+	assert.GreaterOrEqual(
+		t,
+		ls.chain.Tip().Point.Slot,
+		ledgerTip.Point.Slot,
+	)
+}
+
+// TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation
+// verifies the guard does not fire for the legitimate same-block escalation
+// (fork escape): repeating the identical (block, tx) failure must keep
+// escalating without ever entering the hold state.
+func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
+	t *testing.T,
+) {
+	ls, _ := newAtTipDescentLedger(t)
+
+	ferr := atTipDescentFailure(500, "stable")
+	for i := 0; i <= maxAtTipRecoveryAttempts+2; i++ {
+		recovered, err := ls.tryRecoverFromTxValidationError(ferr)
+		require.NoError(t, err)
+		require.True(t, recovered)
+	}
+
+	assert.False(
+		t,
+		ls.atTipRecoveryHolding,
+		"same-block escalation must not trip the non-convergence guard",
+	)
+	assert.Equal(t, 0, ls.atTipRecoveryDescentCount)
+	assert.Equal(
+		t,
+		0.0,
+		promtestutil.ToFloat64(ls.metrics.atTipRecoveryNonConverging),
+	)
+}
+
+// TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress
+// verifies that a distinct failure at a HIGHER slot (forward progress past the
+// previous failing point) resets the descent tracking, so an unrelated later
+// failure gets a fresh recovery budget rather than being treated as part of a
+// descent.
+func TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress(
+	t *testing.T,
+) {
+	ls, _ := newAtTipDescentLedger(t)
+
+	// Two descending distinct failures build up descent state.
+	for _, slot := range []uint64{500, 480} {
+		ferr := atTipDescentFailure(slot, fmt.Sprintf("%d", slot))
+		recovered, err := ls.tryRecoverFromTxValidationError(ferr)
+		require.NoError(t, err)
+		require.True(t, recovered)
+	}
+	require.Positive(t, ls.atTipRecoveryDescentCount)
+
+	// A distinct failure at a higher slot is forward progress and resets it.
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		atTipDescentFailure(600, "ahead"),
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, 0, ls.atTipRecoveryDescentCount)
+	assert.False(t, ls.atTipRecoveryHolding)
 }
 
 func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(

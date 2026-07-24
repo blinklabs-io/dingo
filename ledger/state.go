@@ -647,10 +647,20 @@ type LedgerState struct {
 	closed                        atomic.Bool
 	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery             *atTipRecoveryAttempt
-	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
-	mithrilLedgerHash             []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
-	lastLocalRollbackSeq          uint64
-	lastLocalRollbackPoint        ocommon.Point
+	// At-tip recovery non-convergence tracking (issue #2939). A descending
+	// series of *distinct* (block, tx) validation failures each resets the
+	// same-block escalation to attempt 1, so the escalate-and-cap logic in
+	// lastAtTipRecovery never engages and the primary chain would be rewound
+	// ever deeper, falling unboundedly behind the wall clock. These fields
+	// detect that pattern and switch recovery to a shallow, hold-at-tip mode.
+	// All three are only read/written from the ledger pipeline goroutine.
+	atTipRecoveryLastFailSlot uint64 // failing slot of the previous distinct at-tip failure
+	atTipRecoveryDescentCount int    // consecutive distinct failures that did not advance
+	atTipRecoveryHolding      bool   // sticky: deep rewinds suppressed until forward progress
+	mithrilLedgerSlot         uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash         []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
+	lastLocalRollbackSeq      uint64
+	lastLocalRollbackPoint    ocommon.Point
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -3890,6 +3900,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				if len(pendingNonce) > 0 {
 					ls.currentTipBlockNonce = pendingNonce
 				}
+				// Forward progress past a prior at-tip failure clears the
+				// non-convergence hold so a later, unrelated failure gets a
+				// fresh recovery budget (issue #2939).
+				ls.resetAtTipRecoveryDescent(pendingTip.Point.Slot)
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				if wantEnableValidation {
 					ls.validationEnabled = true
