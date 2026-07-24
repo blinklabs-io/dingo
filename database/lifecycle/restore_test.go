@@ -16,6 +16,8 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -149,4 +151,85 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T
 		"a rejected validate hook must run before targetDir is created, "+
 			"got stat error: %v", statErr,
 	)
+}
+
+// manifestOnlyCloudDestination implements CloudManifestFetcher but fails
+// UploadDir/DownloadDir outright -- used to prove a caller went through
+// the lightweight FetchManifest path and never attempted a full
+// directory download at all, rather than merely happening to succeed
+// either way.
+type manifestOnlyCloudDestination struct {
+	manifest lifecycle.Manifest
+}
+
+func (d *manifestOnlyCloudDestination) UploadDir(context.Context, string) error {
+	return errors.New("manifestOnlyCloudDestination: UploadDir must never be called")
+}
+
+func (d *manifestOnlyCloudDestination) DownloadDir(context.Context, string) error {
+	return errors.New("manifestOnlyCloudDestination: DownloadDir must never be called")
+}
+
+func (d *manifestOnlyCloudDestination) FetchManifest(context.Context) (lifecycle.Manifest, error) {
+	return d.manifest, nil
+}
+
+var _ lifecycle.CloudManifestFetcher = &manifestOnlyCloudDestination{}
+
+func init() {
+	lifecycle.RegisterCloudDestinationScheme(
+		"faketest-manifestonly",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &manifestOnlyCloudDestination{manifest: manifestOnlyFixture}, nil
+		},
+	)
+}
+
+var manifestOnlyFixture = lifecycle.Manifest{
+	BlobPlugin:     "badger",
+	MetadataPlugin: "sqlite",
+}
+
+// TestPeekManifestUsesLightweightCloudFetchWithoutDownloading guards
+// against comment-60's original gap: PeekManifest used to always go
+// through the full download-based resolveManifest path, even for a
+// cloud snapshotDir whose destination type supports fetching just the
+// one manifest.json object via CloudManifestFetcher -- downloading the
+// (possibly very large) blob/metadata backups alongside it just to read
+// its manifest. This uses a destination whose UploadDir/DownloadDir both
+// fail outright, so this test only passes if PeekManifest actually took
+// the lightweight FetchCloudManifest path and never called DownloadDir
+// at all.
+func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
+	m, err := lifecycle.PeekManifest(context.Background(), "faketest-manifestonly://bucket/prefix")
+	require.NoError(t, err)
+	require.Equal(t, manifestOnlyFixture, m)
+}
+
+// TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
+// verifies PeekManifest still works correctly against a cloud destination
+// type that does NOT implement CloudManifestFetcher (this package's own
+// "faketest" scheme has no such restriction, matching a real S3/GCS
+// destination, both of which do implement it — this covers the
+// interface-not-implemented fallback branch generically without needing
+// a destination type that deliberately omits it).
+func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	backingDir := t.TempDir()
+	setFakeCloudBackingDir(t, backingDir)
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap-peek")
+	m, err := lifecycle.SnapshotToCloud(
+		context.Background(), db, snapshotDir,
+		lifecycle.TriggerManual, "test-version", "faketest://bucket/prefix",
+	)
+	require.NoError(t, err)
+
+	peeked, err := lifecycle.PeekManifest(
+		context.Background(), "faketest://bucket/prefix/snap-peek",
+	)
+	require.NoError(t, err)
+	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)
 }

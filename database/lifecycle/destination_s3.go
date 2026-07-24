@@ -31,6 +31,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 func init() {
@@ -243,6 +244,24 @@ func (d *s3Destination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, err
 	return entries, errors.Join(problems...)
 }
 
+// isS3NotFoundError reports whether err represents a confirmed-absent S3
+// object rather than some other failure (auth, network, throttling).
+// GetObject's own modeled "missing key" error is NoSuchKey; s3types.NotFound
+// is modeled for other operations (e.g. HeadObject) and is never actually
+// constructed from a GetObject response by AWS itself, but is kept here
+// defensively. Neither typed check catches every S3-compatible (non-AWS)
+// endpoint, though: some report a missing key as a generic error whose
+// smithy.APIError.ErrorCode() is "NotFound" without it being deserialized
+// into the strongly-typed s3types.NotFound struct at all -- checking the
+// error code string directly is what actually covers those.
+func isS3NotFoundError(err error) bool {
+	var noSuchKey *s3types.NoSuchKey
+	var notFound *s3types.NotFound
+	var apiErr smithy.APIError
+	return errors.As(err, &noSuchKey) || errors.As(err, &notFound) ||
+		(errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotFound")
+}
+
 // fetchManifest downloads and parses just the manifest.json for
 // snapshotID, without downloading the rest of that snapshot's (possibly
 // very large) blob/metadata backups.
@@ -253,9 +272,7 @@ func (d *s3Destination) fetchManifest(ctx context.Context, snapshotID string) (M
 		Key:    &key,
 	})
 	if err != nil {
-		var noSuchKey *s3types.NoSuchKey
-		var notFound *s3types.NotFound
-		if errors.As(err, &noSuchKey) || errors.As(err, &notFound) {
+		if isS3NotFoundError(err) {
 			return Manifest{}, fmt.Errorf(
 				"get s3://%s/%s: %w: %w",
 				d.bucket, key, ErrCloudSnapshotNotFound, err,

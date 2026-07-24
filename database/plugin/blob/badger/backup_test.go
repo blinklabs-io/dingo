@@ -240,3 +240,78 @@ func TestRestoreCancelledMidStreamStopsBeforeCompleting(t *testing.T) {
 		"a second Read must never reach the instrumented reader once ctx is cancelled",
 	)
 }
+
+// cancelAfterNSeekableReads is cancelAfterNReads's seekable counterpart:
+// implementing Seek makes Restore take its already-seekable branch
+// directly (skipping the temp-file buffering spool the non-seekable
+// branch above goes through), so cancellation is exercised against
+// validateLoadRecordSizes's own read pass specifically, not the
+// buffering copy.
+type cancelAfterNSeekableReads struct {
+	r      *bytes.Reader
+	n      int
+	count  int
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterNSeekableReads) Read(p []byte) (int, error) {
+	c.count++
+	if c.count == c.n {
+		c.cancel()
+	}
+	return c.r.Read(p)
+}
+
+func (c *cancelAfterNSeekableReads) Seek(offset int64, whence int) (int64, error) {
+	return c.r.Seek(offset, whence)
+}
+
+// TestRestoreCancelledDuringRecordSizeValidationStopsBeforeCompleting
+// guards against comment-54's gap: validateLoadRecordSizes's own read
+// pass over an already-seekable input used to ignore ctx entirely, unlike
+// the buffering copy the non-seekable branch goes through (see
+// TestRestoreCancelledMidStreamStopsBeforeCompleting above) and unlike the
+// real Load call afterward -- so a cancellation landing specifically
+// during this validation pass sat unnoticed until it finished reading
+// through the entire backup stream. This instrumented io.ReadSeeker makes
+// Restore take the seekable branch directly (skipping the buffering
+// spool), and cancels after its first Read -- a second Read must never
+// reach it.
+func TestRestoreCancelledDuringRecordSizeValidationStopsBeforeCompleting(t *testing.T) {
+	src, err := New(WithDataDir(t.TempDir()))
+	require.NoError(t, err)
+	defer src.Close()
+
+	txn := src.NewTransaction(true)
+	for i := range 200 {
+		require.NoError(t, src.Set(
+			txn,
+			fmt.Appendf(nil, "key%04d", i),
+			bytes.Repeat([]byte("x"), 1024),
+		))
+	}
+	require.NoError(t, txn.Commit())
+
+	var buf bytes.Buffer
+	require.NoError(t, src.Backup(context.Background(), &buf))
+	require.Greater(
+		t, buf.Len(), 4<<10,
+		"backup must exceed validateLoadRecordSizes's bufio.Reader default buffer size",
+	)
+
+	dst, err := New(WithDataDir(t.TempDir()))
+	require.NoError(t, err)
+	defer dst.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	instrumented := &cancelAfterNSeekableReads{
+		r: bytes.NewReader(buf.Bytes()), n: 1, cancel: cancel,
+	}
+	err = dst.Restore(ctx, instrumented)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(
+		t, 1, instrumented.count,
+		"a second Read must never reach the instrumented reader once ctx "+
+			"is cancelled during record-size validation",
+	)
+}

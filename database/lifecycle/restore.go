@@ -128,7 +128,23 @@ func RestoreValidated(
 // manifest against itself, since it opens the restored copy using the
 // manifest's own recorded plugins, not necessarily whatever the caller
 // actually intends to run it with afterward.
+//
+// For a cloud snapshotDir, this tries FetchCloudManifest first — which
+// fetches just the one manifest.json object via CloudManifestFetcher,
+// without downloading the (possibly very large) blob/metadata backups
+// alongside it — before falling back to the full download-based
+// resolveManifest path below. FetchCloudManifest's ok=false covers two
+// distinct cases resolveManifest already handles correctly on its own:
+// snapshotDir isn't a recognized cloud URI at all (a plain local path),
+// or it is one but that destination type doesn't implement
+// CloudManifestFetcher — either way, falling through to resolveManifest
+// is the right move, so its own error (if any) from the failed
+// FetchCloudManifest attempt is deliberately discarded here rather than
+// duplicating PeekManifest's cloud-vs-local branching a second time.
 func PeekManifest(ctx context.Context, snapshotDir string) (Manifest, error) {
+	if m, ok, err := FetchCloudManifest(ctx, snapshotDir); ok {
+		return m, err
+	}
 	manifest, _, cleanup, err := resolveManifest(ctx, snapshotDir)
 	if cleanup != nil {
 		defer cleanup()

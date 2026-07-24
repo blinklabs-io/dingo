@@ -16,6 +16,7 @@ package bark
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -137,6 +138,79 @@ func TestAddrClearsAfterStop(t *testing.T) {
 
 	require.NoError(t, b.Stop(context.Background()))
 	require.Empty(t, b.Addr(), "Addr must be cleared, not stale, once the server has stopped")
+}
+
+// TestAddrClearsAfterStopTimesOut guards against comment-63's original
+// bug: Stop only cleared b.server/b.listenerAddr in the branch where
+// server.Shutdown returned nil, so a Stop call whose ctx deadline was hit
+// before an active connection finished draining (Shutdown returns
+// ctx.Err() in that case) left Addr() reporting the old listener address
+// as if the server were still live. It isn't: http.Server.Shutdown closes
+// every listener essentially immediately, before it even starts waiting
+// on active connections to drain, so the listener is already gone
+// regardless of whether Shutdown's wait times out or completes.
+//
+// To force that timeout path, this holds a connection open in a
+// non-idle state (mid-request, so Shutdown's closeIdleConns can't reap
+// it) and calls Stop with a deadline far shorter than that connection
+// will ever take to finish. Whether the OS/runtime has actually
+// finished accepting that connection and registered it as non-idle by
+// the moment Stop runs is scheduling-dependent and not something this
+// process can observe directly (no hook exists to poll it) -- so rather
+// than pad a fixed guess with time.Sleep, this retries the whole
+// dial-write-Stop sequence against a fresh listener/connection a bounded
+// number of times until Stop actually reports the timeout it's supposed
+// to, the same way a flaky-by-nature OS-timing assertion is made
+// reliable by giving it several independent chances instead of one
+// arbitrarily-padded one.
+func TestAddrClearsAfterStopTimesOut(t *testing.T) {
+	const maxAttempts = 20
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		db := newTestDB(t)
+		b, err := NewBark(BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)})
+		require.NoError(t, err)
+		require.NoError(t, b.Start(context.Background()))
+		addr := b.Addr()
+		require.NotEmpty(t, addr)
+
+		// A raw connection that has sent a partial request line and
+		// nothing more: the server has accepted it and is actively trying
+		// to read the rest of the request (net/http.StateActive), so
+		// Shutdown's closeIdleConns cannot close it out from under the
+		// wait -- unlike a fully idle keep-alive connection, which
+		// Shutdown reaps immediately regardless of ctx.
+		conn, err := net.Dial("tcp", addr)
+		require.NoError(t, err)
+		_, err = conn.Write([]byte("GET / HTTP/1.1\r\n"))
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		stopErr := b.Stop(ctx)
+		cancel()
+		_ = conn.Close()
+		_ = db.Close()
+
+		if stopErr == nil {
+			// The connection wasn't registered as non-idle in time this
+			// attempt (a scheduling artifact, not the behavior under
+			// test) -- Stop succeeded normally, so Addr() being cleared
+			// here would be true regardless of the fix. Retry with a
+			// fresh server instead of asserting on an inconclusive run.
+			continue
+		}
+
+		require.Empty(
+			t, b.Addr(),
+			"Addr must be cleared even when Stop's Shutdown call times "+
+				"out, since the listener is already closed either way",
+		)
+		return
+	}
+	t.Fatalf(
+		"Stop never reported a Shutdown timeout in %d attempts -- "+
+			"could not exercise the timeout path this test guards",
+		maxAttempts,
+	)
 }
 
 // TestAddrClearsWhenStartContextIsCancelled is TestAddrClearsAfterStop's

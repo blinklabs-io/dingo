@@ -41,15 +41,19 @@ const (
 // stores into dir, which must not already exist, writing a manifest
 // alongside them. Both stores are backed up via their native
 // MVCC/versioned mechanism (blob.Backuper, metadata.Backuper), each
-// independently consistent as of whenever it runs — but the two calls
-// still happen one after the other, so without synchronization a commit
-// landing in between would write its commit timestamp to one store's
-// backup and not the other's, and the restored copy would fail its
-// cross-store consistency check. Snapshot closes that window with
-// Database.PauseCommits, which blocks new read-write Txns from being
-// constructed (not reads, and not a quiesce — nothing is torn down or
-// disconnected) for just the two backup calls. This is safe to call
-// against a database a live node is actively writing to.
+// independently consistent as of whenever it runs — but the two backup
+// calls run concurrently (not sequentially: see the comment further down
+// on why neither exposes a way to separate "capture a consistent point"
+// from "stream/copy it"), so without synchronization a commit landing
+// during either one's own window would write its commit timestamp to one
+// store's backup and not the other's, and the restored copy would fail
+// its cross-store consistency check. Snapshot closes that window with
+// Database.PauseCommitsContext, which blocks new read-write Txns from
+// being constructed (not reads, and not a quiesce — nothing is torn down
+// or disconnected) for the full duration of whichever backup call runs
+// longer — bounded by the slower of the two, not their sum, which is the
+// point of running them concurrently in the first place. This is safe to
+// call against a database a live node is actively writing to.
 //
 // dingoVersion is recorded in the manifest for cross-version restore
 // detection; pass the running binary's version string.

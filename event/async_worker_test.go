@@ -16,7 +16,7 @@ func TestAsyncWorkerDropsQueuedEventAfterStop(t *testing.T) {
 			asyncQueue:          make(chan asyncEvent, 1),
 			stopCh:              make(chan struct{}),
 		}
-		sub := newChannelSubscriber(1, nil)
+		sub := newChannelSubscriber(testEvtType, 1, nil)
 		eb.subscriberSnapshots[testEvtType] = []subscriberEntry{
 			{
 				id:         1,

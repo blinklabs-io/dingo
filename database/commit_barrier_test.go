@@ -165,6 +165,14 @@ func TestPauseCommitsContextReturnsPromptlyWhenCancelled(t *testing.T) {
 	db := openTestDB(t)
 
 	outer := db.Transaction(true)
+	// Rollback() is idempotent (checks t.finished), so this defer is safe
+	// alongside the explicit Rollback() call further down: if any
+	// assertion between here and that explicit call fails, this defer
+	// still releases outer's RLock on the commit barrier instead of
+	// leaking it -- matching the pattern
+	// TestBlobOnlyTxnDoesNotBlockOnPendingPauseCommits already uses for
+	// the same reason.
+	defer outer.Rollback() //nolint:errcheck
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -208,6 +216,76 @@ func TestPauseCommitsContextReturnsPromptlyWhenCancelled(t *testing.T) {
 			"acquisition attempt once the outer Txn releases",
 	)
 	laterResume()
+}
+
+// TestPauseCommitsContextCancellationDoesNotStallLaterTxns guards against
+// comment-48's original bug: PauseCommitsContext's cancellation path used
+// to just stop waiting on the result of a background goroutine's blocked
+// sync.RWMutex.Lock() call — that Lock() call itself kept running (and
+// stayed queued) regardless. Because sync.RWMutex gives writers
+// preference, a queued Lock() blocks every subsequent RLock() (i.e. every
+// new read-write Txn) even though the original PauseCommitsContext caller
+// had already given up — so a cancelled snapshot attempt still stalled
+// new Txns for as long as the pre-existing long-running write transaction
+// it was waiting behind took to finish, exactly as if the cancellation
+// had never happened.
+//
+// This holds the barrier's read side directly (db.commitBarrier.RLock),
+// not via a real Transaction(true) Txn: the metadata plugin's write
+// connection pool is sized to exactly one connection (see
+// acquireCommitBarrier's doc comment), so a second concurrent
+// Transaction(true) call would block on that pool regardless of the
+// commitBarrier's own behavior, confounding the very thing this test
+// needs to isolate. Simulating the reader directly keeps the check
+// scoped to the barrier mechanism alone: a cancelled PauseCommitsContext
+// must let a brand new RLock proceed promptly, even while the original,
+// unrelated reader is still held. Only a barrier that fully withdraws
+// the cancelled writer's claim (see cancellableBarrier) can pass this: a
+// naive "just stop waiting" cancellation leaves the new RLock blocked
+// until the original reader eventually releases.
+func TestPauseCommitsContextCancellationDoesNotStallLaterTxns(t *testing.T) {
+	db := openTestDB(t)
+
+	db.commitBarrier.RLock()
+	defer db.commitBarrier.RUnlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	pauseResultCh := make(chan error, 1)
+	go func() {
+		_, err := db.PauseCommitsContext(ctx)
+		pauseResultCh <- err
+	}()
+
+	testutil.RequireNoReceive(
+		t, pauseResultCh, 150*time.Millisecond,
+		"PauseCommitsContext must block while the simulated reader is held",
+	)
+
+	cancel()
+
+	err := testutil.RequireReceive(
+		t, pauseResultCh, time.Second,
+		"PauseCommitsContext must return promptly once ctx is cancelled",
+	)
+	require.ErrorIs(t, err, context.Canceled)
+
+	// The simulated reader is deliberately still held here -- this is the
+	// discriminating check: a naive cancellation that leaves a phantom
+	// queued writer behind would block this new RLock until the deferred
+	// RUnlock above runs, not before it.
+	newRLockDone := make(chan struct{})
+	go func() {
+		db.commitBarrier.RLock()
+		close(newRLockDone)
+	}()
+	testutil.RequireReceive(
+		t, newRLockDone, time.Second,
+		"a new RLock must succeed promptly after the cancelled "+
+			"PauseCommitsContext call, even while the original, unrelated "+
+			"reader is still held",
+	)
+	db.commitBarrier.RUnlock()
 }
 
 // TestPauseCommitsContextSucceedsWhenUncontended verifies the ordinary,

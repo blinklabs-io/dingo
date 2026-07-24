@@ -137,7 +137,14 @@ func (d *BlobStoreBadger) Restore(ctx context.Context, r io.Reader) (err error) 
 		seeker = tmp
 	}
 
-	if err := validateLoadRecordSizes(seeker, maxLoadRecordSize); err != nil {
+	// Wrapped the same way the real Load call below is: a seekable input
+	// (e.g. a local snapshot file) can be large enough that this
+	// validation pass alone takes real time, and without this it ignored
+	// cancellation entirely (unlike the unseekable branch above, whose
+	// buffering io.Copy already went through a contextReader) -- a
+	// cancelled live restore could sit unresponsive through this whole
+	// pass before Load's own cancellation check ever got a chance to run.
+	if err := validateLoadRecordSizes(&contextReader{ctx: ctx, r: seeker}, maxLoadRecordSize); err != nil {
 		return fmt.Errorf("badger restore: %w", err)
 	}
 	if _, err := seeker.Seek(0, io.SeekStart); err != nil {

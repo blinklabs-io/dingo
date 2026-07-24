@@ -375,11 +375,21 @@ func (b *Bark) Stop(ctx context.Context) error {
 
 	if b.server != nil {
 		b.config.Logger.Debug("shutting down bark gRPC server")
-		if err := b.server.Shutdown(ctx); err != nil {
-			return fmt.Errorf("failed to shutdown bark gRPC server: %w", err)
-		}
+		// http.Server.Shutdown closes every open listener essentially
+		// immediately, before it starts waiting (bounded by ctx) for
+		// already-active connections to drain -- so the listener is gone
+		// whether Shutdown returns because that drain finished or because
+		// ctx's deadline was hit first. b.server/b.listenerAddr must be
+		// cleared in both cases, not only on success, or a timed-out Stop
+		// would leave Addr() reporting a listener that (per its own
+		// doc comment's no-stale-address contract) is no longer actually
+		// open.
+		err := b.server.Shutdown(ctx)
 		b.server = nil
 		b.listenerAddr = nil
+		if err != nil {
+			return fmt.Errorf("failed to shutdown bark gRPC server: %w", err)
+		}
 	}
 	return nil
 }

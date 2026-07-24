@@ -140,6 +140,64 @@ func TestCopyFileSyncsDestinationDirectory(t *testing.T) {
 	require.Equal(t, []byte("hello"), data)
 }
 
+// TestCreateDirDurableCreatesNestedDirectories guards against comment-53's
+// original gap: RestoreFrom used to create its data directory via a plain
+// os.MkdirAll, whose own newly-created directory entries (not just the
+// files placed inside afterward) are not durable until their parent is
+// also fsynced -- a crash right after a "successful" restore into a
+// brand-new nested directory could leave that directory (and everything
+// restored into it) unreachable or entirely absent, even though
+// copyFile's own directory sync already made metadata.sqlite durable
+// within it. Actually observing that durability gap needs a simulated
+// crash, impractical in a unit test (see TestCopyFileSyncsDestinationDirectory's
+// identical caveat); what this verifies is that createDirDurable actually
+// creates every missing nested component, matching os.MkdirAll's own
+// behavior, so the added parent-sync walk runs over the right set of
+// directories rather than silently no-op'ing.
+func TestCreateDirDurableCreatesNestedDirectories(t *testing.T) {
+	base := t.TempDir()
+	nested := filepath.Join(base, "a", "b", "c")
+
+	require.NoError(t, createDirDurable(nested))
+	require.DirExists(t, nested)
+	require.DirExists(t, filepath.Join(base, "a"))
+	require.DirExists(t, filepath.Join(base, "a", "b"))
+}
+
+// TestCreateDirDurableIsIdempotentOnExistingDirectory verifies that
+// createDirDurable, like os.MkdirAll, succeeds as a no-op when the
+// directory (and all its ancestors) already exist -- no newly-created
+// directory means no parent-sync walk needs to run at all.
+func TestCreateDirDurableIsIdempotentOnExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, createDirDurable(dir))
+	require.DirExists(t, dir)
+}
+
+// TestRestoreFromCreatesNestedTargetDirectory verifies the actual
+// RestoreFrom path (not just createDirDurable in isolation) succeeds when
+// its data directory requires creating more than one new nested
+// component -- the scenario comment-53 is about.
+func TestRestoreFromCreatesNestedTargetDirectory(t *testing.T) {
+	srcDir := t.TempDir()
+	src, err := New(srcDir, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, src.Start())
+	defer src.Close() //nolint:errcheck
+
+	backupPath := filepath.Join(t.TempDir(), "backup.sqlite")
+	require.NoError(t, src.BackupTo(context.Background(), backupPath))
+
+	dstDir := filepath.Join(t.TempDir(), "nested", "restore-target")
+	dst, err := New(dstDir, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, dst.RestoreFrom(context.Background(), backupPath))
+	require.NoError(t, dst.Start())
+	defer dst.Close() //nolint:errcheck
+
+	require.FileExists(t, filepath.Join(dstDir, "metadata.sqlite"))
+}
+
 var _ io.Reader = &contextReader{}
 
 // TestRestoreFromExistingDestinationErrors verifies that RestoreFrom

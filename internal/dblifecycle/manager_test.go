@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -474,13 +475,24 @@ func (b *syncBuffer) String() string {
 // logged as a real failure, not silently treated as an idempotent
 // already-captured-this-epoch skip just because the local directory now
 // exists.
+//
+// handleEpochTransitionEvent logs this directly via the Manager's own
+// logger (m.logger), not through the EventBus's internal logging, so
+// wiring only the Manager's logger to logBuf below is sufficient on its
+// own -- verified by deliberately misrouting the production log call to
+// a different logger and confirming this test's first require.Eventually
+// then fails instead of passing vacuously. The EventBus is still given
+// the same logger here anyway, purely defensively: it costs nothing and
+// keeps this test valid even if EventBus's own logging (e.g. a
+// SubscribeFunc handler panic) ever became relevant to what it checks.
 func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 	db := newManagerTestDB(t)
-	eb := event.NewEventBus(nil, nil)
-	defer eb.Stop()
 
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
 
 	snapshotDir := t.TempDir()
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
@@ -500,5 +512,122 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 	require.NotContains(
 		t, logBuf.String(), "already exists, skipping",
 		"a cloud-upload failure must not be silently treated as idempotent already-exists skip",
+	)
+}
+
+// blockingCloudDestination's UploadDir blocks unconditionally (ignoring
+// ctx) until released is closed, closing started the moment it's
+// entered -- simulating a slow, still-running upload so a test can hold
+// a snapshot handler "in flight" for exactly as long as it needs,
+// independent of any context cancellation the handler's ctx might see.
+type blockingCloudDestination struct {
+	started  chan struct{}
+	released chan struct{}
+}
+
+func (d *blockingCloudDestination) UploadDir(context.Context, string) error {
+	close(d.started)
+	<-d.released
+	return nil
+}
+
+func (d *blockingCloudDestination) DownloadDir(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+var (
+	blockingCloudMu   sync.Mutex
+	blockingCloudDest *blockingCloudDestination
+)
+
+func init() {
+	lifecycle.RegisterCloudDestinationScheme(
+		"faketestblocking",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			blockingCloudMu.Lock()
+			defer blockingCloudMu.Unlock()
+			return blockingCloudDest, nil
+		},
+	)
+}
+
+// TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation
+// guards against comment-50's original bug: Start's cleanup goroutine
+// (which reacts to the parent ctx passed to Start being cancelled
+// directly, not just to a call to Stop) used to race Stop() to decide
+// which of them was responsible for unsubscribing. If the parent ctx was
+// cancelled externally first, that cleanup goroutine could already have
+// reset the manager's running state by the time a concurrent Stop() call
+// checked it, so Stop() returned immediately instead of waiting for the
+// SAME goroutine's still-in-flight UnsubscribeAndWait call -- which
+// itself was waiting for a snapshot handler that was still actually
+// running. A caller relying on Stop() returning to mean "the manager's
+// snapshot handler is no longer touching the database" could then
+// proceed to close/replace the database while an upload was still
+// running against it. This is exactly the shape of a real node shutdown:
+// the top-level context gets cancelled, and Stop() is called on every
+// subsystem separately with no guaranteed ordering between the two.
+func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(t *testing.T) {
+	db := newManagerTestDB(t)
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	dest := &blockingCloudDestination{
+		started:  make(chan struct{}),
+		released: make(chan struct{}),
+	}
+	blockingCloudMu.Lock()
+	blockingCloudDest = dest
+	blockingCloudMu.Unlock()
+	releaseOnce := sync.Once{}
+	releaseDest := func() { releaseOnce.Do(func() { close(dest.released) }) }
+	// Registered after "defer eb.Stop()" above, so it unwinds first: if an
+	// assertion below fails (exactly what should happen against the buggy
+	// version this test guards against) and aborts the test via Goexit,
+	// this still releases the blocked dispatch goroutine before eb.Stop()
+	// gets a chance to wait on it forever -- without this, a correctly-
+	// failing assertion here would manifest as the whole test hanging
+	// until the package timeout instead of a clean, fast failure.
+	defer releaseDest()
+
+	snapshotDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:          true,
+		SnapshotDir:              snapshotDir,
+		SnapshotEveryNEpochs:     1,
+		SnapshotCloudDestination: "faketestblocking://bucket/prefix",
+	}, nil)
+	require.NoError(t, m.Start(ctx))
+
+	publishEpochTransition(eb, 3)
+	testutil.RequireReceive(
+		t, dest.started, time.Second,
+		"the snapshot handler must have entered UploadDir",
+	)
+
+	// Cancel the PARENT context directly (not via Stop) -- the
+	// external-cancellation path Start's own cleanup goroutine reacts to.
+	cancel()
+
+	// Call Stop concurrently, exactly as node shutdown would.
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		_ = m.Stop()
+	}()
+
+	testutil.RequireNoReceive(
+		t, stopDone, 150*time.Millisecond,
+		"Stop must not return while the snapshot handler it's stopping is "+
+			"still in flight, even though the parent ctx was already "+
+			"cancelled externally",
+	)
+
+	releaseDest()
+
+	testutil.RequireReceive(
+		t, stopDone, time.Second,
+		"Stop must return promptly once the in-flight handler actually finishes",
 	)
 }

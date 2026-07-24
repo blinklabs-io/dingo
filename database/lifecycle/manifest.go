@@ -248,15 +248,7 @@ func WriteManifest(dir string, m Manifest) error {
 	// A file's own fsync does not guarantee its directory entry is
 	// persisted; sync dir itself so the rename above is durable too, not
 	// just atomic.
-	dirFile, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open %q for directory sync: %w", dir, err)
-	}
-	defer dirFile.Close()
-	if err := dirFile.Sync(); err != nil {
-		return fmt.Errorf("sync directory %q: %w", dir, err)
-	}
-	return nil
+	return syncDir(dir)
 }
 
 // ReadManifest reads and validates the manifest at dir/ManifestFileName,
