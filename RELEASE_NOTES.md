@@ -1,5 +1,54 @@
 # Dingo Releases
 
+## v0.67.0 (July 24, 2026)
+
+**Title:** Expand reward handling, configurable mempool backend, and ledger safeguards
+
+**Date:** July 24, 2026
+
+**Version:** v0.67.0
+
+This release expands reward handling for full pot distribution and delegator inactivity, adds a configurable FIFO mempool backend, and strengthens consensus, Ouroboros, ledger, Mithril, devnet, CI, and dependency behavior across the node.
+
+### 💪 Improvements
+
+* Added operator controlled full pot reward distribution behind configuration gates, with validation that blocks unsafe settings on standard networks.
+* Expanded delegator inactivity expiry support with account expiration tracking, historical stake and reward reconstruction, snapshot integration, Mithril compatibility limits, and reward crediting safeguards.
+* Introduced a configurable FIFO mempool backend with backend neutral selection through configuration and node interfaces.
+* Improved Genesis fast source selection by requiring corroboration before fast sources can drive selection.
+* Updated the Antithesis analysis build to use the Antithesis Go build tag.
+* Refreshed the Mithril verification key defaults to point to the IntersectMBO hosted files.
+* Extended DevNet with a Dingo-only default, conformance mode, TCP LocalStateQuery access, and CIP-50 scenario coverage.
+* Strengthened reward crediting and snapshot handling with Mithril compatibility limits for inactivity processing.
+* Eliminated the issue close date workflow and its ORG_PROJECT_PAT dependency.
+* Updated `google.golang.org/grpc` to `1.82.1`.
+* Bumped `gouroboros` to `v0.189.2`.
+
+### 🔧 Fixes
+
+* Fixed txsubmission consumer registration so connections do not leak consumers.
+* Corrected mempool reads so transaction snapshots stay immutable across read and cache boundaries.
+* Reworked mempool validation so the pool releases locks during validation and revalidation.
+* Stabilized mempool shutdown so the node rejects new work after stop and reports the stopped state.
+* Hardened the ledger rewind loop with a hold at tip guard and clearer warning output.
+* Repaired reward stake input mismatches by deduplicating live stake data at startup and in memory.
+* Aligned Mithril primary ledger drain with sparse indexes so iteration continues reliably.
+* Ended blockfetch batches on the rollback sentinel instead of streaming invalid blocks.
+* Enabled CBOR wrapped stake snapshot queries and returned delegation state for wrapped requests.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ## v0.66.2 (July 21, 2026)
 
 **Title:** Update core dependencies, add MySQL conformance coverage, and improve database stability
