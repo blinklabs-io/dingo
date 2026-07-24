@@ -702,16 +702,21 @@ func TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress(
 ) {
 	ls, _ := newAtTipDescentLedger(t)
 
-	// Two descending distinct failures build up descent state.
-	for _, slot := range []uint64{500, 480} {
+	// Enough descending distinct failures to enter the hold state.
+	for _, slot := range []uint64{500, 480, 460} {
 		ferr := atTipDescentFailure(slot, fmt.Sprintf("%d", slot))
 		recovered, err := ls.tryRecoverFromTxValidationError(ferr)
 		require.NoError(t, err)
 		require.True(t, recovered)
 	}
-	require.Positive(t, ls.atTipRecoveryDescentCount)
+	require.Equal(
+		t,
+		maxAtTipRecoveryDescents,
+		ls.atTipRecoveryDescentCount,
+	)
+	require.True(t, ls.atTipRecoveryHolding)
 
-	// A distinct failure at a higher slot is forward progress and resets it.
+	// A distinct failure at a higher slot is forward progress and clears it.
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		atTipDescentFailure(600, "ahead"),
 	)
