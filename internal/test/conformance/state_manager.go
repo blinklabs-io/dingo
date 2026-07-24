@@ -528,6 +528,7 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			m.govState.DRepDelegations[credential] = regCert.Drep
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -546,6 +547,7 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			m.govState.DRepDelegations[credential] = regCert.Drep
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
@@ -558,11 +560,24 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			m.db.Create(&account)
 		}
 
+	case common.CertificateTypeVoteDelegation:
+		if voteCert, ok := cert.(*common.VoteDelegationCertificate); ok {
+			credential := voteCert.StakeCredential.Credential
+			m.govState.DRepDelegations[credential] = voteCert.Drep
+		}
+
+	case common.CertificateTypeStakeVoteDelegation:
+		if voteCert, ok := cert.(*common.StakeVoteDelegationCertificate); ok {
+			credential := voteCert.StakeCredential.Credential
+			m.govState.DRepDelegations[credential] = voteCert.Drep
+		}
+
 	case common.CertificateTypeStakeDeregistration:
 		if deregCert, ok := cert.(*common.StakeDeregistrationCertificate); ok {
 			stakeCredential := deregCert.StakeCredential
 			credential := stakeCredential.Credential
 			delete(m.stakeRegistrations, credential)
+			delete(m.govState.DRepDelegations, credential)
 			m.govState.DeregisterStake(credential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 
@@ -581,6 +596,7 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			stakeCredential := deregCert.StakeCredential
 			credential := stakeCredential.Credential
 			delete(m.stakeRegistrations, credential)
+			delete(m.govState.DRepDelegations, credential)
 			m.govState.DeregisterStake(credential)
 			credentialTag := conformanceCredentialTag(stakeCredential)
 

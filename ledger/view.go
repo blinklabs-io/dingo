@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"time"
 
@@ -653,6 +654,51 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		registrations = append(registrations, reg)
 	}
 	return registrations, nil
+}
+
+// DRepDelegation returns the DRep that the given stake credential is
+// vote-delegated to, or nil when the credential is not registered or is not
+// delegated to any DRep. It satisfies gouroboros' common.DRepDelegationState,
+// which the ledger rules use to validate reward withdrawals on protocol
+// versions 10 and 11 (a withdrawal from a credential not delegated to a DRep
+// is rejected).
+func (lv *LedgerView) DRepDelegation(
+	cred lcommon.Credential,
+) (*lcommon.Drep, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrAccountNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get account for drep delegation: %w", err)
+	}
+	if account == nil {
+		return nil, nil
+	}
+	// No DRep delegation: an empty credential together with the default
+	// key-hash type. An always-abstain / always-no-confidence delegation
+	// carries no credential but a non-default type, so it is a delegation.
+	if len(account.Drep) == 0 && account.DrepType == models.DrepTypeAddrKeyHash {
+		return nil, nil
+	}
+	// DrepType is a small ledger enum (0-3); guard the narrowing conversion
+	// so an out-of-range value degrades to "no DRep" rather than wrapping.
+	if account.DrepType > uint64(math.MaxInt) {
+		return nil, nil
+	}
+	return &lcommon.Drep{
+		Type:       int(account.DrepType),
+		Credential: account.Drep,
+	}, nil
 }
 
 // Constitution returns the current constitution.
