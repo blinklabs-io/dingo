@@ -70,12 +70,12 @@ Thank you for trying!
 * 強化しました DevNet を Dingo-only default、conformance mode、TCP LocalStateQuery access、CIP-50 scenario coverage 付きで動かします。
 * 整えました inactivity 処理に対して Mithril compatibility limit を適用し、reward crediting と snapshot handling を守ります。
 * 削除しました issue close date workflow と ORG_PROJECT_PAT dependency をなくします。
-* 是正しました `google.golang.org/grpc` を `1.82.1` にします。
-* 修正しました `gouroboros` を `v0.189.2` にします。
+* 引き上げました `google.golang.org/grpc` を `1.82.1` に引き上げます。
+* 更新しました `gouroboros` を `v0.189.2` に更新します。
 
 ### 🔧 修正
 
-* 再構成しました txsubmission consumer registration で connection が consumer を漏らさないようにします。
+* 修正しました txsubmission consumer registration で connection が consumer を漏らさないようにします。
 * 安定化しました mempool read で transaction snapshot が read と cache boundary をまたいで immutable のまま保たれます。
 * 強化しました mempool validation で、validation と revalidation の間に pool lock を解放します。
 * 修復しました mempool shutdown 後に node が新しい work を拒否し、stopped state を返します。
