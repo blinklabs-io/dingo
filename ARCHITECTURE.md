@@ -2118,6 +2118,63 @@ Implements the Mesh (formerly Rosetta) API specification for wallet integration 
 
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. Supports optional TLS.
 
+### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
+
+An operator tool that validates Dingo's closed-epoch reward inputs against Koios
+reference data on preview and preprod networks. It is not part of the node
+process; it is a standalone binary built from `cmd/koios-parity/`.
+
+**Architecture:**
+
+```
+internal/koiosparity/      # shared library
+  cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
+  koios_client.go          # Koios v1 REST client with pagination + retry
+  dingo_db.go              # read-only GORM access to Dingo's metadata database
+  compare.go               # field-level comparison, Mismatch category constants
+  fetch.go                 # Koios fetch orchestration (worker pool per epoch)
+  check.go                 # parity check orchestration (pool-level comparison)
+  report.go                # human-readable status + JSON report generation
+
+cmd/koios-parity/          # thin Cobra CLI wrapper
+  main.go                  # root command (default action: fetch+check+status)
+  run.go, fetch.go, check.go, status.go, explain.go, watch.go
+```
+
+**Data sources:**
+- **Reference (Koios):** fetched once into `cache.db` (default `.koios/cache.db`)
+  via the `fetch` subcommand. The cache holds `koios_epoch_info` and
+  `koios_pool_epoch` rows per closed epoch.
+- **Dingo:** read directly from Dingo's metadata database during the `check`
+  phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
+  supported via `--metadata-plugin` (defaulting to `sqlite`):
+  - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode
+  - `postgres` / `mysql`: connects via `--metadata-dsn` or `DINGO_METADATA_DSN`
+
+  Tables queried: `reward_pool_input` (per-pool stake/blocks/delegators),
+  `epoch_summary` (total active stake, pool count, delegator count),
+  `reward_ada_pots` (epoch fees).
+
+**Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
+`dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
+(DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
+may be transient). Results are stored in `check_mismatches` and summarised in
+`check_epoch_status`.
+
+Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
+epoch boundaries, so the go snapshot backing epoch E's active_stake needs
+E-2 >= 0) and Koios permanently returns `active_stake=null` there — `fetch`
+commits a `pre_staking` marker row instead of erroring, so `check` skips
+comparison for that epoch and it's never re-proposed by future `fetch` runs.
+A null `active_stake` on any other epoch is treated as a real, retryable
+error (Koios backend lag or an upstream problem), not silently marked
+permanent. `fetch` also cancels the rest of its in-flight batch as soon as any
+epoch hits such an error, rather than continuing to grind through a
+potentially hours-long backfill before surfacing the failure — a rerun
+resumes only the epochs still missing from the cache.
+
+**Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
+
 ### Bark (`bark/`)
 
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive

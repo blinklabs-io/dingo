@@ -1,0 +1,80 @@
+// Copyright 2025 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/spf13/cobra"
+)
+
+func fetchCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "fetch",
+		Short: "Pull Koios reference data into the local cache",
+		Long: `Incremental Koios fetch into cache.db. Resumes from last cached epoch + 1.
+Does not contact Dingo. Safe to interrupt and resume.`,
+		RunE: fetchRun,
+	}
+
+	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
+	cmd.Flags().Int("concurrency", 5, "parallel fetch workers")
+	cmd.Flags().Uint64("from-epoch", 0, "start epoch (gaps in [from, through] are filled; add --force-refresh to overwrite cached rows)")
+	cmd.Flags().Uint64("through-epoch", 0, "stop at this epoch (default: tip-1)")
+	cmd.Flags().Bool("force-refresh", false, "re-fetch and overwrite all epochs in [from-epoch, through-epoch], not just missing ones")
+
+	return cmd
+}
+
+func fetchRun(cmd *cobra.Command, _ []string) error {
+	network, err := requireNetwork()
+	if err != nil {
+		return err
+	}
+
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	fromEpoch, _ := cmd.Flags().GetUint64("from-epoch")
+	throughEpoch, _ := cmd.Flags().GetUint64("through-epoch")
+	forceRefresh, _ := cmd.Flags().GetBool("force-refresh")
+
+	if forceRefresh && !cmd.Flags().Changed("from-epoch") {
+		return errors.New("--force-refresh requires an explicit --from-epoch to prevent accidental full historical re-fetch")
+	}
+
+	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
+		Network:      network,
+		APIKey:       koiosAPIKey(cmd),
+		CachePath:    resolveCachePath(),
+		Concurrency:  concurrency,
+		FromEpoch:    fromEpoch,
+		ThroughEpoch: throughEpoch,
+		ForceRefresh: forceRefresh,
+	}, slog.Default())
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+
+	fmt.Printf("fetch complete: %d epochs, %d pool rows (epochs %d–%d)\n",
+		result.EpochsFetched, result.PoolsFetched,
+		result.FromEpoch, result.ThroughEpoch,
+	)
+	return nil
+}
