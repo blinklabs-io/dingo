@@ -1550,11 +1550,12 @@ type ParsedPrevGovActionIds struct {
 
 // ParsedGovState holds all decoded governance state components.
 type ParsedGovState struct {
-	Constitution     *ParsedConstitution
-	Committee        []ParsedCommitteeMember
-	CommitteeQuorum  *cbor.Rat
-	Proposals        []ParsedGovProposal
-	PrevGovActionIds *ParsedPrevGovActionIds
+	Constitution         *ParsedConstitution
+	Committee            []ParsedCommitteeMember
+	CommitteeQuorum      *cbor.Rat
+	Proposals            []ParsedGovProposal
+	PrevGovActionIds     *ParsedPrevGovActionIds
+	RatifiedGovActionIds []ParsedGovActionId
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -1630,6 +1631,18 @@ func ParseGovState(
 	}
 	result.Proposals = proposals
 	result.PrevGovActionIds = prevIds
+
+	if len(fields) >= 7 {
+		ratifiedIds, err := parseDRepPulsingStateRatifiedIds(
+			fields[6],
+		)
+		if err != nil {
+			warnings = append(warnings, fmt.Errorf(
+				"parsing drep pulsing state: %w", err,
+			))
+		}
+		result.RatifiedGovActionIds = ratifiedIds
+	}
 
 	return result, errors.Join(warnings...)
 }
@@ -1898,6 +1911,82 @@ func parseProposals(data []byte) (
 	}
 
 	return proposals, prevIds, errors.Join(propErrs...)
+}
+
+// parseDRepPulsingStateRatifiedIds decodes
+// ConwayGovState.cgsDRepPulsingState enough to recover the
+// GovActionIds in DRComplete's RatifyState.rsEnacted field.
+//
+// DRepPulsingState is persisted as DRComplete, even when the node was
+// still pulsing in memory:
+//
+//	[pulsingSnapshot, ratifyState]
+//
+// RatifyState then encodes as:
+//
+//	[enactState, enacted, expired, delayed]
+//
+// The enacted field is a sequence of GovActionState values in the same
+// representation used by cgsProposals, so parseGovActionState can
+// recover the exact action IDs without decoding the full enact state.
+func parseDRepPulsingStateRatifiedIds(
+	data []byte,
+) ([]ParsedGovActionId, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding DRepPulsingState: %w", err,
+		)
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	if len(fields) < 2 {
+		return nil, fmt.Errorf(
+			"DRepPulsingState has %d elements, expected 2",
+			len(fields),
+		)
+	}
+
+	ratifyState, err := decodeRawArray(fields[1])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding RatifyState: %w", err,
+		)
+	}
+	if len(ratifyState) < 2 {
+		return nil, fmt.Errorf(
+			"RatifyState has %d elements, expected 4",
+			len(ratifyState),
+		)
+	}
+
+	enacted, err := decodeRawArray(ratifyState[1])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding RatifyState enacted proposals: %w", err,
+		)
+	}
+	ratifiedIds := make([]ParsedGovActionId, 0, len(enacted))
+	var errs []error
+	for _, item := range enacted {
+		prop, err := parseGovActionState(item)
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"decoding enacted proposal: %w", err,
+			))
+			continue
+		}
+		ratifiedIds = append(ratifiedIds, ParsedGovActionId{
+			TxHash:      append([]byte(nil), prop.TxHash...),
+			ActionIndex: prop.ActionIndex,
+		})
+	}
+
+	return ratifiedIds, errors.Join(errs...)
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the

@@ -2293,25 +2293,25 @@ func importGovState(
 
 	// Import governance proposals
 	if len(govState.Proposals) > 0 {
-		// Snapshot bootstrap close-the-1-epoch-lag heuristic. Canon
-		// nodes mark a HFI ratified at boundary N-1 -> N and enact at
-		// boundary N -> N+1. The snapshot at epoch N reflects the
-		// ratification (in cgsDRepPulsingState's DRComplete result)
-		// but we don't parse that field, so without intervention our
-		// local node would re-ratify at boundary N -> N+1 and only
-		// enact at N+1 -> N+2 — putting us one epoch behind canon
-		// for the protocol-version bump. As a block producer that is
-		// the difference between forging vN+ blocks alongside canon
-		// and forging vN- blocks that risk rejection on TX-validation
-		// rule mismatches gated by the new version.
-		//
-		// Heuristic: when there is exactly one active HFI whose
-		// parent equals the snapshot's per-purpose HardFork root,
-		// mark it ratified at the snapshot's epoch so ENACT picks
-		// it up at the next boundary tick. Skips silently when the
-		// match is ambiguous (0 or >1 candidates) — the lag returns
-		// in those cases but correctness is preserved.
-		ratifiedHFI := findRatifiedHFICandidate(govState)
+		ratifiedIds := ratifiedGovActionIdSet(
+			govState.RatifiedGovActionIds,
+		)
+		var ratifiedHFI *ParsedGovProposal
+		if govState.RatifiedGovActionIds == nil {
+			// Snapshot bootstrap close-the-1-epoch-lag fallback for
+			// older or partial GovState payloads that don't expose
+			// cgsDRepPulsingState's DRComplete result. Exact
+			// RatifyState.rsEnacted IDs above are preferred.
+			ratifiedHFI = findRatifiedHFICandidate(govState)
+		}
+		if len(ratifiedIds) > 0 {
+			cfg.Logger.Info(
+				"marking ratified governance proposals from snapshot DRep pulsing state",
+				"component", "ledgerstate",
+				"count", len(ratifiedIds),
+				"ratified_epoch", cfg.State.Epoch,
+			)
+		}
 		if ratifiedHFI != nil {
 			cfg.Logger.Info(
 				"marking active HFI as ratified at snapshot epoch (close 1-epoch lag)",
@@ -2340,9 +2340,16 @@ func importGovState(
 				)
 				var ratifiedEpoch *uint64
 				var ratifiedSlot *uint64
-				if ratifiedHFI != nil &&
+				_, ratified := ratifiedIds[govActionIdKey(
+					prop.TxHash,
+					prop.ActionIndex,
+				)]
+				if !ratified && ratifiedHFI != nil &&
 					bytes.Equal(prop.TxHash, ratifiedHFI.TxHash) &&
 					prop.ActionIndex == ratifiedHFI.ActionIndex {
+					ratified = true
+				}
+				if ratified {
 					re := cfg.State.Epoch
 					rs := currentEpochSlot
 					ratifiedEpoch = &re
@@ -2429,6 +2436,23 @@ func importGovState(
 	})
 
 	return nil
+}
+
+func ratifiedGovActionIdSet(
+	ids []ParsedGovActionId,
+) map[string]struct{} {
+	if ids == nil {
+		return nil
+	}
+	result := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		result[govActionIdKey(id.TxHash, id.ActionIndex)] = struct{}{}
+	}
+	return result
+}
+
+func govActionIdKey(txHash []byte, actionIdx uint32) string {
+	return fmt.Sprintf("%s#%d", hex.EncodeToString(txHash), actionIdx)
 }
 
 // seedPrevGovActionIds writes synthetic enacted GovernanceProposal

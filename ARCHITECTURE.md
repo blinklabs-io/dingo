@@ -1754,6 +1754,14 @@ Ledger-state import decodes treasury and reserves from the certified
 tip. It does not derive a genesis baseline, because the imported account state
 already includes every pot transition through that tip.
 
+For Conway governance, ledger-state import persists active proposals, the
+per-purpose previous governance action IDs, and the ratified action IDs from
+`ConwayGovState.cgsDRepPulsingState`'s completed `RatifyState.rsEnacted` list.
+Imported proposals whose `(tx_hash, action_index)` appears in that list are
+stored with `ratified_epoch`/`ratified_slot` at the snapshot epoch anchor, so the
+next epoch boundary enacts the same already-ratified actions as the certified
+ledger state instead of re-ratifying them one epoch late.
+
 Ledger-state import also persists `NewEpochState.pool-distr` as
 `pool_stake_snapshot` rows with snapshot type `"actv"` for the imported epoch.
 Those rows store the consensus stake fraction as `total_stake /
