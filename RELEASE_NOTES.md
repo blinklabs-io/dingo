@@ -1,5 +1,152 @@
 # Dingo Releases
 
+## v0.67.0 (July 24, 2026)
+
+**Title:** Expand reward handling, configurable FIFO mempool support, and ledger safeguards
+
+**Date:** July 24, 2026
+
+**Version:** v0.67.0
+
+This release expands reward handling for full pot distribution and delegator inactivity, adds configurable FIFO mempool support, and strengthens consensus, Ouroboros, ledger, Mithril, devnet, CI, and dependency behavior across the node.
+
+### 💪 Improvements
+
+* Added operator controlled full pot reward distribution behind configuration gates, with validation that blocks unsafe settings on standard networks.
+* Expanded delegator inactivity expiry support with account expiration tracking, historical stake and reward reconstruction, snapshot integration, Mithril compatibility limits, and reward crediting safeguards.
+* Introduced a configurable FIFO mempool backend with selection handled independently of the backend through configuration and node interfaces.
+* Improved Genesis fast source selection by requiring corroboration before fast sources can drive selection.
+* Updated the Antithesis analysis build to use the Antithesis Go build tag.
+* Refreshed the Mithril verification key defaults to point to the IntersectMBO hosted files.
+* Extended DevNet with a Dingo-only default, conformance mode, TCP LocalStateQuery access, and CIP-50 scenario coverage.
+* Strengthened reward crediting and snapshot handling with Mithril compatibility checks for inactivity processing.
+* Eliminated the issue close date workflow and its project access token dependency.
+* Updated `google.golang.org/grpc` to `1.82.1`.
+* Bumped `gouroboros` to `v0.189.2`.
+
+### 🔧 Fixes
+
+* Fixed txsubmission consumer registration so connections do not leak consumers.
+* Corrected mempool reads so transaction snapshots stay immutable across read and cache boundaries.
+* Reworked mempool validation so the pool releases locks during validation and revalidation.
+* Stabilized mempool shutdown so the node rejects new work after stop and reports the stopped state.
+* Hardened the ledger rewind loop with a hold at tip guard and clearer warning output.
+* Repaired reward stake input mismatches by deduplicating live stake data at startup and in memory.
+* Aligned Mithril primary ledger drain with sparse indexes so iteration continues reliably.
+* Ended blockfetch batches on the rollback sentinel instead of streaming invalid blocks.
+* Enabled CBOR wrapped stake snapshot queries and returned delegation state for wrapped requests.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** reward 処理を拡張し、設定可能な FIFO mempool backend と ledger 保護を強化
+
+**日付:** July 24, 2026
+
+**バージョン:** v0.67.0
+
+このリリースでは、full pot 配分と delegator inactivity の reward 処理を拡張し、設定可能な FIFO mempool backend を追加し、node 全体で consensus、Ouroboros、ledger、Mithril、devnet、CI、依存関係の挙動を強化します。
+
+### 💪 改善
+
+* 追加しました operator-controlled な設定ゲートの下で full pot reward distribution を有効にし、standard network では unsafe な設定を拒否します。
+* 拡張しました delegator inactivity expiry support を account expiration tracking、historical stake と reward の再構築、snapshot integration、Mithril compatibility limit、reward crediting safeguard とあわせて追加します。
+* 導入しました 設定と node interface から backend を切り替えられる configurable FIFO mempool backend を用意します。
+* 改善しました Genesis fast source selection で、fast source を選ぶ前に corroboration を求めます。
+* 更新しました Antithesis analysis build を Antithesis Go build tag で実行します。
+* 刷新しました Mithril verification key の既定値を IntersectMBO のホスト先ファイルへ向けます。
+* 強化しました DevNet を Dingo-only default、conformance mode、TCP LocalStateQuery access、CIP-50 scenario coverage 付きで動かします。
+* 整えました inactivity 処理に対して Mithril compatibility limit を適用し、reward crediting と snapshot handling を守ります。
+* 削除しました issue close date workflow と project access token dependency をなくします。
+* 引き上げました `google.golang.org/grpc` を `1.82.1` に引き上げます。
+* 更新しました `gouroboros` を `v0.189.2` に更新します。
+
+### 🔧 修正
+
+* 修正しました txsubmission consumer registration で connection から consumer が漏れないようにします。
+* 安定化しました mempool read で transaction snapshot が read と cache boundary をまたいで immutable のまま保たれます。
+* 強化しました mempool validation で、validation と revalidation の間に pool lock を解放します。
+* 修復しました mempool shutdown 後に node が新しい work を拒否し、stopped state を返します。
+* 整合しました ledger rewind loop に hold at tip guard とより明確な warning output を追加します。
+* 防止しました startup 時とメモリ内で live stake data を deduplicate し、reward stake input mismatch の発生を防ぎます。
+* 有効化しました Mithril primary ledger drain が sparse index に沿って iteration を安定して続けられるようにします。
+* 返しました rollback sentinel で blockfetch batch を閉じ、無効な block の streaming を防ぎます。
+* 更新しました CBOR wrapped stake snapshot query に対応し、wrapped request では delegation state も返します。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Ampliar la gestión de recompensas, añadir un backend FIFO configurable y reforzar las protecciones del ledger
+
+**Fecha:** July 24, 2026
+
+**Versión:** v0.67.0
+
+Esta versión amplía la gestión de recompensas para la distribución del full pot y la inactividad de delegadores, añade un backend FIFO configurable para el mempool y refuerza el comportamiento de consenso, Ouroboros, ledger, Mithril, devnet, CI y dependencias en todo el nodo.
+
+### 💪 Mejoras
+
+* Agregó la distribución de recompensas del full pot bajo controles de configuración operados por el operador, con validación que bloquea ajustes inseguros en redes estándar.
+* Amplió la compatibilidad con la expiración por inactividad de delegadores con seguimiento de expiración de cuentas, reconstrucción histórica de stake y recompensas, integración de snapshots, límites de compatibilidad con Mithril y protecciones para el creditado de recompensas.
+* Introdujo un backend FIFO configurable para el mempool con selección neutral al backend a través de la configuración y de las interfaces del nodo.
+* Mejoró la selección de Genesis fast source al exigir corroboración antes de que esas fuentes impulsen la selección.
+* Actualizó la compilación de Antithesis para usar el build tag de Go de Antithesis.
+* Renovó los valores predeterminados de las claves de verificación de Mithril para apuntar a los archivos alojados por IntersectMBO.
+* Extendió DevNet con un modo predeterminado que ejecuta solo Dingo, modo de conformance, acceso TCP a LocalStateQuery y cobertura del escenario CIP-50.
+* Reforzó el creditado de recompensas y el manejo de snapshots con límites de compatibilidad de Mithril para el procesamiento por inactividad.
+* Eliminó el workflow de fecha de cierre de issues y su dependencia del token de acceso del proyecto.
+* Ajustó `google.golang.org/grpc` a `1.82.1`.
+* Subió `gouroboros` a `v0.189.2`.
+
+### 🔧 Correcciones
+
+* Corrigió el registro de consumidores de txsubmission para que las conexiones no dejen consumidores filtrados.
+* Ajustó las lecturas del mempool para que los snapshots de transacciones sigan siendo inmutables entre la lectura y la caché.
+* Reestructuró la validación del mempool para que el pool libere bloqueos durante la validación y la revalidación.
+* Estabilizó el apagado del mempool para que el nodo rechace trabajo nuevo después de detenerse y reporte el estado detenido.
+* Fortaleció el bucle de rewind del ledger con una protección hold at tip y mensajes de advertencia más claros.
+* Reparó los desajustes de los inputs de reward stake al deduplicar los datos de live stake al iniciar y en memoria.
+* Alineó el drenaje principal del ledger de Mithril con índices dispersos para que la iteración continúe de forma fiable.
+* Terminó los lotes de blockfetch en el sentinel de rollback en lugar de transmitir bloques inválidos.
+* Habilitó consultas CBOR wrapped de stake snapshot y devolvió el estado de delegación para las solicitudes wrapped.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.66.2 (July 21, 2026)
 
 **Title:** Update core dependencies, add MySQL conformance coverage, and improve database stability
