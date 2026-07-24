@@ -43,6 +43,13 @@ type stateMetrics struct {
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
 	// as a metric instead of only a WARN loop. See issue #2728.
 	unrecoverableRollbacks prometheus.Counter
+	// Incremented when at-tip validation recovery detects a non-converging,
+	// descending series of distinct failures and holds at the ledger tip
+	// instead of rewinding the primary chain ever deeper. A rising value
+	// means local ledger validation is diverging from the network (e.g. a
+	// false-positive validation rejection), not a peer/fork problem. See
+	// issue #2939.
+	atTipRecoveryNonConverging prometheus.Counter
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -140,6 +147,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_chainsync_unrecoverable_rollback_total",
 			Help: "times a peer repeatedly requested a rollback we cannot cross to (local chain diverged, operator intervention required)",
+		},
+	)
+	m.atTipRecoveryNonConverging = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_attip_recovery_nonconverging_total",
+			Help: "times at-tip validation recovery held at the ledger tip instead of rewinding the primary chain deeper, because a descending series of distinct failures indicated local validation divergence (operator intervention required)",
 		},
 	)
 }

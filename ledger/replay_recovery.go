@@ -73,6 +73,19 @@ func (e *txValidationError) Unwrap() error {
 // relies on ChainSync peer rotation to find a valid candidate chain.
 const maxAtTipRecoveryAttempts = 3
 
+// maxAtTipRecoveryDescents caps how many consecutive *distinct* at-tip failures
+// may fail to advance (each at a slot at or below the previous distinct
+// failure) before at-tip recovery declares itself non-converging and stops
+// rewinding the primary chain deeper. Distinct failures each reset the
+// same-block escalation to attempt 1, so without this bound the escalate-and-cap
+// logic never engages and the primary chain is rewound a stability window
+// deeper every cycle, falling unboundedly behind the wall clock (issue #2939).
+// Once tripped, recovery holds at the ledger tip until the ledger makes forward
+// progress past the failing region, relying on ChainSync re-delivery rather
+// than a destructive descent that no rewind can fix (e.g. a local
+// false-positive validation rejection).
+const maxAtTipRecoveryDescents = 2
+
 type atTipRecoveryAttempt struct {
 	BlockPoint ocommon.Point
 	TxHash     []byte
@@ -237,6 +250,25 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 	)
 }
 
+// resetAtTipRecoveryDescent clears the non-convergence descent tracking once
+// the ledger has made forward progress past the failing region. Called from the
+// block-apply success path when the tip advances beyond the last recorded
+// at-tip failure slot, so a later, unrelated at-tip failure starts with a fresh
+// recovery budget instead of inheriting a stale hold. Runs on the ledger
+// pipeline goroutine, the same goroutine that mutates these fields during
+// recovery, so no additional locking is required.
+func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
+	if ls.atTipRecoveryLastFailSlot == 0 {
+		return
+	}
+	if newTipSlot <= ls.atTipRecoveryLastFailSlot {
+		return
+	}
+	ls.atTipRecoveryLastFailSlot = 0
+	ls.atTipRecoveryDescentCount = 0
+	ls.atTipRecoveryHolding = false
+}
+
 func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	validationErr *txValidationError,
 ) (bool, error) {
@@ -252,9 +284,10 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// Rewind progressively deeper to expose a wider candidate set, up
 	// to the era's stability window. Only halt if even the deepest
 	// rewind has been tried.
+	isSameFailure := ls.lastAtTipRecovery != nil &&
+		ls.lastAtTipRecovery.matches(validationErr)
 	attempts := 1
-	if ls.lastAtTipRecovery != nil &&
-		ls.lastAtTipRecovery.matches(validationErr) {
+	if isSameFailure {
 		attempts = ls.lastAtTipRecovery.Attempts + 1
 		if attempts > maxAtTipRecoveryAttempts {
 			ls.config.Logger.Warn(
@@ -270,6 +303,28 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			attempts = maxAtTipRecoveryAttempts
 		}
 	}
+	// Track non-convergence across DISTINCT failures. Each distinct (block,
+	// tx) failure resets the same-block escalation above to attempt 1, so a
+	// descending series would otherwise rewind the primary chain a stability
+	// window deeper every cycle without ever hitting the escalation cap. When
+	// a distinct failure does not advance beyond the previous distinct
+	// failure's slot, count it as a descent; once enough accumulate, latch
+	// into a hold-at-tip mode that suppresses deep rewinds. The latch clears
+	// only when the ledger makes forward progress (see
+	// resetAtTipRecoveryDescent, called from the block-apply success path).
+	if !isSameFailure {
+		if ls.atTipRecoveryLastFailSlot != 0 &&
+			validationErr.BlockPoint.Slot <= ls.atTipRecoveryLastFailSlot {
+			ls.atTipRecoveryDescentCount++
+		} else {
+			ls.atTipRecoveryDescentCount = 0
+			ls.atTipRecoveryHolding = false
+		}
+		ls.atTipRecoveryLastFailSlot = validationErr.BlockPoint.Slot
+	}
+	if ls.atTipRecoveryDescentCount >= maxAtTipRecoveryDescents {
+		ls.atTipRecoveryHolding = true
+	}
 	ls.lastAtTipRecovery = newAtTipRecoveryAttempt(validationErr)
 	ls.lastAtTipRecovery.Attempts = attempts
 	ls.RLock()
@@ -278,8 +333,12 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	chainTip := ls.chain.Tip()
 	// Compute the rewind target. Depth grows linearly with each retry,
 	// capped at the era stability window so we never undo an immutable block.
+	// While holding (non-converging descent detected), deep rewinds are
+	// suppressed entirely: we rewind only to the ledger tip so the primary
+	// chain stops descending and ChainSync can re-deliver, avoiding the
+	// unbounded staircase of issue #2939.
 	rewindPoint := ledgerTip.Point
-	if attempts > 1 {
+	if attempts > 1 && !ls.atTipRecoveryHolding {
 		stabilityWindow := ls.calculateStabilityWindow()
 		// depth grows linearly so the final attempt reaches the full
 		// stability window: (attempts-1)/(maxAttempts-1) of the window.
@@ -312,6 +371,20 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		}
 		return true, nil
 	}
+	if ls.atTipRecoveryHolding {
+		ls.metrics.atTipRecoveryNonConverging.Inc()
+		ls.config.Logger.Warn(
+			"at-tip recovery not converging across distinct validation failures, holding at ledger tip instead of rewinding primary chain deeper",
+			"component", "ledger",
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot", validationErr.BlockPoint.Slot,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+			"primary_chain_tip_slot", chainTip.Point.Slot,
+			"descent_count", ls.atTipRecoveryDescentCount,
+			"hint", "local ledger validation likely diverging from the network; operator intervention may be required",
+		)
+	}
 	ls.config.Logger.Warn(
 		"validation failure after reaching tip, rewinding primary chain",
 		"component", "ledger",
@@ -323,6 +396,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		"primary_chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
 		"rewind_target_slot", rewindPoint.Slot,
 		"attempt", attempts,
+		"holding", ls.atTipRecoveryHolding,
 	)
 	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
 		rewindPoint,

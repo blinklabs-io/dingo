@@ -1731,6 +1731,28 @@ detector itself breaks a loop by skipping a rollback it can no longer cross,
 it feeds that same point-keyed tracker so the escalation and metric fire on
 the skip path too, rather than silently suppressing the rollback.
 
+A separate recovery path handles transaction-validation failures that occur
+after the node has reached the chain tip (`recoverAtTipFromTxValidationError`
+in `ledger/replay_recovery.go`). When a block fails per-tx validation at tip,
+the node rewinds the primary chain and rolls the ledger back so ChainSelection
+can re-pick a candidate chain; repeating the *same* `(block, tx)` failure
+escalates the rewind progressively deeper, up to the era stability window, to
+escape a losing fork. A descending series of *distinct* failures is treated
+differently (issue #2939): because each distinct failure resets the same-block
+escalation, without a guard the primary chain would be rewound a stability
+window deeper every cycle and the node would fall unboundedly behind the wall
+clock, recoverable only by restart. `maxAtTipRecoveryDescents` consecutive
+distinct failures that fail to advance latch recovery into a hold-at-tip mode
+that suppresses deep rewinds — rewinding only to the ledger tip so ChainSync
+re-delivers rather than descending. The latch clears when the ledger makes
+forward progress past the failing region (`resetAtTipRecoveryDescent`, called
+from the block-apply success path). Because a hold usually indicates local
+ledger validation diverging from the network (a false-positive rejection that
+no rewind can fix) rather than a peer/fork problem, it surfaces the
+`dingo_ledger_attip_recovery_nonconverging_total` metric and a throttled
+operator warning; a node in this state needs the underlying validation
+divergence resolved.
+
 Topology configuration is loaded from an explicit topology file when provided,
 otherwise from the embedded `network/topology.json` for built-in networks,
 falling back to the legacy network bootstrap-peer list only when no embedded
