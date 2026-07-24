@@ -379,7 +379,10 @@ func (n *Node) Run(ctx context.Context) error {
 			// CIP-0163 full-pot reward distribution. Operator-set (not derived
 			// from the network) and off by default; enable only where every node
 			// also enables it.
-			FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
+			FullPotRewardsEnabled: n.config.fullPotRewardsEnabled,
+			// CIP-0163 reward-account inactivity expiry (operator-set)
+			DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
+			DelegatorInactivity:        n.config.delegatorInactivity,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
@@ -600,6 +603,14 @@ func (n *Node) Run(ctx context.Context) error {
 		n.eventBus,
 		n.config.logger,
 	)
+	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
+	// so it matches the ledger config that drives account expiry stamping.
+	if err := n.snapshotMgr.SetDelegatorInactivity(
+		n.config.delegatorInactivityEnabled,
+		n.config.delegatorInactivity,
+	); err != nil {
+		return fmt.Errorf("configuring snapshot manager: %w", err)
+	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Wire the authoritative epoch-boundary capture before block sync begins so
 	// each epoch rollover stages its mark snapshot atomically at the SNAP point.

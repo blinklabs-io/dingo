@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 
@@ -761,6 +762,8 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccounts(t *testing.T) {
 	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
 		[][]byte{poolA, poolB, poolEmpty},
 		80,
+		0,
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -771,6 +774,440 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccounts(t *testing.T) {
 	require.Equal(t, uint64(1), delegators[string(poolB)])
 	require.Equal(t, uint64(0), stakes[string(poolEmpty)])
 	require.Equal(t, uint64(0), delegators[string(poolEmpty)])
+}
+
+// TestGetStakeByPoolsAtSlotExcludesExpiredAccounts covers the CIP-0163
+// reward-account inactivity exclusion in the shared stake-aggregation
+// chokepoint. Two credentials delegate to the same pool; one has an
+// expiration_epoch in the past. With the gate on (expiryEpoch > 0) the expired
+// credential's stake is dropped from the pool total and delegator count; with
+// the gate off (expiryEpoch == 0) both are included, matching pre-CIP behavior.
+func TestGetStakeByPoolsAtSlotExcludesExpiredAccounts(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+	pool := bytes.Repeat([]byte{0xC1}, 28)
+	active := bytes.Repeat([]byte{0x08}, 28)  // expiration_epoch 0 (never expires)
+	expired := bytes.Repeat([]byte{0x09}, 28) // expiration_epoch 5 (< currentEpoch)
+
+	accounts := []models.Account{
+		{StakingKey: active, Pool: pool, AddedSlot: 10, Active: true},
+		{
+			StakingKey: expired, Pool: pool, AddedSlot: 10, Active: true,
+			ExpirationEpoch: 5,
+		},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+
+	utxos := []models.Utxo{
+		{
+			TxId: bytes.Repeat([]byte{0x51}, 32), OutputIdx: 0,
+			StakingKey: active, Amount: 100, AddedSlot: 20,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x52}, 32), OutputIdx: 0,
+			StakingKey: expired, Amount: 40, AddedSlot: 20,
+		},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+
+	// Gate off (expiryEpoch == 0): both credentials included (baseline).
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, 80, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(140), stakes[string(pool)],
+		"gate off must include both delegators (100 + 40)")
+	require.Equal(t, uint64(2), delegators[string(pool)])
+
+	// Gate on with currentEpoch 10: expired (expiration 5 < 10) is excluded.
+	stakes, delegators, err = store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, 80, 10, 90, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(100), stakes[string(pool)],
+		"gate on must drop the expired delegator's 40")
+	require.Equal(t, uint64(1), delegators[string(pool)])
+
+	// Gate on where the boundary has not yet passed (currentEpoch 5):
+	// expiration_epoch 5 is not strictly less than 5, so it is still active.
+	stakes, _, err = store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, 80, 5, 90, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(140), stakes[string(pool)],
+		"expiration_epoch == currentEpoch is not yet expired")
+}
+
+// TestGetStakeByPoolsAtSlotUsesHistoricalExpiration proves a witness after the
+// requested slot cannot revive stake that had already expired at that slot.
+func TestGetStakeByPoolsAtSlotUsesHistoricalExpiration(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	for epoch := uint64(0); epoch <= 5; epoch++ {
+		require.NoError(t, db.Create(&models.Epoch{
+			EpochId: epoch, StartSlot: epoch * 100, LengthInSlots: 100,
+		}).Error)
+	}
+	pool := bytes.Repeat([]byte{0xC2}, 28)
+	credential := bytes.Repeat([]byte{0x12}, 28)
+	require.NoError(t, db.Create(&models.Account{
+		StakingKey: credential, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+		Active: true, ExpirationEpoch: 7, // later witness: epoch 5 + window 2
+	}).Error)
+	require.NoError(t, db.Create(&models.Utxo{
+		TxId: bytes.Repeat([]byte{0x61}, 32), StakingKey: credential,
+		Amount: 40, AddedSlot: 20,
+	}).Error)
+	for i, witnessSlot := range []uint64{50, 550} {
+		require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+			StakingKey: credential, AddedSlot: witnessSlot,
+			TxHash: bytes.Repeat([]byte{byte(0x70 + i)}, 32),
+		}).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, 250, 3, 2, nil,
+	)
+	require.NoError(t, err)
+	require.Zero(t, stakes[string(pool)],
+		"epoch-5 renewal must not replace epoch-0 expiration at slot 250")
+	require.Zero(t, delegators[string(pool)])
+}
+
+// TestGetStakeByPoolsAtSlotAppliesHistoricalActivationFloor proves the
+// one-time activation stamp remains part of historical reconstruction even
+// after a later witness overwrites the mutable account projection.
+func TestGetStakeByPoolsAtSlotAppliesHistoricalActivationFloor(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	for epoch := uint64(0); epoch <= 5; epoch++ {
+		require.NoError(t, db.Create(&models.Epoch{
+			EpochId: epoch, StartSlot: epoch * 100, LengthInSlots: 100,
+		}).Error)
+	}
+	require.NoError(t, db.Create(&models.SyncState{
+		Key: "delegator_inactivity_activated", Value: "2",
+	}).Error)
+	pool := bytes.Repeat([]byte{0xC3}, 28)
+	credential := bytes.Repeat([]byte{0x13}, 28)
+	require.NoError(t, db.Create(&models.Account{
+		StakingKey: credential, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+		Active: true, ExpirationEpoch: 7,
+	}).Error)
+	require.NoError(t, db.Create(&models.AccountInactivityActivation{
+		StakingKey: credential,
+	}).Error)
+	require.NoError(t, db.Create(&models.Utxo{
+		TxId: bytes.Repeat([]byte{0x62}, 32), StakingKey: credential,
+		Amount: 40, AddedSlot: 20,
+	}).Error)
+	for i, witnessSlot := range []uint64{50, 550} {
+		require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+			StakingKey: credential, AddedSlot: witnessSlot,
+			TxHash: bytes.Repeat([]byte{byte(0x72 + i)}, 32),
+		}).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, 250, 3, 2, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(40), stakes[string(pool)],
+		"activation epoch 2 must floor historical expiration at epoch 4")
+	require.Equal(t, uint64(1), delegators[string(pool)])
+}
+
+// TestGetStakeByPoolsAtSlotDoesNotFloorUnstampedAccount proves that an account
+// row that existed but was inactive at activation does not receive the
+// activation floor. Such rows are absent from the exact activation-membership
+// table.
+func TestGetStakeByPoolsAtSlotDoesNotFloorUnstampedAccount(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	for epoch := uint64(0); epoch <= 5; epoch++ {
+		require.NoError(t, db.Create(&models.Epoch{
+			EpochId: epoch, StartSlot: epoch * 100, LengthInSlots: 100,
+		}).Error)
+	}
+	require.NoError(t, db.Create(&models.SyncState{
+		Key: "delegator_inactivity_activated", Value: "2",
+	}).Error)
+	pool := bytes.Repeat([]byte{0xC4}, 28)
+	credential := bytes.Repeat([]byte{0x14}, 28)
+	require.NoError(t, db.Create(&models.Account{
+		StakingKey: credential, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+		Active: true, ExpirationEpoch: 7,
+	}).Error)
+	require.NoError(t, db.Create(&models.Utxo{
+		TxId: bytes.Repeat([]byte{0x63}, 32), StakingKey: credential,
+		Amount: 40, AddedSlot: 20,
+	}).Error)
+	for i, witnessSlot := range []uint64{50, 550} {
+		require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+			StakingKey: credential, AddedSlot: witnessSlot,
+			TxHash: bytes.Repeat([]byte{byte(0x74 + i)}, 32),
+		}).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, 250, 3, 2, nil,
+	)
+	require.NoError(t, err)
+	require.Zero(t, stakes[string(pool)],
+		"an account absent from activation membership must expire at epoch 2")
+	require.Zero(t, delegators[string(pool)])
+}
+
+// TestGetRewardStakeInputsForPoolsExcludesExpiredAccounts covers the CIP-0163
+// exclusion on the reward-basis path. With the gate off it reads the live
+// reward stake aggregate. With the gate on it reconstructs expiration at the
+// requested slot from the same historical CTE as GetStakeByPoolsAtSlot, so a
+// post-slot witness that renewed a credential's live account.expiration_epoch
+// cannot revive stake that had already expired at the boundary — matching the
+// leader-election path rather than the mutable live column.
+func TestGetRewardStakeInputsForPoolsExcludesExpiredAccounts(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+
+	for epoch := uint64(0); epoch <= 5; epoch++ {
+		require.NoError(t, db.Create(&models.Epoch{
+			EpochId: epoch, StartSlot: epoch * 100, LengthInSlots: 100,
+		}).Error)
+	}
+
+	pool := bytes.Repeat([]byte{0xD1}, 28)
+	active := bytes.Repeat([]byte{0x0A}, 28)
+	expired := bytes.Repeat([]byte{0x0B}, 28)
+
+	// Both credentials are delegated to the pool (account-row fallback) and hold
+	// UTxO stake, and both carry a high live ExpirationEpoch (7) — a live-column
+	// filter would keep both. Only the historical reconstruction at slot 250
+	// distinguishes them by their surviving witness.
+	accounts := []models.Account{
+		{
+			StakingKey: active, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+			Active: true, ExpirationEpoch: 7,
+		},
+		{
+			StakingKey: expired, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+			Active: true, ExpirationEpoch: 7,
+		},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+	utxos := []models.Utxo{
+		{
+			TxId: bytes.Repeat([]byte{0x61}, 32), StakingKey: active,
+			Amount: 100, AddedSlot: 20,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x62}, 32), StakingKey: expired,
+			Amount: 40, AddedSlot: 20,
+		},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+	// active: latest witness <= slot 250 is at slot 250 (epoch 2) -> 2+2=4 >= 3.
+	require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+		StakingKey: active, AddedSlot: 250,
+		TxHash: bytes.Repeat([]byte{0x70}, 32),
+	}).Error)
+	// expired: latest witness <= slot 250 is at slot 50 (epoch 0) -> 0+2=2 < 3;
+	// the epoch-5 witness at slot 550 is after the boundary and must not revive it.
+	require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+		StakingKey: expired, AddedSlot: 50,
+		TxHash: bytes.Repeat([]byte{0x71}, 32),
+	}).Error)
+	require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+		StakingKey: expired, AddedSlot: 550,
+		TxHash: bytes.Repeat([]byte{0x72}, 32),
+	}).Error)
+
+	// reward_live_stake rows back the gate-off (live-aggregate) path.
+	live := []models.RewardLiveStake{
+		{
+			PoolKeyHash: pool, StakingKey: active, CredentialTag: 0,
+			TotalStake: types.Uint64(100), Registered: true,
+		},
+		{
+			PoolKeyHash: pool, StakingKey: expired, CredentialTag: 0,
+			TotalStake: types.Uint64(40), Registered: true,
+		},
+	}
+	for i := range live {
+		require.NoError(t, db.Create(&live[i]).Error)
+	}
+
+	// Gate off: live aggregate returns both inputs (slot/inactivity ignored).
+	inputs, err := store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 0, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 2)
+
+	// Gate on (expiryEpoch 3, window 2): expiration reconstructed at slot 250.
+	// The expired credential's surviving witness is epoch 0 -> excluded; the
+	// active credential's is epoch 2 -> included. A live-column filter would
+	// have kept both (both have live ExpirationEpoch 7).
+	inputs, err = store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 3, 2, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, active, inputs[0].StakingKey)
+	require.Equal(t, uint64(100), uint64(inputs[0].Stake),
+		"historical reward input stake must match the leader-election basis")
+}
+
+// TestGetRewardStakeInputsForPoolsDeduplicatesPoolsAcrossChunks verifies that
+// repeated pool hashes cannot duplicate reward inputs when the historical
+// CIP-0163 query splits the requested pools across multiple SQL queries.
+func TestGetRewardStakeInputsForPoolsDeduplicatesPoolsAcrossChunks(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	for epoch := uint64(0); epoch <= 3; epoch++ {
+		require.NoError(t, db.Create(&models.Epoch{
+			EpochId: epoch, StartSlot: epoch * 100, LengthInSlots: 100,
+		}).Error)
+	}
+
+	pool := bytes.Repeat([]byte{0xD3}, 28)
+	credential := bytes.Repeat([]byte{0x31}, 28)
+	require.NoError(t, db.Create(&models.Account{
+		StakingKey: credential, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+		Active: true, ExpirationEpoch: 4,
+	}).Error)
+	require.NoError(t, db.Create(&models.Utxo{
+		TxId: bytes.Repeat([]byte{0x63}, 32), StakingKey: credential,
+		Amount: 100, AddedSlot: 20,
+	}).Error)
+	require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+		StakingKey: credential, AddedSlot: 250,
+		TxHash: bytes.Repeat([]byte{0x73}, 32),
+	}).Error)
+
+	// SQLite's historical query chunk size is 800. Put the same real pool in
+	// the first and second chunks, separated by distinct unmatched hashes so
+	// production deduplication does not collapse the request to one chunk.
+	pools := make([][]byte, 0, 802)
+	pools = append(pools, pool)
+	for i := range 800 {
+		unmatched := bytes.Repeat([]byte{0xEE}, 28)
+		binary.BigEndian.PutUint32(unmatched[24:], uint32(i)) // #nosec G115
+		pools = append(pools, unmatched)
+	}
+	pools = append(pools, pool)
+
+	inputs, err := store.GetRewardStakeInputsForPools(
+		pools, 250, 3, 2, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, pool, inputs[0].PoolKeyHash)
+	require.Equal(t, credential, inputs[0].StakingKey)
+	require.Equal(t, uint64(100), uint64(inputs[0].Stake))
+}
+
+// TestGetRewardStakeInputsForPoolsAgreesWithLeaderStakeAtSlot pins the Option A
+// invariant: with the CIP-0163 gate on, reward-basis inputs are sourced from
+// the same historical CTE as the leader-election pool totals, so the
+// per-credential input stakes sum to exactly the leader pool total and cover
+// the same active delegator set at the requested slot — never the mutable live
+// account state.
+func TestGetRewardStakeInputsForPoolsAgreesWithLeaderStakeAtSlot(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	for epoch := uint64(0); epoch <= 5; epoch++ {
+		require.NoError(t, db.Create(&models.Epoch{
+			EpochId: epoch, StartSlot: epoch * 100, LengthInSlots: 100,
+		}).Error)
+	}
+	pool := bytes.Repeat([]byte{0xD2}, 28)
+	one := bytes.Repeat([]byte{0x21}, 28)
+	two := bytes.Repeat([]byte{0x22}, 28)
+	expired := bytes.Repeat([]byte{0x23}, 28)
+
+	for _, cred := range [][]byte{one, two, expired} {
+		require.NoError(t, db.Create(&models.Account{
+			StakingKey: cred, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+			Active: true, ExpirationEpoch: 7,
+		}).Error)
+	}
+	utxos := []models.Utxo{
+		{TxId: bytes.Repeat([]byte{0x51}, 32), StakingKey: one, Amount: 100, AddedSlot: 20},
+		{TxId: bytes.Repeat([]byte{0x52}, 32), StakingKey: two, Amount: 250, AddedSlot: 20},
+		{TxId: bytes.Repeat([]byte{0x53}, 32), StakingKey: expired, Amount: 40, AddedSlot: 20},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+	// one, two: witnessed in epoch 2 (active at slot 250). expired: witnessed in
+	// epoch 0 only (expired at slot 250).
+	for _, w := range []struct {
+		key  []byte
+		slot uint64
+		tag  byte
+	}{
+		{one, 250, 0x80},
+		{two, 250, 0x81},
+		{expired, 50, 0x82},
+	} {
+		require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+			StakingKey: w.key, AddedSlot: w.slot,
+			TxHash: bytes.Repeat([]byte{w.tag}, 32),
+		}).Error)
+	}
+
+	const (
+		slot   = uint64(250)
+		expiry = uint64(3)
+		window = uint64(2)
+	)
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, slot, expiry, window, nil,
+	)
+	require.NoError(t, err)
+	inputs, err := store.GetRewardStakeInputsForPools(
+		[][]byte{pool}, slot, expiry, window, nil,
+	)
+	require.NoError(t, err)
+
+	var sum uint64
+	for _, in := range inputs {
+		require.Equal(t, pool, in.PoolKeyHash)
+		require.NotEqual(t, expired, in.StakingKey,
+			"expired-at-slot credential must not appear in reward inputs")
+		sum += uint64(in.Stake)
+	}
+	require.Equal(t, stakes[string(pool)], sum,
+		"reward inputs must sum to the leader-election pool total")
+	require.Equal(t, delegators[string(pool)], uint64(len(inputs)),
+		"reward input count must match the leader-election delegator count")
+	require.Equal(t, uint64(350), sum,
+		"only the two active credentials contribute (100+250)")
 }
 
 // TestGetStakeByPoolsAtSlotIncludesRewardBalance covers issue #2813: a mark
@@ -825,6 +1262,8 @@ func TestGetStakeByPoolsAtSlotIncludesRewardBalance(t *testing.T) {
 	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
 		[][]byte{poolA, poolB},
 		80,
+		0,
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -890,6 +1329,8 @@ func TestGetStakeByPoolsAtSlotUsesHistoricalRewardBalance(t *testing.T) {
 	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
 		[][]byte{pool},
 		80,
+		0,
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -901,6 +1342,8 @@ func TestGetStakeByPoolsAtSlotUsesHistoricalRewardBalance(t *testing.T) {
 	stakes, delegators, err = store.GetStakeByPoolsAtSlot(
 		[][]byte{pool},
 		105,
+		0,
+		0,
 		nil,
 	)
 	require.NoError(t, err)

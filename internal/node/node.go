@@ -461,6 +461,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.ForgeStaleGapThresholdSlots,
 			),
 			dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+			// CIP-0163 reward-account inactivity expiry (consensus-affecting)
+			dingo.WithDelegatorInactivity(
+				cfg.DelegatorInactivityEnabled,
+				cfg.DelegatorInactivity,
+			),
 			// Leios voting (experimental)
 			dingo.WithLeiosVoteSigningKeyFile(
 				cfg.LeiosVoteSigningKeyFile,

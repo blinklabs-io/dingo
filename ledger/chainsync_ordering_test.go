@@ -115,13 +115,14 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	// Each entry is the trailing identifier of a SelectorExpr (or a bare
 	// Ident for unqualified calls).
 	wantOrder := []string{
-		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
-		"applyPoolRetirements",         // (2) embedded POOLREAP deposit refunds
-		"applyMIRCerts",                // (3) Shelley-era INSTANT rule
-		"ProcessEpoch",                 // (4) Conway-style governance enact
-		"SetPParams",                   // (5) persist enacted pparams
-		"isHardForkTransition",         // (6) inter-era boundary detection
-		"applyIntraEraHardForkRule",    // (7) per-major-version HARDFORK rule
+		"ComputeAndApplyPParamUpdates",        // (1) Shelley-style pparam updates
+		"applyPoolRetirements",                // (2) embedded POOLREAP deposit refunds
+		"applyMIRCerts",                       // (3) Shelley-era INSTANT rule
+		"activateDelegatorInactivityIfNeeded", // (4) CIP-0163 activation
+		"ProcessEpoch",                        // (5) Conway-style governance enact
+		"SetPParams",                          // (6) persist enacted pparams
+		"isHardForkTransition",                // (7) inter-era boundary detection
+		"applyIntraEraHardForkRule",           // (8) per-major-version HARDFORK rule
 	}
 
 	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)

@@ -34,6 +34,121 @@ func (d *Database) CreateAccount(txn *Txn, account *models.Account) error {
 	})
 }
 
+// RenewAccountExpirations sets the CIP-0163 expirationEpoch for the given
+// reward-account credentials. See the metadata store implementation for
+// semantics (refs with no matching account row are ignored). When txn is
+// nil a write transaction is opened, committed on success and rolled back
+// on error via Txn.Do; pass an existing write txn to participate in a
+// wider unit of work.
+func (d *Database) RenewAccountExpirations(
+	refs []models.StakeCredentialRef,
+	expirationEpoch uint64,
+	txn *Txn,
+) error {
+	if txn != nil {
+		return d.metadata.RenewAccountExpirations(refs, expirationEpoch, txn.Metadata())
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.RenewAccountExpirations(refs, expirationEpoch, t.Metadata())
+	})
+}
+
+// AccountLastWitnessSlots returns, per requested credential, the greatest
+// CIP-0163 witnessing slot <= maxSlot across the stake-witnessing certificate
+// tables and the reward-withdrawal history, keyed by
+// StakeCredentialRef.MapKey(). A credential with no witness <= maxSlot is
+// absent from the map. When txn is nil a read transaction is opened for the
+// query; pass an existing txn to read within a wider unit of work.
+func (d *Database) AccountLastWitnessSlots(
+	refs []models.StakeCredentialRef,
+	maxSlot uint64,
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.AccountLastWitnessSlots(refs, maxSlot, txn.Metadata())
+}
+
+// AccountsWitnessedAfterSlot returns the distinct reward-account credentials
+// witnessed (via a stake-witnessing certificate or a reward withdrawal) at a
+// slot greater than the given slot — the CIP-0163 rollback affected set. It
+// must be called before rolled-back certificate and reward-delta rows are
+// deleted. When txn is nil a read transaction is opened for the query; pass an
+// existing txn to read within a wider unit of work.
+func (d *Database) AccountsWitnessedAfterSlot(
+	slot uint64,
+	txn *Txn,
+) ([]models.StakeCredentialRef, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.AccountsWitnessedAfterSlot(slot, txn.Metadata())
+}
+
+// StampAllActiveAccountExpirations sets the CIP-0163 expirationEpoch for every
+// active account row. Used once at activation to give every pre-existing
+// account a full inactivity window from the activation epoch, including
+// accounts witnessed before activation. Returns the number of rows stamped.
+// When txn is nil a write transaction is opened, committed on success and
+// rolled back on error via Txn.Do; pass an existing write txn to participate
+// in a wider unit of work.
+func (d *Database) StampAllActiveAccountExpirations(
+	expirationEpoch uint64,
+	txn *Txn,
+) (int64, error) {
+	if txn != nil {
+		return d.metadata.StampAllActiveAccountExpirations(expirationEpoch, txn.Metadata())
+	}
+	var rows int64
+	err := d.MetadataTxn(true).Do(func(t *Txn) error {
+		var doErr error
+		rows, doErr = d.metadata.StampAllActiveAccountExpirations(expirationEpoch, t.Metadata())
+		return doErr
+	})
+	return rows, err
+}
+
+// AccountInactivityActivationMembership returns the requested credentials that
+// were included in the one-time CIP-0163 activation stamp.
+func (d *Database) AccountInactivityActivationMembership(
+	refs []models.StakeCredentialRef,
+	txn *Txn,
+) (map[string]struct{}, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.AccountInactivityActivationMembership(
+		refs,
+		txn.Metadata(),
+	)
+}
+
+// ResetAccountExpirationActivation clears expiration from every account in the
+// durable activation-membership set, deletes that set, and returns the affected
+// credentials so the ledger can reconstruct any overwritten pre-activation
+// witness expiration. When txn is nil, the operation runs in its own write
+// transaction.
+func (d *Database) ResetAccountExpirationActivation(
+	txn *Txn,
+) ([]models.StakeCredentialRef, error) {
+	if txn != nil {
+		return d.metadata.ResetAccountExpirationActivation(txn.Metadata())
+	}
+	var refs []models.StakeCredentialRef
+	err := d.MetadataTxn(true).Do(func(t *Txn) error {
+		var doErr error
+		refs, doErr = d.metadata.ResetAccountExpirationActivation(
+			t.Metadata(),
+		)
+		return doErr
+	})
+	return refs, err
+}
+
 // ClearDanglingDRepDelegations applies the cardano-ledger Conway HARDFORK
 // STS rule for protocol major version 10 (Plomin, mainnet January 2025): any
 // account with a credential-backed DRep delegation (DrepType 0 or 1) whose
@@ -125,7 +240,7 @@ func (d *Database) GetAccountByCredential(
 	txn *Txn,
 ) (*models.Account, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
 	account, err := d.metadata.GetAccountByCredential(
@@ -151,7 +266,7 @@ func (d *Database) GetAccountsByCredential(
 	txn *Txn,
 ) (map[string]*models.Account, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
 	return d.metadata.GetAccountsByCredential(

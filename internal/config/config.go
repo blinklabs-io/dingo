@@ -591,6 +591,11 @@ type Config struct {
 	// for running CIP-0163 full-pot rewards on predefined public networks.
 	// Leave false except for controlled off-consensus experiments.
 	UnsafeFullPotRewardsOnStandardNetworks bool `yaml:"unsafeFullPotRewardsOnStandardNetworks" envconfig:"DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS"`
+	// CIP-0163 reward-account inactivity expiry. Consensus-affecting; defaults
+	// off. See ARCHITECTURE.md ("Stake Snapshots", CIP-0163 reward-account
+	// inactivity).
+	DelegatorInactivityEnabled bool   `yaml:"delegatorInactivityEnabled" envconfig:"DINGO_DELEGATOR_INACTIVITY_ENABLED"`
+	DelegatorInactivity        uint64 `yaml:"delegatorInactivity"        envconfig:"DINGO_DELEGATOR_INACTIVITY"`
 
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381

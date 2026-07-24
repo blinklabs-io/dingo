@@ -267,6 +267,16 @@ func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
 	}
 }
 
+func TestWithDelegatorInactivity(t *testing.T) {
+	cfg := &Config{}
+	WithDelegatorInactivity(true, 90)(cfg)
+	assert.True(t, cfg.delegatorInactivityEnabled)
+	assert.Equal(t, uint64(90), cfg.delegatorInactivity)
+	WithDelegatorInactivity(false, 0)(cfg)
+	assert.False(t, cfg.delegatorInactivityEnabled)
+	assert.Zero(t, cfg.delegatorInactivity)
+}
+
 func TestExperimentalDijkstraEnabled(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -15,9 +15,14 @@
 package stakequery
 
 import (
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountwitness"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/rewardstate"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/sqldialect"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -36,8 +41,9 @@ type registrationSource struct {
 }
 
 const (
-	defaultPoolQueryChunkSize = 800
-	largePoolQueryChunkSize   = 5000
+	defaultPoolQueryChunkSize           = 800
+	largePoolQueryChunkSize             = 5000
+	delegatorInactivityActivatedSyncKey = "delegator_inactivity_activated"
 )
 
 // GetStakeByPoolsAtSlot returns delegated stake and delegator counts at a
@@ -48,6 +54,8 @@ func GetStakeByPoolsAtSlot(
 	db *gorm.DB,
 	poolKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 ) (map[string]uint64, map[string]uint64, error) {
 	stakeMap := make(map[string]uint64, len(poolKeyHashes))
 	delegatorMap := make(map[string]uint64, len(poolKeyHashes))
@@ -59,9 +67,13 @@ func GetStakeByPoolsAtSlot(
 		return stakeMap, delegatorMap, nil
 	}
 
-	query, args := historicalDelegatorStakeCTE(
-		db, slot, "active_delegation.pool_key_hash IN ?",
+	query, args, err := historicalDelegatorStakeCTE(
+		db, slot, expiryEpoch, inactivityPeriod,
+		"active_delegation.pool_key_hash IN ?",
 	)
+	if err != nil {
+		return nil, nil, err
+	}
 	query += `
 SELECT pool_key_hash,
 	COUNT(*) AS delegator_count,
@@ -97,13 +109,123 @@ GROUP BY pool_key_hash`
 	return stakeMap, delegatorMap, nil
 }
 
+// GetRewardStakeInputsByPoolsAtSlot returns positive per-credential delegated
+// stake for the requested pools reconstructed at slot, from the same
+// active_delegator_stake CTE that GetStakeByPoolsAtSlot aggregates for
+// leader-election pool totals. Sourcing both halves of the epoch-boundary
+// snapshot from one CTE makes the reward-basis inputs agree with the
+// leader-election stake by construction: identical credential membership,
+// identical slot-accurate stake values, and the identical CIP-0163 historical
+// expiry filter (expiration reconstructed at slot, not read from the mutable
+// live account.expiration_epoch column). It is used only when the
+// delegator-inactivity gate is active (expiryEpoch > 0); the gate-off reward
+// path stays on the live aggregate (StakeInputsForPools) to remain
+// byte-identical to the pre-CIP query.
+func GetRewardStakeInputsByPoolsAtSlot(
+	db *gorm.DB,
+	poolKeyHashes [][]byte,
+	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+) ([]*models.RewardStakeInput, error) {
+	if len(poolKeyHashes) == 0 {
+		return nil, nil
+	}
+	poolKeyHashes = rewardstate.DedupePoolKeyHashes(poolKeyHashes)
+
+	query, args, err := historicalDelegatorStakeCTE(
+		db, slot, expiryEpoch, inactivityPeriod,
+		"active_delegation.pool_key_hash IN ?",
+	)
+	if err != nil {
+		return nil, err
+	}
+	// Only positive stake contributes a reward input, matching the live-path
+	// filter (StakeInputsForPools drops total_stake = 0). Ordering mirrors the
+	// live path for stable output.
+	query += `
+SELECT pool_key_hash, credential_tag, staking_key, total_stake
+FROM active_delegator_stake
+WHERE total_stake > 0
+ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC`
+
+	type inputRow struct {
+		PoolKeyHash   []byte `gorm:"column:pool_key_hash"`
+		StakingKey    []byte `gorm:"column:staking_key"`
+		CredentialTag uint8  `gorm:"column:credential_tag"`
+		TotalStake    uint64 `gorm:"column:total_stake"`
+	}
+	var ret []*models.RewardStakeInput
+	chunkSize := poolQueryChunkSize(db)
+	for start := 0; start < len(poolKeyHashes); start += chunkSize {
+		end := min(start+chunkSize, len(poolKeyHashes))
+		queryArgs := append(append([]any(nil), args...), poolKeyHashes[start:end])
+		var rows []inputRow
+		if err := db.Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
+			return nil, fmt.Errorf(
+				"query historical reward stake inputs: %w", err,
+			)
+		}
+		for _, row := range rows {
+			ret = append(ret, &models.RewardStakeInput{
+				PoolKeyHash:   append([]byte(nil), row.PoolKeyHash...),
+				StakingKey:    append([]byte(nil), row.StakingKey...),
+				CredentialTag: row.CredentialTag,
+				Stake:         types.Uint64(row.TotalStake),
+				// active_delegator_stake contains only actively-delegated
+				// credentials at slot, so every row is registered.
+				Registered: true,
+			})
+		}
+	}
+	return ret, nil
+}
+
+// historicalDelegatorStakeCTE builds the shared per-credential stake
+// aggregation. When expiryEpoch > 0 the CIP-0163 reward-account inactivity gate
+// is active: a LEFT JOIN to account plus a WHERE clause drop credentials whose
+// account expired before expiryEpoch (nonzero expiration_epoch < expiryEpoch),
+// while credentials with no account row (LEFT JOIN NULL) or expiration_epoch 0
+// stay active. When expiryEpoch == 0 the gate is off and the generated SQL and
+// args are byte-identical to the pre-CIP query (no join, no clause, no arg).
 func historicalDelegatorStakeCTE(
 	db *gorm.DB,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 	predicate string,
-) (string, []any) {
+) (string, []any, error) {
 	cte, args := activeDelegationCTE(db, slot)
-	query := cte + fmt.Sprintf(`,
+	// The expiry gate is hand-written positional-arg SQL. Its "?" sits in the
+	// WHERE clause ahead of the caller-supplied predicate's `IN ?`, so the
+	// expiryEpoch bind arg is appended right after the four slot args below and
+	// before the caller appends the pool chunk. Keeping the clause ahead of the
+	// predicate preserves the "caller appends last" contract of both callers.
+	var expiryCTE, expiryJoin, expiryPredicate string
+	if expiryEpoch > 0 {
+		if inactivityPeriod == 0 {
+			return "", nil, errors.New(
+				"historical stake expiry enabled with zero inactivity period",
+			)
+		}
+		activationEpoch, err := loadActivationEpoch(db)
+		if err != nil {
+			return "", nil, err
+		}
+		var expiryArgs []any
+		expiryCTE, expiryArgs = historicalExpirationCTE(
+			slot, inactivityPeriod, activationEpoch, expiryEpoch,
+		)
+		args = append(args, expiryArgs...)
+		expiryJoin = `
+	LEFT JOIN historical_expiration expiry_acct
+		ON expiry_acct.credential_tag = active_delegation.credential_tag
+		AND expiry_acct.staking_key = active_delegation.staking_key`
+		expiryPredicate = `(expiry_acct.expiration_epoch = 0
+		OR expiry_acct.expiration_epoch >= ?
+		OR expiry_acct.expiration_epoch IS NULL) AND `
+	}
+	query := cte + expiryCTE + fmt.Sprintf(`,
 ranked_future_withdrawal AS (
 	SELECT withdrawal.credential_tag,
 		withdrawal.staking_key,
@@ -183,14 +305,17 @@ active_delegator_stake AS (
 		AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
 	LEFT JOIN historical_reward
 		ON historical_reward.credential_tag = active_delegation.credential_tag
-		AND historical_reward.staking_key = active_delegation.staking_key
-	WHERE %[2]s
+		AND historical_reward.staking_key = active_delegation.staking_key%[3]s
+	WHERE %[4]s%[2]s
 	GROUP BY active_delegation.pool_key_hash,
 		active_delegation.credential_tag,
 		active_delegation.staking_key
-)`, utxoAmountCastType(db), predicate)
+)`, utxoAmountCastType(db), predicate, expiryJoin, expiryPredicate)
 	args = append(args, slot, slot, slot, slot)
-	return query, args
+	if expiryEpoch > 0 {
+		args = append(args, expiryEpoch)
+	}
+	return query, args, nil
 }
 
 // GetPoolOwnerStakeAtSlot returns stake only for the requested key-hash owner
@@ -201,16 +326,21 @@ func GetPoolOwnerStakeAtSlot(
 	db *gorm.DB,
 	ownerKeys [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 ) (map[string]uint64, error) {
 	out := make(map[string]uint64)
 	if len(ownerKeys) == 0 {
 		return out, nil
 	}
-	query, args := historicalDelegatorStakeCTE(
-		db, slot,
+	query, args, err := historicalDelegatorStakeCTE(
+		db, slot, expiryEpoch, inactivityPeriod,
 		"active_delegation.credential_tag = 0 "+
 			"AND active_delegation.staking_key IN ?",
 	)
+	if err != nil {
+		return nil, err
+	}
 	query += `
 SELECT pool_key_hash, staking_key, total_stake
 FROM active_delegator_stake`
@@ -235,6 +365,151 @@ FROM active_delegator_stake`
 		}
 	}
 	return out, nil
+}
+
+// loadActivationEpoch returns the durable one-time CIP-0163 activation epoch.
+// Reading and parsing it here keeps malformed consensus state from being
+// silently coerced by backend-specific SQL casts.
+func loadActivationEpoch(db *gorm.DB) (*uint64, error) {
+	var state models.SyncState
+	result := db.Where(
+		"sync_key = ?", delegatorInactivityActivatedSyncKey,
+	).Limit(1).Find(&state)
+	if result.Error != nil {
+		return nil, fmt.Errorf("load delegator inactivity activation: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	epoch, err := strconv.ParseUint(state.Value, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"parse delegator inactivity activation %q: %w", state.Value, err,
+		)
+	}
+	return &epoch, nil
+}
+
+// historicalExpirationCTE reconstructs expiration at slot from the latest
+// locally retained witness at or before that slot. The mutable account value is
+// used only for imported/bootstrap credentials with no reconstructable witness
+// or activation floor.
+func historicalExpirationCTE(
+	slot uint64,
+	inactivityPeriod uint64,
+	activationEpoch *uint64,
+	expiryEpoch uint64,
+) (string, []any) {
+	witnessParts := make([]string, 0, len(accountwitness.CertTableNames())+2)
+	args := make([]any, 0, len(accountwitness.CertTableNames())+4)
+	for _, table := range accountwitness.CertTableNames() {
+		witnessParts = append(witnessParts, fmt.Sprintf(`
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+FROM %s witness
+INNER JOIN active_delegation
+	ON active_delegation.credential_tag = witness.credential_tag
+	AND active_delegation.staking_key = witness.staking_key`, table))
+	}
+	witnessParts = append(witnessParts, `
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+FROM account_withdrawal_witness witness
+INNER JOIN active_delegation
+	ON active_delegation.credential_tag = witness.credential_tag
+	AND active_delegation.staking_key = witness.staking_key`)
+	witnessParts = append(witnessParts, `
+SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+FROM account_reward_delta witness
+INNER JOIN active_delegation
+	ON active_delegation.credential_tag = witness.credential_tag
+	AND active_delegation.staking_key = witness.staking_key
+WHERE witness.withdrawal = TRUE`)
+	args = append(args, slot)
+
+	activationCTE := ""
+	createdEpochJoin := ""
+	expirationExpr := `CASE
+		WHEN account.id IS NULL THEN 0
+		WHEN historical_witness_epoch.epoch_id IS NOT NULL
+			THEN historical_witness_epoch.epoch_id + ?
+		WHEN witness_summary.latest_added_slot IS NOT NULL
+			THEN COALESCE(created_epoch.epoch_id, 0) + ?
+		ELSE COALESCE(account.expiration_epoch, 0)
+	END`
+	createdEpochJoin = `
+	LEFT JOIN epoch created_epoch
+		ON account.created_slot > 0
+		AND account.created_slot >= created_epoch.start_slot
+		AND account.created_slot < created_epoch.start_slot + created_epoch.length_in_slots`
+	if activationEpoch != nil && *activationEpoch <= expiryEpoch {
+		activationCTE = `,
+inactivity_activation AS (
+	SELECT ? AS epoch_id
+)`
+		args = append(args, *activationEpoch)
+		createdEpochJoin = `
+	LEFT JOIN epoch created_epoch
+		ON account.created_slot > 0
+		AND account.created_slot >= created_epoch.start_slot
+		AND account.created_slot < created_epoch.start_slot + created_epoch.length_in_slots
+	CROSS JOIN inactivity_activation
+	LEFT JOIN account_inactivity_activation activation_account
+		ON activation_account.credential_tag = active_delegation.credential_tag
+		AND activation_account.staking_key = active_delegation.staking_key`
+		expirationExpr = `CASE
+		WHEN account.id IS NULL THEN 0
+		WHEN activation_account.staking_key IS NOT NULL
+			AND (historical_witness_epoch.epoch_id IS NULL
+				OR historical_witness_epoch.epoch_id < inactivity_activation.epoch_id)
+			THEN inactivity_activation.epoch_id + ?
+		WHEN historical_witness_epoch.epoch_id IS NOT NULL
+			THEN historical_witness_epoch.epoch_id + ?
+		WHEN witness_summary.latest_added_slot IS NOT NULL
+			THEN COALESCE(created_epoch.epoch_id, 0) + ?
+		ELSE COALESCE(account.expiration_epoch, 0)
+	END`
+		args = append(args, inactivityPeriod, inactivityPeriod, inactivityPeriod)
+	} else {
+		args = append(args, inactivityPeriod, inactivityPeriod)
+	}
+
+	return fmt.Sprintf(`,
+account_witness_events AS (
+%s
+),
+witness_summary AS (
+	SELECT credential_tag,
+		staking_key,
+		MAX(CASE WHEN added_slot <= ? THEN added_slot END) AS historical_added_slot,
+		MAX(added_slot) AS latest_added_slot
+	FROM account_witness_events
+	GROUP BY credential_tag, staking_key
+),
+historical_witness_epoch AS (
+	SELECT witness_summary.credential_tag,
+		witness_summary.staking_key,
+		MAX(epoch.epoch_id) AS epoch_id
+	FROM witness_summary
+	INNER JOIN epoch
+		ON witness_summary.historical_added_slot >= epoch.start_slot
+		AND witness_summary.historical_added_slot < epoch.start_slot + epoch.length_in_slots
+	GROUP BY witness_summary.credential_tag,
+		witness_summary.staking_key
+)%s,
+historical_expiration AS (
+	SELECT active_delegation.credential_tag,
+		active_delegation.staking_key,
+		%s AS expiration_epoch
+	FROM active_delegation
+	LEFT JOIN account
+		ON account.credential_tag = active_delegation.credential_tag
+		AND account.staking_key = active_delegation.staking_key
+	LEFT JOIN historical_witness_epoch
+		ON historical_witness_epoch.credential_tag = active_delegation.credential_tag
+		AND historical_witness_epoch.staking_key = active_delegation.staking_key
+	LEFT JOIN witness_summary
+		ON witness_summary.credential_tag = active_delegation.credential_tag
+		AND witness_summary.staking_key = active_delegation.staking_key%s
+)`, strings.Join(witnessParts, "\nUNION ALL\n"), activationCTE, expirationExpr, createdEpochJoin), args
 }
 
 func poolQueryChunkSize(db *gorm.DB) int {

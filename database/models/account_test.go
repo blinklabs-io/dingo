@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -423,6 +424,63 @@ func TestAccount_String_Bech32Format(t *testing.T) {
 				addr,
 			)
 		}
+	}
+}
+
+func TestAccountWithdrawalWitnessCredentialSlotIndex(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&AccountWithdrawalWitness{}); err != nil {
+		t.Fatalf("migrate account withdrawal witness: %v", err)
+	}
+
+	indexes, err := db.Migrator().GetIndexes(&AccountWithdrawalWitness{})
+	if err != nil {
+		t.Fatalf("get account withdrawal witness indexes: %v", err)
+	}
+	for _, index := range indexes {
+		if index.Name() != "idx_account_withdrawal_witness_credential_slot" {
+			continue
+		}
+		columns := index.Columns()
+		want := []string{"staking_key", "credential_tag", "added_slot"}
+		if !slices.Equal(columns, want) {
+			t.Fatalf(
+				"credential-slot index columns = %v, want %v",
+				columns,
+				want,
+			)
+		}
+		return
+	}
+	t.Fatal("credential-slot index missing after AutoMigrate")
+}
+
+func TestAccountInactivityActivationCompositeIdentity(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&AccountInactivityActivation{}); err != nil {
+		t.Fatalf("migrate account inactivity activation: %v", err)
+	}
+
+	key := bytes.Repeat([]byte{0xA5}, 28)
+	otherKey := bytes.Repeat([]byte{0x5A}, 28)
+	if err := db.Create(&[]AccountInactivityActivation{
+		{CredentialTag: 0, StakingKey: key},
+		{CredentialTag: 1, StakingKey: key},
+		{CredentialTag: 0, StakingKey: otherKey},
+	}).Error; err != nil {
+		t.Fatalf("insert composite-distinct activation members: %v", err)
+	}
+	if err := db.Create(&AccountInactivityActivation{
+		CredentialTag: 0,
+		StakingKey:    key,
+	}).Error; err == nil {
+		t.Fatal("duplicate composite activation member unexpectedly succeeded")
 	}
 }
 

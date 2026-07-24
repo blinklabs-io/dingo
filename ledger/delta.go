@@ -194,6 +194,36 @@ func (d *LedgerDelta) applyWithDonationRecording(
 		}
 	}
 
+	// CIP-0163: renew reward-account expirations for the credentials witnessed
+	// by this block's transactions. This runs after every transaction's effects
+	// (including stake-key registrations that create account rows) have been
+	// written to the same DB transaction above, so a credential registered by
+	// this block already has a row for RenewAccountExpirations to update, and
+	// the renewal commits or rolls back atomically with the block. It is a
+	// no-op when the delegator-inactivity gate is off. The renewal is idempotent
+	// and monotonic, so applying it per delta (once per block outside
+	// validation, once per transaction while validating, where each tx is its
+	// own delta) yields the same final expiration as applying it once per block.
+	if ls.config.DelegatorInactivityEnabled {
+		ls.RLock()
+		currentEpoch := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		witnessTxs := make([]lcommon.Transaction, 0, len(d.Transactions))
+		for i, tr := range d.Transactions {
+			if !appliedTxs[i] {
+				continue
+			}
+			witnessTxs = append(witnessTxs, tr.Tx)
+		}
+		if err := ls.renewWitnessedAccountExpirations(
+			txn,
+			currentEpoch,
+			witnessTxs,
+		); err != nil {
+			return fmt.Errorf("renew witnessed account expirations: %w", err)
+		}
+	}
+
 	if recordDonations {
 		if err := d.recordNetworkDonations(ls, txn, appliedTxs); err != nil {
 			return err

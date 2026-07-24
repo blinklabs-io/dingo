@@ -208,6 +208,11 @@ type Config struct {
 	// of returning the residual to reserves.
 	fullPotRewardsEnabled                  bool
 	unsafeFullPotRewardsOnStandardNetworks bool
+	// CIP-0163 reward-account inactivity expiry (consensus-affecting; default
+	// off). delegatorInactivity is the inactivity window in epochs, used only
+	// when enabled.
+	delegatorInactivityEnabled bool
+	delegatorInactivity        uint64
 	// Leios voting configuration (experimental)
 	leiosVoteSigningKeyFile string
 	leiosVoterPublicKeys    map[string]string
@@ -523,6 +528,13 @@ func (n *Node) configValidate() error {
 				shelleyGenesis.NetworkMagic,
 			)
 		}
+	}
+	if n.config.delegatorInactivityEnabled &&
+		(n.config.delegatorInactivity < 1 || n.config.delegatorInactivity > 10_000) {
+		return fmt.Errorf(
+			"delegator inactivity (%d) must be in [1, 10000] when enabled",
+			n.config.delegatorInactivity,
+		)
 	}
 	return nil
 }
@@ -1088,6 +1100,17 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.validateForgedBlock = enabled
+	}
+}
+
+// WithDelegatorInactivity configures the CIP-0163 reward-account inactivity
+// expiry. It is consensus-affecting and disabled by default; enable it only on
+// a network where every node also enables it. epochs is the inactivity window
+// and is used only when enabled.
+func WithDelegatorInactivity(enabled bool, epochs uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.delegatorInactivityEnabled = enabled
+		c.delegatorInactivity = epochs
 	}
 }
 

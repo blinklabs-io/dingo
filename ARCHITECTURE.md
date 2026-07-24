@@ -276,6 +276,7 @@ sequenceDiagram
     LS->>ChM: chain.Rollback(point)
     ChM->>DB: delete blocks/txs after point
     ChM->>DB: restore account/pool/DRep state
+    LS->>DB: recompute CIP-0163 account expiration (epoch-owned)
     LS->>LS: reload epoch cache, repair lab nonces
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
@@ -2511,6 +2512,28 @@ LedgerState --> Epoch Transition --> EventBus (EpochTransitionEvent)
          PoolStakeSnapshot    EpochSummary
 ```
 
+CIP-0163 reward-account inactivity exclusion: the snapshot manager mirrors both
+`LedgerStateConfig.DelegatorInactivityEnabled` and its inactivity period (set at
+construction in `node.go`/`internal/node/load.go` via
+`Manager.SetDelegatorInactivity`). The setting becomes permanently immutable
+when `Start` succeeds or any capture path is entered; a late setter call returns
+an error, and stopping/restarting the same manager does not unlock it. When
+enabled, the manager passes the snapshot slot, epoch (as `expiryEpoch`), and the
+period into the shared historical stake-aggregation chokepoint
+(`GetStakeByPoolsAtSlot`), which reconstructs expiration at the requested slot.
+The reward-input path (`GetRewardStakeInputsForPools`) sources the gated per-pool
+reward basis from that same historical `active_delegator_stake` CTE, so its
+inputs agree with the leader-election stake by construction (identical
+membership, stake values, and slot-historical expiry); only its gate-off path
+reads the live `account.expiration_epoch` aggregate. This closes the earlier
+divergence where a fallback capture running after the boundary could read a
+post-slot renewal from the live column. Together these filters exclude expired
+credentials from leader-election Mark stake, the per-pool reward basis, and SPO
+governance vote power. The gate and period must match the ledger config that
+stamps account expirations, and both are consensus-affecting. The public
+`Calculator.CalculateStakeDistribution` query path passes zero values (gate
+off).
+
 ### Database Models
 
 | Model | Purpose |
@@ -2562,6 +2585,111 @@ Pool registration lookup reconstructs the parameters effective during the
 ended epoch for per-pool input capture. Reward calculation and application
 remain outside the snapshot manager's responsibility.
 
+CIP-0163 reward-account inactivity (proof-of-life) tracks each account's
+`expiration_epoch`. An account is active iff `expiration_epoch == 0` (unset) or
+`expiration_epoch >= currentEpoch` (`ledger.accountExpiredAtEpoch`, negated).
+DRep activity uses a boundary one epoch later —
+`drep.ExpiryEpoch == 0 || drep.ExpiryEpoch > currentEpoch`
+(`ledger/governance/epoch.go` `drepActiveAtEpoch`) — so a stored expiry equal
+to `currentEpoch` is still active for an account but already expired for a
+DRep; the two predicates are intentionally not shared code, matching the
+CIP text's separate account and DRep expiry semantics. When the
+delegator-inactivity gate
+(`LedgerStateConfig.DelegatorInactivityEnabled` / `DelegatorInactivity`) is
+enabled, block application renews it: `LedgerDelta.applyWithDonationRecording`
+(`ledger/delta.go`, the shared body of `apply` and
+`applyWithoutRecordingDonations`)
+calls `LedgerState.renewWitnessedAccountExpirations`
+(`ledger/account_expiry_renew.go`) after the block's transactions have been
+written to the metadata store, inside the same DB transaction, so the renewal
+commits or rolls back atomically with the block. `witnessedRewardCredentials`
+collects the reward-account stake credentials a phase-2-valid transaction
+witnesses — reward-withdrawal accounts plus the stake credential of stake/vote
+registration, deregistration, and delegation certificates (including the
+combined registration+delegation certs), derived exactly as
+`database/plugin/metadata/sqlite` `SetTransaction` derives them — and every
+witnessed credential's `expiration_epoch` is set to
+`currentEpoch + DelegatorInactivity` through `Database.RenewAccountExpirations`.
+Because that primitive only updates existing account rows and runs after the
+block's account writes, a stake-key registration in the same block has already
+created the row it then renews; because the current epoch's expiry is never
+earlier than a prior renewal and within-epoch re-witnessing is idempotent, the
+value only moves forward (the monotonicity is a caller contract, not a guard in
+the primitive). Phase-2-invalid transactions apply no certificates or
+withdrawals, so they witness nothing and are skipped. With the gate off the hook
+computes and writes nothing. `expiration_epoch` enforcement lives in two
+separate read paths plus one application-time guard, all gated by the same flag:
+the stake-aggregation chokepoint (`GetStakeByPoolsAtSlot`/`GetRewardStakeInputsForPools`,
+see the snapshot-manager paragraph above) for leader-election Mark stake, the
+per-pool reward basis, and SPO governance vote power; the DRep voting-power queries
+(`GetDRepVotingPower`/`GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`, see
+"Epoch Boundary State Transitions" step 5) for the DRep governance tally; and the
+reward-crediting guard in `applyStakeRewardApplication` (`ledger/reward_calculation.go`).
+The stake-aggregation chokepoint already removes an expired delegator's stake from
+the reward basis, so an expired delegator earns nothing. A pool's reward (leader)
+account, however, is credited its leader reward independent of that account's own
+stake, so an expired reward account would still be credited without this guard.
+At application time the guard reconstructs expiry for every credited credential
+from witness history through the reward snapshot's captured slot (plus the
+activation floor, with the current row retained only as an import-history
+fallback) and skips crediting any whose account is expired as of the
+reward's snapshot epoch — `stakeRewardEpochsForApplication(newEpoch).snapshot`, the
+same snapshot epoch the basis was judged against, so the two agree on which
+snapshot an account is measured at. A skipped amount is excluded from the credited
+(effective) total and from the unspendable (treasury) total by
+`deriveStakeRewardApplicationTotals`, so it falls through to undistributed and is
+refunded to reserves, and the ADA pots reconcile exactly (reserves gains the
+skipped amount, total supply conserved). The guard set is built only when the gate
+is on; with the gate off it is nil and the crediting loop and pot derivation are
+byte-identical to pre-CIP behavior.
+
+CIP-0163 activation is a one-time stamp that starts the inactivity clock for
+accounts that existed before the gate was ever turned on: without it, those
+accounts would keep `expiration_epoch = 0` (permanently exempt) since ordinary
+renewal only touches credentials witnessed by a transaction.
+`LedgerState.activateDelegatorInactivityIfNeeded`
+(`ledger/account_expiry_activate.go`) runs inside `processEpochRollover`
+(`ledger/chainsync.go`), before the inactivity-gated governance tally and mark
+snapshot, in the same rollover DB transaction. It is a no-op when the gate is
+off. With the gate on, it checks the durable `sync_state` marker
+`delegator_inactivity_activated` (`Database.GetSyncState`/`SetSyncState`); if
+already set (any non-empty value), it returns immediately. Otherwise it calls
+`Database.StampAllActiveAccountExpirations(currentEpoch + DelegatorInactivity,
+txn)` — an exact membership capture followed by an `UPDATE` over every active
+account, including accounts already renewed by a pre-activation witness — and
+then writes the activation epoch `A`
+(the entered `currentEpoch`, as a decimal string) into the marker in the same
+transaction,
+so the stamp and the marker commit or roll back together. `currentEpoch` here
+is the epoch being entered (`currentEpoch.EpochId + 1`), not the epoch that
+just ended, matching the `currentEpoch + DelegatorInactivity` convention the
+per-block renewal hook uses. The new epoch row is persisted later in the same
+transaction. The stored epoch is not just a flag: because the
+activation stamp sets `A + DelegatorInactivity` without leaving any witness,
+the rollback recompute (`recomputeAccountExpirationsAfterRollback`, read back
+via `LedgerState.delegatorInactivityActivationEpoch`) reads `A` as an
+activation floor and clamps each credential in the durable
+`account_inactivity_activation` membership set up to
+`A + DelegatorInactivity` — otherwise an account whose only post-activation
+witness was orphaned would be mis-restored to a far-past registration epoch or
+reset to 0. Explicit membership is required because a deregistered account row
+may exist at activation without being stamped. Because the marker gates the
+whole stamp, later rollovers never repeat it.
+Rolling back before epoch `A` clears expiration for the exact membership set,
+returns its credentials, deletes the membership rows, and unions those
+credentials with credentials witnessed after the rollback point. The ledger then
+reconstructs every affected expiration from surviving witness history before
+deleting the marker. This restores a pre-activation witness renewal that the
+uniform activation stamp overwrote, while an account with no surviving witness
+returns to expiration 0. The marker deletion allows activation to run again
+when the surviving chain next enters an enabled boundary.
+
+Every valid reward-withdrawal map entry is also persisted in the rollback-aware
+`account_withdrawal_witness` history, independently of balance deltas. This
+includes zero-amount withdrawals: they move no rewards but still prove account
+activity under CIP-0163. Rollback affected-set and last-witness queries include
+this history, and rollback removes its orphaned rows.
+
 Reward snapshots consume `RewardLiveStake` instead of scanning the full UTxO
 table at the epoch boundary. The snapshot manager copies the registered,
 delegated subset into `RewardStakeInput` and derives `RewardPoolInput` rows,
@@ -2583,7 +2711,25 @@ for leader-election and governance consumers. Those synthetic rows do not get
 `RewardSnapshot` or reward-input bundles unless the live aggregate represents
 the target boundary exactly; without a historical reward-input backfill, reward
 application skips the missing bundle rather than treating current stake as
-historical stake.
+historical stake. When CIP-0163 delegator inactivity is enabled, Mithril bootstrap is refused
+outright. `account.expiration_epoch` is dingo-only ledger state with no
+representation in the cardano-ledger Mithril snapshot, and it cannot be
+reconstructed after import — a long-inactive account (exactly what CIP-0163
+targets) may have last witnessed before the import point — so a
+Mithril-bootstrapped node would compute different expiry-dependent stake,
+rewards, and governance than a genesis-synced one. Two guards enforce this: the
+`mithril sync` command (and the shared `sync --mithril` path) rejects the run
+when `delegatorInactivityEnabled` is set (`errMithrilInactivityIncompatible`),
+and `dingo serve` refuses to start on a Mithril-bootstrapped database (detected
+via `mithril.WasBootstrapped`, which checks the durable `mithril_immutable_max`
+marker and falls back to the legacy `mithril_ledger_slot` trust boundary so
+databases bootstrapped before that marker existed — pre-v0.62.0, #2694 — are
+still recognized) with the gate on (`checkMithrilInactivityCompat`) — closing the
+"run `mithril sync` gate-off, then restart gate-on" path. A CIP-0163 node must
+sync from genesis.
+(Independently, the snapshot manager also does not synthesize the N-1/N-2 Mark
+rows from live `account.expiration_epoch`, which may reflect a later renewal; the
+current-epoch N row is still captured.)
 
 ### Query Interface
 
@@ -2626,10 +2772,12 @@ relies solely on the fallback capture, preserving the pre-wiring behavior.
 event-driven fallback: `LoadWithDB` builds the snapshot manager with a nil
 `EventBus` and never starts it, and the load ledger publishes no
 `EpochTransitionEvent`s. A post-hoc fallback cannot substitute either, because
-the reward inputs are copied from the live reward aggregate, which only matches
-the boundary during the in-transaction capture. So the ledger's savepoint
-deferral would otherwise turn a transient capture error into a silently missing
-mark/reward snapshot. To prevent that, `LoadWithDB` wraps the hook with a
+with the CIP-0163 gate off the reward inputs are copied from the live reward
+aggregate, which only matches the boundary during the in-transaction capture
+(with the gate on they are reconstructed at slot and would match, but the load
+path publishes no events to drive a fallback regardless). So the ledger's
+savepoint deferral would otherwise turn a transient capture error into a silently
+missing mark/reward snapshot. To prevent that, `LoadWithDB` wraps the hook with a
 `loadCaptureFailureTracker` that records any suppressed capture failure and,
 after replay completes, returns it — failing the load loudly so the operator
 knows the resulting database is incomplete and must be re-imported, rather than
@@ -2727,7 +2875,15 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    credit their rewards to registered reward accounts and apply the pot-to-pot
    transfers between treasury and reserves. It is a no-op for Conway+ epochs,
    where MIR certificates are not valid and no rows exist for those slots.
-5. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
+5. CIP-0163 one-time activation stamp (`activateDelegatorInactivityIfNeeded`):
+   no-op unless the delegator-inactivity gate is on and the durable
+   `delegator_inactivity_activated` `sync_state` marker is unset; otherwise
+   stamps every active account to the new epoch's
+   `EpochId + DelegatorInactivity` and sets the marker atomically with this
+   transaction. It precedes governance so the first inactivity-gated DRep tally
+   observes the same full activation window as the Mark snapshot. See
+   "CIP-0163 activation" above.
+6. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
    proposal-deposit returns, which observe the post-POOLREAP treasury. The
    proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
@@ -2739,23 +2895,36 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    at an epoch boundary with many active proposals it stalled the rollover, and
    thus the whole ledger pipeline, for hours.) A `slowGovernanceTallyThreshold`
    warning surfaces an unexpectedly slow tally rather than letting it present as
-   a silent stalled rollover.
-6. Treasury donations (`applyEpochDonations`), added after withdrawals.
-7. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
+   a silent stalled rollover. `LoadDRepVotingState` also applies the CIP-0163
+   reward-account inactivity exclusion to the DRep voting-power denominator: it
+   passes `expiryEpoch = NewEpoch` (0 when the gate is off) to
+   `GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`, threaded in from
+   `EpochInput.DelegatorInactivityOn` (set by `processEpochRollover` from
+   `LedgerStateConfig.DelegatorInactivityEnabled`, the same gate the snapshot
+   manager and stake-aggregation chokepoint use), excluding delegated stake
+   whose reward account expired before `NewEpoch` from the DRep tally exactly
+   as the stake-aggregation chokepoint excludes it from Mark stake, the reward
+   basis, and SPO vote power. `TallyContext.DelegatorInactivityOn` mirrors the
+   same flag into the lazy (non-precomputed) `tallyDRepVotes` fallback path
+   used by standalone/test callers. The mid-epoch HardForkInitiation stability
+   check snapshots and threads this gate through `StabilityCheckInputs` as well,
+   keeping its advertised transition tally aligned with boundary ratification.
+7. Treasury donations (`applyEpochDonations`), added after withdrawals.
+8. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
    above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal
    reserves top-up). This `reward_ada_pots` row seeds the delayed reward
    calculation for a later epoch.
-8. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
-9. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
-   `snapshot.Manager.CaptureEpochBoundarySnapshot`, when a hook is installed),
-   run last so the new epoch's nonce and boundary slot are available, inside a
-   metadata savepoint so a capture failure defers to the event-driven fallback
-   instead of aborting the rollover. See "Boundary Capture And Events" for the
-   SNAP-point placement caveat and the DevNet gate.
+9. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
+10. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
+    `snapshot.Manager.CaptureEpochBoundarySnapshot`, when a hook is installed),
+    run last so the new epoch's nonce and boundary slot are available, inside a
+    metadata savepoint so a capture failure defers to the event-driven fallback
+    instead of aborting the rollover. See "Boundary Capture And Events" for the
+    SNAP-point placement caveat and the DevNet gate.
 
 POOLREAP runs before governance so any deposit that lands in the treasury is
-visible to the withdrawals checked in step 5. MIR certificate effects are applied
+visible to the withdrawals checked in step 6. MIR certificate effects are applied
 in the same pre-governance window, so their treasury/reserves movements are also
 visible to governance and to the ADA-pot capture. Stake rewards are applied first
 so their reserves/treasury movement is visible to governance and to the ADA-pot

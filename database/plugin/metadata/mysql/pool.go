@@ -1161,6 +1161,8 @@ func (d *MetadataStoreMysql) GetStakeByPools(
 func (d *MetadataStoreMysql) GetStakeByPoolsAtSlot(
 	poolKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
 	db, err := d.resolveDB(txn)
@@ -1174,6 +1176,8 @@ func (d *MetadataStoreMysql) GetStakeByPoolsAtSlot(
 		db,
 		poolKeyHashes,
 		slot,
+		expiryEpoch,
+		inactivityPeriod,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetStakeByPoolsAtSlot: %w", err)
@@ -1184,6 +1188,8 @@ func (d *MetadataStoreMysql) GetStakeByPoolsAtSlot(
 func (d *MetadataStoreMysql) GetPoolOwnerStakeAtSlot(
 	ownerKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
 	db, err := d.resolveReadDB(txn)
@@ -1191,6 +1197,6 @@ func (d *MetadataStoreMysql) GetPoolOwnerStakeAtSlot(
 		return nil, err
 	}
 	return stakequery.GetPoolOwnerStakeAtSlot(
-		db, ownerKeyHashes, slot,
+		db, ownerKeyHashes, slot, expiryEpoch, inactivityPeriod,
 	)
 }

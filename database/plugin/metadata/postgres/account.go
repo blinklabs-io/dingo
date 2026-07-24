@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountwitness"
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -96,6 +98,175 @@ func (d *MetadataStorePostgres) GetAccountsByCredential(
 		}
 	}
 	return ret, nil
+}
+
+// RenewAccountExpirations sets expiration_epoch for every existing account
+// row matching one of refs. Rows with no match are ignored (an account must
+// be registered to have an expiration). Credentials are updated in set-based
+// batches — one UPDATE per chunk rather than one per credential — so a large
+// rollback recompute does not hold the ledger write transaction open across
+// thousands of single-row round-trips.
+func (d *MetadataStorePostgres) RenewAccountExpirations(
+	refs []models.StakeCredentialRef,
+	expirationEpoch uint64,
+	txn types.Txn,
+) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	for start := 0; start < len(refs); start += postgresBatchChunkSize {
+		end := min(start+postgresBatchChunkSize, len(refs))
+		chunk := refs[start:end]
+		// GORM's tuple-IN handling unpacks []byte arguments byte-by-byte across
+		// drivers, so build an OR chain with parallel (credential_tag,
+		// staking_key) equality predicates instead (see MarkUtxosDeletedAtSlot).
+		var clauses strings.Builder
+		args := make([]any, 0, 1+2*len(chunk))
+		args = append(args, expirationEpoch)
+		for i, ref := range chunk {
+			if i > 0 {
+				clauses.WriteString(" OR ")
+			}
+			clauses.WriteString("(credential_tag = ? AND staking_key = ?)")
+			args = append(args, ref.Tag, ref.Key)
+		}
+		if err := db.Exec(
+			"UPDATE account SET expiration_epoch = ? WHERE "+clauses.String(),
+			args...,
+		).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AccountLastWitnessSlots returns, per requested credential, the greatest
+// witnessing added_slot <= maxSlot across the stake-witnessing certificate
+// tables and the reward-withdrawal history (account_reward_delta where
+// withdrawal = TRUE). The witness set matches CIP-0163 exactly (see
+// accountwitness.CertTableNames and the ledger's witnessedRewardCredentials).
+// The result is keyed by StakeCredentialRef.MapKey(); a credential with no
+// witness <= maxSlot is absent from the map.
+//
+// The SQL IN clause filters on the staking-key hash only and the result is
+// post-filtered to the requested composite (tag, hash) keys, so credentials
+// sharing a hash but differing in tag stay isolated.
+func (d *MetadataStorePostgres) AccountLastWitnessSlots(
+	refs []models.StakeCredentialRef,
+	maxSlot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	if len(refs) == 0 {
+		return map[string]uint64{}, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return accountwitness.LastSlots(db, refs, maxSlot, postgresBatchChunkSize)
+}
+
+// AccountsWitnessedAfterSlot returns the distinct reward-account credentials
+// that have a stake-witnessing certificate OR a reward withdrawal at
+// added_slot > slot. It is the CIP-0163 rollback affected set: the credentials
+// whose expiration_epoch may have been renewed by a now-orphaned witness and
+// therefore must be recomputed against the surviving chain. The witness set
+// matches AccountLastWitnessSlots (cert tables + withdrawal history). Callers
+// must invoke this before deleting rolled-back certificate and reward-delta
+// rows, since those are exactly the rows this query inspects.
+func (d *MetadataStorePostgres) AccountsWitnessedAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.StakeCredentialRef, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return accountwitness.AfterSlot(db, slot)
+}
+
+// StampAllActiveAccountExpirations sets expiration_epoch = expirationEpoch for
+// every active account. Used once at CIP-0163 activation to give every
+// pre-existing account a full inactivity window starting at the activation
+// epoch, including accounts witnessed before activation. Returns the number of
+// rows stamped.
+func (d *MetadataStorePostgres) StampAllActiveAccountExpirations(
+	expirationEpoch uint64,
+	txn types.Txn,
+) (int64, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	if err := db.Exec(`
+		INSERT INTO account_inactivity_activation (credential_tag, staking_key)
+		SELECT credential_tag, staking_key
+		FROM account
+		WHERE active = ?`,
+		true,
+	).Error; err != nil {
+		return 0, err
+	}
+	res := db.Model(&models.Account{}).
+		Where("active = ?", true).
+		Update("expiration_epoch", expirationEpoch)
+	return res.RowsAffected, res.Error
+}
+
+func (d *MetadataStorePostgres) AccountInactivityActivationMembership(
+	refs []models.StakeCredentialRef,
+	txn types.Txn,
+) (map[string]struct{}, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return accountwitness.ActivationMembership(
+		db,
+		refs,
+		postgresBatchChunkSize,
+	)
+}
+
+func (d *MetadataStorePostgres) ResetAccountExpirationActivation(
+	txn types.Txn,
+) ([]models.StakeCredentialRef, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var activations []models.AccountInactivityActivation
+	if err := db.Find(&activations).Error; err != nil {
+		return nil, err
+	}
+	if err := db.Exec(`
+		UPDATE account
+		SET expiration_epoch = 0
+		WHERE EXISTS (
+			SELECT 1
+			FROM account_inactivity_activation activation
+			WHERE activation.credential_tag = account.credential_tag
+				AND activation.staking_key = account.staking_key
+		)`,
+	).Error; err != nil {
+		return nil, err
+	}
+	if err := db.Where("1 = 1").
+		Delete(&models.AccountInactivityActivation{}).Error; err != nil {
+		return nil, err
+	}
+	refs := make([]models.StakeCredentialRef, 0, len(activations))
+	for _, activation := range activations {
+		refs = append(refs, models.NewStakeCredentialRef(
+			activation.CredentialTag,
+			activation.StakingKey,
+		))
+	}
+	return refs, nil
 }
 
 // AddAccountRewardByCredential credits a registered reward account.
@@ -414,6 +585,10 @@ func (d *MetadataStorePostgres) DeleteAccountRewardsAfterSlot(
 			"added_slot > ?",
 			slot,
 		).Delete(&models.AccountRewardDelta{}); result.Error != nil {
+			return result.Error
+		}
+		if result := tx.Where("added_slot > ?", slot).
+			Delete(&models.AccountWithdrawalWitness{}); result.Error != nil {
 			return result.Error
 		}
 		return refreshRewardLiveStakeAggregates(tx, refs)

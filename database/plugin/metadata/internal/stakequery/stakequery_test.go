@@ -16,6 +16,7 @@ package stakequery
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -31,6 +32,50 @@ func TestPoolQueryChunkSizeDefault(t *testing.T) {
 	_, cteArgs := activeDelegationCTE(nil, 0)
 	const stakeQueryArgs = 2
 	require.LessOrEqual(t, len(cteArgs)+stakeQueryArgs+chunkSize, 999)
+}
+
+// TestHistoricalDelegatorStakeCTEExpiryGate verifies the CIP-0163 expiry gate
+// on the shared aggregation query builder. It is hand-written positional-arg
+// SQL, so the number of "?" placeholders must always equal len(args)+1 (the
+// caller appends exactly one more arg for the predicate's `IN ?`). With the
+// gate off (expiryEpoch == 0) the generated SQL and args must be byte-identical
+// to the pre-CIP query: no account join, no expiration clause, no extra arg.
+func TestHistoricalDelegatorStakeCTEExpiryGate(t *testing.T) {
+	const predicate = "active_delegation.pool_key_hash IN ?"
+
+	offQuery, offArgs, err := historicalDelegatorStakeCTE(nil, 42, 0, 0, predicate)
+	require.NoError(t, err)
+	// Gate off: byte-identical to today. No expiry artifacts.
+	require.NotContains(t, offQuery, "expiry_acct")
+	require.NotContains(t, offQuery, "expiration_epoch")
+	// The caller fills the single predicate placeholder, so #? == len(args)+1.
+	require.Equal(
+		t,
+		strings.Count(offQuery, "?"),
+		len(offArgs)+1,
+		"gate-off placeholder/arg alignment",
+	)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.SyncState{}))
+	onQuery, onArgs, err := historicalDelegatorStakeCTE(db, 42, 7, 90, predicate)
+	require.NoError(t, err)
+	require.Contains(t, onQuery, "expiry_acct")
+	require.Contains(t, onQuery, "expiration_epoch >= ?")
+	require.Contains(t, onQuery, "expiration_epoch IS NULL")
+	// Same positional invariant must hold with the gate on.
+	require.Equal(
+		t,
+		strings.Count(onQuery, "?"),
+		len(onArgs)+1,
+		"gate-on placeholder/arg alignment",
+	)
+	// The expiry epoch remains the final builder argument, immediately before
+	// the caller's pool chunk; witness-history reconstruction contributes the
+	// preceding slot/window arguments.
+	require.Greater(t, len(onArgs), len(offArgs))
+	require.Equal(t, uint64(7), onArgs[len(onArgs)-1])
 }
 
 func TestPreEpochPoolQueryChunkSizeSQLite(t *testing.T) {

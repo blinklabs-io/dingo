@@ -122,10 +122,29 @@ type Account struct {
 	// disambiguated by whether Drep is nil.
 	DrepType uint64 `gorm:"default:0;index:idx_account_drep_type_active_staking_key,priority:1"`
 	Active   bool   `gorm:"default:true;index:idx_account_drep_active_staking_key,priority:2;index:idx_account_drep_type_active_staking_key,priority:2;index:idx_account_active_pool_staking_key,priority:1"`
+	// ExpirationEpoch is the CIP-0163 reward-account inactivity expiry: the
+	// last epoch in which the account remains active unless it
+	// witnesses again. 0 means unset (treated as active). Mirrors
+	// Drep.ExpiryEpoch. Set/bumped by RenewAccountExpirations and the one-time
+	// activation stamp; only read when the delegator-inactivity gate is on.
+	ExpirationEpoch uint64 `gorm:"index;default:0"`
 }
 
 func (a *Account) TableName() string {
 	return "account"
+}
+
+// AccountInactivityActivation records the exact reward-account credentials
+// stamped by the one-time CIP-0163 activation. Membership cannot be inferred
+// from CreatedSlot alone because an account may have existed but been inactive
+// at the activation boundary.
+type AccountInactivityActivation struct {
+	CredentialTag uint8  `gorm:"primaryKey;autoIncrement:false"`
+	StakingKey    []byte `gorm:"size:28;primaryKey;index"`
+}
+
+func (AccountInactivityActivation) TableName() string {
+	return "account_inactivity_activation"
 }
 
 // MigrateAccountCredentialTagIndex drops the legacy hash-only account
@@ -685,6 +704,19 @@ type AccountRewardDelta struct {
 	AddedSlot      uint64 `gorm:"index;not null;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:5"`
 	Withdrawal     bool   `gorm:"index;not null;default:false;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:1"`
 }
+
+// AccountWithdrawalWitness records every valid reward-withdrawal map entry,
+// including zero-amount withdrawals. It is separate from balance deltas because
+// CIP-0163 treats the credential witness as activity even when no reward moves.
+type AccountWithdrawalWitness struct {
+	StakingKey    []byte `gorm:"size:28;not null;uniqueIndex:idx_account_withdrawal_witness,priority:3;index:idx_account_withdrawal_witness_credential_slot,priority:1"`
+	CredentialTag uint8  `gorm:"not null;default:0;uniqueIndex:idx_account_withdrawal_witness,priority:2;index:idx_account_withdrawal_witness_credential_slot,priority:2"`
+	TxHash        []byte `gorm:"size:32;not null;uniqueIndex:idx_account_withdrawal_witness,priority:1"`
+	ID            uint   `gorm:"primarykey"`
+	AddedSlot     uint64 `gorm:"index;not null;index:idx_account_withdrawal_witness_credential_slot,priority:3"`
+}
+
+func (AccountWithdrawalWitness) TableName() string { return "account_withdrawal_witness" }
 
 func (AccountRewardDelta) TableName() string {
 	return "account_reward_delta"

@@ -617,3 +617,25 @@ mithril:
 # Env: DINGO_FULL_POT_REWARDS_ENABLED / DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS
 # fullPotRewardsEnabled: false
 # unsafeFullPotRewardsOnStandardNetworks: false
+
+# ---
+# CIP-0163 reward-account inactivity expiry (experimental, consensus-affecting)
+#
+# When enabled, a reward account that performs no witnessing action (reward
+# withdrawal, (re)delegation to a pool or DRep, stake-key (de)registration) for
+# delegatorInactivity epochs is treated as expired and ignored for pool leader
+# election, reward crediting, and governance tallying until it witnesses again.
+# This changes the ledger rules, so it MUST only be enabled on a network where
+# every node also enables it (a devnet or custom network). Enabling it
+# off-consensus, e.g. on mainnet or the public testnets, will fork this node off
+# the network. It is disabled by default.
+#
+# Mithril bootstrap ('dingo mithril sync') is NOT supported with this enabled:
+# reward-account expiration state is absent from Mithril ledger snapshots and
+# cannot be reconstructed after import, so a CIP-0163 node must sync from
+# genesis. The sync command and node startup both refuse the combination.
+#
+# CLI: --delegator-inactivity-enabled / --delegator-inactivity
+# Env: DINGO_DELEGATOR_INACTIVITY_ENABLED / DINGO_DELEGATOR_INACTIVITY
+# delegatorInactivityEnabled: false
+# delegatorInactivity: 90        # epochs; integer in [1, 10000]

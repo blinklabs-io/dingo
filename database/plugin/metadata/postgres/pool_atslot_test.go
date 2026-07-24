@@ -58,7 +58,7 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccountsPostgres(t *testing.T) {
 	}
 
 	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
-		[][]byte{poolA, poolB, poolEmpty}, 80, nil,
+		[][]byte{poolA, poolB, poolEmpty}, 80, 0, 0, nil,
 	)
 	require.NoError(t, err)
 
@@ -163,7 +163,7 @@ func TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres(t *testing.T) {
 	}
 
 	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
-		[][]byte{poolA, poolB}, 80, nil,
+		[][]byte{poolA, poolB}, 80, 0, 0, nil,
 	)
 	require.NoError(t, err)
 
@@ -171,4 +171,92 @@ func TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres(t *testing.T) {
 	require.Equal(t, uint64(2), delegators[string(poolA)])
 	require.Equal(t, uint64(40), stakes[string(poolB)])
 	require.Equal(t, uint64(1), delegators[string(poolB)])
+}
+
+// TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres exercises the
+// CIP-0163 gated reward-input path on postgres. With the gate on it must
+// reconstruct expiration at slot from the shared historical CTE (not the live
+// account.expiration_epoch column) so the reward-basis inputs agree with
+// GetStakeByPoolsAtSlot. Postgres type-checks the full query at parse time,
+// catching backend-specific regressions the sqlite test cannot.
+func TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres(t *testing.T) {
+	store := newTestPostgresStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	pool := bytes.Repeat([]byte{0xD5}, 28)
+	active := bytes.Repeat([]byte{0x2A}, 28)
+	expired := bytes.Repeat([]byte{0x2B}, 28)
+
+	cleanup := func() {
+		for _, k := range [][]byte{active, expired} {
+			_ = db.Where("staking_key = ?", k).Delete(&models.Account{}).Error
+			_ = db.Where("staking_key = ?", k).Delete(&models.Utxo{}).Error
+			_ = db.Where("staking_key = ?", k).
+				Delete(&models.AccountWithdrawalWitness{}).Error
+			_ = db.Where("staking_key = ?", k).
+				Delete(&models.RewardLiveStake{}).Error
+		}
+		_ = db.Where("epoch_id <= ?", 5).Delete(&models.Epoch{}).Error
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	for epoch := uint64(0); epoch <= 5; epoch++ {
+		require.NoError(t, db.Create(&models.Epoch{
+			EpochId: epoch, StartSlot: epoch * 100, LengthInSlots: 100,
+		}).Error)
+	}
+	accounts := []models.Account{
+		{
+			StakingKey: active, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+			Active: true, ExpirationEpoch: 7,
+		},
+		{
+			StakingKey: expired, Pool: pool, AddedSlot: 10, CreatedSlot: 10,
+			Active: true, ExpirationEpoch: 7,
+		},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+	utxos := []models.Utxo{
+		{TxId: bytes.Repeat([]byte{0x63}, 32), StakingKey: active, Amount: 100, AddedSlot: 20},
+		{TxId: bytes.Repeat([]byte{0x64}, 32), StakingKey: expired, Amount: 40, AddedSlot: 20},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+	require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+		StakingKey: active, AddedSlot: 250, TxHash: bytes.Repeat([]byte{0x73}, 32),
+	}).Error)
+	require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
+		StakingKey: expired, AddedSlot: 50, TxHash: bytes.Repeat([]byte{0x74}, 32),
+	}).Error)
+	live := []models.RewardLiveStake{
+		{
+			PoolKeyHash: pool, StakingKey: active, CredentialTag: 0,
+			TotalStake: types.Uint64(100), Registered: true,
+		},
+		{
+			PoolKeyHash: pool, StakingKey: expired, CredentialTag: 0,
+			TotalStake: types.Uint64(40), Registered: true,
+		},
+	}
+	for i := range live {
+		require.NoError(t, db.Create(&live[i]).Error)
+	}
+
+	// Gate off: live aggregate returns both inputs.
+	inputs, err := store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 0, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 2)
+
+	// Gate on: expiration reconstructed at slot 250 excludes the expired-at-slot
+	// credential; a live-column filter would have kept both (both live epoch 7).
+	inputs, err = store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 3, 2, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, active, inputs[0].StakingKey)
+	require.Equal(t, uint64(100), uint64(inputs[0].Stake))
 }

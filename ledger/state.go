@@ -470,7 +470,15 @@ type LedgerStateConfig struct {
 	// enable it only on a network where every node also enables it (mainnet and
 	// the public testnets keep it off). Like the CIP-50 pledge-leverage gate it
 	// is set from operator config in node.go, not derived from the network.
-	FullPotRewardsEnabled    bool
+	FullPotRewardsEnabled bool
+	// DelegatorInactivityEnabled turns on CIP-0163 reward-account inactivity
+	// expiry. Consensus-affecting; defaults false. Set from operator config in
+	// node.go (serve mode) and internal/node/load.go (load/replay mode), not
+	// derived from the network. Must match across the network.
+	DelegatorInactivityEnabled bool
+	// DelegatorInactivity is the inactivity window in epochs, used only when
+	// DelegatorInactivityEnabled is true.
+	DelegatorInactivity      uint64
 	ValidateHistorical       bool
 	EnableDijkstra           bool
 	StartInDijkstra          bool
@@ -1961,6 +1969,25 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	var newNonce []byte
 	// Start a transaction
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+		// CIP-0163: capture the reward-account credentials witnessed in the
+		// rolled-away blocks (added_slot > rollback slot) before the deletes
+		// below remove their certificate and reward-withdrawal rows. Their
+		// expiration_epoch is recomputed against the surviving chain once
+		// account state has been restored (see below). Gate off => skip.
+		var expiryAffectedRefs []models.StakeCredentialRef
+		if ls.config.DelegatorInactivityEnabled {
+			var affErr error
+			expiryAffectedRefs, affErr = ls.db.AccountsWitnessedAfterSlot(
+				point.Slot,
+				txn,
+			)
+			if affErr != nil {
+				return fmt.Errorf(
+					"collect rolled-back witnessed accounts: %w",
+					affErr,
+				)
+			}
+		}
 		// Delete certificates first (they reference transactions)
 		if err := ls.db.DeleteCertificatesAfterSlot(
 			point.Slot,
@@ -1989,6 +2016,21 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		); err != nil {
 			return fmt.Errorf(
 				"restore account state after rollback: %w",
+				err,
+			)
+		}
+		// CIP-0163: now that the rolled-away certificate/withdrawal rows are
+		// gone and the remaining account fields are restored, recompute the
+		// expiration_epoch of the affected reward accounts against the
+		// surviving chain (ledger-owned because it requires the epoch
+		// schedule). Gate off => no-op.
+		if err := ls.recomputeAccountExpirationsAfterRollback(
+			txn,
+			point.Slot,
+			expiryAffectedRefs,
+		); err != nil {
+			return fmt.Errorf(
+				"recompute account expirations after rollback: %w",
 				err,
 			)
 		}
@@ -4715,6 +4757,7 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	// exact contention concern.
 	snapshotEpoch := ls.currentEpoch.EpochId
 	snapshotPParams := ls.currentPParams
+	snapshotDelegatorInactivityOn := ls.config.DelegatorInactivityEnabled
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
 	db := ls.db
 	logger := ls.config.Logger
@@ -4734,6 +4777,7 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 				db,
 				nil,
 				snapshotEpoch,
+				snapshotDelegatorInactivityOn,
 				snapshotPParams,
 				conwayGenesis,
 				onDecodeFailure,

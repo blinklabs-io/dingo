@@ -40,6 +40,15 @@ type Manager struct {
 	eventBus *event.EventBus
 	logger   *slog.Logger
 
+	// delegatorInactivityEnabled is the CIP-0163 reward-account inactivity
+	// consensus gate, mirrored from LedgerStateConfig at node/load construction.
+	// When true, mark-snapshot capture excludes accounts expired before the
+	// snapshot epoch from leader-election stake, the reward basis, and SPO vote
+	// power. It is consensus-affecting, so every node on a network must agree.
+	delegatorInactivityEnabled bool
+	delegatorInactivityPeriod  uint64
+	configurationLocked        bool
+
 	mu             sync.RWMutex
 	running        bool
 	stopping       bool
@@ -63,6 +72,72 @@ func NewManager(
 		eventBus: eventBus,
 		logger:   logger,
 	}
+}
+
+// SetDelegatorInactivity mirrors the CIP-0163 reward-account inactivity gate
+// and inactivity window from LedgerStateConfig into the snapshot manager. It
+// must be called before snapshot capture begins (i.e. before
+// CaptureGenesisSnapshot/Start), matching how node.go and load.go configure the
+// ledger. Once capture can begin, the configuration is permanently locked.
+// Default (unset) is gate off, which keeps snapshot capture byte-identical to
+// the pre-CIP behavior.
+func (m *Manager) SetDelegatorInactivity(
+	enabled bool,
+	inactivityPeriod uint64,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.configurationLocked {
+		return errors.New(
+			"snapshot manager: delegator inactivity configuration is locked",
+		)
+	}
+	if enabled && (inactivityPeriod == 0 || inactivityPeriod > 10_000) {
+		return fmt.Errorf(
+			"snapshot manager: delegator inactivity period %d is outside [1, 10000]",
+			inactivityPeriod,
+		)
+	}
+	m.delegatorInactivityEnabled = enabled
+	if enabled {
+		m.delegatorInactivityPeriod = inactivityPeriod
+	} else {
+		m.delegatorInactivityPeriod = 0
+	}
+	return nil
+}
+
+// lockConfiguration freezes consensus-affecting options before snapshot
+// capture can observe them. The lock is permanent for the manager's lifetime:
+// stopping and restarting must not permit snapshots produced by one manager to
+// use different consensus rules.
+func (m *Manager) lockConfiguration() {
+	m.mu.Lock()
+	m.configurationLocked = true
+	m.mu.Unlock()
+}
+
+// expiryEpoch returns the CIP-0163 gate argument for a snapshot being computed
+// for snapshotEpoch: 0 when the gate is off (query byte-identical to pre-CIP),
+// otherwise snapshotEpoch, so the aggregation excludes accounts whose
+// expiration_epoch is nonzero and strictly less than the snapshot epoch.
+func (m *Manager) expiryEpoch(snapshotEpoch uint64) uint64 {
+	m.mu.RLock()
+	enabled := m.delegatorInactivityEnabled
+	m.mu.RUnlock()
+	if !enabled {
+		return 0
+	}
+	return snapshotEpoch
+}
+
+func (m *Manager) inactivityPeriod() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.delegatorInactivityEnabled {
+		return 0
+	}
+	return m.delegatorInactivityPeriod
 }
 
 // SetPromRegistry enables snapshot manager metrics.
@@ -113,6 +188,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("snapshot manager: parent context already done: %w", err)
 	}
 
+	m.configurationLocked = true
 	childCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	m.running = true
@@ -346,6 +422,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	txn *database.Txn,
 	evt event.EpochTransitionEvent,
 ) error {
+	m.lockConfiguration()
 	start := time.Now()
 	calculator := NewCalculator(m.db)
 
@@ -353,6 +430,8 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		ctx,
 		txn,
 		evt.SnapshotSlot,
+		m.expiryEpoch(evt.NewEpoch),
+		m.inactivityPeriod(),
 	)
 	if err != nil {
 		if m.metrics != nil {
@@ -421,11 +500,14 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 func (m *Manager) calculateSnapshotDistribution(
 	ctx context.Context,
 	slot uint64,
+	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
 	calculator := NewCalculator(m.db)
 	txn := m.db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
-	return calculator.calculateStakeDistributionInTxn(ctx, txn, slot)
+	return calculator.calculateStakeDistributionInTxn(
+		ctx, txn, slot, expiryEpoch, m.inactivityPeriod(),
+	)
 }
 
 // captureMarkSnapshot captures the stake distribution as a Mark snapshot.
@@ -433,6 +515,7 @@ func (m *Manager) captureMarkSnapshot(
 	ctx context.Context,
 	evt event.EpochTransitionEvent,
 ) error {
+	m.lockConfiguration()
 	start := time.Now()
 
 	// Calculate canonical, slot-aware leader-election pool totals and attach
@@ -440,6 +523,7 @@ func (m *Manager) captureMarkSnapshot(
 	distribution, err := m.calculateSnapshotDistribution(
 		ctx,
 		evt.SnapshotSlot,
+		m.expiryEpoch(evt.NewEpoch),
 	)
 	if err != nil {
 		if m.metrics != nil {
@@ -526,6 +610,7 @@ func HandleGenesisSnapshotError(
 // the node starts at a much later epoch, so the method also seeds the recent
 // historical window (epochs N, N-1, N-2).
 func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
+	m.lockConfiguration()
 	start := time.Now()
 	if ok, epoch, pools, stake, err := m.hasExistingPostMithrilSnapshotWindow(); err != nil {
 		m.logger.Warn(
@@ -552,7 +637,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	successCount := uint64(0)
 	lastSuccessfulEpoch := uint64(0)
 
-	distribution, err := m.calculateSnapshotDistribution(ctx, 0)
+	// Fresh sync seeds epoch 0, where no account can be expired, so the gate
+	// argument is 0 regardless of the enabled flag.
+	distribution, err := m.calculateSnapshotDistribution(ctx, 0, m.expiryEpoch(0))
 	if err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
@@ -586,7 +673,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 				"total_pools", distribution.TotalPools,
 			)
 			dist2, err2 := m.calculateSnapshotDistribution(
-				ctx, lastEpoch.StartSlot,
+				ctx, lastEpoch.StartSlot, m.expiryEpoch(currentEpochId),
 			)
 			if err2 != nil {
 				m.logger.Warn(
@@ -660,6 +747,19 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			seedEpoch := currentEpochId - offset
 			if seedEpoch == 0 {
 				continue // already saved above
+			}
+			// ExpirationEpoch is live account state, not historical state.
+			// Once CIP-0163 is enabled a later witness may have renewed an
+			// account that was expired at this older boundary, so the current
+			// rows cannot safely reconstruct N-1/N-2. Leave those rows absent
+			// instead of persisting a consensus-incorrect historical snapshot.
+			if offset > 0 && m.expiryEpoch(seedEpoch) > 0 {
+				m.logger.Warn(
+					"skipping post-Mithril historical snapshot with delegator inactivity enabled",
+					"component", "snapshot",
+					"epoch", seedEpoch,
+				)
+				continue
 			}
 			seedEvt := event.EpochTransitionEvent{
 				NewEpoch: seedEpoch,

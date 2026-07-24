@@ -1273,6 +1273,8 @@ func (d *MetadataStoreSqlite) GetStakeByPools(
 func (d *MetadataStoreSqlite) GetStakeByPoolsAtSlot(
 	poolKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
 	db, err := d.resolveReadDB(txn)
@@ -1286,6 +1288,8 @@ func (d *MetadataStoreSqlite) GetStakeByPoolsAtSlot(
 		db,
 		poolKeyHashes,
 		slot,
+		expiryEpoch,
+		inactivityPeriod,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetStakeByPoolsAtSlot: %w", err)
@@ -1296,6 +1300,8 @@ func (d *MetadataStoreSqlite) GetStakeByPoolsAtSlot(
 func (d *MetadataStoreSqlite) GetPoolOwnerStakeAtSlot(
 	ownerKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
 	db, err := d.resolveReadDB(txn)
@@ -1303,6 +1309,6 @@ func (d *MetadataStoreSqlite) GetPoolOwnerStakeAtSlot(
 		return nil, err
 	}
 	return stakequery.GetPoolOwnerStakeAtSlot(
-		db, ownerKeyHashes, slot,
+		db, ownerKeyHashes, slot, expiryEpoch, inactivityPeriod,
 	)
 }

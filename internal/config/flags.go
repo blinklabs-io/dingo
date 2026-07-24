@@ -177,6 +177,9 @@ var flagSpecs = []flagSpec{
 	// CIP-0163 full-pot reward distribution (consensus-affecting; default off)
 	boolFlag("FullPotRewardsEnabled", "full-pot-rewards-enabled", "enable CIP-0163 full-pot reward distribution (custom networks only unless explicitly unsafe)"),
 	boolFlag("UnsafeFullPotRewardsOnStandardNetworks", "unsafe-full-pot-rewards-on-standard-networks", "allow CIP-0163 full-pot rewards on predefined standard networks; consensus-breaking unless the network has adopted it"),
+	// CIP-0163 reward-account inactivity expiry (consensus-affecting; default off)
+	boolFlag("DelegatorInactivityEnabled", "delegator-inactivity-enabled", "enable CIP-0163 reward-account inactivity expiry (only where every node also enables it)"),
+	uint64Flag("DelegatorInactivity", "delegator-inactivity", "CIP-0163 inactivity window in epochs, in [1,10000] (used when delegator-inactivity-enabled)"),
 
 	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
 	boolFlag("PledgeLeverageEnabled", "pledge-leverage-enabled", "enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)"),

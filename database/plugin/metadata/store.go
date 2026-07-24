@@ -108,6 +108,72 @@ type MetadataStore interface {
 	// ImportAccount.
 	CreateAccount(types.Txn, *models.Account) error
 
+	// RenewAccountExpirations sets expiration_epoch for every existing
+	// account row matching one of refs (CIP-0163 delegator-inactivity
+	// mechanism). A ref with no matching account row is ignored: an
+	// account must already be registered to have an expiration. Callers
+	// handling an ordinary witness pass currentEpoch + delegatorInactivity,
+	// which moves expiration forward. Rollback recomputation may instead lower
+	// expiration or reset it to zero to restore the value at the rollback point.
+	RenewAccountExpirations(
+		refs []models.StakeCredentialRef,
+		expirationEpoch uint64,
+		txn types.Txn,
+	) error
+
+	// AccountLastWitnessSlots returns, per requested credential, the greatest
+	// witnessing added_slot <= maxSlot across the stake-witnessing certificate
+	// tables and reward-withdrawal history. Withdrawal history includes
+	// account_withdrawal_witness (which preserves zero-amount withdrawals) and
+	// legacy account_reward_delta rows where withdrawal = TRUE — together with
+	// the certificate tables, this is the CIP-0163 witness set. The result is
+	// keyed by StakeCredentialRef.MapKey(); a credential with no witness <=
+	// maxSlot is absent from the map. Used by the ledger's rollback expiration
+	// recomputation to find each affected account's surviving witness slot.
+	AccountLastWitnessSlots(
+		refs []models.StakeCredentialRef,
+		maxSlot uint64,
+		txn types.Txn,
+	) (map[string]uint64, error)
+
+	// AccountsWitnessedAfterSlot returns the distinct reward-account
+	// credentials with a stake-witnessing certificate OR a reward withdrawal
+	// at added_slot > slot — the CIP-0163 rollback affected set. Withdrawals
+	// come from account_withdrawal_witness (including zero-amount withdrawals)
+	// and legacy account_reward_delta withdrawal rows. Callers must invoke it
+	// before deleting rolled-back certificate, withdrawal-witness, and
+	// reward-delta rows, since those are exactly the rows it inspects.
+	AccountsWitnessedAfterSlot(
+		slot uint64,
+		txn types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// StampAllActiveAccountExpirations sets expiration_epoch = expirationEpoch
+	// for every active account. Used once at CIP-0163 activation to give every
+	// pre-existing account a full inactivity window from the activation epoch,
+	// including accounts witnessed before activation. Returns the number of
+	// rows stamped.
+	StampAllActiveAccountExpirations(
+		expirationEpoch uint64,
+		txn types.Txn,
+	) (int64, error)
+
+	// AccountInactivityActivationMembership returns the requested credentials
+	// included in the one-time activation stamp, keyed by
+	// StakeCredentialRef.MapKey().
+	AccountInactivityActivationMembership(
+		[]models.StakeCredentialRef,
+		types.Txn,
+	) (map[string]struct{}, error)
+
+	// ResetAccountExpirationActivation clears expiration for the exact durable
+	// activation-membership set, deletes that set, and returns its credentials
+	// so the ledger can reconstruct any pre-activation witness expiration. Used
+	// when rollback crosses back before the activation boundary.
+	ResetAccountExpirationActivation(
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
 	// CreateUtxo inserts a Utxo row directly. The normal block-
 	// application path uses AddUtxos with UtxoSlot inputs; this is
 	// the simple-insert variant for callers that already have a
@@ -414,28 +480,46 @@ type MetadataStore interface {
 	// GetStakeByPoolsAtSlot returns delegated stake for multiple pools at a
 	// historical slot. It uses certificate history plus slot-aware UTxO
 	// liveness so epoch-boundary stake snapshots do not read current live
-	// stake for an older boundary.
+	// stake for an older boundary. expiryEpoch and inactivityPeriod drive the
+	// CIP-0163 reward-account inactivity gate: 0 disables it (result
+	// byte-identical to pre-CIP); otherwise expiration is reconstructed from
+	// witness history at slot and credentials expired before expiryEpoch are
+	// excluded.
 	GetStakeByPoolsAtSlot(
 		[][]byte, // poolKeyHashes
 		uint64, // slot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
 	// GetPoolOwnerStakeAtSlot returns historical stake for the requested pool
 	// owner key hashes, keyed by pool plus credential. An owner is included only
 	// when that credential was delegated to the pool at the requested slot.
+	// expiryEpoch drives the CIP-0163 inactivity gate (0 = gate off), and
+	// inactivityPeriod reconstructs expiration from historical witnesses.
 	GetPoolOwnerStakeAtSlot(
 		[][]byte, // ownerKeyHashes
 		uint64, // slot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
 		types.Txn,
 	) (map[string]uint64, error)
 
 	// GetRewardStakeInputsForPools returns positive per-account delegated stake
-	// for pools from the live reward stake aggregate. The aggregate always
-	// reflects the caller's transaction view, so there is no slot argument:
-	// callers scope the result by opening the transaction at the desired point.
+	// for pools. When the CIP-0163 inactivity gate is off (expiryEpoch == 0) it
+	// reads the live reward stake aggregate, byte-identical to the pre-CIP query
+	// (slot and inactivityPeriod are ignored). When the gate is on
+	// (expiryEpoch > 0) it reconstructs per-credential stake and expiration at
+	// slot from the same historical CTE as GetStakeByPoolsAtSlot, so the
+	// reward-basis inputs agree with leader-election pool totals by construction
+	// rather than reading the mutable live account.expiration_epoch column
+	// (which can reflect a post-slot renewal on a fallback capture).
 	GetRewardStakeInputsForPools(
 		[][]byte, // poolKeyHashes
+		uint64, // slot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
@@ -1502,9 +1586,14 @@ type MetadataStore interface {
 	// the current stake of all delegated accounts, approximated from live
 	// UTxO balance plus reward-account balance. credentialTag distinguishes
 	// key (0) from script (1) DRep credentials that share the same hash.
+	// expiryEpoch is the CIP-0163 reward-account inactivity gate: 0 excludes
+	// no accounts (gate off, byte-identical to the pre-CIP query); >0
+	// excludes accounts whose expiration_epoch is nonzero and less than
+	// expiryEpoch.
 	GetDRepVotingPower(
 		uint8, // credentialTag
 		[]byte, // drepCredential
+		uint64, // expiryEpoch
 		types.Txn,
 	) (uint64, error)
 
@@ -1523,18 +1612,22 @@ type MetadataStore interface {
 	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
 	// no delegated stake are omitted. Use StakeCredentialRef to carry both
 	// the tag and hash so that key-hash and script-hash DReps sharing a
-	// 28-byte hash are tallied independently.
+	// 28-byte hash are tallied independently. expiryEpoch is the CIP-0163
+	// gate; see GetDRepVotingPower.
 	GetDRepVotingPowerBatch(
 		drepCredentials []models.StakeCredentialRef,
+		expiryEpoch uint64,
 		txn types.Txn,
 	) (map[string]uint64, error)
 
 	// GetDRepVotingPowerByType returns voting power grouped by DRep
 	// delegation type. This is used for predefined DRep options such
 	// as AlwaysAbstain and AlwaysNoConfidence, which do not have a
-	// credential hash.
+	// credential hash. expiryEpoch is the CIP-0163 gate; see
+	// GetDRepVotingPower.
 	GetDRepVotingPowerByType(
 		drepTypes []uint64,
+		expiryEpoch uint64,
 		txn types.Txn,
 	) (map[uint64]uint64, error)
 

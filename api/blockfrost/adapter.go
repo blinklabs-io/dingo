@@ -1184,7 +1184,9 @@ func (a *NodeAdapter) drepByCredentialTag(
 		)
 	}
 	hasScript := credentialTag == 1
-	power, err := db.GetDRepVotingPower(credentialTag, credential.Hash, nil)
+	// expiryEpoch 0: this point-in-time API query is not gated by the
+	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
+	power, err := db.GetDRepVotingPower(credentialTag, credential.Hash, 0, nil)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
 			"get drep voting power %x: %w",

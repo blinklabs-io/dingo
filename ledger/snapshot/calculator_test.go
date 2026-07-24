@@ -703,6 +703,8 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 		context.Background(),
 		txn,
 		1000,
+		0,
+		0,
 	)
 	require.ErrorContains(t, err, "delegated stake overflow")
 	require.Nil(t, dist)
@@ -746,6 +748,8 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 		context.Background(),
 		txn,
 		1000,
+		0,
+		0,
 	)
 	require.ErrorContains(t, err, "total active stake overflow")
 	require.Nil(t, dist)
