@@ -526,9 +526,18 @@ donations from valid endorser transactions are accumulated in `network_donation`
 under the ranking block's slot/epoch so the treasury update at the epoch boundary
 matches the CIP path. Replayed endorser transactions (hashes already present) are
 skipped so certificate, governance, and UTxO effects are not applied twice.
-Decode/build failures are ignored before storage is touched; once the blob or
-transaction rows start writing, the caller aborts the enclosing block
-transaction rather than committing a partial endorser-block application.
+On the forward/CIP path, decode/build failures are ignored before storage is
+touched; once the blob or transaction rows start writing, the caller aborts the
+enclosing block transaction rather than committing a partial endorser-block
+application. For a Musashi certifying ranking block, the certified parent EB
+and all of these writes are mandatory. The block-processing transaction is not
+opened until the complete EB closure is available, and resolution, decode, or
+apply failure prevents the CertRB and its metadata tip from committing.
+Historical backfill retries instead of recording a prefix that lacks certified
+pool, delegation, UTxO, or governance effects. This guarantee applies to newly
+replayed state; a database produced by an older version that already skipped a
+certified closure must be replayed from before the affected CertRB (normally by
+performing a clean metadata resync).
 
 ### Archive And History Expiry Contract
 

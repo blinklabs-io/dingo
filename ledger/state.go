@@ -403,7 +403,9 @@ type LedgerStateConfig struct {
 	// block that block has already been certified, so the certify-by deadline
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
-	// Shelley slot length. Zero disables the wait.
+	// Shelley slot length. Zero disables best-effort announcement waiting, but
+	// does not permit a Musashi certifying ranking block to commit without its
+	// certified closure.
 	EndorserBlockWaitSlots uint64
 	// LeiosApplyEndorserBlockTxs selects the endorser-block ledger path. When
 	// true (the CIP-conformant path, dingo's forward behavior for real Leios),
@@ -3049,6 +3051,15 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			return
 		}
 		ls.handleLedgerProcessBlocksError(err)
+		if errors.Is(err, errCertifiedEndorserBlockUnavailable) {
+			timer := time.NewTimer(certifiedEndorserBlockRetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
 	}
 }
 
@@ -3576,8 +3587,17 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// endorser blocks its Dijkstra ranking blocks reference, so the
 			// endorser transactions are applied ahead of the ranking blocks
 			// that endorse them. Runs outside the DB transaction opened below
-			// and is a no-op except at the chain tip.
-			ls.ensureReferencedEndorserBlocks(ctx, nextBatch[i:end])
+			// and is a no-op for blocks without Leios references.
+			if err := ls.ensureReferencedEndorserBlocks(
+				ctx,
+				nextBatch[i:end],
+			); err != nil {
+				completeReadResult()
+				return fmt.Errorf(
+					"ensure referenced Leios endorser blocks: %w",
+					err,
+				)
+			}
 
 			// Capture snapshots of state needed during transaction.
 			// Acquire read lock to prevent race with RecoverCommitTimestampConflict
@@ -4081,75 +4101,115 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// block's own. On the forward/CIP path this is the current block's announced
 	// EB. On the Musashi prototype-2026w29 path it is the certified EB announced
 	// by the parent; a CertRB may simultaneously announce a different, new EB.
-	// Decode/build failures remain best-effort. Storage-phase failures abort the
-	// DB transaction so a partial endorser-block application cannot be committed.
-	if currentEra.Id == dijkstra.EraIdDijkstra &&
-		ls.config.EndorserBlockProvider != nil {
-		ebHash, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(block)
-		switch {
-		case refErr != nil:
-			ls.config.Logger.Warn(
-				"failed to resolve Leios endorser block for ranking block",
-				"component", "ledger",
-				"slot", point.Slot,
-				"error", refErr,
-			)
-		case referenced:
-			if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
-				ebHash.Bytes(),
-			); ok {
-				var donation uint64
-				applied, donation, err := ls.applyEndorserBlock(
-					txn,
-					point,
-					block.BlockNumber(),
-					ebSlot,
-					ebHash.Bytes(),
-					ebTxs,
-				)
-				var storageErr *leiosEndorserBlockStorageError
-				switch {
-				case errors.As(err, &storageErr):
-					ls.config.Logger.Warn(
-						"failed to apply Leios endorser block after storage mutation",
-						"component", "ledger",
-						"slot", point.Slot,
-						"eb_slot", ebSlot,
-						"error", err,
+	// Decode/build failures remain best-effort on the forward/CIP path. On the
+	// Musashi certificate-driven path every certified closure is mandatory, so
+	// resolution, availability, decode, and apply failures abort the block.
+	// Storage-phase failures always abort the DB transaction so a partial
+	// endorser-block application cannot be committed.
+	if currentEra.Id == dijkstra.EraIdDijkstra {
+		if ls.config.EndorserBlockProvider == nil {
+			if certifier, ok := block.Header().(leiosEndorserBlockCertifier); ok {
+				if certified, present := certifier.LeiosCertified(); present &&
+					certified &&
+					!ls.config.LeiosApplyEndorserBlockTxs {
+					return nil, fmt.Errorf(
+						"%w: ranking block at slot %d has no endorser block provider",
+						errCertifiedEndorserBlockUnavailable,
+						point.Slot,
 					)
-					return nil, err
-				case err != nil:
-					ls.config.Logger.Warn(
-						"failed to apply Leios endorser block transactions",
-						"component", "ledger",
-						"slot", point.Slot,
-						"eb_slot", ebSlot,
-						"error", err,
-					)
-				default:
-					ls.logLeiosEndorserBlockApplyResult(
-						point,
-						ebSlot,
-						ebTxs,
-						applied,
-					)
-					blockDonation += donation
 				}
-			} else {
-				ls.config.Logger.Debug(
-					"ranking block references an endorser block not yet cached",
+			}
+		} else {
+			ebHash, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(block)
+			switch {
+			case refErr != nil:
+				if !ls.config.LeiosApplyEndorserBlockTxs {
+					return nil, fmt.Errorf(
+						"%w: resolve certified endorser block at slot %d: %w",
+						errCertifiedEndorserBlockUnavailable,
+						point.Slot,
+						refErr,
+					)
+				}
+				ls.config.Logger.Warn(
+					"failed to resolve Leios endorser block for ranking block",
 					"component", "ledger",
 					"slot", point.Slot,
-					"eb_hash", ebHash.String(),
-					"eb_size", ebSize,
+					"error", refErr,
+				)
+			case referenced:
+				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+					ebHash.Bytes(),
+				); ok {
+					var donation uint64
+					applied, donation, err := ls.applyEndorserBlock(
+						txn,
+						point,
+						block.BlockNumber(),
+						ebSlot,
+						ebHash.Bytes(),
+						ebTxs,
+					)
+					var storageErr *leiosEndorserBlockStorageError
+					switch {
+					case errors.As(err, &storageErr):
+						ls.config.Logger.Warn(
+							"failed to apply Leios endorser block after storage mutation",
+							"component", "ledger",
+							"slot", point.Slot,
+							"eb_slot", ebSlot,
+							"error", err,
+						)
+						return nil, err
+					case err != nil:
+						if !ls.config.LeiosApplyEndorserBlockTxs {
+							return nil, fmt.Errorf(
+								"%w: apply certified endorser block at slot %d: %w",
+								errCertifiedEndorserBlockUnavailable,
+								point.Slot,
+								err,
+							)
+						}
+						ls.config.Logger.Warn(
+							"failed to apply Leios endorser block transactions",
+							"component", "ledger",
+							"slot", point.Slot,
+							"eb_slot", ebSlot,
+							"error", err,
+						)
+					default:
+						ls.logLeiosEndorserBlockApplyResult(
+							point,
+							ebSlot,
+							ebTxs,
+							applied,
+						)
+						blockDonation += donation
+					}
+				} else {
+					if !ls.config.LeiosApplyEndorserBlockTxs {
+						return nil, fmt.Errorf(
+							"%w: ranking block at slot %d requires EB %s",
+							errCertifiedEndorserBlockUnavailable,
+							point.Slot,
+							ebHash.String(),
+						)
+					}
+					ls.config.Logger.Debug(
+						"ranking block references an endorser block not yet cached",
+						"component", "ledger",
+						"slot", point.Slot,
+						"eb_hash", ebHash.String(),
+						"eb_size", ebSize,
+					)
+				}
+			default:
+				ls.config.Logger.Debug(
+					"dijkstra block has no Leios endorser block to apply",
+					"component", "ledger",
+					"slot", point.Slot,
 				)
 			}
-		default:
-			ls.config.Logger.Debug(
-				"dijkstra block has no Leios endorser block to apply",
-				"component", "ledger",
-				"slot", point.Slot,
-			)
 		}
 	}
 

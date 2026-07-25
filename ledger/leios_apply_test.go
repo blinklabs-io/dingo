@@ -25,7 +25,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -419,6 +421,136 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 // as both a map key (string form) and an endorser-block hash.
 func leiosTestHash(b byte) []byte {
 	return bytes.Repeat([]byte{b}, lcommon.Blake2b256Size)
+}
+
+func leiosTestRaw(t *testing.T, value any) cbor.RawMessage {
+	t.Helper()
+	raw, err := cbor.Encode(value)
+	require.NoError(t, err)
+	return cbor.RawMessage(raw)
+}
+
+func leiosTestCertifiedBlockPair(
+	t *testing.T,
+) (*dijkstra.DijkstraBlock, *dijkstra.DijkstraBlock, lcommon.Blake2b256) {
+	t.Helper()
+	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE1))
+	parent := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 1,
+					Slot:        100,
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{
+				leiosTestRaw(t, false),
+				leiosTestRaw(t, []any{ebHash.Bytes(), uint64(4096)}),
+			},
+		},
+	}
+	certifier := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 2,
+					Slot:        140,
+					PrevHash:    parent.Hash(),
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{
+				leiosTestRaw(t, true),
+				cbor.RawMessage{0xf6},
+			},
+		},
+	}
+	return parent, certifier, ebHash
+}
+
+func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
+	t *testing.T,
+) {
+	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
+	available := false
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				hash []byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return parent.SlotNumber(), nil,
+					available && bytes.Equal(hash, ebHash.Bytes())
+			},
+			// A zero wait disables best-effort announcement waiting. It must
+			// not disable the certified-closure consistency check.
+			EndorserBlockWaitSlots: 0,
+		},
+	}
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+
+	available = true
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	))
+
+	ls.config.EndorserBlockProvider = nil
+	err = ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.Contains(t, err.Error(), "no endorser block provider configured")
+}
+
+func TestEnsureReferencedEndorserBlocksKeepsCIPAnnouncementsBestEffort(
+	t *testing.T,
+) {
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				[]byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return 0, nil, false
+			},
+			EndorserBlockWaitSlots:     0,
+			LeiosApplyEndorserBlockTxs: true,
+		},
+	}
+
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	))
+}
+
+func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
+	t *testing.T,
+) {
+	_, certifier, _ := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EndorserBlockProvider: func(
+				[]byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return 0, nil, false
+			},
+		},
+	}
+
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.Contains(t, err.Error(), "no resolvable parent announcement")
 }
 
 // TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
