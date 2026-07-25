@@ -32,6 +32,7 @@ make import-boundaries
 ## Non-obvious invariants
 
 - CBOR offsets: UTxOs/txs store 52-byte `CborOffset` refs (magic `"DOFF"` + slot + hash + offset + length), not full CBOR. Resolved via `TieredCborCache` (hot → block LRU → cold blob extract). See `database/cbor_offset.go`, `database/cbor_cache.go`, `database/block_indexer.go`.
+- gouroboros types embedding `DecodeStoreCbor` (blocks, tx bodies, etc.) return the original decoded bytes verbatim from `MarshalCBOR()` whenever `Cbor()` is non-nil — mutating a decoded struct's fields and re-marshaling silently re-emits the pre-mutation bytes. Call `SetCbor(nil)` before marshaling after mutating fields, or the change is dropped.
 - EventBus for async cross-component notifications: block/chain/mempool/peer events go through `event.EventBus.SubscribeFunc()`. Synchronous state queries between components still use direct method calls.
 - Cert ordering: multiple certs per slot — tie-break with `Order("added_slot DESC, block_index DESC, cert_index DESC")` (`cert_index` resets per tx, so `block_index` is required to disambiguate across txs in the same block).
 - Rollbacks: `Chain.Rollback(point)` emits `ChainRollbackEvent`; check `TransactionEvent.Rollback` for undo.
