@@ -1,5 +1,113 @@
 # Dingo Releases
 
+## v0.67.1 (July 25, 2026)
+
+**Title:** Prevent certified Leios commits before endorser closure is ready
+
+**Date:** July 25, 2026
+
+**Version:** v0.67.1
+
+This release prevents silent omission of certified endorser effects during certified ranking block commits, keeps prototype-2026w30 Leios networking compatible, and records the previous release's published highlights in the latest release history. Operators may need to replay or resync from before an affected CertRB if a certified endorser block was previously skipped.
+
+### 💪 Improvements
+
+* Updated the v0.67.0 release notes so the latest release history includes the earlier reward, mempool, and ledger highlights.
+* Improved `CertState` decoding so Dijkstra stake-pool registration certificates accept an optional Leios key or explicit `null`, reject malformed key and proof data, and keep later field positions aligned.
+* Added Leios Notify handling for ranking-block `MsgBlockAnnouncement` messages by ignoring the header for now, which keeps prototype-2026w30 networking compatible.
+
+### 🔧 Fixes
+
+* Fixed certified ranking block commits so the node waits for the certified endorser block closure, retries after `certifiedEndorserBlockRetryDelay` when the closure is unavailable, and returns `errCertifiedEndorserBlockUnavailable` instead of silently committing without certified endorser effects. In affected clusters, operators may need to replay or resync from before the skipped CertRB.
+* Adjusted the prepared-statement cache path so database updates consume the cached statement instead of leaving stale state behind.
+* Restored governance action ID import behavior so previous governance action IDs load during ledger imports.
+* Refined CBOR cache guidance so clearing a cached block uses `SetCbor(nil)`, which keeps cached CBOR data aligned with node state.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** 認証済み Leios のエンドーサー closure 前コミットを防止し、prototype-2026w30 互換性を維持
+
+**日付:** July 25, 2026
+
+**バージョン:** v0.67.1
+
+このリリースでは、認証済みエンドーサーの block closure が整う前に ranking block を commit しないようにし、認証済みエンドーサーの effect が silent に欠落しないようにします。prototype-2026w30 の Leios 通信互換性を保ち、前版の release history 更新も反映します。影響を受けた CertRB の前から replay または resync が必要になる場合があります。
+
+### 💪 改善
+
+* 更新しました v0.67.0 の release notes を、最新の release history に前回の reward、mempool、ledger の要点も含めます。
+* 改善しました `CertState` decoding を、Dijkstra stake-pool registration certificate が optional Leios key または explicit null を受け取り、malformed key/proof data を拒否し、後続 field の位置を正しく保つようにします。
+* 追加しました ranking-block の `MsgBlockAnnouncement` を header を無視して受け取る Leios Notify handling で、prototype-2026w30 の互換性を保ちます。
+
+### 🔧 修正
+
+* 修正しました certified ranking block commit で、node が certified endorser block closure を待ち、closure が利用できないときは `certifiedEndorserBlockRetryDelay` 後に再試行し、`errCertifiedEndorserBlockUnavailable` を返して、certified endorser effects を欠いたまま silent commit しないようにします。影響を受けた cluster では、スキップされた CertRB より前から replay または resync が必要になる場合があります。
+* 是正しました prepared-statement cache path を、database update が cached statement を消費し、stale state を残さないようにします。
+* 復元しました governance action ID の import 動作を、ledger import で前回の governance action ID を読み込めるようにします。
+* 整理しました CBOR cache の案内を、cached block の削除に `SetCbor(nil)` を使い、cached CBOR data を node state と揃えます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Evitar commits certificados de Leios antes de que la closure esté lista y mantener la compatibilidad de prototype-2026w30
+
+**Fecha:** July 25, 2026
+
+**Versión:** v0.67.1
+
+Esta versión evita que los ranking blocks certificados omitan en silencio los efectos del certified endorser, mantiene la compatibilidad de red de Leios con prototype-2026w30 y refleja la actualización del historial de la versión anterior. Si un certified endorser block ya se omitió, puede hacer falta replay o resync desde antes del CertRB afectado.
+
+### 💪 Mejoras
+
+* Actualizó las notas de la versión v0.67.0 para que el historial más reciente incluya los aspectos destacados anteriores de reward, mempool y ledger.
+* Mejoró la decodificación de `CertState` para que los certificados de registro de stake pool de Dijkstra acepten una clave Leios opcional o `null` explícito, rechacen datos de clave y prueba malformados, y mantengan alineados los campos posteriores.
+* Agregó compatibilidad de Leios Notify para mensajes `MsgBlockAnnouncement` con encabezado de ranking block al ignorar el encabezado por ahora, lo que mantiene la compatibilidad con prototype-2026w30.
+
+### 🔧 Correcciones
+
+* Corrigió los commits de ranking blocks certificados para que el nodo espere la closure del certified endorser block, reintente después de `certifiedEndorserBlockRetryDelay` cuando la closure no esté disponible, y devuelva `errCertifiedEndorserBlockUnavailable` en lugar de confirmar sin los efectos del certified endorser. En clústeres afectados, puede hacer falta replay o resync desde antes del CertRB omitido.
+* Restableció la ruta de caché de prepared statements para que las actualizaciones de base de datos consuman la instrucción en caché y no dejen estado obsoleto.
+* Refinó el comportamiento de importación de IDs de governance action para que los IDs anteriores se carguen durante las importaciones del ledger.
+* Fortaleció la guía de caché CBOR para que borrar un bloque en caché use `SetCbor(nil)`, lo que mantiene alineados los datos CBOR en caché con el estado del nodo.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.67.0 (July 24, 2026)
 
 **Title:** Expand reward handling, configurable FIFO mempool support, and ledger safeguards
