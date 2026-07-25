@@ -443,6 +443,12 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		return fmt.Errorf("failed to lookup connection ID: %s", connId)
 	}
 	switch m := msg.(type) {
+	case *oleiosnotify.MsgBlockAnnouncement:
+		// prototype-2026w30 sends the full ranking-block header here instead of
+		// CBOR null. gouroboros retains that payload as raw CBOR; accept it but
+		// intentionally ignore it until dingo's announcement pipeline consumes
+		// ranking-block headers directly.
+		return nil
 	case *oleiosnotify.MsgBlockOffer:
 		// While the ledger is deeply behind the head, do not prefetch this
 		// head endorser block: it would expire before the ledger reaches it and

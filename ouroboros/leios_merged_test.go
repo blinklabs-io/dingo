@@ -248,6 +248,29 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestLeiosNotifyBlockAnnouncementWithHeaderIsIgnored(t *testing.T) {
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	conn, err := gouroboros.New()
+	require.NoError(t, err)
+	require.True(t, cm.AddConnection(conn, false, "127.0.0.1:1234"))
+	defer func() {
+		conn.ErrorChan() <- errors.New("test connection closed")
+	}()
+
+	_, blockRaw := testDijkstraBlockRaw(t, 1)
+	var components []cbor.RawMessage
+	_, err = cbor.Decode(blockRaw, &components)
+	require.NoError(t, err)
+	require.Len(t, components, 2)
+
+	o := NewOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
+	err = o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+		oleiosnotify.NewMsgBlockAnnouncement(components[0]),
+	)
+	require.NoError(t, err)
+}
+
 var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")
 
 func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
