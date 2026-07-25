@@ -36,6 +36,42 @@ This release prevents certified ranking blocks from committing before their cert
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** 認証済み Leios の閉塞前コミットを防止し、prototype-2026w30 互換性を維持
+
+**日付:** July 25, 2026
+
+**バージョン:** v0.67.1
+
+このリリースでは、認証済みエンドーサーの block closure が整う前に ranking block を commit しないようにし、prototype-2026w30 の Leios 通信互換性を保ち、前版の release history 更新も反映します。
+
+### 💪 改善
+
+* 更新しました v0.67.0 の release notes を、最新の release history に前回の reward、mempool、ledger の要点も含めます。
+* 改善しました `CertState` decoding を、Dijkstra stake-pool registration certificate が optional Leios key または explicit null を受け取り、malformed key/proof data を拒否し、後続 field の位置を正しく保つようにします。
+* 追加しました ranking-block の `MsgBlockAnnouncement` を header を無視して受け取る Leios Notify handling で、prototype-2026w30 の互換性を保ちます。
+
+### 🔧 修正
+
+* 修正しました certified ranking block commit で、node が certified endorser block closure を待ち、closure が利用できないときは `certifiedEndorserBlockRetryDelay` 後に再試行し、`errCertifiedEndorserBlockUnavailable` を返して、certified endorser effects を欠いたまま silent commit しないようにします。影響を受けた cluster では、スキップされた CertRB より前から replay または resync が必要になる場合があります。
+* 更新しました prepared-statement cache path を、database update が cached statement を消費し、stale state を残さないようにします。
+* 復元しました governance action ID の import 動作を、ledger import で前回の governance action ID を読み込めるようにします。
+* 整理しました CBOR cache の案内を、cached block の削除に `SetCbor(nil)` を使い、cached CBOR data を node state と揃えます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ## v0.67.0 (July 24, 2026)
 
 **Title:** Expand reward handling, configurable FIFO mempool support, and ledger safeguards
