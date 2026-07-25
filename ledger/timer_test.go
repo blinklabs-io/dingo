@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,4 +256,76 @@ func TestScheduler_ChangeInterval_RejectsInvalidDuration(t *testing.T) {
 	// default case in the select, but the validation itself succeeds.
 	err = timer.ChangeInterval(100 * time.Millisecond)
 	require.NoError(t, err)
+}
+
+// TestScheduler_StopIsIdempotent verifies that calling Stop more than
+// once (or on a Scheduler that was never Start-ed) does not panic.
+// LedgerState.Close calls Scheduler.Stop unconditionally, and some
+// callers (e.g. test cleanup) may also call it directly beforehand --
+// Stop must tolerate being called from both without double-closing its
+// quit channel.
+func TestScheduler_StopIsIdempotent(t *testing.T) {
+	timer := NewScheduler(10 * time.Millisecond)
+	timer.Start()
+	require.NotPanics(t, func() {
+		timer.Stop()
+		timer.Stop()
+	})
+}
+
+// TestScheduler_StopWithoutStartIsSafe verifies that Stop on a Scheduler
+// that was constructed but never Start-ed does not panic either --
+// LedgerState.Close calls Scheduler.Stop whenever ls.Scheduler is
+// non-nil, regardless of whether dev-mode forging ever actually started
+// ticking.
+func TestScheduler_StopWithoutStartIsSafe(t *testing.T) {
+	timer := NewScheduler(10 * time.Millisecond)
+	require.NotPanics(t, func() {
+		timer.Stop()
+	})
+}
+
+// TestScheduler_StopDoesNotRaceChangeInterval guards against a real data
+// race: run's interval-update case (driven by ChangeInterval, which a
+// running node calls at era/epoch boundaries as slot length changes)
+// reassigns st.ticker under st.mutex, but Stop used to read st.ticker
+// with no synchronization at all. This never surfaced via -race in
+// practice until LedgerState.Close started calling Scheduler.Stop on a
+// live, running scheduler -- before that, Stop was only ever called on
+// schedulers nothing else was concurrently touching. Run with -race:
+// this must never report a race between the ChangeInterval goroutine's
+// write and Stop's read of st.ticker.
+func TestScheduler_StopDoesNotRaceChangeInterval(t *testing.T) {
+	timer := NewScheduler(1 * time.Millisecond)
+	timer.Start()
+
+	// updateIntervalChan is unbuffered and ChangeInterval's send is
+	// non-blocking (select/default), so goroutines spinning as fast as
+	// possible maximize the chance run's interval-update case actually
+	// wins the race against Stop reading st.ticker concurrently, rather
+	// than every send just being dropped before run gets to it. Several
+	// concurrent callers (not just one) raise the odds this reproduces
+	// within a single run rather than needing many repeated runs.
+	const changers = 8
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(changers)
+	for g := range changers {
+		go func(n int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				interval := time.Duration(1+(i+n)%3) * time.Millisecond
+				_ = timer.ChangeInterval(interval)
+			}
+		}(g)
+	}
+
+	timer.Stop()
+	close(stop)
+	wg.Wait()
 }

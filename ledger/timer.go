@@ -47,6 +47,7 @@ type Scheduler struct {
 	tasks              []*ScheduledTask
 	interval           time.Duration
 	startOnce          sync.Once
+	stopOnce           sync.Once
 	mutex              sync.Mutex
 	// Worker pool fields
 	workerPoolSize int
@@ -208,11 +209,22 @@ func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 	return nil
 }
 
-// Stop the timer (terminates)
+// Stop the timer (terminates). Safe to call more than once, or on a
+// Scheduler that was never Start-ed: only the first call does anything.
 func (st *Scheduler) Stop() {
-	close(st.quit)
-	if st.ticker != nil {
-		st.ticker.Stop()
-	}
-	st.stopWorkerPool()
+	st.stopOnce.Do(func() {
+		close(st.quit)
+		// st.ticker is reassigned under st.mutex by run's interval-update
+		// case (ChangeInterval, called at era/epoch boundaries in a real
+		// running node) -- read it under the same lock rather than
+		// racing that write, then Stop the ticker itself outside the
+		// lock to keep the critical section to just the field access.
+		st.mutex.Lock()
+		ticker := st.ticker
+		st.mutex.Unlock()
+		if ticker != nil {
+			ticker.Stop()
+		}
+		st.stopWorkerPool()
+	})
 }

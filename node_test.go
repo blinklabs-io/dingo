@@ -255,10 +255,9 @@ func newNodeTestDivergedLedger(
 	})
 	require.NoError(t, err)
 	require.NoError(t, ledgerState.Start(context.Background()))
+	// Close stops ls.Scheduler itself now, so no separate manual Stop
+	// call is needed here.
 	t.Cleanup(func() {
-		if ledgerState.Scheduler != nil {
-			ledgerState.Scheduler.Stop()
-		}
 		require.NoError(t, ledgerState.Close())
 	})
 

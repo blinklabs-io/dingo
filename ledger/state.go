@@ -1418,6 +1418,29 @@ func (ls *LedgerState) Close() error {
 		return nil
 	}
 
+	// Stop the dev-mode block-forging scheduler first, before anything
+	// else below: initForge registers ls.forgeBlock on ls.Scheduler as a
+	// fixed-interval task that writes directly to ls.chain/the database
+	// (its own transaction, entirely bypassing ls.dbWorkerPool -- so
+	// shutting down dbWorkerPool below provides no protection against
+	// it). Left running, a live restore/truncate's quiesce (which stops
+	// only the production BlockForger, node_lifecycle.go) would leave
+	// this scheduler free to keep firing forgeBlock against a LedgerState
+	// that's being closed and replaced out from under it, racing the
+	// live operation's own blob/metadata mutations and the subsequent
+	// construction of a new LedgerState with its own new Scheduler. A
+	// stray block that lands in that window can leave the persistent
+	// block-ID index with a gap whose far side doesn't actually chain
+	// from the post-operation tip -- surfaced later, far from the actual
+	// race, as "persistent chain index gap" from the chain iterator
+	// (chain/chain.go) and a permanently stalled tip. Scheduler.Stop is
+	// synchronous: it closes the ticker and waits for its worker pool to
+	// drain, so no forgeBlock call can still be in flight once this
+	// returns.
+	if ls.Scheduler != nil {
+		ls.Scheduler.Stop()
+	}
+
 	// Unsubscribe from event bus to stop receiving new events. Use
 	// UnsubscribeAndWait, not Unsubscribe: several of these handlers read
 	// component fields (e.g. chainsyncState via GetActiveConnectionFunc)
@@ -7057,6 +7080,32 @@ func (ls *LedgerState) RecordForgedBlock(
 	)
 }
 
+// persistTipAfterForgedBlock persists block as the new tip in the
+// database. forgeBlock's ls.chain.AddBlock call only updates ls.chain's
+// in-memory tip -- unlike the normal chainsync/forged-block batch
+// pipeline (which calls db.SetTip as part of its own transaction once
+// blocksProcessed > 0), forgeBlock has no other call that persists the
+// new tip. Without this, database.GetTip (what dingoctl's `database
+// info` reports, what a live Truncate uses as its deletion boundary, and
+// what BlockForger's leader-election check reads via slotClock) never
+// advances for a dev-mode-forged block. A block left in that state is
+// physically written (blob + metadata block row, raw block_count keeps
+// climbing) but invisible to anything relying on the persisted tip: a
+// later Truncate computes its delete-range against the stale tip and
+// can never reach this block, leaving it a permanent straggler that
+// eventually surfaces as a "persistent chain index gap" error from the
+// chain iterator (chain/chain.go) once something tries to walk past it.
+func (ls *LedgerState) persistTipAfterForgedBlock(block ledger.Block) error {
+	newTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			block.SlotNumber(),
+			block.Hash().Bytes(),
+		),
+		BlockNumber: block.BlockNumber(),
+	}
+	return ls.db.SetTip(newTip, nil)
+}
+
 // forgeBlock creates a conway block with transactions from mempool
 // Also adds it to the primary chain
 func (ls *LedgerState) forgeBlock() {
@@ -7400,6 +7449,17 @@ func (ls *LedgerState) forgeBlock() {
 	if err != nil {
 		ls.config.Logger.Error(
 			"failed to add forged block to primary chain",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+
+	// Persist the new tip. See persistTipAfterForgedBlock's doc comment
+	// for why this is required in addition to AddBlock above.
+	if err := ls.persistTipAfterForgedBlock(ledgerBlock); err != nil {
+		ls.config.Logger.Error(
+			"failed to persist tip after forged block",
 			"component", "ledger",
 			"error", err,
 		)
