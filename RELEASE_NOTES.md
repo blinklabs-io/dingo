@@ -72,6 +72,42 @@ Thank you for trying!
 
 ご利用ありがとうございます。
 
+### 🇪🇸 Español
+
+**Título:** Evitar commits certificados de Leios antes de que la closure esté lista y mantener la compatibilidad de prototype-2026w30
+
+**Fecha:** July 25, 2026
+
+**Versión:** v0.67.1
+
+Esta versión evita que los ranking blocks certificados se confirmen antes de que la certified endorser block closure esté lista, mantiene la compatibilidad de red de Leios con prototype-2026w30 y refleja la actualización del historial de la versión anterior.
+
+### 💪 Mejoras
+
+* Actualizó las notas de la versión v0.67.0 para que el historial más reciente incluya los aspectos destacados anteriores de reward, mempool y ledger.
+* Mejoró la decodificación de `CertState` para que los certificados de registro de stake pool de Dijkstra acepten una clave Leios opcional o `null` explícito, rechacen datos de clave y prueba malformados, y mantengan alineados los campos posteriores.
+* Agregó compatibilidad de Leios Notify para mensajes `MsgBlockAnnouncement` con encabezado de ranking block al ignorar el encabezado por ahora, lo que mantiene la compatibilidad con prototype-2026w30.
+
+### 🔧 Correcciones
+
+* Corrigió los commits de ranking blocks certificados para que el nodo espere la closure del certified endorser block, reintente después de `certifiedEndorserBlockRetryDelay` cuando la closure no esté disponible, y devuelva `errCertifiedEndorserBlockUnavailable` en lugar de confirmar sin los efectos del certified endorser. En clústeres afectados, puede hacer falta replay o resync desde antes del CertRB omitido.
+* Restableció la ruta de caché de prepared statements para que las actualizaciones de base de datos consuman la instrucción en caché y no dejen estado obsoleto.
+* Refinó el comportamiento de importación de IDs de governance action para que los IDs anteriores se carguen durante las importaciones del ledger.
+* Fortaleció la guía de caché CBOR para que borrar un bloque en caché use `SetCbor(nil)`, lo que mantiene alineados los datos CBOR en caché con el estado del nodo.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.67.0 (July 24, 2026)
 
 **Title:** Expand reward handling, configurable FIFO mempool support, and ledger safeguards
