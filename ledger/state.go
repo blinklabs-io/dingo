@@ -2310,33 +2310,97 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	return nil
 }
 
-// processChainIteratorRollback applies a rollback emitted by the primary chain
-// iterator only when the chain still sits at that rollback point. Iterator
-// rollbacks can lag behind live blockfetch/chainsync activity; if the primary
-// chain has already re-extended past the rollback point, applying the rollback
-// again would desynchronize metadata from the blob-backed chain. In that case
-// we must restart the ledger pipeline so the chain iterator rewinds itself to
-// the current metadata tip and resumes on the canonical chain instead of
-// continuing from stale block indexes on the abandoned fork.
+// processChainIteratorRollback applies a rollback emitted by the primary
+// chain iterator. Iterator rollbacks can lag behind live blockfetch/
+// chainsync activity: by the time this runs, the primary chain may have
+// already re-extended past the rollback point (point). A stale point does
+// NOT by itself mean ls.currentTip is fine -- it only means point is not
+// the chain's current tip anymore. What actually determines whether
+// ls.currentTip needs rolling back is whether ls.currentTip's own block is
+// still part of the chain at all. Chain.Rollback (chain/chain.go,
+// rollbackLocked) physically deletes an abandoned block's blob/metadata
+// rows (database.BlockDeleteTxn, keyed by slot+hash+ID) the moment chain-
+// selection decides against it -- independent of how far behind the
+// ledger's own rollback/catch-up has gotten -- so a direct, uncached
+// database.BlockByPoint(ls.db, ls.currentTip.Point) lookup reliably
+// answers "is ls.currentTip still on the canonical chain" even when the
+// chain has grown further since this rollback event was emitted. This
+// must go straight to the database rather than through
+// ls.chain.BlockByPoint: ChainManager.removeBlockByIndex deliberately
+// re-inserts the removed block into its own in-memory blockCache
+// ("in case other chains are using it", chain/manager.go) as part of
+// removal, so a chain-level lookup finds a just-deleted block right after
+// its removal and would defeat this check entirely.
+//
+//   - Found: ls.currentTip is still valid (an ancestor of, or equal to,
+//     the current chain tip) -- this rollback event is moot, whatever
+//     triggered it has already been superseded. Skip ls.rollback (calling
+//     it here would wrongly discard still-valid, already-ledger-processed
+//     blocks added after point). The read iterator's own cursor may still
+//     need rewinding, though, so still request a pipeline restart.
+//   - Not found: ls.currentTip's block was removed -- it was on the
+//     abandoned fork. point is the fork/rollback point chain-selection
+//     reported when it made that decision, so it's still the correct
+//     ancestor to roll back to even though the chain has since grown
+//     further from it.
+//
+// Getting this backwards previously caused two distinct failures: an
+// earlier version of this fix rolled back unconditionally on any stale
+// mismatch, which (per TestProcessChainIteratorRollbackSkipsStaleRollback)
+// wrongly discards valid state whenever the chain has simply grown past
+// point without ls.currentTip ever having diverged. The original code
+// skipped the rollback unconditionally instead, which left ls.currentTip
+// permanently stuck on a genuinely abandoned fork when one existed: every
+// subsequent pipeline restart re-derived expectedPrevHash from that same
+// un-rolled-back ls.currentTip, so ledgerProcessBlock's prev-hash check
+// failed identically forever (errStaleChainIterator in a tight loop, no
+// forward progress, eventually exhausting the node).
 func (ls *LedgerState) processChainIteratorRollback(
 	point ocommon.Point,
 ) error {
 	chainTip := ls.chain.Tip()
-	if chainTip.Point.Slot != point.Slot ||
-		!bytes.Equal(chainTip.Point.Hash, point.Hash) {
-		ls.config.Logger.Debug(
-			"stale chain iterator rollback detected, restarting ledger pipeline",
-			"component", "ledger",
-			"rollback_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"chain_tip_slot", chainTip.Point.Slot,
-			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-		)
-		return errRestartLedgerPipeline
-	}
+	stale := chainTip.Point.Slot != point.Slot ||
+		!bytes.Equal(chainTip.Point.Hash, point.Hash)
+
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
+
+	if stale {
+		_, err := database.BlockByPoint(ls.db, currentTip.Point)
+		switch {
+		case err == nil:
+			ls.config.Logger.Debug(
+				"stale chain iterator rollback superseded, ledger tip still valid, restarting ledger pipeline",
+				"component", "ledger",
+				"rollback_slot", point.Slot,
+				"rollback_hash", hex.EncodeToString(point.Hash),
+				"chain_tip_slot", chainTip.Point.Slot,
+				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			)
+			return errRestartLedgerPipeline
+		case errors.Is(err, models.ErrBlockNotFound):
+			ls.config.Logger.Debug(
+				"stale chain iterator rollback, ledger tip was on abandoned fork, rolling back and restarting ledger pipeline",
+				"component", "ledger",
+				"rollback_slot", point.Slot,
+				"rollback_hash", hex.EncodeToString(point.Hash),
+				"chain_tip_slot", chainTip.Point.Slot,
+				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+				"ledger_tip_slot", currentTip.Point.Slot,
+				"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+			)
+			if err := ls.rollback(point); err != nil {
+				return err
+			}
+			return errRestartLedgerPipeline
+		default:
+			return fmt.Errorf(
+				"check ledger tip against current chain: %w", err,
+			)
+		}
+	}
+
 	if currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
 		return nil
@@ -2875,7 +2939,29 @@ func (ls *LedgerState) ledgerReadChainIterator(
 	}
 }
 
+// noProgressBackoffBase/Max bound the delay applied when consecutive
+// pipeline restarts land on the exact same (slot, hash) tip with no
+// forward progress between them. Without this, a genuinely unrecoverable
+// error (one that a bare pipeline restart can never fix on its own, e.g.
+// two blocks legitimately racing for the same slot) spins the loop below
+// at whatever speed a restart+immediate-refail cycle completes -- observed
+// in practice at roughly one attempt every ~40ms, pegging a CPU core
+// indefinitely with no possibility of ever making progress on its own.
+// This is a backstop, not a fix for any specific error: it does not change
+// whether the condition resolves, only how fast the pipeline hammers
+// against it while it doesn't.
+const (
+	noProgressBackoffBase = 10 * time.Millisecond
+	noProgressBackoffMax  = 2 * time.Second
+)
+
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
+	var (
+		consecutiveNoProgress int
+		haveLastTip           bool
+		lastTipSlot           uint64
+		lastTipHash           []byte
+	)
 	for {
 		attemptCtx, cancel := context.WithCancel(ctx)
 		readChainResultCh := make(chan readChainResult)
@@ -2896,6 +2982,47 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 				timer.Stop()
 				return
 			case <-timer.C:
+			}
+			continue
+		}
+
+		ls.RLock()
+		tipSlot := ls.currentTip.Point.Slot
+		tipHash := ls.currentTip.Point.Hash
+		ls.RUnlock()
+		if haveLastTip && tipSlot == lastTipSlot &&
+			bytes.Equal(tipHash, lastTipHash) {
+			consecutiveNoProgress++
+		} else {
+			consecutiveNoProgress = 0
+		}
+		lastTipSlot = tipSlot
+		lastTipHash = tipHash
+		haveLastTip = true
+
+		if consecutiveNoProgress > 0 {
+			shift := min(consecutiveNoProgress-1, 8)
+			backoff := min(
+				noProgressBackoffBase*(time.Duration(1)<<uint(shift)),
+				noProgressBackoffMax,
+			)
+			if consecutiveNoProgress == 10 ||
+				consecutiveNoProgress%100 == 0 {
+				ls.config.Logger.Warn(
+					"ledger pipeline making no progress across repeated restarts, backing off",
+					"component", "ledger",
+					"consecutive_no_progress", consecutiveNoProgress,
+					"backoff", backoff,
+					"tip_slot", tipSlot,
+					"error", err,
+				)
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return
 			}
 		}
 	}

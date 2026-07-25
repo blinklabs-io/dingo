@@ -3596,3 +3596,53 @@ On chain rollback past an epoch boundary:
   inputs (mark snapshot, performance block counts, and the pot's
   treasury/reserves/fees) are frozen at or before the retained pot's slot, so the
   recomputed value is numerically identical
+
+### Ledger-Tip/Chain-Iterator Rollback Synchronization
+
+`ledgerProcessBlocks` (`ledger/state.go`) reads batches from the primary
+chain iterator in a loop; when the iterator reports a rollback,
+`processChainIteratorRollback` decides whether `ls.currentTip` (the
+ledger's own committed position, distinct from `ls.chain.Tip()`, the
+chain-selection layer's current view) needs rolling back to match. The
+iterator's reported rollback point can be stale by the time this runs —
+chain-selection may have already extended the chain further past it —
+but staleness alone does not determine whether `ls.currentTip` needs
+correcting: a stale point can mean either "the chain simply grew past
+this point, `ls.currentTip` was never affected" (skip) or "`ls.currentTip`
+is on a fork chain-selection has since abandoned" (must roll back). This
+function distinguishes the two with a direct, uncached
+`database.BlockByPoint(ls.db, ls.currentTip.Point)` lookup rather than a
+chain-tip comparison or `ls.chain.BlockByPoint`:
+`ChainManager.removeBlockByIndex` physically deletes an abandoned block's
+blob/metadata rows (`database.BlockDeleteTxn`, keyed by slot+hash+ID) the
+moment chain-selection commits to a different fork — independent of how
+far behind the ledger's own downstream rollback/catch-up has gotten — but
+it also re-inserts the removed block into `ChainManager`'s own in-memory
+`blockCache` ("in case other chains are using it"), so a chain-level
+lookup would find a block that was just deleted from the canonical index
+and give a false "still valid" answer. Getting this wrong in either
+direction is a real failure mode, not a cosmetic one: unconditionally
+rolling back on any stale mismatch discards already-ledger-processed
+blocks the chain grew on top of; unconditionally skipping the rollback
+(the original bug) leaves `ls.currentTip` permanently stuck on an
+abandoned fork — every subsequent pipeline restart re-derives
+`ledgerProcessBlock`'s expected-previous-hash from that same un-rolled-
+back tip, so it fails the identical prev-hash check forever, observed as
+an unrecoverable tight restart loop under multi-producer chain contention
+(reproducible even on a fresh devnet within minutes of startup, not
+scale-dependent).
+
+As a defense-in-depth backstop against *other*, not-necessarily-yet-
+understood error classes that could similarly loop the pipeline without
+progress (e.g. a legitimate multi-leader same-slot block collision
+rejected by envelope validation, which a bare pipeline restart cannot
+resolve on its own), `ledgerProcessBlocks`'s outer retry loop tracks
+consecutive restarts that land on the exact same `(slot, hash)` tip and
+applies a bounded exponential backoff (10ms up to a 2s cap) rather than
+retrying at whatever speed a restart-and-immediate-refail cycle completes
+(observed in practice at roughly one attempt per ~40ms, pegging a CPU
+core indefinitely). This does not change whether a given error condition
+resolves — only how fast the pipeline hammers against it while it
+doesn't — and is deliberately generic rather than classifying specific
+error types, since the failure modes this guards against are exactly the
+ones not yet fully understood well enough to special-case safely.
