@@ -2,13 +2,13 @@
 
 ## v0.67.1 (July 25, 2026)
 
-**Title:** Prevent silent certified Leios commits before closure is ready
+**Title:** Prevent certified Leios commits before endorser closure is ready
 
 **Date:** July 25, 2026
 
 **Version:** v0.67.1
 
-This release prevents certified ranking blocks from committing before their certified endorser block closure is ready, keeps prototype-2026w30 Leios networking compatible, and records the latest release history update for the previous version.
+This release prevents certified ranking blocks from committing before their certified endorser block closure is ready, keeps prototype-2026w30 Leios networking compatible, and records the previous release's published highlights in the latest release history.
 
 ### 💪 Improvements
 
@@ -19,7 +19,7 @@ This release prevents certified ranking blocks from committing before their cert
 ### 🔧 Fixes
 
 * Fixed certified ranking block commits so the node waits for the certified endorser block closure, retries after `certifiedEndorserBlockRetryDelay` when the closure is unavailable, and returns `errCertifiedEndorserBlockUnavailable` instead of silently committing without certified endorser effects. In affected clusters, operators may need to replay or resync from before the skipped CertRB.
-* Updated the prepared-statement cache path so database updates consume the cached statement instead of leaving stale state behind.
+* Adjusted the prepared-statement cache path so database updates consume the cached statement instead of leaving stale state behind.
 * Restored governance action ID import behavior so previous governance action IDs load during ledger imports.
 * Refined CBOR cache guidance so clearing a cached block uses `SetCbor(nil)`, which keeps cached CBOR data aligned with node state.
 
@@ -38,7 +38,7 @@ Thank you for trying!
 
 ### 🇯🇵 日本語
 
-**タイトル:** 認証済み Leios の閉塞前コミットを防止し、prototype-2026w30 互換性を維持
+**タイトル:** 認証済み Leios のエンドーサー closure 前コミットを防止し、prototype-2026w30 互換性を維持
 
 **日付:** July 25, 2026
 
@@ -55,7 +55,7 @@ Thank you for trying!
 ### 🔧 修正
 
 * 修正しました certified ranking block commit で、node が certified endorser block closure を待ち、closure が利用できないときは `certifiedEndorserBlockRetryDelay` 後に再試行し、`errCertifiedEndorserBlockUnavailable` を返して、certified endorser effects を欠いたまま silent commit しないようにします。影響を受けた cluster では、スキップされた CertRB より前から replay または resync が必要になる場合があります。
-* 更新しました prepared-statement cache path を、database update が cached statement を消費し、stale state を残さないようにします。
+* 是正しました prepared-statement cache path を、database update が cached statement を消費し、stale state を残さないようにします。
 * 復元しました governance action ID の import 動作を、ledger import で前回の governance action ID を読み込めるようにします。
 * 整理しました CBOR cache の案内を、cached block の削除に `SetCbor(nil)` を使い、cached CBOR data を node state と揃えます。
 
