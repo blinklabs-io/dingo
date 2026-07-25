@@ -8,7 +8,7 @@
 
 **Version:** v0.67.1
 
-This release prevents certified ranking blocks from committing before their certified endorser block closure is ready, keeps prototype-2026w30 Leios networking compatible, and records the previous release's published highlights in the latest release history.
+This release prevents silent omission of certified endorser effects during certified ranking block commits, keeps prototype-2026w30 Leios networking compatible, and records the previous release's published highlights in the latest release history. Operators may need to replay or resync from before an affected CertRB if a certified endorser block was previously skipped.
 
 ### 💪 Improvements
 
@@ -44,7 +44,7 @@ Thank you for trying!
 
 **バージョン:** v0.67.1
 
-このリリースでは、認証済みエンドーサーの block closure が整う前に ranking block を commit しないようにし、prototype-2026w30 の Leios 通信互換性を保ち、前版の release history 更新も反映します。
+このリリースでは、認証済みエンドーサーの block closure が整う前に ranking block を commit しないようにし、認証済みエンドーサーの effect が silent に欠落しないようにします。prototype-2026w30 の Leios 通信互換性を保ち、前版の release history 更新も反映します。影響を受けた CertRB の前から replay または resync が必要になる場合があります。
 
 ### 💪 改善
 
@@ -80,7 +80,7 @@ Thank you for trying!
 
 **Versión:** v0.67.1
 
-Esta versión evita que los ranking blocks certificados se confirmen antes de que la certified endorser block closure esté lista, mantiene la compatibilidad de red de Leios con prototype-2026w30 y refleja la actualización del historial de la versión anterior.
+Esta versión evita que los ranking blocks certificados omitan en silencio los efectos del certified endorser, mantiene la compatibilidad de red de Leios con prototype-2026w30 y refleja la actualización del historial de la versión anterior. Si un certified endorser block ya se omitió, puede hacer falta replay o resync desde antes del CertRB afectado.
 
 ### 💪 Mejoras
 
