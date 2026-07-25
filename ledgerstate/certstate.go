@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ParseCertState decodes the CertState from raw CBOR.
@@ -747,6 +748,7 @@ var ErrNotPoolParams = errors.New("not pool params shape")
 //
 //	operator,      -- PoolKeyHash (28 bytes)
 //	vrfKeyHash,    -- 32 bytes
+//	leiosKey,      -- optional [96-byte BLS key, 48-byte PoP] (Dijkstra)
 //	pledge,        -- Coin
 //	cost,          -- Coin
 //	margin,        -- UnitInterval (tag 30, [num, denom])
@@ -805,25 +807,40 @@ func parsePoolParams(
 		)
 	}
 
-	// Pledge (index 2)
+	leiosOffset, err := optionalLeiosKeyOffset(params, 2)
+	if err != nil {
+		return nil, err
+	}
+	if len(params) < 7+leiosOffset {
+		return nil, fmt.Errorf(
+			"%w: pool params has %d elements, expected at least %d",
+			ErrNotPoolParams,
+			len(params),
+			7+leiosOffset,
+		)
+	}
+
+	// Pledge (legacy index 2; Dijkstra index 3 when Leios key/null is present)
 	if _, err := cbor.Decode(
-		params[2],
+		params[2+leiosOffset],
 		&pool.Pledge,
 	); err != nil {
 		return nil, fmt.Errorf("decoding pledge: %w", err)
 	}
 
-	// Cost (index 3)
+	// Cost (legacy index 3)
 	if _, err := cbor.Decode(
-		params[3],
+		params[3+leiosOffset],
 		&pool.Cost,
 	); err != nil {
 		return nil, fmt.Errorf("decoding cost: %w", err)
 	}
 
-	// Margin (index 4) - CBOR tag 30 [num, denom]
+	// Margin (legacy index 4) - CBOR tag 30 [num, denom]
 	var marginOK bool
-	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[4])
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(
+		params[4+leiosOffset],
+	)
 	if !marginOK {
 		slog.Warn(
 			"failed to decode pool margin, defaulting to 0/1",
@@ -834,25 +851,27 @@ func parsePoolParams(
 		pool.MarginDen = 1
 	}
 
-	// Reward account (index 5)
-	rewardAccount, rewardAccountTag, ok := parseRewardAccount(params[5])
+	// Reward account (legacy index 5)
+	rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+		params[5+leiosOffset],
+	)
 	if !ok {
 		return nil, fmt.Errorf("decoding reward account for pool %x", poolKeyHash)
 	}
 	pool.RewardAccount = rewardAccount
 	pool.RewardAccountCredentialTag = rewardAccountTag
 
-	// Owners (index 6) - set of 28-byte key hashes
-	pool.Owners = parsePoolOwners(params[6])
+	// Owners (legacy index 6) - set of 28-byte key hashes
+	pool.Owners = parsePoolOwners(params[6+leiosOffset])
 
-	// Relays (index 7) - array of relay entries
-	if len(params) > 7 {
-		pool.Relays = parseRelays(params[7])
+	// Relays (legacy index 7) - array of relay entries
+	if len(params) > 7+leiosOffset {
+		pool.Relays = parseRelays(params[7+leiosOffset])
 	}
 
-	// Pool metadata (index 8) - null or [url, hash]
-	if len(params) > 8 {
-		parsePoolMetadata(params[8], pool)
+	// Pool metadata (legacy index 8) - null or [url, hash]
+	if len(params) > 8+leiosOffset {
+		parsePoolMetadata(params[8+leiosOffset], pool)
 	}
 
 	return pool, nil
@@ -879,15 +898,35 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	if _, err := cbor.Decode(params[1], &pool.Pledge); err != nil {
+	leiosOffset, err := optionalLeiosKeyOffset(params, 1)
+	if err != nil {
+		return nil, true, err
+	}
+	if len(params) < 7+leiosOffset {
+		return nil, true, fmt.Errorf(
+			"pool state has %d elements, expected at least %d",
+			len(params),
+			7+leiosOffset,
+		)
+	}
+
+	if _, err := cbor.Decode(
+		params[1+leiosOffset],
+		&pool.Pledge,
+	); err != nil {
 		return nil, true, fmt.Errorf("decoding pledge: %w", err)
 	}
-	if _, err := cbor.Decode(params[2], &pool.Cost); err != nil {
+	if _, err := cbor.Decode(
+		params[2+leiosOffset],
+		&pool.Cost,
+	); err != nil {
 		return nil, true, fmt.Errorf("decoding cost: %w", err)
 	}
 
 	var marginOK bool
-	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[3])
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(
+		params[3+leiosOffset],
+	)
 	if !marginOK {
 		slog.Warn(
 			"failed to decode pool margin, defaulting to 0/1",
@@ -898,20 +937,25 @@ func parsePoolParamsWithoutOperator(
 		pool.MarginDen = 1
 	}
 
-	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(params[4]); ok {
+	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+		params[4+leiosOffset],
+	); ok {
 		pool.RewardAccount = rewardAccount
 		pool.RewardAccountCredentialTag = rewardAccountTag
 	}
 
-	pool.Owners = parsePoolOwners(params[5])
-	if len(params) > 6 {
-		pool.Relays = parseRelays(params[6])
+	pool.Owners = parsePoolOwners(params[5+leiosOffset])
+	if len(params) > 6+leiosOffset {
+		pool.Relays = parseRelays(params[6+leiosOffset])
 	}
-	if len(params) > 7 {
-		parsePoolMetadata(params[7], pool)
+	if len(params) > 7+leiosOffset {
+		parsePoolMetadata(params[7+leiosOffset], pool)
 	}
-	if len(params) > 8 {
-		if _, err := cbor.Decode(params[8], &pool.Deposit); err != nil {
+	if len(params) > 8+leiosOffset {
+		if _, err := cbor.Decode(
+			params[8+leiosOffset],
+			&pool.Deposit,
+		); err != nil {
 			return nil, true, fmt.Errorf(
 				"decoding pool deposit: %w",
 				err,
@@ -920,6 +964,34 @@ func parsePoolParamsWithoutOperator(
 	}
 
 	return pool, true, nil
+}
+
+// optionalLeiosKeyOffset reports whether the given pool-parameter position is
+// occupied by Dijkstra's optional Leios key. The ledger's PV12 decoder accepts
+// both an omitted field and an explicit null, so snapshot import must preserve
+// the same distinction when locating all fields that follow it.
+func optionalLeiosKeyOffset(
+	params []cbor.RawMessage,
+	index int,
+) (int, error) {
+	if len(params) <= index || len(params[index]) == 0 {
+		return 0, nil
+	}
+	if len(params[index]) == 1 && params[index][0] == 0xf6 {
+		return 1, nil
+	}
+	// A legacy pledge/cost is an unsigned integer. Only an array at this
+	// position can be the new Leios key; if it is an array, validate its
+	// exact key/proof shape through gouroboros rather than shifting on a
+	// malformed value.
+	if params[index][0]>>5 != 4 {
+		return 0, nil
+	}
+	var key lcommon.LeiosKey
+	if _, err := cbor.Decode(params[index], &key); err != nil {
+		return 0, fmt.Errorf("decoding Leios key: %w", err)
+	}
+	return 1, nil
 }
 
 func parseRewardAccount(data []byte) ([]byte, uint8, bool) {
