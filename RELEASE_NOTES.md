@@ -1,5 +1,41 @@
 # Dingo Releases
 
+## v0.67.1 (July 25, 2026)
+
+**Title:** Prevent silent certified Leios commits before closure is ready
+
+**Date:** July 25, 2026
+
+**Version:** v0.67.1
+
+This release prevents certified ranking blocks from committing before their certified endorser block closure is ready, keeps prototype-2026w30 Leios networking compatible, and records the latest release history update for the previous version.
+
+### 💪 Improvements
+
+* Updated the v0.67.0 release notes so the latest release history includes the earlier reward, mempool, and ledger highlights.
+* Improved `CertState` decoding so Dijkstra stake-pool registration certificates accept an optional Leios key or explicit `null`, reject malformed key and proof data, and keep later field positions aligned.
+* Added Leios Notify handling for ranking-block `MsgBlockAnnouncement` messages by ignoring the header for now, which keeps prototype-2026w30 networking compatible.
+
+### 🔧 Fixes
+
+* Fixed certified ranking block commits so the node waits for the certified endorser block closure, retries after `certifiedEndorserBlockRetryDelay` when the closure is unavailable, and returns `errCertifiedEndorserBlockUnavailable` instead of silently committing without certified endorser effects. In affected clusters, operators may need to replay or resync from before the skipped CertRB.
+* Updated the prepared-statement cache path so database updates consume the cached statement instead of leaving stale state behind.
+* Restored governance action ID import behavior so previous governance action IDs load during ledger imports.
+* Refined CBOR cache guidance so clearing a cached block uses `SetCbor(nil)`, which keeps cached CBOR data aligned with node state.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ## v0.67.0 (July 24, 2026)
 
 **Title:** Expand reward handling, configurable FIFO mempool support, and ledger safeguards
