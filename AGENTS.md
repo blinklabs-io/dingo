@@ -38,6 +38,7 @@ make golines
 
 - EventBus for async cross-component notifications: use `event.EventBus.SubscribeFunc()` for block/chain/mempool/peer events. Synchronous state queries between components still use direct method calls.
 - CBOR offsets: UTxOs/txs stored as 52-byte refs (magic `"DOFF"` + slot + hash + offset + length), resolved by `TieredCborCache` (hot → block LRU → cold extract). See `database/cbor_offset.go`.
+- gouroboros types embedding `DecodeStoreCbor` (blocks, tx bodies, etc.) return the original decoded bytes verbatim from `MarshalCBOR()` whenever `Cbor()` is non-nil — mutating a decoded struct's fields and re-marshaling silently re-emits the pre-mutation bytes. Call `SetCbor(nil)` before marshaling after mutating fields, or the change is dropped.
 - Cert ordering: `Order("added_slot DESC, block_index DESC, cert_index DESC")` — `cert_index` resets per tx, so `block_index` is required to disambiguate across txs in the same block.
 - Rollbacks: delivered on `chain.update` as a `chain.ChainRollbackEvent` payload (no separate `chain.rollback` topic); also subscribe to `chain.fork_detected` for fork metrics. Check `TransactionEvent.Rollback` for undo.
 - Stake snapshots: mark/set/go rotation at epoch boundaries (Praos). `LedgerView.GetStakeDistribution(epoch)` for leader election. Per-pool stake in `PoolStakeSnapshot`; aggregates in `EpochSummary`.
