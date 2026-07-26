@@ -552,8 +552,8 @@ func (b *Backfill) calculateCertDeposits(
 	return certDeposits
 }
 
-// processBlockGovernance calls governance processing for
-// valid Conway-era transactions that have proposals or votes.
+// processBlockGovernance calls governance processing for valid Conway-era
+// transactions that have proposals, votes, or DRep activity certificates.
 func (b *Backfill) processBlockGovernance(
 	tx lcommon.Transaction,
 	point ocommon.Point,
@@ -566,7 +566,8 @@ func (b *Backfill) processBlockGovernance(
 	}
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
-	if len(proposals) == 0 && len(votes) == 0 {
+	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
 		return nil
 	}
 	conwayPP, ok := pp.(*conway.ConwayProtocolParameters)
@@ -592,6 +593,19 @@ func (b *Backfill) processBlockGovernance(
 		); err != nil {
 			return fmt.Errorf(
 				"governance votes: %w", err,
+			)
+		}
+	}
+	if hasDRepActivityCerts {
+		if err := governance.ProcessDRepActivityCertificates(
+			tx,
+			epochId,
+			conwayPP.DRepInactivityPeriod,
+			b.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"DRep activity certificates: %w", err,
 			)
 		}
 	}

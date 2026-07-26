@@ -25,6 +25,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -42,6 +45,54 @@ func newTestDB(t *testing.T) *database.Database {
 		db.Close() //nolint:errcheck
 	})
 	return db
+}
+
+func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+
+	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        credentialBytes,
+		AddedSlot:         10,
+		LastActivityEpoch: 5,
+		ExpiryEpoch:       25,
+		Active:            true,
+	}))
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.UpdateDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeUpdateDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.DRepInactivityPeriod = 20
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return backfill.processBlockGovernance(
+			tx,
+			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			100,
+			&pparams,
+			txn,
+		)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
