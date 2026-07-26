@@ -685,6 +685,99 @@ func (b *Blockfrost) handleDRep(
 	writeJSON(w, http.StatusOK, DRepResponse(drep))
 }
 
+// handleDReps handles GET /api/v0/governance/dreps and returns the
+// paginated list of registered DReps.
+func (b *Blockfrost) handleDReps(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	pagination, errMsg := ParsePaginationStrict(r)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, "Bad Request", errMsg)
+		return
+	}
+	params := DRepListParams{Pagination: pagination}
+
+	query := r.URL.Query()
+	switch query.Get("order_by") {
+	case "", "amount":
+		params.OrderByAmount = query.Get("order_by") == "amount"
+	default:
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"querystring/order_by must be equal to one of the allowed values",
+		)
+		return
+	}
+	for _, flag := range []struct {
+		name string
+		dest **bool
+	}{
+		{"retired", &params.Retired},
+		{"expired", &params.Expired},
+	} {
+		switch query.Get(flag.name) {
+		case "":
+		case "true":
+			v := true
+			*flag.dest = &v
+		case "false":
+			v := false
+			*flag.dest = &v
+		default:
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"querystring/"+flag.name+" must be boolean",
+			)
+			return
+		}
+	}
+
+	items, total, err := b.node.DReps(params)
+	if err != nil {
+		b.logger.Error(
+			"failed to list dreps",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve DReps",
+		)
+		return
+	}
+
+	SetPaginationHeaders(w, total, pagination)
+	resp := make([]DRepListItemResponse, 0, len(items))
+	for _, item := range items {
+		var metadata *DRepMetadataResponse
+		if item.Metadata != nil {
+			metadata = &DRepMetadataResponse{
+				URL:          item.Metadata.URL,
+				Hash:         item.Metadata.Hash,
+				JSONMetadata: item.Metadata.JSONMetadata,
+				Bytes:        item.Metadata.Bytes,
+			}
+		}
+		resp = append(resp, DRepListItemResponse{
+			DRepID:          item.DRepID,
+			Hex:             item.Hex,
+			Amount:          item.Amount,
+			HasScript:       item.HasScript,
+			Retired:         item.Retired,
+			Expired:         item.Expired,
+			LastActiveEpoch: item.LastActiveEpoch,
+			Metadata:        metadata,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleAddressUTXOs handles GET /api/v0/addresses/{address}/utxos
 // and returns the current UTxOs for an address.
 func (b *Blockfrost) handleAddressUTXOs(
@@ -1587,6 +1680,15 @@ func parseDRepIdentifier(
 	if id == "" {
 		return DRepCredential{}, errors.New("empty DRep identifier")
 	}
+	// The special DReps carry no credential hash.
+	switch id {
+	case "drep_always_abstain":
+		drepType := models.DrepTypeAlwaysAbstain
+		return DRepCredential{ID: id, Predefined: &drepType}, nil
+	case "drep_always_no_confidence":
+		drepType := models.DrepTypeAlwaysNoConfidence
+		return DRepCredential{ID: id, Predefined: &drepType}, nil
+	}
 	// Blockfrost accepts the raw credential hash as hex. Storage uses the
 	// raw 28-byte hash for lookup.
 	if len(id) == drepCredentialHexLen {
@@ -1644,27 +1746,25 @@ func parseDRepIdentifier(
 }
 
 func parseCIP129DRepScriptFlag(header byte) (bool, error) {
+	// CIP-129 header: high nibble is the governance credential kind
+	// (0x2 = DRep), low nibble the credential type (0x2 = key hash,
+	// 0x3 = script hash) — so 0x22 is a key DRep and 0x23 a script
+	// DRep.
 	voterType := header >> 4
 	credentialNibble := header & 0x0f
-	switch voterType {
-	case 2:
-		if credentialNibble != 0x2 {
-			return false, fmt.Errorf(
-				"invalid DRep key credential nibble 0x%x",
-				credentialNibble,
-			)
-		}
+	if voterType != 0x2 {
+		return false, fmt.Errorf("invalid DRep voter type %d", voterType)
+	}
+	switch credentialNibble {
+	case 0x2:
 		return false, nil
-	case 3:
-		if credentialNibble != 0x3 {
-			return false, fmt.Errorf(
-				"invalid DRep script credential nibble 0x%x",
-				credentialNibble,
-			)
-		}
+	case 0x3:
 		return true, nil
 	default:
-		return false, fmt.Errorf("invalid DRep voter type %d", voterType)
+		return false, fmt.Errorf(
+			"invalid DRep credential nibble 0x%x",
+			credentialNibble,
+		)
 	}
 }
 

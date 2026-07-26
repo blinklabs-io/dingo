@@ -658,6 +658,29 @@ type MetadataStore interface {
 	// GetActiveDreps retrieves all active DReps.
 	GetActiveDreps(types.Txn) ([]*models.Drep, error)
 
+	// GetDreps retrieves every DRep row, including deregistered ones,
+	// ordered by the credential's first on-chain appearance (earliest
+	// registration, update, or delegation reference). Used by the
+	// Blockfrost DRep list endpoint.
+	GetDreps(types.Txn) ([]models.DrepListRow, error)
+
+	// GetPredefinedDrepFirstSeenSlots returns the earliest delegation
+	// added_slot per predefined DRep type (AlwaysAbstain,
+	// AlwaysNoConfidence). Types never delegated to are absent.
+	GetPredefinedDrepFirstSeenSlots(types.Txn) (map[uint64]uint64, error)
+
+	// GetDrepLastRegistrationSlot returns the added_slot of the most
+	// recent registration certificate for the DRep credential, or 0
+	// when no registration certificate history exists. Blockfrost's
+	// active_epoch reports the most recent registration, which the
+	// mutable drep.added_slot cannot provide because update and
+	// deregistration certificates overwrite it.
+	GetDrepLastRegistrationSlot(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (uint64, error)
+
 	// GetActiveAccountCredentials returns the stake credentials (tag + key) of
 	// every currently active account. Used by Mithril v2 catch-up
 	// reconciliation to find accounts absent from a newer snapshot's live set.

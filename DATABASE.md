@@ -995,6 +995,84 @@ FROM active_delegator_stake
 GROUP BY pool_key_hash;
 ```
 
+### `GetDreps` and `GetPredefinedDrepFirstSeenSlots`
+
+Full DRep listing (including deregistered rows) ordered by the
+credential's first on-chain appearance — the earliest registration,
+update, or delegation reference across the certificate tables — which
+survives deregister/re-register cycles and matches hosted Blockfrost's
+db-sync row ordering. Rows without certificate history fall back to the
+current registration slot:
+
+```sql
+WITH first_seen AS (
+    SELECT cred, tag, MIN(slot) AS slot FROM (
+        SELECT drep_credential AS cred, credential_tag AS tag,
+               MIN(added_slot) AS slot
+        FROM registration_drep GROUP BY drep_credential, credential_tag
+        UNION ALL SELECT credential, credential_tag, MIN(added_slot)
+        FROM update_drep GROUP BY credential, credential_tag
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM vote_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM stake_vote_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM vote_registration_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM stake_vote_registration_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+    ) u GROUP BY cred, tag
+),
+last_reg AS (
+    -- certificate_id filters out the synthetic rows the Mithril
+    -- ledger-state import writes at the bootstrap slot
+    SELECT drep_credential AS cred, credential_tag AS tag,
+           MAX(added_slot) AS slot
+    FROM registration_drep
+    WHERE certificate_id IS NOT NULL AND certificate_id != 0
+    GROUP BY drep_credential, credential_tag
+)
+SELECT drep.*, COALESCE(first_seen.slot, drep.added_slot) AS first_seen_slot,
+       COALESCE(last_reg.slot, 0) AS last_registration_slot
+FROM drep
+LEFT JOIN first_seen
+    ON first_seen.cred = drep.credential
+    AND first_seen.tag = drep.credential_tag
+LEFT JOIN last_reg
+    ON last_reg.cred = drep.credential
+    AND last_reg.tag = drep.credential_tag
+ORDER BY COALESCE(first_seen.slot, drep.added_slot), drep.id;
+```
+
+`last_registration_slot` feeds the Blockfrost `active_epoch` field: the
+mutable `drep.added_slot` is overwritten by update and deregistration
+certificates, so the most recent registration certificate is the correct
+source. `GetDrepLastRegistrationSlot` is the single-credential variant used
+by the DRep detail endpoint:
+
+```sql
+SELECT COALESCE(MAX(added_slot), 0)
+FROM registration_drep
+WHERE credential_tag = $1 AND drep_credential = decode($2, 'hex')
+  AND certificate_id IS NOT NULL AND certificate_id != 0;
+```
+
+`GetPredefinedDrepFirstSeenSlots` returns the earliest delegation slot
+per predefined DRep type (2 = AlwaysAbstain, 3 = AlwaysNoConfidence),
+used to interleave the special DReps into the same listing:
+
+```sql
+SELECT drep_type, MIN(slot) AS slot FROM (
+    SELECT drep_type, MIN(added_slot) AS slot
+    FROM vote_delegation WHERE drep_type >= 2 GROUP BY drep_type
+    UNION ALL SELECT drep_type, MIN(added_slot)
+    FROM stake_vote_delegation WHERE drep_type >= 2 GROUP BY drep_type
+    UNION ALL SELECT drep_type, MIN(added_slot)
+    FROM vote_registration_delegation WHERE drep_type >= 2 GROUP BY drep_type
+    UNION ALL SELECT drep_type, MIN(added_slot)
+    FROM stake_vote_registration_delegation WHERE drep_type >= 2 GROUP BY drep_type
+) u GROUP BY drep_type;
+```
+
 ### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
 
 All three DRep voting-power queries take an `expiryEpoch uint64` argument that

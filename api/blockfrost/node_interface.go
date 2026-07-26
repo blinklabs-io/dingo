@@ -152,6 +152,10 @@ type BlockfrostNode interface {
 	// DRep credential.
 	DRep(DRepCredential) (DRepInfo, error)
 
+	// DReps returns the paginated DRep list along with the total
+	// number of matching results before pagination.
+	DReps(DRepListParams) ([]DRepListItemInfo, int, error)
+
 	// Account returns stake-account information for the
 	// requested stake address.
 	Account(string) (AccountInfo, error)
@@ -602,19 +606,54 @@ type DRepCredential struct {
 	Hash               []byte
 	HasScript          bool
 	CredentialTagKnown bool
+	// Predefined is set for the special DReps
+	// (drep_always_abstain, drep_always_no_confidence), which carry
+	// no credential hash. The value is a models.DrepType* constant.
+	Predefined *uint64
 }
 
-// DRepInfo holds DRep data needed by the governance API.
+// DRepInfo holds DRep data needed by the governance API,
+// following the Blockfrost OpenAPI 0.1.90 drep schema.
 type DRepInfo struct {
-	DRepID      string
-	Hex         string
-	HasScript   bool
-	Registered  bool
-	Epoch       uint64
-	Amount      string
-	Active      bool
-	ActiveEpoch uint64
-	LiveStake   string
+	DRepID          string
+	Hex             string
+	Amount          string
+	Active          bool
+	ActiveEpoch     *uint64
+	HasScript       bool
+	Retired         bool
+	Expired         bool
+	LastActiveEpoch *uint64
+}
+
+// DRepListParams holds query parameters for the DRep list endpoint.
+type DRepListParams struct {
+	Pagination    PaginationParams
+	OrderByAmount bool
+	Retired       *bool
+	Expired       *bool
+}
+
+// DRepListItemInfo is one entry of the DRep list endpoint. Unlike
+// DRepInfo it always uses CIP-129 identifiers and carries the
+// resolved anchor metadata.
+type DRepListItemInfo struct {
+	DRepID          string
+	Hex             string
+	Amount          string
+	HasScript       bool
+	Retired         bool
+	Expired         bool
+	LastActiveEpoch *uint64
+	Metadata        *DRepMetadataInfo
+}
+
+// DRepMetadataInfo is the resolved CIP-119 anchor document for a DRep.
+type DRepMetadataInfo struct {
+	URL          string
+	Hash         string
+	JSONMetadata json.RawMessage
+	Bytes        string
 }
 
 // AccountInfo holds stake-account data needed by the API.

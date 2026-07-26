@@ -95,6 +95,63 @@ func ParsePagination(r *http.Request) (PaginationParams, error) {
 	return params, nil
 }
 
+// MaxPaginationPage mirrors the hosted Blockfrost fastify schema bound
+// for the page parameter.
+const MaxPaginationPage = 21474836
+
+// ParsePaginationStrict parses pagination query parameters with
+// Blockfrost-compatible validation: out-of-range values are rejected with
+// the hosted API's exact fastify error message instead of being clamped.
+// The second return value is the error message, empty when parsing
+// succeeded.
+func ParsePaginationStrict(r *http.Request) (PaginationParams, string) {
+	params := PaginationParams{
+		Count: DefaultPaginationCount,
+		Page:  DefaultPaginationPage,
+		Order: PaginationOrderAsc,
+	}
+
+	query := r.URL.Query()
+	if countParam := query.Get("count"); countParam != "" {
+		count, err := strconv.Atoi(countParam)
+		if err != nil {
+			return params, "querystring/count must be integer"
+		}
+		if count > MaxPaginationCount {
+			return params, "querystring/count must be <= 100"
+		}
+		if count < 1 {
+			return params, "querystring/count must be >= 1"
+		}
+		params.Count = count
+	}
+
+	if pageParam := query.Get("page"); pageParam != "" {
+		page, err := strconv.Atoi(pageParam)
+		if err != nil {
+			return params, "querystring/page must be integer"
+		}
+		if page > MaxPaginationPage {
+			return params, "querystring/page must be <= 21474836"
+		}
+		if page < 1 {
+			return params, "querystring/page must be >= 1"
+		}
+		params.Page = page
+	}
+
+	if orderParam := query.Get("order"); orderParam != "" {
+		switch strings.ToLower(orderParam) {
+		case PaginationOrderAsc, PaginationOrderDesc:
+			params.Order = strings.ToLower(orderParam)
+		default:
+			return params, "querystring/order must be equal to one of the allowed values"
+		}
+	}
+
+	return params, ""
+}
+
 // SetPaginationHeaders sets Blockfrost pagination headers.
 func SetPaginationHeaders(
 	w http.ResponseWriter,
