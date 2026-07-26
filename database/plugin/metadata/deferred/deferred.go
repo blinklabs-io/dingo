@@ -195,13 +195,16 @@ var Manifest = []Index{
 		Notes:    "Composite SearchUtxos index; primary utxorpc query path",
 		Critical: true,
 	},
-	{
-		Model: &models.Utxo{}, Name: "idx_utxo_staking_deleted_amount", Table: "utxo",
-		Notes: "DRep voting-power live UTxO SUM; live query path. RebuildRewardLiveStake " +
-			"runs during ledger-state import and hints this index, but the sqlite backend " +
-			"applies the INDEXED BY hint only when the index exists, so it stays deferrable.",
-		Critical: true,
-	},
+	// idx_utxo_staking_deleted_amount is deliberately NOT deferred.
+	// FlushBatch -> refreshRewardLiveStakeAggregates runs a per-credential
+	// live UTxO SUM (WHERE credential_tag = ? AND staking_key = ? AND
+	// deleted_slot = 0) on every API-mode backfill batch. With this index
+	// dropped each of those SUMs is a full scan of the growing utxo table,
+	// making the backfill quadratic: measured on preview, throughput
+	// collapsed from ~1700 to ~4 blocks/sec by 3% progress. The one-shot
+	// RebuildRewardLiveStake at the end of ledger-state import tolerates a
+	// missing index (single full scan), but the per-batch incremental
+	// refresh cannot.
 	{
 		Model: &models.Utxo{}, Name: "idx_utxo_deleted_payment_script", Table: "utxo",
 		Notes:    "Script-locked supply SUM (blockfrost /network); live query path",

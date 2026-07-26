@@ -2638,11 +2638,14 @@ distinguishes an upgraded database with accounts but no aggregate rows from a
 legitimately fresh empty database. Node startup performs the check and rebuild
 after database recovery and before ledger processing. Mithril ledger-state
 import also invokes the rebuild directly, at the end of import once accounts and
-UTxOs are populated. That import runs with the deferred-index manifest dropped
-for bulk load, so the SQLite backend applies its `INDEXED BY
-idx_utxo_staking_deleted_amount` query-planner hint only when the index is
-present; while the index is deferred the rebuild falls back to a planner-chosen
-plan rather than aborting with `no such index`.
+UTxOs are populated. `idx_utxo_staking_deleted_amount` is deliberately kept
+out of the deferred-index manifest: the API-mode metadata backfill refreshes
+per-credential live-stake aggregates on every flushed batch, and without the
+index each refresh degenerates into a full scan of the growing `utxo` table,
+making the backfill quadratic. The SQLite backend still applies its `INDEXED
+BY idx_utxo_staking_deleted_amount` query-planner hint only when the index is
+present (a defensive fallback for databases where it is missing), falling back
+to a planner-chosen plan rather than aborting with `no such index`.
 
 Pool registration lookup reconstructs the parameters effective during the
 ended epoch for per-pool input capture. Reward calculation and application

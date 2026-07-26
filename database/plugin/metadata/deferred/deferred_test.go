@@ -70,7 +70,10 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 		t.Fatal("CriticalManifest returned empty slice")
 	}
 	// Pin the expected count so accidental de-classification is caught.
-	const wantCritical = 13
+	// idx_utxo_staking_deleted_amount left the manifest entirely: the
+	// API-backfill per-batch live-stake SUM needs it during bulk load,
+	// so it is never dropped and no longer needs a critical rebuild slot.
+	const wantCritical = 12
 	if len(critical) != wantCritical {
 		t.Errorf("CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally", len(critical), wantCritical)
 	}
