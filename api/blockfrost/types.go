@@ -198,6 +198,16 @@ type AddressAmountResponse struct {
 	Quantity string `json:"quantity"`
 }
 
+// AddressResponse represents a Blockfrost address summary
+// object.
+type AddressResponse struct {
+	Address      string                  `json:"address"`
+	Amount       []AddressAmountResponse `json:"amount"`
+	StakeAddress *string                 `json:"stake_address"`
+	Type         string                  `json:"type"`
+	Script       bool                    `json:"script"`
+}
+
 // AddressUTXOResponse represents a Blockfrost address
 // UTxO object.
 type AddressUTXOResponse struct {

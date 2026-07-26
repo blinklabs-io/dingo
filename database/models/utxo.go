@@ -30,13 +30,43 @@ var (
 	ErrEmptyAssetPolicyID = errors.New("empty asset policy id")
 )
 
+// UtxoAddressMatchMode selects how an address matches utxo rows.
+type UtxoAddressMatchMode int
+
+const (
+	// UtxoAddressMatchExact preserves full-address identity: a
+	// payment-only (enterprise/pointer) address matches only rows
+	// with no staking part, so base-address UTxOs sharing the same
+	// payment credential are excluded.
+	UtxoAddressMatchExact UtxoAddressMatchMode = iota
+	// UtxoAddressMatchPaymentCred aggregates across every address
+	// form sharing the payment credential, mirroring Blockfrost's
+	// bare-credential (addr_vkh/script) lookups.
+	UtxoAddressMatchPaymentCred
+)
+
 // AppendUtxoAddressOrBranch appends an OR branch for the given address
 // to the ors/args slices. It uses standard "?" placeholders that work
-// across SQLite, MySQL, and Postgres via GORM.
+// across SQLite, MySQL, and Postgres via GORM. Payment-only addresses
+// use payment-credential matching; see AppendUtxoAddressOrBranchMode
+// for exact full-address semantics.
 func AppendUtxoAddressOrBranch(
 	ors *[]string,
 	args *[]any,
 	addr ledger.Address,
+) error {
+	return AppendUtxoAddressOrBranchMode(
+		ors, args, addr, UtxoAddressMatchPaymentCred,
+	)
+}
+
+// AppendUtxoAddressOrBranchMode appends an OR branch for the given
+// address with an explicit match mode.
+func AppendUtxoAddressOrBranchMode(
+	ors *[]string,
+	args *[]any,
+	addr ledger.Address,
+	mode UtxoAddressMatchMode,
 ) error {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	pk := addr.PaymentKeyHash()
@@ -62,6 +92,16 @@ func AppendUtxoAddressOrBranch(
 			sk.Bytes(),
 		)
 	case hasPayment:
+		if mode == UtxoAddressMatchExact {
+			// LENGTH counts bytes for blob columns on SQLite,
+			// MySQL, and Postgres alike.
+			*ors = append(
+				*ors,
+				"(utxo.payment_script = ? AND utxo.payment_key = ? AND (utxo.staking_key IS NULL OR LENGTH(utxo.staking_key) = 0))",
+			)
+			*args = append(*args, paymentScript, pk.Bytes())
+			break
+		}
 		*ors = append(*ors, "(utxo.payment_script = ? AND utxo.payment_key = ?)")
 		*args = append(*args, paymentScript, pk.Bytes())
 	case hasStake:
@@ -221,6 +261,22 @@ func StakeCredentialTagFromAddress(addr ledger.Address) (uint8, bool) {
 
 func PaymentScriptFromAddress(addr ledger.Address) bool {
 	return addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit
+}
+
+// AddressBalance holds SQL-aggregated live-UTxO balances for an address.
+type AddressBalance struct {
+	Lovelace  uint64
+	UtxoCount int64
+	// Assets is ordered by (policy id, name) so callers emit
+	// deterministic unit ordering without re-sorting.
+	Assets []AssetBalance
+}
+
+// AssetBalance is one aggregated native-asset balance.
+type AssetBalance struct {
+	PolicyId []byte
+	Name     []byte
+	Amount   uint64
 }
 
 // UtxoSlot allows providing a slot number with a ledger.Utxo object

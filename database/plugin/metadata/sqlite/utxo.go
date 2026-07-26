@@ -1051,3 +1051,97 @@ func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
 	}
 	return db.Transaction(mutation)
 }
+
+// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance, per-asset
+// balances, and live UTxO count for the given address, aggregated in SQL.
+// Assets are ordered by (policy id, name) for deterministic output.
+//
+// SQLite's planner tends to pick idx_utxo_deleted_payment_script for these
+// aggregates (it matches deleted_slot + payment_script, i.e. nearly every
+// live UTxO) and then filters the credential row by row, which takes tens of
+// seconds on large chains. Force the credential-selective index when it is
+// present; fall back to the planner when it is missing (e.g. during bulk
+// load), mirroring the live-stake INDEXED BY handling.
+func (d *MetadataStoreSqlite) GetUtxoBalanceByAddress(
+	addr lcommon.Address,
+	mode models.UtxoAddressMatchMode,
+	txn types.Txn,
+) (models.AddressBalance, error) {
+	var ret models.AddressBalance
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return ret, fmt.Errorf(
+			"resolve DB for utxo balance by address: %w",
+			err,
+		)
+	}
+	var ors []string
+	var args []any
+	if err := models.AppendUtxoAddressOrBranchMode(
+		&ors, &args, addr, mode,
+	); err != nil {
+		return ret, fmt.Errorf("utxo balance by address: %w", err)
+	}
+	if len(ors) == 0 {
+		return ret, nil
+	}
+	addrCond := "(" + strings.Join(ors, " OR ") + ")"
+
+	// Pick the credential-selective index for the address form: payment
+	// lookups drive through the payment key, staking-only lookups through
+	// the staking composite.
+	zeroHash := lcommon.NewBlake2b224(nil)
+	hintIndex := "idx_utxo_payment_key"
+	if addr.PaymentKeyHash() == zeroHash {
+		hintIndex = "idx_utxo_staking_deleted_amount"
+	}
+	indexedBy := ""
+	var indexPresent bool
+	if err := db.Raw(
+		"SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
+		hintIndex,
+	).Scan(&indexPresent).Error; err != nil {
+		return ret, fmt.Errorf(
+			"probe index for utxo balance by address: %w",
+			err,
+		)
+	}
+	if indexPresent {
+		indexedBy = "INDEXED BY " + hintIndex
+	}
+
+	var totals struct {
+		Cnt      int64
+		Lovelace uint64
+	}
+	if err := db.Raw(
+		"SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace "+
+			"FROM utxo "+indexedBy+
+			" WHERE utxo.deleted_slot = 0 AND "+addrCond,
+		args...,
+	).Scan(&totals).Error; err != nil {
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
+	ret.UtxoCount = totals.Cnt
+	ret.Lovelace = totals.Lovelace
+	if ret.UtxoCount == 0 {
+		return ret, nil
+	}
+
+	if err := db.Raw(
+		"SELECT asset.policy_id AS policy_id, asset.name AS name, "+
+			"COALESCE(SUM(asset.amount), 0) AS amount "+
+			"FROM utxo "+indexedBy+
+			" JOIN asset ON asset.utxo_id = utxo.id"+
+			" WHERE utxo.deleted_slot = 0 AND "+addrCond+
+			" GROUP BY asset.policy_id, asset.name"+
+			" ORDER BY asset.policy_id, asset.name",
+		args...,
+	).Scan(&ret.Assets).Error; err != nil {
+		return ret, fmt.Errorf(
+			"sum utxo asset balances by address: %w",
+			err,
+		)
+	}
+	return ret, nil
+}

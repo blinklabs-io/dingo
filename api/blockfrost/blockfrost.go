@@ -125,6 +125,10 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleDRep,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}",
+		b.handleAddress,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}/utxos",
 		b.handleAddressUTXOs,
 	)

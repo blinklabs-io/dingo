@@ -716,6 +716,18 @@ WHERE atx.payment_key = decode($1, 'hex')
   AND (atx.staking_key IS NULL OR length(atx.staking_key) = 0)
 ```
 
+### `CountTransactionsByPaymentCred`
+
+Counts transactions for a payment credential across every address carrying
+it, regardless of staking part. Used by the Blockfrost payment-credential
+(`addr_vkh`/`script`) address lookups:
+
+```sql
+SELECT COUNT(DISTINCT atx.transaction_id) AS tx_count
+FROM address_transaction atx
+WHERE atx.payment_key = decode($1, 'hex');
+```
+
 ### `GetAddressesByCredential`
 
 ```sql
@@ -728,6 +740,43 @@ GROUP BY payment_key, credential_tag, staking_key
 ORDER BY payment_key ASC
 LIMIT 100;
 ```
+
+### `GetUtxoBalanceByAddress`
+
+Aggregates live-UTxO balances for an address in SQL (used by the Blockfrost
+`/addresses/{address}` summary). Lovelace and count:
+
+```sql
+SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace
+FROM utxo
+WHERE utxo.deleted_slot = 0
+  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex')
+       AND utxo.credential_tag = $3 AND utxo.staking_key = decode($4, 'hex'));
+```
+
+Per-asset balances, ordered for deterministic unit output:
+
+```sql
+SELECT asset.policy_id, asset.name, COALESCE(SUM(asset.amount), 0) AS amount
+FROM asset
+JOIN utxo ON asset.utxo_id = utxo.id
+WHERE utxo.deleted_slot = 0
+  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex')
+       AND utxo.credential_tag = $3 AND utxo.staking_key = decode($4, 'hex'))
+GROUP BY asset.policy_id, asset.name
+ORDER BY asset.policy_id, asset.name;
+```
+
+The address condition follows the same payment/staking branch rules as the
+UTxO listing queries, with an explicit match mode: exact matching adds
+`AND (staking_key IS NULL OR LENGTH(staking_key) = 0)` for payment-only
+(enterprise/pointer) addresses so base-address UTxOs sharing the payment
+credential are excluded, while payment-credential mode (bare
+`addr_vkh`/`script` lookups) keeps the payment-only predicate and
+aggregates across address forms. Pointer addresses are further narrowed
+by the API adapter, which compares each candidate output's decoded
+address bytes, because the pointer payload is not represented in the
+`utxo` table.
 
 ### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 

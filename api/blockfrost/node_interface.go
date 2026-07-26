@@ -61,6 +61,10 @@ type BlockfrostNode interface {
 	// extended details.
 	PoolsExtended() ([]PoolExtendedInfo, error)
 
+	// Address returns summary information for an address,
+	// including balances aggregated across its live UTxOs.
+	Address(address string) (AddressInfo, error)
+
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
@@ -382,6 +386,15 @@ type PoolRelayInfo struct {
 type AddressAmountInfo struct {
 	Unit     string
 	Quantity string
+}
+
+// AddressInfo holds address summary data needed by the API.
+type AddressInfo struct {
+	Address      string
+	Amount       []AddressAmountInfo
+	StakeAddress *string
+	Type         string
+	Script       bool
 }
 
 // AddressUTXOInfo holds address UTxO data needed by the

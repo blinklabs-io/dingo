@@ -26,6 +26,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -50,6 +51,7 @@ import (
 
 var (
 	ErrInvalidAddress      = errors.New("invalid address")
+	ErrAddressNotFound     = errors.New("address not found")
 	ErrInvalidBlockID      = errors.New("invalid block id")
 	ErrBlockNotFound       = errors.New("block not found")
 	ErrEpochNotFound       = errors.New("epoch not found")
@@ -2462,6 +2464,330 @@ func uintToInt(v uint) int {
 
 // AddressUTXOs returns paginated current UTxOs for the
 // requested address.
+// parseAddressOrPaymentCred parses a full address, or a bare payment
+// credential in CIP-5 "addr_vkh"/"script" bech32 form as accepted by the
+// Blockfrost address endpoints. A payment credential maps to a synthetic
+// enterprise address so UTxO queries aggregate across every address sharing
+// that credential, mirroring Blockfrost's paymentCred behavior; the second
+// return value reports that form so callers can adjust semantics.
+func parseAddressOrPaymentCred(
+	address string,
+) (lcommon.Address, bool, error) {
+	if hrp, data, err := bech32.Decode(address); err == nil {
+		var addrType uint8
+		isPaymentCred := true
+		switch strings.ToLower(hrp) {
+		case "addr_vkh":
+			addrType = lcommon.AddressTypeKeyNone
+		case "script":
+			addrType = lcommon.AddressTypeScriptNone
+		default:
+			isPaymentCred = false
+		}
+		if isPaymentCred {
+			payload, err := bech32.ConvertBits(data, 5, 8, false)
+			if err != nil {
+				return lcommon.Address{}, false, fmt.Errorf(
+					"decode payment credential payload: %w",
+					err,
+				)
+			}
+			// The network id only affects the synthetic address's
+			// textual form, which is never used; queries match on
+			// the credential.
+			addr, err := lcommon.NewAddressFromParts(
+				addrType,
+				lcommon.AddressNetworkTestnet,
+				payload,
+				nil,
+			)
+			return addr, true, err
+		}
+	}
+	addr, err := lcommon.NewAddress(address)
+	if err != nil {
+		return lcommon.Address{}, false, err
+	}
+	// NewAddress falls back to base58 and accepts arbitrary bytes without
+	// structural validation, so require the parsed address to round-trip
+	// back to the input to reject malformed input like "addr1stonks".
+	if addr.String() != address {
+		return lcommon.Address{}, false, fmt.Errorf(
+			"address does not round-trip: %w",
+			ErrInvalidAddress,
+		)
+	}
+	// Reject inputs without a payment part (e.g. stake addresses), which
+	// the Blockfrost address endpoints treat as malformed.
+	if addr.PaymentKeyHash() == lcommon.NewBlake2b224(nil) {
+		return lcommon.Address{}, false, fmt.Errorf(
+			"address has no payment part: %w",
+			ErrInvalidAddress,
+		)
+	}
+	return addr, false, nil
+}
+
+// isPointerAddress reports whether the address carries a pointer
+// staking reference (Shelley address types 0x4/0x5).
+func isPointerAddress(addr lcommon.Address) bool {
+	switch addr.Type() {
+	case lcommon.AddressTypeKeyPointer, lcommon.AddressTypeScriptPointer:
+		return true
+	default:
+		return false
+	}
+}
+
+// pointerAddressBalance aggregates balances for a pointer address by
+// exact address identity: SQL narrows the candidates to outputs sharing
+// the payment credential, and each candidate's output CBOR is decoded
+// to compare the full address bytes. Pointer addresses are vanishingly
+// rare, so the candidate sets stay small.
+func (a *NodeAdapter) pointerAddressBalance(
+	addr lcommon.Address,
+) (models.AddressBalance, error) {
+	var ret models.AddressBalance
+	wantBytes, err := addr.Bytes()
+	if err != nil {
+		return ret, fmt.Errorf("encode pointer address: %w", err)
+	}
+
+	candidates, err := a.ledgerState.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			Addresses: []lcommon.Address{addr},
+		},
+	)
+	if err != nil {
+		return ret, fmt.Errorf("get pointer address candidates: %w", err)
+	}
+	if len(candidates) == 0 {
+		return ret, nil
+	}
+
+	utxoCbor, err := a.addressUtxoCbor(candidates)
+	if err != nil {
+		return ret, fmt.Errorf(
+			"resolve CBOR for pointer address candidates: %w", err,
+		)
+	}
+	for i := range candidates {
+		raw := utxoCbor[utxoRef(candidates[i].Utxo)]
+		if len(raw) == 0 {
+			continue
+		}
+		output, err := gledger.NewTransactionOutputFromCbor(raw)
+		if err != nil {
+			continue
+		}
+		outAddr := output.Address()
+		gotBytes, err := outAddr.Bytes()
+		if err != nil || !bytes.Equal(gotBytes, wantBytes) {
+			continue
+		}
+		ret.UtxoCount++
+		ret.Lovelace += uint64(candidates[i].Amount)
+		for _, asset := range candidates[i].Assets {
+			ret.Assets = append(ret.Assets, models.AssetBalance{
+				PolicyId: asset.PolicyId,
+				Name:     asset.Name,
+				Amount:   uint64(asset.Amount),
+			})
+		}
+	}
+	// Merge duplicate asset units and restore the (policy id, name)
+	// ordering the SQL path provides.
+	merged := make(map[string]*models.AssetBalance)
+	for i := range ret.Assets {
+		key := string(ret.Assets[i].PolicyId) + "\x00" + string(ret.Assets[i].Name)
+		if existing, ok := merged[key]; ok {
+			existing.Amount += ret.Assets[i].Amount
+			continue
+		}
+		assetCopy := ret.Assets[i]
+		merged[key] = &assetCopy
+	}
+	ret.Assets = ret.Assets[:0]
+	for _, asset := range merged {
+		ret.Assets = append(ret.Assets, *asset)
+	}
+	sort.Slice(ret.Assets, func(i, j int) bool {
+		if c := bytes.Compare(
+			ret.Assets[i].PolicyId, ret.Assets[j].PolicyId,
+		); c != 0 {
+			return c < 0
+		}
+		return bytes.Compare(
+			ret.Assets[i].Name, ret.Assets[j].Name,
+		) < 0
+	})
+	return ret, nil
+}
+
+// Address returns summary details for the requested address, with balances
+// aggregated across its live UTxOs. Addresses never seen on chain map to
+// ErrAddressNotFound; addresses with spent history resolve with a zero
+// lovelace balance.
+func (a *NodeAdapter) Address(
+	address string,
+) (AddressInfo, error) {
+	addr, isPaymentCred, err := parseAddressOrPaymentCred(address)
+	if err != nil {
+		return AddressInfo{}, fmt.Errorf(
+			"parse address %q: %w",
+			address,
+			ErrInvalidAddress,
+		)
+	}
+	// Blockfrost rejects addresses encoded for a different network than
+	// the node's; queries match on bare credential hashes, so without
+	// this check a foreign-network address would return this network's
+	// balances. Bare payment credentials carry no network id.
+	if !isPaymentCred && addr.NetworkId() != uint(a.networkID()) {
+		return AddressInfo{}, fmt.Errorf(
+			"address %q network mismatch: %w",
+			address,
+			ErrInvalidAddress,
+		)
+	}
+
+	// Read every query from one snapshot so a block committed
+	// mid-request cannot mix two chain states in the response.
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	// Full addresses use exact matching so UTxOs at other address
+	// forms sharing the payment credential are excluded; bare
+	// payment credentials (addr_vkh/script) deliberately aggregate
+	// across forms.
+	matchMode := models.UtxoAddressMatchExact
+	if isPaymentCred {
+		matchMode = models.UtxoAddressMatchPaymentCred
+	}
+
+	var balance models.AddressBalance
+	if !isPaymentCred && isPointerAddress(addr) {
+		// Pointer addresses cannot be distinguished from
+		// enterprise addresses (or from each other) by the stored
+		// credential columns: the pointer payload is not
+		// represented in the utxo table. Narrow candidates by
+		// payment credential in SQL, then keep only outputs whose
+		// decoded address matches the request exactly.
+		balance, err = a.pointerAddressBalance(addr)
+	} else {
+		balance, err = db.Metadata().
+			GetUtxoBalanceByAddress(addr, matchMode, txn.Metadata())
+	}
+	if err != nil {
+		return AddressInfo{}, fmt.Errorf(
+			"get address balance for %q: %w",
+			address,
+			err,
+		)
+	}
+	if balance.UtxoCount == 0 {
+		var txCount int
+		if isPaymentCred {
+			// The synthetic enterprise address would only match
+			// enterprise usage in the per-address transaction
+			// index; a spent-out credential used via base
+			// addresses must still resolve, so count across every
+			// address carrying the payment credential.
+			txCount, err = db.CountTransactionsByPaymentCred(
+				addr.PaymentKeyHash().Bytes(),
+				txn,
+			)
+		} else {
+			txCount, err = db.CountTransactionsByAddress(addr, txn)
+		}
+		if err != nil {
+			return AddressInfo{}, fmt.Errorf(
+				"count address transactions for %q: %w",
+				address,
+				err,
+			)
+		}
+		if txCount == 0 {
+			return AddressInfo{}, fmt.Errorf(
+				"address %q: %w",
+				address,
+				ErrAddressNotFound,
+			)
+		}
+	}
+
+	// Balances are aggregated in SQL (see GetUtxoBalanceByAddress);
+	// assets arrive ordered by (policy id, name), which matches the
+	// hex-string unit ordering Blockfrost emits.
+	amounts := make([]AddressAmountInfo, 0, len(balance.Assets)+1)
+	amounts = append(amounts, AddressAmountInfo{
+		Unit:     "lovelace",
+		Quantity: strconv.FormatUint(balance.Lovelace, 10),
+	})
+	for _, asset := range balance.Assets {
+		amounts = append(amounts, AddressAmountInfo{
+			Unit: hex.EncodeToString(asset.PolicyId) +
+				hex.EncodeToString(asset.Name),
+			Quantity: strconv.FormatUint(asset.Amount, 10),
+		})
+	}
+
+	var stakeAddress *string
+	if stakeAddr := addr.StakeAddress(); stakeAddr != nil {
+		encoded := stakeAddr.String()
+		stakeAddress = &encoded
+	} else if addr.Type() == lcommon.AddressTypeKeyScript {
+		// gouroboros Address.StakeAddress() has no case for
+		// key-payment/script-staking base addresses; build the script
+		// stake address from the staking credential directly.
+		networkID, err := uintToUint8(
+			addr.NetworkId(),
+			"address network id",
+		)
+		if err != nil {
+			return AddressInfo{}, err
+		}
+		encoded, err := stakeAddressFromCredential(
+			lcommon.Credential{
+				CredType:   lcommon.CredentialTypeScriptHash,
+				Credential: lcommon.CredentialHash(addr.StakeKeyHash()),
+			},
+			networkID,
+		)
+		if err != nil {
+			return AddressInfo{}, fmt.Errorf(
+				"derive script stake address for %q: %w",
+				address,
+				err,
+			)
+		}
+		stakeAddress = &encoded
+	}
+
+	addrType := "shelley"
+	if addr.Type() == lcommon.AddressTypeByron {
+		addrType = "byron"
+	}
+
+	script := false
+	switch addr.Type() {
+	case lcommon.AddressTypeScriptKey,
+		lcommon.AddressTypeScriptScript,
+		lcommon.AddressTypeScriptPointer,
+		lcommon.AddressTypeScriptNone:
+		script = true
+	}
+
+	return AddressInfo{
+		Address:      address,
+		Amount:       amounts,
+		StakeAddress: stakeAddress,
+		Type:         addrType,
+		Script:       script,
+	}, nil
+}
+
 func (a *NodeAdapter) AddressUTXOs(
 	address string,
 	params PaginationParams,
