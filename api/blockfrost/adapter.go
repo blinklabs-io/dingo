@@ -24,11 +24,13 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"sort"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -1145,6 +1147,9 @@ func paginateAssetHolders(
 func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
+	if credential.Predefined != nil {
+		return a.predefinedDRep(credential)
+	}
 	if credential.CredentialTagKnown {
 		var credentialTag uint8
 		if credential.HasScript {
@@ -1161,6 +1166,68 @@ func (a *NodeAdapter) DRep(
 		return DRepInfo{}, err
 	}
 	return a.drepByCredentialTag(credential, 1)
+}
+
+// predefinedDRep returns the special always-abstain /
+// always-no-confidence DRep summary. These carry no credential, never
+// register, retire, or expire, and have no activity epochs.
+func (a *NodeAdapter) predefinedDRep(
+	credential DRepCredential,
+) (DRepInfo, error) {
+	drepType := *credential.Predefined
+	powers, err := a.ledgerState.Database().Metadata().
+		GetDRepVotingPowerByType([]uint64{drepType}, 0, nil)
+	if err != nil {
+		return DRepInfo{}, fmt.Errorf(
+			"get predefined drep voting power: %w",
+			err,
+		)
+	}
+	return DRepInfo{
+		DRepID: credential.ID,
+		Hex:    "",
+		Amount: strconv.FormatUint(powers[drepType], 10),
+		Active: true,
+	}, nil
+}
+
+// drepInactivityPeriod returns the Conway-era drep_activity protocol
+// parameter (epochs of inactivity before a DRep expires), or 0 when it
+// is unavailable.
+func (a *NodeAdapter) drepInactivityPeriod() uint64 {
+	switch pp := a.ledgerState.GetCurrentPParams().(type) {
+	case *conway.ConwayProtocolParameters:
+		return pp.DRepInactivityPeriod
+	case *dijkstra.DijkstraProtocolParameters:
+		return pp.DRepInactivityPeriod
+	default:
+		return 0
+	}
+}
+
+// drepStatus derives the Blockfrost retirement/expiry view of a DRep
+// row. A DRep with no recorded activity falls back to its registration
+// epoch, and a missing expiry epoch is derived from the drep_activity
+// protocol parameter, matching hosted Blockfrost semantics.
+func drepStatus(
+	active bool,
+	lastActivityEpoch uint64,
+	expiryEpoch uint64,
+	registrationEpoch uint64,
+	currentEpoch uint64,
+	inactivityPeriod uint64,
+) (retired bool, expired bool, lastActive uint64) {
+	retired = !active
+	lastActive = lastActivityEpoch
+	if lastActive == 0 {
+		lastActive = registrationEpoch
+	}
+	expiry := expiryEpoch
+	if expiry == 0 && inactivityPeriod > 0 {
+		expiry = lastActive + inactivityPeriod
+	}
+	expired = !retired && expiry > 0 && expiry <= currentEpoch
+	return retired, expired, lastActive
 }
 
 func (a *NodeAdapter) drepByCredentialTag(
@@ -1195,32 +1262,366 @@ func (a *NodeAdapter) drepByCredentialTag(
 		)
 	}
 
-	registrationEpoch, err := a.ledgerState.SlotToEpoch(drep.AddedSlot)
+	// The most recent registration certificate is the active_epoch
+	// source; drep.added_slot is overwritten by update and
+	// deregistration certificates. Rows without certificate history
+	// (core mode or pre-backfill databases) fall back to added_slot.
+	regSlot, err := db.Metadata().GetDrepLastRegistrationSlot(
+		credentialTag, credential.Hash, nil,
+	)
+	if err != nil {
+		return DRepInfo{}, fmt.Errorf(
+			"get drep last registration slot %x: %w",
+			credential.Hash,
+			err,
+		)
+	}
+	if regSlot == 0 {
+		regSlot = drep.AddedSlot
+	}
+	registrationEpoch, err := a.ledgerState.SlotToEpoch(regSlot)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
 			"get DRep registration epoch for slot %d: %w",
-			drep.AddedSlot,
+			regSlot,
 			err,
 		)
 	}
 
-	currentEpoch := a.ledgerState.CurrentEpoch()
-	registered := drep.Active
-	active := registered &&
-		(drep.ExpiryEpoch == 0 || drep.ExpiryEpoch > currentEpoch)
-	amount := strconv.FormatUint(power, 10)
+	retired, expired, lastActive := drepStatus(
+		drep.Active,
+		drep.LastActivityEpoch,
+		drep.ExpiryEpoch,
+		registrationEpoch.EpochId,
+		a.ledgerState.CurrentEpoch(),
+		a.drepInactivityPeriod(),
+	)
 
+	// Echo the identifier form the caller used: CIP-129 inputs carry
+	// the credential-type prefix byte in hex, legacy inputs the bare
+	// 28-byte hash.
+	hexID := hex.EncodeToString(credential.Hash)
+	if credential.CredentialTagKnown {
+		hexID = hex.EncodeToString(
+			append(
+				[]byte{cip129DRepHeader(hasScript)},
+				credential.Hash...,
+			),
+		)
+	}
+
+	regEpoch := registrationEpoch.EpochId
 	return DRepInfo{
-		DRepID:      credential.ID,
-		Hex:         hex.EncodeToString(credential.Hash),
-		HasScript:   hasScript,
-		Registered:  registered,
-		Epoch:       registrationEpoch.EpochId,
-		Amount:      amount,
-		Active:      active,
-		ActiveEpoch: drep.LastActivityEpoch,
-		LiveStake:   amount,
+		DRepID:          credential.ID,
+		Hex:             hexID,
+		Amount:          strconv.FormatUint(power, 10),
+		Active:          !retired,
+		ActiveEpoch:     &regEpoch,
+		HasScript:       hasScript,
+		Retired:         retired,
+		Expired:         expired,
+		LastActiveEpoch: &lastActive,
 	}, nil
+}
+
+// cip129DRepHeader returns the CIP-129 governance-credential header
+// byte for a DRep: 0x22 for a key-hash credential, 0x23 for a script
+// hash.
+func cip129DRepHeader(hasScript bool) byte {
+	if hasScript {
+		return 0x23
+	}
+	return 0x22
+}
+
+// DReps returns the paginated DRep list. Default ordering follows the
+// credential's first on-chain appearance; order_by=amount sorts by
+// delegated voting power with appearance order as the tie-break. The
+// special always-abstain / always-no-confidence DReps are interleaved
+// at the position of their first delegation, matching hosted
+// Blockfrost.
+func (a *NodeAdapter) DReps(
+	params DRepListParams,
+) ([]DRepListItemInfo, int, error) {
+	db := a.ledgerState.Database()
+	// Read every query from one snapshot so a block committed
+	// mid-request cannot mix two chain states in the response.
+	txn := db.Transaction(false)
+	defer txn.Release()
+	meta := db.Metadata()
+
+	dreps, err := meta.GetDreps(txn.Metadata())
+	if err != nil {
+		return nil, 0, fmt.Errorf("get dreps: %w", err)
+	}
+
+	// Slot-to-epoch resolution walks the epoch table once instead of
+	// querying per DRep.
+	epochs, err := meta.GetEpochs(txn.Metadata())
+	if err != nil {
+		return nil, 0, fmt.Errorf("get epochs: %w", err)
+	}
+	epochForSlot := func(slot uint64) uint64 {
+		id := uint64(0)
+		for i := range epochs {
+			if epochs[i].StartSlot > slot {
+				break
+			}
+			id = epochs[i].EpochId
+		}
+		return id
+	}
+
+	currentEpoch := a.ledgerState.CurrentEpoch()
+	inactivity := a.drepInactivityPeriod()
+
+	type entry struct {
+		predefined *uint64
+		credential []byte
+		tag        uint8
+		id         uint
+		firstSeen  uint64
+		anchorURL  string
+		anchorHash []byte
+		retired    bool
+		expired    bool
+		lastActive *uint64
+		amount     uint64
+	}
+	entries := make([]entry, 0, len(dreps)+2)
+	for i := range dreps {
+		drep := dreps[i]
+		// The most recent registration certificate is the
+		// active_epoch source; drep.added_slot is overwritten by
+		// update and deregistration certificates.
+		regSlot := drep.LastRegistrationSlot
+		if regSlot == 0 {
+			regSlot = drep.AddedSlot
+		}
+		retired, expired, lastActive := drepStatus(
+			drep.Active,
+			drep.LastActivityEpoch,
+			drep.ExpiryEpoch,
+			epochForSlot(regSlot),
+			currentEpoch,
+			inactivity,
+		)
+		entries = append(entries, entry{
+			credential: drep.Credential,
+			tag:        drep.CredentialTag,
+			id:         drep.ID,
+			firstSeen:  drep.FirstSeenSlot,
+			anchorURL:  drep.AnchorURL,
+			anchorHash: drep.AnchorHash,
+			retired:    retired,
+			expired:    expired,
+			lastActive: &lastActive,
+		})
+	}
+	// The special DReps appear at the position of their first
+	// delegation. They never register, retire, or expire.
+	specialSlots, err := meta.GetPredefinedDrepFirstSeenSlots(
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get predefined drep first seen slots: %w", err,
+		)
+	}
+	for _, drepType := range []uint64{
+		models.DrepTypeAlwaysAbstain,
+		models.DrepTypeAlwaysNoConfidence,
+	} {
+		slot, ok := specialSlots[drepType]
+		if !ok {
+			continue
+		}
+		dt := drepType
+		entries = append(entries, entry{
+			predefined: &dt,
+			firstSeen:  slot,
+		})
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].firstSeen != entries[j].firstSeen {
+			return entries[i].firstSeen < entries[j].firstSeen
+		}
+		return entries[i].id < entries[j].id
+	})
+
+	filtered := entries[:0]
+	for _, item := range entries {
+		if params.Retired != nil && item.retired != *params.Retired {
+			continue
+		}
+		if params.Expired != nil && item.expired != *params.Expired {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	entries = filtered
+	total := len(entries)
+
+	fillAmounts := func(items []entry) error {
+		refs := make([]models.StakeCredentialRef, 0, len(items))
+		specialTypes := make([]uint64, 0, 2)
+		for i := range items {
+			if items[i].predefined != nil {
+				specialTypes = append(
+					specialTypes, *items[i].predefined,
+				)
+				continue
+			}
+			refs = append(refs, models.StakeCredentialRef{
+				Tag: items[i].tag,
+				Key: items[i].credential,
+			})
+		}
+		powers := map[string]uint64{}
+		if len(refs) > 0 {
+			powers, err = meta.GetDRepVotingPowerBatch(
+				refs, 0, txn.Metadata(),
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"get drep voting power batch: %w", err,
+				)
+			}
+		}
+		typePowers := map[uint64]uint64{}
+		if len(specialTypes) > 0 {
+			typePowers, err = meta.GetDRepVotingPowerByType(
+				specialTypes, 0, txn.Metadata(),
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"get predefined drep voting power: %w", err,
+				)
+			}
+		}
+		for i := range items {
+			if items[i].predefined != nil {
+				items[i].amount = typePowers[*items[i].predefined]
+				continue
+			}
+			ref := models.StakeCredentialRef{
+				Tag: items[i].tag,
+				Key: items[i].credential,
+			}
+			items[i].amount = powers[ref.MapKey()]
+		}
+		return nil
+	}
+
+	desc := params.Pagination.Order == PaginationOrderDesc
+	if params.OrderByAmount {
+		// Amount ordering needs every candidate's voting power
+		// before pagination.
+		if err := fillAmounts(entries); err != nil {
+			return nil, 0, err
+		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].amount != entries[j].amount {
+				if desc {
+					return entries[i].amount > entries[j].amount
+				}
+				return entries[i].amount < entries[j].amount
+			}
+			return entries[i].firstSeen < entries[j].firstSeen
+		})
+	} else if desc {
+		slices.Reverse(entries)
+	}
+
+	start := (params.Pagination.Page - 1) * params.Pagination.Count
+	if start >= len(entries) {
+		return []DRepListItemInfo{}, total, nil
+	}
+	end := min(start+params.Pagination.Count, len(entries))
+	page := entries[start:end]
+
+	if !params.OrderByAmount {
+		if err := fillAmounts(page); err != nil {
+			return nil, 0, err
+		}
+	}
+
+	ret := make([]DRepListItemInfo, 0, len(page))
+	for i := range page {
+		item := &page[i]
+		if item.predefined != nil {
+			drepID := "drep_always_abstain"
+			if *item.predefined == models.DrepTypeAlwaysNoConfidence {
+				drepID = "drep_always_no_confidence"
+			}
+			ret = append(ret, DRepListItemInfo{
+				DRepID: drepID,
+				Hex:    "",
+				Amount: strconv.FormatUint(item.amount, 10),
+			})
+			continue
+		}
+		hasScript := item.tag == 1
+		payload := append(
+			[]byte{cip129DRepHeader(hasScript)},
+			item.credential...,
+		)
+		drepID, err := bech32EncodeData("drep", payload)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"encode drep id %x: %w",
+				item.credential,
+				err,
+			)
+		}
+		ret = append(ret, DRepListItemInfo{
+			DRepID:          drepID,
+			Hex:             hex.EncodeToString(payload),
+			Amount:          strconv.FormatUint(item.amount, 10),
+			HasScript:       hasScript,
+			Retired:         item.retired,
+			Expired:         item.expired,
+			LastActiveEpoch: item.lastActive,
+			Metadata: a.drepAnchorMetadata(
+				item.anchorURL, item.anchorHash, txn.Metadata(),
+			),
+		})
+	}
+	return ret, total, nil
+}
+
+// drepAnchorMetadata resolves a DRep's anchor document from the
+// off-chain metadata cache. It returns nil when the DRep has no anchor
+// or the document has not been fetched successfully; cache lookup
+// failures degrade to nil rather than failing the listing.
+func (a *NodeAdapter) drepAnchorMetadata(
+	anchorURL string,
+	anchorHash []byte,
+	txn dbtypes.Txn,
+) *DRepMetadataInfo {
+	if anchorURL == "" {
+		return nil
+	}
+	doc, err := a.ledgerState.Database().Metadata().GetOffchainMetadata(
+		models.OffchainMetadataSourceDrep,
+		anchorURL,
+		anchorHash,
+		txn,
+	)
+	if err != nil || doc == nil ||
+		doc.Status != models.OffchainMetadataStatusFetched ||
+		len(doc.Content) == 0 {
+		return nil
+	}
+	ret := &DRepMetadataInfo{
+		URL:   anchorURL,
+		Hash:  hex.EncodeToString(anchorHash),
+		Bytes: "\\x" + hex.EncodeToString(doc.Content),
+	}
+	if json.Valid(doc.Content) {
+		ret.JSONMetadata = json.RawMessage(doc.Content)
+	}
+	return ret
 }
 
 func (a *NodeAdapter) latestBlockData(

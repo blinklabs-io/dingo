@@ -247,17 +247,40 @@ type AssetResponse struct {
 	Metadata                *any    `json:"metadata"`
 }
 
-// DRepResponse represents a Blockfrost governance DRep object.
+// DRepResponse represents a Blockfrost governance DRep object
+// (OpenAPI 0.1.90 drep schema; active and active_epoch are deprecated
+// there but remain required).
 type DRepResponse struct {
-	DRepID      string `json:"drep_id"`
-	Hex         string `json:"hex"`
-	HasScript   bool   `json:"has_script"`
-	Registered  bool   `json:"registered"`
-	Epoch       uint64 `json:"epoch"`
-	Amount      string `json:"amount"`
-	Active      bool   `json:"active"`
-	ActiveEpoch uint64 `json:"active_epoch"`
-	LiveStake   string `json:"live_stake"`
+	DRepID          string  `json:"drep_id"`
+	Hex             string  `json:"hex"`
+	Amount          string  `json:"amount"`
+	Active          bool    `json:"active"`
+	ActiveEpoch     *uint64 `json:"active_epoch"`
+	HasScript       bool    `json:"has_script"`
+	Retired         bool    `json:"retired"`
+	Expired         bool    `json:"expired"`
+	LastActiveEpoch *uint64 `json:"last_active_epoch"`
+}
+
+// DRepListItemResponse is one entry of the Blockfrost DRep list.
+type DRepListItemResponse struct {
+	DRepID          string                `json:"drep_id"`
+	Hex             string                `json:"hex"`
+	Amount          string                `json:"amount"`
+	HasScript       bool                  `json:"has_script"`
+	Retired         bool                  `json:"retired"`
+	Expired         bool                  `json:"expired"`
+	LastActiveEpoch *uint64               `json:"last_active_epoch"`
+	Metadata        *DRepMetadataResponse `json:"metadata"`
+}
+
+// DRepMetadataResponse is the resolved CIP-119 anchor document
+// attached to a DRep list entry.
+type DRepMetadataResponse struct {
+	URL          string          `json:"url"`
+	Hash         string          `json:"hash"`
+	JSONMetadata json.RawMessage `json:"json_metadata"`
+	Bytes        string          `json:"bytes"`
 }
 
 // ErrorResponse represents a Blockfrost error response.

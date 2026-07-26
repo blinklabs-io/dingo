@@ -72,6 +72,9 @@ type mockNode struct {
 	assetAddressesAssetName       []byte
 	assetAddressesParams          PaginationParams
 	drep                          DRepInfo
+	drepList                      []DRepListItemInfo
+	drepListTotal                 int
+	drepListParams                DRepListParams
 	drepCredential                DRepCredential
 	addressUTXOs                  []AddressUTXOInfo
 	addressTransactions           []AddressTransactionInfo
@@ -114,6 +117,7 @@ type mockNode struct {
 	assetErr                      error
 	assetAddressesErr             error
 	drepErr                       error
+	drepListErr                   error
 	addressUTXOsErr               error
 	addressTransactionsErr        error
 	metadataJSONErr               error
@@ -228,6 +232,13 @@ func (m *mockNode) DRep(
 ) (DRepInfo, error) {
 	m.drepCredential = credential
 	return m.drep, m.drepErr
+}
+
+func (m *mockNode) DReps(
+	params DRepListParams,
+) ([]DRepListItemInfo, int, error) {
+	m.drepListParams = params
+	return m.drepList, m.drepListTotal, m.drepListErr
 }
 
 func (m *mockNode) AddressUTXOs(
@@ -980,17 +991,19 @@ func TestHandleDRep(t *testing.T) {
 	const drepHex = "00000000000000000000000000000000000000000000000000000000"
 	const drepID = drepHex
 
+	activeEpoch := uint64(12)
+	lastActive := uint64(14)
 	mock := &mockNode{
 		drep: DRepInfo{
-			DRepID:      drepID,
-			Hex:         drepHex,
-			HasScript:   false,
-			Registered:  true,
-			Epoch:       12,
-			Amount:      "123456",
-			Active:      true,
-			ActiveEpoch: 14,
-			LiveStake:   "123456",
+			DRepID:          drepID,
+			Hex:             drepHex,
+			Amount:          "123456",
+			Active:          true,
+			ActiveEpoch:     &activeEpoch,
+			HasScript:       false,
+			Retired:         false,
+			Expired:         true,
+			LastActiveEpoch: &lastActive,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -1012,18 +1025,121 @@ func TestHandleDRep(t *testing.T) {
 	assert.Equal(t, mock.drep.DRepID, resp.DRepID)
 	assert.Equal(t, mock.drep.Hex, resp.Hex)
 	assert.Equal(t, mock.drep.HasScript, resp.HasScript)
-	assert.Equal(t, mock.drep.Registered, resp.Registered)
-	assert.Equal(t, mock.drep.Epoch, resp.Epoch)
 	assert.Equal(t, mock.drep.Amount, resp.Amount)
 	assert.Equal(t, mock.drep.Active, resp.Active)
-	assert.Equal(t, mock.drep.ActiveEpoch, resp.ActiveEpoch)
-	assert.Equal(t, mock.drep.LiveStake, resp.LiveStake)
+	require.NotNil(t, resp.ActiveEpoch)
+	assert.Equal(t, activeEpoch, *resp.ActiveEpoch)
+	assert.False(t, resp.Retired)
+	assert.True(t, resp.Expired)
+	require.NotNil(t, resp.LastActiveEpoch)
+	assert.Equal(t, lastActive, *resp.LastActiveEpoch)
+}
+
+func TestHandleDReps(t *testing.T) {
+	lastActive := uint64(680)
+	mock := &mockNode{
+		drepListTotal: 42,
+		drepList: []DRepListItemInfo{
+			{
+				DRepID:          "drep1y2zpa7e9f23g7snuhfqss73ufeshsqhdt4qqfu74p9y4kfqcpsxym",
+				Hex:             "22841efb254aa28f427cba41087a3c4e617802ed5d4004f3d509495b24",
+				Amount:          "1000000",
+				HasScript:       false,
+				Retired:         false,
+				Expired:         true,
+				LastActiveEpoch: &lastActive,
+				Metadata: &DRepMetadataInfo{
+					URL:          "https://example.com/drep.json",
+					Hash:         "aa",
+					JSONMetadata: json.RawMessage(`{"a":1}`),
+					Bytes:        "\\x7b2261223a317d",
+				},
+			},
+			{
+				DRepID: "drep1yvvxuvh64q9zdqgrjt76d42eclk5wgdxtnsun4808cwg0dquhj65s",
+				Hex:    "23186e32faa80a26810392fda6d559c7ed4721a65ce1c9d4ef3e1c87b4",
+				Amount: "0", HasScript: true, Retired: true,
+			},
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/governance/dreps?count=2&order_by=amount&order=desc&retired=false",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	b.handleDReps(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "42", w.Header().Get("X-Pagination-Count-Total"))
+	assert.True(t, mock.drepListParams.OrderByAmount)
+	require.NotNil(t, mock.drepListParams.Retired)
+	assert.False(t, *mock.drepListParams.Retired)
+	assert.Nil(t, mock.drepListParams.Expired)
+	assert.Equal(t, PaginationOrderDesc, mock.drepListParams.Pagination.Order)
+
+	var resp []DRepListItemResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 2)
+	assert.Equal(t, "1000000", resp[0].Amount)
+	require.NotNil(t, resp[0].Metadata)
+	assert.Equal(t, "https://example.com/drep.json", resp[0].Metadata.URL)
+	assert.Nil(t, resp[1].Metadata)
+	assert.True(t, resp[1].Retired)
+}
+
+func TestHandleDRepsInvalidParams(t *testing.T) {
+	cases := []struct {
+		query   string
+		message string
+	}{
+		{"order=a", "querystring/order must be equal to one of the allowed values"},
+		{"page=x", "querystring/page must be integer"},
+		{"page=0", "querystring/page must be >= 1"},
+		{"page=99999999999999", "querystring/page must be <= 21474836"},
+		{"count=x", "querystring/count must be integer"},
+		{"count=999999999999999", "querystring/count must be <= 100"},
+		{"count=0", "querystring/count must be >= 1"},
+		{"order_by=bogus", "querystring/order_by must be equal to one of the allowed values"},
+		{"retired=x", "querystring/retired must be boolean"},
+		{"expired=x", "querystring/expired must be boolean"},
+	}
+	b := newTestBlockfrost(&mockNode{})
+	for _, tc := range cases {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/api/v0/governance/dreps?"+tc.query,
+			nil,
+		)
+		w := httptest.NewRecorder()
+		b.handleDReps(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code, tc.query)
+		var resp ErrorResponse
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), tc.query)
+		assert.Equal(t, tc.message, resp.Message, tc.query)
+	}
+}
+
+func TestParseDRepIdentifierSpecial(t *testing.T) {
+	cred, err := parseDRepIdentifier("drep_always_abstain")
+	require.NoError(t, err)
+	require.NotNil(t, cred.Predefined)
+	assert.Equal(t, models.DrepTypeAlwaysAbstain, *cred.Predefined)
+
+	cred, err = parseDRepIdentifier("drep_always_no_confidence")
+	require.NoError(t, err)
+	require.NotNil(t, cred.Predefined)
+	assert.Equal(t, models.DrepTypeAlwaysNoConfidence, *cred.Predefined)
 }
 
 // TestHandleDRepCIP129ScriptIdentifier verifies script DRep IDs keep their
 // credential type when the HTTP handler passes them to the node adapter.
 func TestHandleDRepCIP129ScriptIdentifier(t *testing.T) {
-	const drepID = "drep1xvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhknfj5"
+	const drepID = "drep1yvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq770f95"
 	const drepHex = "00000000000000000000000000000000000000000000000000000000"
 
 	mock := &mockNode{
@@ -1065,7 +1181,7 @@ func TestParseDRepIdentifierCIP129CredentialType(t *testing.T) {
 		},
 		{
 			name:          "script",
-			id:            "drep1xvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhknfj5",
+			id:            "drep1yvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq770f95",
 			wantHasScript: true,
 		},
 	}
