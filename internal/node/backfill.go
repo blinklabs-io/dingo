@@ -31,6 +31,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -570,8 +571,16 @@ func (b *Backfill) processBlockGovernance(
 	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
 		return nil
 	}
-	conwayPP, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	var conwayPP *conway.ConwayProtocolParameters
+	switch p := pp.(type) {
+	case *conway.ConwayProtocolParameters:
+		conwayPP = p
+	case *dijkstra.DijkstraProtocolParameters:
+		if p != nil {
+			conwayPP = &p.ConwayProtocolParameters
+		}
+	}
+	if conwayPP == nil {
 		return nil
 	}
 	if len(proposals) > 0 {
