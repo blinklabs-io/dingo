@@ -76,6 +76,7 @@ type mockNode struct {
 	drepListTotal                 int
 	drepListParams                DRepListParams
 	drepCredential                DRepCredential
+	addressInfo                   AddressInfo
 	addressUTXOs                  []AddressUTXOInfo
 	addressTransactions           []AddressTransactionInfo
 	metadataJSON                  []MetadataTransactionJSONInfo
@@ -118,6 +119,7 @@ type mockNode struct {
 	assetAddressesErr             error
 	drepErr                       error
 	drepListErr                   error
+	addressInfoErr                error
 	addressUTXOsErr               error
 	addressTransactionsErr        error
 	metadataJSONErr               error
@@ -239,6 +241,12 @@ func (m *mockNode) DReps(
 ) ([]DRepListItemInfo, int, error) {
 	m.drepListParams = params
 	return m.drepList, m.drepListTotal, m.drepListErr
+}
+
+func (m *mockNode) Address(
+	_ string,
+) (AddressInfo, error) {
+	return m.addressInfo, m.addressInfoErr
 }
 
 func (m *mockNode) AddressUTXOs(
@@ -2708,6 +2716,159 @@ func TestDefaultListenAddress(t *testing.T) {
 		slog.Default(),
 	)
 	assert.Equal(t, ":3000", b.config.ListenAddress)
+}
+
+func TestParseAddressOrPaymentCred(t *testing.T) {
+	// CIP-5 payment key hash credential
+	addr, isPaymentCred, err := parseAddressOrPaymentCred(
+		"addr_vkh1x0ph3nhyrvhpttyy3alk78f00q244vfdjwm38h5f3kz47kpgum5",
+	)
+	require.NoError(t, err)
+	assert.True(t, isPaymentCred)
+	assert.Equal(t, uint8(lcommon.AddressTypeKeyNone), addr.Type())
+	assert.Nil(t, addr.StakeAddress())
+
+	// CIP-5 script hash credential
+	addr, isPaymentCred, err = parseAddressOrPaymentCred(
+		"script1tx3c5y302fupjrm0xs3skumkaw97h2le97rjgrfzw8spydzr5ej",
+	)
+	require.NoError(t, err)
+	assert.True(t, isPaymentCred)
+	assert.Equal(t, uint8(lcommon.AddressTypeScriptNone), addr.Type())
+
+	// Full base address still parses through the normal path
+	addr, isPaymentCred, err = parseAddressOrPaymentCred(
+		"addr_test1qprwyxzmswhtjstxvj7epjc28gskffsqcxuurx80qrjdy3uayerntq74us2hsgxymgk3f5nka58z46zcqgctv9c05ctq8g0qn7",
+	)
+	require.NoError(t, err)
+	assert.False(t, isPaymentCred)
+	require.NotNil(t, addr.StakeAddress())
+	assert.Equal(
+		t,
+		"stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
+		addr.StakeAddress().String(),
+	)
+
+	// Garbage input fails despite decoding as base58 bytes
+	_, _, err = parseAddressOrPaymentCred("addr1stonks")
+	require.Error(t, err)
+
+	// Stake addresses have no payment part and are rejected
+	_, _, err = parseAddressOrPaymentCred(
+		"stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
+	)
+	require.Error(t, err)
+}
+
+func TestKeyScriptStakeAddressDerivation(t *testing.T) {
+	// gouroboros StakeAddress() returns nil for type-2 base addresses
+	// (key payment / script staking); the adapter derives the script
+	// stake address from the staking credential instead.
+	paymentHash := bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize)
+	stakeScriptHash := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyScript,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		stakeScriptHash,
+	)
+	require.NoError(t, err)
+	require.Nil(t, addr.StakeAddress())
+
+	encoded, err := stakeAddressFromCredential(
+		lcommon.Credential{
+			CredType:   lcommon.CredentialTypeScriptHash,
+			Credential: lcommon.CredentialHash(addr.StakeKeyHash()),
+		},
+		lcommon.AddressNetworkTestnet,
+	)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(encoded, "stake_test17"))
+
+	stakeAddr, err := lcommon.NewAddress(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, stakeScriptHash, stakeAddr.StakeKeyHash().Bytes())
+}
+
+func TestHandleAddress(t *testing.T) {
+	stakeAddress := "stake_test1upwlsqc..."
+	mock := &mockNode{
+		addressInfo: AddressInfo{
+			Address: "addr_test1vr8nl4...",
+			Amount: []AddressAmountInfo{
+				{Unit: "lovelace", Quantity: "3000"},
+				{Unit: "policyasset", Quantity: "7"},
+			},
+			StakeAddress: &stakeAddress,
+			Type:         "shelley",
+			Script:       false,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4...",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4...")
+	w := httptest.NewRecorder()
+	b.handleAddress(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp AddressResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "addr_test1vr8nl4...", resp.Address)
+	require.Len(t, resp.Amount, 2)
+	assert.Equal(t, "lovelace", resp.Amount[0].Unit)
+	assert.Equal(t, "3000", resp.Amount[0].Quantity)
+	assert.Equal(t, "policyasset", resp.Amount[1].Unit)
+	assert.Equal(t, "7", resp.Amount[1].Quantity)
+	require.NotNil(t, resp.StakeAddress)
+	assert.Equal(t, stakeAddress, *resp.StakeAddress)
+	assert.Equal(t, "shelley", resp.Type)
+	assert.False(t, resp.Script)
+}
+
+func TestHandleAddressNotFound(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		addressInfoErr: ErrAddressNotFound,
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4...",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4...")
+	w := httptest.NewRecorder()
+	b.handleAddress(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"The requested component has not been found.",
+		resp.Message,
+	)
+}
+
+func TestHandleAddressInvalidAddress(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		addressInfoErr: ErrInvalidAddress,
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/not_an_address",
+		nil,
+	)
+	req.SetPathValue("address", "not_an_address")
+	w := httptest.NewRecorder()
+	b.handleAddress(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestHandleAddressUTXOs(t *testing.T) {

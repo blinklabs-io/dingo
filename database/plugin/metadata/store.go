@@ -824,6 +824,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
+	// CountTransactionsByPaymentCred returns the total number of
+	// transactions involving the provided payment credential across every
+	// address that carries it, regardless of staking part. Used by the
+	// Blockfrost payment-credential (addr_vkh/script) address lookups.
+	CountTransactionsByPaymentCred(
+		[]byte, // paymentKey
+		types.Txn,
+	) (int, error)
+
 	// GetAddressesByCredential retrieves distinct address mappings for a stake credential.
 	GetAddressesByCredential(
 		uint8, // credentialTag
@@ -1153,6 +1162,19 @@ type MetadataStore interface {
 	// UTxOs whose payment credential is a script. This is the network's
 	// script-locked supply (blockfrost /network supply.locked).
 	GetScriptLockedSupply(types.Txn) (uint64, error)
+
+	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
+	// per-asset balances (ordered by policy id then name), and live UTxO
+	// count for the given address, aggregated in SQL. The match mode
+	// selects full-address identity (exact) or payment-credential
+	// aggregation. Used by the Blockfrost address summary endpoint,
+	// where loading every UTxO row for aggregation in Go is too slow
+	// for large addresses.
+	GetUtxoBalanceByAddress(
+		lcommon.Address,
+		models.UtxoAddressMatchMode,
+		types.Txn,
+	) (models.AddressBalance, error)
 
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
 	// See models.UtxoWithOrderingQuery. q must be non-nil.

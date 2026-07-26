@@ -424,20 +424,20 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) {
 	addrType := (headerByte >> 4) & 0x0f
 
 	// Even address types (0,2,4,6) have payment KEY credentials;
-	// odd types (1,3,5,7) have payment SCRIPT credentials.
+	// odd types (1,3,5,7) have payment SCRIPT credentials. The payment
+	// credential hash is stored for both kinds — the CBOR parsing path
+	// (parseCborTxOut) and live sync (UtxoLedgerToModel) both store
+	// script hashes in PaymentKey, and payment-credential queries
+	// (address lookups, blockfrost addr_vkh/script) match on it.
 	// For staking: types 0,1 have staking KEY; types 2,3 have
-	// staking SCRIPT. Only store key hashes, not script hashes,
-	// to match the CBOR parsing path (parseCborTxOut).
-	paymentIsKey := addrType%2 == 0
+	// staking SCRIPT.
+	paymentIsScript := addrType%2 == 1
 
 	switch {
 	case addrType <= 3 && len(addr) >= 57:
 		// Base address: 1 header + 28 payment + 28 staking
-		if paymentIsKey {
-			result.PaymentKey = bytes.Clone(addr[1:29])
-		} else {
-			result.PaymentScript = true
-		}
+		result.PaymentKey = bytes.Clone(addr[1:29])
+		result.PaymentScript = paymentIsScript
 		if addrType <= 1 { // staking is key for types 0,1
 			result.StakingKey = bytes.Clone(addr[29:57])
 			result.CredentialTag = 0
@@ -447,18 +447,12 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) {
 		}
 	case (addrType == 4 || addrType == 5) && len(addr) >= 29:
 		// Pointer address: 1 header + 28 payment + pointer
-		if paymentIsKey {
-			result.PaymentKey = bytes.Clone(addr[1:29])
-		} else {
-			result.PaymentScript = true
-		}
+		result.PaymentKey = bytes.Clone(addr[1:29])
+		result.PaymentScript = paymentIsScript
 	case (addrType == 6 || addrType == 7) && len(addr) >= 29:
 		// Enterprise address: 1 header + 28 payment
-		if paymentIsKey {
-			result.PaymentKey = bytes.Clone(addr[1:29])
-		} else {
-			result.PaymentScript = true
-		}
+		result.PaymentKey = bytes.Clone(addr[1:29])
+		result.PaymentScript = paymentIsScript
 	}
 }
 

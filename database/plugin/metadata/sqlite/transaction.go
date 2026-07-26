@@ -472,6 +472,36 @@ func (d *MetadataStoreSqlite) CountTransactionsByAddress(
 	return int(count), nil
 }
 
+// CountTransactionsByPaymentCred returns the total number of distinct
+// transactions involving the given payment credential across every address
+// that carries it, regardless of staking part.
+func (d *MetadataStoreSqlite) CountTransactionsByPaymentCred(
+	paymentKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(paymentKey) == 0 {
+		return 0, nil
+	}
+
+	var count int64
+	result := db.Model(&models.AddressTransaction{}).
+		Where("payment_key = ?", paymentKey).
+		Distinct("transaction_id").
+		Count(&count)
+	if result.Error != nil {
+		return 0, fmt.Errorf(
+			"count txs by payment cred: %w",
+			result.Error,
+		)
+	}
+	return int(count), nil
+}
+
 // GetAddressesByCredential returns distinct addresses mapped to a stake credential.
 func (d *MetadataStoreSqlite) GetAddressesByCredential(
 	credentialTag uint8,

@@ -778,6 +778,46 @@ func (b *Blockfrost) handleDReps(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleAddress handles GET /api/v0/addresses/{address}
+// and returns summary information for an address.
+func (b *Blockfrost) handleAddress(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	address := r.PathValue("address")
+	info, err := b.node.Address(address)
+	if err != nil {
+		if errors.Is(err, ErrAddressNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested component has not been found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get address",
+			"address", address,
+			"error", err,
+		)
+		writeNodeQueryError(
+			w,
+			err,
+			"failed to retrieve address",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AddressResponse{
+		Address:      info.Address,
+		Amount:       convertAddressAmounts(info.Amount),
+		StakeAddress: info.StakeAddress,
+		Type:         info.Type,
+		Script:       info.Script,
+	})
+}
+
 // handleAddressUTXOs handles GET /api/v0/addresses/{address}/utxos
 // and returns the current UTxOs for an address.
 func (b *Blockfrost) handleAddressUTXOs(
@@ -1778,7 +1818,7 @@ func writeNodeQueryError(
 			w,
 			http.StatusBadRequest,
 			"Bad Request",
-			"Invalid address provided.",
+			"Invalid address for this network or malformed address format.",
 		)
 		return
 	}

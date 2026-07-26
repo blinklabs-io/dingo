@@ -737,3 +737,110 @@ func TestGetUtxosByAddressUsesPaymentScript(t *testing.T) {
 	assert.True(t, orderedRows[0].PaymentScript)
 	assert.Equal(t, scriptUtxo.TxId, orderedRows[0].TxId)
 }
+
+// TestGetUtxoBalanceByAddressMatchModes seeds enterprise, base, and
+// pointer UTxOs sharing one payment hash and verifies that exact
+// matching keeps full-address identity while payment-credential
+// matching deliberately aggregates across address forms. Regression
+// coverage for the address-conflation review on the Blockfrost address
+// summary endpoint.
+func TestGetUtxoBalanceByAddressMatchModes(t *testing.T) {
+	store := setupTestDB(t)
+
+	paymentHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
+	stakeHash := bytes.Repeat([]byte{0xCD}, lcommon.AddressHashSize)
+	otherPayment := bytes.Repeat([]byte{0xEE}, lcommon.AddressHashSize)
+
+	enterpriseAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		nil,
+	)
+	require.NoError(t, err)
+	baseAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		stakeHash,
+	)
+	require.NoError(t, err)
+
+	rows := []models.Utxo{
+		// Enterprise-form UTxO (no staking part).
+		{
+			TxId:       bytes.Repeat([]byte{0x01}, 32),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  10,
+			Amount:     types.Uint64(1_000_000),
+		},
+		// Base-address UTxO sharing the same payment hash.
+		{
+			TxId:          bytes.Repeat([]byte{0x02}, 32),
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			StakingKey:    stakeHash,
+			CredentialTag: 0,
+			AddedSlot:     11,
+			Amount:        types.Uint64(2_000_000),
+		},
+		// Pointer-address UTxO: like enterprise it carries no staking
+		// key in the row, so it lands in the payment-only bucket. The
+		// adapter separates real pointer addresses by exact CBOR
+		// address comparison; at the storage layer it is part of the
+		// staking-less set.
+		{
+			TxId:       bytes.Repeat([]byte{0x03}, 32),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  12,
+			Amount:     types.Uint64(4_000_000),
+		},
+		// Unrelated payment credential: never included.
+		{
+			TxId:       bytes.Repeat([]byte{0x04}, 32),
+			OutputIdx:  0,
+			PaymentKey: otherPayment,
+			AddedSlot:  13,
+			Amount:     types.Uint64(64_000_000),
+		},
+		// Spent UTxO on the shared credential: never included.
+		{
+			TxId:        bytes.Repeat([]byte{0x05}, 32),
+			OutputIdx:   0,
+			PaymentKey:  paymentHash,
+			AddedSlot:   14,
+			DeletedSlot: 20,
+			Amount:      types.Uint64(32_000_000),
+		},
+	}
+	for i := range rows {
+		require.NoError(t, store.DB().Create(&rows[i]).Error)
+	}
+
+	// Exact enterprise matching excludes the base-address UTxO.
+	balance, err := store.GetUtxoBalanceByAddress(
+		enterpriseAddr, models.UtxoAddressMatchExact, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5_000_000), balance.Lovelace)
+	assert.Equal(t, int64(2), balance.UtxoCount)
+
+	// Exact base matching returns only the base-address UTxO.
+	balance, err = store.GetUtxoBalanceByAddress(
+		baseAddr, models.UtxoAddressMatchExact, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2_000_000), balance.Lovelace)
+	assert.Equal(t, int64(1), balance.UtxoCount)
+
+	// Payment-credential matching aggregates every live UTxO sharing
+	// the credential, across address forms.
+	balance, err = store.GetUtxoBalanceByAddress(
+		enterpriseAddr, models.UtxoAddressMatchPaymentCred, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7_000_000), balance.Lovelace)
+	assert.Equal(t, int64(3), balance.UtxoCount)
+}

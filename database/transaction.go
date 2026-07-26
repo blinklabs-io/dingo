@@ -1237,6 +1237,31 @@ func (d *Database) CountTransactionsByAddressKeys(
 	return count, nil
 }
 
+// CountTransactionsByPaymentCred returns the total number of transactions
+// involving a payment credential across every address that carries it,
+// regardless of staking part.
+func (d *Database) CountTransactionsByPaymentCred(
+	paymentKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountTransactionsByPaymentCred(
+		paymentKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count txs by payment cred %x: %w",
+			paymentKey,
+			err,
+		)
+	}
+	return count, nil
+}
+
 // GetAddressesByCredential returns distinct address mappings for a stake credential.
 func (d *Database) GetAddressesByCredential(
 	credentialTag uint8,

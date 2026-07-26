@@ -955,3 +955,62 @@ func (d *MetadataStoreMysql) MarkUtxosDeletedAtSlot(
 	}
 	return refreshRewardLiveStakeAggregates(db, rewardRefs)
 }
+
+// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance, per-asset
+// balances, and live UTxO count for the given address, aggregated in SQL.
+// Assets are ordered by (policy id, name) for deterministic output.
+func (d *MetadataStoreMysql) GetUtxoBalanceByAddress(
+	addr lcommon.Address,
+	mode models.UtxoAddressMatchMode,
+	txn types.Txn,
+) (models.AddressBalance, error) {
+	var ret models.AddressBalance
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return ret, fmt.Errorf(
+			"resolve DB for utxo balance by address: %w",
+			err,
+		)
+	}
+	var ors []string
+	var args []any
+	if err := models.AppendUtxoAddressOrBranchMode(
+		&ors, &args, addr, mode,
+	); err != nil {
+		return ret, fmt.Errorf("utxo balance by address: %w", err)
+	}
+	if len(ors) == 0 {
+		return ret, nil
+	}
+	addrCond := "(" + strings.Join(ors, " OR ") + ")"
+
+	var totals struct {
+		Cnt      int64
+		Lovelace uint64
+	}
+	if err := db.Model(&models.Utxo{}).
+		Where("utxo.deleted_slot = 0 AND "+addrCond, args...).
+		Select("COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace").
+		Scan(&totals).Error; err != nil {
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
+	ret.UtxoCount = totals.Cnt
+	ret.Lovelace = totals.Lovelace
+	if ret.UtxoCount == 0 {
+		return ret, nil
+	}
+
+	if err := db.Model(&models.Asset{}).
+		Joins("JOIN utxo ON asset.utxo_id = utxo.id").
+		Where("utxo.deleted_slot = 0 AND "+addrCond, args...).
+		Select("asset.policy_id AS policy_id, asset.name AS name, COALESCE(SUM(asset.amount), 0) AS amount").
+		Group("asset.policy_id, asset.name").
+		Order("asset.policy_id, asset.name").
+		Scan(&ret.Assets).Error; err != nil {
+		return ret, fmt.Errorf(
+			"sum utxo asset balances by address: %w",
+			err,
+		)
+	}
+	return ret, nil
+}

@@ -61,7 +61,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:         "type1_script_payment_key_staking",
 			addr:         buildShelleyAddr(1, 1, payHash, stakeHash),
 			wantScript:   true,
-			wantPayKey:   false,
+			wantPayKey:   true,
 			wantStakeKey: true,
 			wantStakeTag: 0,
 		},
@@ -79,7 +79,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:         "type3_script_payment_script_staking",
 			addr:         buildShelleyAddr(3, 1, payHash, stakeHash),
 			wantScript:   true,
-			wantPayKey:   false,
+			wantPayKey:   true,
 			wantStakeKey: true,
 			wantStakeTag: 1,
 		},
@@ -88,7 +88,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:       "type5_script_payment_pointer",
 			addr:       buildShelleyAddr(5, 1, payHash, nil),
 			wantScript: true,
-			wantPayKey: false,
+			wantPayKey: true,
 		},
 		{
 			// Type 6: enterprise key payment — NOT script
@@ -102,7 +102,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			name:       "type7_enterprise_script",
 			addr:       buildShelleyAddr(7, 1, payHash, nil),
 			wantScript: true,
-			wantPayKey: false,
+			wantPayKey: true,
 		},
 	}
 
@@ -115,7 +115,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			if tc.wantPayKey {
 				require.Equal(t, payHash, result.PaymentKey, "PaymentKey")
 			} else {
-				require.Empty(t, result.PaymentKey, "PaymentKey should be empty for script payment")
+				require.Empty(t, result.PaymentKey, "PaymentKey should be empty for truncated/unknown address types")
 			}
 			if tc.wantStakeKey {
 				require.Equal(t, stakeHash, result.StakingKey, "StakingKey")
