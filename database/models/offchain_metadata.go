@@ -26,6 +26,15 @@ const (
 	OffchainMetadataSourceConstitution       = "constitution"
 	OffchainMetadataSourceCommitteeResign    = "committee_resign"
 
+	// OffchainFetchErrHashMismatch is the exact LastError recorded when
+	// the fetched document does not match the on-chain anchor hash. The
+	// API error classification matches on it, so the fetcher and API
+	// must agree on the text.
+	OffchainFetchErrHashMismatch = "metadata hash mismatch"
+	// OffchainFetchErrBodyTooLargePrefix prefixes the LastError recorded
+	// when the response body exceeds the fetch size limit.
+	OffchainFetchErrBodyTooLargePrefix = "response body exceeds"
+
 	OffchainMetadataStatusPending = "pending"
 	OffchainMetadataStatusFetched = "fetched"
 	OffchainMetadataStatusFailed  = "failed"

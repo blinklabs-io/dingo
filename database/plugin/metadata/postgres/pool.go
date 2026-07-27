@@ -1251,3 +1251,71 @@ func (d *MetadataStorePostgres) GetPoolOwnerStakeAtSlot(
 		db, ownerKeyHashes, slot, expiryEpoch, inactivityPeriod,
 	)
 }
+
+// GetRetiringPools returns pools whose latest retirement certificate
+// targets an epoch after currentEpoch and has not been cancelled by a
+// later registration certificate. Certificate recency compares
+// (added_slot, synthetic-import precedence, block_index, cert_index),
+// mirroring the GetPools preload ordering; rows written by the Mithril
+// ledger-state import carry certificate_id = 0 and take precedence
+// within their slot. Results are ordered by retirement epoch, then
+// announcement position, matching hosted Blockfrost.
+func (d *MetadataStorePostgres) GetRetiringPools(
+	currentEpoch uint64,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	const sql = `
+		WITH latest_reg AS (
+			SELECT pr.pool_key_hash, pr.added_slot,
+			       CASE WHEN pr.certificate_id = 0 THEN 1 ELSE 0 END AS synth,
+			       COALESCE(t.block_index, 0) AS block_index,
+			       COALESCE(c.cert_index, 0) AS cert_index,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY pr.pool_key_hash
+			           ORDER BY pr.added_slot DESC,
+			               CASE WHEN pr.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+			               COALESCE(t.block_index, 0) DESC,
+			               COALESCE(c.cert_index, 0) DESC
+			       ) AS rn
+			FROM pool_registration pr
+			LEFT JOIN certs c ON c.id = pr.certificate_id
+			LEFT JOIN "transaction" t ON t.id = c.transaction_id
+		),
+		latest_ret AS (
+			SELECT pt.pool_key_hash, pt.epoch, pt.added_slot,
+			       CASE WHEN pt.certificate_id = 0 THEN 1 ELSE 0 END AS synth,
+			       COALESCE(t.block_index, 0) AS block_index,
+			       COALESCE(c.cert_index, 0) AS cert_index,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY pt.pool_key_hash
+			           ORDER BY pt.added_slot DESC,
+			               CASE WHEN pt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+			               COALESCE(t.block_index, 0) DESC,
+			               COALESCE(c.cert_index, 0) DESC
+			       ) AS rn
+			FROM pool_retirement pt
+			LEFT JOIN certs c ON c.id = pt.certificate_id
+			LEFT JOIN "transaction" t ON t.id = c.transaction_id
+		)
+		SELECT r.pool_key_hash, r.epoch
+		FROM latest_ret r
+		LEFT JOIN latest_reg g
+			ON g.pool_key_hash = r.pool_key_hash AND g.rn = 1
+		WHERE r.rn = 1
+		  AND r.epoch > ?
+		  AND (
+		      g.pool_key_hash IS NULL
+		      OR (r.added_slot, r.synth, r.block_index, r.cert_index)
+		         > (g.added_slot, g.synth, g.block_index, g.cert_index)
+		  )
+		ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`
+	var rows []models.PoolRetiringRow
+	if err := db.Raw(sql, currentEpoch).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get retiring pools: %w", err)
+	}
+	return rows, nil
+}

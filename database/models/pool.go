@@ -113,6 +113,15 @@ func (PoolRegistrationRelay) TableName() string {
 	return "pool_registration_relay"
 }
 
+// PoolRetiringRow is one pending-retirement entry returned by
+// GetRetiringPools: the latest retirement certificate for a pool that
+// has not been cancelled by a later registration and whose epoch is
+// still in the future.
+type PoolRetiringRow struct {
+	PoolKeyHash []byte
+	Epoch       uint64
+}
+
 type PoolRetirement struct {
 	PoolKeyHash   []byte `gorm:"index;size:28"`
 	CertificateID uint   `gorm:"index"`

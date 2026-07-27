@@ -293,6 +293,34 @@ type DRepMetadataResponse struct {
 	Bytes        string          `json:"bytes"`
 }
 
+// PoolRetiringResponse is one entry of the Blockfrost retiring pools
+// list.
+type PoolRetiringResponse struct {
+	PoolID string `json:"pool_id"`
+	Epoch  uint64 `json:"epoch"`
+}
+
+// PoolMetadataResponse represents Blockfrost pool metadata. The error
+// object is only present when the off-chain document fetch failed.
+type PoolMetadataResponse struct {
+	PoolID      string                      `json:"pool_id"`
+	Hex         string                      `json:"hex"`
+	URL         *string                     `json:"url"`
+	Hash        *string                     `json:"hash"`
+	Ticker      *string                     `json:"ticker"`
+	Name        *string                     `json:"name"`
+	Description *string                     `json:"description"`
+	Homepage    *string                     `json:"homepage"`
+	Error       *OffchainFetchErrorResponse `json:"error,omitempty"`
+}
+
+// OffchainFetchErrorResponse is the Blockfrost error object attached to
+// metadata whose off-chain document fetch failed.
+type OffchainFetchErrorResponse struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 // ErrorResponse represents a Blockfrost error response.
 type ErrorResponse struct {
 	StatusCode int    `json:"status_code"`

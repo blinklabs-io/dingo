@@ -17,7 +17,9 @@ package blockfrost
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -65,6 +67,9 @@ type mockNode struct {
 	networkEras                   []NetworkEraInfo
 	genesis                       GenesisInfo
 	pools                         []PoolExtendedInfo
+	poolsRetiring                 []PoolRetiringInfo
+	poolsRetiringTotal            int
+	poolMetadata                  PoolMetadataInfo
 	asset                         AssetInfo
 	assetHolders                  []AssetHolderInfo
 	assetHoldersTotal             int
@@ -115,6 +120,8 @@ type mockNode struct {
 	networkErasErr                error
 	genesisErr                    error
 	poolsErr                      error
+	poolsRetiringErr              error
+	poolMetadataErr               error
 	assetErr                      error
 	assetAddressesErr             error
 	drepErr                       error
@@ -209,6 +216,18 @@ func (m *mockNode) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
 	return m.pools, m.poolsErr
+}
+
+func (m *mockNode) PoolsRetiring(
+	_ PaginationParams,
+) ([]PoolRetiringInfo, int, error) {
+	return m.poolsRetiring, m.poolsRetiringTotal, m.poolsRetiringErr
+}
+
+func (m *mockNode) PoolMetadata(
+	_ string,
+) (PoolMetadataInfo, error) {
+	return m.poolMetadata, m.poolMetadataErr
 }
 
 func (m *mockNode) Asset(
@@ -993,6 +1012,181 @@ func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
 	require.Len(t, holders, 1)
 	assert.Equal(t, addr.String(), holders[0].Address)
 	assert.Equal(t, "7", holders[0].Quantity)
+}
+
+func TestHandlePoolsRetiring(t *testing.T) {
+	mock := &mockNode{
+		poolsRetiringTotal: 1,
+		poolsRetiring: []PoolRetiringInfo{
+			{PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec", Epoch: 1400},
+		},
+	}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/v0/pools/retiring?count=10", nil,
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolsRetiring(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "1", w.Header().Get("X-Pagination-Count-Total"))
+	var resp []PoolRetiringResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, uint64(1400), resp[0].Epoch)
+}
+
+func TestHandlePoolsRetiringInvalidPagination(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{})
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/v0/pools/retiring?order=a", nil,
+	)
+	w := httptest.NewRecorder()
+	b.handlePoolsRetiring(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(
+		t,
+		"querystring/order must be equal to one of the allowed values",
+		resp.Message,
+	)
+}
+
+func TestHandlePoolMetadata(t *testing.T) {
+	url := "https://example.com/pool.json"
+	hash := "18c2dcb8d69024dbe95beebcef4a49a2bdc3f0b1c60e5e669007e5e39edd4a7f"
+	ticker := "TEST"
+	mock := &mockNode{
+		poolMetadata: PoolMetadataInfo{
+			PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+			Hex:    "6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+			URL:    &url,
+			Hash:   &hash,
+			Ticker: &ticker,
+		},
+	}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec/metadata",
+		nil,
+	)
+	req.SetPathValue("pool_id", "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec")
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp PoolMetadataResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, mock.poolMetadata.PoolID, resp.PoolID)
+	require.NotNil(t, resp.URL)
+	assert.Equal(t, url, *resp.URL)
+	require.NotNil(t, resp.Ticker)
+	assert.Nil(t, resp.Name)
+}
+
+func TestHandlePoolMetadataNoAnchor(t *testing.T) {
+	// A pool without registered metadata answers with an empty JSON
+	// object, matching hosted Blockfrost.
+	b := newTestBlockfrost(&mockNode{
+		poolMetadata: PoolMetadataInfo{
+			PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+			Hex:    "6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec/metadata",
+		nil,
+	)
+	req.SetPathValue("pool_id", "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec")
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, "{}", w.Body.String())
+}
+
+func TestOffchainFetchErrorClassification(t *testing.T) {
+	url := "https://example.com/meta.json"
+	expected := bytes.Repeat([]byte{0x01}, 32)
+	stale := bytes.Repeat([]byte{0x02}, 32)
+
+	// Latest attempt failed with 404; the stale BodyHash from an
+	// earlier hash-mismatch attempt must not win.
+	err404 := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
+		LastError:      "unexpected HTTP status 404",
+		LastHTTPStatus: 404,
+		BodyHash:       stale,
+	})
+	assert.Equal(t, "HTTP_RESPONSE_ERROR", err404.Code)
+	assert.Contains(t, err404.Message, `404 "Not Found"`)
+
+	mismatch := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
+		LastError:      models.OffchainFetchErrHashMismatch,
+		LastHTTPStatus: 200,
+		BodyHash:       stale,
+	})
+	assert.Equal(t, "HASH_MISMATCH", mismatch.Code)
+	assert.Contains(t, mismatch.Message, hex.EncodeToString(stale))
+
+	size := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
+		LastError:      models.OffchainFetchErrBodyTooLargePrefix + " 1048576 bytes",
+		LastHTTPStatus: 200,
+	})
+	assert.Equal(t, "SIZE_EXCEEDED", size.Code)
+
+	conn := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
+		LastError: "dial tcp: connection refused",
+	})
+	assert.Equal(t, "CONNECTION_ERROR", conn.Code)
+}
+
+func TestHandlePoolMetadataInvalidID(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{poolMetadataErr: ErrInvalidPoolID})
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/v0/pools/pool1stonks/metadata", nil,
+	)
+	req.SetPathValue("pool_id", "pool1stonks")
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Invalid or malformed pool id format.", resp.Message)
+}
+
+func TestHandlePoolMetadataNotFound(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		poolMetadataErr: fmt.Errorf("get pool: %w", models.ErrPoolNotFound),
+	})
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/v0/pools/pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d/metadata", nil,
+	)
+	req.SetPathValue("pool_id", "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d")
+	w := httptest.NewRecorder()
+	b.handlePoolMetadata(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestParsePoolID(t *testing.T) {
+	hash, err := parsePoolID("pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec")
+	require.NoError(t, err)
+	assert.Equal(t, "6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946", hex.EncodeToString(hash))
+
+	hash2, err := parsePoolID("6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946")
+	require.NoError(t, err)
+	assert.Equal(t, hash, hash2)
+
+	_, err = parsePoolID("pool1stonks")
+	require.Error(t, err)
+
+	_, err = parsePoolID("drep1ygqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7vlc9n")
+	require.Error(t, err)
 }
 
 func TestHandleDRep(t *testing.T) {

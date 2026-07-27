@@ -546,6 +546,102 @@ func (b *Blockfrost) handleAssetAddresses(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handlePoolsRetiring handles GET /api/v0/pools/retiring and returns
+// the paginated list of pools with a pending retirement.
+func (b *Blockfrost) handlePoolsRetiring(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, errMsg := ParsePaginationStrict(r)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, "Bad Request", errMsg)
+		return
+	}
+	pools, total, err := b.node.PoolsRetiring(params)
+	if err != nil {
+		b.logger.Error(
+			"failed to list retiring pools",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve retiring pools",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]PoolRetiringResponse, 0, len(pools))
+	for _, pool := range pools {
+		resp = append(resp, PoolRetiringResponse(pool))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handlePoolMetadata handles GET /api/v0/pools/{pool_id}/metadata and
+// returns the pool's registered metadata.
+func (b *Blockfrost) handlePoolMetadata(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	poolID := r.PathValue("pool_id")
+	info, err := b.node.PoolMetadata(poolID)
+	if err != nil {
+		if errors.Is(err, ErrInvalidPoolID) {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Invalid or malformed pool id format.",
+			)
+			return
+		}
+		if errors.Is(err, models.ErrPoolNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested component has not been found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get pool metadata",
+			"pool_id", poolID,
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve pool metadata",
+		)
+		return
+	}
+	// A pool without a registered metadata anchor answers with an
+	// empty JSON object, matching hosted Blockfrost.
+	if info.URL == nil {
+		writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
+	resp := PoolMetadataResponse{
+		PoolID:      info.PoolID,
+		Hex:         info.Hex,
+		URL:         info.URL,
+		Hash:        info.Hash,
+		Ticker:      info.Ticker,
+		Name:        info.Name,
+		Description: info.Description,
+		Homepage:    info.Homepage,
+	}
+	if info.Error != nil {
+		respErr := OffchainFetchErrorResponse(*info.Error)
+		resp.Error = &respErr
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handlePoolsExtended handles GET /api/v0/pools/extended
 // and returns active pools with extended details.
 func (b *Blockfrost) handlePoolsExtended(
