@@ -322,28 +322,40 @@ func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	)
 }
 
-// TestPublishNoGoroutineLeak verifies that publishing to a slow or blocked
-// subscriber does not leak goroutines. This is a regression test for MEM-06
-// where publishWithTimeout spawned goroutines that could never complete when
-// a subscriber's channel buffer was full.
+// TestPublishNoGoroutineLeak verifies that publishing far more events than a
+// subscriber's buffer can hold does not leak goroutines. This is a regression
+// test for MEM-06 where publishWithTimeout spawned goroutines that could never
+// complete when a subscriber's channel buffer was full. Publish now
+// backpressures instead of dropping (#2932), so the subscriber is drained
+// concurrently and the assertion is that repeatedly hitting the full-buffer
+// path spawns no per-event goroutines.
 func TestPublishNoGoroutineLeak(t *testing.T) {
 	const testEvtType event.EventType = "test.leak"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	// Subscribe but never read from the channel, simulating a blocked subscriber.
-	_, _ = eb.Subscribe(testEvtType)
+	// Small buffer so nearly every publish hits the blocked-send path.
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 4)
 
-	// Allow the runtime to settle (async workers, etc.)
+	const eventCount = 5000
+	drained := make(chan int, 1)
+	go func() {
+		count := 0
+		for range subCh {
+			count++
+			if count == eventCount {
+				drained <- count
+				return
+			}
+		}
+		drained <- count
+	}()
+
+	// Allow the runtime to settle (async workers, drain goroutine, etc.)
 	runtime.GC()
 	runtime.Gosched()
 	goroutinesBefore := runtime.NumGoroutine()
 
-	// Publish many more events than the channel buffer can hold
-	// (buffer = EventQueueSize). With the old publishWithTimeout
-	// approach, each publish beyond the buffer would spawn a
-	// goroutine that could never complete.
-	const eventCount = event.EventQueueSize + 10
 	for i := range eventCount {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, i))
 	}
@@ -353,7 +365,13 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 	runtime.Gosched()
 	goroutinesAfter := runtime.NumGoroutine()
 
-	// With the fix, Publish returns immediately via non-blocking send.
+	require.Equal(
+		t,
+		eventCount,
+		<-drained,
+		"every published event must reach the subscriber",
+	)
+
 	// Allow a small margin (5) for normal runtime variation.
 	require.InDelta(
 		t,
@@ -361,7 +379,7 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 		goroutinesAfter,
 		5,
 		"goroutine count should not grow significantly after "+
-			"publishing to a blocked subscriber "+
+			"publishing through a full subscriber buffer "+
 			"(before=%d, after=%d)",
 		goroutinesBefore,
 		goroutinesAfter,
@@ -370,43 +388,52 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 
 // TestPublishAsyncNoGoroutineLeak verifies that PublishAsync with a slow
 // subscriber does not leak goroutines. The async workers call Publish
-// internally, which previously used publishWithTimeout.
+// internally, which previously used publishWithTimeout. Since #2932 the async
+// queue backpressures instead of dropping, so the subscriber is drained
+// concurrently.
 func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 	const testEvtType event.EventType = "test.async.leak"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	// Subscribe but never read from the channel.
-	_, _ = eb.Subscribe(testEvtType)
+	// Small buffer so the async workers repeatedly hit the blocked-send path.
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 4)
+
+	const eventCount = 5000
+	drained := make(chan int, 1)
+	go func() {
+		count := 0
+		for range subCh {
+			count++
+			if count == eventCount {
+				drained <- count
+				return
+			}
+		}
+		drained <- count
+	}()
 
 	// Allow the runtime to settle
 	runtime.GC()
 	runtime.Gosched()
 	goroutinesBefore := runtime.NumGoroutine()
 
-	// PublishAsync many events; async workers will attempt to deliver them
-	// to the blocked subscriber via Publish -> Deliver.
-	const eventCount = event.EventQueueSize + 10
+	// PublishAsync more events than the shared async queue can hold; the
+	// workers deliver them to the slow subscriber via Publish -> Deliver.
 	for i := range eventCount {
-		eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i))
+		require.True(
+			t,
+			eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, i)),
+			"PublishAsync must not drop events",
+		)
 	}
 
-	// Wait for async workers to process the queued events.
-	// We probe by attempting a single PublishAsync; a successful
-	// enqueue means the workers have drained at least one slot.
-	// The flag ensures we stop probing after the first success
-	// so the callback is side-effect-free on subsequent calls.
-	probed := false
-	require.Eventually(t, func() bool {
-		if probed {
-			return true
-		}
-		if eb.PublishAsync(testEvtType, event.NewEvent(testEvtType, -1)) {
-			probed = true
-			return true
-		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "async workers should drain the queue")
+	require.Equal(
+		t,
+		eventCount,
+		<-drained,
+		"every async-published event must reach the subscriber",
+	)
 
 	runtime.GC()
 	runtime.Gosched()
@@ -418,57 +445,64 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 		goroutinesAfter,
 		5,
 		"goroutine count should not grow after async "+
-			"publishing to a blocked subscriber "+
+			"publishing to a slow subscriber "+
 			"(before=%d, after=%d)",
 		goroutinesBefore,
 		goroutinesAfter,
 	)
 }
 
-// TestPublishDropsEventsOnFullBuffer verifies that when a subscriber's channel
-// buffer is full, Publish drops events gracefully instead of blocking.
-func TestPublishDropsEventsOnFullBuffer(t *testing.T) {
-	const testEvtType event.EventType = "test.drop"
+// TestPublishBlocksOnFullBufferAndLosesNothing verifies that when a
+// subscriber's channel buffer is full, Publish backpressures the producer and
+// every event is eventually delivered. Regression test for
+// blinklabs-io/dingo#2932, which replaced the drop-on-full behavior this test
+// previously asserted.
+func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
+	const testEvtType event.EventType = "test.backpressure"
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	// Subscribe with the high-burst buffer; never consume events.
-	_, subCh := eb.SubscribeWithBuffer(testEvtType, event.EventQueueSize)
+	const buffer = 16
+	const overflow = 50
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, buffer)
 
-	// Fill the buffer (EventQueueSize)
-	for i := range event.EventQueueSize {
+	// Fill the buffer exactly.
+	for i := range buffer {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, i))
 	}
 
-	// Publish should return immediately even though the buffer is full.
-	// Use a timeout to ensure Publish doesn't block.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := range 50 {
-			eb.Publish(
-				testEvtType,
-				event.NewEvent(testEvtType, event.EventQueueSize+i),
-			)
+		for i := range overflow {
+			eb.Publish(testEvtType, event.NewEvent(testEvtType, buffer+i))
 		}
 	}()
 
-	select {
-	case <-done:
-		// Good: Publish returned promptly
-	case <-time.After(2 * time.Second):
-		t.Fatal("Publish blocked on full subscriber channel buffer")
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"Publish should backpressure while the subscriber buffer is full",
+	)
+
+	// Drain everything; each event must arrive exactly once, in order.
+	for i := range buffer + overflow {
+		evt := testutil.RequireReceive(
+			t,
+			subCh,
+			2*time.Second,
+			"expected event to be delivered, not dropped",
+		)
+		require.Equal(t, i, evt.Data, "events must arrive in publish order")
 	}
 
-	// Verify the subscriber still received the first EventQueueSize events.
-	for range event.EventQueueSize {
-		select {
-		case _, ok := <-subCh:
-			require.True(t, ok, "channel should not be closed")
-		case <-time.After(1 * time.Second):
-			t.Fatal("expected buffered event not received")
-		}
-	}
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"Publish did not complete after the subscriber drained",
+	)
 }
 
 func TestPublishBlockingWaitsForSubscriberCapacity(t *testing.T) {

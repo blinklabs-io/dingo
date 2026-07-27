@@ -178,30 +178,42 @@ func TestStopWaitsForInFlightPublish(t *testing.T) {
 	}
 }
 
-// TestPublishDoesNotBlockOnFullChannel verifies that Publish returns
-// promptly even when a subscriber's channel buffer is completely full.
-// Before the non-blocking send fix, this scenario would deadlock:
-// Deliver() held mu.RLock while blocking on ch<-, and Close() would
-// block trying to acquire mu.Lock.
-func TestPublishDoesNotBlockOnFullChannel(t *testing.T) {
+// TestPublishBlocksOnFullChannelUntilDrained verifies that Publish applies
+// backpressure when a subscriber's channel buffer is full, and that the event
+// is delivered once capacity appears rather than dropped. Regression test for
+// blinklabs-io/dingo#2932. Close() must still be able to run against an
+// in-flight blocked send without deadlocking, which is why the blocked send
+// wakes on the subscriber's close signal.
+func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {
 	eb := NewEventBus(nil, nil)
-	typ := EventType("deadlock.test")
+	typ := EventType("backpressure.test")
 
-	_, ch := eb.SubscribeWithBuffer(typ, EventQueueSize)
+	const buffer = 64
+	_, ch := eb.SubscribeWithBuffer(typ, buffer)
 
 	// Fill the subscriber's channel buffer completely.
-	for range EventQueueSize {
-		eb.Publish(typ, NewEvent(typ, "fill"))
+	for i := range buffer {
+		eb.Publish(typ, NewEvent(typ, i))
 	}
 
-	// This next Publish must complete without blocking. With the old
-	// blocking send this would hang forever (deadlock). Use a channel
-	// + require.Eventually to detect the hang.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		eb.Publish(typ, NewEvent(typ, "overflow"))
 	}()
+
+	select {
+	case <-done:
+		t.Fatal("Publish returned while the subscriber buffer was full")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: the publisher is backpressured.
+	}
+
+	// Draining releases the publisher and the event must arrive.
+	drained := make([]any, 0, buffer+1)
+	for range buffer {
+		drained = append(drained, (<-ch).Data)
+	}
 
 	require.Eventually(t, func() bool {
 		select {
@@ -211,31 +223,18 @@ func TestPublishDoesNotBlockOnFullChannel(t *testing.T) {
 			return false
 		}
 	}, 2*time.Second, 5*time.Millisecond,
-		"Publish should not block when subscriber channel is full",
+		"Publish should complete once subscriber capacity is available",
 	)
 
-	// Drain the channel and verify we got EventQueueSize events
-	// (the overflow event was dropped).
-	drained := 0
-	for drained < EventQueueSize {
-		select {
-		case <-ch:
-			drained++
-		default:
-			t.Fatalf(
-				"expected %d buffered events, got %d",
-				EventQueueSize, drained,
-			)
-		}
+	select {
+	case evt := <-ch:
+		drained = append(drained, evt.Data)
+	case <-time.After(time.Second):
+		t.Fatal("event that was backpressured never arrived")
 	}
 
-	// No extra event should be in the channel.
-	select {
-	case <-ch:
-		t.Fatal("overflow event should have been dropped")
-	default:
-		// expected
-	}
+	require.Len(t, drained, buffer+1, "no event may be dropped")
+	require.Equal(t, "overflow", drained[buffer])
 
 	eb.Stop()
 }
