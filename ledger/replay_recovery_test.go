@@ -1359,3 +1359,96 @@ func testRawBlock(
 		Cbor:        []byte{0x80},
 	}
 }
+
+// TestReplayRecoveryParentPointGenesisPredecessor covers the first block after
+// genesis, whose PrevHash is the all-zero hash rather than an empty slice.
+// Treating that as a real parent sends replay recovery into BlockByHash for a
+// block that cannot exist, and the resulting error restarts the ledger
+// pipeline in a loop -- observed on DevNet as a producer pinned at its own
+// block 0 (slot 4) for minutes while the rest of the network advanced.
+func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	// A forged first block reports block number 0 at a non-zero slot with an
+	// all-zero PrevHash, which is how the genesis predecessor is encoded.
+	firstBlock := models.Block{
+		Slot:     4,
+		Number:   0,
+		Hash:     testHashBytes("genesis-successor"),
+		PrevHash: make([]byte, 32),
+	}
+
+	point, err := ls.replayRecoveryParentPoint(firstBlock)
+	require.NoError(
+		t,
+		err,
+		"the genesis predecessor has no stored block; it must not be looked up",
+	)
+	require.Equal(
+		t,
+		ocommon.Point{},
+		point,
+		"a block with no real parent must roll back to origin",
+	)
+}
+
+// TestIsGenesisPrevHashRejectsMalformedHashes pins the two encodings that
+// legitimately mean "no parent": a decoded block carrying no prev hash at all,
+// and a forged block carrying the all-zero Blake2b-256 hash. An all-zero slice
+// of any other length is malformed, and treating it as the genesis predecessor
+// would swallow the corruption instead of surfacing it as a failed lookup.
+func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		prevHash []byte
+		want     bool
+	}{
+		{"nil", nil, true},
+		{"empty", []byte{}, true},
+		{
+			"all-zero blake2b-256",
+			make([]byte, lcommon.Blake2b256Size),
+			true,
+		},
+		{"single zero byte", []byte{0}, false},
+		{"short all-zero", make([]byte, 16), false},
+		{"long all-zero", make([]byte, lcommon.Blake2b256Size+8), false},
+		{
+			"real parent hash",
+			bytes.Repeat([]byte{0x42}, lcommon.Blake2b256Size),
+			false,
+		},
+		{
+			"mostly zero with one set byte",
+			append(
+				make([]byte, lcommon.Blake2b256Size-1),
+				0x01,
+			),
+			false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(
+				t,
+				tc.want,
+				isGenesisPrevHash(tc.prevHash),
+				"prevHash %x", tc.prevHash,
+			)
+		})
+	}
+}
