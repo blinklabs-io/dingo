@@ -228,6 +228,8 @@ func Truncate(
 	db *database.Database,
 	target models.Block,
 	batchSize int,
+	delegatorInactivityEnabled bool,
+	delegatorInactivity uint64,
 ) (blocksRemoved uint64, err error) {
 	tip, err := db.GetTip(nil)
 	if err != nil {
@@ -326,8 +328,52 @@ func Truncate(
 	}
 
 	point := ocommon.Point{Slot: target.Slot, Hash: target.Hash}
-	if _, _, err := db.TruncateAfterSlot(point, mithrilFloor, nil); err != nil {
-		return 0, fmt.Errorf("truncate: truncate metadata: %w", err)
+	// CIP-0163: collect the reward-account credentials witnessed in the
+	// truncated-away blocks (added_slot > target.Slot) before
+	// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
+	// their rows, then recompute their expiration_epoch against the
+	// surviving chain once TruncateAfterSlot has restored account state.
+	// Both must run in the same write transaction as TruncateAfterSlot --
+	// this is the exact same CIP-0163 bookkeeping
+	// ledger.LedgerState.rollback applies for a normal (security-
+	// parameter-bounded) rollback; skipping it here would leave a
+	// CIP-0163-enabled network with incorrect stake/reward/DRep
+	// calculations after any offline or live truncate, since rolled-away
+	// activity could leave expiration_epoch renewed past what the
+	// surviving chain actually witnessed.
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		var affectedRefs []models.StakeCredentialRef
+		if delegatorInactivityEnabled {
+			var affErr error
+			affectedRefs, affErr = db.AccountsWitnessedAfterSlot(point.Slot, txn)
+			if affErr != nil {
+				return fmt.Errorf(
+					"collect truncated-away witnessed accounts: %w",
+					affErr,
+				)
+			}
+		}
+		if _, _, err := db.TruncateAfterSlot(point, mithrilFloor, txn); err != nil {
+			return fmt.Errorf("truncate metadata: %w", err)
+		}
+		if err := database.RecomputeAccountExpirationsAfterTruncate(
+			db,
+			txn,
+			delegatorInactivityEnabled,
+			delegatorInactivity,
+			point.Slot,
+			affectedRefs,
+		); err != nil {
+			return fmt.Errorf(
+				"recompute account expirations after truncate: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("truncate: %w", err)
 	}
 	return blocksDeleted, nil
 }

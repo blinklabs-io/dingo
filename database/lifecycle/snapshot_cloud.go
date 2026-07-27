@@ -17,10 +17,78 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/blinklabs-io/dingo/database"
 )
+
+// cloudMirrorMarkerName is a small marker file written inside a local
+// snapshot directory the moment its cloud upload actually succeeds — not
+// before. Its presence is what distinguishes "this snapshot is fully
+// mirrored to cloud" from "the local copy exists but the cloud upload
+// never completed (or failed)", which the snapshot directory's own
+// existence alone cannot tell apart. See MirrorToCloud's doc comment for
+// why this matters: a bare directory-existence check treats both cases
+// identically, permanently skipping (and never retrying) a cloud mirror
+// that failed on an earlier attempt.
+const cloudMirrorMarkerName = ".cloud-mirrored"
+
+// CloudMirrorMarkerPath returns the marker file path for the local
+// snapshot directory dir, per cloudMirrorMarkerName's doc comment.
+func CloudMirrorMarkerPath(dir string) string {
+	return filepath.Join(dir, cloudMirrorMarkerName)
+}
+
+// IsCloudMirrored reports whether dir's cloud mirror marker is present —
+// i.e. whether a previous MirrorToCloud call for this exact directory
+// actually completed successfully, as opposed to dir merely existing
+// locally.
+func IsCloudMirrored(dir string) bool {
+	_, err := os.Stat(CloudMirrorMarkerPath(dir))
+	return err == nil
+}
+
+// MirrorToCloud uploads dir's contents to cloudDest (a base URI like
+// "s3://bucket/prefix" or "gcs://bucket/prefix"; see
+// RegisterCloudDestinationScheme), nested one level under this snapshot's
+// own ID (dir's base name), mirroring the local SnapshotDir/<snapshotID>
+// layout — see SnapshotToCloud's doc comment for why. Writes
+// CloudMirrorMarkerPath(dir) the moment the upload actually succeeds, so
+// a caller can later tell a fully-mirrored snapshot apart from one whose
+// local copy exists but whose cloud upload never completed, and retry
+// only the upload in that case rather than mistaking the local-only
+// partial success for "already done".
+//
+// cloudDest == "" is a no-op (success, no marker written): nothing to
+// mirror.
+func MirrorToCloud(ctx context.Context, dir string, cloudDest string) error {
+	if cloudDest == "" {
+		return nil
+	}
+	snapshotCloudURI := JoinCloudURI(cloudDest, filepath.Base(dir))
+	dest, err := ParseCloudDestination(snapshotCloudURI)
+	if err != nil {
+		return fmt.Errorf(
+			"cloud destination %q is invalid: %w", snapshotCloudURI, err,
+		)
+	}
+	defer closeCloudDestination(dest)
+	if err := dest.UploadDir(ctx, dir); err != nil {
+		return fmt.Errorf(
+			"upload to %q failed: %w", snapshotCloudURI, err,
+		)
+	}
+	if err := os.WriteFile(
+		CloudMirrorMarkerPath(dir), []byte(snapshotCloudURI+"\n"), 0o600,
+	); err != nil {
+		return fmt.Errorf(
+			"upload to %q succeeded, but recording the cloud-mirrored marker failed: %w",
+			snapshotCloudURI, err,
+		)
+	}
+	return nil
+}
 
 // SnapshotToCloud calls Snapshot to produce the local copy at dir exactly
 // as before, then — if cloudDest is non-empty — additionally uploads
@@ -47,28 +115,19 @@ func SnapshotToCloud(
 	dir string,
 	trigger string,
 	dingoVersion string,
+	blobPluginName string,
+	metadataPluginName string,
 	cloudDest string,
 ) (Manifest, error) {
-	manifest, err := Snapshot(ctx, db, dir, trigger, dingoVersion)
+	manifest, err := Snapshot(
+		ctx, db, dir, trigger, dingoVersion, blobPluginName, metadataPluginName,
+	)
 	if err != nil {
 		return Manifest{}, err
 	}
-	if cloudDest == "" {
-		return manifest, nil
-	}
-	snapshotCloudURI := JoinCloudURI(cloudDest, filepath.Base(dir))
-	dest, err := ParseCloudDestination(snapshotCloudURI)
-	if err != nil {
+	if err := MirrorToCloud(ctx, dir, cloudDest); err != nil {
 		return manifest, fmt.Errorf(
-			"snapshot written locally to %q, but cloud destination is invalid: %w",
-			dir, err,
-		)
-	}
-	defer closeCloudDestination(dest)
-	if err := dest.UploadDir(ctx, dir); err != nil {
-		return manifest, fmt.Errorf(
-			"snapshot written locally to %q, but upload to %q failed: %w",
-			dir, snapshotCloudURI, err,
+			"snapshot written locally to %q, but %w", dir, err,
 		)
 	}
 	return manifest, nil

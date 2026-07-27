@@ -813,6 +813,8 @@ func (n *Node) Run(ctx context.Context) error {
 		n.db,
 		n.eventBus,
 		n.config.databaseLifecycle,
+		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
+		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
 		n.config.logger,
 	)
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck

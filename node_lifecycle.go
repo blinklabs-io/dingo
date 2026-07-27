@@ -45,10 +45,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
@@ -66,6 +64,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -73,6 +72,7 @@ import (
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	midnightserver "github.com/blinklabs-io/dingo/midnight/server"
 	"github.com/blinklabs-io/dingo/peergov"
+	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -133,8 +133,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
-	if n.utxorpc != nil {
-		if stopErr := n.utxorpc.Stop(ctx); stopErr != nil {
+	// utxorpc/blockfrost/mesh are API-capability plugin providers with no
+	// service kept on Node (see node.go's Run()) -- StopCapability is a
+	// no-op if the capability was never resolved (e.g. non-API storage
+	// mode or a zero configured port).
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityAPIUtxorpc,
+		); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("utxorpc shutdown: %w", stopErr))
 		}
 	}
@@ -160,16 +166,18 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
-	if n.blockfrostAPI != nil {
-		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityAPIBlockfrost,
+		); stopErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
 			)
 		}
-	}
-	if n.meshAPI != nil {
-		if stopErr := n.meshAPI.Stop(ctx); stopErr != nil {
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityAPIMesh,
+		); stopErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("mesh API shutdown: %w", stopErr),
@@ -193,11 +201,16 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	if n.midnightIndexer != nil {
 		n.midnightIndexer.Stop()
 	}
-	if n.mempool != nil {
-		if stopErr := n.mempool.Stop(ctx); stopErr != nil {
+	// mempool is a plugin-capability provider with no Stop method of its
+	// own (see node.go's Run()) -- it is stopped/discarded via the host.
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityMempool,
+		); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("mempool shutdown: %w", stopErr))
 		}
 	}
+	n.mempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
 			err = errors.Join(
@@ -283,6 +296,31 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 		n.db = nil
 	}
 
+	// database.Close no longer touches the provider-owned stores it was
+	// given (see database.Stores's doc comment) -- they must be stopped
+	// separately here, or reinitializeCoreStorage's re-resolve of the same
+	// capabilities below would collide with these still-open instances
+	// (e.g. badger's exclusive file lock on the same on-disk directory).
+	// Stopped in reverse of Run()'s resolve order (blob, then metadata).
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityStorageMetadata,
+		); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("metadata storage shutdown: %w", stopErr),
+			)
+		}
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityStorageBlob,
+		); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("blob storage shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	// chainManager and chainsyncState have no Stop/Close method (see
 	// quiesceForLiveLifecycleOp) — they're simply dropped here so
 	// reinitializeStorage starts from a clean slate.
@@ -312,8 +350,16 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 // they still exist; this function reassigns their exported fields
 // (LedgerState, Mempool, ChainsyncState, ConnManager, PeerGov) once the new
 // objects exist, exactly like Run()'s late-binding setters do.
-func (n *Node) reinitializeCoreStorage() error {
-	db, err := database.New(n.databaseConfig())
+func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
+	deps := n.storageDependencies(n.config.dataDir)
+	deps.PromRegistry = n.config.promRegistry
+	stores, err := internalplugins.ResolveStorage(
+		ctx, n.pluginHost, n.storageSelections(), deps,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to reopen storage: %w", err)
+	}
+	db, err := database.New(n.databaseConfig(), stores)
 	if db == nil {
 		if err != nil {
 			return fmt.Errorf("failed to reopen database: %w", err)
@@ -365,17 +411,24 @@ func (n *Node) reinitializeCoreStorage() error {
 			LeiosApplyEndorserBlockTxs:    !n.config.isMusashiNetwork(),
 			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
 			SkipDijkstraTxValidation:      n.config.isMusashiNetwork(),
-			// These four must mirror Run()'s construction exactly: they're
+			// These six must mirror Run()'s construction exactly: they're
 			// operator-configured reward/pool-validation feature flags
 			// (CIP-23 min pool margin, CIP-50 pledge leverage, CIP-0163
-			// full-pot rewards), not derived from the network, and were
-			// previously omitted here entirely -- silently resetting them
-			// to their zero values (disabled) on every live restore/
-			// truncate regardless of what was actually configured.
+			// full-pot rewards, CIP-0163 delegator-inactivity expiry), not
+			// derived from the network, and were previously omitted here
+			// entirely -- silently resetting them to their zero values
+			// (disabled) on every live restore/truncate regardless of what
+			// was actually configured. DelegatorInactivityEnabled/
+			// DelegatorInactivity specifically: a node configured for
+			// CIP-0163 delegator-inactivity expiry would silently run with
+			// the gate disabled after any live restore/truncate until a
+			// full process restart, with no indication anything changed.
 			MinPoolMargin:              n.config.minPoolMargin,
 			PledgeLeverageEnabled:      n.config.pledgeLeverageEnabled,
 			PledgeLeverage:             n.config.pledgeLeverage,
 			FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
+			DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
+			DelegatorInactivity:        n.config.delegatorInactivity,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
@@ -603,6 +656,8 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		n.db,
 		n.eventBus,
 		n.config.databaseLifecycle,
+		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
+		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
 		n.config.logger,
 	)
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -635,19 +690,21 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 // peerGov. Must run after reinitializeBackgroundManagers (mempool/
 // chainsyncState come after the background managers in Run()'s order,
 // though nothing here actually depends on them).
-func (n *Node) reinitializeNetworkingCore() error {
+func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
+	mempoolSelection := n.config.pluginSelections[plugin.CapabilityMempool]
 	var err error
-	n.mempool, err = mempool.New(
-		n.config.mempoolImplementation,
-		mempool.MempoolConfig{
-			MempoolCapacity:    n.config.mempoolCapacity,
-			EvictionWatermark:  n.config.evictionWatermark,
-			RejectionWatermark: n.config.rejectionWatermark,
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			PromRegistry:       n.config.promRegistry,
-			Validator:          n.ledgerState,
-			CurrentSlotFunc:    n.ledgerState.CurrentOrTipSlot,
+	n.mempool, err = plugin.Resolve[mempool.Service](
+		ctx,
+		n.pluginHost,
+		plugin.CapabilityMempool,
+		mempoolSelection.Provider,
+		mempoolSelection.Config,
+		mempool.ProviderDependencies{
+			PromRegistry:    n.config.promRegistry,
+			Validator:       n.ledgerState,
+			Logger:          n.config.logger,
+			EventBus:        n.eventBus,
+			CurrentSlotFunc: n.ledgerState.CurrentOrTipSlot,
 		},
 	)
 	if err != nil {
@@ -791,21 +848,26 @@ func (n *Node) reinitializeNetworkingCore() error {
 // n.ledgerState/n.chainSelector fresh each tick, so it picks up the
 // rebuilt objects on its own next tick.
 func (n *Node) reinitializeAPIServers() error {
-	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
-		n.utxorpc = utxorpc.NewUtxorpc(
-			utxorpc.UtxorpcConfig{
-				Logger:             n.config.logger,
-				EventBus:           n.eventBus,
-				LedgerState:        n.ledgerState,
-				Mempool:            n.mempool,
+	utxorpcSelection, utxorpcPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIUtxorpc,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && utxorpcPort > 0 {
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
+			utxorpcSelection.Provider, utxorpcSelection.Config,
+			utxorpc.ProviderDependencies{
+				Logger: n.config.logger, EventBus: n.eventBus,
+				LedgerState: n.ledgerState, Mempool: n.mempool,
 				Host:               n.config.bindAddr,
-				Port:               n.config.utxorpcPort,
-				TlsCertFilePath:    n.config.tlsCertFilePath,
-				TlsKeyFilePath:     n.config.tlsKeyFilePath,
+				TLSCertFilePath:    n.config.tlsCertFilePath,
+				TLSKeyFilePath:     n.config.tlsKeyFilePath,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
-		if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
+		if err != nil {
 			return fmt.Errorf("restarting utxorpc: %w", err)
 		}
 	}
@@ -847,29 +909,37 @@ func (n *Node) reinitializeAPIServers() error {
 		}
 	}
 
-	if n.config.storageMode.IsAPI() && n.config.blockfrostPort > 0 {
-		listenAddr := net.JoinHostPort(
-			n.config.bindAddr,
-			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
-		)
+	blockfrostSelection, blockfrostPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIBlockfrost,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && blockfrostPort > 0 {
 		adapter, err := blockfrost.NewNodeAdapter(n.ledgerState, n.mempool)
 		if err != nil {
 			return fmt.Errorf("recreating blockfrost node adapter: %w", err)
 		}
-		n.blockfrostAPI = blockfrost.New(
-			blockfrost.BlockfrostConfig{
-				ListenAddress:      listenAddr,
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
+			blockfrostSelection.Provider, blockfrostSelection.Config,
+			blockfrost.ProviderDependencies{
+				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
-			adapter,
-			n.config.logger,
 		)
-		if err := n.blockfrostAPI.Start(n.ctx); err != nil { //nolint:contextcheck
+		if err != nil {
 			return fmt.Errorf("restarting blockfrost API: %w", err)
 		}
 	}
 
-	if n.config.storageMode.IsAPI() && n.config.meshPort > 0 {
+	meshSelection, meshPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIMesh,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && meshPort > 0 {
 		var genesisHash string
 		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {
@@ -884,19 +954,16 @@ func (n *Node) reinitializeAPIServers() error {
 					"(Byron genesis hash and Shelley genesis)",
 			)
 		}
-		listenAddr := net.JoinHostPort(
-			n.config.bindAddr,
-			strconv.FormatUint(uint64(n.config.meshPort), 10),
-		)
-		var meshErr error
-		n.meshAPI, meshErr = mesh.NewServer(
-			mesh.ServerConfig{
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
+			meshSelection.Provider, meshSelection.Config,
+			mesh.ProviderDependencies{
 				Logger:              n.config.logger,
 				LedgerState:         n.ledgerState,
 				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
-				ListenAddress:       listenAddr,
+				Host:                n.config.bindAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
@@ -904,11 +971,8 @@ func (n *Node) reinitializeAPIServers() error {
 				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
 			},
 		)
-		if meshErr != nil {
-			return fmt.Errorf("recreate mesh API server: %w", meshErr)
-		}
-		if err := n.meshAPI.Start(n.ctx); err != nil { //nolint:contextcheck
-			return fmt.Errorf("restarting mesh API: %w", err)
+		if err != nil {
+			return fmt.Errorf("recreate mesh API server: %w", err)
 		}
 	}
 
@@ -988,10 +1052,6 @@ func (n *Node) databaseConfig() *database.Config {
 		DataDir:              n.config.dataDir,
 		Logger:               n.config.logger,
 		PromRegistry:         n.config.promRegistry,
-		BlobPlugin:           n.config.blobPlugin,
-		RunMode:              n.config.runMode,
-		MetadataPlugin:       n.config.metadataPlugin,
-		MaxConnections:       n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
 		StorageMode:          string(n.config.storageMode),
 		Network:              n.config.network,
 		StrictUtxoValidation: n.config.strictUtxoValidation,
@@ -1001,6 +1061,33 @@ func (n *Node) databaseConfig() *database.Config {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
+	}
+}
+
+// storageSelections returns this node's configured blob/metadata provider
+// selections, for the live-lifecycle paths that must resolve storage
+// themselves (reinitializeCoreStorage against n.pluginHost; a disposable
+// internalplugins.OpenDatabase host elsewhere) rather than through Run()'s
+// own one-time resolution.
+func (n *Node) storageSelections() internalplugins.StorageSelections {
+	return internalplugins.StorageSelections{
+		Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob],
+		Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata],
+	}
+}
+
+// storageDependencies returns the shared application settings injected
+// into storage providers for dataDir, mirroring Run()'s own construction
+// (node.go) but parameterized so a temporary handle (e.g. Truncate's
+// tmpDB, or Restore's staging-directory validation) can target a
+// different directory than n.config.dataDir.
+func (n *Node) storageDependencies(dataDir string) internalplugins.StorageDependencies {
+	return internalplugins.StorageDependencies{
+		DataDir:        dataDir,
+		RunMode:        n.config.runMode,
+		StorageMode:    string(n.config.storageMode),
+		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+		Logger:         n.config.logger,
 	}
 }
 
@@ -1015,12 +1102,16 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 		name string
 		fn   func() error
 	}{
-		{"core storage", n.reinitializeCoreStorage},
+		{"core storage", func() error {
+			return n.reinitializeCoreStorage(ctx)
+		}},
 		{"midnight indexer", n.reinitializeMidnightIndexer},
 		{"background managers", func() error {
 			return n.reinitializeBackgroundManagers(ctx)
 		}},
-		{"networking core", n.reinitializeNetworkingCore},
+		{"networking core", func() error {
+			return n.reinitializeNetworkingCore(ctx)
+		}},
 		{"API servers", n.reinitializeAPIServers},
 		{"block producer", n.reinitializeBlockProducer},
 	}
@@ -1060,6 +1151,8 @@ func (n *Node) Snapshot(
 		destDir,
 		lifecycle.TriggerManual,
 		dingoversion.GetVersionString(),
+		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
+		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
 		n.config.databaseLifecycle.SnapshotCloudDestination,
 	)
 }
@@ -1098,7 +1191,7 @@ func (n *Node) Restore(
 	if err != nil {
 		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
 	}
-	if err := n.validateRestoredAgainstNodeConfig(stagingDir); err != nil {
+	if err := n.validateRestoredAgainstNodeConfig(ctx, stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return lifecycle.Manifest{}, fmt.Errorf(
 			"validate restored snapshot against node configuration: %w",
@@ -1126,7 +1219,7 @@ func (n *Node) Restore(
 	// failure handling below.
 	if err := n.quiesceForLiveLifecycleOp(ctx); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, fmt.Errorf(
 				"quiesce: %w (resume also failed: %w)", err, resumeErr,
@@ -1146,7 +1239,7 @@ func (n *Node) Restore(
 	}
 	if err := n.closeStorageForLiveLifecycleOp(ctx); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, fmt.Errorf(
 				"close storage: %w (resume also failed: %w)", err, resumeErr,
@@ -1163,7 +1256,7 @@ func (n *Node) Restore(
 		// The original data directory is intact (or was successfully
 		// rolled back) — bring the node back up on it rather than leaving
 		// it down over a failed swap.
-		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			return lifecycle.Manifest{}, fmt.Errorf(
 				"%w (resume also failed: %w)", err, resumeErr,
 			)
@@ -1171,7 +1264,7 @@ func (n *Node) Restore(
 		return lifecycle.Manifest{}, err
 	}
 
-	if err := n.reinitializeAndResume(ctx); err != nil {
+	if err := n.reinitializeAndResume(context.WithoutCancel(ctx)); err != nil {
 		return lifecycle.Manifest{}, err
 	}
 	return manifest, nil
@@ -1191,13 +1284,18 @@ func (n *Node) Restore(
 // with n.db's own (unlike Truncate's tmpDB, which only opens after
 // closeStorageForLiveLifecycleOp has already unregistered the old db's
 // collectors).
-func (n *Node) validateRestoredAgainstNodeConfig(stagingDir string) error {
+func (n *Node) validateRestoredAgainstNodeConfig(
+	ctx context.Context,
+	stagingDir string,
+) error {
 	cfg := n.databaseConfig()
 	cfg.DataDir = stagingDir
 	cfg.PromRegistry = nil
-	db, err := database.New(cfg)
-	if db != nil {
-		defer db.Close()
+	runtime, err := internalplugins.OpenDatabase(
+		ctx, cfg, n.storageSelections(), n.storageDependencies(stagingDir),
+	)
+	if runtime != nil {
+		defer runtime.Close(ctx)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to reopen database: %w", err)
@@ -1269,7 +1367,7 @@ func (n *Node) Truncate(
 	// it there would strand the node running but silently unresponsive
 	// with no indication a restart is needed.
 	if err := n.quiesceForLiveLifecycleOp(ctx); err != nil {
-		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return 0, fmt.Errorf(
 				"quiesce: %w (resume also failed: %w)", err, resumeErr,
@@ -1284,7 +1382,7 @@ func (n *Node) Truncate(
 		n.bark.PauseDB()
 	}
 	if err := n.closeStorageForLiveLifecycleOp(ctx); err != nil {
-		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return 0, fmt.Errorf(
 				"close storage: %w (resume also failed: %w)", err, resumeErr,
@@ -1294,21 +1392,28 @@ func (n *Node) Truncate(
 	}
 
 	blocksRemoved, truncateErr := func() (uint64, error) {
-		tmpDB, err := database.New(n.databaseConfig())
-		// database.New can return a non-nil db alongside a non-nil error
-		// (a recoverable CommitTimestampError — see its own doc comment,
-		// "database is available for recovery, so return it with error").
+		deps := n.storageDependencies(n.config.dataDir)
+		deps.PromRegistry = n.config.promRegistry
+		tmpRuntime, err := internalplugins.OpenDatabase(
+			ctx, n.databaseConfig(), n.storageSelections(), deps,
+		)
+		// database.New (inside OpenDatabase) can return a non-nil db
+		// alongside a non-nil error (a recoverable CommitTimestampError —
+		// see its own doc comment, "database is available for recovery,
+		// so return it with error"), and OpenDatabase preserves that by
+		// returning a non-nil runtime alongside the error in that case.
 		// The defer must be registered here, before the err check below,
-		// so that case still closes tmpDB rather than leaking its open
-		// badger/sqlite handles: an early return on err != nil before this
-		// line would skip the deferred Close entirely, leaving tmpDB's
-		// storage locks held. reinitializeAndResume's reinitializeCoreStorage
-		// then reopens the very same data directory a moment later (this
-		// error is classified as ErrTruncateNotStarted, so nothing on disk
-		// was touched and resume is expected to succeed) — reopening
-		// storage that a leaked tmpDB is still holding open.
-		if tmpDB != nil {
-			defer tmpDB.Close()
+		// so that case still closes tmpRuntime rather than leaking its
+		// open badger/sqlite handles: an early return on err != nil before
+		// this line would skip the deferred Close entirely, leaving
+		// tmpRuntime's storage locks held. reinitializeAndResume's
+		// reinitializeCoreStorage then reopens the very same data
+		// directory a moment later (this error is classified as
+		// ErrTruncateNotStarted, so nothing on disk was touched and
+		// resume is expected to succeed) — reopening storage that a
+		// leaked tmpRuntime is still holding open.
+		if tmpRuntime != nil {
+			defer tmpRuntime.Close(ctx)
 		}
 		if err != nil {
 			return 0, fmt.Errorf(
@@ -1316,6 +1421,7 @@ func (n *Node) Truncate(
 				lifecycle.ErrTruncateNotStarted, err,
 			)
 		}
+		tmpDB := tmpRuntime.Database
 
 		block, err := dblifecycle.ResolveTarget(tmpDB, target)
 		if err != nil {
@@ -1323,7 +1429,14 @@ func (n *Node) Truncate(
 				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
 			)
 		}
-		return lifecycle.Truncate(ctx, tmpDB, block, 0)
+		return lifecycle.Truncate(
+			ctx,
+			tmpDB,
+			block,
+			0,
+			n.config.delegatorInactivityEnabled,
+			n.config.delegatorInactivity,
+		)
 	}()
 	// tmpDB's database.New registered its own Prometheus collectors under
 	// the same names reinitializeAndResume's database.New is about to use;
@@ -1337,7 +1450,7 @@ func (n *Node) Truncate(
 		// Nothing was touched on disk — resume on the untouched data
 		// directory rather than tearing the whole node down over a
 		// rejected target or a cancellation that landed before any delete.
-		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			return 0, fmt.Errorf(
 				"%w (resume also failed: %w)", truncateErr, resumeErr,
 			)
@@ -1345,7 +1458,7 @@ func (n *Node) Truncate(
 		return 0, fmt.Errorf("truncate: %w", truncateErr)
 	}
 
-	if err := n.reinitializeAndResume(ctx); err != nil {
+	if err := n.reinitializeAndResume(context.WithoutCancel(ctx)); err != nil {
 		return 0, err
 	}
 	return blocksRemoved, nil

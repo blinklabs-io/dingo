@@ -304,7 +304,7 @@ func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "snap-local-only")
 	m, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "",
+		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite", "",
 	)
 	require.NoError(t, err)
 	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
@@ -328,6 +328,8 @@ func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
 		dir,
 		lifecycle.TriggerManual,
 		"test-version",
+		"badger",
+		"sqlite",
 		"faketest://bucket/prefix",
 	)
 	require.NoError(t, err)
@@ -363,6 +365,8 @@ func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(t *testing.T)
 		dir,
 		lifecycle.TriggerManual,
 		"test-version",
+		"badger",
+		"sqlite",
 		"unsupported-scheme://bucket/prefix",
 	)
 	require.Error(t, err)
@@ -387,6 +391,8 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 		localDir,
 		lifecycle.TriggerManual,
 		"test-version",
+		"badger",
+		"sqlite",
 		"faketest://bucket/prefix",
 	)
 	require.NoError(t, err)
@@ -420,6 +426,8 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 			filepath.Join(t.TempDir(), name),
 			lifecycle.TriggerManual,
 			"test-version",
+			"badger",
+			"sqlite",
 			cloudDest,
 		)
 		require.NoError(t, err)

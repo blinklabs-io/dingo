@@ -49,10 +49,12 @@ const epochSnapshotDirPrefix = "epoch-"
 // transaction. Because Badger's Backup and SQLite's VACUUM INTO are both
 // non-blocking for concurrent writers, this needs no node quiesce.
 type Manager struct {
-	db       *database.Database
-	eventBus *event.EventBus
-	cfg      config.DatabaseLifecycleConfig
-	logger   *slog.Logger
+	db                 *database.Database
+	eventBus           *event.EventBus
+	cfg                config.DatabaseLifecycleConfig
+	blobPluginName     string
+	metadataPluginName string
+	logger             *slog.Logger
 
 	mu             sync.Mutex
 	running        bool
@@ -63,21 +65,27 @@ type Manager struct {
 }
 
 // NewManager creates a new automatic-snapshot manager. db and eventBus
-// must not be nil once Start is called.
+// must not be nil once Start is called. blobPluginName/metadataPluginName
+// are recorded in every automatic snapshot's manifest (the running
+// database no longer tracks which provider names resolved its stores).
 func NewManager(
 	db *database.Database,
 	eventBus *event.EventBus,
 	cfg config.DatabaseLifecycleConfig,
+	blobPluginName string,
+	metadataPluginName string,
 	logger *slog.Logger,
 ) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Manager{
-		db:       db,
-		eventBus: eventBus,
-		cfg:      cfg,
-		logger:   logger,
+		db:                 db,
+		eventBus:           eventBus,
+		cfg:                cfg,
+		blobPluginName:     blobPluginName,
+		metadataPluginName: metadataPluginName,
+		logger:             logger,
 	}
 }
 
@@ -279,12 +287,51 @@ func (m *Manager) handleEpochTransition(
 	// cloud-upload failure as routine idempotency. Checking first means
 	// any error from here on is always a real failure to report.
 	if _, statErr := os.Stat(destDir); statErr == nil {
-		m.logger.Debug(
-			"automatic snapshot for epoch already exists, skipping",
+		// destDir existing is NOT by itself proof this epoch is fully
+		// done: a cloud destination is configured separately from the
+		// local write, so a previous attempt could have written destDir
+		// successfully and then failed (or never even tried) to mirror
+		// it to the cloud. Treating that local-only partial success as
+		// "already done" would permanently skip the cloud mirror for
+		// this epoch -- and, combined with retention pruning the local
+		// copy once enough newer epochs accumulate, silently lose the
+		// only copy of this snapshot ever having existed. So when a
+		// cloud destination is configured, only skip if this directory
+		// is actually marked as mirrored; otherwise retry just the
+		// upload from the already-valid local copy, not the whole
+		// snapshot.
+		if m.cfg.SnapshotCloudDestination == "" ||
+			lifecycle.IsCloudMirrored(destDir) {
+			m.logger.Debug(
+				"automatic snapshot for epoch already exists, skipping",
+				"component", "dblifecycle",
+				"epoch", evt.NewEpoch,
+				"dir", destDir,
+			)
+			return nil
+		}
+		m.logger.Warn(
+			"automatic snapshot for epoch exists locally but was never mirrored to the cloud, retrying upload",
 			"component", "dblifecycle",
 			"epoch", evt.NewEpoch,
 			"dir", destDir,
 		)
+		if err := lifecycle.MirrorToCloud(
+			ctx, destDir, m.cfg.SnapshotCloudDestination,
+		); err != nil {
+			return fmt.Errorf(
+				"retry epoch-boundary snapshot cloud mirror: %w", err,
+			)
+		}
+		m.logger.Info(
+			"mirrored previously local-only automatic database snapshot to the cloud",
+			"component", "dblifecycle",
+			"epoch", evt.NewEpoch,
+			"dir", destDir,
+		)
+		if m.cfg.SnapshotRetention > 0 {
+			m.pruneOldSnapshots(ctx)
+		}
 		return nil
 	}
 	_, err := lifecycle.SnapshotToCloud(
@@ -293,6 +340,8 @@ func (m *Manager) handleEpochTransition(
 		destDir,
 		lifecycle.TriggerEpochBoundary,
 		version.GetVersionString(),
+		m.blobPluginName,
+		m.metadataPluginName,
 		m.cfg.SnapshotCloudDestination,
 	)
 	if err != nil {

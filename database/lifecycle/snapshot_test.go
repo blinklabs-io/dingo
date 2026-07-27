@@ -23,88 +23,11 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
-
-// pluginDataDirDest returns the live *string backing pluginName's "data-dir"
-// option — plugin.GetPlugins copies PluginEntry/PluginOption structs, but
-// each PluginOption.Dest is the same *string pointer SetPluginOption writes
-// through, so dereferencing it always reflects the option's current,
-// actually-in-effect value, not just its registered default.
-func pluginDataDirDest(
-	t *testing.T,
-	pluginType plugin.PluginType,
-	pluginName string,
-) *string {
-	t.Helper()
-	for _, entry := range plugin.GetPlugins(pluginType) {
-		if entry.Name != pluginName {
-			continue
-		}
-		for _, opt := range entry.Options {
-			if opt.Name != "data-dir" {
-				continue
-			}
-			dest, ok := opt.Dest.(*string)
-			require.Truef(t, ok, "%s/%s data-dir option Dest must be *string", pluginType, pluginName)
-			return dest
-		}
-	}
-	t.Fatalf("no data-dir option registered for plugin %v/%s", pluginType, pluginName)
-	return nil
-}
-
-// setPluginDataDirForTest sets pluginName's "data-dir" option to dir and,
-// via t.Cleanup, restores it to whatever value was in effect before this
-// call once the test finishes. plugin.SetPluginOption mutates process-
-// global registry state (see its own doc comment) — left unrestored, the
-// last test in this package's binary to call it determines what every
-// later test silently gets for the default plugin's data directory,
-// instead of each test's own explicit setup being what actually takes
-// effect.
-func setPluginDataDirForTest(
-	t *testing.T,
-	pluginType plugin.PluginType,
-	pluginName string,
-	dir string,
-) {
-	t.Helper()
-	dest := pluginDataDirDest(t, pluginType, pluginName)
-	previous := *dest
-	require.NoError(t, plugin.SetPluginOption(pluginType, pluginName, "data-dir", dir))
-	t.Cleanup(func() {
-		require.NoError(
-			t,
-			plugin.SetPluginOption(pluginType, pluginName, "data-dir", previous),
-		)
-	})
-}
-
-// TestSetPluginDataDirForTestRestoresPreviousValue guards against the
-// leaked-global bug this helper exists to fix: a subtest that calls
-// setPluginDataDirForTest must not leave its value in place once it
-// finishes — the subtest's t.Cleanup runs synchronously before t.Run
-// returns, so the pre-existing value must already be back by the time
-// this checks it.
-func TestSetPluginDataDirForTestRestoresPreviousValue(t *testing.T) {
-	dest := pluginDataDirDest(t, plugin.PluginTypeBlob, config.DefaultBlobPlugin)
-	before := *dest
-
-	t.Run("mutate", func(t *testing.T) {
-		setPluginDataDirForTest(
-			t, plugin.PluginTypeBlob, config.DefaultBlobPlugin, t.TempDir(),
-		)
-	})
-
-	require.Equal(
-		t, before, *dest,
-		"data-dir must be restored to its pre-test value via t.Cleanup",
-	)
-}
 
 // TestSnapshotWritesManifestAndBackupFiles verifies that Snapshot writes
 // a manifest plus blob/metadata backup files with matching commit timestamps.
@@ -114,7 +37,7 @@ func TestSnapshotWritesManifestAndBackupFiles(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "snap1")
 	m, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
+		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 	)
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)
@@ -137,7 +60,7 @@ func TestSnapshotRefusesExistingDirectory(t *testing.T) {
 	dir := t.TempDir() // already exists
 
 	_, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
+		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 	)
 	require.Error(t, err)
 }
@@ -162,7 +85,7 @@ func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(t *testing.T)
 	require.NoError(t, os.WriteFile(winnerFile, []byte("winner's data"), 0o644))
 
 	_, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
+		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 	)
 	require.Error(t, err)
 
@@ -203,7 +126,7 @@ func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
 			defer wg.Done()
 			<-start
 			_, err := lifecycle.Snapshot(
-				context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
+				context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 			)
 			errs[i] = err
 		}(i)
@@ -270,7 +193,7 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "snap-concurrent")
 	_, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
+		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 	)
 	wg.Wait()
 	require.NoError(t, err)
@@ -279,15 +202,8 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	_, err = lifecycle.Restore(context.Background(), dir, restoredDir)
 	require.NoError(t, err)
 
-	setPluginDataDirForTest(t, plugin.PluginTypeBlob, config.DefaultBlobPlugin, restoredDir)
-	setPluginDataDirForTest(t, plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, restoredDir)
-	restored, err := database.New(&database.Config{
-		DataDir:        restoredDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	_, err = dbtest.NewDatabase(t, &database.Config{DataDir: restoredDir})
 	require.NoError(t, err)
-	defer restored.Close()
 }
 
 // TestSnapshotCleansUpOnFailure verifies that a Snapshot failure (here, a
@@ -299,7 +215,7 @@ func TestSnapshotCleansUpOnFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := lifecycle.Snapshot(
-		ctx, db, dir, lifecycle.TriggerManual, "test-version",
+		ctx, db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 	)
 	require.Error(t, err)
 	require.NoDirExists(t, dir)

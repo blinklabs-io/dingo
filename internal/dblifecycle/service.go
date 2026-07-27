@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/version"
 )
 
@@ -61,7 +62,7 @@ type Service struct {
 }
 
 // NewService creates a Service bound to cfg's database configuration
-// (DatabasePath, BlobPlugin, MetadataPlugin, StorageMode, Network).
+// (DatabasePath, Plugins.Storage, StorageMode, Network).
 func NewService(cfg *config.Config, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -85,23 +86,35 @@ func (s *Service) SetLiveNode(n LiveNode) {
 // bootstrap paths, it does not tolerate a commit-timestamp mismatch —
 // lifecycle operations should fail loudly on a database that looks
 // inconsistent rather than operate on it.
-func (s *Service) openDatabase() (*database.Database, error) {
-	db, err := database.New(&database.Config{
-		DataDir:        s.cfg.DatabasePath,
-		Logger:         s.logger,
-		BlobPlugin:     s.cfg.BlobPlugin,
-		MetadataPlugin: s.cfg.MetadataPlugin,
-		MaxConnections: s.cfg.DatabaseWorkers,
-		StorageMode:    s.cfg.StorageMode,
-		Network:        s.cfg.Network,
-	})
+func (s *Service) openDatabase(
+	ctx context.Context,
+) (*internalplugins.DatabaseRuntime, error) {
+	runtime, err := internalplugins.OpenDatabase(
+		ctx,
+		&database.Config{
+			DataDir:     s.cfg.DatabasePath,
+			Logger:      s.logger,
+			StorageMode: s.cfg.StorageMode,
+			Network:     s.cfg.Network,
+		},
+		internalplugins.StorageSelections{
+			Blob:     s.cfg.Plugins.Storage.Blob,
+			Metadata: s.cfg.Plugins.Storage.Metadata,
+		},
+		internalplugins.StorageDependencies{
+			DataDir:        s.cfg.DatabasePath,
+			StorageMode:    s.cfg.StorageMode,
+			MaxConnections: s.cfg.DatabaseWorkers,
+			Logger:         s.logger,
+		},
+	)
 	if err != nil {
-		if db != nil {
-			_ = db.Close()
+		if runtime != nil {
+			_ = runtime.Close(ctx)
 		}
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	return db, nil
+	return runtime, nil
 }
 
 // Snapshot captures a point-in-time backup of the configured database
@@ -116,17 +129,19 @@ func (s *Service) Snapshot(
 	if s.liveNode != nil {
 		return s.liveNode.Snapshot(ctx, destDir)
 	}
-	db, err := s.openDatabase()
+	db, err := s.openDatabase(ctx)
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
-	defer db.Close()
+	defer db.Close(ctx)
 	return lifecycle.SnapshotToCloud(
 		ctx,
-		db,
+		db.Database,
 		destDir,
 		lifecycle.TriggerManual,
 		version.GetVersionString(),
+		s.cfg.Plugins.Storage.Blob.Provider,
+		s.cfg.Plugins.Storage.Metadata.Provider,
 		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
 	)
 }
@@ -159,8 +174,8 @@ func (s *Service) Restore(
 		s.cfg.DatabasePath,
 		func(m lifecycle.Manifest) error {
 			if err := m.CheckCompatibility(
-				s.cfg.BlobPlugin,
-				s.cfg.MetadataPlugin,
+				s.cfg.Plugins.Storage.Blob.Provider,
+				s.cfg.Plugins.Storage.Metadata.Provider,
 				storageMode,
 				s.cfg.Network,
 			); err != nil {
@@ -199,17 +214,24 @@ func (s *Service) Truncate(
 		return s.liveNode.Truncate(ctx, target)
 	}
 
-	db, err := s.openDatabase()
+	db, err := s.openDatabase(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer db.Close()
+	defer db.Close(ctx)
 
-	block, err := ResolveTarget(db, target)
+	block, err := ResolveTarget(db.Database, target)
 	if err != nil {
 		return 0, err
 	}
-	return lifecycle.Truncate(ctx, db, block, 0)
+	return lifecycle.Truncate(
+		ctx,
+		db.Database,
+		block,
+		0,
+		s.cfg.DelegatorInactivityEnabled,
+		s.cfg.DelegatorInactivity,
+	)
 }
 
 // ResolveTarget resolves target against db to a single canonical block,

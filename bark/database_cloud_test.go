@@ -30,6 +30,7 @@ import (
 	"connectrpc.com/connect"
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -297,21 +298,21 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 	localAndCloudDir := filepath.Join(snapshotDir, "local-and-cloud")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(), db, localAndCloudDir,
-		lifecycle.TriggerManual, "test-version", cloudDest,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
 
 	cloudOnlyDir := filepath.Join(snapshotDir, "cloud-only")
 	_, err = lifecycle.SnapshotToCloud(
 		context.Background(), db, cloudOnlyDir,
-		lifecycle.TriggerManual, "test-version", cloudDest,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(cloudOnlyDir))
 
 	localOnlyDir := filepath.Join(snapshotDir, "local-only")
 	_, err = lifecycle.Snapshot(
-		context.Background(), db, localOnlyDir, lifecycle.TriggerManual, "test-version",
+		context.Background(), db, localOnlyDir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 	)
 	require.NoError(t, err)
 
@@ -364,6 +365,8 @@ func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
 		filepath.Join(snapshotDir, "only-snapshot"),
 		lifecycle.TriggerManual,
 		"test-version",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
@@ -402,10 +405,10 @@ func TestRestoreFromLocalSnapshot(t *testing.T) {
 	snapshotDir := t.TempDir()
 	_, err := lifecycle.Snapshot(
 		context.Background(), sourceDB, filepath.Join(snapshotDir, "snap1"),
-		lifecycle.TriggerManual, "test-version",
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 	)
 	require.NoError(t, err)
-	sourceDB.Close()
+	dbtest.CloseDatabase(sourceDB) //nolint:errcheck
 
 	targetDataDir := filepath.Join(t.TempDir(), "target")
 	h := newTestDatabaseServiceHandler(t, nil, targetDataDir)
@@ -452,10 +455,10 @@ func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
 
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(), sourceDB, filepath.Join(snapshotDir, "cloud-snap"),
-		lifecycle.TriggerManual, "test-version", cloudDest,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
-	sourceDB.Close()
+	dbtest.CloseDatabase(sourceDB) //nolint:errcheck
 
 	// Remove the local copy so only the cloud mirror remains — simulating
 	// a snapshot ListAvailableSnapshots would surface as cloud-only.
@@ -534,7 +537,7 @@ func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
 
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(), db, filepath.Join(snapshotDir, "cloud-verify"),
-		lifecycle.TriggerManual, "test-version", cloudDest,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(filepath.Join(snapshotDir, "cloud-verify")))
@@ -578,7 +581,7 @@ func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
 
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(), db, filepath.Join(snapshotDir, "cloud-delete"),
-		lifecycle.TriggerManual, "test-version", cloudDest,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(filepath.Join(snapshotDir, "cloud-delete")))
@@ -612,7 +615,7 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(), db, filepath.Join(snapshotDir, "both"),
-		lifecycle.TriggerManual, "test-version", cloudDest,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
 
@@ -685,7 +688,7 @@ func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
 	localDir := filepath.Join(snapshotDir, "no-delete-support")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(), db, localDir,
-		lifecycle.TriggerManual, "test-version", cloudDest,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
 	// Remove the local copy so DeleteSnapshot must act on the cloud-only
@@ -725,7 +728,7 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 	for _, name := range []string{"local-a", "local-b"} {
 		_, err := lifecycle.Snapshot(
 			context.Background(), db, filepath.Join(snapshotDir, name),
-			lifecycle.TriggerManual, "test-version",
+			lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 		)
 		require.NoError(t, err)
 	}
@@ -733,7 +736,7 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 		dir := filepath.Join(snapshotDir, name)
 		_, err := lifecycle.SnapshotToCloud(
 			context.Background(), db, dir,
-			lifecycle.TriggerManual, "test-version", cloudDest,
+			lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 		)
 		require.NoError(t, err)
 		require.NoError(t, os.RemoveAll(dir))

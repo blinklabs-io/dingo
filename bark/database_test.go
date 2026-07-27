@@ -27,9 +27,10 @@ import (
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -44,19 +45,8 @@ const databaseOperationTimeout = 30 * time.Second
 // back up (VACUUM INTO refuses an in-memory sqlite database).
 func newDiskTestDB(t *testing.T, dataDir string) *database.Database {
 	t.Helper()
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", dataDir,
-	))
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", dataDir,
-	))
-	db, err := database.New(&database.Config{
-		DataDir:        dataDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
 	return db
 }
 
@@ -77,9 +67,13 @@ func newTestDatabaseServiceHandler(
 		barkDB = newTestDB(t)
 	}
 	svc := dblifecycle.NewService(&config.Config{
-		DatabasePath:   dbDataDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
+		DatabasePath: dbDataDir,
+		Plugins: config.PluginsConfig{
+			Storage: config.StoragePluginsConfig{
+				Blob:     plugin.Selection{Provider: "badger"},
+				Metadata: plugin.Selection{Provider: "sqlite"},
+			},
+		},
 	}, nil)
 	b, err := NewBark(BarkConfig{
 		DB:          barkDB,
@@ -159,7 +153,7 @@ func TestCreateSnapshotAndGetSnapshotStatus(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 
@@ -273,7 +267,7 @@ func TestTruncateAndGetTruncateStatus(t *testing.T) {
 		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
 		BlockNumber: last.Number,
 	}, nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 
@@ -356,7 +350,7 @@ func TestListSnapshotsReturnsCreatedSnapshotWithLabel(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{
@@ -397,7 +391,7 @@ func TestListSnapshotsPaginates(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	for range 3 {
@@ -431,7 +425,7 @@ func TestListAvailableSnapshotsMirrorsListSnapshots(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -451,7 +445,7 @@ func TestDeleteSnapshotRemovesItFromTheCatalog(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -507,7 +501,7 @@ func TestVerifySnapshotSucceedsForValidSnapshot(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -552,7 +546,7 @@ func TestVerifySnapshotFailsForCorruptedSnapshot(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -618,7 +612,7 @@ func TestVerifySnapshotOfTamperedManifestReturnsDataLoss(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -648,7 +642,7 @@ func TestDeleteSnapshotRemovesLocalSnapshotWithCorruptedManifest(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -689,7 +683,7 @@ func TestGetOperationHistoryReturnsPastOperations(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -720,7 +714,7 @@ func TestGetOperationHistoryFiltersByTypeAndStatus(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
@@ -752,7 +746,7 @@ func TestGetOperationHistoryPaginates(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	for range 3 {
@@ -839,7 +833,7 @@ func TestCancelOperationOnAlreadyCompletedOperationIsANoOp(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	db.Close()
+	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
 	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})

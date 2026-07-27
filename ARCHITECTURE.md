@@ -3646,3 +3646,70 @@ resolves — only how fast the pipeline hammers against it while it
 doesn't — and is deliberately generic rather than classifying specific
 error types, since the failure modes this guards against are exactly the
 ones not yet fully understood well enough to special-case safely.
+
+### CIP-0163 Bookkeeping Shared Between Ledger Rollback and Lifecycle Truncate
+
+`database.RecomputeAccountExpirationsAfterTruncate` (`database/account_expiry_truncate.go`)
+and `database.EpochBySlot` (`database/epoch.go`) hold the CIP-0163
+delegator-inactivity recompute logic — restoring the `expiration_epoch`
+of reward accounts affected by rolling blocks away — as ledger-independent
+functions operating purely on `*database.Database`, not
+`ledger.LedgerState`. Both `ledger.LedgerState.rollback` (normal,
+security-parameter-bounded rollback during sync) and
+`database/lifecycle.Truncate` (offline and live CIP-0135 disaster-recovery
+truncate, which has no `LedgerState` at all in the offline case) call the
+same functions, so both apply identical CIP-0163 bookkeeping regardless of
+which path performs the truncation. `database.EpochBySlot` deliberately
+does not have `ledger.LedgerState.SlotToEpoch`'s ability to project an
+epoch boundary beyond the persisted epoch table (which needs live
+hard-fork/era-transition state) — every caller here only resolves a
+rollback or witness slot that has already been committed, so the persisted
+table alone is always sufficient. `ledger.recomputeAccountExpirationsAfterRollback`
+is now a thin wrapper delegating to the shared function; the sync_state
+marker key guarding the one-time CIP-0163 activation stamp
+(`database.DelegatorInactivityActivatedSyncKey`) is likewise defined once
+in `database`, not duplicated, since both the ledger-owned write side
+(`activateDelegatorInactivityIfNeeded`, forward-processing only) and the
+shared rollback/truncate read/clear side must agree on the exact same key.
+
+Before this, `database/lifecycle.Truncate` called `database.TruncateAfterSlot`
+directly with no CIP-0163 hooks at all — a truncate on a CIP-0163-enabled
+network could leave `expiration_epoch` renewed by activity in the
+truncated-away blocks, producing incorrect stake/reward/DRep calculations
+downstream. This affected both the offline CLI path and the live path
+(`Node.Truncate` calls the same `lifecycle.Truncate`).
+
+Separately, the `ledger.LedgerStateConfig` reconstructed during a live
+restore/truncate's reinitialization (`node_lifecycle.go`) must mirror every
+operator-configured field `Run()`'s own construction sets — this has twice
+now been the source of a real bug (first `MinPoolMargin`/
+`PledgeLeverageEnabled`/`PledgeLeverage`/`FullPotRewardsEnabled`, now
+`DelegatorInactivityEnabled`/`DelegatorInactivity`) silently omitted,
+resetting the feature to disabled after any live restore/truncate until a
+full process restart, with no indication anything changed. There is no
+compile-time check tying these two construction sites together; this class
+of bug is only caught by comparing them by hand or by a test that actually
+asserts a configured value survives reinitialization (see
+`TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig` in
+`node_lifecycle_test.go`).
+
+### Automatic Snapshot Cloud-Mirror Idempotency
+
+`internal/dblifecycle.Manager`'s epoch-boundary automatic snapshot trigger
+checks whether a snapshot for the target epoch already exists before doing
+anything, so a redelivered epoch-transition event (or a node restart) does
+not redo a snapshot that already completed. That check alone cannot tell
+"fully completed, including its cloud mirror" apart from "the local
+snapshot completed but a configured cloud upload failed or never ran" —
+both leave the same local snapshot directory present.
+`database.MirrorToCloud` (`database/lifecycle/snapshot_cloud.go`) writes a
+small marker file (`database.CloudMirrorMarkerPath`) inside the local
+snapshot directory the moment its cloud upload actually succeeds, and
+`database.IsCloudMirrored` checks for it. When a cloud destination is
+configured and the local directory exists but is not marked mirrored, the
+manager retries just the cloud upload from the existing local copy (via
+`MirrorToCloud` directly) rather than treating the directory's mere
+existence as proof the epoch is fully done — which would otherwise
+permanently skip the cloud mirror for that epoch, and, combined with
+retention eventually pruning the local-only copy, could silently lose the
+only copy of that snapshot ever having existed.

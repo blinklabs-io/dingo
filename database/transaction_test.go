@@ -212,7 +212,7 @@ func (m *mockBlobTxn) Rollback() error {
 // safety check can fail closed.
 func TestMithrilTrustBoundarySlotStrictPropagatesReadError(t *testing.T) {
 	db := openTestDB(t)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	_, err := db.MithrilTrustBoundarySlotStrict(nil)
 	require.Error(t, err)
@@ -224,7 +224,7 @@ func TestMithrilTrustBoundarySlotStrictPropagatesReadError(t *testing.T) {
 // file): a failed read still returns 0, not an error.
 func TestMithrilTrustBoundarySlotSwallowsReadError(t *testing.T) {
 	db := openTestDB(t)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
 }

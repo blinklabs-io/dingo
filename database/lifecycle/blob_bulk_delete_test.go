@@ -23,8 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,26 +46,8 @@ func (c *cancelAfterNErrChecks) Err() error {
 
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	tmpDir := t.TempDir()
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-		"data-dir",
-		tmpDir,
-	))
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-		"data-dir",
-		tmpDir,
-	))
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
 	return db
 }
 

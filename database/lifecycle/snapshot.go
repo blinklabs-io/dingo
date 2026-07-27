@@ -56,26 +56,32 @@ const (
 // call against a database a live node is actively writing to.
 //
 // dingoVersion is recorded in the manifest for cross-version restore
-// detection; pass the running binary's version string.
+// detection; pass the running binary's version string. blobPluginName and
+// metadataPluginName are recorded in the manifest for Restore's later
+// plugin-match check (Manifest.CheckPluginMatch) — db itself no longer
+// knows which provider names resolved its injected Stores, so the caller
+// (which does know, from its own plugin selection) must supply them.
 func Snapshot(
 	ctx context.Context,
 	db *database.Database,
 	dir string,
 	trigger string,
 	dingoVersion string,
+	blobPluginName string,
+	metadataPluginName string,
 ) (m Manifest, err error) {
 	blobBackuper, ok := db.Blob().(blob.Backuper)
 	if !ok {
 		return Manifest{}, fmt.Errorf(
 			"blob plugin %q does not support snapshotting",
-			db.Config().BlobPlugin,
+			blobPluginName,
 		)
 	}
 	metadataBackuper, ok := db.Metadata().(metadata.Backuper)
 	if !ok {
 		return Manifest{}, fmt.Errorf(
 			"metadata plugin %q does not support snapshotting",
-			db.Config().MetadataPlugin,
+			metadataPluginName,
 		)
 	}
 
@@ -233,8 +239,8 @@ func Snapshot(
 		TipSlot:         tip.Point.Slot,
 		TipHash:         tip.Point.Hash,
 		TipBlockNumber:  tip.BlockNumber,
-		BlobPlugin:      db.Config().BlobPlugin,
-		MetadataPlugin:  db.Config().MetadataPlugin,
+		BlobPlugin:      blobPluginName,
+		MetadataPlugin:  metadataPluginName,
 		DingoVersion:    dingoVersion,
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),

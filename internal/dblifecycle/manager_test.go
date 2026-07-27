@@ -33,20 +33,15 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 func newManagerTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := database.New(&database.Config{
-		DataDir:        dir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
 	return db
 }
 
@@ -71,7 +66,7 @@ func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled: false,
 		SnapshotDir:     snapshotDir,
-	}, nil)
+	}, "badger", "sqlite", nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -94,7 +89,7 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-	}, nil)
+	}, "badger", "sqlite", nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -118,7 +113,7 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 2,
-	}, nil)
+	}, "badger", "sqlite", nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -145,7 +140,7 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-	}, nil)
+	}, "badger", "sqlite", nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -179,7 +174,7 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
 		SnapshotRetention:    2,
-	}, nil)
+	}, "badger", "sqlite", nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -302,7 +297,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
-	}, nil)
+	}, "badger", "sqlite", nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -416,7 +411,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestpanic://bucket/prefix",
-	}, logger)
+	}, "badger", "sqlite", logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -500,7 +495,7 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestfail://bucket/prefix",
-	}, logger)
+	}, "badger", "sqlite", logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -597,7 +592,7 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(t *t
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestblocking://bucket/prefix",
-	}, nil)
+	}, "badger", "sqlite", nil)
 	require.NoError(t, m.Start(ctx))
 	// Registered immediately after Start succeeds (before any assertion
 	// that could fail): if this test fails before reaching the explicit
@@ -642,5 +637,110 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(t *t
 	testutil.RequireReceive(
 		t, stopDone, time.Second,
 		"Stop must return promptly once the in-flight handler actually finishes",
+	)
+}
+
+// flakyCloudDestination fails UploadDir exactly once (its first call),
+// then succeeds on every subsequent call — simulating a transient cloud
+// outage that has cleared by the time the operation is retried, as
+// opposed to failingCloudDestination's permanent failure.
+type flakyCloudDestination struct {
+	failed *bool
+	mu     *sync.Mutex
+}
+
+func (d flakyCloudDestination) UploadDir(context.Context, string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !*d.failed {
+		*d.failed = true
+		return errors.New("simulated transient cloud upload failure")
+	}
+	return nil
+}
+
+func (flakyCloudDestination) DownloadDir(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func init() {
+	failed := false
+	var mu sync.Mutex
+	lifecycle.RegisterCloudDestinationScheme(
+		"faketestflaky",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return flakyCloudDestination{failed: &failed, mu: &mu}, nil
+		},
+	)
+}
+
+// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent
+// guards the actual bug behind this fix: handleEpochTransition's
+// idempotency check used to look only at whether the local snapshot
+// directory existed, which a transient cloud-upload failure and a fully
+// successful run both leave true — so once a cloud upload failed after
+// the local write succeeded, a later redelivered epoch-transition event
+// (or a node restart) would see the directory, assume "already done", and
+// permanently skip the cloud mirror. Combined with retention eventually
+// pruning the local-only copy, this could silently lose the only copy of
+// that snapshot ever having existed. This proves the opposite: after a
+// transient failure, redelivering the same epoch event actually retries
+// (and this time succeeds at) the cloud mirror, from the existing local
+// copy, without redoing the local snapshot.
+func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *testing.T) {
+	db := newManagerTestDB(t)
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:          true,
+		SnapshotDir:              snapshotDir,
+		SnapshotEveryNEpochs:     1,
+		SnapshotCloudDestination: "faketestflaky://bucket/prefix",
+	}, "badger", "sqlite", logger)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	// First delivery: local write succeeds, cloud upload fails.
+	publishEpochTransition(eb, 9)
+	require.Eventually(t, func() bool {
+		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
+	}, 5*time.Second, 10*time.Millisecond)
+
+	entries, err := os.ReadDir(snapshotDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "the local snapshot must still exist despite the cloud failure")
+	destDir := filepath.Join(snapshotDir, entries[0].Name())
+	require.False(
+		t, lifecycle.IsCloudMirrored(destDir),
+		"must not be marked mirrored after a failed upload",
+	)
+
+	// Redelivery of the SAME epoch event (e.g. a restart, or the EventBus
+	// redelivering): the cloud outage has cleared, so this must retry the
+	// upload from the existing local copy and succeed, not skip as
+	// already-done.
+	publishEpochTransition(eb, 9)
+	require.Eventually(t, func() bool {
+		return strings.Contains(
+			logBuf.String(),
+			"mirrored previously local-only automatic database snapshot to the cloud",
+		)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.True(
+		t, lifecycle.IsCloudMirrored(destDir),
+		"must be marked mirrored after the retried upload succeeds",
+	)
+	entries, err = os.ReadDir(snapshotDir)
+	require.NoError(t, err)
+	require.Len(
+		t, entries, 1,
+		"the retry must reuse the existing local snapshot directory, not create a second one",
 	)
 }

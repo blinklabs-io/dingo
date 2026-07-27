@@ -26,6 +26,8 @@ import (
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -74,12 +76,16 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		Point:       ocommon.Point{Slot: block1.Slot, Hash: block1.Hash},
 		BlockNumber: block1.Number,
 	}, nil))
-	svcDB.Close()
+	dbtest.CloseDatabase(svcDB) //nolint:errcheck
 
 	svc := dblifecycle.NewService(&config.Config{
-		DatabasePath:   svcDataDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
+		DatabasePath: svcDataDir,
+		Plugins: config.PluginsConfig{
+			Storage: config.StoragePluginsConfig{
+				Blob:     plugin.Selection{Provider: "badger"},
+				Metadata: plugin.Selection{Provider: "sqlite"},
+			},
+		},
 	}, nil)
 
 	b, err := NewBark(BarkConfig{

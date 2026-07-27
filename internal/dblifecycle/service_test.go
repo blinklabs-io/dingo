@@ -23,16 +23,22 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
 func testConfig(dataDir string) *config.Config {
 	return &config.Config{
-		DatabasePath:   dataDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-		StorageMode:    "core",
-		Network:        "test",
+		DatabasePath: dataDir,
+		Plugins: config.PluginsConfig{
+			Storage: config.StoragePluginsConfig{
+				Blob:     plugin.Selection{Provider: "badger"},
+				Metadata: plugin.Selection{Provider: "sqlite"},
+			},
+		},
+		StorageMode: "core",
+		Network:     "test",
 	}
 }
 
@@ -46,18 +52,14 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 
 	// Seed the source database directly since Service has no block-write
 	// API of its own.
-	db, err := database.New(&database.Config{
-		DataDir:        srcDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, dbtest.CloseDatabase(db))
 
 	snapDir := filepath.Join(t.TempDir(), "snap")
 	m, err := svc.Snapshot(context.Background(), snapDir)
 	require.NoError(t, err)
-	require.Equal(t, config.DefaultBlobPlugin, m.BlobPlugin)
+	require.Equal(t, "badger", m.BlobPlugin)
 
 	restoreSvc := dblifecycle.NewService(
 		testConfig(filepath.Join(t.TempDir(), "restored")), nil,
@@ -79,13 +81,9 @@ func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 	srcCfg := testConfig(srcDir)
 	svc := dblifecycle.NewService(srcCfg, nil)
 
-	db, err := database.New(&database.Config{
-		DataDir:        srcDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, dbtest.CloseDatabase(db))
 
 	snapDir := filepath.Join(t.TempDir(), "snap")
 	_, err = svc.Snapshot(context.Background(), snapDir)
@@ -106,13 +104,9 @@ func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 // rejects both no target set and more than one target field set at once.
 func TestServiceTruncateRequiresExactlyOneTarget(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
-	db, err := database.New(&database.Config{
-		DataDir:        dir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, dbtest.CloseDatabase(db))
 
 	svc := dblifecycle.NewService(testConfig(dir), nil)
 

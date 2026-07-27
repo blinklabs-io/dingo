@@ -31,8 +31,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
+	"github.com/blinklabs-io/dingo/plugin"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -80,12 +83,23 @@ func newLiveLifecycleTestNodeWithGenesis(
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	pluginHost, err := internalplugins.NewHost()
+	require.NoError(t, err)
+	storageSelections := internalplugins.StorageSelections{
+		Blob:     plugin.Selection{Provider: "badger"},
+		Metadata: plugin.Selection{Provider: "sqlite"},
+	}
+	stores, err := internalplugins.ResolveStorage(
+		context.Background(),
+		pluginHost,
+		storageSelections,
+		internalplugins.StorageDependencies{DataDir: tmpDir, Logger: logger},
+	)
+	require.NoError(t, err)
 	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		Logger:         logger,
-	})
+		DataDir: tmpDir,
+		Logger:  logger,
+	}, stores)
 	require.NoError(t, err)
 
 	eventBus := event.NewEventBus(nil, nil)
@@ -136,8 +150,8 @@ func newLiveLifecycleTestNodeWithGenesis(
 		WithLogger(logger),
 		WithNetwork("preview"),
 		WithCardanoNodeConfig(cardanoNodeCfg),
-		WithBlobPlugin("badger"),
-		WithMetadataPlugin("sqlite"),
+		WithPluginSelection(plugin.CapabilityStorageBlob, storageSelections.Blob),
+		WithPluginSelection(plugin.CapabilityStorageMetadata, storageSelections.Metadata),
 		WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
 			WorkerPoolSize: 1,
 			TaskQueueSize:  1,
@@ -150,6 +164,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 		config:       cfg,
 		eventBus:     eventBus,
 		db:           db,
+		pluginHost:   pluginHost,
 		chainManager: cm,
 		ledgerState:  ledgerState,
 		ouroboros:    ouro,
@@ -158,8 +173,8 @@ func newLiveLifecycleTestNodeWithGenesis(
 	}
 	t.Cleanup(func() {
 		cancel()
-		if n.mempool != nil {
-			_ = n.mempool.Stop(context.Background())
+		if n.pluginHost != nil {
+			_ = n.pluginHost.StopCapability(context.Background(), plugin.CapabilityMempool)
 		}
 		if n.connManager != nil {
 			_ = n.connManager.Stop(context.Background())
@@ -178,6 +193,9 @@ func newLiveLifecycleTestNodeWithGenesis(
 		}
 		if n.db != nil {
 			_ = n.db.Close()
+		}
+		if n.pluginHost != nil {
+			_ = n.pluginHost.Stop(context.Background())
 		}
 		eventBus.Stop()
 	})
@@ -281,6 +299,8 @@ func lifecycleSnapshot(
 		destDir,
 		lifecycle.TriggerManual,
 		"test",
+		"badger",
+		"sqlite",
 	)
 }
 
@@ -350,6 +370,38 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 			require.Errorf(t, err, "block %d (slot %d) should be truncated away", i, p.Slot)
 		}
 	}
+}
+
+// TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig
+// guards against the reconstructed ledger.LedgerStateConfig in
+// node_lifecycle.go silently dropping operator-configured fields it
+// doesn't explicitly copy from n.config -- the same class of bug
+// previously found for MinPoolMargin/PledgeLeverageEnabled/
+// PledgeLeverage/FullPotRewardsEnabled (see the comment at that
+// construction site). A node configured for CIP-0163 delegator-
+// inactivity expiry must keep that gate enabled, with its exact
+// configured window, after a live truncate rebuilds its LedgerState --
+// not silently disabled until a full process restart.
+func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(t *testing.T) {
+	const numBlocks = 20
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	n.config.delegatorInactivityEnabled = true
+	n.config.delegatorInactivity = 42
+
+	targetIndex := numBlocks / 2
+	targetSlot := points[targetIndex].Slot
+
+	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: &targetSlot,
+	})
+	require.NoError(t, err)
+
+	enabled, window := n.ledgerState.DelegatorInactivityConfig()
+	require.True(t, enabled,
+		"DelegatorInactivityEnabled must survive live truncate reinitialization")
+	require.Equal(t, uint64(42), window,
+		"DelegatorInactivity window must survive live truncate reinitialization")
 }
 
 // TestLiveTruncateIsSerializedAgainstConcurrentCalls exercises
@@ -674,12 +726,10 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	// checksum, tip matches its own data) and only mismatches what n is
 	// actually configured to run — the real-world scenario this guards.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	otherDB, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		Logger:         logger,
-		Network:        "devnet",
+	otherDB, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  logger,
+		Network: "devnet",
 	})
 	require.NoError(t, err)
 	require.NoError(t, otherDB.SetTip(ochainsync.Tip{
@@ -689,10 +739,10 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap")
 	_, err = lifecycle.Snapshot(
-		context.Background(), otherDB, snapshotDir, lifecycle.TriggerManual, "test",
+		context.Background(), otherDB, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
 	)
 	require.NoError(t, err)
-	require.NoError(t, otherDB.Close())
+	require.NoError(t, dbtest.CloseDatabase(otherDB))
 
 	oldCtx := n.ctx
 	oldDB := n.db

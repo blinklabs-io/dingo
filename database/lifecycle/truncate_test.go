@@ -197,7 +197,7 @@ func TestTruncateReportsActualDeletedCountForSparseIndex(t *testing.T) {
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 	target := f.blocks[2] // ID 3
 
-	blocksRemoved, err := lifecycle.Truncate(context.Background(), f.db, target, 0)
+	blocksRemoved, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
 	require.NoError(t, err)
 	require.Equal(
 		t, uint64(3), blocksRemoved,
@@ -222,7 +222,7 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	target := f.blocks[2] // truncate to block 3, removing 4 and 5
 
 	blocksRemoved, err := lifecycle.Truncate(
-		context.Background(), f.db, target, 0,
+		context.Background(), f.db, target, 0, false, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), blocksRemoved)
@@ -243,7 +243,7 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	// Truncating again to the same (now current) target is a no-op, not
 	// an error, and reports zero blocks removed.
 	blocksRemoved, err = lifecycle.Truncate(
-		context.Background(), f.db, target, 0,
+		context.Background(), f.db, target, 0, false, 0,
 	)
 	require.NoError(t, err)
 	require.Zero(t, blocksRemoved)
@@ -254,7 +254,7 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
 	f := buildTestChain(t, 3)
 	aheadTarget := testBlock(99, 0x63)
-	_, err := lifecycle.Truncate(context.Background(), f.db, aheadTarget, 0)
+	_, err := lifecycle.Truncate(context.Background(), f.db, aheadTarget, 0, false, 0)
 	require.Error(t, err)
 }
 
@@ -277,7 +277,7 @@ func TestTruncateRejectsTargetWithMismatchedHash(t *testing.T) {
 	target := f.blocks[2]
 	target.Hash = bytes.Repeat([]byte{0xFF}, 32) // does not match what's stored at this ID
 
-	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0)
+	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 
@@ -301,7 +301,7 @@ func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
 	target := f.blocks[2]
 	target.Slot = target.Slot + 1 // does not match what's stored at this ID
 
-	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0)
+	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 
@@ -322,12 +322,12 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 	))
 
 	// blocks[2] is before the boundary; truncating there must be refused.
-	_, err := lifecycle.Truncate(context.Background(), f.db, f.blocks[2], 0)
+	_, err := lifecycle.Truncate(context.Background(), f.db, f.blocks[2], 0, false, 0)
 	require.Error(t, err)
 
 	// blocks[3] is exactly at the boundary and must be allowed.
 	blocksRemoved, err := lifecycle.Truncate(
-		context.Background(), f.db, f.blocks[3], 0,
+		context.Background(), f.db, f.blocks[3], 0, false, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), blocksRemoved)

@@ -498,7 +498,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 			expiration = epoch.EpochId + ls.config.DelegatorInactivity
 		}
 		if activationApplies {
-			floor, applies := rollbackActivationFloor(
+			floor, applies := database.RollbackActivationFloor(
 				models.NewStakeCredentialRef(account.CredentialTag, account.StakingKey),
 				true, activationEpoch, activationMembership,
 			)

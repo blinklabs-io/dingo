@@ -24,8 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -43,18 +42,7 @@ func setupLifecycleTestChain(
 	numBlocks int,
 ) (db *database.Database, points []ocommon.Point) {
 	t.Helper()
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", tmpDir,
-	))
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", tmpDir,
-	))
-
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: tmpDir})
 	require.NoError(t, err)
 
 	cm, err := chain.NewManager(db, nil)
@@ -90,7 +78,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 
 	snapDir := filepath.Join(t.TempDir(), "snap")
 	manifest, err := lifecycle.Snapshot(
-		context.Background(), db, snapDir, lifecycle.TriggerManual, "test",
+		context.Background(), db, snapDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
 	)
 	require.NoError(t, err)
 	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
@@ -102,17 +90,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)
 
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", restoredDir,
-	))
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", restoredDir,
-	))
-	restoredDB, err := database.New(&database.Config{
-		DataDir:        restoredDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	restoredDB, err := dbtest.NewDatabase(t, &database.Config{DataDir: restoredDir})
 	require.NoError(t, err)
 	defer restoredDB.Close()
 
@@ -145,7 +123,7 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, points[targetIndex].Slot, target.Slot)
 
-	blocksRemoved, err := lifecycle.Truncate(context.Background(), db, target, 0)
+	blocksRemoved, err := lifecycle.Truncate(context.Background(), db, target, 0, false, 0)
 	require.NoError(t, err)
 	// Blocks strictly after targetIndex, up to and including the last one
 	// (numBlocks-1): a difference between contiguous IDs, so it's exact
@@ -187,7 +165,7 @@ func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = lifecycle.Truncate(context.Background(), db, beforeBoundary, 0)
+	_, err = lifecycle.Truncate(context.Background(), db, beforeBoundary, 0, false, 0)
 	require.Error(t, err)
 	// Not just any error: specifically the Mithril-boundary rejection,
 	// wrapped in ErrTruncateNotStarted (nothing on disk was touched) --

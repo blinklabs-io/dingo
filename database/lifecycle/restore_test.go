@@ -24,8 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +37,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	snapMan, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test",
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
 	)
 	require.NoError(t, err)
 
@@ -52,19 +51,8 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 
 	// Reopen the restored data dir like a normal node startup would and
 	// confirm the blocks survived the round trip.
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", targetDir,
-	))
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", targetDir,
-	))
-	restored, err := database.New(&database.Config{
-		DataDir:        targetDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	restored, err := dbtest.NewDatabase(t, &database.Config{DataDir: targetDir})
 	require.NoError(t, err)
-	defer restored.Close()
 
 	block1, err := restored.BlockByIndex(1, nil)
 	require.NoError(t, err)
@@ -82,7 +70,7 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	_, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test",
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
 	)
 	require.NoError(t, err)
 
@@ -109,7 +97,7 @@ func TestManifestCheckPluginMatch(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	m, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test",
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
 	)
 	require.NoError(t, err)
 	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))
@@ -132,7 +120,7 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	_, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test",
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
 	)
 	require.NoError(t, err)
 
@@ -223,7 +211,7 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 	snapshotDir := filepath.Join(t.TempDir(), "snap-peek")
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(), db, snapshotDir,
-		lifecycle.TriggerManual, "test-version", "faketest://bucket/prefix",
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", "faketest://bucket/prefix",
 	)
 	require.NoError(t, err)
 

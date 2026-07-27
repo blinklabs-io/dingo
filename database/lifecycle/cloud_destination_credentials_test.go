@@ -41,8 +41,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -134,7 +133,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	})
 
 	manifest, err := lifecycle.SnapshotToCloud(
-		ctx, db, localDir, lifecycle.TriggerManual, "test", baseURI,
+		ctx, db, localDir, lifecycle.TriggerManual, "test", "badger", "sqlite", baseURI,
 	)
 	require.NoError(t, err, "SnapshotToCloud (local write + cloud upload)")
 
@@ -165,19 +164,8 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)
 
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", restoredDir,
-	))
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", restoredDir,
-	))
-	restored, err := database.New(&database.Config{
-		DataDir:        restoredDir,
-		BlobPlugin:     config.DefaultBlobPlugin,
-		MetadataPlugin: config.DefaultMetadataPlugin,
-	})
+	restored, err := dbtest.NewDatabase(t, &database.Config{DataDir: restoredDir})
 	require.NoError(t, err)
-	defer restored.Close()
 	block1, err := restored.BlockByIndex(1, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), block1.ID)

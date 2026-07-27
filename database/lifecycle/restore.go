@@ -24,9 +24,9 @@ import (
 	"path/filepath"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/plugin"
 )
 
 // Restore populates targetDataDir (which must not already exist, or must
@@ -105,13 +105,19 @@ func RestoreValidated(
 		}
 	}()
 
-	if err := restoreMetadataStore(ctx, manifest, snapshotDir, targetDataDir); err != nil {
+	host, err := newStorageHost()
+	if err != nil {
+		return Manifest{}, fmt.Errorf("build storage plugin host: %w", err)
+	}
+	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+
+	if err := restoreMetadataStore(ctx, host, manifest, snapshotDir, targetDataDir); err != nil {
 		return Manifest{}, err
 	}
-	if err := restoreBlobStore(ctx, manifest, snapshotDir, targetDataDir); err != nil {
+	if err := restoreBlobStore(ctx, host, manifest, snapshotDir, targetDataDir); err != nil {
 		return Manifest{}, err
 	}
-	if err := validateRestoredDatabase(manifest, targetDataDir); err != nil {
+	if err := validateRestoredDatabase(ctx, host, manifest, targetDataDir); err != nil {
 		return Manifest{}, err
 	}
 
@@ -197,38 +203,60 @@ func requireEmptyOrAbsent(dir string) error {
 	return nil
 }
 
-// restoreMetadataStore restores the metadata store's on-disk file into
-// targetDataDir before the plugin is started, per metadata.Restorer's
-// contract.
+// restoreMetadataStore resolves the manifest-recorded metadata plugin
+// against targetDataDir just long enough to construct it (plugin.Resolve
+// always constructs and starts a provider together — there is no
+// construct-only step), then stops it immediately and undoes whatever it
+// created on disk, since metadata.Restorer's contract requires
+// RestoreFrom to run before the store has ever been started, or after
+// Close() — which StopCapability guarantees here.
 func restoreMetadataStore(
 	ctx context.Context,
+	host *plugin.Host,
 	manifest Manifest,
 	snapshotDir string,
 	targetDataDir string,
 ) error {
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
+	store, err := plugin.Resolve[metadata.MetadataStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageMetadata,
 		manifest.MetadataPlugin,
-		"data-dir",
-		targetDataDir,
-	); err != nil {
-		return fmt.Errorf("configure metadata plugin: %w", err)
-	}
-	metadataPlugin := plugin.GetPlugin(
-		plugin.PluginTypeMetadata,
-		manifest.MetadataPlugin,
+		nil,
+		metadata.ProviderDependencies{
+			DataDir:     targetDataDir,
+			StorageMode: manifest.StorageMode,
+		},
 	)
-	if metadataPlugin == nil {
-		return plugin.MissingPluginError(
-			plugin.PluginTypeMetadata,
+	if err != nil {
+		return fmt.Errorf(
+			"resolve metadata plugin %q: %w",
 			manifest.MetadataPlugin,
+			err,
 		)
 	}
-	restorer, ok := metadataPlugin.(metadata.Restorer)
+	restorer, ok := store.(metadata.Restorer)
 	if !ok {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
 		return fmt.Errorf(
 			"metadata plugin %q does not support restore",
 			manifest.MetadataPlugin,
+		)
+	}
+	if err := host.StopCapability(ctx, plugin.CapabilityStorageMetadata); err != nil {
+		return fmt.Errorf("stop metadata plugin before restore: %w", err)
+	}
+	// RestoreFrom refuses to overwrite an existing destination -- undo
+	// whatever the brief resolve-and-start above wrote to targetDataDir so
+	// it looks exactly as empty as before that call.
+	if err := os.RemoveAll(targetDataDir); err != nil {
+		return fmt.Errorf(
+			"reset target data directory %q: %w", targetDataDir, err,
+		)
+	}
+	if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
+		return fmt.Errorf(
+			"recreate target data directory %q: %w", targetDataDir, err,
 		)
 	}
 	backupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
@@ -242,44 +270,43 @@ func restoreMetadataStore(
 // and loads the backup into it, per blob.Restorer's contract.
 func restoreBlobStore(
 	ctx context.Context,
+	host *plugin.Host,
 	manifest Manifest,
 	snapshotDir string,
 	targetDataDir string,
 ) error {
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
+	store, err := plugin.Resolve[blob.BlobStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageBlob,
 		manifest.BlobPlugin,
-		"data-dir",
-		targetDataDir,
-	); err != nil {
-		return fmt.Errorf("configure blob plugin: %w", err)
-	}
-	blobPlugin := plugin.GetPlugin(plugin.PluginTypeBlob, manifest.BlobPlugin)
-	if blobPlugin == nil {
-		return plugin.MissingPluginError(
-			plugin.PluginTypeBlob,
+		nil,
+		blob.ProviderDependencies{DataDir: targetDataDir},
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve blob plugin %q: %w",
 			manifest.BlobPlugin,
+			err,
 		)
 	}
-	restorer, ok := blobPlugin.(blob.Restorer)
+	restorer, ok := store.(blob.Restorer)
 	if !ok {
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
 		return fmt.Errorf(
 			"blob plugin %q does not support restore",
 			manifest.BlobPlugin,
 		)
 	}
-	if err := blobPlugin.Start(); err != nil {
-		return fmt.Errorf("start blob plugin for restore: %w", err)
-	}
 	backupPath := filepath.Join(snapshotDir, BlobBackupFileName)
 	backupFile, err := os.Open(backupPath)
 	if err != nil {
-		_ = blobPlugin.Stop()
+		_ = host.StopCapability(ctx, plugin.CapabilityStorageBlob)
 		return fmt.Errorf("open %q: %w", backupPath, err)
 	}
 	restoreErr := restorer.Restore(ctx, backupFile)
 	closeErr := backupFile.Close()
-	stopErr := blobPlugin.Stop()
+	stopErr := host.StopCapability(ctx, plugin.CapabilityStorageBlob)
 	if restoreErr != nil {
 		return fmt.Errorf("restore blob store: %w", restoreErr)
 	}
@@ -297,14 +324,57 @@ func restoreBlobStore(
 // checkCommitTimestamp checks validate internal consistency, then
 // additionally confirms the restored tip matches what the manifest
 // recorded before closing it again.
-func validateRestoredDatabase(manifest Manifest, targetDataDir string) error {
+func validateRestoredDatabase(
+	ctx context.Context,
+	host *plugin.Host,
+	manifest Manifest,
+	targetDataDir string,
+) error {
+	blobStore, err := plugin.Resolve[blob.BlobStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageBlob,
+		manifest.BlobPlugin,
+		nil,
+		blob.ProviderDependencies{DataDir: targetDataDir},
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve blob plugin %q for validation: %w",
+			manifest.BlobPlugin,
+			err,
+		)
+	}
+	defer host.StopCapability( //nolint:errcheck
+		context.WithoutCancel(ctx), plugin.CapabilityStorageBlob,
+	)
+	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageMetadata,
+		manifest.MetadataPlugin,
+		nil,
+		metadata.ProviderDependencies{
+			DataDir:     targetDataDir,
+			StorageMode: manifest.StorageMode,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve metadata plugin %q for validation: %w",
+			manifest.MetadataPlugin,
+			err,
+		)
+	}
+	defer host.StopCapability( //nolint:errcheck
+		context.WithoutCancel(ctx), plugin.CapabilityStorageMetadata,
+	)
+
 	db, err := database.New(&database.Config{
-		DataDir:        targetDataDir,
-		BlobPlugin:     manifest.BlobPlugin,
-		MetadataPlugin: manifest.MetadataPlugin,
-		StorageMode:    manifest.StorageMode,
-		Network:        manifest.Network,
-	})
+		DataDir:     targetDataDir,
+		StorageMode: manifest.StorageMode,
+		Network:     manifest.Network,
+	}, database.Stores{Blob: blobStore, Metadata: metadataStore})
 	if db != nil {
 		defer db.Close()
 	}

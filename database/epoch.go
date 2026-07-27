@@ -15,6 +15,8 @@
 package database
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
@@ -36,6 +38,34 @@ func (d *Database) GetEpochsByEra(
 		return d.metadata.GetEpochsByEra(eraId, nil)
 	}
 	return txn.db.metadata.GetEpochsByEra(eraId, txn.Metadata())
+}
+
+// EpochBySlot returns the persisted epoch containing slot: the one with
+// the greatest StartSlot <= slot. Unlike ledger.LedgerState.SlotToEpoch
+// (which additionally consults the live hard-fork/era-transition summary
+// so it can also reason about slots in the future), this only walks the
+// persisted epoch table, with no dependency on genesis config or a live
+// LedgerState -- sufficient for every caller here, since a truncate or
+// rollback target is always at or before the already-committed tip, so
+// the epoch containing it has always already been persisted.
+func EpochBySlot(d *Database, slot uint64, txn *Txn) (models.Epoch, error) {
+	epochs, err := d.GetEpochs(txn)
+	if err != nil {
+		return models.Epoch{}, fmt.Errorf("get epochs: %w", err)
+	}
+	var best *models.Epoch
+	for i := range epochs {
+		e := &epochs[i]
+		if e.StartSlot <= slot && (best == nil || e.StartSlot > best.StartSlot) {
+			best = e
+		}
+	}
+	if best == nil {
+		return models.Epoch{}, fmt.Errorf(
+			"slot %d is outside the known epoch range", slot,
+		)
+	}
+	return *best, nil
 }
 
 func (d *Database) GetEpochs(txn *Txn) ([]models.Epoch, error) {
