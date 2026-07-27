@@ -637,6 +637,19 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	}
 
 	n.snapshotMgr = snapshot.NewManager(n.db, n.eventBus, n.config.logger)
+	// Mirror the CIP-0163 reward-account inactivity gate into snapshot
+	// capture so it matches the ledger config that drives account expiry
+	// stamping (see Run()'s identical call in node.go) -- must happen
+	// before CaptureGenesisSnapshot/Start below locks this configuration,
+	// or a live restore/truncate would silently run post-CIP-163 stake
+	// and reward snapshots with pre-CIP behavior even though the operator
+	// has it enabled.
+	if err := n.snapshotMgr.SetDelegatorInactivity(
+		n.config.delegatorInactivityEnabled,
+		n.config.delegatorInactivity,
+	); err != nil {
+		return fmt.Errorf("configuring snapshot manager: %w", err)
+	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	n.ledgerState.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {

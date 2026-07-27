@@ -404,6 +404,38 @@ func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(t *testi
 		"DelegatorInactivity window must survive live truncate reinitialization")
 }
 
+// TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig
+// guards the companion gap to the test above: the rebuilt stake/reward
+// snapshot manager (n.snapshotMgr) also needs SetDelegatorInactivity called
+// with the operator's configured value before CaptureGenesisSnapshot/Start
+// locks its configuration -- reinitializeBackgroundManagers used to skip
+// this call entirely (unlike Run()'s identical one in node.go), so a live
+// restore/truncate would silently capture post-CIP-163 stake and reward
+// snapshots using pre-CIP behavior even though the operator enabled it.
+func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig(
+	t *testing.T,
+) {
+	const numBlocks = 20
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	n.config.delegatorInactivityEnabled = true
+	n.config.delegatorInactivity = 42
+
+	targetIndex := numBlocks / 2
+	targetSlot := points[targetIndex].Slot
+
+	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: &targetSlot,
+	})
+	require.NoError(t, err)
+
+	enabled, window := n.snapshotMgr.DelegatorInactivityConfig()
+	require.True(t, enabled,
+		"snapshot manager's DelegatorInactivityEnabled must survive live truncate reinitialization")
+	require.Equal(t, uint64(42), window,
+		"snapshot manager's DelegatorInactivity window must survive live truncate reinitialization")
+}
+
 // TestLiveTruncateIsSerializedAgainstConcurrentCalls exercises
 // n.liveLifecycleMu: two Truncate calls racing must not interleave their
 // quiesce/rebuild sequences.

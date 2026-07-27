@@ -107,6 +107,17 @@ func (m *Manager) SetDelegatorInactivity(
 	return nil
 }
 
+// DelegatorInactivityConfig returns the CIP-0163 reward-account inactivity
+// gate and window currently configured on this manager, as last set by
+// SetDelegatorInactivity (mirrors LedgerState.DelegatorInactivityConfig's
+// identical pattern) — used to verify a live restore/truncate's rebuilt
+// snapshot manager actually picked up the operator's configured value.
+func (m *Manager) DelegatorInactivityConfig() (enabled bool, period uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.delegatorInactivityEnabled, m.delegatorInactivityPeriod
+}
+
 // lockConfiguration freezes consensus-affecting options before snapshot
 // capture can observe them. The lock is permanent for the manager's lifetime:
 // stopping and restarting must not permit snapshots produced by one manager to
