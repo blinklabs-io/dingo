@@ -160,7 +160,8 @@ type UtxoWithOrdering struct {
 // UtxoOrderingCursor is the keyset position for SearchUtxos.
 //
 // Text form (non-empty): slot:block_index:output_idx. GetUtxosByAddressWithOrdering
-// uses the producing transaction position for ordering.
+// uses the producing transaction position for ordering. Snapshot-imported
+// UTxOs without a producing transaction use AddedSlot and block index zero.
 type UtxoOrderingCursor struct {
 	Slot       uint64
 	BlockIndex uint32

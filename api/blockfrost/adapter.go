@@ -2546,6 +2546,7 @@ func isPointerAddress(addr lcommon.Address) bool {
 // rare, so the candidate sets stay small.
 func (a *NodeAdapter) pointerAddressBalance(
 	addr lcommon.Address,
+	txn *database.Txn,
 ) (models.AddressBalance, error) {
 	var ret models.AddressBalance
 	wantBytes, err := addr.Bytes()
@@ -2553,10 +2554,11 @@ func (a *NodeAdapter) pointerAddressBalance(
 		return ret, fmt.Errorf("encode pointer address: %w", err)
 	}
 
-	candidates, err := a.ledgerState.UtxosByAddressWithOrdering(
+	candidates, err := a.ledgerState.Database().UtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
 			Addresses: []lcommon.Address{addr},
 		},
+		txn,
 	)
 	if err != nil {
 		return ret, fmt.Errorf("get pointer address candidates: %w", err)
@@ -2565,24 +2567,35 @@ func (a *NodeAdapter) pointerAddressBalance(
 		return ret, nil
 	}
 
-	utxoCbor, err := a.addressUtxoCbor(candidates)
-	if err != nil {
-		return ret, fmt.Errorf(
-			"resolve CBOR for pointer address candidates: %w", err,
-		)
-	}
 	for i := range candidates {
-		raw := utxoCbor[utxoRef(candidates[i].Utxo)]
+		raw := candidates[i].Cbor
 		if len(raw) == 0 {
-			continue
+			return ret, fmt.Errorf(
+				"pointer address candidate %x#%d has no output CBOR",
+				candidates[i].TxId,
+				candidates[i].OutputIdx,
+			)
 		}
 		output, err := gledger.NewTransactionOutputFromCbor(raw)
 		if err != nil {
-			continue
+			return ret, fmt.Errorf(
+				"decode pointer address candidate %x#%d: %w",
+				candidates[i].TxId,
+				candidates[i].OutputIdx,
+				err,
+			)
 		}
 		outAddr := output.Address()
 		gotBytes, err := outAddr.Bytes()
-		if err != nil || !bytes.Equal(gotBytes, wantBytes) {
+		if err != nil {
+			return ret, fmt.Errorf(
+				"encode pointer address candidate %x#%d: %w",
+				candidates[i].TxId,
+				candidates[i].OutputIdx,
+				err,
+			)
+		}
+		if !bytes.Equal(gotBytes, wantBytes) {
 			continue
 		}
 		ret.UtxoCount++
@@ -2674,7 +2687,7 @@ func (a *NodeAdapter) Address(
 		// represented in the utxo table. Narrow candidates by
 		// payment credential in SQL, then keep only outputs whose
 		// decoded address matches the request exactly.
-		balance, err = a.pointerAddressBalance(addr)
+		balance, err = a.pointerAddressBalance(addr, txn)
 	} else {
 		balance, err = db.Metadata().
 			GetUtxoBalanceByAddress(addr, matchMode, txn.Metadata())

@@ -476,12 +476,14 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
+	// Snapshot-imported UTxOs have no producing transaction row. Keep them in
+	// the result and fall back to their import slot for stable ordering.
 	// SQLite treats TRANSACTION as a reserved keyword, so table references
 	// must be quoted when joining against the transaction table.
 	base := db.
 		Table("utxo").
 		Joins(
-			`INNER JOIN "transaction" ON utxo.transaction_id = "transaction".id`,
+			`LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id`,
 		).
 		Where("utxo.deleted_slot = 0")
 
@@ -528,8 +530,8 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 
 	useKeyset := q.Limit > 0 || q.After != nil
 	if useKeyset {
-		slotExpr := `"transaction".slot`
-		biExpr := `"transaction".block_index`
+		slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
+		biExpr := `COALESCE("transaction".block_index, 0)`
 		base = base.Select(fmt.Sprintf(
 			"utxo.*, %s as tx_slot, %s as tx_block_index",
 			slotExpr,
@@ -558,9 +560,9 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 		)
 	} else {
 		base = base.Select(
-			`utxo.*, "transaction".slot as tx_slot, "transaction".block_index as tx_block_index`,
+			`utxo.*, COALESCE("transaction".slot, utxo.added_slot) as tx_slot, COALESCE("transaction".block_index, 0) as tx_block_index`,
 		).Order(
-			`"transaction".slot ASC, "transaction".block_index ASC, utxo.output_idx ASC`,
+			`COALESCE("transaction".slot, utxo.added_slot) ASC, COALESCE("transaction".block_index, 0) ASC, utxo.output_idx ASC`,
 		)
 	}
 

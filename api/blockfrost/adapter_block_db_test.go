@@ -29,6 +29,9 @@ import (
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,6 +76,144 @@ func newDBBackedAdapter(
 // values in tests.
 func fill32(b byte) []byte {
 	return bytes.Repeat([]byte{b}, 32)
+}
+
+func testPointerAddress(
+	t *testing.T,
+	paymentHash []byte,
+	pointer byte,
+) lcommon.Address {
+	t.Helper()
+	addrBytes := []byte{
+		(lcommon.AddressTypeKeyPointer << 4) |
+			lcommon.AddressNetworkTestnet,
+	}
+	addrBytes = append(addrBytes, paymentHash...)
+	addrBytes = append(addrBytes, pointer, 0x00, 0x00)
+	addr, err := lcommon.NewAddressFromBytes(addrBytes)
+	require.NoError(t, err)
+	return addr
+}
+
+func storePointerOutputCbor(
+	t *testing.T,
+	db *database.Database,
+	txID []byte,
+	outputIdx uint32,
+	addr lcommon.Address,
+	amount uint64,
+) {
+	t.Helper()
+	raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  amount,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		return db.Blob().SetUtxo(txn.Blob(), txID, outputIdx, raw)
+	}))
+}
+
+func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
+	adapter, store, db := newDBBackedAdapter(t)
+
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	wantAddr := testPointerAddress(t, paymentHash, 0x01)
+	otherAddr := testPointerAddress(t, paymentHash, 0x02)
+	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
+	assetName := []byte("TOKEN")
+
+	transactionID := uint(1)
+	require.NoError(t, store.DB().Create(&models.Transaction{
+		ID:         transactionID,
+		Hash:       fill32(0x10),
+		Slot:       10,
+		BlockIndex: 2,
+	}).Error)
+
+	rows := []models.Utxo{
+		{
+			TransactionID: &transactionID,
+			TxId:          fill32(0x10),
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			AddedSlot:     10,
+			Amount:        types.Uint64(1_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(2),
+			}},
+		},
+		{
+			// Mithril snapshot imports intentionally have no TransactionID.
+			TxId:       fill32(0x20),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(2_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(3),
+			}},
+		},
+		{
+			// A different pointer payload sharing the payment credential must
+			// remain excluded by the full decoded-address comparison.
+			TxId:       fill32(0x30),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(4_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(7),
+			}},
+		},
+	}
+	for i := range rows {
+		require.NoError(t, store.DB().Create(&rows[i]).Error)
+	}
+	storePointerOutputCbor(
+		t, db, rows[0].TxId, rows[0].OutputIdx, wantAddr, 1_000_000,
+	)
+	storePointerOutputCbor(
+		t, db, rows[1].TxId, rows[1].OutputIdx, wantAddr, 2_000_000,
+	)
+	storePointerOutputCbor(
+		t, db, rows[2].TxId, rows[2].OutputIdx, otherAddr, 4_000_000,
+	)
+
+	info, err := adapter.Address(wantAddr.String())
+	require.NoError(t, err)
+	require.Len(t, info.Amount, 2)
+	assert.Equal(t, "lovelace", info.Amount[0].Unit)
+	assert.Equal(t, "3000000", info.Amount[0].Quantity)
+	assert.Equal(
+		t,
+		hex.EncodeToString(policyID)+hex.EncodeToString(assetName),
+		info.Amount[1].Unit,
+	)
+	assert.Equal(t, "5", info.Amount[1].Quantity)
+}
+
+func TestNodeAdapterAddressPointerRejectsMissingCandidateCbor(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	addr := testPointerAddress(t, paymentHash, 0x01)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId:       fill32(0x40),
+		OutputIdx:  0,
+		PaymentKey: paymentHash,
+		AddedSlot:  20,
+		Amount:     types.Uint64(2_000_000),
+	}).Error)
+
+	_, err := adapter.Address(addr.String())
+	require.ErrorContains(t, err, "utxo cbor unavailable")
 }
 
 // TestNodeAdapterBlockOutputAndFees exercises the real DB aggregation path,

@@ -738,6 +738,64 @@ func TestGetUtxosByAddressUsesPaymentScript(t *testing.T) {
 	assert.Equal(t, scriptUtxo.TxId, orderedRows[0].TxId)
 }
 
+func TestGetUtxosByAddressWithOrderingIncludesSnapshotUtxos(t *testing.T) {
+	store := setupTestDB(t)
+
+	paymentHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		nil,
+	)
+	require.NoError(t, err)
+
+	txID := uint(1)
+	require.NoError(t, store.DB().Create(&models.Transaction{
+		ID:         txID,
+		Hash:       bytes.Repeat([]byte{0x01}, 32),
+		Slot:       10,
+		BlockIndex: 3,
+	}).Error)
+	rows := []models.Utxo{
+		{
+			TransactionID: &txID,
+			TxId:          bytes.Repeat([]byte{0x10}, 32),
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			AddedSlot:     10,
+			Amount:        types.Uint64(1_000_000),
+		},
+		{
+			// Snapshot imports contain the live output but not its historical
+			// transaction relationship.
+			TxId:       bytes.Repeat([]byte{0x20}, 32),
+			OutputIdx:  1,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(2_000_000),
+		},
+	}
+	for i := range rows {
+		require.NoError(t, store.DB().Create(&rows[i]).Error)
+	}
+
+	got, err := store.GetUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			Addresses: []lcommon.Address{addr},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, rows[0].TxId, got[0].TxId)
+	assert.Equal(t, uint64(10), got[0].TxSlot)
+	assert.Equal(t, uint32(3), got[0].TxBlockIndex)
+	assert.Equal(t, rows[1].TxId, got[1].TxId)
+	assert.Equal(t, uint64(20), got[1].TxSlot)
+	assert.Equal(t, uint32(0), got[1].TxBlockIndex)
+}
+
 // TestGetUtxoBalanceByAddressMatchModes seeds enterprise, base, and
 // pointer UTxOs sharing one payment hash and verifies that exact
 // matching keeps full-address identity while payment-credential
