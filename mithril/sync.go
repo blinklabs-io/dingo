@@ -385,24 +385,22 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// download: chunks are copied into the blob store in contiguous order as
 	// they finish downloading, instead of waiting for the whole download.
 	runtime, err := openDatabase(ctx, cfg, logger, cfg.DatabaseWorkers)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("opening database: %w", err)
+	}
 	if runtime == nil || runtime.Database == nil {
-		if err != nil {
-			return SyncResult{}, fmt.Errorf("opening database: %w", err)
-		}
 		return SyncResult{}, errors.New(
 			"opening database: runtime did not provide a database",
 		)
 	}
 	db := runtime.Database
-	// runtime carries a live database past the guard above, so close it on
-	// every return below, including the non-recoverable error path that
-	// openDatabase can reach with a live runtime when database.New fails after
-	// opening the stores.
 	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if err != nil {
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Tolerate a recoverable commit-timestamp mismatch from a previously
 		// interrupted run; mithril import heals it on forward progress.
-		if cte, ok := errors.AsType[database.CommitTimestampError](err); ok {
+		if cte, ok := errors.AsType[database.CommitTimestampError](
+			recoveryErr,
+		); ok {
 			logger.Warn(
 				"opened database with commit timestamp mismatch; "+
 					"continuing mithril sync — import will heal it",
@@ -411,7 +409,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"blob_timestamp", cte.BlobTimestamp,
 			)
 		} else {
-			return SyncResult{}, fmt.Errorf("opening database: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"opening database: %w",
+				recoveryErr,
+			)
 		}
 	}
 
@@ -1092,20 +1093,20 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 		logger = slog.Default()
 	}
 	runtime, err := openDatabase(context.Background(), cfg, logger, 1)
+	if err != nil {
+		return false, fmt.Errorf("opening database: %w", err)
+	}
 	if runtime == nil || runtime.Database == nil {
-		if err != nil {
-			return false, fmt.Errorf("opening database: %w", err)
-		}
 		return false, errors.New(
 			"opening database: runtime did not provide a database",
 		)
 	}
 	db := runtime.Database
 	defer runtime.Close(context.Background())
-	if err != nil {
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) {
-			return false, fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return false, fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
 	val, err := db.GetSyncState("sync_status", nil)

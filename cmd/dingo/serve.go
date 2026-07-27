@@ -97,27 +97,22 @@ func checkSyncState(
 	runtime, err := openConfiguredDatabase(
 		context.Background(), cfg, logger, 1,
 	)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
 	db, runtimeErr := runtimeDatabase(runtime)
 	if runtimeErr != nil {
-		if err != nil {
-			return fmt.Errorf("opening database: %w", err)
-		}
 		return runtimeErr
 	}
-	// runtime is non-nil past this point (runtimeDatabase only succeeds for a
-	// runtime that carries a database), so close it on every return below —
-	// including the non-recoverable error path, which openConfiguredDatabase
-	// can reach with a live runtime when database.New fails after opening the
-	// stores.
 	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if err != nil {
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// A commit-timestamp mismatch is recoverable downstream in
 		// node.Run. We only need to read sync_status here, which
 		// works on the partially-initialised db handle returned with
 		// the error.
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) {
-			return fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 		logger.Warn(
 			"sync state check observed commit timestamp mismatch; "+
@@ -164,20 +159,20 @@ func checkMithrilInactivityCompat(
 	runtime, err := openConfiguredDatabase(
 		context.Background(), cfg, logger, 1,
 	)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
 	db, runtimeErr := runtimeDatabase(runtime)
 	if runtimeErr != nil {
-		if err != nil {
-			return fmt.Errorf("opening database: %w", err)
-		}
 		return runtimeErr
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if err != nil {
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// A commit-timestamp mismatch is recovered downstream in node.Run;
 		// the marker read works on the partially-initialised handle.
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) {
-			return fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
 
@@ -199,18 +194,18 @@ func repairDeferredIndexes(
 	runtime, err := openConfiguredDatabase(
 		context.Background(), cfg, logger, cfg.DatabaseWorkers,
 	)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
 	db, runtimeErr := runtimeDatabase(runtime)
 	if runtimeErr != nil {
-		if err != nil {
-			return fmt.Errorf("opening database: %w", err)
-		}
 		return runtimeErr
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if err != nil {
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) {
-			return fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
 	return node.RepairDeferredIndexes(db, logger)
@@ -251,22 +246,22 @@ func resumeBackfill(
 	runtime, err := openConfiguredDatabase(
 		ctx, cfg, logger, cfg.DatabaseWorkers,
 	)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
 	db, runtimeErr := runtimeDatabase(runtime)
 	if runtimeErr != nil {
-		if err != nil {
-			return fmt.Errorf("opening database: %w", err)
-		}
 		return runtimeErr
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
-	if err != nil {
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Backfill writes through full transactions which heal a
 		// commit-timestamp mismatch as it makes progress, and
 		// node.Run will run a full recovery pass afterwards. So a
 		// recoverable mismatch should not block the resume.
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) {
-			return fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 		logger.Warn(
 			"backfill observed commit timestamp mismatch; "+

@@ -98,10 +98,22 @@ func ResolveStorage(
 // DatabaseRuntime is a composed database plus the plugin host that owns its
 // injected stores. Close preserves database-before-store shutdown ordering.
 type DatabaseRuntime struct {
-	Database *database.Database
-	Host     *plugin.Host
-	once     sync.Once
-	err      error
+	Database      *database.Database
+	Host          *plugin.Host
+	once          sync.Once
+	err           error
+	recoveryError error
+}
+
+// RecoveryError reports a recoverable error encountered while opening the
+// database. OpenDatabase returns these errors on the owned runtime instead of
+// as its error result, so a non-nil returned error always means there is no
+// live runtime for the caller to close.
+func (r *DatabaseRuntime) RecoveryError() error {
+	if r == nil {
+		return nil
+	}
+	return r.recoveryError
 }
 
 // Close stops database-owned resources before provider-owned stores.
@@ -121,7 +133,9 @@ func (r *DatabaseRuntime) Close(ctx context.Context) error {
 }
 
 // OpenDatabase explicitly composes a fresh host, storage providers, and a
-// database. A non-nil runtime may accompany a recoverable database error.
+// database. A non-nil error is returned only after all started resources have
+// been stopped. Recoverable database initialization errors are exposed through
+// DatabaseRuntime.RecoveryError on the successfully owned runtime.
 func OpenDatabase(
 	ctx context.Context,
 	dbConfig *database.Config,
@@ -140,11 +154,24 @@ func OpenDatabase(
 	db, err := database.New(dbConfig, stores) //nolint:contextcheck
 	runtime := &DatabaseRuntime{Database: db, Host: host}
 	if db == nil {
-		_ = runtime.Close(context.WithoutCancel(ctx))
+		closeErr := runtime.Close(context.WithoutCancel(ctx))
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, closeErr)
 		}
-		return nil, errors.New("database construction returned no database")
+		return nil, errors.Join(
+			errors.New("database construction returned no database"),
+			closeErr,
+		)
 	}
-	return runtime, err
+	if err != nil {
+		if _, ok := errors.AsType[database.CommitTimestampError](err); ok {
+			runtime.recoveryError = err
+			return runtime, nil
+		}
+		return nil, errors.Join(
+			err,
+			runtime.Close(context.WithoutCancel(ctx)),
+		)
+	}
+	return runtime, nil
 }
