@@ -1653,8 +1653,8 @@ func parsePaginationOrWriteError(
 	w http.ResponseWriter,
 	r *http.Request,
 ) (PaginationParams, bool) {
-	params, err := ParsePagination(r)
-	if err != nil {
+	params, errMsg := ParsePaginationStrict(r)
+	if errMsg != "" {
 		writeError(
 			w,
 			http.StatusBadRequest,

@@ -19,8 +19,10 @@ import (
 	"math"
 	"testing"
 
+	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database/models"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 	utxorpcCardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
@@ -147,15 +149,67 @@ func TestSearchUtxosMatchAllAddresses(t *testing.T) {
 	require.True(t, searchUtxosMatchAllAddresses(nil, nil, nil))
 }
 
-func TestDedupeSearchAddresses(t *testing.T) {
-	paymentKey := make([]byte, 28)
-	stakeKey := make([]byte, 28)
-	a1, err := ledger.NewAddressFromParts(0, 0, paymentKey, stakeKey)
+func TestSearchUtxoAddressPatternsPreservesMatchIntent(t *testing.T) {
+	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	stake := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		stake,
+	)
 	require.NoError(t, err)
-	a2, err := ledger.NewAddressFromParts(0, 0, paymentKey, stakeKey)
+	addrBytes, err := addr.Bytes()
 	require.NoError(t, err)
-	out := dedupeSearchAddresses([]ledger.Address{a1, a2})
-	require.Len(t, out, 1)
+
+	got, err := searchUtxoAddressPatterns(&utxorpcCardano.AddressPattern{
+		ExactAddress:   addrBytes,
+		PaymentPart:    payment,
+		DelegationPart: stake,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []models.UtxoAddressPattern{{
+		ExactAddress:   addrBytes,
+		PaymentPart:    payment,
+		DelegationPart: stake,
+	}}, got)
+}
+
+func TestSearchUtxoAddressPatternsRejectsInvalidCredentialLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern *utxorpcCardano.AddressPattern
+		message string
+	}{
+		{
+			name: "exact address",
+			pattern: &utxorpcCardano.AddressPattern{
+				ExactAddress: []byte{0x01},
+			},
+			message: "failed to decode exact address",
+		},
+		{
+			name: "payment part",
+			pattern: &utxorpcCardano.AddressPattern{
+				PaymentPart: []byte{0x01},
+			},
+			message: "invalid payment part length",
+		},
+		{
+			name: "delegation part",
+			pattern: &utxorpcCardano.AddressPattern{
+				DelegationPart: []byte{0x01},
+			},
+			message: "invalid delegation part length",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := searchUtxoAddressPatterns(tc.pattern)
+			require.ErrorContains(t, err, tc.message)
+			require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+		})
+	}
 }
 
 func TestExtractSearchPredicatePatterns_NilPredicate(t *testing.T) {

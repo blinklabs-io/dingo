@@ -716,20 +716,26 @@ func TestGetUtxosByAddressUsesPaymentScript(t *testing.T) {
 	require.NoError(t, store.DB().Create(&keyUtxo).Error)
 	require.NoError(t, store.DB().Create(&scriptUtxo).Error)
 
-	keyRows, err := store.GetUtxosByAddress(keyAddr, nil)
+	keyPattern, err := models.ExactUtxoAddressPattern(keyAddr)
+	require.NoError(t, err)
+	keyRows, err := store.GetUtxosByAddress(keyPattern, nil)
 	require.NoError(t, err)
 	require.Len(t, keyRows, 1)
 	assert.False(t, keyRows[0].PaymentScript)
 	assert.Equal(t, keyUtxo.TxId, keyRows[0].TxId)
 
-	scriptRows, err := store.GetUtxosByAddress(scriptAddr, nil)
+	scriptPattern, err := models.ExactUtxoAddressPattern(scriptAddr)
+	require.NoError(t, err)
+	scriptRows, err := store.GetUtxosByAddress(scriptPattern, nil)
 	require.NoError(t, err)
 	require.Len(t, scriptRows, 1)
 	assert.True(t, scriptRows[0].PaymentScript)
 	assert.Equal(t, scriptUtxo.TxId, scriptRows[0].TxId)
 
 	orderedRows, err := store.GetUtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{Addresses: []lcommon.Address{scriptAddr}},
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{scriptPattern},
+		},
 		nil,
 	)
 	require.NoError(t, err)
@@ -779,10 +785,12 @@ func TestGetUtxosByAddressWithOrderingIncludesSnapshotUtxos(t *testing.T) {
 	for i := range rows {
 		require.NoError(t, store.DB().Create(&rows[i]).Error)
 	}
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
 
 	got, err := store.GetUtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
-			Addresses: []lcommon.Address{addr},
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
 		nil,
 	)
@@ -836,11 +844,13 @@ func TestGetUtxosByAddressWithOrderingPaginatesCollidingSnapshotUtxos(
 	for i := range rows {
 		require.NoError(t, store.DB().Create(&rows[i]).Error)
 	}
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
 
 	firstPage, err := store.GetUtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
-			Addresses: []lcommon.Address{addr},
-			Limit:     2,
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           2,
 		},
 		nil,
 	)
@@ -852,7 +862,7 @@ func TestGetUtxosByAddressWithOrderingPaginatesCollidingSnapshotUtxos(
 	last := firstPage[len(firstPage)-1]
 	secondPage, err := store.GetUtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
-			Addresses: []lcommon.Address{addr},
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
 			After: &models.UtxoOrderingCursor{
 				Slot:       last.TxSlot,
 				BlockIndex: last.TxBlockIndex,
@@ -888,14 +898,6 @@ func TestGetUtxoBalanceByAddressMatchModes(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	baseAddr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyKey,
-		lcommon.AddressNetworkTestnet,
-		paymentHash,
-		stakeHash,
-	)
-	require.NoError(t, err)
-
 	rows := []models.Utxo{
 		// Enterprise-form UTxO (no staking part).
 		{
@@ -949,25 +951,16 @@ func TestGetUtxoBalanceByAddressMatchModes(t *testing.T) {
 		require.NoError(t, store.DB().Create(&rows[i]).Error)
 	}
 
-	// Exact enterprise matching excludes the base-address UTxO.
-	balance, err := store.GetUtxoBalanceByAddress(
+	// Metadata-only aggregation cannot promise exact identity because pointer
+	// payloads and network IDs are available only in output CBOR.
+	_, err = store.GetUtxoBalanceByAddress(
 		enterpriseAddr, models.UtxoAddressMatchExact, nil,
 	)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(5_000_000), balance.Lovelace)
-	assert.Equal(t, int64(2), balance.UtxoCount)
-
-	// Exact base matching returns only the base-address UTxO.
-	balance, err = store.GetUtxoBalanceByAddress(
-		baseAddr, models.UtxoAddressMatchExact, nil,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2_000_000), balance.Lovelace)
-	assert.Equal(t, int64(1), balance.UtxoCount)
+	require.ErrorIs(t, err, models.ErrExactAddressRequiresCbor)
 
 	// Payment-credential matching aggregates every live UTxO sharing
 	// the credential, across address forms.
-	balance, err = store.GetUtxoBalanceByAddress(
+	balance, err := store.GetUtxoBalanceByAddress(
 		enterpriseAddr, models.UtxoAddressMatchPaymentCred, nil,
 	)
 	require.NoError(t, err)

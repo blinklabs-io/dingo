@@ -2528,76 +2528,28 @@ func parseAddressOrPaymentCred(
 	return addr, false, nil
 }
 
-// isPointerAddress reports whether the address carries a pointer
-// staking reference (Shelley address types 0x4/0x5).
-func isPointerAddress(addr lcommon.Address) bool {
-	switch addr.Type() {
-	case lcommon.AddressTypeKeyPointer, lcommon.AddressTypeScriptPointer:
-		return true
-	default:
-		return false
-	}
-}
-
-// pointerAddressBalance aggregates balances for a pointer address by
-// exact address identity: SQL narrows the candidates to outputs sharing
-// the payment credential, and each candidate's output CBOR is decoded
-// to compare the full address bytes. Pointer addresses are vanishingly
-// rare, so the candidate sets stay small.
-func (a *NodeAdapter) pointerAddressBalance(
+// exactAddressBalance aggregates balances after the database layer has
+// compared each candidate's complete decoded output address.
+func (a *NodeAdapter) exactAddressBalance(
 	addr lcommon.Address,
 	txn *database.Txn,
 ) (models.AddressBalance, error) {
 	var ret models.AddressBalance
-	wantBytes, err := addr.Bytes()
+	pattern, err := models.ExactUtxoAddressPattern(addr)
 	if err != nil {
-		return ret, fmt.Errorf("encode pointer address: %w", err)
+		return ret, err
 	}
 
 	candidates, err := a.ledgerState.Database().UtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
-			Addresses: []lcommon.Address{addr},
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
 		txn,
 	)
 	if err != nil {
-		return ret, fmt.Errorf("get pointer address candidates: %w", err)
+		return ret, fmt.Errorf("get exact address UTxOs: %w", err)
 	}
-	if len(candidates) == 0 {
-		return ret, nil
-	}
-
 	for i := range candidates {
-		raw := candidates[i].Cbor
-		if len(raw) == 0 {
-			return ret, fmt.Errorf(
-				"pointer address candidate %x#%d has no output CBOR",
-				candidates[i].TxId,
-				candidates[i].OutputIdx,
-			)
-		}
-		output, err := gledger.NewTransactionOutputFromCbor(raw)
-		if err != nil {
-			return ret, fmt.Errorf(
-				"decode pointer address candidate %x#%d: %w",
-				candidates[i].TxId,
-				candidates[i].OutputIdx,
-				err,
-			)
-		}
-		outAddr := output.Address()
-		gotBytes, err := outAddr.Bytes()
-		if err != nil {
-			return ret, fmt.Errorf(
-				"encode pointer address candidate %x#%d: %w",
-				candidates[i].TxId,
-				candidates[i].OutputIdx,
-				err,
-			)
-		}
-		if !bytes.Equal(gotBytes, wantBytes) {
-			continue
-		}
 		ret.UtxoCount++
 		ret.Lovelace += uint64(candidates[i].Amount)
 		for _, asset := range candidates[i].Assets {
@@ -2674,23 +2626,16 @@ func (a *NodeAdapter) Address(
 	// forms sharing the payment credential are excluded; bare
 	// payment credentials (addr_vkh/script) deliberately aggregate
 	// across forms.
-	matchMode := models.UtxoAddressMatchExact
-	if isPaymentCred {
-		matchMode = models.UtxoAddressMatchPaymentCred
-	}
-
 	var balance models.AddressBalance
-	if !isPaymentCred && isPointerAddress(addr) {
-		// Pointer addresses cannot be distinguished from
-		// enterprise addresses (or from each other) by the stored
-		// credential columns: the pointer payload is not
-		// represented in the utxo table. Narrow candidates by
-		// payment credential in SQL, then keep only outputs whose
-		// decoded address matches the request exactly.
-		balance, err = a.pointerAddressBalance(addr, txn)
-	} else {
+	if isPaymentCred {
 		balance, err = db.Metadata().
-			GetUtxoBalanceByAddress(addr, matchMode, txn.Metadata())
+			GetUtxoBalanceByAddress(
+				addr,
+				models.UtxoAddressMatchPaymentCred,
+				txn.Metadata(),
+			)
+	} else {
+		balance, err = a.exactAddressBalance(addr, txn)
 	}
 	if err != nil {
 		return AddressInfo{}, fmt.Errorf(
@@ -2700,19 +2645,21 @@ func (a *NodeAdapter) Address(
 		)
 	}
 	if balance.UtxoCount == 0 {
-		var txCount int
+		var hasTransactions bool
 		if isPaymentCred {
 			// The synthetic enterprise address would only match
 			// enterprise usage in the per-address transaction
 			// index; a spent-out credential used via base
 			// addresses must still resolve, so count across every
 			// address carrying the payment credential.
+			var txCount int
 			txCount, err = db.CountTransactionsByPaymentCred(
 				addr.PaymentKeyHash().Bytes(),
 				txn,
 			)
+			hasTransactions = txCount > 0
 		} else {
-			txCount, err = db.CountTransactionsByAddress(addr, txn)
+			hasTransactions, err = db.HasTransactionsByAddress(addr, txn)
 		}
 		if err != nil {
 			return AddressInfo{}, fmt.Errorf(
@@ -2721,7 +2668,7 @@ func (a *NodeAdapter) Address(
 				err,
 			)
 		}
-		if txCount == 0 {
+		if !hasTransactions {
 			return AddressInfo{}, fmt.Errorf(
 				"address %q: %w",
 				address,
@@ -2814,9 +2761,13 @@ func (a *NodeAdapter) AddressUTXOs(
 		)
 	}
 
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	if err != nil {
+		return nil, 0, err
+	}
 	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
-			Addresses: []lcommon.Address{addr},
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
 	)
 	if err != nil {
