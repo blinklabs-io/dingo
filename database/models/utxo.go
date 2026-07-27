@@ -159,13 +159,16 @@ type UtxoWithOrdering struct {
 
 // UtxoOrderingCursor is the keyset position for SearchUtxos.
 //
-// Text form (non-empty): slot:block_index:output_idx. GetUtxosByAddressWithOrdering
-// uses the producing transaction position for ordering. Snapshot-imported
-// UTxOs without a producing transaction use AddedSlot and block index zero.
+// Text form (non-empty): slot:block_index:output_idx:tx_id.
+// GetUtxosByAddressWithOrdering uses the producing transaction position for
+// ordering. Snapshot-imported UTxOs without a producing transaction use
+// AddedSlot and block index zero. TxId makes the cursor unique when those
+// fallback fields collide.
 type UtxoOrderingCursor struct {
 	Slot       uint64
 	BlockIndex uint32
 	OutputIdx  uint32
+	TxId       []byte
 }
 
 // UtxoWithOrderingQuery drives GetUtxosByAddressWithOrdering (single MetadataStore entry).

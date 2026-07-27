@@ -95,10 +95,12 @@ func parseSearchUtxosStartToken(
 		return nil, nil
 	}
 	parts := strings.Split(startToken, ":")
-	if len(parts) != 3 {
+	if len(parts) != 4 {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
-			errors.New("invalid start_token: expected slot:block_index:output_idx"),
+			errors.New(
+				"invalid start_token: expected slot:block_index:output_idx:tx_id",
+			),
 		)
 	}
 
@@ -126,10 +128,19 @@ func parseSearchUtxosStartToken(
 		)
 	}
 
+	cursorTxId, err := hex.DecodeString(parts[3])
+	if err != nil || len(cursorTxId) != 32 {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			errors.New("invalid start_token tx_id"),
+		)
+	}
+
 	return &models.UtxoOrderingCursor{
 		Slot:       cursorSlot,
 		BlockIndex: uint32(cursorBlockIndex),
 		OutputIdx:  uint32(cursorOutputIdx),
+		TxId:       cursorTxId,
 	}, nil
 }
 
@@ -659,10 +670,11 @@ func (s *queryServiceServer) SearchUtxos(
 	if hasMore && len(utxos) > 0 {
 		last := utxos[len(utxos)-1]
 		resp.NextToken = fmt.Sprintf(
-			"%d:%d:%d",
+			"%d:%d:%d:%x",
 			last.TxSlot,
 			last.TxBlockIndex,
 			last.OutputIdx,
+			last.TxId,
 		)
 	}
 

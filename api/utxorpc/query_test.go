@@ -15,6 +15,7 @@
 package utxorpc
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -83,21 +84,25 @@ func TestEffectiveSearchUtxosMaxItems(t *testing.T) {
 
 func TestParseSearchUtxosStartToken_Valid(t *testing.T) {
 	t.Parallel()
-	cur, err := parseSearchUtxosStartToken("1:2:3")
+	txId := bytes.Repeat([]byte{0xab}, 32)
+	cur, err := parseSearchUtxosStartToken(
+		"1:2:3:abababababababababababababababababababababababababababababababab",
+	)
 	require.NoError(t, err)
 	require.NotNil(t, cur)
 	require.Equal(t, uint64(1), cur.Slot)
 	require.Equal(t, uint32(2), cur.BlockIndex)
 	require.Equal(t, uint32(3), cur.OutputIdx)
+	require.Equal(t, txId, cur.TxId)
 }
 
-func TestParseSearchUtxosStartToken_NotThreeParts(t *testing.T) {
+func TestParseSearchUtxosStartToken_NotFourParts(t *testing.T) {
 	t.Parallel()
-	_, err := parseSearchUtxosStartToken("1:2")
+	_, err := parseSearchUtxosStartToken("1:2:3")
 	require.Error(t, err)
 }
 
-func TestParseSearchUtxosStartToken_FourPartsInvalid(t *testing.T) {
+func TestParseSearchUtxosStartToken_InvalidTxId(t *testing.T) {
 	t.Parallel()
 	_, err := parseSearchUtxosStartToken("10:20:30:42")
 	require.Error(t, err)
