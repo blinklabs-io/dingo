@@ -557,7 +557,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		opt(&c)
 	}
 	mempoolSelection := c.pluginSelections[plugin.CapabilityMempool]
-	if mempoolSelection.Provider == "default" {
+	switch mempoolSelection.Provider {
+	case "default", "fifo", "dag":
 		if mempoolSelection.Config == nil {
 			mempoolSelection.Config = make(map[string]any)
 		}

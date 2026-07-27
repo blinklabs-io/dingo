@@ -583,7 +583,7 @@ func defaultPluginsConfig() PluginsConfig {
 			Blob:     hostplugin.Selection{Provider: "badger", Config: map[string]any{}},
 			Metadata: hostplugin.Selection{Provider: "sqlite", Config: map[string]any{}},
 		},
-		Mempool: hostplugin.Selection{Provider: "default", Config: map[string]any{
+		Mempool: hostplugin.Selection{Provider: DefaultMempoolImplementation, Config: map[string]any{
 			"evictionWatermark":    DefaultEvictionWatermark,
 			"rejectionWatermark":   DefaultRejectionWatermark,
 			"revalidationDeltaCap": DefaultMempoolRevalidationDeltaCap,

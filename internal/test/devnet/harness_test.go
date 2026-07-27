@@ -74,10 +74,12 @@ func TestHarnessWaitForSlot(t *testing.T) {
 
 	h.WaitForAllNodesReady(60 * time.Second)
 
-	// Wait for slot 10. Timeout: 10 slots worth of wall-clock time
-	// plus margin for startup variance.
+	// Wait for slot 10. Container health means the node is queryable, but it
+	// can precede the generated network's system start. Include a fixed startup
+	// allowance in addition to slot and block-production time.
 	const targetSlot = 10
-	timeout := time.Duration(targetSlot)*cfg.SlotDuration() +
+	timeout := 30*time.Second +
+		time.Duration(targetSlot)*cfg.SlotDuration() +
 		cfg.ExpectedBlockTime()*5
 	h.WaitForSlot(targetSlot, timeout)
 }

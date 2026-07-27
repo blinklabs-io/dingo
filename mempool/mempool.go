@@ -136,6 +136,7 @@ type Mempool struct {
 		implementation  prometheus.Gauge
 	}
 	validator              TxValidator
+	implementation         Implementation
 	logger                 *slog.Logger
 	eventBus               *event.EventBus
 	consumers              map[ouroboros.ConnectionId]*MempoolConsumer
@@ -152,13 +153,15 @@ type Mempool struct {
 	revalidationJournalCap int
 	stopped                bool
 	sync.RWMutex
-	doneOnce       sync.Once
-	mutationMutex  sync.Mutex
-	startOnce      sync.Once
-	stopOnce       sync.Once
-	workerWG       sync.WaitGroup
-	consumersMutex sync.Mutex
-	overlay        *utxoOverlay
+	doneOnce        sync.Once
+	mutationMutex   sync.Mutex
+	startOnce       sync.Once
+	stopOnce        sync.Once
+	workerWG        sync.WaitGroup
+	consumersMutex  sync.Mutex
+	overlay         *utxoOverlay
+	dag             *transactionDAG
+	headroomChanged chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -184,14 +187,37 @@ type revalidationCandidate struct {
 	txByHash     map[string]*MempoolTransaction
 	sizeBytes    int64
 	invalid      map[string]*MempoolTransaction
+	invalidUtxos map[string]struct{}
 }
 
 func newRevalidationCandidate() *revalidationCandidate {
 	return &revalidationCandidate{
-		overlay:  newUtxoOverlay(),
-		txByHash: make(map[string]*MempoolTransaction),
-		invalid:  make(map[string]*MempoolTransaction),
+		overlay:      newUtxoOverlay(),
+		txByHash:     make(map[string]*MempoolTransaction),
+		invalid:      make(map[string]*MempoolTransaction),
+		invalidUtxos: make(map[string]struct{}),
 	}
+}
+
+func (c *revalidationCandidate) reject(
+	at appliedTx,
+	tx *MempoolTransaction,
+) {
+	if tx != nil {
+		c.invalid[at.hash] = tx
+	}
+	for utxo := range at.created {
+		c.invalidUtxos[utxo] = struct{}{}
+	}
+}
+
+func (c *revalidationCandidate) dependsOnInvalid(at appliedTx) bool {
+	for _, utxo := range at.consumed {
+		if _, invalid := c.invalidUtxos[utxo]; invalid {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
@@ -225,6 +251,9 @@ func (c *revalidationCandidate) add(
 	c.txByHash[at.hash] = tx
 	c.sizeBytes += int64(len(tx.Cbor))
 	delete(c.invalid, at.hash)
+	for utxo := range at.created {
+		delete(c.invalidUtxos, utxo)
+	}
 }
 
 // appliedTx records a pending transaction and its UTxO effects for overlay rebuild.
@@ -472,8 +501,21 @@ func (e *MempoolFullError) Error() string {
 }
 
 func NewMempool(config MempoolConfig) (*Mempool, error) {
+	return newMempool(config, ImplementationFIFO)
+}
+
+func newMempool(
+	config MempoolConfig,
+	implementation Implementation,
+) (*Mempool, error) {
 	if config.Validator == nil {
 		return nil, ErrNilValidator
+	}
+	if !implementation.Valid() {
+		return nil, fmt.Errorf(
+			"unknown mempool implementation %q",
+			implementation,
+		)
 	}
 	evictionWatermark := config.EvictionWatermark
 	if evictionWatermark == 0 {
@@ -496,11 +538,14 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 		revalidationDeltaCap = DefaultRevalidationDeltaCap
 	}
 	m := &Mempool{
-		eventBus:               config.EventBus,
-		consumers:              make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		eventBus: config.EventBus,
+		consumers: make(
+			map[ouroboros.ConnectionId]*MempoolConsumer,
+		),
 		txByHash:               make(map[string]*MempoolTransaction),
 		overlay:                newUtxoOverlay(),
 		validator:              config.Validator,
+		implementation:         implementation,
 		config:                 config,
 		done:                   make(chan struct{}),
 		transactionTTL:         transactionTTL,
@@ -509,6 +554,10 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 		rejectionWatermark:     rejectionWatermark,
 		revalidationDeltaCap:   revalidationDeltaCap,
 		revalidationJournalCap: defaultRevalidationJournalCap,
+	}
+	if implementation == ImplementationDAG {
+		m.dag = newTransactionDAG()
+		m.headroomChanged = make(chan struct{})
 	}
 	if config.Logger == nil {
 		// Create logger to throw away logs
@@ -564,7 +613,7 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 			Name: "dingo_metrics_mempool_info",
 			Help: "mempool implementation identity",
 			ConstLabels: prometheus.Labels{
-				"implementation": string(ImplementationFIFO),
+				"implementation": string(implementation),
 			},
 		},
 	)
@@ -643,6 +692,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 		m.stopped = true
 		m.recordMutationLocked(mempoolMutation{stopped: true})
 		m.doneOnce.Do(func() { close(m.done) })
+		m.notifyHeadroomChangedLocked()
 		m.Unlock()
 		m.mutationMutex.Unlock()
 
@@ -686,6 +736,9 @@ func (m *Mempool) Stop(ctx context.Context) error {
 		m.txByHash = make(map[string]*MempoolTransaction)
 		m.currentSizeBytes = 0
 		m.overlay.reset()
+		if m.dag != nil {
+			m.dag.rebuild(nil)
+		}
 		m.metrics.txsInMempool.Set(0)
 		m.metrics.mempoolBytes.Set(0)
 	})
@@ -709,7 +762,8 @@ func (m *Mempool) FindConsumer(connId ouroboros.ConnectionId) Consumer {
 	return consumer
 }
 
-// ProviderConfig is the canonical configuration for the default mempool.
+// ProviderConfig is the canonical configuration for built-in mempool
+// providers.
 type ProviderConfig struct {
 	Capacity             int64   `yaml:"capacity"`
 	EvictionWatermark    float64 `yaml:"evictionWatermark"`
@@ -727,14 +781,35 @@ type ProviderDependencies struct {
 	CurrentSlotFunc func() uint64
 }
 
-// RegisterProvider registers the current implementation as mempool/default.
+// RegisterProvider registers the FIFO compatibility alias as mempool/default.
 func RegisterProvider(host *plugin.Host) error {
+	return registerProvider(host, "default", ImplementationFIFO)
+}
+
+// RegisterFIFOProvider registers the explicit mempool/fifo provider.
+func RegisterFIFOProvider(host *plugin.Host) error {
+	return registerProvider(host, "fifo", ImplementationFIFO)
+}
+
+// RegisterDAGProvider registers the dependency-indexed mempool/dag provider.
+func RegisterDAGProvider(host *plugin.Host) error {
+	return registerProvider(host, "dag", ImplementationDAG)
+}
+
+func registerProvider(
+	host *plugin.Host,
+	name string,
+	implementation Implementation,
+) error {
 	return plugin.Register(
 		host,
 		plugin.Descriptor{
-			Capability:  plugin.CapabilityMempool,
-			Name:        "default",
-			Description: "Dingo transaction mempool",
+			Capability: plugin.CapabilityMempool,
+			Name:       name,
+			Description: fmt.Sprintf(
+				"Dingo %s transaction mempool",
+				implementation,
+			),
 		},
 		func() ProviderConfig {
 			return ProviderConfig{
@@ -744,7 +819,7 @@ func RegisterProvider(host *plugin.Host) error {
 			}
 		},
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (Service, plugin.Instance, error) {
-			m, err := NewMempool(MempoolConfig{
+			mempoolConfig := MempoolConfig{
 				PromRegistry: deps.PromRegistry, Validator: deps.Validator,
 				Logger: deps.Logger, EventBus: deps.EventBus,
 				MempoolCapacity:      cfg.Capacity,
@@ -752,11 +827,29 @@ func RegisterProvider(host *plugin.Host) error {
 				RejectionWatermark:   cfg.RejectionWatermark,
 				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
-			})
+			}
+			var (
+				service  Service
+				instance plugin.Instance
+				err      error
+			)
+			switch implementation {
+			case ImplementationFIFO:
+				fifo, fifoErr := NewFIFO(mempoolConfig)
+				service, instance, err = fifo, fifo, fifoErr
+			case ImplementationDAG:
+				dag, dagErr := NewDAG(mempoolConfig)
+				service, instance, err = dag, dag, dagErr
+			default:
+				return nil, nil, fmt.Errorf(
+					"unknown mempool implementation %q",
+					implementation,
+				)
+			}
 			if err != nil {
 				return nil, nil, err
 			}
-			return m, m, nil
+			return service, instance, nil
 		},
 	)
 }
@@ -959,6 +1052,10 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 				m.transactions = candidate.transactions
 				m.txByHash = candidate.txByHash
 				m.currentSizeBytes = candidate.sizeBytes
+				if m.dag != nil {
+					m.dag.rebuild(candidate.overlay.applied)
+				}
+				m.notifyHeadroomChangedLocked()
 				m.metrics.txsInMempool.Set(float64(len(candidate.transactions)))
 				m.metrics.mempoolBytes.Set(float64(candidate.sizeBytes))
 				m.consumersMutex.Unlock()
@@ -1005,7 +1102,9 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 				appliedSeq = mutation.seq
 			}
 		}
-		return errors.New("mempool: revalidation could not catch up with mutations")
+		return errors.New(
+			"mempool: revalidation could not catch up with mutations",
+		)
 	})
 	if err != nil {
 		finishJournal()
@@ -1039,17 +1138,25 @@ func (m *Mempool) revalidateAppliedTx(
 	) error,
 ) {
 	if tx == nil {
+		candidate.reject(at, nil)
 		m.logger.Warn(
 			"overlay applied transaction is missing from transaction index during re-validation",
-			"component", "mempool",
-			"tx_hash", at.hash,
-			"tx_type", at.txType,
+			"component",
+			"mempool",
+			"tx_hash",
+			at.hash,
+			"tx_type",
+			at.txType,
 		)
+		return
+	}
+	if candidate.dependsOnInvalid(at) {
+		candidate.reject(at, tx)
 		return
 	}
 	tmpTx, err := gledger.NewTransactionFromCbor(at.txType, at.cbor)
 	if err != nil {
-		candidate.invalid[at.hash] = tx
+		candidate.reject(at, tx)
 		m.logger.Error(
 			"transaction failed decode during re-validation",
 			"component", "mempool",
@@ -1063,7 +1170,7 @@ func (m *Mempool) revalidateAppliedTx(
 		candidate.overlay.consumed,
 		candidate.overlay.created,
 	); err != nil {
-		candidate.invalid[at.hash] = tx
+		candidate.reject(at, tx)
 		m.logger.Debug(
 			"transaction failed re-validation",
 			"component", "mempool",
@@ -1137,11 +1244,24 @@ func (m *Mempool) removeExpiredTransactions() {
 	}
 	directExpiredCount := len(expiredHashes)
 	if directExpiredCount > 0 {
-		// Remove from overlay with descendant pruning
-		pruned := m.overlay.removeBatchWithDescendants(expiredHashes)
-		// Add pruned descendants to the removal set
-		for _, h := range pruned {
-			expiredHashes[h] = struct{}{}
+		var pruned []string
+		if m.dag != nil {
+			allExpired := m.dag.descendants(expiredHashes)
+			for hash := range allExpired {
+				if _, direct := expiredHashes[hash]; !direct {
+					pruned = append(pruned, hash)
+				}
+			}
+			expiredHashes = allExpired
+			m.overlay.removeByHashes(expiredHashes)
+			m.dag.remove(expiredHashes)
+		} else {
+			// Remove from overlay with descendant pruning.
+			pruned = m.overlay.removeBatchWithDescendants(expiredHashes)
+			// Add pruned descendants to the removal set.
+			for _, h := range pruned {
+				expiredHashes[h] = struct{}{}
+			}
 		}
 		// Remove all from transactions list (backward for safe index handling)
 		for i, v := range slices.Backward(m.transactions) {
@@ -1153,7 +1273,9 @@ func (m *Mempool) removeExpiredTransactions() {
 				}
 			}
 		}
-		m.recordMutationLocked(mempoolMutation{removed: maps.Clone(expiredHashes)})
+		m.recordMutationLocked(
+			mempoolMutation{removed: maps.Clone(expiredHashes)},
+		)
 		if len(pruned) > 0 {
 			m.logger.Debug(
 				"pruned orphaned descendant transactions during expiry",
@@ -1255,7 +1377,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		evictionThreshold := int64(
 			float64(m.config.MempoolCapacity) * m.evictionWatermark,
 		)
-		if newSize > evictionThreshold {
+		if m.dag == nil && newSize > evictionThreshold {
 			needsEviction = true
 			targetBytes = max(int64(0), evictionThreshold-txSize)
 			// Compute which TXs would be evicted from the front
@@ -1295,6 +1417,10 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		txCbor := slices.Clone(txBytes)
 		m.overlay.applyTx(txHash, txType, overlayCbor, tmpTx)
 		added := cloneAppliedTx(m.overlay.applied[len(m.overlay.applied)-1])
+		if m.dag != nil {
+			applied := m.overlay.applied[len(m.overlay.applied)-1]
+			m.dag.add(applied)
+		}
 		tx := &MempoolTransaction{
 			Hash:     txHash,
 			Type:     txType,
@@ -1304,6 +1430,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		m.transactions = append(m.transactions, tx)
 		m.txByHash[txHash] = tx
 		m.currentSizeBytes += txSize
+		m.notifyHeadroomChangedLocked()
 		m.logger.Debug(
 			"added transaction",
 			"component", "mempool",
@@ -1353,14 +1480,27 @@ func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
 
 func (m *Mempool) Transactions() []MempoolTransaction {
 	m.RLock()
-	ret := make([]MempoolTransaction, len(m.transactions))
-	for i := range m.transactions {
-		ret[i] = *m.transactions[i]
+	var ret []MempoolTransaction
+	if m.dag != nil {
+		order := m.dag.topologicalOrder()
+		ret = make([]MempoolTransaction, 0, len(order))
+		for _, hash := range order {
+			if tx := m.txByHash[hash]; tx != nil {
+				ret = append(ret, *tx)
+			}
+		}
+	} else {
+		ret = make([]MempoolTransaction, len(m.transactions))
+		for i := range m.transactions {
+			ret[i] = *m.transactions[i]
+		}
 	}
 	m.RUnlock()
-	// CBOR is immutable after admission, so copying its slice headers while
-	// locked is sufficient; move the potentially expensive byte copies outside
-	// the pool lock to keep writers moving during large snapshots.
+
+	// Transaction CBOR is immutable after admission. Copy the slice headers
+	// under the state lock, then clone the bytes after releasing it so forging
+	// and relay snapshots do not hold up the final revalidation swap in
+	// proportion to total transaction bytes.
 	for i := range ret {
 		ret[i].Cbor = slices.Clone(ret[i].Cbor)
 	}
@@ -1383,6 +1523,28 @@ func (m *Mempool) CapacityBytes() int64 {
 	return m.config.MempoolCapacity
 }
 
+func (m *Mempool) admissionLimitBytes() int64 {
+	return int64(
+		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
+	)
+}
+
+// admissionHeadroomBytesLocked returns available admission capacity. The
+// caller must hold at least the mempool read lock.
+func (m *Mempool) admissionHeadroomBytesLocked() int64 {
+	return max(int64(0), m.admissionLimitBytes()-m.currentSizeBytes)
+}
+
+// notifyHeadroomChangedLocked wakes admission waiters after a size or lifecycle
+// transition. The caller must hold the mempool write lock.
+func (m *Mempool) notifyHeadroomChangedLocked() {
+	if m.headroomChanged == nil {
+		return
+	}
+	close(m.headroomChanged)
+	m.headroomChanged = make(chan struct{})
+}
+
 func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {
 	return m.txByHash[txHash]
 }
@@ -1392,11 +1554,23 @@ func (m *Mempool) RemoveTransaction(txHash string) {
 	m.mutationMutex.Lock()
 	m.Lock()
 	m.consumersMutex.Lock()
-	// Remove from overlay with descendant pruning
 	toRemove := map[string]struct{}{txHash: {}}
-	pruned := m.overlay.removeBatchWithDescendants(toRemove)
-	for _, h := range pruned {
-		toRemove[h] = struct{}{}
+	var pruned []string
+	if m.dag != nil {
+		toRemove = m.dag.descendants(toRemove)
+		for hash := range toRemove {
+			if hash != txHash {
+				pruned = append(pruned, hash)
+			}
+		}
+		m.overlay.removeByHashes(toRemove)
+		m.dag.remove(toRemove)
+	} else {
+		// Remove from overlay with descendant pruning.
+		pruned = m.overlay.removeBatchWithDescendants(toRemove)
+		for _, h := range pruned {
+			toRemove[h] = struct{}{}
+		}
 	}
 	// Remove all from transactions list (backward for safe index handling)
 	var removed bool
@@ -1454,6 +1628,9 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 	m.consumersMutex.Lock()
 	m.overlay.removeByHashes(hashSet)
 	removedHashes := make(map[string]struct{}, len(hashSet))
+	if m.dag != nil {
+		m.dag.remove(hashSet)
+	}
 	for i, v := range slices.Backward(m.transactions) {
 		if _, ok := hashSet[v.Hash]; ok {
 			removedHashes[v.Hash] = struct{}{}
@@ -1495,6 +1672,7 @@ func (m *Mempool) removeTransactionByIndexLocked(
 	)
 	delete(m.txByHash, tx.Hash)
 	m.currentSizeBytes -= txSize
+	m.notifyHeadroomChangedLocked()
 	m.metrics.txsInMempool.Dec()
 	m.metrics.mempoolBytes.Sub(float64(txSize))
 	// Update consumer indexes to reflect removed TX
@@ -1525,6 +1703,9 @@ func (m *Mempool) removeTransactionByIndexLocked(
 // lock and consumersMutex. Returns events to publish after
 // releasing locks (MEM-03).
 func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
+	if m.dag != nil {
+		return nil
+	}
 	// Calculate how many transactions to evict from the front
 	var evicted int
 	var evictedBytes int64
@@ -1542,7 +1723,7 @@ func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 	for i := range evicted {
 		evictedHashes[m.transactions[i].Hash] = struct{}{}
 	}
-	// Remove from overlay with descendant pruning
+	// Remove from overlay with descendant pruning.
 	pruned := m.overlay.removeBatchWithDescendants(evictedHashes)
 
 	// Clean up hash map, update metrics, and collect events

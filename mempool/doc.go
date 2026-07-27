@@ -17,12 +17,16 @@
 // traffic (N2N), validates them against the current ledger state,
 // and holds them until they are included in a block or evicted.
 //
-// Pool is the backend-neutral node contract. FIFO is the default backend and
-// orders transactions by successful admission: independent submissions retain
-// arrival order, and a duplicate refresh does not move a transaction. Mempool
-// remains the concrete queue embedded by FIFO for source compatibility.
+// Service is the backend-neutral node contract. FIFO is the default backend
+// and orders transactions by successful admission: independent submissions
+// retain arrival order, and a duplicate refresh does not move a transaction.
+// DAG is the alternative backend. It indexes pending producers and spenders
+// plus parent/child edges, and exposes parents before descendants with FIFO
+// tie-breaking between ready transactions. DAG never watermark-evicts; network
+// intake waits for admission headroom instead. Mempool remains the shared
+// engine embedded by both backends for source compatibility.
 //
-// The FIFO backend validates every submitted
+// Both backends validate every submitted
 // transaction through the ledger package — UTxO resolution, fees,
 // ExUnit budgets, validity interval, size, and the full UTxO validation
 // rules enforced by the ledger package — before admitting it. Transactions
@@ -31,15 +35,18 @@
 //
 // # Eviction and watermarks
 //
-// The pool uses a two-level watermark scheme:
+// FIFO uses a two-level watermark scheme:
 //
 //   - EvictionWatermark  — above this fill level, the oldest transactions
 //     are evicted in successful-admission order to make room for new ones
 //   - RejectionWatermark — above this fill level, new submissions are
 //     rejected outright
 //
-// Eviction is oldest-first in successful-admission order. It is not driven by
-// fee density or another priority score.
+// FIFO eviction is oldest-first in successful-admission order. It is not driven
+// by fee density or another priority score. DAG ignores EvictionWatermark,
+// preserves admitted transactions, and exposes admission headroom so network
+// intake pauses before the rejection watermark. Direct submissions above that
+// watermark receive MempoolFullError.
 //
 // # Events
 //

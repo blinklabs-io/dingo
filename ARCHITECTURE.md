@@ -541,7 +541,9 @@ dingo/
 │   ├── utxo.go          # UTXO state handling
 │   └── certstate.go     # Certificate state handling
 ├── mempool/             # Transaction pool
-│   ├── mempool.go       # Mempool, validation, capacity
+│   ├── backend.go       # FIFO/DAG backend contract and constructors
+│   ├── dag.go           # Dependency graph and topological ordering
+│   ├── mempool.go       # Shared validation, lifecycle, capacity, providers
 │   └── consumer.go      # Per-consumer transaction tracking
 ├── ouroboros/            # Ouroboros protocol handlers
 │   ├── ouroboros.go      # N2N and N2C protocol management
@@ -634,7 +636,7 @@ type Node struct {
     chainsyncState *chainsync.State               // Multi-peer sync state
     chainSelector  *chainselection.ChainSelector  // Chain comparison
     eventBus       *event.EventBus                // Event routing
-    mempool        mempool.Pool                   // Selected transaction pool
+    mempool        mempool.Service                // Selected transaction pool
     chainManager   *chain.ChainManager            // Blockchain state
     db             *database.Database             // Storage layer
     ledgerState    *ledger.LedgerState            // UTXO/state tracking
@@ -1945,13 +1947,30 @@ ChainSync streams ineligible.
 
 ## Transaction Mempool
 
-`mempool.Pool` is the backend-neutral contract used by node composition.
-`mempool.FIFO` embeds the existing ordered queue and is the default backend.
-Successful admissions append to that queue; independent transactions are
+`mempool.Service` is the backend-neutral contract used by node composition.
+The plugin host resolves either the `fifo` provider (the default) or the `dag`
+provider. The legacy provider name `default` remains an alias for `fifo`.
+Successful FIFO admissions append to one queue; independent transactions are
 therefore exposed to forging and relay consumers in admission order. Duplicate
 submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
+
+The DAG provider maintains nodes keyed by transaction hash, pending-output
+producer and spender indexes, and explicit parent/child edges. An edge points
+from a pending transaction to a transaction that consumes one of its outputs.
+Only validated transactions enter the graph, parents always precede descendants,
+and the ready frontier uses admission sequence then hash as deterministic
+tie-breakers. Independent transactions therefore retain FIFO behavior. Manual
+removal and expiry use the adjacency index to find the transitive descendant
+closure; confirmed removal detaches only the confirmed nodes because their
+outputs have moved into ledger state. The DAG backend never watermark-evicts
+transactions. Its TxSubmission intake waits for sufficient admission headroom,
+while direct submissions receive `MempoolFullError` above the rejection
+watermark. DAG intake currently requests one transaction ID per TxSubmission
+round trip, which can reduce inbound throughput on high-latency peer links.
+This is required because gouroboros acknowledges every ID returned by a peer;
+support for acknowledging only the fetched prefix would permit batched requests.
 
 The selected pool manages pending transactions:
 
@@ -1961,7 +1980,7 @@ The selected pool manages pending transactions:
     | Transaction Management                         |
     |   Validation on add (Phase 1 + Phase 2)        |
     |   Capacity limits (configurable)               |
-    |   Watermark-based eviction and rejection       |
+    |   FIFO eviction / DAG intake backpressure      |
     |   Automatic purging on chain updates           |
     |                                                |
     | Consumer Tracking                              |
@@ -1973,14 +1992,14 @@ The selected pool manages pending transactions:
     -------------------------------------------------
 ```
 
-The `mempoolImplementation` setting accepts only `fifo`, which is also the
-default; configuration validation rejects every other value. Selection and
+Selection uses `plugins.mempool.provider: fifo|dag`; provider-specific capacity
+and watermark settings remain under `plugins.mempool.config`. Selection and
 construction happen in `node.go`; networking depends on its own narrow mempool
 interface, forging and APIs retain their existing narrow adapters, and none of
-them import FIFO state. Cardano-compatible metrics and `mempool.add_tx` /
+them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 `mempool.remove_tx` events remain backend-neutral;
-`dingo_metrics_mempool_info{implementation="fifo"}` identifies the selected
-backend.
+`dingo_metrics_mempool_info{implementation="fifo|dag"}` identifies the
+selected backend.
 
 Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
 clearing transaction and consumer state; later transaction admission returns
@@ -1988,29 +2007,30 @@ clearing transaction and consumer state; later transaction admission returns
 prevents in-flight protocol callbacks from repopulating a pool whose background
 expiry and chain-update workers have already been stopped.
 
-Ordinary FIFO mutations are serialized by a dedicated mutation gate, but
-chain-update revalidation does not hold that gate while it validates the whole
-pool. A rebuild briefly snapshots the live FIFO and starts a mutation journal,
-then constructs a private candidate state while admissions, confirmed/manual
-removals, descendant pruning, expiry, and watermark eviction continue against
-the live state. The bounded journal aborts a candidate instead of growing
-without limit. Otherwise, the candidate catches up by mutation sequence,
-leaving at most the configured `revalidationDeltaCap` residual per pass, and
-commits only after it reaches the current sequence. The final critical section
-translates consumer cursors and swaps the candidate overlay, ordered
-transaction slice, hash index, and byte totals; its work is independent of
-total pool occupancy. Shutdown is a terminal journal state, and repeated
-ledger-generation changes abandon the candidate after a bounded retry so chain
-activity cannot create a busy loop.
+Ordinary mutations are serialized by a dedicated mutation gate, but chain-update
+revalidation does not hold that gate while it validates the whole pool. Both
+backends briefly snapshot their live state, build a private candidate while
+admissions and removals continue, and replay concurrent changes from a monotonic
+mutation journal. Bounded catch-up loops apply large deltas off the gate and
+leave only a limited residual for the final critical section.
 
-`LedgerState.WithTxValidationSession` is the narrow boundary for a rebuild. It
-pins one published ledger generation (tip, era, and protocol parameters), one
-validation reference slot, and one repeatable-read metadata/blob transaction
-for every transaction in the batch. The mempool verifies that generation again
-immediately before the swap; if a block or rollback published a newer one, the
-candidate is discarded and retried from the live FIFO. This prevents a single
-candidate from mixing transaction results from different ledger or database
-views.
+The shared bounded journal aborts a candidate instead of growing without limit,
+and `plugins.mempool.config.revalidationDeltaCap` controls the residual mutation
+count for both providers. The final critical section translates consumer
+cursors and swaps the candidate overlay, ordered transaction slice, hash index,
+and byte totals; DAG additionally rebuilds and swaps its dependency graph. Its
+work is independent of total pool occupancy. Shutdown terminates an in-flight
+rebuild, and bounded ledger-generation retries prevent chain activity from
+creating a busy loop.
+
+`LedgerState.WithTxValidationSession` is the narrow boundary for every backend
+rebuild. It pins one published ledger generation (tip, era, and protocol
+parameters), one validation reference slot, and one repeatable-read
+metadata/blob transaction for every transaction in the batch. The mempool
+verifies that generation again immediately before the swap; if a block or
+rollback published a newer one, the candidate is discarded and retried from
+the live pool. This prevents one FIFO or DAG candidate from mixing transaction
+results from different ledger or database views.
 
 CBOR decoding and ledger validation run without the primary pool RW lock or
 consumer lock. `Transactions` likewise snapshots transaction values under the
