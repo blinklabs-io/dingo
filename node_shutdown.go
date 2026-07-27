@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/blinklabs-io/dingo/plugin"
 )
 
 func (n *Node) Stop() error {
@@ -135,12 +137,6 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.utxorpc != nil {
-		if stopErr := n.utxorpc.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("utxorpc shutdown: %w", stopErr))
-		}
-	}
-
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
@@ -164,21 +160,16 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.blockfrostAPI != nil {
-		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
-			)
-		}
-	}
-
-	if n.meshAPI != nil {
-		if stopErr := n.meshAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("mesh API shutdown: %w", stopErr),
-			)
+	// API providers are stopped before consumers and stateful dependencies.
+	if n.pluginHost != nil {
+		for _, capability := range []plugin.Capability{
+			plugin.CapabilityAPIUtxorpc,
+			plugin.CapabilityAPIMesh,
+			plugin.CapabilityAPIBlockfrost,
+		} {
+			if stopErr := n.pluginHost.StopCapability(ctx, capability); stopErr != nil {
+				err = errors.Join(err, stopErr)
+			}
 		}
 	}
 
@@ -200,9 +191,9 @@ func (n *Node) shutdown() error {
 	n.config.logger.Info("shutdown phase 2: draining connections")
 	phase2Start := time.Now()
 
-	if n.mempool != nil {
-		if stopErr := n.mempool.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("mempool shutdown: %w", stopErr))
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(ctx, plugin.CapabilityMempool); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 
@@ -272,6 +263,11 @@ func (n *Node) shutdown() error {
 				err,
 				fmt.Errorf("database close: %w", closeErr),
 			)
+		}
+	}
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("plugin host shutdown: %w", stopErr))
 		}
 	}
 

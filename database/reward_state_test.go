@@ -22,7 +22,7 @@ import (
 )
 
 func TestRebuildRewardLiveStakeRejectsInvalidTransaction(t *testing.T) {
-	db, err := New(&Config{DataDir: ""})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, db.Close())
@@ -51,7 +51,7 @@ func TestRebuildRewardLiveStakeRejectsInvalidTransaction(t *testing.T) {
 	})
 
 	t.Run("transaction from another database", func(t *testing.T) {
-		other, err := New(&Config{DataDir: ""})
+		other, err := newTestDatabase(t, &Config{DataDir: ""})
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, other.Close()) })
 		txn := other.MetadataTxn(true)

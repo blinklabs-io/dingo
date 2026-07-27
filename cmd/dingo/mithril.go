@@ -560,13 +560,15 @@ func runMithrilSync(
 		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
 		VerifyCertChain:        cfg.Mithril.VerifyCertificates,
 		CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
-		BlobPlugin:             cfg.BlobPlugin,
-		MetadataPlugin:         cfg.MetadataPlugin,
-		RunMode:                string(config.RunModeLoad),
-		BackfillBatchSize:      cfg.BackfillBatchSize,
-		DatabaseWorkers:        cfg.DatabaseWorkers,
-		Logger:                 logger,
-		OnProgress:             onProgress,
+		StoragePlugins: mithril.StoragePlugins{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		RunMode:           string(config.RunModeLoad),
+		BackfillBatchSize: cfg.BackfillBatchSize,
+		DatabaseWorkers:   cfg.DatabaseWorkers,
+		Logger:            logger,
+		OnProgress:        onProgress,
 	})
 	if err != nil {
 		return err

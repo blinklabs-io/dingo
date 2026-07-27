@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,7 +36,6 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 )
@@ -248,66 +247,35 @@ func testHash28(seed string) []byte {
 	return hash
 }
 
-// isMysqlConfigured checks if mysql is configured via cmdlineOptions or environment variables.
-// It first checks cmdlineOptions (the plugin's configured state), then falls back to environment variables.
+// isMysqlConfigured checks whether integration-test credentials are present.
 // Returns true if a password or DSN is configured, false otherwise.
 func isMysqlConfigured() bool {
-	// Check if cmdlineOptions has a password or DSN set
-	cmdlineOptionsMutex.RLock()
-	password := cmdlineOptions.password
-	dsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
-
-	if password != "" || dsn != "" {
-		return true
-	}
-
-	// Fall back to environment variables
 	return os.Getenv("MYSQL_PASSWORD") != "" || os.Getenv("MYSQL_DSN") != ""
 }
 
 // getTestMysqlOptions returns options for creating a test mysql store.
-// It uses cmdlineOptions if configured, otherwise falls back to environment variables.
+// It reads the standard MySQL integration-test environment variables.
 func getTestMysqlOptions() []MysqlOptionFunc {
-	cmdlineOptionsMutex.RLock()
-	host := cmdlineOptions.host
-	port := uint(cmdlineOptions.port)
-	user := cmdlineOptions.user
-	password := cmdlineOptions.password
-	database := cmdlineOptions.database
-	sslMode := cmdlineOptions.sslMode
-	timeZone := cmdlineOptions.timeZone
-	dsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
+	host, port, user := "localhost", uint(3306), "root"
+	password, database := os.Getenv("MYSQL_PASSWORD"), "dingo_test"
+	sslMode, timeZone, dsn := "", "UTC", os.Getenv("MYSQL_DSN")
 
-	// Override with environment variables if cmdlineOptions password is not set
-	if password == "" {
-		password = os.Getenv("MYSQL_PASSWORD")
-
-		// Also check for other env vars when using env-based config
-		if envHost := os.Getenv("MYSQL_HOST"); envHost != "" {
-			host = envHost
+	if envHost := os.Getenv("MYSQL_HOST"); envHost != "" {
+		host = envHost
+	}
+	if envPort := os.Getenv("MYSQL_PORT"); envPort != "" {
+		if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
+			port = uint(p)
 		}
-		if envPort := os.Getenv("MYSQL_PORT"); envPort != "" {
-			if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
-				port = uint(p)
-			}
-		}
-		if envUser := os.Getenv("MYSQL_USER"); envUser != "" {
-			user = envUser
-		}
-		if envDB := os.Getenv("MYSQL_DATABASE"); envDB != "" {
-			database = envDB
-		} else if database == "mysql" {
-			// Use a separate test database by default
-			database = "dingo_test"
-		}
-		if envSSL := os.Getenv("MYSQL_SSLMODE"); envSSL != "" {
-			sslMode = envSSL
-		}
-		if envDSN := os.Getenv("MYSQL_DSN"); envDSN != "" {
-			dsn = envDSN
-		}
+	}
+	if envUser := os.Getenv("MYSQL_USER"); envUser != "" {
+		user = envUser
+	}
+	if envDB := os.Getenv("MYSQL_DATABASE"); envDB != "" {
+		database = envDB
+	}
+	if envSSL := os.Getenv("MYSQL_SSLMODE"); envSSL != "" {
+		sslMode = envSSL
 	}
 
 	return []MysqlOptionFunc{
@@ -323,7 +291,7 @@ func getTestMysqlOptions() []MysqlOptionFunc {
 }
 
 // newTestMysqlStore creates a new mysql store for testing.
-// It skips the test if mysql is not configured (no password in cmdlineOptions or MYSQL_PASSWORD env var).
+// It skips the test if MySQL credentials are not configured.
 func newTestMysqlStore(t *testing.T) *MetadataStoreMysql {
 	t.Helper()
 
@@ -337,94 +305,6 @@ func newTestMysqlStore(t *testing.T) *MetadataStoreMysql {
 	store, err := NewWithOptions(opts...)
 	if err != nil {
 		t.Fatalf("failed to create mysql store: %v", err)
-	}
-
-	if err := store.Start(); err != nil {
-		t.Fatalf("failed to start mysql store: %v", err)
-	}
-
-	return store
-}
-
-// newTestMysqlStoreFromPlugin creates a mysql store using NewFromCmdlineOptions.
-// This tests the plugin registration path. Skips if not configured.
-func newTestMysqlStoreFromPlugin(t *testing.T) *MetadataStoreMysql {
-	t.Helper()
-
-	if !isMysqlConfigured() {
-		t.Skip(
-			"Skipping mysql integration test: mysql not configured (set MYSQL_PASSWORD or configure via cmdline options)",
-		)
-	}
-
-	// Capture original cmdlineOptions before any modifications
-	cmdlineOptionsMutex.RLock()
-	originalHost := cmdlineOptions.host
-	originalPort := cmdlineOptions.port
-	originalUser := cmdlineOptions.user
-	originalPassword := cmdlineOptions.password
-	originalDatabase := cmdlineOptions.database
-	originalSslMode := cmdlineOptions.sslMode
-	originalTimeZone := cmdlineOptions.timeZone
-	originalDsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
-
-	// Restore original cmdlineOptions after test setup
-	t.Cleanup(func() {
-		cmdlineOptionsMutex.Lock()
-		cmdlineOptions.host = originalHost
-		cmdlineOptions.port = originalPort
-		cmdlineOptions.user = originalUser
-		cmdlineOptions.password = originalPassword
-		cmdlineOptions.database = originalDatabase
-		cmdlineOptions.sslMode = originalSslMode
-		cmdlineOptions.timeZone = originalTimeZone
-		cmdlineOptions.dsn = originalDsn
-		cmdlineOptionsMutex.Unlock()
-	})
-
-	if originalPassword == "" && originalDsn == "" {
-		// Set cmdlineOptions from environment for this test
-		cmdlineOptionsMutex.Lock()
-		if envHost := os.Getenv("MYSQL_HOST"); envHost != "" {
-			cmdlineOptions.host = envHost
-		}
-		if envPort := os.Getenv("MYSQL_PORT"); envPort != "" {
-			if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
-				cmdlineOptions.port = p
-			}
-		}
-		if envUser := os.Getenv("MYSQL_USER"); envUser != "" {
-			cmdlineOptions.user = envUser
-		}
-		cmdlineOptions.password = os.Getenv("MYSQL_PASSWORD")
-		if envDB := os.Getenv("MYSQL_DATABASE"); envDB != "" {
-			cmdlineOptions.database = envDB
-		} else {
-			cmdlineOptions.database = "dingo_test"
-		}
-		if envSSL := os.Getenv("MYSQL_SSLMODE"); envSSL != "" {
-			cmdlineOptions.sslMode = envSSL
-		}
-		if envDSN := os.Getenv("MYSQL_DSN"); envDSN != "" {
-			cmdlineOptions.dsn = envDSN
-		}
-		cmdlineOptionsMutex.Unlock()
-	}
-
-	p := NewFromCmdlineOptions()
-	if p == nil {
-		t.Fatal("NewFromCmdlineOptions returned nil")
-	}
-
-	// Check if it's an error plugin
-	if _, ok := p.(*plugin.ErrorPlugin); ok {
-		t.Fatal("NewFromCmdlineOptions returned an error plugin")
-	}
-
-	store, ok := p.(*MetadataStoreMysql)
-	if !ok {
-		t.Fatalf("expected *MetadataStoreMysql, got %T", p)
 	}
 
 	if err := store.Start(); err != nil {

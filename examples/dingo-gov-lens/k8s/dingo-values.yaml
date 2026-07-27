@@ -12,12 +12,12 @@ environment:
   CARDANO_NETWORK: "preview"
   CARDANO_DATABASE_PATH: "/data"
   DINGO_STORAGE_MODE: "api"
-  DINGO_DATABASE_METADATA_PLUGIN: "postgres"
-  DINGO_DATABASE_METADATA_POSTGRES_DSN: "host=postgres.example.svc port=5432 user=dingo password=change-me dbname=dingo_metadata sslmode=verify-full sslrootcert=/etc/postgres-ca/ca.crt TimeZone=UTC"
-  DINGO_DATABASE_BLOB_PLUGIN: "badger"
-  DINGO_UTXORPC_PORT: "0"
-  DINGO_BLOCKFROST_PORT: "0"
-  DINGO_MESH_PORT: "0"
+  DINGO_PLUGINS_STORAGE_METADATA_PROVIDER: "postgres"
+  DINGO_PLUGINS_STORAGE_METADATA_CONFIG_DSN: "host=postgres.example.svc port=5432 user=dingo password=change-me dbname=dingo_metadata sslmode=verify-full sslrootcert=/etc/postgres-ca/ca.crt TimeZone=UTC"
+  DINGO_PLUGINS_STORAGE_BLOB_PROVIDER: "badger"
+  DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT: "0"
+  DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT: "0"
+  DINGO_PLUGINS_API_MESH_CONFIG_PORT: "0"
 
 persistence:
   accessMode: ReadWriteOnce

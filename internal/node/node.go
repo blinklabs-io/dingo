@@ -32,7 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -301,11 +301,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		)
 		storageMode = dingo.StorageModeAPI
 	}
+	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
+	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
+	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
-		"blockfrost", storageMode.IsAPI() && cfg.BlockfrostPort > 0,
-		"utxorpc", storageMode.IsAPI() && cfg.UtxorpcPort > 0,
-		"mesh", storageMode.IsAPI() && cfg.MeshPort > 0,
+		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
+		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
+		"mesh", storageMode.IsAPI() && meshPort > 0,
 		"midnight_indexing", storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
 	)
@@ -315,21 +318,18 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithIntersectTip(cfg.IntersectTip),
 			dingo.WithLogger(logger),
 			dingo.WithDatabasePath(cfg.DatabasePath),
-			dingo.WithBlobPlugin(cfg.BlobPlugin),
-			dingo.WithMetadataPlugin(cfg.MetadataPlugin),
-			dingo.WithMempoolImplementation(
-				mempool.Implementation(cfg.MempoolImplementation),
-			),
-			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
-			dingo.WithEvictionWatermark(cfg.EvictionWatermark),
-			dingo.WithRejectionWatermark(cfg.RejectionWatermark),
+			dingo.WithPluginSelection(plugin.CapabilityStorageBlob, cfg.Plugins.Storage.Blob),
+			dingo.WithPluginSelection(plugin.CapabilityStorageMetadata, cfg.Plugins.Storage.Metadata),
+			dingo.WithPluginSelection(plugin.CapabilityMempool, cfg.Plugins.Mempool),
+			dingo.WithPluginSelection(plugin.CapabilityAPIBlockfrost, cfg.Plugins.API.Blockfrost),
+			dingo.WithPluginSelection(plugin.CapabilityAPIMesh, cfg.Plugins.API.Mesh),
+			dingo.WithPluginSelection(plugin.CapabilityAPIUtxorpc, cfg.Plugins.API.Utxorpc),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithNetworkMagic(cfg.NetworkMagic),
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),
 			dingo.WithPeerSharing(peerSharing),
-			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
@@ -432,8 +432,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				chainsyncStrategy,
 			),
 			dingo.WithBindAddr(cfg.BindAddr),
-			dingo.WithBlockfrostPort(cfg.BlockfrostPort),
-			dingo.WithMeshPort(cfg.MeshPort),
 			dingo.WithStorageMode(storageMode),
 			// CIP-23 minimum pool margin (consensus-affecting)
 			dingo.WithMinPoolMargin(cfg.MinPoolMargin),

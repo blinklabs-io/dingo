@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,11 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build dingo_extra_plugins
-
-package metadata
+package blob
 
 import (
-	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
-	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
+	"log/slog"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// ProviderDependencies are shared application settings injected into any
+// storage.blob provider.
+type ProviderDependencies struct {
+	DataDir      string
+	RunMode      string
+	StorageMode  string
+	Logger       *slog.Logger
+	PromRegistry prometheus.Registerer
+}

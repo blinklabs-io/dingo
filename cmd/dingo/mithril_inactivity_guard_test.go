@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -57,8 +59,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	cfg := &config.Config{
 		DelegatorInactivityEnabled: true,
 		DatabasePath:               dir,
-		BlobPlugin:                 "badger",
-		MetadataPlugin:             "sqlite",
+		Plugins:                    testStoragePlugins(),
 	}
 
 	// Gate on, fresh (non-bootstrapped) database: allowed.
@@ -67,15 +68,13 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	// Mark the database as Mithril-bootstrapped, then confirm serving is
 	// refused. The key mirrors mithril's durable immutable-import marker
 	// (mithril.WasBootstrapped / import_marker.go).
-	db, err := database.New(&database.Config{
-		DataDir:        dir,
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: dir,
+		Logger:  logger,
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetSyncState("mithril_immutable_max", "26887", nil))
-	require.NoError(t, db.Close())
+	require.NoError(t, dbtest.CloseDatabase(db))
 
 	err = checkMithrilInactivityCompat(cfg, logger)
 	require.Error(t, err)
@@ -94,23 +93,35 @@ func TestCheckMithrilInactivityCompatLegacyMarker(t *testing.T) {
 	cfg := &config.Config{
 		DelegatorInactivityEnabled: true,
 		DatabasePath:               dir,
-		BlobPlugin:                 "badger",
-		MetadataPlugin:             "sqlite",
+		Plugins:                    testStoragePlugins(),
 	}
 
 	// Legacy bootstrap: only the durable mithril_ledger_slot boundary is set,
 	// with no newer mithril_immutable_max marker.
-	db, err := database.New(&database.Config{
-		DataDir:        dir,
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: dir,
+		Logger:  logger,
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "12345678", nil))
-	require.NoError(t, db.Close())
+	require.NoError(t, dbtest.CloseDatabase(db))
 
 	err = checkMithrilInactivityCompat(cfg, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot use Mithril bootstrap")
+}
+
+func testStoragePlugins() config.PluginsConfig {
+	return config.PluginsConfig{
+		Storage: config.StoragePluginsConfig{
+			Blob: plugin.Selection{
+				Provider: "badger",
+				Config:   map[string]any{},
+			},
+			Metadata: plugin.Selection{
+				Provider: "sqlite",
+				Config:   map[string]any{},
+			},
+		},
+	}
 }

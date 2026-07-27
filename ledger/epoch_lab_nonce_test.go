@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -43,9 +44,8 @@ import (
 // blake2b(frozenCandidate || epoch1347.LastEpochBlockNonce); eta_1349 lab =
 // prevHash(94d3083a) = 08a8dd12.
 func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -197,9 +197,8 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 // returned as-is — NOT converted to the boundary block's own hash (the old
 // "normalize PrevHash -> Hash" behavior was the eta_1349 off-by-one regression).
 func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
 
 	const (
 		epochStart uint64 = 200
@@ -230,9 +229,8 @@ func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
 }
 
 func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -294,9 +292,8 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) 
 // block and wedges every following epoch at the tip. koios preview:
 // eta_1349 lab = prevHash(94d3083a, last block of 1347) = 08a8dd12.
 func TestEpochLabNonceReturnsPrevHashNotHash(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
 
 	const (
 		epochStart uint64 = 1000

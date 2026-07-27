@@ -1,306 +1,110 @@
-# Plugin Development Guide
+# Compiled-in Plugin Development
 
-This guide explains how to develop plugins for Dingo's storage system.
+Dingo plugins are compiled-in Go providers registered explicitly on an
+application-owned `plugin.Host`. Registration never happens in `init`, provider
+configuration is decoded before construction, and the host owns `Start`/`Stop`.
 
-## Overview
+Storage contracts remain in `database/plugin/blob` and
+`database/plugin/metadata`; the generic `plugin` package does not import either
+domain. The same platform also hosts mempool and API providers.
 
-Dingo supports pluggable storage backends through a registration-based plugin system. Plugins can extend the system with new blob storage (blocks, transactions) and metadata storage (indexes, state) implementations.
+## Provider shape
 
-## Plugin Types
-
-### Blob Storage Plugins
-Store blockchain data (blocks, transactions, etc.). Examples:
-- `badger` - Local BadgerDB key-value store
-- `gcs` - Google Cloud Storage
-- `s3` - AWS S3
-
-#### Iterator lifetime note
-Blob plugins expose iterators via `NewIterator(txn, opts)`. Items returned by the
-iterator's `Item()` must only be accessed while the transaction used to create
-the iterator is still active — implementations may validate transaction state at
-access time and will return errors if the transaction has been committed or
-rolled back. See `database/types/types.go` `BlobIterator` for details.
-
-### Metadata Storage Plugins
-Store metadata and indexes. Examples:
-- `sqlite` - SQLite relational database
-
-## Plugin Interface
-
-All plugins must implement the `plugin.Plugin` interface:
+Define a typed provider config, use the domain dependency bundle for shared
+settings, and register a typed factory:
 
 ```go
-type Plugin interface {
-    Start() error
-    Stop() error
+type Config struct {
+    Bucket string `yaml:"bucket"`
 }
-```
 
-## Plugin Registration
-
-Plugins register themselves during package initialization using the `plugin.Register()` function:
-
-```go
-func init() {
-    plugin.Register(plugin.PluginEntry{
-        Type:               plugin.PluginTypeBlob, // or PluginTypeMetadata
-        Name:               "myplugin",
-        Description:        "My custom storage plugin",
-        NewFromOptionsFunc: NewFromCmdlineOptions,
-        Options: []plugin.PluginOption{
-            // Plugin-specific options
+func RegisterProvider(host *plugin.Host) error {
+    return plugin.Register(
+        host,
+        plugin.Descriptor{
+            Capability:  plugin.CapabilityStorageBlob,
+            Name:        "example",
+            Description: "Example blob store",
         },
-    })
+        func() Config { return Config{} },
+        func(
+            ctx context.Context,
+            cfg Config,
+            deps blob.ProviderDependencies,
+        ) (*Store, plugin.Instance, error) {
+            store, err := New(cfg.Bucket, deps.Logger)
+            if err != nil {
+                return nil, nil, err
+            }
+            lifecycle := plugin.Lifecycle{
+                StartFunc: func(ctx context.Context) error {
+                    if err := ctx.Err(); err != nil {
+                        return err
+                    }
+                    return store.Start()
+                },
+                StopFunc: func(context.Context) error { return store.Stop() },
+            }
+            return store, lifecycle, nil
+        },
+    )
 }
 ```
 
-## Plugin Options
+Keep shared node settings such as data directory, storage mode, logger, and
+metrics registry in the dependency bundle. A local storage provider may expose
+a typed `dataDir` override while using the injected directory as its fallback;
+this preserves the application-wide database-path shortcut. Other provider
+config contains only provider-specific settings. Configuration decoding rejects
+unknown fields.
 
-Plugins define configuration options using the `PluginOption` struct:
+Register always-built providers in `internal/plugins/register.go`. Register
+optional providers in `internal/plugins/register_extra.go`, guarded by
+`dingo_extra_plugins`. Add the provider name to the known optional-provider
+map so an untagged binary returns the actionable build-tag error.
 
-```go
-plugin.PluginOption{
-    Name:         "data-dir",           // Option name
-    Type:         plugin.PluginOptionTypeString, // Data type
-    Description:  "Data directory path", // Help text
-    DefaultValue: "/tmp/data",         // Default value
-    Dest:         &cmdlineOptions.dataDir, // Destination variable
-}
-```
-
-Supported option types:
-- `PluginOptionTypeString`
-- `PluginOptionTypeBool`
-- `PluginOptionTypeInt`
-- `PluginOptionTypeUint`
-
-## Environment Variables
-
-Plugins automatically support environment variables with the pattern:
-`DINGO_DATABASE_{TYPE}_{PLUGIN}_{OPTION}`
-
-Examples:
-- `DINGO_DATABASE_BLOB_BADGER_DATA_DIR=/data`
-- `DINGO_DATABASE_METADATA_SQLITE_DATA_DIR=/metadata.db`
-
-## YAML Configuration
-
-Plugins can be configured in `dingo.yaml`:
+## Configuration
 
 ```yaml
-database:
-  blob:
-    plugin: "myplugin"
-    myplugin:
-      option1: "value1"
-      option2: 42
-  metadata:
-    plugin: "sqlite"
-    sqlite:
-      data-dir: "/data/metadata.db"
+plugins:
+  storage:
+    blob:
+      provider: example
+      config:
+        bucket: blocks
 ```
 
-## Configuration Precedence
-
-1. Command-line flags (highest priority)
-2. Environment variables
-3. YAML configuration
-4. Default values (lowest priority)
-
-## Command Line Options
-
-Plugins support command-line flags with the pattern:
-`--{type}-{plugin}-{option}`
-
-Examples:
-- `--blob-badger-data-dir /data`
-- `--metadata-sqlite-data-dir /metadata.db`
-
-## Plugin Development Steps
-
-### 1. Create Plugin Structure
+The selector flag is `--blob example`. Generic environment paths flatten the
+capability and config field names, for example:
 
 ```text
-database/plugin/{type}/{name}/
-├── plugin.go      # Registration and options
-├── options.go     # Option functions
-├── database.go    # Core implementation
-└── options_test.go # Unit tests
+DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=example
+DINGO_PLUGINS_STORAGE_BLOB_CONFIG_BUCKET=blocks
 ```
 
-### 2. Implement Core Plugin
+Precedence is selector CLI flag, generic plugin environment, YAML, then
+provider defaults. There are no provider-specific flags, mutable global option
+destinations, or name-based storage constructors.
 
-Create the main plugin struct that implements `plugin.Plugin`:
+## Lifecycle and tests
 
-```go
-type MyPlugin struct {
-    // Fields
-}
+Factories should construct resources without starting background work.
+`Start` begins the provider and `Stop` must be idempotent. If startup fails,
+the host stops that provider before returning the error. Composition code owns
+unwinding previously started providers around their non-plugin dependents.
 
-func (p *MyPlugin) Start() error {
-    // Initialize resources
-    return nil
-}
+The built-in storage stores expose `Start`/`Stop` with no context parameter, so
+the lifecycle adapter honors cancellation only at the boundary: `StartFunc`
+returns early on `ctx.Err()` before beginning work, but it cannot interrupt a
+`Start` already in progress. `StopFunc` runs cleanup regardless of `ctx` state.
+If your store's own start/stop accept a context, thread it through instead.
 
-func (p *MyPlugin) Stop() error {
-    // Clean up resources
-    return nil
-}
+Test strict configuration decoding, construction/start failures, normal stop,
+and the subsystem contract. Storage providers must preserve transaction,
+iterator-lifetime, commit-timestamp, optimization, and persisted-format
+semantics. Run both:
+
+```text
+go test ./...
+go test -tags dingo_extra_plugins ./...
 ```
-
-### 3. Define Options
-
-Create option functions following the pattern:
-
-```go
-func WithOptionName(value Type) OptionFunc {
-    return func(p *MyPlugin) {
-        p.field = value
-    }
-}
-```
-
-### 4. Implement Constructors
-
-Provide both options-based and legacy constructors:
-
-```go
-func NewWithOptions(opts ...OptionFunc) (*MyPlugin, error) {
-    p := &MyPlugin{}
-    for _, opt := range opts {
-        opt(p)
-    }
-    return p, nil
-}
-
-func New(legacyParam1, legacyParam2) (*MyPlugin, error) {
-    // For backward compatibility
-    return NewWithOptions(
-        WithOption1(legacyParam1),
-        WithOption2(legacyParam2),
-    )
-}
-```
-
-### 5. Register Plugin
-
-In `plugin.go`, register during initialization:
-
-```go
-var cmdlineOptions struct {
-    option1 string
-    option2 int
-}
-
-func init() {
-    plugin.Register(plugin.PluginEntry{
-        Type: plugin.PluginTypeBlob,
-        Name: "myplugin",
-        Description: "My custom plugin",
-        NewFromOptionsFunc: NewFromCmdlineOptions,
-        Options: []plugin.PluginOption{
-            {
-                Name: "option1",
-                Type: plugin.PluginOptionTypeString,
-                Description: "First option",
-                DefaultValue: "default",
-                Dest: &cmdlineOptions.option1,
-            },
-            // More options...
-        },
-    })
-}
-
-func NewFromCmdlineOptions() plugin.Plugin {
-    p, err := NewWithOptions(
-        WithOption1(cmdlineOptions.option1),
-        WithOption2(cmdlineOptions.option2),
-    )
-    if err != nil {
-        panic(err)
-    }
-    return p
-}
-```
-
-### 6. Add Tests
-
-Create comprehensive tests:
-
-```go
-func TestOptions(t *testing.T) {
-    // Test option functions
-}
-
-func TestLifecycle(t *testing.T) {
-    p, err := NewWithOptions(WithOption1("test"))
-    // Test Start/Stop
-}
-```
-
-### 7. Update Imports
-
-Add your plugin to the import list in the appropriate store file:
-- `database/plugin/blob/blob.go` for blob plugins
-- `database/plugin/metadata/metadata.go` for metadata plugins
-
-## Example: Complete Plugin
-
-See the existing plugins for complete examples:
-- `database/plugin/blob/badger/` - BadgerDB implementation
-- `database/plugin/metadata/sqlite/` - SQLite implementation
-- `database/plugin/blob/gcs/` - Google Cloud Storage implementation
-- `database/plugin/blob/aws/` - AWS S3 implementation
-
-## Best Practices
-
-1. **Error Handling**: Always return descriptive errors
-2. **Resource Management**: Properly implement Start/Stop for resource lifecycle
-3. **Thread Safety**: Ensure plugins are safe for concurrent use
-4. **Configuration Validation**: Validate configuration during construction
-5. **Backward Compatibility**: Maintain compatibility with existing deployments
-6. **Documentation**: Document all options and their effects
-7. **Testing**: Provide comprehensive unit and integration tests
-
-## Testing Your Plugin
-
-### Unit Tests
-Test individual components and option functions.
-
-### Integration Tests
-Test the complete plugin lifecycle and interaction with the plugin system.
-
-### CLI Testing
-Use the CLI to test plugin listing and selection:
-
-```bash
-./dingo --blob list
-./dingo --metadata list
-```
-
-### Configuration Testing
-Test environment variables and YAML configuration:
-
-```bash
-DINGO_DATABASE_BLOB_MYPLUGIN_OPTION1=value ./dingo --blob myplugin
-```
-
-## Programmatic Option Overrides (for tests)
-
-When writing tests or programmatically constructing database instances you can override plugin options
-without importing plugin implementation packages directly by using the plugin registry helper:
-
-```go
-// Set data-dir for the blob plugin to a per-test temp directory
-plugin.SetPluginOption(plugin.PluginTypeBlob, "badger", "data-dir", t.TempDir())
-
-// Set data-dir for the metadata plugin
-plugin.SetPluginOption(plugin.PluginTypeMetadata, "sqlite", "data-dir", t.TempDir())
-```
-
-The helper sets the plugin option's destination variable in the registry before plugin instantiation.
-If the requested option is not defined by the targeted plugin the call is non-fatal and returns nil,
-allowing tests to run regardless of which plugin implementation is selected.
-
-Using `t.TempDir()` guarantees each test uses its own on-disk path and prevents concurrent tests from
-colliding on shared directories (for example the default `.dingo` Badger directory).

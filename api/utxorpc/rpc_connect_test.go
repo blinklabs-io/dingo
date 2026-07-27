@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -140,13 +141,10 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 	)
 	require.NoError(t, err)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 
 	blocks := loadTestChainBlocks(t, opts.numBlocks)
 	require.NotEmpty(t, blocks)

@@ -61,7 +61,7 @@ import (
 // has chosen its decoder for. The two scenarios below seed both rows
 // at the same epoch and confirm the filter picks the right one.
 func TestGetPParams_PicksRowMatchingRequestedEra(t *testing.T) {
-	db, err := New(&Config{DataDir: ""})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
@@ -153,7 +153,7 @@ func TestGetPParams_PicksRowMatchingRequestedEra(t *testing.T) {
 // would return the Alonzo-shape row (27 fields) and the Mary decoder
 // fail on element count.
 func TestGetPParams_MaryToAlonzo_PicksMaryRow(t *testing.T) {
-	db, err := New(&Config{DataDir: ""})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 

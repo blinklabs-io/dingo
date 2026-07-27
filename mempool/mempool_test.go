@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -134,6 +134,7 @@ func newTestMempool(t *testing.T) *Mempool {
 		MempoolCapacity: 1024 * 1024, // 1MB
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -151,6 +152,7 @@ func newTestMempoolWithValidator(
 		MempoolCapacity: 1024 * 1024,
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -1764,6 +1766,7 @@ func newTestMempoolWithCapacity(
 		RejectionWatermark: rejectionWM,
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -2177,6 +2180,7 @@ func newTestMempoolWithTTL(
 		CleanupInterval: cleanupInterval,
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -3311,4 +3315,16 @@ func TestNewMempool_RejectsNilValidator(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrNilValidator)
 	assert.Nil(t, m)
+}
+
+// TestNewConsumerReturnsUntypedNilAfterStop pins that NewConsumer hands back an
+// untyped nil interface (not an interface wrapping a nil *MempoolConsumer) when
+// the mempool is stopped, so callers' == nil checks detect the stopped mempool.
+func TestNewConsumerReturnsUntypedNilAfterStop(t *testing.T) {
+	m := newTestMempool(t)
+	require.NoError(t, m.Stop(context.Background()))
+	consumer := m.NewConsumer(newTestConnectionId(1))
+	if consumer != nil {
+		t.Fatalf("NewConsumer after Stop = %#v, want untyped nil", consumer)
+	}
 }

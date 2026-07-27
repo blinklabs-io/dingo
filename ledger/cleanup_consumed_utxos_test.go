@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -35,12 +36,11 @@ import (
 // mode. An empty mode defaults to core (per Database.New).
 func newTestDBForCleanup(t *testing.T, mode string) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir:     "",
 		StorageMode: mode,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 

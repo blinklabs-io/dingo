@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -59,6 +60,29 @@ type MempoolTransaction struct {
 	Hash     string
 	Cbor     []byte
 	Type     uint
+}
+
+// Consumer is the neutral per-connection transaction cursor used by
+// TxSubmission.
+type Consumer interface {
+	NextTx(bool) *MempoolTransaction
+	GetTxFromCache(string) *MempoolTransaction
+	ClearCache()
+	RemoveTxFromCache(string)
+}
+
+// Service is the domain-owned mempool capability consumed by node wiring,
+// networking, forging, ledger, and APIs.
+type Service interface {
+	AddTransaction(uint, []byte) error
+	GetTransaction(string) (MempoolTransaction, bool)
+	Transactions() []MempoolTransaction
+	RemoveTransaction(string)
+	RemoveTxsByHash([]string)
+	NewConsumer(ouroboros.ConnectionId) Consumer
+	RemoveConsumer(ouroboros.ConnectionId)
+	FindConsumer(ouroboros.ConnectionId) Consumer
+	CapacityBytes() int64
 }
 
 // TxValidator defines the interface for transaction validation needed by mempool.
@@ -109,6 +133,9 @@ type Mempool struct {
 	sync.RWMutex
 	doneOnce       sync.Once
 	mutationMutex  sync.Mutex
+	startOnce      sync.Once
+	stopOnce       sync.Once
+	workerWG       sync.WaitGroup
 	consumersMutex sync.Mutex
 	overlay        *utxoOverlay
 }
@@ -426,11 +453,34 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 		},
 	)
 	m.metrics.implementation.Set(1)
-	// Subscribe to chain update events
-	go m.processChainEvents()
-	// Start TTL cleanup goroutine
-	go m.expireTransactions()
 	return m, nil
+}
+
+// Start begins the mempool background lifecycle. Construction is deliberately
+// side-effect free so the plugin host owns startup and rollback.
+func (m *Mempool) Start(ctx context.Context) error {
+	// Honor a caller that has already abandoned startup: do not launch the
+	// background workers if the context is cancelled.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.Lock()
+	defer m.Unlock()
+	if m.stopped {
+		return ErrMempoolStopped
+	}
+	m.startOnce.Do(func() {
+		m.workerWG.Add(2)
+		go func() {
+			defer m.workerWG.Done()
+			m.processChainEvents()
+		}()
+		go func() {
+			defer m.workerWG.Done()
+			m.expireTransactions()
+		}()
+	})
+	return nil
 }
 
 func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
@@ -449,6 +499,18 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	return consumer
 }
 
+// NewConsumer exposes AddConsumer through the neutral Service contract.
+func (m *Mempool) NewConsumer(connId ouroboros.ConnectionId) Consumer {
+	consumer := m.AddConsumer(connId)
+	if consumer == nil {
+		// AddConsumer returns a nil *MempoolConsumer when the mempool is
+		// stopped. Return an untyped nil interface so callers' == nil checks
+		// detect it, rather than a non-nil interface wrapping a nil pointer.
+		return nil
+	}
+	return consumer
+}
+
 func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	m.consumersMutex.Lock()
 	delete(m.consumers, connId)
@@ -456,39 +518,60 @@ func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 }
 
 func (m *Mempool) Stop(ctx context.Context) error {
-	// Context is accepted for API consistency but not used since cleanup is synchronous and fast
 	m.logger.Debug("stopping mempool")
-	m.mutationMutex.Lock()
-	defer m.mutationMutex.Unlock()
-
-	// Establish a terminal state before clearing data. AddTransaction and
-	// AddConsumer check this state while holding the same pool lock, so neither
-	// can repopulate the mempool once shutdown begins.
-	m.Lock()
-	if m.stopped {
+	m.stopOnce.Do(func() {
+		// Establish a terminal state before waiting for background workers.
+		// Releasing the mutation and pool locks lets in-flight workers finish.
+		m.mutationMutex.Lock()
+		m.Lock()
+		m.stopped = true
+		m.doneOnce.Do(func() { close(m.done) })
 		m.Unlock()
-		return nil
-	}
-	m.stopped = true
-	m.doneOnce.Do(func() { close(m.done) })
+		m.mutationMutex.Unlock()
 
-	m.consumersMutex.Lock()
-	for _, consumer := range m.consumers {
-		if consumer != nil {
-			consumer.ClearCache()
+		// Wait for the background workers to drain, but honor the caller's
+		// deadline so a wedged worker cannot block shutdown forever. The
+		// terminal state above already rejects new work and signals the
+		// workers to exit, so if the context fires first the mempool is still
+		// safely stopped; we only skip the best-effort memory teardown below
+		// (the workers will still exit on their own once they observe the
+		// closed done channel). Stop stays best-effort and returns nil.
+		workersDone := make(chan struct{})
+		go func() {
+			m.workerWG.Wait()
+			close(workersDone)
+		}()
+		select {
+		case <-workersDone:
+		case <-ctx.Done():
+			m.logger.Debug(
+				"mempool stop cancelled before workers drained; "+
+					"skipping teardown",
+				"error", ctx.Err(),
+			)
+			return
 		}
-	}
-	m.consumers = make(map[ouroboros.ConnectionId]*MempoolConsumer)
-	m.consumersMutex.Unlock()
 
-	m.transactions = []*MempoolTransaction{}
-	m.txByHash = make(map[string]*MempoolTransaction)
-	m.currentSizeBytes = 0
-	m.overlay.reset()
-	// Reset metrics
-	m.metrics.txsInMempool.Set(0)
-	m.metrics.mempoolBytes.Set(0)
-	m.Unlock()
+		m.mutationMutex.Lock()
+		defer m.mutationMutex.Unlock()
+		m.Lock()
+		defer m.Unlock()
+		m.consumersMutex.Lock()
+		for _, consumer := range m.consumers {
+			if consumer != nil {
+				consumer.ClearCache()
+			}
+		}
+		m.consumers = make(map[ouroboros.ConnectionId]*MempoolConsumer)
+		m.consumersMutex.Unlock()
+
+		m.transactions = []*MempoolTransaction{}
+		m.txByHash = make(map[string]*MempoolTransaction)
+		m.currentSizeBytes = 0
+		m.overlay.reset()
+		m.metrics.txsInMempool.Set(0)
+		m.metrics.mempoolBytes.Set(0)
+	})
 
 	m.logger.Debug("mempool stopped")
 	return nil
@@ -498,6 +581,64 @@ func (m *Mempool) Consumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	m.consumersMutex.Lock()
 	defer m.consumersMutex.Unlock()
 	return m.consumers[connId]
+}
+
+// FindConsumer exposes Consumer through the neutral Service contract.
+func (m *Mempool) FindConsumer(connId ouroboros.ConnectionId) Consumer {
+	consumer := m.Consumer(connId)
+	if consumer == nil {
+		return nil
+	}
+	return consumer
+}
+
+// ProviderConfig is the canonical configuration for the default mempool.
+type ProviderConfig struct {
+	Capacity           int64   `yaml:"capacity"`
+	EvictionWatermark  float64 `yaml:"evictionWatermark"`
+	RejectionWatermark float64 `yaml:"rejectionWatermark"`
+}
+
+// ProviderDependencies are runtime dependencies assembled after ledger and
+// database startup.
+type ProviderDependencies struct {
+	PromRegistry    prometheus.Registerer
+	Validator       TxValidator
+	Logger          *slog.Logger
+	EventBus        *event.EventBus
+	CurrentSlotFunc func() uint64
+}
+
+// RegisterProvider registers the current implementation as mempool/default.
+func RegisterProvider(host *plugin.Host) error {
+	return plugin.Register(
+		host,
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityMempool,
+			Name:        "default",
+			Description: "Dingo transaction mempool",
+		},
+		func() ProviderConfig {
+			return ProviderConfig{
+				EvictionWatermark:  DefaultEvictionWatermark,
+				RejectionWatermark: DefaultRejectionWatermark,
+			}
+		},
+		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (Service, plugin.Instance, error) {
+			m, err := NewMempool(MempoolConfig{
+				PromRegistry: deps.PromRegistry, Validator: deps.Validator,
+				Logger: deps.Logger, EventBus: deps.EventBus,
+				MempoolCapacity:    cfg.Capacity,
+				EvictionWatermark:  cfg.EvictionWatermark,
+				RejectionWatermark: cfg.RejectionWatermark,
+				CurrentSlotFunc:    deps.CurrentSlotFunc,
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+			return m, m, nil
+		},
+	)
 }
 
 func (m *Mempool) processChainEvents() {
@@ -573,7 +714,10 @@ func (m *Mempool) rebuildOverlay() error {
 		newOverlay := newUtxoOverlay()
 		var invalidHashes []string
 		for _, at := range prevApplied {
-			tmpTx, decodeErr := gledger.NewTransactionFromCbor(at.txType, at.cbor)
+			tmpTx, decodeErr := gledger.NewTransactionFromCbor(
+				at.txType,
+				at.cbor,
+			)
 			if decodeErr != nil {
 				invalidHashes = append(invalidHashes, at.hash)
 				m.logger.Error(
@@ -813,7 +957,9 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 				evictedBytes += int64(len(m.transactions[i].Cbor))
 				evictedHashes[m.transactions[i].Hash] = struct{}{}
 			}
-			validConsumed, validCreated = m.overlay.simulateRemoveBatch(evictedHashes)
+			validConsumed, validCreated = m.overlay.simulateRemoveBatch(
+				evictedHashes,
+			)
 		}
 		m.Unlock()
 

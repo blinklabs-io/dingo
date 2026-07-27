@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -31,13 +32,11 @@ import (
 
 func newDonationTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	return db
 }
 

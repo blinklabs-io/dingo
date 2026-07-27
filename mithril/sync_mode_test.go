@@ -8,20 +8,19 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
 func newSyncModeTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	db, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  logger,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	return db
 }
 

@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -191,13 +192,11 @@ func (l testSecurityParamLedger) SecurityParam() int {
 func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 	t.Helper()
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -874,7 +873,10 @@ func TestChainsyncServerRequestNext_SyncIteratorErrorPropagates(
 	)
 	require.NoError(t, err)
 	clientState.NeedsInitialRollback = false
-	require.NoError(t, h.ledgerState.Database().Close())
+	require.NoError(
+		t,
+		dbtest.CloseDatabase(h.ledgerState.Database()),
+	)
 
 	// Request the next item from the now-broken iterator.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{

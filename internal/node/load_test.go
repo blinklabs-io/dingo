@@ -216,7 +216,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
-	// SetPluginOption and the in-memory schema migration.
+	// instance-local provider setup and the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
 		"..",
@@ -379,7 +379,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 ) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
-	// SetPluginOption and the in-memory schema migration.
+	// instance-local provider setup and the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
 		"..",
@@ -670,7 +670,7 @@ func TestCaptureLoadGenesisSnapshot_BlockProducerFatal(t *testing.T) {
 	mgr := snapshot.NewManager(db, nil, logger)
 
 	// Close the database so the capture call fails deterministically.
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDB(db))
 
 	err := captureLoadGenesisSnapshot(
 		context.Background(),
@@ -690,7 +690,7 @@ func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mgr := snapshot.NewManager(db, nil, logger)
 
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDB(db))
 
 	err := captureLoadGenesisSnapshot(
 		context.Background(),
@@ -718,7 +718,7 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	t *testing.T,
 ) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state (see
-	// database.go:164), so concurrent test runs race on SetPluginOption and
+	// database construction, so concurrent test runs share no provider options and
 	// the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
@@ -856,7 +856,7 @@ func TestRunPlannerStats_Idempotent(t *testing.T) {
 
 func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
 	db := newTestDB(t)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDB(db))
 
 	err := RunPlannerStats(db, slog.Default())
 	require.Error(t, err)

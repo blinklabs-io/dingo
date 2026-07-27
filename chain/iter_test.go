@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
@@ -35,13 +36,10 @@ import (
 func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 
 	blocks := []models.Block{
 		{
@@ -114,13 +112,10 @@ func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
 func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		DataDir:        t.TempDir(),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 
 	ledgerTipHash := bytes.Repeat([]byte{0x02}, 32)
 	blocks := []models.Block{

@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
@@ -115,11 +116,9 @@ var (
 		},
 	}
 	dbConfig = &database.Config{
-		Logger:         nil,
-		PromRegistry:   nil,
-		DataDir:        "",
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		Logger:       nil,
+		PromRegistry: nil,
+		DataDir:      "",
 	}
 )
 
@@ -225,11 +224,11 @@ func TestChainBasic(t *testing.T) {
 }
 
 func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -280,11 +279,11 @@ func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
 // 60, 80, 100): below all, at a block slot, between blocks, and above the tip.
 // It guards the #2771 change from the linear backward walk to a binary search.
 func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
@@ -1226,7 +1225,7 @@ func TestChainFromIntersect(t *testing.T) {
 			Slot: testBlocks[testForkPointIndex].MockSlot,
 		},
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}
@@ -1470,18 +1469,16 @@ func TestIntersectPointsIncludesOlderSamples(t *testing.T) {
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	cfg := &database.Config{
-		DataDir:        t.TempDir(),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		DataDir: t.TempDir(),
 	}
-	db, err := database.New(cfg)
+	db, err := dbtest.NewDatabase(t, cfg)
 	if err != nil {
 		t.Fatalf(
 			"unexpected error creating database: %s",
 			err,
 		)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 	return db
 }
 
@@ -1807,7 +1804,7 @@ func TestChainFork(t *testing.T) {
 			MockPrevHash:    testHashPrefix + "00a5",
 		},
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	if err != nil {
 		t.Fatalf("unexpected error creating database: %s", err)
 	}

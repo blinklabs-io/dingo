@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -260,14 +261,12 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 ) {
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	rewardAddress, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xE1}, testGapHash28("proposal-reward")...),
@@ -403,14 +402,12 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -497,14 +494,12 @@ func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 
 func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 	tmpDir := t.TempDir()
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Three synthetic blocks at well-separated slots so the deletion
 	// boundary is unambiguous. CBOR/type don't need to parse — the
@@ -535,14 +530,12 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 
 func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 	tmpDir := t.TempDir()
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	blocks := []models.Block{
 		{Slot: 100, Hash: testGapHash32("blk-100"), Cbor: []byte{0x82, 0x01}, Type: 1},
@@ -570,14 +563,12 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 func TestLoadGapBlocksFromBlob(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := database.New(&database.Config{
-		DataDir:        tmpDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	immutableDir := filepath.Join(
 		"..",

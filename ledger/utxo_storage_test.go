@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 // TestUtxoStorageAndRetrieval tests that UTxOs from regular blocks are stored
@@ -50,14 +51,12 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 
 	// Create database
 	dbConfig := &database.Config{
-		DataDir:        tmpDir,
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		DataDir: tmpDir,
+		Logger:  logger,
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Load blocks from immutable testdata
 	imm, err := immutable.New("../database/immutable/testdata")
@@ -369,14 +368,12 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 
 	// Create database
 	dbConfig := &database.Config{
-		DataDir:        tmpDir,
-		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		DataDir: tmpDir,
+		Logger:  logger,
 	}
-	db, err := database.New(dbConfig)
+	db, err := dbtest.NewDatabase(t, dbConfig)
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Load blocks from immutable testdata
 	imm, err := immutable.New("../database/immutable/testdata")
@@ -498,14 +495,12 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 			)
 
 			dbConfig := &database.Config{
-				DataDir:        tmpDir,
-				Logger:         logger,
-				BlobPlugin:     "badger",
-				MetadataPlugin: "sqlite",
+				DataDir: tmpDir,
+				Logger:  logger,
 			}
-			db, err := database.New(dbConfig)
+			db, err := dbtest.NewDatabase(t, dbConfig)
 			require.NoError(t, err)
-			defer db.Close()
+			defer dbtest.CloseDatabase(db)
 
 			imm, err := immutable.New("../database/immutable/testdata")
 			require.NoError(t, err)

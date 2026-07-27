@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -37,13 +38,13 @@ import (
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "", // in-memory
 		Logger:  logger,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		db.Close() //nolint:errcheck
+		dbtest.CloseDatabase(db) //nolint:errcheck
 	})
 	return db
 }
@@ -143,6 +144,10 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func closeTestDB(db *database.Database) error {
+	return dbtest.CloseDatabase(db)
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {

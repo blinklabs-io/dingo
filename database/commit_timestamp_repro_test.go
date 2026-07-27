@@ -28,14 +28,13 @@ import (
 // database opens cleanly: a missing blob commit-timestamp key must be
 // treated like a missing metadata row (return 0), not as a fatal error.
 func TestCheckCommitTimestamp_FreshBlobAndMetadata(t *testing.T) {
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
-	defer db.Close()
+	defer closeTestDatabase(db)
 
 	bts, bErr := db.Blob().GetCommitTimestamp()
 	require.NoError(t, bErr, "blob.GetCommitTimestamp on fresh blob must not error")
@@ -48,28 +47,26 @@ func TestCheckCommitTimestamp_FreshBlobAndMetadata(t *testing.T) {
 // (so the existing recovery path in node.Run can run), not as the raw
 // "blob key not found" plumbing leak.
 func TestCheckCommitTimestamp_MetadataOnly(t *testing.T) {
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	dataDir := db.config.DataDir
 
 	metaTxn := db.Metadata().Transaction()
 	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
 	require.NoError(t, metaTxn.Commit())
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
-	db2, err := New(&Config{
-		DataDir:        dataDir,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db2, err := newTestDatabase(t, &Config{
+		DataDir: dataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	if db2 != nil {
-		defer db2.Close()
+		defer closeTestDatabase(db2)
 	}
 	require.Error(t, err)
 	var cte CommitTimestampError

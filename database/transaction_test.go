@@ -360,7 +360,7 @@ func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
 }
 
 func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T) {
-	db, err := New(&Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, db.Close())
@@ -398,15 +398,11 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T)
 // Preload("Outputs") through the producer Transaction would silently
 // drop it.
 func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
-	// Intentionally not t.Parallel(): database.New() writes to plugin
-	// option destination pointers via SetPluginOption, which the race
-	// detector flags when two tests build a Database concurrently.
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -595,20 +591,16 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 // trust boundary (blocks past the boundary should have complete producer
 // history; blocks at or below it legitimately may not).
 func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
-	// Intentionally not t.Parallel(): database.New() writes to plugin
-	// option destination pointers via SetPluginOption, which the race
-	// detector flags when two tests build a Database concurrently.
 	candidate := findGapConsumeCandidateWithoutCertificates(t)
 
 	newTestDB := func(t *testing.T, strict bool) *Database {
 		t.Helper()
-		db, err := New(&Config{
+		db, err := newTestDatabase(t, &Config{
 			DataDir:              t.TempDir(),
 			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-			BlobPlugin:           "badger",
-			MetadataPlugin:       "sqlite",
 			StrictUtxoValidation: strict,
 		})
+
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		// Intentionally do NOT persist candidate.producers, so the

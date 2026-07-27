@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -160,9 +161,8 @@ func drepPulsingStateWithRatified(
 }
 
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	pp := &ParsedGovActionId{
 		TxHash:      bytes.Repeat([]byte{0x11}, 32),
@@ -290,9 +290,9 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	ppRoot := &ParsedGovActionId{
 		TxHash:      bytes.Repeat([]byte{0x11}, 32),
@@ -347,9 +347,8 @@ func TestImportGovStateMarksRatifiedParameterChangeFromDRepPulsingState(
 }
 
 func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	cm := &ParsedGovActionId{
 		TxHash:      bytes.Repeat([]byte{0x55}, 32),
@@ -394,9 +393,8 @@ func TestImportGovStateSeedsCommitteeUpdateWhenCommitteePresent(t *testing.T) {
 }
 
 func TestImportGovStateNoSeedingWhenAllSNothing(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	govStateData := govStateWithRoots(
 		t,

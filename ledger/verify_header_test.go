@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ledgersnapshot "github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -766,13 +767,11 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 		epoch1Nonce[i] = byte(i + 1) //nolint:gosec
 	}
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	// Seed genesis snapshot (epoch 0, "mark") for the pool so leader
 	// eligibility succeeds for blocks in epoch 0.
@@ -1081,13 +1080,11 @@ func newEligibilityTestLedger(
 	epochNonce []byte,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	ls := &LedgerState{
 		db: db,
@@ -1958,13 +1955,11 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	// Seed a pool stake snapshot so the check reaches the coeff lookup.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
@@ -1993,13 +1988,11 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,31 +27,35 @@ import (
 // validTestConfig returns a minimal configuration that passes
 // validation, mirroring the production defaults.
 func validTestConfig() *Config {
-	return &Config{
-		Network:               "preview",
-		RunMode:               RunModeServe,
-		StorageMode:           storageModeCore,
-		MempoolImplementation: DefaultMempoolImplementation,
-		EvictionWatermark:     DefaultEvictionWatermark,
-		RejectionWatermark:    DefaultRejectionWatermark,
-		MempoolCapacity:       DefaultMempoolCapacityPraos,
-		RelayPort:             3001,
-		PrivatePort:           3002,
-		MetricsPort:           12798,
-		UtxorpcPort:           9090,
-		BlockfrostPort:        3000,
-		MeshPort:              8080,
-		ShutdownTimeout:       DefaultShutdownTimeout,
-		LedgerCatchupTimeout:  DefaultLedgerCatchupTimeout,
-		Cache:                 DefaultCacheConfig(),
-		Chainsync:             DefaultChainsyncConfig(),
-		HistoryExpiry:         DefaultHistoryExpiryConfig(),
-		Midnight:              DefaultMidnightConfig(),
+	cfg := &Config{
+		Plugins:              defaultPluginsConfig(),
+		Network:              "preview",
+		RunMode:              RunModeServe,
+		StorageMode:          storageModeCore,
+		RelayPort:            3001,
+		PrivatePort:          3002,
+		MetricsPort:          12798,
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		Cache:                DefaultCacheConfig(),
+		Chainsync:            DefaultChainsyncConfig(),
+		HistoryExpiry:        DefaultHistoryExpiryConfig(),
+		Midnight:             DefaultMidnightConfig(),
 		Mithril: MithrilConfig{
 			Enabled: true,
 			Backend: "v2",
 		},
 	}
+	cfg.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
+	return cfg
+}
+
+func setPluginPort(selection *hostplugin.Selection, port any) {
+	selection.Config["port"] = port
+}
+
+func setMempoolSetting(c *Config, name string, value any) {
+	c.Plugins.Mempool.Config[name] = value
 }
 
 func TestValidateDefaultsPass(t *testing.T) {
@@ -64,13 +69,6 @@ func TestValidate(t *testing.T) {
 		modify  func(*Config)
 		wantErr string
 	}{
-		{
-			name: "invalid mempool implementation",
-			modify: func(c *Config) {
-				c.MempoolImplementation = "priority"
-			},
-			wantErr: "invalid mempoolImplementation",
-		},
 		{
 			name:    "invalid run mode",
 			modify:  func(c *Config) { c.RunMode = "batch" },
@@ -131,15 +129,15 @@ func TestValidate(t *testing.T) {
 			name: "port above maximum",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.UtxorpcPort = 99999999
+				setPluginPort(&c.Plugins.API.Utxorpc, 99999999)
 			},
-			wantErr: "invalid utxorpcPort: 99999999 (must be at most 65535)",
+			wantErr: "invalid plugins.api.utxorpc.config.port: 99999999 (must be at most 65535)",
 		},
 		{
 			name: "privileged port without privileges",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.BlockfrostPort = 443
+				setPluginPort(&c.Plugins.API.Blockfrost, 443)
 			},
 			wantErr: "privileged port",
 		},
@@ -157,7 +155,7 @@ func TestValidate(t *testing.T) {
 			name: "optional port disabled with zero",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.UtxorpcPort = 0
+				setPluginPort(&c.Plugins.API.Utxorpc, 0)
 			},
 		},
 		{
@@ -179,8 +177,8 @@ func TestValidate(t *testing.T) {
 			name: "core mode skips inactive API port validation",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeCore
-				c.UtxorpcPort = 99999999
-				c.BlockfrostPort = 443
+				setPluginPort(&c.Plugins.API.Utxorpc, 99999999)
+				setPluginPort(&c.Plugins.API.Blockfrost, 443)
 			},
 		},
 		{
@@ -189,7 +187,7 @@ func TestValidate(t *testing.T) {
 			name: "core mode ignores API/serving port collision",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeCore
-				c.MetricsPort = c.MeshPort
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 		},
 		{
@@ -198,7 +196,7 @@ func TestValidate(t *testing.T) {
 			name: "api mode rejects API/serving port collision",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
-				c.MetricsPort = c.MeshPort
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 			wantErr: "is assigned to both",
 		},
@@ -279,37 +277,37 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:    "negative mempool capacity",
-			modify:  func(c *Config) { c.MempoolCapacity = -1 },
-			wantErr: "invalid mempoolCapacity",
+			modify:  func(c *Config) { setMempoolSetting(c, "capacity", -1) },
+			wantErr: "invalid plugins.mempool.config.capacity",
 		},
 		{
 			name:    "eviction watermark out of range",
-			modify:  func(c *Config) { c.EvictionWatermark = 1.5 },
-			wantErr: "invalid evictionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "evictionWatermark", 1.5) },
+			wantErr: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:    "rejection watermark out of range",
-			modify:  func(c *Config) { c.RejectionWatermark = 1.5 },
-			wantErr: "invalid rejectionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "rejectionWatermark", 1.5) },
+			wantErr: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			// Every ordered comparison with NaN is false, so a plain
 			// out-of-range check would let NaN through (e.g. from
 			// --eviction-watermark NaN, which strconv parses).
 			name:    "NaN eviction watermark",
-			modify:  func(c *Config) { c.EvictionWatermark = math.NaN() },
-			wantErr: "invalid evictionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "evictionWatermark", math.NaN()) },
+			wantErr: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:    "NaN rejection watermark",
-			modify:  func(c *Config) { c.RejectionWatermark = math.NaN() },
-			wantErr: "invalid rejectionWatermark",
+			modify:  func(c *Config) { setMempoolSetting(c, "rejectionWatermark", math.NaN()) },
+			wantErr: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name: "eviction above rejection",
 			modify: func(c *Config) {
-				c.EvictionWatermark = 0.95
-				c.RejectionWatermark = 0.90
+				setMempoolSetting(c, "evictionWatermark", 0.95)
+				setMempoolSetting(c, "rejectionWatermark", 0.90)
 			},
 			wantErr: "must be less than rejectionWatermark",
 		},
@@ -560,7 +558,7 @@ func TestValidateDelegatorInactivity(t *testing.T) {
 func TestValidatePrivilegedPortAllowedWhenBindable(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BlockfrostPort = 443
+	setPluginPort(&cfg.Plugins.API.Blockfrost, 443)
 	assert.NoError(t, cfg.validate(cfg.RunMode, 0))
 }
 
@@ -571,9 +569,9 @@ func TestValidatePrivilegedPortAllowedWhenBindable(t *testing.T) {
 func TestValidateLoweredPrivilegedPortCutoff(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BlockfrostPort = 80
+	setPluginPort(&cfg.Plugins.API.Blockfrost, 80)
 	assert.NoError(t, cfg.validate(cfg.RunMode, 80))
-	cfg.BlockfrostPort = 79
+	setPluginPort(&cfg.Plugins.API.Blockfrost, 79)
 	err := cfg.validate(cfg.RunMode, 80)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "privileged port")
@@ -604,7 +602,7 @@ func TestValidateUtilityModesRelaxListenerAndSource(t *testing.T) {
 // collision and validation must pass.
 func TestValidateSyncModeIgnoresInactiveListenerCollision(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.MetricsPort = cfg.MeshPort // 8080, the default mesh port
+	cfg.MetricsPort = APIPluginPort(cfg.Plugins.API.Mesh)
 	cfg.RelayPort = 0
 	cfg.PrivatePort = 0
 	cfg.ImmutableDbPath = ""
@@ -641,10 +639,10 @@ func TestValidateDevConfigViaServeChecksApiPorts(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeDev
 	cfg.StorageMode = storageModeCore
-	cfg.UtxorpcPort = 99999999
+	setPluginPort(&cfg.Plugins.API.Utxorpc, 99999999)
 	err := cfg.validate(RunModeServe, minUnprivilegedPort)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid utxorpcPort")
+	assert.Contains(t, err.Error(), "invalid plugins.api.utxorpc.config.port")
 }
 
 // TestValidateLoadModeSkipsAllListenerPorts verifies that load, which
@@ -655,7 +653,7 @@ func TestValidateLoadModeSkipsAllListenerPorts(t *testing.T) {
 	cfg.RunMode = RunModeLoad
 	cfg.ImmutableDbPath = "/data/immutable"
 	cfg.MetricsPort = 99999999
-	cfg.UtxorpcPort = 99999999
+	setPluginPort(&cfg.Plugins.API.Utxorpc, 99999999)
 	assert.NoError(t, cfg.validate(RunModeLoad, minUnprivilegedPort))
 }
 
@@ -679,12 +677,12 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeLoad
 	cfg.ImmutableDbPath = ""
-	cfg.EvictionWatermark = 2.0
+	setMempoolSetting(cfg, "evictionWatermark", 2.0)
 	cfg.Chainsync.Strategy = "fastest"
 	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
-	assert.Contains(t, err.Error(), "invalid evictionWatermark")
+	assert.Contains(t, err.Error(), "invalid plugins.mempool.config.evictionWatermark")
 	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
 }
 
