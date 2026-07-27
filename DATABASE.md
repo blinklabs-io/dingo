@@ -905,6 +905,23 @@ complete `(slot, block_index, output_idx, tx_id)` tuple; the transaction hash
 is the final key that makes the cursor unique when snapshot fallback fields
 collide.
 
+UTxO address queries carry an explicit `UtxoAddressPattern`. A complete
+`ExactAddress` is distinct from credential-scoped `PaymentPart` and
+`DelegationPart` fields; fields in one pattern are ANDed and multiple patterns
+are ORed. SQLite, MySQL, and Postgres use the stored credential columns only to
+narrow candidates. The coordinated database layer resolves output CBOR and
+compares the complete address bytes for exact patterns, which distinguishes
+enterprise addresses, pointer payloads, network IDs, and other address forms
+that share credentials. Ordered exact queries continue scanning coarse SQL
+pages until the requested number of exact matches is collected, so limits and
+UTxO-RPC continuation tokens do not skip matches hidden behind nonmatching
+credential siblings.
+
+The `address_transaction` table likewise remains a credential-based candidate
+index. Full-address transaction reads resolve participating UTxO CBOR, compare
+complete address bytes, and scan candidate pages before applying the requested
+offset and limit.
+
 ### `GetTransactionsByMetadataLabel`
 
 Transactions by metadata label:

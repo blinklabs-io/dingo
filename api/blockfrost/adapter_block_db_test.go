@@ -216,6 +216,63 @@ func TestNodeAdapterAddressPointerRejectsMissingCandidateCbor(t *testing.T) {
 	require.ErrorContains(t, err, "utxo cbor unavailable")
 }
 
+func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
+	adapter, store, db := newDBBackedAdapter(t)
+
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		nil,
+	)
+	require.NoError(t, err)
+	pointer := testPointerAddress(t, paymentHash, 0x01)
+	addresses := []lcommon.Address{enterprise, pointer}
+
+	for i := range addresses {
+		txID := uint(i + 1)
+		txHash := fill32(byte(i + 1))
+		require.NoError(t, store.DB().Create(&models.Transaction{
+			ID:         txID,
+			Hash:       txHash,
+			BlockHash:  fill32(0xf0),
+			Slot:       uint64(i + 1),
+			BlockIndex: uint32(i),
+		}).Error)
+		require.NoError(t, store.DB().Create(&models.Utxo{
+			TransactionID: &txID,
+			TxId:          txHash,
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			AddedSlot:     uint64(i + 1),
+			Amount:        types.Uint64((i + 1) * 1_000_000),
+		}).Error)
+		raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addresses[i],
+			OutputAmount:  uint64((i + 1) * 1_000_000),
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, raw)
+		}))
+	}
+
+	info, err := adapter.Address(enterprise.String())
+	require.NoError(t, err)
+	require.Len(t, info.Amount, 1)
+	assert.Equal(t, "1000000", info.Amount[0].Quantity)
+
+	utxos, total, err := adapter.AddressUTXOs(
+		enterprise.String(),
+		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, hex.EncodeToString(fill32(0x01)), utxos[0].TxHash)
+}
+
 // TestNodeAdapterBlockOutputAndFees exercises the real DB aggregation path,
 // including the phase-2 invalid transaction branch where the collateral return
 // (not the discarded outputs) counts toward block output.

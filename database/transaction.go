@@ -1080,25 +1080,8 @@ func (d *Database) GetTransactionsByAddress(
 	offset int,
 	txn *Txn,
 ) ([]models.Transaction, error) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	var paymentKey []byte
-	var credentialTag uint8
-	var stakingKey []byte
-	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-		paymentKey = pkh.Bytes()
-	}
-	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		var ok bool
-		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
-		if !ok {
-			return nil, errors.New("derive stake credential tag from address")
-		}
-		stakingKey = skh.Bytes()
-	}
-	return d.GetTransactionsByAddressKeys(
-		paymentKey,
-		credentialTag,
-		stakingKey,
+	return d.getTransactionsByExactAddress(
+		addr,
 		limit,
 		offset,
 		"desc",
@@ -1115,6 +1098,18 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 	order string,
 	txn *Txn,
 ) ([]models.Transaction, error) {
+	return d.getTransactionsByExactAddress(
+		addr,
+		limit,
+		offset,
+		order,
+		txn,
+	)
+}
+
+func addressTransactionKeys(
+	addr lcommon.Address,
+) ([]byte, uint8, []byte, error) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	var paymentKey []byte
 	var credentialTag uint8
@@ -1126,19 +1121,146 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 		var ok bool
 		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
 		if !ok {
-			return nil, errors.New("derive stake credential tag from address")
+			return nil, 0, nil, errors.New(
+				"derive stake credential tag from address",
+			)
 		}
 		stakingKey = skh.Bytes()
 	}
-	return d.GetTransactionsByAddressKeys(
-		paymentKey,
-		credentialTag,
-		stakingKey,
-		limit,
-		offset,
-		order,
-		txn,
+	return paymentKey, credentialTag, stakingKey, nil
+}
+
+func (d *Database) getTransactionsByExactAddress(
+	addr lcommon.Address,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.Transaction, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	paymentKey, credentialTag, stakingKey, err := addressTransactionKeys(addr)
+	if err != nil {
+		return nil, err
+	}
+	exactAddress, err := addr.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encode exact transaction address: %w", err)
+	}
+
+	const candidateBatchSize = 128
+	initialCapacity := min(max(limit, 0), candidateBatchSize)
+	ret := make([]models.Transaction, 0, initialCapacity)
+	candidateOffset := 0
+	candidatesProcessed := 0
+	matchesSkipped := 0
+	for {
+		remainingCandidates := exactAddressCandidateScanLimit -
+			candidatesProcessed
+		if remainingCandidates <= 0 {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		batchSize := min(candidateBatchSize, remainingCandidates)
+		candidates, err := d.metadata.GetTransactionsByAddress(
+			paymentKey,
+			credentialTag,
+			stakingKey,
+			batchSize,
+			candidateOffset,
+			order,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get exact-address transaction candidates: %w",
+				err,
+			)
+		}
+		candidatesProcessed += len(candidates)
+		for i := range candidates {
+			match, err := transactionContainsExactAddress(
+				&candidates[i],
+				exactAddress,
+				txn,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !match {
+				continue
+			}
+			if matchesSkipped < offset {
+				matchesSkipped++
+				continue
+			}
+			ret = append(ret, candidates[i])
+			if limit > 0 && len(ret) == limit {
+				return ret, nil
+			}
+		}
+		if len(candidates) < batchSize {
+			return ret, nil
+		}
+		if candidatesProcessed >= exactAddressCandidateScanLimit {
+			return ret, errExactAddressCandidateScanLimit
+		}
+		candidateOffset += len(candidates)
+	}
+}
+
+func transactionContainsExactAddress(
+	tx *models.Transaction,
+	exactAddress []byte,
+	txn *Txn,
+) (bool, error) {
+	utxos := make([]*models.Utxo, 0,
+		len(tx.Inputs)+len(tx.Outputs)+len(tx.Collateral)+
+			len(tx.ReferenceInputs)+1,
 	)
+	for i := range tx.Inputs {
+		utxos = append(utxos, &tx.Inputs[i])
+	}
+	for i := range tx.Outputs {
+		utxos = append(utxos, &tx.Outputs[i])
+	}
+	for i := range tx.Collateral {
+		utxos = append(utxos, &tx.Collateral[i])
+	}
+	for i := range tx.ReferenceInputs {
+		utxos = append(utxos, &tx.ReferenceInputs[i])
+	}
+	if tx.CollateralReturn != nil {
+		utxos = append(utxos, tx.CollateralReturn)
+	}
+	for _, utxo := range utxos {
+		if err := loadCbor(utxo, txn); err != nil {
+			return false, fmt.Errorf(
+				"load transaction UTxO %x#%d for exact address match: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		output, err := utxo.Decode()
+		if err != nil {
+			return false, fmt.Errorf(
+				"decode transaction UTxO %x#%d for exact address match: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		addressBytes, err := output.Address().Bytes()
+		if err != nil {
+			return false, fmt.Errorf("encode transaction UTxO address: %w", err)
+		}
+		if bytes.Equal(addressBytes, exactAddress) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // GetTransactionsByAddressKeys returns transactions for a payment/staking
@@ -1185,27 +1307,36 @@ func (d *Database) CountTransactionsByAddress(
 	addr lcommon.Address,
 	txn *Txn,
 ) (int, error) {
-	zeroHash := lcommon.NewBlake2b224(nil)
-	var paymentKey []byte
-	var credentialTag uint8
-	var stakingKey []byte
-	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-		paymentKey = pkh.Bytes()
-	}
-	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		var ok bool
-		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
-		if !ok {
-			return 0, errors.New("derive stake credential tag from address")
-		}
-		stakingKey = skh.Bytes()
-	}
-	return d.CountTransactionsByAddressKeys(
-		paymentKey,
-		credentialTag,
-		stakingKey,
+	txs, err := d.getTransactionsByExactAddress(
+		addr,
+		0,
+		0,
+		"desc",
 		txn,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return len(txs), nil
+}
+
+// HasTransactionsByAddress reports whether at least one transaction involves
+// the given exact address.
+func (d *Database) HasTransactionsByAddress(
+	addr lcommon.Address,
+	txn *Txn,
+) (bool, error) {
+	txs, err := d.getTransactionsByExactAddress(
+		addr,
+		1,
+		0,
+		"desc",
+		txn,
+	)
+	if err != nil {
+		return false, err
+	}
+	return len(txs) > 0, nil
 }
 
 // CountTransactionsByAddressKeys returns the total number

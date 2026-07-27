@@ -2180,6 +2180,19 @@ payload. The candidate query includes snapshot-imported live UTxOs that lack a
 producing transaction relationship, and missing or undecodable candidate CBOR
 fails the request rather than silently reporting a partial or zero balance.
 
+Full-address UTxO queries are exact at the database boundary. Metadata plugins
+first narrow candidates with payment/stake credential columns, then the
+coordinated database layer resolves each candidate's output CBOR and compares
+the complete serialized address. Credential-scoped callers explicitly use
+payment or delegation parts instead. Blockfrost address summaries and UTxO
+listings therefore distinguish enterprise and pointer addresses sharing a
+payment credential, while bare `addr_vkh`/`script` summaries intentionally
+aggregate them. UTxO-RPC `SearchUtxos` carries exact/payment/delegation intent
+as one ANDed address pattern; exact keyset queries scan through nonmatching
+coarse candidates before forming a limited page, preserving continuation-token
+correctness. Blockfrost address-transaction reads apply the same CBOR-backed
+exact check over credential-index candidates and paginate the exact matches.
+
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and

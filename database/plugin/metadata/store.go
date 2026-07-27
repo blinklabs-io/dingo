@@ -1147,8 +1147,13 @@ type MetadataStore interface {
 	// window for historical transaction queries.
 	GetUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
 
-	// GetUtxosByAddress retrieves all UTxOs for a given address.
-	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+	// GetUtxosByAddress retrieves coarse SQL candidates for an explicit
+	// address pattern. The database layer performs full exact-address CBOR
+	// filtering when ExactAddress is set.
+	GetUtxosByAddress(
+		models.UtxoAddressPattern,
+		types.Txn,
+	) ([]models.Utxo, error)
 
 	// GetControlledAmountByCredential returns the sum of live UTxO
 	// amounts controlled by the given stake credential.
@@ -1165,11 +1170,10 @@ type MetadataStore interface {
 
 	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
 	// per-asset balances (ordered by policy id then name), and live UTxO
-	// count for the given address, aggregated in SQL. The match mode
-	// selects full-address identity (exact) or payment-credential
-	// aggregation. Used by the Blockfrost address summary endpoint,
-	// where loading every UTxO row for aggregation in Go is too slow
-	// for large addresses.
+	// count for the given address, aggregated in SQL. Payment-credential
+	// mode aggregates across address forms. Exact mode returns
+	// models.ErrExactAddressRequiresCbor; exact summaries use the coordinated
+	// Database query path instead.
 	GetUtxoBalanceByAddress(
 		lcommon.Address,
 		models.UtxoAddressMatchMode,
@@ -1188,7 +1192,7 @@ type MetadataStore interface {
 
 	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
 	GetUtxosByAddressAtSlot(
-		lcommon.Address,
+		models.UtxoAddressPattern,
 		uint64,
 		types.Txn,
 	) ([]models.Utxo, error)

@@ -376,9 +376,25 @@ func addressWhereClause(
 	}
 }
 
+func addressPatternWhereClause(
+	db *gorm.DB,
+	pattern models.UtxoAddressPattern,
+) (*gorm.DB, error) {
+	var ors []string
+	var args []any
+	if err := models.AppendUtxoAddressPatternOrBranch(
+		&ors,
+		&args,
+		pattern,
+	); err != nil {
+		return nil, err
+	}
+	return db.Where(ors[0], args...), nil
+}
+
 // GetUtxosByAddress returns a list of Utxos
 func (d *MetadataStoreSqlite) GetUtxosByAddress(
-	addr ledger.Address,
+	pattern models.UtxoAddressPattern,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
@@ -386,7 +402,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery, err := addressWhereClause(db, addr)
+	addrQuery, err := addressPatternWhereClause(db, pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -487,17 +503,21 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 		).
 		Where("utxo.deleted_slot = 0")
 
-	addrs := q.Addresses
+	patterns := q.AddressPatterns
 	switch {
 	case q.MatchAllAddresses:
 		// No payment_key / staking_key filter.
-	case len(addrs) == 0:
+	case len(patterns) == 0:
 		base = base.Where("1 = 0")
 	default:
 		var ors []string
 		var args []any
-		for i := range addrs {
-			if err := models.AppendUtxoAddressOrBranch(&ors, &args, addrs[i]); err != nil {
+		for i := range patterns {
+			if err := models.AppendUtxoAddressPatternOrBranch(
+				&ors,
+				&args,
+				patterns[i],
+			); err != nil {
 				return nil, fmt.Errorf(
 					"GetUtxosByAddressWithOrdering: %w",
 					err,
@@ -610,7 +630,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 // GetUtxosByAddressAtSlot returns UTxOs for an address
 // that existed at a specific slot.
 func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
-	addr lcommon.Address,
+	pattern models.UtxoAddressPattern,
 	slot uint64,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
@@ -619,7 +639,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery, err := addressWhereClause(db, addr)
+	addrQuery, err := addressPatternWhereClause(db, pattern)
 	if err != nil {
 		return nil, err
 	}

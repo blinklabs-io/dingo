@@ -15,7 +15,10 @@
 package models
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -27,17 +30,154 @@ var (
 	ErrNilUtxoWithOrderingQuery = errors.New(
 		"nil UtxoWithOrderingQuery",
 	)
-	ErrEmptyAssetPolicyID = errors.New("empty asset policy id")
+	ErrEmptyAssetPolicyID       = errors.New("empty asset policy id")
+	ErrEmptyUtxoAddressPattern  = errors.New("empty UTxO address pattern")
+	ErrExactAddressRequiresCbor = errors.New(
+		"exact address matching requires output CBOR",
+	)
 )
+
+// UtxoAddressPattern carries explicit address-match intent through the shared
+// query API. Fields within one pattern are ANDed; multiple patterns are ORed.
+// ExactAddress is the complete serialized address, while PaymentPart and
+// DelegationPart deliberately match credentials across address forms.
+type UtxoAddressPattern struct {
+	ExactAddress   []byte
+	PaymentPart    []byte
+	DelegationPart []byte
+}
+
+// ExactUtxoAddressPattern builds an exact pattern from a decoded address.
+func ExactUtxoAddressPattern(addr ledger.Address) (UtxoAddressPattern, error) {
+	addrBytes, err := addr.Bytes()
+	if err != nil {
+		return UtxoAddressPattern{}, fmt.Errorf("encode exact address: %w", err)
+	}
+	return UtxoAddressPattern{ExactAddress: addrBytes}, nil
+}
+
+// RequiresExactAddressFilter reports whether candidate rows must be checked
+// against decoded output CBOR after the coarse SQL credential predicate.
+func RequiresExactAddressFilter(patterns []UtxoAddressPattern) bool {
+	for i := range patterns {
+		if len(patterns[i].ExactAddress) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesUtxoAddressPatterns applies the full address-pattern contract to a
+// decoded output address.
+func MatchesUtxoAddressPatterns(
+	addr ledger.Address,
+	patterns []UtxoAddressPattern,
+) (bool, error) {
+	if len(patterns) == 0 {
+		return false, nil
+	}
+	for i := range patterns {
+		if len(patterns[i].ExactAddress) == 0 &&
+			len(patterns[i].PaymentPart) == 0 &&
+			len(patterns[i].DelegationPart) == 0 {
+			return false, ErrEmptyUtxoAddressPattern
+		}
+	}
+	addrBytes, err := addr.Bytes()
+	if err != nil {
+		return false, fmt.Errorf("encode output address: %w", err)
+	}
+	for i := range patterns {
+		pattern := patterns[i]
+		if len(pattern.ExactAddress) > 0 &&
+			!bytes.Equal(addrBytes, pattern.ExactAddress) {
+			continue
+		}
+		if len(pattern.PaymentPart) > 0 &&
+			!bytes.Equal(addr.PaymentKeyHash().Bytes(), pattern.PaymentPart) {
+			continue
+		}
+		if len(pattern.DelegationPart) > 0 &&
+			!bytes.Equal(addr.StakeKeyHash().Bytes(), pattern.DelegationPart) {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// AppendUtxoAddressPatternOrBranch appends one coarse SQL branch. Exact
+// addresses are narrowed by their stored credentials and later compared by
+// complete serialized bytes after CBOR resolution.
+func AppendUtxoAddressPatternOrBranch(
+	ors *[]string,
+	args *[]any,
+	pattern UtxoAddressPattern,
+) error {
+	var ands []string
+	var branchArgs []any
+	if len(pattern.ExactAddress) > 0 {
+		addr, err := lcommon.NewAddressFromBytes(pattern.ExactAddress)
+		if err != nil {
+			return fmt.Errorf("decode exact address: %w", err)
+		}
+		var exactOrs []string
+		var exactArgs []any
+		if err := AppendUtxoAddressOrBranchMode(
+			&exactOrs,
+			&exactArgs,
+			addr,
+			UtxoAddressMatchPaymentCred,
+		); err != nil {
+			return err
+		}
+		if len(exactOrs) == 0 {
+			ands = append(
+				ands,
+				"((utxo.payment_key IS NULL OR LENGTH(utxo.payment_key) = 0) AND (utxo.staking_key IS NULL OR LENGTH(utxo.staking_key) = 0))",
+			)
+		} else {
+			ands = append(ands, exactOrs[0])
+			branchArgs = append(branchArgs, exactArgs...)
+		}
+	}
+	if len(pattern.PaymentPart) > 0 {
+		if len(pattern.PaymentPart) != lcommon.AddressHashSize {
+			return fmt.Errorf(
+				"payment part length %d, expected %d",
+				len(pattern.PaymentPart),
+				lcommon.AddressHashSize,
+			)
+		}
+		ands = append(ands, "utxo.payment_key = ?")
+		branchArgs = append(branchArgs, pattern.PaymentPart)
+	}
+	if len(pattern.DelegationPart) > 0 {
+		if len(pattern.DelegationPart) != lcommon.AddressHashSize {
+			return fmt.Errorf(
+				"delegation part length %d, expected %d",
+				len(pattern.DelegationPart),
+				lcommon.AddressHashSize,
+			)
+		}
+		ands = append(ands, "utxo.staking_key = ?")
+		branchArgs = append(branchArgs, pattern.DelegationPart)
+	}
+	if len(ands) == 0 {
+		return ErrEmptyUtxoAddressPattern
+	}
+	*ors = append(*ors, "("+strings.Join(ands, " AND ")+")")
+	*args = append(*args, branchArgs...)
+	return nil
+}
 
 // UtxoAddressMatchMode selects how an address matches utxo rows.
 type UtxoAddressMatchMode int
 
 const (
-	// UtxoAddressMatchExact preserves full-address identity: a
-	// payment-only (enterprise/pointer) address matches only rows
-	// with no staking part, so base-address UTxOs sharing the same
-	// payment credential are excluded.
+	// UtxoAddressMatchExact requests full-address identity. Metadata-only
+	// aggregate queries reject this mode because exact identity requires
+	// output CBOR; use UtxoAddressPattern through the coordinated Database.
 	UtxoAddressMatchExact UtxoAddressMatchMode = iota
 	// UtxoAddressMatchPaymentCred aggregates across every address
 	// form sharing the payment credential, mirroring Blockfrost's
@@ -68,6 +208,9 @@ func AppendUtxoAddressOrBranchMode(
 	addr ledger.Address,
 	mode UtxoAddressMatchMode,
 ) error {
+	if mode == UtxoAddressMatchExact {
+		return ErrExactAddressRequiresCbor
+	}
 	zeroHash := lcommon.NewBlake2b224(nil)
 	pk := addr.PaymentKeyHash()
 	sk := addr.StakeKeyHash()
@@ -92,16 +235,6 @@ func AppendUtxoAddressOrBranchMode(
 			sk.Bytes(),
 		)
 	case hasPayment:
-		if mode == UtxoAddressMatchExact {
-			// LENGTH counts bytes for blob columns on SQLite,
-			// MySQL, and Postgres alike.
-			*ors = append(
-				*ors,
-				"(utxo.payment_script = ? AND utxo.payment_key = ? AND (utxo.staking_key IS NULL OR LENGTH(utxo.staking_key) = 0))",
-			)
-			*args = append(*args, paymentScript, pk.Bytes())
-			break
-		}
 		*ors = append(*ors, "(utxo.payment_script = ? AND utxo.payment_key = ?)")
 		*args = append(*args, paymentScript, pk.Bytes())
 	case hasStake:
@@ -177,11 +310,10 @@ type UtxoOrderingCursor struct {
 //   - MatchAllAddresses true: do not filter by payment/stake keys (all live UTxOs, subject
 //     to asset filter if set). SearchUtxos sets this when the predicate is nil or is
 //     asset-only (no address pattern).
-//   - MatchAllAddresses false and len(Addresses) == 0: match no rows (caller uses this when
+//   - MatchAllAddresses false and len(AddressPatterns) == 0: match no rows (caller uses this when
 //     a predicate was given but no Cardano address parts could be decoded).
-//   - MatchAllAddresses false and len(Addresses) > 0: match UTxOs that satisfy ANY branch
-//     (OR): exact / payment-only / stake-only per address, same rules as legacy
-//     addressWhereClause.
+//   - MatchAllAddresses false and len(AddressPatterns) > 0: match UTxOs that
+//     satisfy any pattern. Fields within a pattern are ANDed; patterns are ORed.
 //
 // After + Limit: keyset pagination; Limit <= 0 means no SQL LIMIT. SearchUtxos sets Limit to
 // effective page size + 1.
@@ -190,7 +322,7 @@ type UtxoOrderingCursor struct {
 // the policy (same semantics as GetUtxosByAssets).
 type UtxoWithOrderingQuery struct {
 	MatchAllAddresses bool
-	Addresses         []ledger.Address
+	AddressPatterns   []UtxoAddressPattern
 	After             *UtxoOrderingCursor
 	Limit             int
 	FilterByAsset     bool
