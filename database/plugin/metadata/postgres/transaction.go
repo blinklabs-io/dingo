@@ -4556,6 +4556,8 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 //     row, but a network's genesis file is immutable so this is intentional;
 //     callers must not re-bootstrap with a different genesis against an existing
 //     database.
+//   - Owner and relay rows are replaced after resolving the durable slot-0
+//     registration ID, so replay repairs an interrupted association write.
 //   - No synthetic slot-0 Registration / StakeDelegation history row is written
 //     for the stakeDelegations entries here, unlike SetGenesisGovernance. This
 //     leaves a known rollback hole: a later on-chain cert touching a
@@ -4685,12 +4687,69 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 			tmpReg.Relays[i].PoolID = tmpPool.ID
 		}
 
-		result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&tmpReg)
+		result := db.Clauses(clause.OnConflict{DoNothing: true}).
+			Omit(clause.Associations).
+			Create(&tmpReg)
 		if result.Error != nil {
 			return fmt.Errorf(
 				"create genesis pool registration: %w",
 				result.Error,
 			)
+		}
+
+		// On a replay, the conflict above leaves tmpReg.ID unset. GORM would
+		// otherwise try to create owners and relays with registration ID 0,
+		// which violates their foreign keys. Load the durable parent ID, then
+		// replace its associations so a restart repairs any partially-written
+		// genesis registration.
+		var storedReg models.PoolRegistration
+		if result := db.Select("id").
+			Where("pool_id = ? AND added_slot = ?", tmpPool.ID, 0).
+			First(&storedReg); result.Error != nil {
+			return fmt.Errorf(
+				"fetch genesis pool registration: %w",
+				result.Error,
+			)
+		}
+		if result := db.Where(
+			"pool_registration_id = ?",
+			storedReg.ID,
+		).Delete(&models.PoolRegistrationOwner{}); result.Error != nil {
+			return fmt.Errorf(
+				"replace genesis pool registration owners: %w",
+				result.Error,
+			)
+		}
+		if result := db.Where(
+			"pool_registration_id = ?",
+			storedReg.ID,
+		).Delete(&models.PoolRegistrationRelay{}); result.Error != nil {
+			return fmt.Errorf(
+				"replace genesis pool registration relays: %w",
+				result.Error,
+			)
+		}
+		for i := range tmpReg.Owners {
+			tmpReg.Owners[i].PoolRegistrationID = storedReg.ID
+		}
+		if len(tmpReg.Owners) > 0 {
+			if result := db.Create(&tmpReg.Owners); result.Error != nil {
+				return fmt.Errorf(
+					"create genesis pool registration owners: %w",
+					result.Error,
+				)
+			}
+		}
+		for i := range tmpReg.Relays {
+			tmpReg.Relays[i].PoolRegistrationID = storedReg.ID
+		}
+		if len(tmpReg.Relays) > 0 {
+			if result := db.Create(&tmpReg.Relays); result.Error != nil {
+				return fmt.Errorf(
+					"create genesis pool registration relays: %w",
+					result.Error,
+				)
+			}
 		}
 	}
 
