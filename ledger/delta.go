@@ -317,10 +317,11 @@ func (d *LedgerDelta) recordNetworkDonations(
 	return nil
 }
 
-// processGovernance handles governance proposals and votes from a transaction.
+// processGovernance handles governance proposals, votes, and DRep activity
+// certificates from a transaction.
 // This is called during delta application for valid Conway-era transactions.
-// Proposals and votes are only present in Conway-era transactions, so this is
-// a no-op for pre-Conway eras.
+// These items are only present in Conway-era transactions, so this is a no-op
+// for pre-Conway eras.
 func (d *LedgerDelta) processGovernance(
 	ls *LedgerState,
 	tx lcommon.Transaction,
@@ -328,9 +329,10 @@ func (d *LedgerDelta) processGovernance(
 ) error {
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
+	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
 
 	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 {
+	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
 		return nil
 	}
 
@@ -375,6 +377,18 @@ func (d *LedgerDelta) processGovernance(
 			txn,
 		); err != nil {
 			return fmt.Errorf("process governance votes: %w", err)
+		}
+	}
+
+	if hasDRepActivityCerts {
+		if err := governance.ProcessDRepActivityCertificates(
+			tx,
+			currentEpoch,
+			conwayPParams.DRepInactivityPeriod,
+			ls.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process DRep activity certificates: %w", err)
 		}
 	}
 

@@ -36,6 +36,80 @@ type proposalSource interface {
 	ProposalProcedures() []lcommon.ProposalProcedure
 }
 
+// HasDRepActivityCertificates reports whether the transaction contains a
+// certificate that renews a DRep's activity period.
+func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
+	for _, cert := range tx.Certificates() {
+		switch cert.(type) {
+		case *lcommon.RegistrationDrepCertificate,
+			*lcommon.UpdateDrepCertificate:
+			return true
+		}
+	}
+	return false
+}
+
+// ProcessDRepActivityCertificates renews DRep activity for registration and
+// update certificates. Certificate persistence creates or updates the DRep row
+// before this function runs, and both writes participate in the same database
+// transaction.
+func ProcessDRepActivityCertificates(
+	tx lcommon.Transaction,
+	currentEpoch uint64,
+	drepInactivityPeriod uint64,
+	db *database.Database,
+	txn *database.Txn,
+) error {
+	updated := make(map[string]struct{})
+	for i, cert := range tx.Certificates() {
+		var credential lcommon.Credential
+		switch c := cert.(type) {
+		case *lcommon.RegistrationDrepCertificate:
+			if c == nil {
+				continue
+			}
+			credential = c.DrepCredential
+		case *lcommon.UpdateDrepCertificate:
+			if c == nil {
+				continue
+			}
+			credential = c.DrepCredential
+		default:
+			continue
+		}
+
+		credentialTag, err := models.CredentialTagFromUint(
+			credential.CredType,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"renew DRep activity for certificate %d: %w",
+				i,
+				err,
+			)
+		}
+		key := string([]byte{credentialTag}) + string(credential.Credential[:])
+		if _, ok := updated[key]; ok {
+			continue
+		}
+		if err := db.UpdateDRepActivity(
+			credentialTag,
+			credential.Credential[:],
+			currentEpoch,
+			drepInactivityPeriod,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"renew DRep activity for certificate %d: %w",
+				i,
+				err,
+			)
+		}
+		updated[key] = struct{}{}
+	}
+	return nil
+}
+
 // ProcessProposals extracts governance proposals from a Conway-era
 // transaction and persists them to the database. Each proposal procedure in the
 // transaction body is mapped to a GovernanceProposal model with the appropriate
