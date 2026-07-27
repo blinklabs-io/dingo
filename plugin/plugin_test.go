@@ -19,7 +19,12 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 type testConfig struct {
@@ -415,5 +420,154 @@ func TestResolveRejectsTypedNilMapInstance(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nil lifecycle") {
 		t.Fatalf("error = %v, want nil lifecycle", err)
+	}
+}
+
+func TestStopCapabilityRacingWithResolveUnwindsNewInstance(t *testing.T) {
+	host := NewHost()
+	existingStopStarted := make(chan struct{})
+	releaseExistingStop := make(chan struct{})
+	racingStartFinished := make(chan struct{})
+	releaseRacingStart := make(chan struct{})
+	var releaseExistingOnce sync.Once
+	var releaseRacingOnce sync.Once
+	var existingStopStartedOnce sync.Once
+	var racingStartFinishedOnce sync.Once
+	releaseExisting := func() {
+		releaseExistingOnce.Do(func() { close(releaseExistingStop) })
+	}
+	releaseRacing := func() {
+		releaseRacingOnce.Do(func() { close(releaseRacingStart) })
+	}
+	t.Cleanup(releaseExisting)
+	t.Cleanup(releaseRacing)
+
+	var existingStops atomic.Int32
+	var racingStops atomic.Int32
+	register := func(
+		name string,
+		start func(context.Context) error,
+		stop func(context.Context) error,
+	) {
+		t.Helper()
+		err := Register(
+			host,
+			Descriptor{Capability: CapabilityMempool, Name: name},
+			func() testConfig { return testConfig{} },
+			func(
+				context.Context,
+				testConfig,
+				testDeps,
+			) (string, Instance, error) {
+				return name, Lifecycle{
+					StartFunc: start,
+					StopFunc:  stop,
+				}, nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	register(
+		"existing",
+		nil,
+		func(context.Context) error {
+			existingStops.Add(1)
+			existingStopStartedOnce.Do(func() { close(existingStopStarted) })
+			<-releaseExistingStop
+			return nil
+		},
+	)
+	register(
+		"racing",
+		func(context.Context) error {
+			racingStartFinishedOnce.Do(func() { close(racingStartFinished) })
+			<-releaseRacingStart
+			return nil
+		},
+		func(context.Context) error {
+			racingStops.Add(1)
+			return nil
+		},
+	)
+
+	_, err := Resolve[string](
+		context.Background(),
+		host,
+		CapabilityMempool,
+		"existing",
+		nil,
+		testDeps{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolveDone := make(chan error, 1)
+	go func() {
+		_, resolveErr := Resolve[string](
+			context.Background(),
+			host,
+			CapabilityMempool,
+			"racing",
+			nil,
+			testDeps{},
+		)
+		resolveDone <- resolveErr
+	}()
+	testutil.RequireReceive(
+		t,
+		racingStartFinished,
+		3*time.Second,
+		"racing provider start",
+	)
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- host.StopCapability(
+			context.Background(),
+			CapabilityMempool,
+		)
+	}()
+	testutil.RequireReceive(
+		t,
+		existingStopStarted,
+		3*time.Second,
+		"existing provider stop",
+	)
+
+	releaseRacing()
+	err = testutil.RequireReceive(
+		t,
+		resolveDone,
+		3*time.Second,
+		"racing provider resolution",
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "stopped during resolution") {
+		t.Fatalf("resolve error = %v, want capability stopped error", err)
+	}
+	if got := racingStops.Load(); got != 1 {
+		t.Fatalf("racing provider stop count = %d, want 1", got)
+	}
+
+	releaseExisting()
+	if err := testutil.RequireReceive(
+		t,
+		stopDone,
+		3*time.Second,
+		"capability stop",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := existingStops.Load(); got != 1 {
+		t.Fatalf("existing provider stop count = %d, want 1", got)
+	}
+	if err := host.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := racingStops.Load(); got != 1 {
+		t.Fatalf("racing provider stop count after host stop = %d, want 1", got)
 	}
 }

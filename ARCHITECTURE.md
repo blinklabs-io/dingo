@@ -17,6 +17,14 @@ Database receives provider-owned stores through `database.Stores`.
 API providers are resolved for lifecycle only because node composition has no
 in-process consumer of their concrete server values.
 
+Command and bootstrap composition that opens a standalone database uses
+`internal/plugins.OpenDatabase`. Its return contract keeps ownership
+unambiguous: a non-nil error never accompanies a live runtime, while a
+recoverable commit-timestamp mismatch is available from
+`DatabaseRuntime.RecoveryError()` on the successfully returned runtime. The
+caller must close every returned runtime, and `DatabaseRuntime.Close` preserves
+database-before-provider shutdown order.
+
 Composition injects the application `databasePath` into both storage provider
 dependency bundles, preserving `CARDANO_DATABASE_PATH` and `--data-dir` as a
 shortcut for both stores. Local providers can independently override that

@@ -145,10 +145,10 @@ func ensureDB(
 			Logger: logger,
 		},
 	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating database: %w", err)
+	}
 	if runtime == nil || runtime.Database == nil {
-		if err != nil {
-			return nil, nil, fmt.Errorf("creating database: %w", err)
-		}
 		return nil, nil, errors.New(
 			"creating database: runtime did not provide a database",
 		)
@@ -157,14 +157,16 @@ func ensureDB(
 	cleanup := func() {
 		_ = runtime.Close(context.Background())
 	}
-	if err != nil {
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Bootstrap paths (load / mithril sync) tolerate a recoverable
 		// commit-timestamp mismatch: the import work that follows
 		// writes through full transactions which heal the timestamps.
 		// Returning the error here would leave the user unable to
 		// re-run a load / re-bootstrap from a previous interrupted
 		// import.
-		if cte, ok := errors.AsType[database.CommitTimestampError](err); ok {
+		if cte, ok := errors.AsType[database.CommitTimestampError](
+			recoveryErr,
+		); ok {
 			logger.Warn(
 				"opened database with commit timestamp mismatch; "+
 					"continuing — import will heal it",
@@ -173,7 +175,7 @@ func ensureDB(
 			)
 			return newDB, cleanup, nil
 		}
-		return nil, nil, fmt.Errorf("creating database: %w", err)
+		return nil, nil, fmt.Errorf("creating database: %w", recoveryErr)
 	}
 	return newDB, cleanup, nil
 }

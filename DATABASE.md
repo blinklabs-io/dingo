@@ -11,6 +11,14 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 `Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
 local `badger` blob and `sqlite` metadata providers.
 
+Standalone command/bootstrap composition owns these stores through
+`internal/plugins.DatabaseRuntime`. `OpenDatabase` returns either a live
+runtime with a nil error or a nil runtime with an error, so conventional error
+handling cannot leak provider resources. A live runtime may report a
+recoverable commit-timestamp mismatch through `RecoveryError()`; callers that
+perform repair or forward import can inspect it before continuing and must
+still close the runtime.
+
 `databasePath` (including its `CARDANO_DATABASE_PATH` environment binding and
 the `--data-dir` flag) is the shared data-directory shortcut for both local
 storage providers. `plugins.storage.blob.config.dataDir` and
