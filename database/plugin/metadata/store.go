@@ -1176,8 +1176,11 @@ type MetadataStore interface {
 		types.Txn,
 	) (models.AddressBalance, error)
 
-	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
-	// See models.UtxoWithOrderingQuery. q must be non-nil.
+	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering
+	// metadata. Snapshot-imported UTxOs without a producing transaction use
+	// AddedSlot and block index zero. Keyset ordering uses the unique tuple
+	// (slot, block_index, output_idx, tx_id). See
+	// models.UtxoWithOrderingQuery. q must be non-nil.
 	GetUtxosByAddressWithOrdering(
 		*models.UtxoWithOrderingQuery,
 		types.Txn,

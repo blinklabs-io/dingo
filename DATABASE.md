@@ -895,6 +895,16 @@ quantities by that address. Decoding CBOR is required because some valid
 addresses, such as pointer addresses, cannot be reconstructed from the
 metadata credential-hash columns alone.
 
+`GetUtxosByAddressWithOrdering` includes live UTxOs imported from a ledger-state
+snapshot even though those rows have no `transaction_id` or historical
+`transaction` row. Its ordering join is therefore a left join. Transaction-
+backed UTxOs use the producing transaction's `(slot, block_index, output_idx)`;
+snapshot-only UTxOs use `(utxo.added_slot, 0, output_idx)`. SQLite, MySQL, and
+Postgres implement the same fallback. Keyset cursors and ordering use the
+complete `(slot, block_index, output_idx, tx_id)` tuple; the transaction hash
+is the final key that makes the cursor unique when snapshot fallback fields
+collide.
+
 ### `GetTransactionsByMetadataLabel`
 
 Transactions by metadata label:

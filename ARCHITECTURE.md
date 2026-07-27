@@ -2162,6 +2162,13 @@ document is served only at the literal `/` path (`GET /{$}`); any other
 unregistered path falls through to a catch-all `404` handler instead of the
 root document, matching real Blockfrost's behavior for unimplemented routes.
 
+Address summaries run balance, asset, CBOR, and existence reads through one
+coordinated read transaction. Pointer addresses require an exact decoded-output
+address comparison because the metadata columns do not store their pointer
+payload. The candidate query includes snapshot-imported live UTxOs that lack a
+producing transaction relationship, and missing or undecodable candidate CBOR
+fails the request rather than silently reporting a partial or zero balance.
+
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
