@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -119,6 +120,9 @@ type replayRecoveryCandidate struct {
 	ProducerBlock models.Block
 	RollbackPoint ocommon.Point
 	Strategy      string
+	// ProducerUnresolved distinguishes the security-parameter fallback from
+	// strategies that found a concrete producer. Strategy remains a log label.
+	ProducerUnresolved bool
 }
 
 type replayRecoveryPendingInput struct {
@@ -184,8 +188,14 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if candidate.ProducerTx != nil {
 		producerTxHash = hex.EncodeToString(candidate.ProducerTx.Hash)
 	}
+	rewindPrimaryChain := candidate.ProducerUnresolved &&
+		ls.config.ChainManager != nil
+	recoveryAction := "rewinding metadata state"
+	if rewindPrimaryChain {
+		recoveryAction = "rewinding primary chain and metadata state"
+	}
 	ls.config.Logger.Warn(
-		"detected inconsistent local ledger state during replay, rewinding metadata state",
+		"detected inconsistent local ledger state during replay, "+recoveryAction,
 		"component", "ledger",
 		"recovery_strategy", candidate.Strategy,
 		"tx_hash", hex.EncodeToString(validationErr.TxHash),
@@ -206,6 +216,20 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		}
 		return true, nil
 	}
+	if rewindPrimaryChain {
+		if err := ls.rollbackPrimaryChainInSecurityParamWindows(
+			candidate.RollbackPoint,
+		); err != nil {
+			return false, fmt.Errorf(
+				"rewind primary chain for replay recovery: %w",
+				err,
+			)
+		}
+	}
+	// The chain moves first while the rollback anchor is guaranteed to remain
+	// available. If metadata synchronization fails, the primary chain is still
+	// at a valid retained point and the standard divergence reconciler can
+	// finish rolling metadata back to its common ancestor.
 	if err := ls.rollback(candidate.RollbackPoint); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state for replay recovery: %w",
@@ -213,6 +237,73 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		)
 	}
 	return true, nil
+}
+
+// rollbackPrimaryChainInSecurityParamWindows reaches a deep corrective rewind
+// by applying a sequence of ordinary, security-parameter-bounded rollbacks.
+// Each step therefore preserves ChainRollbackEvent's k-bounded contract and
+// bounds the blocks retained for event delivery. A failure leaves the chain at
+// the last committed intermediate point; startup/live reconciliation can then
+// replay or finish rolling metadata back to that valid primary-chain tip.
+func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
+	point ocommon.Point,
+) error {
+	securityParam := ls.SecurityParam()
+	if securityParam <= 0 {
+		return chain.ErrSecurityParamNotConfigured
+	}
+
+	targetIndex := uint64(0)
+	if point.Slot > 0 || len(point.Hash) > 0 {
+		targetBlock, err := database.BlockByPoint(ls.db, point)
+		if err != nil {
+			return fmt.Errorf("lookup replay recovery target: %w", err)
+		}
+		targetIndex = targetBlock.ID
+	}
+
+	tip := ls.chain.Tip()
+	if tip.Point.Slot == point.Slot &&
+		bytes.Equal(tip.Point.Hash, point.Hash) {
+		return nil
+	}
+	tipBlock, err := database.BlockByPoint(ls.db, tip.Point)
+	if err != nil {
+		return fmt.Errorf("lookup primary chain tip: %w", err)
+	}
+	tipIndex := tipBlock.ID
+	if tipIndex < targetIndex {
+		return fmt.Errorf(
+			"primary chain tip index %d is behind replay recovery target %d",
+			tipIndex,
+			targetIndex,
+		)
+	}
+	window := uint64(securityParam)
+	for tipIndex-targetIndex > window {
+		nextIndex := tipIndex - window
+		nextBlock, err := ls.db.BlockByIndex(nextIndex, nil)
+		if err != nil {
+			return fmt.Errorf(
+				"lookup intermediate replay recovery block %d: %w",
+				nextIndex,
+				err,
+			)
+		}
+		nextPoint := ocommon.NewPoint(nextBlock.Slot, nextBlock.Hash)
+		if err := ls.chain.Rollback(nextPoint); err != nil {
+			return fmt.Errorf(
+				"rollback primary chain to intermediate point %d: %w",
+				nextIndex,
+				err,
+			)
+		}
+		tipIndex = nextIndex
+	}
+	if err := ls.chain.Rollback(point); err != nil {
+		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
+	}
+	return nil
 }
 
 func (ls *LedgerState) recoveryRollbackExceedsMithrilBoundary(
@@ -398,7 +489,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		"attempt", attempts,
 		"holding", ls.atTipRecoveryHolding,
 	)
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+	if err := ls.rollbackPrimaryChainInSecurityParamWindows(
 		rewindPoint,
 	); err != nil {
 		return false, fmt.Errorf(
@@ -414,8 +505,8 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// looks up its inputs, finds them already marked consumed, and
 	// returns "rule 22 bad input(s) ... rule 24 value not conserved
 	// (consumed 0)" again, looping the recovery indefinitely until
-	// process restart. RewindPrimaryChainToPoint by design only touches
-	// the chain blob — the matching ledger rollback must be explicit.
+	// process restart. Primary-chain rollback only touches the chain
+	// store — the matching ledger rollback must be explicit.
 	if err := ls.rollback(rewindPoint); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after validation failure: %w",
@@ -484,7 +575,7 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		)
 	}
 	logRejection(mithrilLedgerSlot, rewindPoint)
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to Mithril trust boundary: %w",
 			err,
@@ -866,10 +957,11 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 		return nil, err
 	}
 	return &replayRecoveryCandidate{
-		Input:         inputs[0],
-		ProducerBlock: anchorBlock,
-		RollbackPoint: rollbackPoint,
-		Strategy:      "security-param-fallback",
+		Input:              inputs[0],
+		ProducerBlock:      anchorBlock,
+		RollbackPoint:      rollbackPoint,
+		Strategy:           "security-param-fallback",
+		ProducerUnresolved: true,
 	}, nil
 }
 
