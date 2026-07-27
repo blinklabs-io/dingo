@@ -28,6 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
 )
 
@@ -694,11 +696,18 @@ func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 		Model(&models.RewardLiveStake{}).
 		Where("staking_key = ?", positiveKey).
 		Update("total_stake", types.Uint64(75)).Error)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 100,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 1,
+	}, nil))
 
 	calc := NewCalculator(db)
 	txn := db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
-	dist, err := calc.calculateStakeDistributionInTxn(
+	dist, err := calc.calculateBoundaryStakeDistributionInTxn(
 		context.Background(), txn, 100, 0, 0,
 	)
 	require.NoError(t, err)
@@ -711,6 +720,73 @@ func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 	require.Equal(t, uint64(75), dist.TotalStake)
 	require.Len(t, dist.StakeInputs, 1,
 		"zero-stake credentials are not persisted as reward inputs")
+}
+
+func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		setTip bool
+	}{
+		{
+			name:   "tip beyond requested slot",
+			setTip: true,
+		},
+		{
+			name: "no persisted tip",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			seedSnapshotEpoch(t, db)
+
+			poolHash := bytes.Repeat([]byte{0xa8}, 28)
+			positiveKey := bytes.Repeat([]byte{0x19}, 28)
+			zeroKey := bytes.Repeat([]byte{0x1a}, 28)
+			seedPoolAndDelegations(t, db, poolHash, []struct {
+				stakingKey  []byte
+				utxoAmounts []types.Uint64
+			}{
+				{
+					stakingKey:  positiveKey,
+					utxoAmounts: []types.Uint64{50},
+				},
+				{
+					stakingKey: zeroKey,
+				},
+			}, 100)
+
+			// Deliberately differ from the historical UTxO reconstruction so
+			// the selected branch is observable.
+			require.NoError(t, snapshotGormDB(t, db).
+				Model(&models.RewardLiveStake{}).
+				Where("staking_key = ?", positiveKey).
+				Update("total_stake", types.Uint64(75)).Error)
+			if test.setTip {
+				require.NoError(t, db.SetTip(ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 101,
+						Hash: bytes.Repeat([]byte{0x02}, 32),
+					},
+					BlockNumber: 2,
+				}, nil))
+			}
+
+			calc := NewCalculator(db)
+			txn := db.Transaction(false)
+			defer func() { _ = txn.Commit() }()
+			dist, err := calc.calculateBoundaryStakeDistributionInTxn(
+				context.Background(), txn, 100, 0, 0,
+			)
+			require.NoError(t, err)
+
+			var pool lcommon.PoolKeyHash
+			copy(pool[:], poolHash)
+			require.Equal(t, uint64(50), dist.PoolStakes[pool])
+			require.Equal(t, uint64(2), dist.DelegatorCount[pool])
+			require.Equal(t, uint64(50), dist.TotalStake)
+			require.Len(t, dist.StakeInputs, 1)
+		})
+	}
 }
 
 func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
