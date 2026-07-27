@@ -182,6 +182,26 @@ func (d *MetadataStorePostgres) GetRewardStakeInputsForPools(poolKeyHashes [][]b
 	return inputs, nil
 }
 
+func (d *MetadataStorePostgres) GetLiveStakeInputsForPools(
+	poolKeyHashes [][]byte,
+	expiryEpoch uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetLiveStakeInputsForPools: resolve db: %w", err,
+		)
+	}
+	inputs, err := rewardstate.LiveStakeInputsForPools(
+		db, poolKeyHashes, 1000, expiryEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
+	}
+	return inputs, nil
+}
+
 func (d *MetadataStorePostgres) SaveRewardStakeInputs(inputs []*models.RewardStakeInput, txn types.Txn) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {

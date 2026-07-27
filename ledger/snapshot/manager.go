@@ -505,7 +505,7 @@ func (m *Manager) calculateSnapshotDistribution(
 	calculator := NewCalculator(m.db)
 	txn := m.db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
-	return calculator.calculateStakeDistributionInTxn(
+	return calculator.calculateBoundaryStakeDistributionInTxn(
 		ctx, txn, slot, expiryEpoch, m.inactivityPeriod(),
 	)
 }

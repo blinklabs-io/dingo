@@ -384,6 +384,33 @@ func StakeInputsForPools(
 	chunkSize int,
 	expiryEpoch uint64,
 ) ([]*models.RewardStakeInput, error) {
+	return stakeInputsForPools(
+		db, poolKeyHashes, chunkSize, expiryEpoch, true,
+	)
+}
+
+// LiveStakeInputsForPools returns every registered credential from the
+// maintained live reward aggregate for the requested pools. Unlike
+// StakeInputsForPools it retains zero-stake credentials so snapshot capture can
+// derive the exact delegator count without a second account/UTxO scan.
+func LiveStakeInputsForPools(
+	db *gorm.DB,
+	poolKeyHashes [][]byte,
+	chunkSize int,
+	expiryEpoch uint64,
+) ([]*models.RewardStakeInput, error) {
+	return stakeInputsForPools(
+		db, poolKeyHashes, chunkSize, expiryEpoch, false,
+	)
+}
+
+func stakeInputsForPools(
+	db *gorm.DB,
+	poolKeyHashes [][]byte,
+	chunkSize int,
+	expiryEpoch uint64,
+	positiveOnly bool,
+) ([]*models.RewardStakeInput, error) {
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
 	}
@@ -401,19 +428,28 @@ func StakeInputsForPools(
 				OR acct.expiration_epoch >= ?
 				OR acct.expiration_epoch IS NULL)`
 	}
+	stakePredicate := ""
+	if positiveOnly {
+		stakePredicate = fmt.Sprintf(
+			"\n\t\t\tAND CAST(rls.total_stake AS %s) > ?",
+			integerCastType(db),
+		)
+	}
 	query := fmt.Sprintf(`
 		SELECT rls.*
 		FROM reward_live_stake rls%s
 		WHERE rls.pool_key_hash IN ?
-			AND rls.registered = ?
-			AND CAST(rls.total_stake AS %s) > ?%s
+			AND rls.registered = ?%s%s
 		ORDER BY rls.pool_key_hash ASC, rls.credential_tag ASC, rls.staking_key ASC
-	`, expiryJoin, integerCastType(db), expiryPredicate)
+	`, expiryJoin, stakePredicate, expiryPredicate)
 
 	rows := make([]models.RewardLiveStake, 0)
 	for start := 0; start < len(poolKeyHashes); start += chunkSize {
 		end := min(start+chunkSize, len(poolKeyHashes))
-		args := []any{poolKeyHashes[start:end], true, 0}
+		args := []any{poolKeyHashes[start:end], true}
+		if positiveOnly {
+			args = append(args, 0)
+		}
 		if expiryEpoch > 0 {
 			args = append(args, expiryEpoch)
 		}

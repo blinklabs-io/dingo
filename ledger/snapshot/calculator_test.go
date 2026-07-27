@@ -667,6 +667,52 @@ func TestCalculateStakeDistribution_EmptyDatabase(t *testing.T) {
 	require.Empty(t, dist.PoolStakes, "empty database should have no pool stakes")
 }
 
+func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
+	db := setupTestDB(t)
+	seedSnapshotEpoch(t, db)
+
+	poolHash := bytes.Repeat([]byte{0xa7}, 28)
+	positiveKey := bytes.Repeat([]byte{0x17}, 28)
+	zeroKey := bytes.Repeat([]byte{0x18}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  positiveKey,
+			utxoAmounts: []types.Uint64{50},
+		},
+		{
+			stakingKey: zeroKey,
+		},
+	}, 100)
+
+	// Make the maintained live aggregate deliberately differ from the
+	// historical UTxO reconstruction. The authoritative SNAP-point path must
+	// consume this table directly; rebuilding history here is issue #2948.
+	require.NoError(t, snapshotGormDB(t, db).
+		Model(&models.RewardLiveStake{}).
+		Where("staking_key = ?", positiveKey).
+		Update("total_stake", types.Uint64(75)).Error)
+
+	calc := NewCalculator(db)
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Commit() }()
+	dist, err := calc.calculateStakeDistributionInTxn(
+		context.Background(), txn, 100, 0, 0,
+	)
+	require.NoError(t, err)
+
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	require.Equal(t, uint64(75), dist.PoolStakes[pool])
+	require.Equal(t, uint64(2), dist.DelegatorCount[pool],
+		"zero-stake registered credentials still count as delegators")
+	require.Equal(t, uint64(75), dist.TotalStake)
+	require.Len(t, dist.StakeInputs, 1,
+		"zero-stake credentials are not persisted as reward inputs")
+}
+
 func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)

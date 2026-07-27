@@ -523,6 +523,16 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetLiveStakeInputsForPools returns every registered credential (including
+	// zero-stake credentials) from the transactionally maintained live reward
+	// aggregate for the requested pools. expiryEpoch applies the live
+	// CIP-0163 account-expiration filter when nonzero.
+	GetLiveStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // expiryEpoch (0 = gate off)
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 	// canonical account and live UTxO metadata. Node startup uses it as an
 	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.
