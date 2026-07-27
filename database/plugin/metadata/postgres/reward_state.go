@@ -26,6 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+const rewardStakeInputPoolBatchSize = 1000
+
 // SaveRewardAdaPots saves reward-related ADA pots for an epoch.
 func (d *MetadataStorePostgres) SaveRewardAdaPots(
 	pots *models.RewardAdaPots,
@@ -164,8 +166,8 @@ func (d *MetadataStorePostgres) GetRewardStakeInputsForPools(poolKeyHashes [][]b
 	}
 	// CIP-0163 gate on: reconstruct reward inputs at slot from the same
 	// historical CTE the leader-election path uses so both halves of the
-	// snapshot agree by construction. Gate off: read the live aggregate,
-	// byte-identical to the pre-CIP query.
+	// snapshot agree by construction. Gate off: read the live aggregate without
+	// an account join or expiration predicate.
 	if expiryEpoch > 0 {
 		inputs, err := stakequery.GetRewardStakeInputsByPoolsAtSlot(
 			db, poolKeyHashes, slot, expiryEpoch, inactivityPeriod,
@@ -175,7 +177,9 @@ func (d *MetadataStorePostgres) GetRewardStakeInputsForPools(poolKeyHashes [][]b
 		}
 		return inputs, nil
 	}
-	inputs, err := rewardstate.StakeInputsForPools(db, poolKeyHashes, 1000, expiryEpoch)
+	inputs, err := rewardstate.StakeInputsForPools(
+		db, poolKeyHashes, rewardStakeInputPoolBatchSize, expiryEpoch,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("GetRewardStakeInputsForPools: %w", err)
 	}
@@ -194,7 +198,7 @@ func (d *MetadataStorePostgres) GetLiveStakeInputsForPools(
 		)
 	}
 	inputs, err := rewardstate.LiveStakeInputsForPools(
-		db, poolKeyHashes, 1000, expiryEpoch,
+		db, poolKeyHashes, rewardStakeInputPoolBatchSize, expiryEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)

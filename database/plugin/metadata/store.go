@@ -508,8 +508,8 @@ type MetadataStore interface {
 
 	// GetRewardStakeInputsForPools returns positive per-account delegated stake
 	// for pools. When the CIP-0163 inactivity gate is off (expiryEpoch == 0) it
-	// reads the live reward stake aggregate, byte-identical to the pre-CIP query
-	// (slot and inactivityPeriod are ignored). When the gate is on
+	// reads the live reward stake aggregate (slot and inactivityPeriod are
+	// ignored). When the gate is on
 	// (expiryEpoch > 0) it reconstructs per-credential stake and expiration at
 	// slot from the same historical CTE as GetStakeByPoolsAtSlot, so the
 	// reward-basis inputs agree with leader-election pool totals by construction

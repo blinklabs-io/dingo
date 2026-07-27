@@ -376,8 +376,8 @@ func DedupePoolKeyHashes(poolKeyHashes [][]byte) [][]byte {
 // the live aggregate is joined to account and credentials whose account expired
 // before expiryEpoch (nonzero expiration_epoch < expiryEpoch) are excluded,
 // while credentials with no account row or expiration_epoch 0 stay included.
-// When expiryEpoch == 0 the gate is off and the query and args are
-// byte-identical to the pre-CIP query.
+// When expiryEpoch == 0 the gate is off and no account join or expiration
+// predicate is added.
 func StakeInputsForPools(
 	db *gorm.DB,
 	poolKeyHashes [][]byte,

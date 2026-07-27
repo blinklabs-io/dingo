@@ -103,21 +103,21 @@ func (RewardStakeInput) TableName() string {
 }
 
 // RewardLiveStake is the live per-stake-credential aggregate maintained for a
-// future reward-snapshot consumer. UtxoStake and RewardStake are stored
+// reward and leader-election snapshot consumers. UtxoStake and RewardStake are stored
 // separately so rollback/account-reward repair can refresh only the affected
 // credential while TotalStake remains directly queryable.
 type RewardLiveStake struct {
-	PoolKeyHash   []byte       `gorm:"size:28"`
-	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:2;size:28;not null"`
+	PoolKeyHash   []byte       `gorm:"index:idx_reward_live_stake_pool_order,priority:1;size:28"`
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:2;index:idx_reward_live_stake_pool_order,priority:3;size:28;not null"`
 	ID            uint         `gorm:"primarykey"`
-	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:1;not null;default:0"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:1;index:idx_reward_live_stake_pool_order,priority:2;not null;default:0"`
 	UtxoStake     types.Uint64 `gorm:"not null"`
 	RewardStake   types.Uint64 `gorm:"not null"`
 	TotalStake    types.Uint64 `gorm:"not null"`
 	Registered    bool         `gorm:"not null"`
 	// PoolDelegation* records the certificate order used to derive PoolKeyHash.
-	// It is rollback/rebuild bookkeeping; consumers must apply any pool
-	// registration-recency eligibility rule when snapshot capture is wired.
+	// It is rollback/rebuild bookkeeping; snapshot consumers select eligible
+	// pools independently at the requested slot.
 	PoolDelegationSlot       uint64 `gorm:"not null;default:0"`
 	PoolDelegationBlockIndex uint64 `gorm:"not null;default:0"`
 	PoolDelegationCertIndex  uint32 `gorm:"not null;default:0"`
@@ -168,9 +168,10 @@ func (RewardAccountOutput) TableName() string {
 }
 
 // MigrateRewardLiveStakePoolIndex drops the legacy pool/total_stake index.
-// The aggregate has no pool-ordered query consumer yet, and retaining the
-// index prevents MySQL from changing total_stake's numeric column type during
-// AutoMigrate because the previous schema represented it as TEXT.
+// Snapshot capture uses the replacement pool/credential ordering index declared
+// on RewardLiveStake. Dropping the legacy index first lets MySQL change
+// total_stake's numeric column type during AutoMigrate when an older schema
+// represented it as TEXT.
 func MigrateRewardLiveStakePoolIndex(db *gorm.DB, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()

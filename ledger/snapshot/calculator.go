@@ -92,7 +92,6 @@ func (c *Calculator) calculateStakeDistributionInTxn(
 	txn *database.Txn,
 	slot uint64,
 	expiryEpoch uint64,
-	_ uint64,
 ) (*StakeDistribution, error) {
 	dist, err := c.calculateLiveStakeDistributionInTxn(
 		ctx, txn, slot, expiryEpoch,
@@ -128,7 +127,7 @@ func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 	hasTip := tip.BlockNumber > 0 || len(tip.Point.Hash) > 0
 	if hasTip && tip.Point.Slot <= slot {
 		return c.calculateStakeDistributionInTxn(
-			ctx, txn, slot, expiryEpoch, inactivityPeriod,
+			ctx, txn, slot, expiryEpoch,
 		)
 	}
 
@@ -182,6 +181,7 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	if err != nil {
 		return nil, fmt.Errorf("get live stake inputs: %w", err)
 	}
+	dist.StakeInputs = make([]StakeInput, 0, len(inputs))
 	for _, input := range inputs {
 		if input == nil {
 			return nil, errors.New("nil live stake input")
@@ -220,18 +220,12 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 		dist.TotalStake += stake
 		if stake > 0 {
 			dist.StakeInputs = append(dist.StakeInputs, StakeInput{
-				PoolKeyHash:   append([]byte(nil), input.PoolKeyHash...),
+				PoolKeyHash:   input.PoolKeyHash,
 				CredentialTag: input.CredentialTag,
-				StakingKey:    append([]byte(nil), input.StakingKey...),
+				StakingKey:    input.StakingKey,
 				Stake:         stake,
 				Registered:    input.Registered,
 			})
-		}
-	}
-	for poolHash, delegators := range dist.DelegatorCount {
-		if delegators == 0 {
-			delete(dist.DelegatorCount, poolHash)
-			delete(dist.PoolStakes, poolHash)
 		}
 	}
 	dist.TotalPools = uint64(len(dist.PoolStakes))
@@ -388,13 +382,10 @@ func (c *Calculator) getActivePoolsAtSlot(
 	return pools, nil
 }
 
-// getBatchPoolsDelegatedStake returns per-credential reward stake for all
-// pools. With the CIP-0163 gate off it reads the live reward aggregate, which
-// metadata block application keeps aligned with UTxO, account, delegation, and
-// reward-balance changes so the epoch-boundary snapshot avoids scanning the
-// UTxO set. With the gate on it reconstructs the inputs at slot from the same
-// historical CTE as the leader-election pool totals, trading that optimization
-// for reward inputs that agree with leader stake by construction.
+// getBatchPoolsDelegatedStake returns historical per-credential reward stake
+// for all pools. The fallback path reconstructs both these inputs and the
+// leader-election totals at slot so they agree even when live account state has
+// advanced beyond the boundary.
 func (c *Calculator) getBatchPoolsDelegatedStake(
 	_ context.Context,
 	meta metadata.MetadataStore,

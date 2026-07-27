@@ -431,7 +431,6 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		txn,
 		evt.SnapshotSlot,
 		m.expiryEpoch(evt.NewEpoch),
-		m.inactivityPeriod(),
 	)
 	if err != nil {
 		if m.metrics != nil {

@@ -89,6 +89,14 @@ func TestMigrateRewardLiveStakePoolIndex(t *testing.T) {
 	)
 
 	require.NoError(t, MigrateRewardLiveStakePoolIndex(db, nil))
+	require.NoError(t, db.AutoMigrate(&RewardLiveStake{}))
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&RewardLiveStake{},
+			"idx_reward_live_stake_pool_order",
+		),
+	)
 	require.False(
 		t,
 		db.Migrator().HasIndex(

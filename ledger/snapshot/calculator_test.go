@@ -669,6 +669,123 @@ func TestCalculateStakeDistribution_EmptyDatabase(t *testing.T) {
 	require.Empty(t, dist.PoolStakes, "empty database should have no pool stakes")
 }
 
+func seedBoundaryPathFixture(
+	t *testing.T,
+	db *database.Database,
+) ([]byte, []byte) {
+	t.Helper()
+	seedSnapshotEpoch(t, db)
+
+	poolHash := bytes.Repeat([]byte{0xa6}, 28)
+	expiredKey := bytes.Repeat([]byte{0x16}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  bytes.Repeat([]byte{0x14}, 28),
+			utxoAmounts: []types.Uint64{100},
+		},
+		{
+			stakingKey:  expiredKey,
+			utxoAmounts: []types.Uint64{40},
+		},
+		{
+			stakingKey: bytes.Repeat([]byte{0x15}, 28),
+		},
+	}, 100)
+	require.NoError(t, snapshotGormDB(t, db).
+		Model(&models.Account{}).
+		Where("staking_key = ?", expiredKey).
+		Update("expiration_epoch", 2).Error)
+	return poolHash, expiredKey
+}
+
+func TestCalculateEpochBoundaryStakeLivePathExcludesExpiredAccount(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+	poolHash, expiredKey := seedBoundaryPathFixture(t, db)
+
+	calc := NewCalculator(db)
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Commit() }()
+	dist, err := calc.calculateStakeDistributionInTxn(
+		context.Background(), txn, 100, 3,
+	)
+	require.NoError(t, err)
+
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	require.Equal(t, uint64(100), dist.PoolStakes[pool])
+	require.Equal(t, uint64(2), dist.DelegatorCount[pool],
+		"the expired credential is excluded while the active zero-stake credential counts")
+	require.Equal(t, uint64(100), dist.TotalStake)
+	require.Len(t, dist.StakeInputs, 1)
+	require.NotEqual(t, expiredKey, dist.StakeInputs[0].StakingKey)
+}
+
+func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		expiryEpoch      uint64
+		inactivityPeriod uint64
+	}{
+		{name: "CIP-0163 gate off"},
+		{
+			name:             "CIP-0163 gate on",
+			expiryEpoch:      3,
+			inactivityPeriod: 2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			seedBoundaryPathFixture(t, db)
+			calc := NewCalculator(db)
+
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 100,
+					Hash: bytes.Repeat([]byte{0x01}, 32),
+				},
+				BlockNumber: 1,
+			}, nil))
+			liveTxn := db.Transaction(false)
+			live, err := calc.calculateBoundaryStakeDistributionInTxn(
+				context.Background(),
+				liveTxn,
+				100,
+				test.expiryEpoch,
+				test.inactivityPeriod,
+			)
+			require.NoError(t, err)
+			require.NoError(t, liveTxn.Commit())
+
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 101,
+					Hash: bytes.Repeat([]byte{0x02}, 32),
+				},
+				BlockNumber: 2,
+			}, nil))
+			historicalTxn := db.Transaction(false)
+			historical, err := calc.calculateBoundaryStakeDistributionInTxn(
+				context.Background(),
+				historicalTxn,
+				100,
+				test.expiryEpoch,
+				test.inactivityPeriod,
+			)
+			require.NoError(t, err)
+			require.NoError(t, historicalTxn.Commit())
+
+			require.Equal(t, live.PoolStakes, historical.PoolStakes)
+			require.Equal(t, live.DelegatorCount, historical.DelegatorCount)
+			require.Equal(t, live.TotalStake, historical.TotalStake)
+		})
+	}
+}
+
 func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
@@ -826,7 +943,6 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 		txn,
 		1000,
 		0,
-		0,
 	)
 	require.ErrorContains(t, err, "delegated stake overflow")
 	require.Nil(t, dist)
@@ -870,7 +986,6 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 		context.Background(),
 		txn,
 		1000,
-		0,
 		0,
 	)
 	require.ErrorContains(t, err, "total active stake overflow")
