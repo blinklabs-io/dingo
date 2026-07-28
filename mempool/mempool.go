@@ -854,11 +854,8 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 		m.mutationMutex.Unlock()
 		return nil, ErrMempoolStopped
 	}
-	base := make([]appliedTx, len(m.overlay.applied))
+	base := slices.Clone(m.overlay.applied)
 	baseTxs := make(map[string]*MempoolTransaction, len(m.txByHash))
-	for i, at := range m.overlay.applied {
-		base[i] = cloneAppliedTx(at)
-	}
 	maps.Copy(baseTxs, m.txByHash)
 	startSeq := m.mutationSeq
 	m.mutationJournal = nil
@@ -1042,6 +1039,12 @@ func (m *Mempool) revalidateAppliedTx(
 	) error,
 ) {
 	if tx == nil {
+		m.logger.Warn(
+			"overlay applied transaction is missing from transaction index during re-validation",
+			"component", "mempool",
+			"tx_hash", at.hash,
+			"tx_type", at.txType,
+		)
 		return
 	}
 	tmpTx, err := gledger.NewTransactionFromCbor(at.txType, at.cbor)

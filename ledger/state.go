@@ -6893,6 +6893,43 @@ func validationReferenceSlot(
 	return tipSlot
 }
 
+type txValidationSnapshot struct {
+	generation     uint64
+	currentEra     eras.EraDesc
+	currentPParams lcommon.ProtocolParameters
+	prevEraPParams lcommon.ProtocolParameters
+	eraList        []eras.EraDesc
+	referenceSlot  uint64
+}
+
+func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
+	consensusState, tipState := ls.loadStateSnapshots()
+	tipSlot := tipState.currentTip.Point.Slot
+	currentSlot, currentSlotErr := ls.CurrentSlot()
+	if currentSlotErr != nil {
+		ls.config.Logger.Debug(
+			"slot clock unavailable during tx validation, falling back to snapshot tip slot",
+			"error",
+			currentSlotErr,
+			"snapshot_tip_slot",
+			tipSlot,
+		)
+		ls.metrics.slotClockFallbacks.Inc()
+	}
+	return txValidationSnapshot{
+		generation:     consensusState.generation,
+		currentEra:     consensusState.currentEra,
+		currentPParams: consensusState.currentPParams,
+		prevEraPParams: consensusState.prevEraPParams,
+		eraList:        ls.eraList(),
+		referenceSlot: validationReferenceSlot(
+			tipSlot,
+			currentSlot,
+			currentSlotErr,
+		),
+	}
+}
+
 // WithTxValidationSession pins a mempool revalidation batch to one immutable
 // ledger publication, one validation slot/era/parameter set, and one
 // repeatable-read database transaction. stillCurrent lets the mempool reject
@@ -6908,30 +6945,7 @@ func (ls *LedgerState) WithTxValidationSession(
 		stillCurrent func() bool,
 	) error,
 ) error {
-	consensusState, tipState := ls.loadStateSnapshots()
-	generation := consensusState.generation
-	snapshotEra := consensusState.currentEra
-	snapshotPParams := consensusState.currentPParams
-	snapshotPrevEraPParams := consensusState.prevEraPParams
-	snapshotTipSlot := tipState.currentTip.Point.Slot
-	eraList := ls.eraList()
-
-	currentSlot, currentSlotErr := ls.CurrentSlot()
-	if currentSlotErr != nil {
-		ls.config.Logger.Debug(
-			"slot clock unavailable during tx validation session, falling back to snapshot tip slot",
-			"error",
-			currentSlotErr,
-			"snapshot_tip_slot",
-			snapshotTipSlot,
-		)
-		ls.metrics.slotClockFallbacks.Inc()
-	}
-	snapshotSlot := validationReferenceSlot(
-		snapshotTipSlot,
-		currentSlot,
-		currentSlotErr,
-	)
+	snapshot := ls.txValidationSnapshot()
 
 	txn := ls.db.Transaction(false)
 	return txn.Do(func(txn *database.Txn) error {
@@ -6942,8 +6956,8 @@ func (ls *LedgerState) WithTxValidationSession(
 		) error {
 			validationEra, err := resolveValidationEra(
 				tx,
-				snapshotEra,
-				eraList,
+				snapshot.currentEra,
+				snapshot.eraList,
 			)
 			if err != nil {
 				return err
@@ -6951,14 +6965,14 @@ func (ls *LedgerState) WithTxValidationSession(
 			if validationEra.ValidateTxFunc == nil {
 				return nil
 			}
-			pp := snapshotPParams
-			if validationEra.Id != snapshotEra.Id &&
-				snapshotPrevEraPParams != nil {
-				pp = snapshotPrevEraPParams
+			pp := snapshot.currentPParams
+			if validationEra.Id != snapshot.currentEra.Id &&
+				snapshot.prevEraPParams != nil {
+				pp = snapshot.prevEraPParams
 			}
 			err = validationEra.ValidateTxFunc(
 				tx,
-				snapshotSlot,
+				snapshot.referenceSlot,
 				&LedgerView{
 					txn:             txn,
 					ls:              ls,
@@ -6978,8 +6992,8 @@ func (ls *LedgerState) WithTxValidationSession(
 		}
 		stillCurrent := func() bool {
 			currentConsensus, currentTip := ls.loadStateSnapshots()
-			return currentConsensus.generation == generation &&
-				currentTip.generation == generation
+			return currentConsensus.generation == snapshot.generation &&
+				currentTip.generation == snapshot.generation
 		}
 		return fn(validate, stillCurrent)
 	})
@@ -6993,46 +7007,27 @@ func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
 	buildLV func(txn *database.Txn) *LedgerView,
 ) error {
-	consensusState, tipState := ls.loadStateSnapshots()
-	snapshotEra := consensusState.currentEra
-	snapshotTipSlot := tipState.currentTip.Point.Slot
-	snapshotPParams := consensusState.currentPParams
-	snapshotPrevEraPParams := consensusState.prevEraPParams
-	currentSlot, currentSlotErr := ls.CurrentSlot()
-	if currentSlotErr != nil {
-		ls.config.Logger.Debug(
-			"slot clock unavailable during tx validation, falling back to snapshot tip slot",
-			"error",
-			currentSlotErr,
-			"snapshot_tip_slot",
-			snapshotTipSlot,
-		)
-		ls.metrics.slotClockFallbacks.Inc()
-	}
-	snapshotSlot := validationReferenceSlot(
-		snapshotTipSlot,
-		currentSlot,
-		currentSlotErr,
-	)
+	snapshot := ls.txValidationSnapshot()
 
 	validationEra, err := resolveValidationEra(
 		tx,
-		snapshotEra,
-		ls.eraList(),
+		snapshot.currentEra,
+		snapshot.eraList,
 	)
 	if err != nil {
 		return err
 	}
 	if validationEra.ValidateTxFunc != nil {
-		pp := snapshotPParams
-		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
-			pp = snapshotPrevEraPParams
+		pp := snapshot.currentPParams
+		if validationEra.Id != snapshot.currentEra.Id &&
+			snapshot.prevEraPParams != nil {
+			pp = snapshot.prevEraPParams
 		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
 			return validationEra.ValidateTxFunc(
 				tx,
-				snapshotSlot,
+				snapshot.referenceSlot,
 				buildLV(txn),
 				pp,
 			)

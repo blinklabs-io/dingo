@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -79,7 +80,7 @@ func BenchmarkFIFOAdmissionNoRevalidation(b *testing.B) {
 	validator := &fifoRevalidationBenchmarkValidator{
 		started: make(chan struct{}),
 	}
-	pool := newFIFORevalidationBenchmarkPool(b, validator)
+	pool, _ := newFIFORevalidationBenchmarkPool(b, validator)
 	generator := &fifoRevalidationTxGenerator{chainGap: 10}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -110,7 +111,7 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 				validator := &fifoRevalidationBenchmarkValidator{
 					started: make(chan struct{}),
 				}
-				pool := newFIFORevalidationBenchmarkPool(b, validator)
+				pool, cleanup := newFIFORevalidationBenchmarkPool(b, validator)
 				generator := &fifoRevalidationTxGenerator{
 					chainGap: scenario.chainGap,
 				}
@@ -129,7 +130,17 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 				syncStart := time.Now()
 				rebuildDone := make(chan error, 1)
 				go func() { rebuildDone <- pool.rebuildOverlay() }()
-				<-validator.started
+				waitCtx, cancelWait := context.WithTimeout(
+					context.Background(),
+					3*time.Second,
+				)
+				select {
+				case <-validator.started:
+				case <-waitCtx.Done():
+					cancelWait()
+					b.Fatal("timeout waiting for validation session start")
+				}
+				cancelWait()
 
 				admissionStart := time.Now()
 				if err := pool.AddTransaction(
@@ -147,6 +158,8 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 					b.Fatal(err)
 				}
 				syncTotal += time.Since(syncStart)
+				b.StopTimer()
+				cleanup()
 			}
 			b.ReportMetric(
 				float64(admissionTotal.Nanoseconds())/float64(b.N),
@@ -173,19 +186,26 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 func newFIFORevalidationBenchmarkPool(
 	b *testing.B,
 	validator TxValidator,
-) *Mempool {
+) (*Mempool, func()) {
 	b.Helper()
+	eventBus := event.NewEventBus(nil, nil)
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(eventBus.Close)
+	}
+	b.Cleanup(cleanup)
 	pool, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:        event.NewEventBus(nil, nil),
+		EventBus:        eventBus,
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       validator,
 		MempoolCapacity: 1 << 30,
 	})
 	if err != nil {
+		cleanup()
 		b.Fatal(err)
 	}
-	return pool
+	return pool, cleanup
 }
 
 type fifoRevalidationTxGenerator struct {

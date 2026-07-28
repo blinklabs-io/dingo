@@ -138,12 +138,12 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 		func() bool,
 	) error,
 ) error {
+	v.startOnce.Do(func() { close(v.started) })
 	validate := func(
 		gledger.Transaction,
 		map[string]struct{},
 		map[string]lcommon.Utxo,
 	) error {
-		v.startOnce.Do(func() { close(v.started) })
 		<-v.release
 		return nil
 	}
