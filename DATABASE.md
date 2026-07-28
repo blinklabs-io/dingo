@@ -593,7 +593,13 @@ older than the ledger stability window:
   download URLs before fetching: they must be HTTPS, must not contain embedded
   credentials, and must resolve to the `barkBaseUrl` hostname or a configured
   `barkBlockDownloadHosts` entry; downloads are also size-limited to the archive
-  block response cap.
+  block response cap. Downloaded bytes are then verified locally before any
+  caller sees them: the block is decoded (with body-hash validation enabled) and
+  its computed hash and slot must match the requested point. The returned
+  `types.BlockMetadata` type, height, and previous hash come from the decoded
+  block, and archive-reported height or previous hash that contradicts it is an
+  error rather than an override. The archive is therefore trusted to store block
+  bytes, not to identify them.
 
 ### Block Hash Index Contract
 

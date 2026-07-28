@@ -2303,6 +2303,17 @@ remote Bark archive and downloading the signed URL. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 
+Because the archive controls both the download URL and the response body, the
+client re-establishes block identity locally rather than trusting the response.
+Downloaded bytes are decoded with body-hash validation enabled, and the block's
+computed hash and slot must match the point that was requested; the archive's
+own block type is treated as a decode hint, since a wrong type either fails to
+decode or produces a different hash. Block metadata is derived from the decoded
+block, and archive-reported height or previous hash that disagrees with it fails
+the fetch. Both entry points — `GetBlock` and the iterator's expired-history
+resolution — share this path, so neither is an unchecked route into archive
+data.
+
 ### Midnight Indexer (`midnight/indexer/`)
 
 An optional block scanner that indexes Midnight chain events into multiple

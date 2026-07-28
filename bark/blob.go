@@ -15,6 +15,7 @@
 package bark
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -31,6 +32,7 @@ import (
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -296,9 +298,10 @@ func (b *BlobStoreBark) GetBlock(
 		return nil, types.BlockMetadata{}, archErr
 	}
 	// Prefer the local metadata for ID (the archive does not know our
-	// local block IDs), but trust the archive for Type/Height/PrevHash
-	// in case upstream returned a zero metadata struct alongside the
-	// expired-history error.
+	// local block IDs), and fill Type/Height/PrevHash from the archive
+	// result when upstream returned a zero metadata struct alongside the
+	// expired-history error. Those fields are derived from the decoded,
+	// hash-verified block rather than from the archive's own claims.
 	merged := upstreamMeta
 	if merged.Type == 0 {
 		merged.Type = archiveMeta.Type
@@ -389,7 +392,7 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 			fmt.Errorf("bark: archive response exceeds %d-byte limit", maxArchiveBlockSize)
 	}
 
-	prevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())
+	archivePrevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed decoding previous hash: %w", err)
@@ -401,10 +404,98 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 			fmt.Errorf("invalid block type: %d", blockType)
 	}
 
-	return blockBody, types.BlockMetadata{
+	decoded, err := verifyArchiveBlock(
+		(uint)(blockType), blockBody, slot, hash,
+	)
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	meta, err := archiveBlockMetadata(
+		decoded, block.GetBlock().GetHeight(), archivePrevHash,
+	)
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+
+	return blockBody, meta, nil
+}
+
+// verifyArchiveBlock establishes locally that the bytes the archive returned
+// really are the block that was requested. Bark chooses both the download URL
+// and the response body, so it can only be trusted to store blocks, not to
+// identify them: consensus-relevant identity is re-derived here before any
+// caller sees the data.
+//
+// The block type carried in the archive response is a decode hint only. A
+// wrong type either fails to decode or yields a different block hash, and
+// both outcomes are rejected below, so it cannot be used to smuggle in
+// substitute bytes. Decoding runs with validation enabled, so a block whose
+// header is genuine but whose body was swapped fails the body-hash check.
+func verifyArchiveBlock(
+	blockType uint,
+	body []byte,
+	slot uint64,
+	hash []byte,
+) (gledger.Block, error) {
+	decoded, err := gledger.NewBlockFromCbor(blockType, body)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"bark: decoding archive block for slot %d: %w", slot, err,
+		)
+	}
+	decodedHash := decoded.Hash()
+	if !bytes.Equal(decodedHash[:], hash) {
+		return nil, fmt.Errorf(
+			"bark: archive returned block with hash %x for requested hash %x",
+			decodedHash[:], hash,
+		)
+	}
+	if decoded.SlotNumber() != slot {
+		return nil, fmt.Errorf(
+			"bark: archive block %x is at slot %d, requested slot %d",
+			decodedHash[:], decoded.SlotNumber(), slot,
+		)
+	}
+	return decoded, nil
+}
+
+// archiveBlockMetadata derives block metadata from the verified block rather
+// than from what the archive claimed alongside it, and rejects archive-supplied
+// values that contradict the block. The bytes are already hash-verified by this
+// point, so a disagreement means the archive is misreporting; failing is more
+// useful than silently preferring the decoded value and carrying on.
+//
+// Zero-valued archive fields are treated as absent rather than as a conflict:
+// the archive is not required to populate them.
+func archiveBlockMetadata(
+	decoded gledger.Block,
+	archiveHeight uint64,
+	archivePrevHash []byte,
+) (types.BlockMetadata, error) {
+	height := decoded.BlockNumber()
+	if archiveHeight != 0 && archiveHeight != height {
+		return types.BlockMetadata{}, fmt.Errorf(
+			"bark: archive reported height %d for block at height %d",
+			archiveHeight, height,
+		)
+	}
+	prevHash := decoded.PrevHash()
+	if len(archivePrevHash) > 0 && !bytes.Equal(archivePrevHash, prevHash[:]) {
+		return types.BlockMetadata{}, fmt.Errorf(
+			"bark: archive reported previous hash %x for block whose previous hash is %x",
+			archivePrevHash, prevHash[:],
+		)
+	}
+	blockType := decoded.Type()
+	if blockType < 0 {
+		return types.BlockMetadata{}, fmt.Errorf(
+			"bark: decoded block has invalid type %d", blockType,
+		)
+	}
+	return types.BlockMetadata{
 		Type:     (uint)(blockType),
-		Height:   block.GetBlock().GetHeight(),
-		PrevHash: prevHash,
+		Height:   height,
+		PrevHash: prevHash[:],
 	}, nil
 }
 
