@@ -1,5 +1,146 @@
 # Dingo Releases
 
+## v0.68.0 (July 28, 2026)
+
+**Title:** Improve DRep coverage, recovery safety, and dependency freshness
+
+**Date:** July 28, 2026
+
+**Version:** v0.68.0
+
+This release expands DRep and stake query coverage, keeps backfills and replay paths steadier, improves event delivery under load, and refreshes storage, cloud, AWS, and example dependencies.
+
+### 💪 Improvements
+
+* Added support for keeping the live stake index available during API backfill, which keeps stake data visible while the database catches up.
+* Expanded Blockfrost DRep support by adding the DRep list endpoint and aligning DRep responses with the rest of the API.
+* Refreshed the Google Cloud storage client and related Google client packages, which keeps cloud storage operations current.
+* Extended stake address coverage with `stake-address-info` queries, which makes stake lookups available through the ledger interface.
+* Refined the plugin system so extension points are clearer and easier to maintain.
+* Strengthened AWS client support by updating the AWS SDK modules.
+* Updated the `@blaze-cardano/sdk` dependency in the example project, keeping the sample aligned with current client behavior.
+* Renewed the `github.com/blinklabs-io/bark` dependency, which keeps the Bark server stack current.
+
+### 🔧 Fixes
+
+* Fixed pointer snapshot UTxOs so pointer based wallet views stay accurate.
+* Corrected DRep activity renewal from certificates, which keeps DRep status current after certificate processing.
+* Improved exact UTxO address matching so address specific lookups return only the intended outputs.
+* Reordered Ouroboros rollback observation ahead of the apply gate, which keeps rollback handling aligned with node state.
+* Hardened genesis restart safety so restarts recover more predictably during startup.
+* Tightened open database ownership checks so the node protects existing database ownership more reliably.
+* Switched Mark snapshot handling to `reward_live_stake`, which keeps snapshot totals aligned with live reward stake.
+* Stabilized the replay path recovery loop so recovery continues instead of cycling on the same failure.
+* Parsed Leios pool reward accounts correctly, which improves reward account handling during ledger processing.
+* Applied backpressure instead of dropping events, which helps the node preserve event delivery under load.
+
+### 🙏 Thank You
+
+Thank you to @mmahut for the first contribution in this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🇯🇵 日本語
+
+**タイトル:** DRep、UTxO、回復処理を強化し、依存関係を更新
+
+**日付:** July 28, 2026
+
+**バージョン:** v0.68.0
+
+このリリースでは、DRep と stake query の対象範囲を広げ、バックフィルと replay path をより安定させ、負荷時のイベント配信を改善し、storage、cloud、AWS、example の依存関係を更新します。
+
+### 💪 改善
+
+* 追加しました API backfill 中も live stake index を維持し、database が追いつく間も stake data を見えるままにします。
+* 拡張しました Blockfrost の DRep 対応として DRep list endpoint を追加し、DRep response を API 全体に揃えます。
+* 更新しました Google Cloud storage client と関連 Google client package を、cloud storage operation を最新に保ちます。
+* 整備しました `stake-address-info` query を追加し、ledger interface から stake lookup を使えるようにします。
+* 磨きました plugin system を、拡張点が分かりやすく保守しやすくなります。
+* 強化しました AWS client support を更新し、cloud integration を最新の対応版に保ちます。
+* 改めました example project の `@blaze-cardano/sdk` dependency を、sample が現在の client behavior に合うようにします。
+* 刷新しました `github.com/blinklabs-io/bark` dependency を、Bark server stack を最新に保ちます。
+
+### 🔧 修正
+
+* 修正しました pointer snapshot UTxOs を、pointer-based wallet view が正確なままになるようにします。
+* 是正しました certificate からの DRep activity renewal を、certificate processing 後も DRep status を最新に保ちます。
+* 改善しました exact UTxO address matching を、address-specific lookup が意図した output だけを返すようにします。
+* 並べ替えました Ouroboros rollback observation を apply gate の前に置き、rollback handling を node state と整合させます。
+* 硬化しました genesis restart safety を、起動時の再開をより予測しやすくします。
+* 引き締めました open database ownership checks を、既存 database ownership をより確実に守ります。
+* 切り替えました Mark snapshot handling を `reward_live_stake` にし、snapshot total を live reward stake と揃えます。
+* 安定化しました replay path recovery loop を、同じ failure を繰り返さず recovery を継続できるようにします。
+* 解析しました Leios pool reward account を正しく読み取り、ledger processing 中の reward account handling を改善します。
+* 適用しました event を drop せず backpressure をかけ、負荷時も event delivery を保ちます。
+
+### 🙏 感謝
+
+@mmahut の最初の contribution に感謝します。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🇪🇸 Español
+
+**Título:** Mejorar el soporte de DRep, UTxO y recuperación mientras se actualizan dependencias
+
+**Fecha:** July 28, 2026
+
+**Versión:** v0.68.0
+
+Esta versión amplía la cobertura de consultas de DRep y stake, mantiene más estables los backfills y las rutas de replay, mejora la entrega de eventos bajo carga y actualiza dependencias de almacenamiento, nube, AWS y ejemplos.
+
+### 💪 Mejoras
+
+* Añadió compatibilidad para mantener el índice de live stake durante el API backfill, lo que mantiene visibles los datos de stake mientras la base de datos se pone al día.
+* Amplió el soporte de Blockfrost para DRep al agregar el endpoint de lista de DRep y alinear las respuestas de DRep con el resto de la API.
+* Actualizó el cliente de almacenamiento de Google Cloud y los paquetes relacionados de Google, lo que mantiene actuales las operaciones de cloud storage.
+* Incorporó consultas `stake-address-info`, lo que permite usar búsquedas de stake desde la interfaz del ledger.
+* Refinó el sistema de plugins para que los puntos de extensión sean más claros y más fáciles de mantener.
+* Fortaleció el soporte de cliente de AWS al actualizar los módulos del AWS SDK.
+* Renovó la dependencia `@blaze-cardano/sdk` en el proyecto de ejemplo, manteniendo la muestra alineada con el comportamiento actual del cliente.
+* Refrescó la dependencia `github.com/blinklabs-io/bark`, lo que mantiene actualizada la pila del servidor Bark.
+
+### 🔧 Correcciones
+
+* Arregló los pointer snapshot UTxOs para que las vistas de wallet basadas en pointer sigan siendo precisas.
+* Corrigió la renovación de la actividad de DRep a partir de certificados, lo que mantiene actualizada la información de DRep después del procesamiento de certificados.
+* Mejoró la coincidencia exacta de direcciones UTxO para que las búsquedas específicas de dirección devuelvan solo los outputs previstos.
+* Reordenó la observación de rollback de Ouroboros antes del apply gate, lo que mantiene alineado el manejo de rollback con el estado del nodo.
+* Endureció la seguridad de reinicio de Genesis para que los reinicios se recuperen de forma más predecible durante el arranque.
+* Ajustó las comprobaciones de propiedad de la base de datos abierta para proteger de forma más fiable la propiedad de la base de datos existente.
+* Cambió el manejo de Mark snapshot a `reward_live_stake`, lo que alinea los totales de instantánea con el reward live stake.
+* Estabilizó el bucle de recuperación de replay path para que la recuperación continúe en lugar de repetir el mismo fallo.
+* Analizó correctamente las cuentas de recompensa de pool de Leios, lo que mejora el manejo de cuentas de recompensa durante el procesamiento del ledger.
+* Aplicó backpressure en lugar de descartar eventos, lo que ayuda a conservar la entrega de eventos bajo carga.
+
+### 🙏 Gracias
+
+Gracias a @mmahut por su primera contribución en esta versión.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
 ## v0.67.1 (July 25, 2026)
 
 **Title:** Prevent certified Leios commits before endorser closure is ready
