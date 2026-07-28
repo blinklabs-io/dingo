@@ -90,4 +90,25 @@ type BlobStore interface {
 	// DiskSize returns the on-disk size of the blob store in bytes.
 	// Returns 0 for cloud-backed stores where local size is not meaningful.
 	DiskSize() (int64, error)
+
+	// Sync flushes everything committed so far to durable storage, so it
+	// survives an unclean shutdown of the process or host.
+	//
+	// This exists because committing a blob transaction is not the same as
+	// making it durable. The combined blob+metadata commit in database.Txn
+	// deliberately commits blob first so the blob store can only ever be ahead
+	// of the metadata tip, never behind -- startup reconciliation knows how to
+	// trim a blob store that is ahead (cleanupOrphanedBlobs) but cannot
+	// reconstruct blocks the metadata tip already references. That ordering
+	// only holds on disk if the blob commit is durable before the metadata
+	// commit is, so Txn.Commit calls Sync between the two. Skipping it inverts
+	// the invariant on an unclean host shutdown, because the two stores flush on
+	// very different schedules: SQLite reaches disk at WAL checkpoints (every
+	// 1000 pages by default) while Badger can hold committed writes in a 128MiB
+	// memtable for hours at chain tip. The metadata tip then survives while the
+	// blocks it references are silently discarded.
+	//
+	// Implementations whose writes are already durable on commit (remote
+	// object stores) may return nil.
+	Sync() error
 }

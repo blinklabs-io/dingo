@@ -477,6 +477,24 @@ func (d *BlobStoreBadger) DiskSize() (int64, error) {
 	return lsm + vlog, nil
 }
 
+// Sync flushes committed writes to disk. Badger is opened with its default
+// SyncWrites=false, so a committed transaction lives in the active memtable's
+// WAL and the value log without an fsync; with a 128MiB default memtable and
+// only a few MiB of blocks per hour at chain tip, an unclean shutdown can
+// discard hours of committed blocks. badger.DB.Sync syncs both the memtable WAL
+// and the value log, which is what makes those commits recoverable on reopen.
+// It is a no-op for in-memory and read-only stores.
+func (d *BlobStoreBadger) Sync() error {
+	db := d.DB()
+	if db == nil {
+		return nil
+	}
+	if err := db.Sync(); err != nil {
+		return fmt.Errorf("badger sync: %w", err)
+	}
+	return nil
+}
+
 // NewTransaction creates a new badger transaction
 func (d *BlobStoreBadger) NewTransaction(update bool) types.Txn {
 	return newBadgerTxn(d, d.DB().NewTransaction(update))

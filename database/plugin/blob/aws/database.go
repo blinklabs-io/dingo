@@ -139,6 +139,12 @@ func (d *BlobStoreS3) DiskSize() (int64, error) {
 	return 0, nil
 }
 
+// Sync is a no-op: an S3 object is durable once its PutObject has been
+// acknowledged, so a committed write needs no additional flush.
+func (d *BlobStoreS3) Sync() error {
+	return nil
+}
+
 // NewTransaction returns a lightweight transaction wrapper.
 func (d *BlobStoreS3) NewTransaction(readWrite bool) types.Txn {
 	return &s3Txn{store: d, readWrite: readWrite}

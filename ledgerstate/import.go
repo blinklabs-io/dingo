@@ -973,6 +973,14 @@ func importAccounts(
 			)
 		}
 
+		// CreatedSlot is deliberately left at 0. The account's real registration
+		// slot predates the snapshot and is not recoverable from it, and 0
+		// ("existed before any reachable rollback point") is the answer rollback
+		// needs: RestoreAccountStateAtSlot deletes an account only when
+		// created_slot is past the rollback slot, which is the only thing
+		// keeping these rows alive given the snapshot carries no certificate
+		// history to prove they were registered. Stamping the snapshot slot here
+		// would make every imported account deletable by a rollback to it.
 		model := &models.Account{
 			StakingKey:    acct.StakingKey.Hash,
 			CredentialTag: credentialTag,

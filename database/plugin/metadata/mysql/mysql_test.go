@@ -1244,11 +1244,15 @@ func TestMysqlRestoreAccountStateAtSlot(t *testing.T) {
 
 		stakingKey := testHash28("staking_key_new")
 
-		// Create account registered at slot 2000 (no prior registration)
+		// Create account registered at slot 2000 (no prior registration).
+		// CreatedSlot is set explicitly because the production insert paths
+		// always stamp it (SetAccount directly, saveAccount via the
+		// AccountCreatedSlotUnset sentinel) and raw DB().Create bypasses them.
 		account := models.Account{
-			StakingKey: stakingKey,
-			AddedSlot:  2000,
-			Active:     true,
+			StakingKey:  stakingKey,
+			AddedSlot:   2000,
+			CreatedSlot: 2000,
+			Active:      true,
 		}
 		pgStore.DB().Create(&account)
 
