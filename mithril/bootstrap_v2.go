@@ -609,8 +609,11 @@ func downloadDigestsArchive(
 		downloadDir,
 		"digests-"+truncateDigest(artifact.Hash),
 	)
+	// Replace: removeDigestsCache may not have run if a previous attempt
+	// was interrupted, leaving a stale digests directory.
 	if _, err := ExtractArchive(
 		ctx, archivePath, destDir, cfg.Logger,
+		WithReplaceDestination(),
 	); err != nil {
 		return nil, fmt.Errorf("extracting digests archive: %w", err)
 	}
@@ -973,8 +976,12 @@ func fetchImmutableArchive(
 	if err != nil {
 		return err
 	}
+	// Merge: every immutable archive extracts into one shared directory,
+	// concurrently, so this destination accumulates across calls and must
+	// not be staged-and-swapped.
 	if _, err := ExtractArchive(
 		ctx, archivePath, extractDir, extractLogger,
+		WithMergeIntoDestination(),
 	); err != nil {
 		return fmt.Errorf("extracting: %w", err)
 	}
@@ -1120,8 +1127,11 @@ func downloadAncillaryV2(
 		downloadDir,
 		"ancillary-"+artifact.Hash,
 	)
+	// Replace: the resume path above may have removed an unverified
+	// extraction, but an interrupted run can still leave one behind.
 	if _, extractErr := ExtractArchive(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
+		WithReplaceDestination(),
 	); extractErr != nil {
 		return "", "", fmt.Errorf(
 			"extracting ancillary archive: %w",

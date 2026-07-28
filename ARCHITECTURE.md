@@ -2464,6 +2464,24 @@ Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
 everything downstream of `Bootstrap()` is backend-agnostic.
 
+`ExtractArchive` treats the destination filesystem as untrusted, because an
+archive's contents being safe does not make the directory it is written into
+safe. Every extracted path has its components lstat-checked, and files open
+with `O_NOFOLLOW` where the platform provides it, so a symlink already present
+in the destination is rejected rather than followed. Destinations come in two
+shapes, selected by the caller:
+
+- **Exclusive** (v1 snapshot, ancillary, digests): extraction is staged in a
+  fresh `0700` directory alongside the destination and renamed into place only
+  once complete, so a failed run publishes nothing and a pre-existing entry is
+  discarded rather than merged with. A non-empty destination is refused unless
+  the caller passes `WithReplaceDestination` to recover from an interrupted
+  run.
+- **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
+  archives populate one shared directory concurrently, so extraction writes
+  into it directly and accumulates. Staging is unavailable here, and the
+  per-path symlink checks carry the guarantee on their own.
+
 ### Catch-up vs bootstrap dispatch
 
 `mithril.Sync` (the `dingo mithril sync` entry point) selects what to do from

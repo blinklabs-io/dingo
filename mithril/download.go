@@ -956,23 +956,29 @@ const (
 // specified destination directory. It returns the path to the
 // directory where files were extracted. The context is checked
 // between files so that long-running extractions can be cancelled.
+//
+// By default the destination is exclusive: it must be empty, extraction is
+// staged in a private directory, and the result is renamed into place only
+// once complete. See WithReplaceDestination and WithMergeIntoDestination for
+// the destinations that need other policies.
 func ExtractArchive(
 	ctx context.Context,
 	archivePath string,
 	destDir string,
 	logger *slog.Logger,
+	opts ...ExtractOption,
 ) (string, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	// Create destination directory
-	if err := os.MkdirAll(destDir, 0o750); err != nil {
-		return "", fmt.Errorf(
-			"creating extraction directory: %w",
-			err,
-		)
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, newExtractConfig(opts),
+	)
+	if err != nil {
+		return "", err
 	}
+	defer cleanup()
 
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -1041,10 +1047,10 @@ func ExtractArchive(
 			)
 		}
 
-		// Zip Slip prevention: join the cleaned name to destDir,
-		// then verify the result stays within destDir using
+		// Zip Slip prevention: join the cleaned name to the working
+		// directory, then verify the result stays within it using
 		// both HasPrefix and Rel checks.
-		cleanDest := filepath.Clean(destDir)
+		cleanDest := filepath.Clean(workDir)
 		target := filepath.Join(
 			cleanDest, filepath.FromSlash(name),
 		)
@@ -1060,7 +1066,7 @@ func ExtractArchive(
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil { //nolint:gosec // target validated by validRelPath + HasPrefix above
+			if err := mkdirExtracted(target); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
 					target,
@@ -1081,7 +1087,7 @@ func ExtractArchive(
 
 			// Ensure parent directory exists
 			parent := filepath.Dir(target)
-			if err := os.MkdirAll(parent, 0o750); err != nil { //nolint:gosec // parent derived from validated target path
+			if err := mkdirExtracted(parent); err != nil {
 				return "", fmt.Errorf(
 					"creating parent directory %s: %w",
 					parent,
@@ -1089,11 +1095,7 @@ func ExtractArchive(
 				)
 			}
 
-			outFile, err := os.OpenFile( //nolint:gosec // target validated by validRelPath + HasPrefix above
-				target,
-				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-				0o640,
-			)
+			outFile, err := createExtractedFile(target)
 			if err != nil {
 				return "", fmt.Errorf(
 					"creating file %s: %w",
@@ -1170,6 +1172,10 @@ func ExtractArchive(
 			// Skip symlinks and other types for security
 			continue
 		}
+	}
+
+	if err := publish(); err != nil {
+		return "", err
 	}
 
 	logger.Info(

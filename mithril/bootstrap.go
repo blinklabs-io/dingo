@@ -545,8 +545,11 @@ func Bootstrap(
 			"immutable_dir", immutableDir,
 		)
 	} else {
+		// Replace: a previous run may have left a partial extraction
+		// here, which findImmutableDir above did not accept.
 		_, err = ExtractArchive(
 			ctx, archivePath, extractDir, cfg.Logger,
+			WithReplaceDestination(),
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -657,8 +660,11 @@ func downloadAncillary(
 		downloadDir,
 		"ancillary-"+snapshot.Digest,
 	)
+	// Replace: the ancillary directory is keyed by digest, so a stale
+	// copy from an interrupted run may already be present.
 	if _, extractErr := ExtractArchive(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
+		WithReplaceDestination(),
 	); extractErr != nil {
 		return "", "", fmt.Errorf(
 			"extracting ancillary archive: %w",
