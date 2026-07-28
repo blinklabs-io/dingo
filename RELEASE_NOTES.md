@@ -16,7 +16,7 @@ This release expands DRep and stake query coverage, keeps backfills and replay p
 * Expanded Blockfrost DRep support by adding the DRep list endpoint and aligning DRep responses with the rest of the API.
 * Refreshed the Google Cloud storage client and related Google client packages, which keeps cloud storage operations current.
 * Extended stake address coverage with `stake-address-info` queries, which makes stake lookups available through the ledger interface.
-* Refined the plugin system to make extension points clearer and easier to maintain.
+* Refined the plugin system so extension points are clearer and easier to maintain.
 * Strengthened AWS client support by updating the AWS SDK modules.
 * Updated the `@blaze-cardano/sdk` dependency in the example project, keeping the sample aligned with current client behavior.
 * Renewed the `github.com/blinklabs-io/bark` dependency, which keeps the Bark server stack current.
@@ -63,7 +63,7 @@ Thank you to @mmahut for the first contribution in this release.
 * 拡張しました Blockfrost の DRep 対応として DRep list endpoint を追加し、DRep response を API 全体に揃えます。
 * 更新しました Google Cloud storage client と関連 Google client package を、cloud storage operation を最新に保ちます。
 * 整備しました `stake-address-info` query を追加し、ledger interface から stake lookup を使えるようにします。
-* 磨きました plugin system を、拡張点を分かりやすく保守しやすくします。
+* 磨きました plugin system を、拡張点が分かりやすく保守しやすくなります。
 * 強化しました AWS client support を更新し、cloud integration を最新の対応版に保ちます。
 * 改めました example project の `@blaze-cardano/sdk` dependency を、sample が現在の client behavior に合うようにします。
 * 刷新しました `github.com/blinklabs-io/bark` dependency を、Bark server stack を最新に保ちます。
@@ -110,7 +110,7 @@ Esta versión amplía la cobertura de consultas de DRep y stake, mantiene más e
 * Amplió el soporte de Blockfrost para DRep al agregar el endpoint de lista de DRep y alinear las respuestas de DRep con el resto de la API.
 * Actualizó el cliente de almacenamiento de Google Cloud y los paquetes relacionados de Google, lo que mantiene actuales las operaciones de cloud storage.
 * Incorporó consultas `stake-address-info`, lo que permite usar búsquedas de stake desde la interfaz del ledger.
-* Refinó el sistema de plugins para que los puntos de extensión sean más claros y fáciles de mantener.
+* Refinó el sistema de plugins para que los puntos de extensión sean más claros y más fáciles de mantener.
 * Fortaleció el soporte de cliente de AWS al actualizar los módulos del AWS SDK.
 * Renovó la dependencia `@blaze-cardano/sdk` en el proyecto de ejemplo, manteniendo la muestra alineada con el comportamiento actual del cliente.
 * Refrescó la dependencia `github.com/blinklabs-io/bark`, lo que mantiene actualizada la pila del servidor Bark.
