@@ -263,7 +263,10 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if err := d.metadata.SetTransactionBatched(
 		tx, point, idx, certDeposits, acc, metadataTxn,
 	); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (batch idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 
 	if updateEpoch > 0 && tx.IsValid() {

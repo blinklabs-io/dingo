@@ -258,7 +258,10 @@ func (d *Database) SetTransactionWithOpts(
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 
 	if updateEpoch > 0 && tx.IsValid() {
@@ -311,7 +314,10 @@ func (d *Database) SetTransactionMetadataOnly(
 		certDeposits,
 		metadataTxn,
 	); err != nil {
-		return fmt.Errorf("set transaction metadata only: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
