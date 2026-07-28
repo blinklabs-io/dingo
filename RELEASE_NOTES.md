@@ -2,13 +2,13 @@
 
 ## v0.68.0 (July 28, 2026)
 
-**Title:** Broaden DRep, UTxO, and recovery support while refreshing dependencies
+**Title:** Improve DRep coverage, recovery safety, and dependency freshness
 
 **Date:** July 28, 2026
 
 **Version:** v0.68.0
 
-This release expands DRep and stake query coverage, keeps backfills and replay paths more reliable, improves event delivery under load, and refreshes storage, cloud, AWS, and example dependencies.
+This release expands DRep and stake query coverage, keeps backfills and replay paths steadier, improves event delivery under load, and refreshes storage, cloud, AWS, and example dependencies.
 
 ### 💪 Improvements
 
@@ -17,7 +17,7 @@ This release expands DRep and stake query coverage, keeps backfills and replay p
 * Refreshed the Google Cloud storage client and related Google client packages, which keeps cloud storage operations current.
 * Extended stake address coverage with `stake-address-info` queries, which makes stake lookups available through the ledger interface.
 * Refined the plugin system to make extension points clearer and easier to maintain.
-* Strengthened cloud integration support by updating the AWS SDK modules.
+* Strengthened AWS client support by updating the AWS SDK modules.
 * Updated the `@blaze-cardano/sdk` dependency in the example project, keeping the sample aligned with current client behavior.
 * Renewed the `github.com/blinklabs-io/bark` dependency, which keeps the Bark server stack current.
 
@@ -49,13 +49,13 @@ Thank you to @mmahut for the first contribution in this release.
 
 ### 🇯🇵 日本語
 
-**タイトル:** DRep、UTxO、回復処理を広げ、依存関係を更新
+**タイトル:** DRep、UTxO、回復処理を強化し、依存関係を更新
 
 **日付:** July 28, 2026
 
 **バージョン:** v0.68.0
 
-このリリースでは、DRep と stake query の対象範囲を広げ、バックフィルと replay path の信頼性を高め、負荷時のイベント配信を改善し、storage、cloud、AWS、example の依存関係を更新します。
+このリリースでは、DRep と stake query の対象範囲を広げ、バックフィルと replay path をより安定させ、負荷時のイベント配信を改善し、storage、cloud、AWS、example の依存関係を更新します。
 
 ### 💪 改善
 
@@ -64,7 +64,7 @@ Thank you to @mmahut for the first contribution in this release.
 * 更新しました Google Cloud storage client と関連 Google client package を、cloud storage operation を最新に保ちます。
 * 整備しました `stake-address-info` query を追加し、ledger interface から stake lookup を使えるようにします。
 * 磨きました plugin system を、拡張点を分かりやすく保守しやすくします。
-* 強化しました AWS SDK modules を更新し、cloud integration を最新の対応版に保ちます。
+* 強化しました AWS client support を更新し、cloud integration を最新の対応版に保ちます。
 * 改めました example project の `@blaze-cardano/sdk` dependency を、sample が現在の client behavior に合うようにします。
 * 刷新しました `github.com/blinklabs-io/bark` dependency を、Bark server stack を最新に保ちます。
 
@@ -96,13 +96,13 @@ Thank you to @mmahut for the first contribution in this release.
 
 ### 🇪🇸 Español
 
-**Título:** Ampliar el soporte de DRep, UTxO y recuperación mientras se actualizan dependencias
+**Título:** Mejorar el soporte de DRep, UTxO y recuperación mientras se actualizan dependencias
 
 **Fecha:** July 28, 2026
 
 **Versión:** v0.68.0
 
-Esta versión amplía la cobertura de consultas de DRep y stake, hace más fiables los backfills y las rutas de replay, mejora la entrega de eventos bajo carga y actualiza dependencias de almacenamiento, nube, AWS y ejemplos.
+Esta versión amplía la cobertura de consultas de DRep y stake, mantiene más estables los backfills y las rutas de replay, mejora la entrega de eventos bajo carga y actualiza dependencias de almacenamiento, nube, AWS y ejemplos.
 
 ### 💪 Mejoras
 
@@ -111,7 +111,7 @@ Esta versión amplía la cobertura de consultas de DRep y stake, hace más fiabl
 * Actualizó el cliente de almacenamiento de Google Cloud y los paquetes relacionados de Google, lo que mantiene actuales las operaciones de cloud storage.
 * Incorporó consultas `stake-address-info`, lo que permite usar búsquedas de stake desde la interfaz del ledger.
 * Refinó el sistema de plugins para que los puntos de extensión sean más claros y fáciles de mantener.
-* Fortaleció el soporte de integración en la nube al actualizar los módulos del AWS SDK.
+* Fortaleció el soporte de cliente de AWS al actualizar los módulos del AWS SDK.
 * Renovó la dependencia `@blaze-cardano/sdk` en el proyecto de ejemplo, manteniendo la muestra alineada con el comportamiento actual del cliente.
 * Refrescó la dependencia `github.com/blinklabs-io/bark`, lo que mantiene actualizada la pila del servidor Bark.
 
