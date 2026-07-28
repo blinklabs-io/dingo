@@ -39,10 +39,12 @@ const (
 	AddTransactionEventType    event.EventType = "mempool.add_tx"
 	RemoveTransactionEventType event.EventType = "mempool.remove_tx"
 
-	DefaultEvictionWatermark  = 0.90
-	DefaultRejectionWatermark = 0.95
-	DefaultTransactionTTL     = 5 * time.Minute
-	DefaultCleanupInterval    = 1 * time.Minute
+	DefaultEvictionWatermark      = 0.90
+	DefaultRejectionWatermark     = 0.95
+	DefaultTransactionTTL         = 5 * time.Minute
+	DefaultCleanupInterval        = 1 * time.Minute
+	DefaultRevalidationDeltaCap   = 64
+	defaultRevalidationJournalCap = 65_536
 )
 
 type AddTransactionEvent struct {
@@ -94,17 +96,34 @@ type TxValidator interface {
 		createdUtxos map[string]lcommon.Utxo,
 	) error
 }
+
+// TxValidationSessionProvider optionally pins a batch of validations to one
+// coherent ledger snapshot. LedgerState implements this interface; lightweight
+// validators used by tests and alternate embeddings may continue to implement
+// only TxValidator.
+type TxValidationSessionProvider interface {
+	WithTxValidationSession(func(
+		validate func(
+			tx gledger.Transaction,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
+		) error,
+		stillCurrent func() bool,
+	) error) error
+}
+
 type MempoolConfig struct {
-	PromRegistry       prometheus.Registerer
-	Validator          TxValidator
-	Logger             *slog.Logger
-	EventBus           *event.EventBus
-	MempoolCapacity    int64
-	TransactionTTL     time.Duration
-	CleanupInterval    time.Duration
-	EvictionWatermark  float64
-	RejectionWatermark float64
-	CurrentSlotFunc    func() uint64 // returns current slot for early TX rejection
+	PromRegistry         prometheus.Registerer
+	Validator            TxValidator
+	Logger               *slog.Logger
+	EventBus             *event.EventBus
+	MempoolCapacity      int64
+	TransactionTTL       time.Duration
+	CleanupInterval      time.Duration
+	EvictionWatermark    float64
+	RejectionWatermark   float64
+	RevalidationDeltaCap int
+	CurrentSlotFunc      func() uint64 // returns current slot for early TX rejection
 }
 
 type Mempool struct {
@@ -116,20 +135,22 @@ type Mempool struct {
 		txsExpired      prometheus.Counter
 		implementation  prometheus.Gauge
 	}
-	validator          TxValidator
-	logger             *slog.Logger
-	eventBus           *event.EventBus
-	consumers          map[ouroboros.ConnectionId]*MempoolConsumer
-	done               chan struct{}
-	config             MempoolConfig
-	transactions       []*MempoolTransaction
-	txByHash           map[string]*MempoolTransaction // O(1) lookup by hash
-	currentSizeBytes   int64                          // Cached total size of all transactions in bytes
-	transactionTTL     time.Duration
-	cleanupInterval    time.Duration
-	evictionWatermark  float64
-	rejectionWatermark float64
-	stopped            bool
+	validator              TxValidator
+	logger                 *slog.Logger
+	eventBus               *event.EventBus
+	consumers              map[ouroboros.ConnectionId]*MempoolConsumer
+	done                   chan struct{}
+	config                 MempoolConfig
+	transactions           []*MempoolTransaction
+	txByHash               map[string]*MempoolTransaction // O(1) lookup by hash
+	currentSizeBytes       int64                          // Cached total size of all transactions in bytes
+	transactionTTL         time.Duration
+	cleanupInterval        time.Duration
+	evictionWatermark      float64
+	rejectionWatermark     float64
+	revalidationDeltaCap   int
+	revalidationJournalCap int
+	stopped                bool
 	sync.RWMutex
 	doneOnce       sync.Once
 	mutationMutex  sync.Mutex
@@ -138,6 +159,72 @@ type Mempool struct {
 	workerWG       sync.WaitGroup
 	consumersMutex sync.Mutex
 	overlay        *utxoOverlay
+
+	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
+	// mutationJournal are protected by mutationMutex and let that rebuild catch
+	// up with admissions/removals performed while ledger validation runs.
+	rebuildMutex    sync.Mutex
+	mutationSeq     uint64
+	mutationJournal []mempoolMutation
+	journalActive   bool
+	journalOverflow bool
+}
+
+type mempoolMutation struct {
+	seq     uint64
+	added   *appliedTx
+	addedTx *MempoolTransaction
+	removed map[string]struct{}
+	stopped bool
+}
+
+type revalidationCandidate struct {
+	overlay      *utxoOverlay
+	transactions []*MempoolTransaction
+	txByHash     map[string]*MempoolTransaction
+	sizeBytes    int64
+	invalid      map[string]*MempoolTransaction
+}
+
+func newRevalidationCandidate() *revalidationCandidate {
+	return &revalidationCandidate{
+		overlay:  newUtxoOverlay(),
+		txByHash: make(map[string]*MempoolTransaction),
+		invalid:  make(map[string]*MempoolTransaction),
+	}
+}
+
+func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
+	if len(hashes) == 0 {
+		return
+	}
+	c.overlay.removeByHashes(hashes)
+	remaining := make([]*MempoolTransaction, 0, len(c.transactions))
+	for _, tx := range c.transactions {
+		if _, remove := hashes[tx.Hash]; remove {
+			delete(c.txByHash, tx.Hash)
+			delete(c.invalid, tx.Hash)
+			c.sizeBytes -= int64(len(tx.Cbor))
+			continue
+		}
+		remaining = append(remaining, tx)
+	}
+	c.transactions = remaining
+	for hash := range hashes {
+		delete(c.invalid, hash)
+	}
+}
+
+func (c *revalidationCandidate) add(
+	at appliedTx,
+	tx *MempoolTransaction,
+	decoded gledger.Transaction,
+) {
+	c.overlay.applyTx(at.hash, at.txType, at.cbor, decoded)
+	c.transactions = append(c.transactions, tx)
+	c.txByHash[at.hash] = tx
+	c.sizeBytes += int64(len(tx.Cbor))
+	delete(c.invalid, at.hash)
 }
 
 // appliedTx records a pending transaction and its UTxO effects for overlay rebuild.
@@ -147,6 +234,29 @@ type appliedTx struct {
 	cbor     []byte
 	consumed []string                // UTxO keys consumed by this TX
 	created  map[string]lcommon.Utxo // UTxO keys created by this TX
+}
+
+func cloneAppliedTx(at appliedTx) appliedTx {
+	ret := at
+	ret.cbor = slices.Clone(at.cbor)
+	ret.consumed = slices.Clone(at.consumed)
+	ret.created = maps.Clone(at.created)
+	return ret
+}
+
+// recordMutationLocked appends an ordered mutation for an active rebuild.
+// The caller must hold mutationMutex and must invoke this only after the live
+// pool and overlay mutation has committed.
+func (m *Mempool) recordMutationLocked(mutation mempoolMutation) {
+	m.mutationSeq++
+	mutation.seq = m.mutationSeq
+	if m.journalActive {
+		if len(m.mutationJournal) >= m.revalidationJournalCap {
+			m.journalOverflow = true
+			return
+		}
+		m.mutationJournal = append(m.mutationJournal, mutation)
+	}
 }
 
 // utxoOverlay tracks cumulative UTxO state changes from all pending mempool TXs.
@@ -381,18 +491,24 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 	if cleanupInterval <= 0 {
 		cleanupInterval = DefaultCleanupInterval
 	}
+	revalidationDeltaCap := config.RevalidationDeltaCap
+	if revalidationDeltaCap <= 0 {
+		revalidationDeltaCap = DefaultRevalidationDeltaCap
+	}
 	m := &Mempool{
-		eventBus:           config.EventBus,
-		consumers:          make(map[ouroboros.ConnectionId]*MempoolConsumer),
-		txByHash:           make(map[string]*MempoolTransaction),
-		overlay:            newUtxoOverlay(),
-		validator:          config.Validator,
-		config:             config,
-		done:               make(chan struct{}),
-		transactionTTL:     transactionTTL,
-		cleanupInterval:    cleanupInterval,
-		evictionWatermark:  evictionWatermark,
-		rejectionWatermark: rejectionWatermark,
+		eventBus:               config.EventBus,
+		consumers:              make(map[ouroboros.ConnectionId]*MempoolConsumer),
+		txByHash:               make(map[string]*MempoolTransaction),
+		overlay:                newUtxoOverlay(),
+		validator:              config.Validator,
+		config:                 config,
+		done:                   make(chan struct{}),
+		transactionTTL:         transactionTTL,
+		cleanupInterval:        cleanupInterval,
+		evictionWatermark:      evictionWatermark,
+		rejectionWatermark:     rejectionWatermark,
+		revalidationDeltaCap:   revalidationDeltaCap,
+		revalidationJournalCap: defaultRevalidationJournalCap,
 	}
 	if config.Logger == nil {
 		// Create logger to throw away logs
@@ -525,6 +641,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 		m.mutationMutex.Lock()
 		m.Lock()
 		m.stopped = true
+		m.recordMutationLocked(mempoolMutation{stopped: true})
 		m.doneOnce.Do(func() { close(m.done) })
 		m.Unlock()
 		m.mutationMutex.Unlock()
@@ -594,9 +711,10 @@ func (m *Mempool) FindConsumer(connId ouroboros.ConnectionId) Consumer {
 
 // ProviderConfig is the canonical configuration for the default mempool.
 type ProviderConfig struct {
-	Capacity           int64   `yaml:"capacity"`
-	EvictionWatermark  float64 `yaml:"evictionWatermark"`
-	RejectionWatermark float64 `yaml:"rejectionWatermark"`
+	Capacity             int64   `yaml:"capacity"`
+	EvictionWatermark    float64 `yaml:"evictionWatermark"`
+	RejectionWatermark   float64 `yaml:"rejectionWatermark"`
+	RevalidationDeltaCap int     `yaml:"revalidationDeltaCap"`
 }
 
 // ProviderDependencies are runtime dependencies assembled after ledger and
@@ -620,18 +738,20 @@ func RegisterProvider(host *plugin.Host) error {
 		},
 		func() ProviderConfig {
 			return ProviderConfig{
-				EvictionWatermark:  DefaultEvictionWatermark,
-				RejectionWatermark: DefaultRejectionWatermark,
+				EvictionWatermark:    DefaultEvictionWatermark,
+				RejectionWatermark:   DefaultRejectionWatermark,
+				RevalidationDeltaCap: DefaultRevalidationDeltaCap,
 			}
 		},
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (Service, plugin.Instance, error) {
 			m, err := NewMempool(MempoolConfig{
 				PromRegistry: deps.PromRegistry, Validator: deps.Validator,
 				Logger: deps.Logger, EventBus: deps.EventBus,
-				MempoolCapacity:    cfg.Capacity,
-				EvictionWatermark:  cfg.EvictionWatermark,
-				RejectionWatermark: cfg.RejectionWatermark,
-				CurrentSlotFunc:    deps.CurrentSlotFunc,
+				MempoolCapacity:      cfg.Capacity,
+				EvictionWatermark:    cfg.EvictionWatermark,
+				RejectionWatermark:   cfg.RejectionWatermark,
+				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
+				CurrentSlotFunc:      deps.CurrentSlotFunc,
 			})
 			if err != nil {
 				return nil, nil, err
@@ -684,103 +804,288 @@ func (m *Mempool) processChainEvents() {
 	}
 }
 
-// rebuildOverlay re-validates all pending TXs sequentially, rebuilding the
-// UTxO overlay from scratch. TXs that fail re-validation are removed.
-// Mutations are serialized for the duration, but decoding and ledger validation
-// run without the primary pool lock so snapshot readers remain available.
-//
-// Returns ErrNilValidator if called on a Mempool whose validator is nil —
-// a programmer error the chain-update loop logs rather than crashes on.
+const maxRevalidationCatchupRounds = 16
+
+var errValidationSnapshotChanged = errors.New(
+	"mempool: ledger snapshot changed during revalidation",
+)
+
+var errRevalidationJournalOverflow = errors.New(
+	"mempool: revalidation mutation journal overflow",
+)
+
+// rebuildOverlay re-validates all pending TXs against a stable ledger snapshot
+// in a private overlay. Admissions and removals continue against the live
+// overlay and are replayed from an ordered journal before the candidate is
+// swapped in during a short mutation-lock hold.
 func (m *Mempool) rebuildOverlay() error {
 	if m.validator == nil {
 		return ErrNilValidator
 	}
-	var events []event.Event
-	err := func() error {
-		m.mutationMutex.Lock()
-		defer m.mutationMutex.Unlock()
+	m.rebuildMutex.Lock()
+	defer m.rebuildMutex.Unlock()
 
-		m.RLock()
-		prevApplied := make([]appliedTx, len(m.overlay.applied))
-		for i, at := range m.overlay.applied {
-			prevApplied[i] = at
-			prevApplied[i].cbor = slices.Clone(at.cbor)
+	// A ledger publication racing the batch invalidates its pinned view. Retry
+	// once from the new live pool; a later chain event provides further retries
+	// without allowing a busy chain to spin here indefinitely.
+	for attempt := range 2 {
+		events, err := m.rebuildOverlayAttempt()
+		if errors.Is(err, errValidationSnapshotChanged) && attempt == 0 {
+			continue
 		}
-		m.RUnlock()
-		if len(prevApplied) == 0 {
-			return nil
+		if err != nil {
+			return err
 		}
-
-		newOverlay := newUtxoOverlay()
-		var invalidHashes []string
-		for _, at := range prevApplied {
-			tmpTx, decodeErr := gledger.NewTransactionFromCbor(
-				at.txType,
-				at.cbor,
-			)
-			if decodeErr != nil {
-				invalidHashes = append(invalidHashes, at.hash)
-				m.logger.Error(
-					"transaction failed decode during re-validation",
-					"component", "mempool",
-					"tx_hash", at.hash,
-					"error", decodeErr,
-				)
-				continue
-			}
-			if validateErr := m.validator.ValidateTxWithOverlay(
-				tmpTx,
-				newOverlay.consumed,
-				newOverlay.created,
-			); validateErr != nil {
-				invalidHashes = append(invalidHashes, at.hash)
-				m.logger.Debug(
-					"transaction failed re-validation",
-					"component", "mempool",
-					"tx_hash", at.hash,
-					"error", validateErr,
-				)
-				continue
-			}
-			newOverlay.applyTx(at.hash, at.txType, at.cbor, tmpTx)
-		}
-
-		m.Lock()
-		defer m.Unlock()
-		m.overlay = newOverlay
-		if len(invalidHashes) > 0 {
-			hashSet := make(map[string]struct{}, len(invalidHashes))
-			for _, h := range invalidHashes {
-				hashSet[h] = struct{}{}
-			}
-			m.consumersMutex.Lock()
-			defer m.consumersMutex.Unlock()
-			for i, v := range slices.Backward(m.transactions) {
-				h := v.Hash
-				if _, found := hashSet[h]; found {
-					evt := m.removeTransactionByIndexLocked(i)
-					if evt != nil {
-						events = append(events, *evt)
-					}
-					delete(hashSet, h)
-					if len(hashSet) == 0 {
-						break
-					}
-				}
+		if m.eventBus != nil {
+			for _, evt := range events {
+				m.eventBus.Publish(RemoveTransactionEventType, evt)
 			}
 		}
 		return nil
-	}()
-	if err != nil {
-		return err
+	}
+	return errValidationSnapshotChanged
+}
+
+func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
+	m.mutationMutex.Lock()
+	m.RLock()
+	if m.stopped {
+		m.RUnlock()
+		m.mutationMutex.Unlock()
+		return nil, ErrMempoolStopped
+	}
+	base := make([]appliedTx, len(m.overlay.applied))
+	baseTxs := make(map[string]*MempoolTransaction, len(m.txByHash))
+	for i, at := range m.overlay.applied {
+		base[i] = cloneAppliedTx(at)
+	}
+	maps.Copy(baseTxs, m.txByHash)
+	startSeq := m.mutationSeq
+	m.mutationJournal = nil
+	m.journalActive = true
+	m.journalOverflow = false
+	m.RUnlock()
+	m.mutationMutex.Unlock()
+
+	finishJournal := func() {
+		m.mutationMutex.Lock()
+		m.journalActive = false
+		m.mutationJournal = nil
+		m.journalOverflow = false
+		m.mutationMutex.Unlock()
 	}
 
-	if m.eventBus != nil {
-		for _, evt := range events {
-			m.eventBus.Publish(RemoveTransactionEventType, evt)
+	var events []event.Event
+	err := m.withTxValidationSession(func(
+		validate func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error,
+		stillCurrent func() bool,
+	) error {
+		candidate := newRevalidationCandidate()
+		for _, at := range base {
+			m.revalidateAppliedTx(candidate, at, baseTxs[at.hash], validate)
+		}
+
+		appliedSeq := startSeq
+		for range maxRevalidationCatchupRounds {
+			m.mutationMutex.Lock()
+			if m.journalOverflow {
+				m.mutationMutex.Unlock()
+				return errRevalidationJournalOverflow
+			}
+			delta := mutationsAfter(m.mutationJournal, appliedSeq)
+			if len(delta) == 0 {
+				m.RLock()
+				liveOrder := slices.Clone(m.transactions)
+				liveSeq := m.mutationSeq
+				m.RUnlock()
+				m.mutationMutex.Unlock()
+
+				// Precompute cursor translations outside both mempool locks.
+				// prefixValid[n] is the number of candidate transactions in
+				// the first n entries of the current live FIFO.
+				prefixValid := make([]int, len(liveOrder)+1)
+				for i, tx := range liveOrder {
+					prefixValid[i+1] = prefixValid[i]
+					if _, ok := candidate.txByHash[tx.Hash]; ok {
+						prefixValid[i+1]++
+					}
+				}
+				invalidHashes := make([]string, 0, len(candidate.invalid))
+				for _, tx := range slices.Backward(liveOrder) {
+					if _, invalid := candidate.invalid[tx.Hash]; invalid {
+						invalidHashes = append(invalidHashes, tx.Hash)
+					}
+				}
+
+				m.mutationMutex.Lock()
+				if m.mutationSeq != liveSeq {
+					m.mutationMutex.Unlock()
+					continue
+				}
+				if !stillCurrent() {
+					m.journalActive = false
+					m.mutationJournal = nil
+					m.journalOverflow = false
+					m.mutationMutex.Unlock()
+					return errValidationSnapshotChanged
+				}
+
+				m.Lock()
+				if m.stopped {
+					m.Unlock()
+					m.journalActive = false
+					m.mutationJournal = nil
+					m.journalOverflow = false
+					m.mutationMutex.Unlock()
+					return ErrMempoolStopped
+				}
+				m.consumersMutex.Lock()
+				for _, consumer := range m.consumers {
+					consumer.nextTxIdxMu.Lock()
+					oldIdx := min(consumer.nextTxIdx, len(liveOrder))
+					consumer.nextTxIdx = prefixValid[oldIdx]
+					consumer.nextTxIdxMu.Unlock()
+				}
+				if m.eventBus != nil {
+					for _, hash := range invalidHashes {
+						events = append(events, event.NewEvent(
+							RemoveTransactionEventType,
+							RemoveTransactionEvent{Hash: hash},
+						))
+					}
+				}
+				m.overlay = candidate.overlay
+				m.transactions = candidate.transactions
+				m.txByHash = candidate.txByHash
+				m.currentSizeBytes = candidate.sizeBytes
+				m.metrics.txsInMempool.Set(float64(len(candidate.transactions)))
+				m.metrics.mempoolBytes.Set(float64(candidate.sizeBytes))
+				m.consumersMutex.Unlock()
+				m.Unlock()
+				m.journalActive = false
+				m.mutationJournal = nil
+				m.journalOverflow = false
+				if len(invalidHashes) > 0 {
+					removed := make(
+						map[string]struct{},
+						len(invalidHashes),
+					)
+					for _, hash := range invalidHashes {
+						removed[hash] = struct{}{}
+					}
+					m.recordMutationLocked(mempoolMutation{removed: removed})
+				}
+				m.mutationMutex.Unlock()
+				return nil
+			}
+			m.mutationMutex.Unlock()
+
+			applyCount := len(delta)
+			if applyCount > m.revalidationDeltaCap {
+				// Drain the excess off-lock, leaving at most the configured
+				// residual for the next catch-up/finalization pass.
+				applyCount -= m.revalidationDeltaCap
+			}
+			for _, mutation := range delta[:applyCount] {
+				if mutation.stopped {
+					return ErrMempoolStopped
+				}
+				if len(mutation.removed) > 0 {
+					candidate.remove(mutation.removed)
+				}
+				if mutation.added != nil {
+					m.revalidateAppliedTx(
+						candidate,
+						*mutation.added,
+						mutation.addedTx,
+						validate,
+					)
+				}
+				appliedSeq = mutation.seq
+			}
+		}
+		return errors.New("mempool: revalidation could not catch up with mutations")
+	})
+	if err != nil {
+		finishJournal()
+		return nil, err
+	}
+	return events, nil
+}
+
+func mutationsAfter(
+	journal []mempoolMutation,
+	seq uint64,
+) []mempoolMutation {
+	idx := len(journal)
+	for i := range journal {
+		if journal[i].seq > seq {
+			idx = i
+			break
 		}
 	}
-	return nil
+	return slices.Clone(journal[idx:])
+}
+
+func (m *Mempool) revalidateAppliedTx(
+	candidate *revalidationCandidate,
+	at appliedTx,
+	tx *MempoolTransaction,
+	validate func(
+		gledger.Transaction,
+		map[string]struct{},
+		map[string]lcommon.Utxo,
+	) error,
+) {
+	if tx == nil {
+		return
+	}
+	tmpTx, err := gledger.NewTransactionFromCbor(at.txType, at.cbor)
+	if err != nil {
+		candidate.invalid[at.hash] = tx
+		m.logger.Error(
+			"transaction failed decode during re-validation",
+			"component", "mempool",
+			"tx_hash", at.hash,
+			"error", err,
+		)
+		return
+	}
+	if err := validate(
+		tmpTx,
+		candidate.overlay.consumed,
+		candidate.overlay.created,
+	); err != nil {
+		candidate.invalid[at.hash] = tx
+		m.logger.Debug(
+			"transaction failed re-validation",
+			"component", "mempool",
+			"tx_hash", at.hash,
+			"error", err,
+		)
+		return
+	}
+	candidate.add(at, tx, tmpTx)
+}
+
+func (m *Mempool) withTxValidationSession(
+	fn func(
+		validate func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error,
+		stillCurrent func() bool,
+	) error,
+) error {
+	if provider, ok := m.validator.(TxValidationSessionProvider); ok {
+		return provider.WithTxValidationSession(fn)
+	}
+	return fn(m.validator.ValidateTxWithOverlay, func() bool { return true })
 }
 
 // expireTransactions periodically removes transactions that have
@@ -845,6 +1150,7 @@ func (m *Mempool) removeExpiredTransactions() {
 				}
 			}
 		}
+		m.recordMutationLocked(mempoolMutation{removed: maps.Clone(expiredHashes)})
 		if len(pruned) > 0 {
 			m.logger.Debug(
 				"pruned orphaned descendant transactions during expiry",
@@ -985,6 +1291,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		overlayCbor := slices.Clone(txBytes)
 		txCbor := slices.Clone(txBytes)
 		m.overlay.applyTx(txHash, txType, overlayCbor, tmpTx)
+		added := cloneAppliedTx(m.overlay.applied[len(m.overlay.applied)-1])
 		tx := &MempoolTransaction{
 			Hash:     txHash,
 			Type:     txType,
@@ -1002,6 +1309,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		m.metrics.txsProcessedNum.Inc()
 		m.metrics.txsInMempool.Inc()
 		m.metrics.mempoolBytes.Add(float64(txSize))
+		m.recordMutationLocked(mempoolMutation{added: &added, addedTx: tx})
 		if m.eventBus != nil {
 			evt := event.NewEvent(
 				AddTransactionEventType,
@@ -1042,10 +1350,16 @@ func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
 
 func (m *Mempool) Transactions() []MempoolTransaction {
 	m.RLock()
-	defer m.RUnlock()
 	ret := make([]MempoolTransaction, len(m.transactions))
 	for i := range m.transactions {
-		ret[i] = *cloneMempoolTransaction(m.transactions[i])
+		ret[i] = *m.transactions[i]
+	}
+	m.RUnlock()
+	// CBOR is immutable after admission, so copying its slice headers while
+	// locked is sufficient; move the potentially expensive byte copies outside
+	// the pool lock to keep writers moving during large snapshots.
+	for i := range ret {
+		ret[i].Cbor = slices.Clone(ret[i].Cbor)
 	}
 	return ret
 }
@@ -1093,6 +1407,7 @@ func (m *Mempool) RemoveTransaction(txHash string) {
 		}
 	}
 	if removed {
+		m.recordMutationLocked(mempoolMutation{removed: maps.Clone(toRemove)})
 		if len(pruned) > 0 {
 			m.logger.Debug(
 				"pruned orphaned descendant transactions",
@@ -1135,13 +1450,18 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 	m.Lock()
 	m.consumersMutex.Lock()
 	m.overlay.removeByHashes(hashSet)
+	removedHashes := make(map[string]struct{}, len(hashSet))
 	for i, v := range slices.Backward(m.transactions) {
 		if _, ok := hashSet[v.Hash]; ok {
+			removedHashes[v.Hash] = struct{}{}
 			evt := m.removeTransactionByIndexLocked(i)
 			if evt != nil {
 				events = append(events, *evt)
 			}
 		}
+	}
+	if len(removedHashes) > 0 {
+		m.recordMutationLocked(mempoolMutation{removed: removedHashes})
 	}
 	m.consumersMutex.Unlock()
 	m.Unlock()
@@ -1282,6 +1602,12 @@ func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 	}
 
 	totalEvicted := evicted + len(pruned)
+	removedHashes := make(map[string]struct{}, len(evictedHashes)+len(pruned))
+	maps.Copy(removedHashes, evictedHashes)
+	for _, hash := range pruned {
+		removedHashes[hash] = struct{}{}
+	}
+	m.recordMutationLocked(mempoolMutation{removed: removedHashes})
 	m.metrics.txsEvicted.Add(float64(totalEvicted))
 	m.logger.Debug(
 		"evicted transactions from mempool",

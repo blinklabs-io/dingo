@@ -6893,6 +6893,98 @@ func validationReferenceSlot(
 	return tipSlot
 }
 
+// WithTxValidationSession pins a mempool revalidation batch to one immutable
+// ledger publication, one validation slot/era/parameter set, and one
+// repeatable-read database transaction. stillCurrent lets the mempool reject
+// the candidate immediately before its atomic swap if a block or rollback
+// published a newer generation while validation was running.
+func (ls *LedgerState) WithTxValidationSession(
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
+		) error,
+		stillCurrent func() bool,
+	) error,
+) error {
+	consensusState, tipState := ls.loadStateSnapshots()
+	generation := consensusState.generation
+	snapshotEra := consensusState.currentEra
+	snapshotPParams := consensusState.currentPParams
+	snapshotPrevEraPParams := consensusState.prevEraPParams
+	snapshotTipSlot := tipState.currentTip.Point.Slot
+	eraList := ls.eraList()
+
+	currentSlot, currentSlotErr := ls.CurrentSlot()
+	if currentSlotErr != nil {
+		ls.config.Logger.Debug(
+			"slot clock unavailable during tx validation session, falling back to snapshot tip slot",
+			"error",
+			currentSlotErr,
+			"snapshot_tip_slot",
+			snapshotTipSlot,
+		)
+		ls.metrics.slotClockFallbacks.Inc()
+	}
+	snapshotSlot := validationReferenceSlot(
+		snapshotTipSlot,
+		currentSlot,
+		currentSlotErr,
+	)
+
+	txn := ls.db.Transaction(false)
+	return txn.Do(func(txn *database.Txn) error {
+		validate := func(
+			tx ledger.Transaction,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
+		) error {
+			validationEra, err := resolveValidationEra(
+				tx,
+				snapshotEra,
+				eraList,
+			)
+			if err != nil {
+				return err
+			}
+			if validationEra.ValidateTxFunc == nil {
+				return nil
+			}
+			pp := snapshotPParams
+			if validationEra.Id != snapshotEra.Id &&
+				snapshotPrevEraPParams != nil {
+				pp = snapshotPrevEraPParams
+			}
+			err = validationEra.ValidateTxFunc(
+				tx,
+				snapshotSlot,
+				&LedgerView{
+					txn:             txn,
+					ls:              ls,
+					intraBlockUtxos: createdUtxos,
+					consumedUtxos:   consumedUtxos,
+				},
+				pp,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"TX %s failed validation: %w",
+					tx.Hash(),
+					err,
+				)
+			}
+			return nil
+		}
+		stillCurrent := func() bool {
+			currentConsensus, currentTip := ls.loadStateSnapshots()
+			return currentConsensus.generation == generation &&
+				currentTip.generation == generation
+		}
+		return fn(validate, stillCurrent)
+	})
+}
+
 // validateTxCore is the shared validation flow for ValidateTx and
 // ValidateTxWithOverlay. It snapshots ledger state, resolves the
 // validation era, opens a DB transaction, and invokes the era's

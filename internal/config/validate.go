@@ -319,6 +319,15 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			rejectionWatermark,
 		))
 	}
+	if value, ok := c.Plugins.Mempool.Config["revalidationDeltaCap"]; ok {
+		revalidationDeltaCap := pluginInt64(value)
+		if revalidationDeltaCap <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid plugins.mempool.config.revalidationDeltaCap: %d (must be positive)",
+				revalidationDeltaCap,
+			))
+		}
+	}
 
 	// Block production needs all three credential paths
 	if c.BlockProducer {

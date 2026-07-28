@@ -545,6 +545,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			plugin.CapabilityStorageMetadata: {Provider: "sqlite", Config: map[string]any{}},
 			plugin.CapabilityMempool: {Provider: "default", Config: map[string]any{
 				"evictionWatermark": 0.90, "rejectionWatermark": 0.95,
+				"revalidationDeltaCap": 64,
 			}},
 			plugin.CapabilityAPIBlockfrost: {Provider: "builtin", Config: map[string]any{"port": uint(3000)}},
 			plugin.CapabilityAPIMesh:       {Provider: "builtin", Config: map[string]any{"port": uint(8080)}},
