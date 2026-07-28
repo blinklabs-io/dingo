@@ -112,10 +112,13 @@ type KoiosTotals struct {
 	// schema but are not currently compared against any Dingo value — Dingo's
 	// AdaPots model has no circulating-supply or deposit-pot aggregate (see
 	// KoiosTotalsResp for why).
-	Circulation        string `gorm:"not null;default:''"`
-	Supply             string `gorm:"not null;default:''"`
-	DepositsStake      string `gorm:"not null;default:''"`
-	DepositsDRep       string `gorm:"not null;default:''"`
+	Circulation   string `gorm:"not null;default:''"`
+	Supply        string `gorm:"not null;default:''"`
+	DepositsStake string `gorm:"not null;default:''"`
+	// column pinned explicitly: GORM's naming strategy converts DepositsDRep
+	// to "deposits_d_rep" (splitting the lone "D" from "Rep"), not
+	// "deposits_drep" — pin it to match Koios's own field name exactly.
+	DepositsDRep       string `gorm:"column:deposits_drep;not null;default:''"`
 	DepositsProposal   string `gorm:"not null;default:''"`
 	TreasuryDonation   string `gorm:"not null;default:''"`
 	TreasuryWithdrawal string `gorm:"not null;default:''"`
@@ -231,6 +234,16 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 			if err := db.Migrator().DropColumn(&KoiosEpochInfo{}, col); err != nil {
 				return nil, fmt.Errorf("drop stale column %s from koios_epoch_info: %w", col, err)
 			}
+		}
+	}
+	// Drop the mis-named column from a prior version of KoiosTotals: before
+	// DepositsDRep's column was pinned explicitly to "deposits_drep" (matching
+	// Koios's own field name), GORM's naming strategy generated "deposits_d_rep"
+	// instead (it splits the lone "D" from "Rep"). AutoMigrate never drops
+	// columns, so a cache.db created before this fix still has the old one.
+	if db.Migrator().HasColumn(&KoiosTotals{}, "deposits_d_rep") {
+		if err := db.Migrator().DropColumn(&KoiosTotals{}, "deposits_d_rep"); err != nil {
+			return nil, fmt.Errorf("drop stale column deposits_d_rep from koios_totals: %w", err)
 		}
 	}
 	return &Cache{db: db, logger: logger}, nil
