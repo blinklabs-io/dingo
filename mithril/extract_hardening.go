@@ -81,30 +81,53 @@ func newExtractConfig(opts []ExtractOption) extractConfig {
 	return cfg
 }
 
-// assertSafeDirPath walks the components of dir that exist and rejects any
-// that is a symlink or a non-directory. Extraction resolves paths through
-// these components, so a symlink anywhere along the chain relocates writes
-// outside the destination even when the archive's own entries are clean.
+// assertSafeExtractRoot checks the extraction root itself, rejecting a root
+// that is a symlink or an existing non-directory.
 //
-// Components that do not exist yet are fine: they will be created by this
-// process, and the checks are repeated for each file written.
-func assertSafeDirPath(dir string) error {
-	cleaned := filepath.Clean(dir)
-	volume := filepath.VolumeName(cleaned)
-	rest := strings.TrimPrefix(cleaned, volume)
-	separator := string(filepath.Separator)
-
-	current := volume
-	if strings.HasPrefix(rest, separator) {
-		current += separator
-		rest = strings.TrimPrefix(rest, separator)
+// Only the root entry is inspected, never its ancestors. Directories above the
+// root are chosen by the operator and are outside the threat this guards
+// against, which is content planted inside the destination. Walking to the
+// filesystem root would also reject ordinary layouts: on macOS every temporary
+// path sits under /var, which is a symlink to /private/var.
+func assertSafeExtractRoot(root string) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspecting %s: %w", root, err)
 	}
-	if rest == "" {
+	return assertRealDir(root, info)
+}
+
+// assertSafeDescendant rejects a symlink or non-directory at any component of
+// target below root. Extraction resolves target through those components, so
+// one symlink among them relocates the write outside root even when the
+// archive's own entry paths are clean.
+//
+// Components that do not exist yet are fine: this process creates them, and
+// the check runs again for every path written.
+func assertSafeDescendant(root, target string) error {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return fmt.Errorf(
+			"%w: %s is not under %s", ErrExtractUnsafePath, target, root,
+		)
+	}
+	if rel == "." {
 		return nil
 	}
+	if rel == ".." || strings.HasPrefix(
+		rel, ".."+string(filepath.Separator),
+	) {
+		return fmt.Errorf(
+			"%w: %s escapes %s", ErrExtractUnsafePath, target, root,
+		)
+	}
 
-	for component := range strings.SplitSeq(rest, separator) {
-		if component == "" {
+	current := root
+	for component := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		if component == "" || component == "." {
 			continue
 		}
 		current = filepath.Join(current, component)
@@ -116,18 +139,24 @@ func assertSafeDirPath(dir string) error {
 			}
 			return fmt.Errorf("inspecting %s: %w", current, err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf(
-				"%w: %s is a symlink",
-				ErrExtractUnsafePath, current,
-			)
+		if err := assertRealDir(current, info); err != nil {
+			return err
 		}
-		if !info.IsDir() {
-			return fmt.Errorf(
-				"%w: %s is not a directory",
-				ErrExtractUnsafePath, current,
-			)
-		}
+	}
+	return nil
+}
+
+// assertRealDir rejects a path that is a symlink or is not a directory.
+func assertRealDir(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf(
+			"%w: %s is a symlink", ErrExtractUnsafePath, path,
+		)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf(
+			"%w: %s is not a directory", ErrExtractUnsafePath, path,
+		)
 	}
 	return nil
 }
@@ -159,7 +188,9 @@ func prepareExtractDestination(
 ) (workDir string, publish func() error, cleanup func(), err error) {
 	cleanDest := filepath.Clean(destDir)
 
-	if err := assertSafeDirPath(cleanDest); err != nil {
+	// Checked before anything is created or read, so a destination that is
+	// itself a symlink never gets followed.
+	if err := assertSafeExtractRoot(cleanDest); err != nil {
 		return "", nil, nil, err
 	}
 
@@ -171,7 +202,7 @@ func prepareExtractDestination(
 		}
 		// Re-check after creation: MkdirAll succeeds against a symlink
 		// that already resolves to a directory.
-		if err := assertSafeDirPath(cleanDest); err != nil {
+		if err := assertSafeExtractRoot(cleanDest); err != nil {
 			return "", nil, nil, err
 		}
 		return cleanDest, func() error { return nil }, func() {}, nil
@@ -196,9 +227,6 @@ func prepareExtractDestination(
 		return "", nil, nil, fmt.Errorf(
 			"creating extraction parent directory: %w", err,
 		)
-	}
-	if err := assertSafeDirPath(parent); err != nil {
-		return "", nil, nil, err
 	}
 
 	// Staged alongside the destination so publishing is a rename within one
@@ -228,8 +256,8 @@ func prepareExtractDestination(
 
 // createExtractedFile opens target for writing, refusing to follow a symlink
 // at the final component and rejecting an unsafe parent chain first.
-func createExtractedFile(target string) (*os.File, error) {
-	if err := assertSafeDirPath(filepath.Dir(target)); err != nil {
+func createExtractedFile(root, target string) (*os.File, error) {
+	if err := assertSafeDescendant(root, filepath.Dir(target)); err != nil {
 		return nil, err
 	}
 	// An existing symlink at the target itself is rejected outright, which
@@ -258,8 +286,8 @@ func createExtractedFile(target string) (*os.File, error) {
 
 // mkdirExtracted creates an extracted directory after checking that no
 // component of its path is a symlink.
-func mkdirExtracted(target string) error {
-	if err := assertSafeDirPath(target); err != nil {
+func mkdirExtracted(root, target string) error {
+	if err := assertSafeDescendant(root, target); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(target, 0o750); err != nil { //nolint:gosec // caller validated target against the destination root
@@ -267,5 +295,5 @@ func mkdirExtracted(target string) error {
 	}
 	// MkdirAll is a no-op against a symlink that already resolves to a
 	// directory, so confirm what now exists is a real directory.
-	return assertSafeDirPath(target)
+	return assertSafeDescendant(root, target)
 }

@@ -2466,10 +2466,19 @@ everything downstream of `Bootstrap()` is backend-agnostic.
 
 `ExtractArchive` treats the destination filesystem as untrusted, because an
 archive's contents being safe does not make the directory it is written into
-safe. Every extracted path has its components lstat-checked, and files open
-with `O_NOFOLLOW` where the platform provides it, so a symlink already present
-in the destination is rejected rather than followed. Destinations come in two
-shapes, selected by the caller:
+safe. Extracted paths are lstat-checked at every component **below the
+extraction root**, and files open with `O_NOFOLLOW` where the platform provides
+it, so a symlink already present in the destination is rejected rather than
+followed.
+
+The check deliberately stops at the root. Directories above it are chosen by
+the operator and are not part of this threat, which is content planted inside
+the destination; walking higher would reject ordinary layouts, since on macOS
+every temporary path resolves through `/var`, itself a symlink to
+`/private/var`. The root entry is still checked, so a destination that is
+itself a symlink is refused.
+
+Destinations come in two shapes, selected by the caller:
 
 - **Exclusive** (v1 snapshot, ancillary, digests): extraction is staged in a
   fresh `0700` directory alongside the destination and renamed into place only

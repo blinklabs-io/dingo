@@ -178,6 +178,36 @@ func TestExtractArchiveMergeDoesNotWriteThroughPreExistingSymlink(
 		"merge extraction must not write through a pre-existing symlink")
 }
 
+// TestExtractArchiveAllowsSymlinkedAncestor pins the boundary of the symlink
+// checks: directories above the destination belong to the operator and are
+// not part of the threat, so a symlink among them must not block extraction.
+//
+// Rejecting them breaks ordinary systems rather than attackers — on macOS
+// every temporary path resolves through /var, which is a symlink to
+// /private/var.
+func TestExtractArchiveAllowsSymlinkedAncestor(t *testing.T) {
+	archivePath := writeTestArchive(t, map[string]string{
+		"immutable/00000.chunk": "chunk0",
+	})
+
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	require.NoError(t, os.MkdirAll(realParent, 0o750))
+	linkedParent := filepath.Join(root, "linked")
+	requireSymlinkSupport(t, realParent, linkedParent)
+
+	// The destination is reached through a symlinked ancestor.
+	destDir := filepath.Join(linkedParent, "extracted")
+	_, err := ExtractArchive(t.Context(), archivePath, destDir, nil)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(
+		filepath.Join(destDir, "immutable", "00000.chunk"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "chunk0", string(data))
+}
+
 // TestExtractArchiveRefusesSymlinkedDestination covers the destination path
 // itself being a symlink, which would otherwise relocate the whole
 // extraction.

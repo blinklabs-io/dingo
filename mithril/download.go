@@ -1066,7 +1066,7 @@ func ExtractArchive(
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := mkdirExtracted(target); err != nil {
+			if err := mkdirExtracted(cleanDest, target); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
 					target,
@@ -1087,7 +1087,7 @@ func ExtractArchive(
 
 			// Ensure parent directory exists
 			parent := filepath.Dir(target)
-			if err := mkdirExtracted(parent); err != nil {
+			if err := mkdirExtracted(cleanDest, parent); err != nil {
 				return "", fmt.Errorf(
 					"creating parent directory %s: %w",
 					parent,
@@ -1095,7 +1095,7 @@ func ExtractArchive(
 				)
 			}
 
-			outFile, err := createExtractedFile(target)
+			outFile, err := createExtractedFile(cleanDest, target)
 			if err != nil {
 				return "", fmt.Errorf(
 					"creating file %s: %w",
