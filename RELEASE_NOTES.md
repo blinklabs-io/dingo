@@ -1,5 +1,52 @@
 # Dingo Releases
 
+## v0.68.0 (July 28, 2026)
+
+**Title:** Broaden DRep, UTxO, and recovery support while refreshing dependencies
+
+**Date:** July 28, 2026
+
+**Version:** v0.68.0
+
+This release expands DRep and stake query coverage, keeps backfills and replay paths more reliable, improves event delivery under load, and refreshes storage, cloud, AWS, and example dependencies.
+
+### 💪 Improvements
+
+* Added support for keeping the live stake index available during API backfill, which keeps stake data visible while the database catches up.
+* Expanded Blockfrost DRep support by adding the DRep list endpoint and aligning DRep responses with the rest of the API.
+* Refreshed the Google Cloud storage client and related Google client packages, which keeps cloud storage operations current.
+* Extended stake address coverage with `stake-address-info` queries, which makes stake lookups available through the ledger interface.
+* Refined the plugin system to make extension points clearer and easier to maintain.
+* Strengthened cloud integration support by updating the AWS SDK modules.
+* Updated the `@blaze-cardano/sdk` dependency in the example project, keeping the sample aligned with current client behavior.
+* Renewed the `github.com/blinklabs-io/bark` dependency, which keeps the Bark server stack current.
+
+### 🔧 Fixes
+
+* Fixed pointer snapshot UTxOs so pointer based wallet views stay accurate.
+* Corrected DRep activity renewal from certificates, which keeps DRep status current after certificate processing.
+* Improved exact UTxO address matching so address specific lookups return only the intended outputs.
+* Reordered Ouroboros rollback observation ahead of the apply gate, which keeps rollback handling aligned with node state.
+* Hardened genesis restart safety so restarts recover more predictably during startup.
+* Tightened open database ownership checks so the node protects existing database ownership more reliably.
+* Switched Mark snapshot handling to `reward_live_stake`, which keeps snapshot totals aligned with live reward stake.
+* Stabilized the replay path recovery loop so recovery continues instead of cycling on the same failure.
+* Parsed Leios pool reward accounts correctly, which improves reward account handling during ledger processing.
+* Applied backpressure instead of dropping events, which helps the node preserve event delivery under load.
+
+### 🙏 Thank You
+
+Thank you to @mmahut for the first contribution in this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
 ## v0.67.1 (July 25, 2026)
 
 **Title:** Prevent certified Leios commits before endorser closure is ready
