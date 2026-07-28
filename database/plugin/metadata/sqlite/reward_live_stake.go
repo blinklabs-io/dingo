@@ -163,7 +163,7 @@ func rewardStakeRefsFromUtxoSpends(
 }
 
 // flattenPoolDelegationCache converts this package's local certificate cache
-// (populated by batchFetchCerts in account.go) into the shared package's
+// (populated by batchFetchPoolDelegations in account.go) into the shared package's
 // PoolDelegationCache. account.go's accountCertCache/certRecord types carry
 // registration/deregistration/DRep-delegation data used elsewhere in that
 // file; only the pool-delegation slice is relevant to the reward-live-stake
@@ -186,11 +186,9 @@ func flattenPoolDelegationCache(
 	return flat
 }
 
-// refreshRewardLiveStakeAggregates batch-fetches certificate state once per
-// distinct slot (via batchFetchCerts, which is local to this package because
-// it shares account.go's certificate-batching machinery) and then refreshes
-// each credential's reward_live_stake row through the shared package's
-// per-credential engine.
+// refreshRewardLiveStakeAggregates batch-fetches pool-delegation certificate
+// state once per distinct slot and then refreshes each credential's
+// reward_live_stake row through the shared package's per-credential engine.
 func refreshRewardLiveStakeAggregates(
 	db *gorm.DB,
 	refs map[string]rewardCredentialSlotRef,
@@ -213,7 +211,7 @@ func refreshRewardLiveStakeAggregates(
 		len(refsBySlot),
 	)
 	for slot, slotRefs := range refsBySlot {
-		cache, err := batchFetchCerts(db, slotRefs, slot)
+		cache, err := batchFetchPoolDelegations(db, slotRefs, slot)
 		if err != nil {
 			return fmt.Errorf(
 				"query reward live stake pool delegations: %w",
@@ -246,7 +244,11 @@ func refreshRewardLiveStakeAggregate(
 	if len(ref.Key) == 0 {
 		return nil
 	}
-	cache, err := batchFetchCerts(db, []models.StakeCredentialRef{ref}, slot)
+	cache, err := batchFetchPoolDelegations(
+		db,
+		[]models.StakeCredentialRef{ref},
+		slot,
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"query reward live stake pool delegation: %w",
