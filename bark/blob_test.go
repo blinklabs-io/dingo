@@ -398,6 +398,120 @@ func TestGetBlock_AcceptsVerifiedArchiveBlock(t *testing.T) {
 	}
 }
 
+// realEraBlock loads a block produced by the reference implementation for the
+// named era fixture, returning its CBOR and true block type. Generated blocks
+// are no use here: cross-era decoding has to be exercised against bytes whose
+// header layout is genuinely shared between eras.
+func realEraBlock(t *testing.T, name string) ([]byte, uint) {
+	t.Helper()
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	require.NoError(t, err)
+	f, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/"+name,
+	)
+	require.NoError(t, err)
+	raw, err := f.ConsensusLedgerBlockBytes()
+	require.NoError(t, err)
+	blockType, err := f.LedgerBlockType()
+	require.NoError(t, err)
+	return raw, blockType
+}
+
+// TestGetBlock_RejectsArchiveBlockTypeMismatch covers an archive that serves
+// genuine block bytes while misreporting their era.
+//
+// The block hash for Shelley and later is taken over the header alone, and
+// adjacent eras share that header layout, so the same bytes decode under more
+// than one era with an identical hash and slot. The hash check therefore
+// cannot police the era, and without an independent derivation the archive
+// would dictate BlockMetadata.Type.
+func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		fixture  string
+		claimed  archive.BlockType
+		claimedN uint
+	}{
+		{
+			name:     "babbage served as conway",
+			fixture:  "Block_Babbage",
+			claimed:  archive.BlockType_BLOCK_TYPE_CONWAY,
+			claimedN: gledger.BlockTypeConway,
+		},
+		{
+			name:     "shelley served as mary",
+			fixture:  "Block_Shelley",
+			claimed:  archive.BlockType_BLOCK_TYPE_MARY,
+			claimedN: gledger.BlockTypeMary,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, trueType := realEraBlock(t, tc.fixture)
+			require.NotEqual(t, trueType, tc.claimedN,
+				"fixture era must differ from the claimed era")
+
+			// The misreported era must still decode, otherwise the test
+			// would pass for the wrong reason.
+			decoded, err := gledger.NewBlockFromCbor(tc.claimedN, raw)
+			require.NoError(t, err,
+				"cross-era decode must succeed for this test to be meaningful")
+			hash := decoded.Hash()
+
+			db := newTestDB(t)
+			baseURL, fakeArch, httpClient := startFakeArchive(
+				t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+			)
+			fakeArch.blockType = tc.claimed
+			fakeArch.height = decoded.BlockNumber()
+			prevHash := decoded.PrevHash()
+			fakeArch.prevHash = prevHash[:]
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+			require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
+		})
+	}
+}
+
+// TestGetBlock_RejectsUnclassifiableEra pins the fail-closed behaviour when a
+// block's era cannot be derived from its header.
+//
+// The consensus golden fixtures carry synthetic protocol versions that
+// DetermineBlockType does not map, which stands in for a block from an era
+// this node does not know. Trusting the archive's claim in that case would
+// hand era selection straight back to it, so the fetch is refused. A node that
+// cannot classify a block could not process it anyway.
+func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
+	raw, trueType := realEraBlock(t, "Block_Babbage")
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType(trueType) //nolint:gosec // fixture-derived era
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	// Even though the archive reported the fixture's own era, the era cannot
+	// be confirmed from the header, so the block is not accepted.
+	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockTypeMismatch)
+}
+
 // TestGetBlock_RejectsArchiveBlockForDifferentPoint is the core regression for
 // the finding: the archive is asked for one block and answers with a
 // different, individually valid block. The substituted block must not reach

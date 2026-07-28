@@ -2306,11 +2306,19 @@ local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 Because the archive controls both the download URL and the response body, the
 client re-establishes block identity locally rather than trusting the response.
 Downloaded bytes are decoded with body-hash validation enabled, and the block's
-computed hash and slot must match the point that was requested; the archive's
-own block type is treated as a decode hint, since a wrong type either fails to
-decode or produces a different hash. Block metadata is derived from the decoded
-block, and archive-reported height or previous hash that disagrees with it fails
-the fetch. Both entry points — `GetBlock` and the iterator's expired-history
+computed hash and slot must match the point that was requested.
+
+The block era needs its own check. For Shelley and later the hash covers the
+header alone, and adjacent eras share that header layout, so one set of bytes
+decodes under several eras with an identical hash and slot — the hash cannot
+police the era. The era is therefore derived from the header itself via
+`ledger.DetermineBlockType` and must equal what the archive claimed. Byron is
+exempt because its hash is taken over the block type byte followed by the
+header, so the hash already binds it. An era that cannot be derived at all is
+refused rather than taken on the archive's word.
+
+Block metadata is derived from the decoded block, and archive-reported height
+or previous hash that disagrees with it fails the fetch. Both entry points — `GetBlock` and the iterator's expired-history
 resolution — share this path, so neither is an unchecked route into archive
 data.
 

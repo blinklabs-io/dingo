@@ -410,8 +410,12 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
+	era, err := blockEraFromHeader(decoded, (uint)(blockType))
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
 	meta, err := archiveBlockMetadata(
-		decoded, block.GetBlock().GetHeight(), archivePrevHash,
+		decoded, era, block.GetBlock().GetHeight(), archivePrevHash,
 	)
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
@@ -445,7 +449,56 @@ var (
 	ErrArchiveMetadataMismatch = errors.New(
 		"bark: archive metadata contradicts the block",
 	)
+	// ErrArchiveBlockTypeMismatch reports a block whose era, derived from its
+	// own header, is not the era the archive claimed.
+	ErrArchiveBlockTypeMismatch = errors.New(
+		"bark: archive block era does not match the block header",
+	)
 )
+
+// blockEraFromHeader derives a block's era from its own header rather than
+// from the era the archive nominated.
+//
+// This is needed because the hash does not pin the era for Shelley and later:
+// those hashes cover the header alone, and adjacent eras share its layout, so
+// one set of bytes decodes under several eras with an identical hash and slot.
+// Byron is the exception — its hash is taken over the block type byte followed
+// by the header, so the era is already bound by the hash check and there is
+// nothing further to derive.
+func blockEraFromHeader(
+	decoded gledger.Block,
+	claimed uint,
+) (uint, error) {
+	if claimed == gledger.BlockTypeByronEbb ||
+		claimed == gledger.BlockTypeByronMain {
+		return claimed, nil
+	}
+	header := decoded.Header()
+	if header == nil {
+		return 0, fmt.Errorf(
+			"%w: block has no header to derive the era from",
+			ErrArchiveBlockTypeMismatch,
+		)
+	}
+	derived, err := gledger.DetermineBlockType(header.Cbor())
+	if err != nil {
+		// Fail closed. An era that cannot be derived cannot be checked, and
+		// falling back to the archive's claim would hand era selection back to
+		// it. A block this node cannot classify is one it could not process
+		// anyway, so refusing costs nothing it could otherwise have used.
+		return 0, fmt.Errorf(
+			"%w: deriving era from header: %w",
+			ErrArchiveBlockTypeMismatch, err,
+		)
+	}
+	if derived != claimed {
+		return 0, fmt.Errorf(
+			"%w: header is era %d, archive claimed %d",
+			ErrArchiveBlockTypeMismatch, derived, claimed,
+		)
+	}
+	return derived, nil
+}
 
 // verifyArchiveBlock establishes locally that the bytes the archive returned
 // really are the block that was requested. Bark chooses both the download URL
@@ -498,6 +551,7 @@ func verifyArchiveBlock(
 // the archive is not required to populate them.
 func archiveBlockMetadata(
 	decoded gledger.Block,
+	era uint,
 	archiveHeight uint64,
 	archivePrevHash []byte,
 ) (types.BlockMetadata, error) {
@@ -515,14 +569,8 @@ func archiveBlockMetadata(
 			ErrArchiveMetadataMismatch, archivePrevHash, prevHash[:],
 		)
 	}
-	blockType := decoded.Type()
-	if blockType < 0 {
-		return types.BlockMetadata{}, fmt.Errorf(
-			"bark: decoded block has invalid type %d", blockType,
-		)
-	}
 	return types.BlockMetadata{
-		Type:     (uint)(blockType),
+		Type:     era,
 		Height:   height,
 		PrevHash: prevHash[:],
 	}, nil
