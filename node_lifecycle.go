@@ -1313,6 +1313,14 @@ func (n *Node) validateRestoredAgainstNodeConfig(
 	if err != nil {
 		return fmt.Errorf("failed to reopen database: %w", err)
 	}
+	// OpenDatabase treats a CommitTimestampError as recoverable and
+	// returns it via RecoveryError instead of as err, since normal node
+	// startup wants the runtime kept open for recovery. Validation here
+	// has no such use for a half-consistent database: any mismatch must
+	// fail before the real data directory is touched.
+	if recErr := runtime.RecoveryError(); recErr != nil {
+		return fmt.Errorf("failed to reopen database: %w", recErr)
+	}
 	return nil
 }
 
@@ -1410,15 +1418,16 @@ func (n *Node) Truncate(
 		tmpRuntime, err := internalplugins.OpenDatabase(
 			ctx, n.databaseConfig(), n.storageSelections(), deps,
 		)
-		// database.New (inside OpenDatabase) can return a non-nil db
-		// alongside a non-nil error (a recoverable CommitTimestampError —
-		// see its own doc comment, "database is available for recovery,
-		// so return it with error"), and OpenDatabase preserves that by
-		// returning a non-nil runtime alongside the error in that case.
-		// The defer must be registered here, before the err check below,
-		// so that case still closes tmpRuntime rather than leaking its
-		// open badger/sqlite handles: an early return on err != nil before
-		// this line would skip the deferred Close entirely, leaving
+		// OpenDatabase can return a non-nil runtime alongside a nil error
+		// even when the underlying database.New hit a recoverable
+		// CommitTimestampError, surfacing it instead through
+		// tmpRuntime.RecoveryError() below (normal node startup wants the
+		// runtime kept open for recovery in that case). Truncate has no
+		// use for a half-consistent tmpDB, so that's treated as a hard
+		// failure here too. The defer must be registered here, before
+		// either check below, so both cases still close tmpRuntime rather
+		// than leaking its open badger/sqlite handles: an early return
+		// before this line would skip the deferred Close entirely, leaving
 		// tmpRuntime's storage locks held. reinitializeAndResume's
 		// reinitializeCoreStorage then reopens the very same data
 		// directory a moment later (this error is classified as
@@ -1432,6 +1441,12 @@ func (n *Node) Truncate(
 			return 0, fmt.Errorf(
 				"%w: open database for truncate: %w",
 				lifecycle.ErrTruncateNotStarted, err,
+			)
+		}
+		if recErr := tmpRuntime.RecoveryError(); recErr != nil {
+			return 0, fmt.Errorf(
+				"%w: open database for truncate: %w",
+				lifecycle.ErrTruncateNotStarted, recErr,
 			)
 		}
 		tmpDB := tmpRuntime.Database
