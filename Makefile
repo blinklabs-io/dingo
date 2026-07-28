@@ -32,7 +32,7 @@ GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' 
 BUILD_TAGS ?= dingo_extra_plugins
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 
-.PHONY: all build help mod-tidy clean format golines lint import-boundaries proto test bench test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help mod-tidy clean format golines lint import-boundaries proto test bench bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -102,6 +102,9 @@ test: mod-tidy ## Run tests with race detection
 
 bench: mod-tidy ## Run benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
+
+bench-mempool-revalidation: ## Benchmark FIFO admission during normal and degenerate rebuilds
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkFIFO(AdmissionNoRevalidation|Revalidation)$$' -benchmem ./mempool
 
 test-load: build ## Load test data into a fresh database
 	rm -rf .dingo

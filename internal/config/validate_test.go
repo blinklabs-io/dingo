@@ -291,6 +291,13 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
+			name: "non-positive mempool revalidation delta cap",
+			modify: func(c *Config) {
+				setMempoolSetting(c, "revalidationDeltaCap", 0)
+			},
+			wantErr: "invalid plugins.mempool.config.revalidationDeltaCap",
+		},
+		{
 			// Every ordered comparison with NaN is false, so a plain
 			// out-of-range check would let NaN through (e.g. from
 			// --eviction-watermark NaN, which strconv parses).

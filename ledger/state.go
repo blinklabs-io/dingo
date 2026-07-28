@@ -6893,6 +6893,112 @@ func validationReferenceSlot(
 	return tipSlot
 }
 
+type txValidationSnapshot struct {
+	generation     uint64
+	currentEra     eras.EraDesc
+	currentPParams lcommon.ProtocolParameters
+	prevEraPParams lcommon.ProtocolParameters
+	eraList        []eras.EraDesc
+	referenceSlot  uint64
+}
+
+func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
+	consensusState, tipState := ls.loadStateSnapshots()
+	tipSlot := tipState.currentTip.Point.Slot
+	currentSlot, currentSlotErr := ls.CurrentSlot()
+	if currentSlotErr != nil {
+		ls.config.Logger.Debug(
+			"slot clock unavailable during tx validation, falling back to snapshot tip slot",
+			"error",
+			currentSlotErr,
+			"snapshot_tip_slot",
+			tipSlot,
+		)
+		ls.metrics.slotClockFallbacks.Inc()
+	}
+	return txValidationSnapshot{
+		generation:     consensusState.generation,
+		currentEra:     consensusState.currentEra,
+		currentPParams: consensusState.currentPParams,
+		prevEraPParams: consensusState.prevEraPParams,
+		eraList:        ls.eraList(),
+		referenceSlot: validationReferenceSlot(
+			tipSlot,
+			currentSlot,
+			currentSlotErr,
+		),
+	}
+}
+
+// WithTxValidationSession pins a mempool revalidation batch to one immutable
+// ledger publication, one validation slot/era/parameter set, and one
+// repeatable-read database transaction. stillCurrent lets the mempool reject
+// the candidate immediately before its atomic swap if a block or rollback
+// published a newer generation while validation was running.
+func (ls *LedgerState) WithTxValidationSession(
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
+		) error,
+		stillCurrent func() bool,
+	) error,
+) error {
+	snapshot := ls.txValidationSnapshot()
+
+	txn := ls.db.Transaction(false)
+	return txn.Do(func(txn *database.Txn) error {
+		validate := func(
+			tx ledger.Transaction,
+			consumedUtxos map[string]struct{},
+			createdUtxos map[string]lcommon.Utxo,
+		) error {
+			validationEra, err := resolveValidationEra(
+				tx,
+				snapshot.currentEra,
+				snapshot.eraList,
+			)
+			if err != nil {
+				return err
+			}
+			if validationEra.ValidateTxFunc == nil {
+				return nil
+			}
+			pp := snapshot.currentPParams
+			if validationEra.Id != snapshot.currentEra.Id &&
+				snapshot.prevEraPParams != nil {
+				pp = snapshot.prevEraPParams
+			}
+			err = validationEra.ValidateTxFunc(
+				tx,
+				snapshot.referenceSlot,
+				&LedgerView{
+					txn:             txn,
+					ls:              ls,
+					intraBlockUtxos: createdUtxos,
+					consumedUtxos:   consumedUtxos,
+				},
+				pp,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"TX %s failed validation: %w",
+					tx.Hash(),
+					err,
+				)
+			}
+			return nil
+		}
+		stillCurrent := func() bool {
+			currentConsensus, currentTip := ls.loadStateSnapshots()
+			return currentConsensus.generation == snapshot.generation &&
+				currentTip.generation == snapshot.generation
+		}
+		return fn(validate, stillCurrent)
+	})
+}
+
 // validateTxCore is the shared validation flow for ValidateTx and
 // ValidateTxWithOverlay. It snapshots ledger state, resolves the
 // validation era, opens a DB transaction, and invokes the era's
@@ -6901,46 +7007,27 @@ func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
 	buildLV func(txn *database.Txn) *LedgerView,
 ) error {
-	consensusState, tipState := ls.loadStateSnapshots()
-	snapshotEra := consensusState.currentEra
-	snapshotTipSlot := tipState.currentTip.Point.Slot
-	snapshotPParams := consensusState.currentPParams
-	snapshotPrevEraPParams := consensusState.prevEraPParams
-	currentSlot, currentSlotErr := ls.CurrentSlot()
-	if currentSlotErr != nil {
-		ls.config.Logger.Debug(
-			"slot clock unavailable during tx validation, falling back to snapshot tip slot",
-			"error",
-			currentSlotErr,
-			"snapshot_tip_slot",
-			snapshotTipSlot,
-		)
-		ls.metrics.slotClockFallbacks.Inc()
-	}
-	snapshotSlot := validationReferenceSlot(
-		snapshotTipSlot,
-		currentSlot,
-		currentSlotErr,
-	)
+	snapshot := ls.txValidationSnapshot()
 
 	validationEra, err := resolveValidationEra(
 		tx,
-		snapshotEra,
-		ls.eraList(),
+		snapshot.currentEra,
+		snapshot.eraList,
 	)
 	if err != nil {
 		return err
 	}
 	if validationEra.ValidateTxFunc != nil {
-		pp := snapshotPParams
-		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
-			pp = snapshotPrevEraPParams
+		pp := snapshot.currentPParams
+		if validationEra.Id != snapshot.currentEra.Id &&
+			snapshot.prevEraPParams != nil {
+			pp = snapshot.prevEraPParams
 		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
 			return validationEra.ValidateTxFunc(
 				tx,
-				snapshotSlot,
+				snapshot.referenceSlot,
 				buildLV(txn),
 				pp,
 			)

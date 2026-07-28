@@ -1954,12 +1954,37 @@ clearing transaction and consumer state; later transaction admission returns
 prevents in-flight protocol callbacks from repopulating a pool whose background
 expiry and chain-update workers have already been stopped.
 
-Mempool mutations are serialized by a dedicated mutation gate so admission and
-chain-update revalidation use a stable UTxO-overlay view. CBOR decoding and
-ledger validation run without the primary pool RW lock or consumer lock;
-transaction snapshots, lookups, and relay reads therefore remain available
-during slow script validation. Revalidation commits its rebuilt overlay and any
-invalid removals atomically before releasing the mutation gate.
+Ordinary FIFO mutations are serialized by a dedicated mutation gate, but
+chain-update revalidation does not hold that gate while it validates the whole
+pool. A rebuild briefly snapshots the live FIFO and starts a mutation journal,
+then constructs a private candidate state while admissions, confirmed/manual
+removals, descendant pruning, expiry, and watermark eviction continue against
+the live state. The bounded journal aborts a candidate instead of growing
+without limit. Otherwise, the candidate catches up by mutation sequence,
+leaving at most the configured `revalidationDeltaCap` residual per pass, and
+commits only after it reaches the current sequence. The final critical section
+translates consumer cursors and swaps the candidate overlay, ordered
+transaction slice, hash index, and byte totals; its work is independent of
+total pool occupancy. Shutdown is a terminal journal state, and repeated
+ledger-generation changes abandon the candidate after a bounded retry so chain
+activity cannot create a busy loop.
+
+`LedgerState.WithTxValidationSession` is the narrow boundary for a rebuild. It
+pins one published ledger generation (tip, era, and protocol parameters), one
+validation reference slot, and one repeatable-read metadata/blob transaction
+for every transaction in the batch. The mempool verifies that generation again
+immediately before the swap; if a block or rollback published a newer one, the
+candidate is discarded and retried from the live FIFO. This prevents a single
+candidate from mixing transaction results from different ledger or database
+views.
+
+CBOR decoding and ledger validation run without the primary pool RW lock or
+consumer lock. `Transactions` likewise snapshots transaction values under the
+read lock and clones their immutable CBOR bytes after releasing it. Forging,
+relay reads, admission, and removals therefore remain available during slow
+script validation and large forging snapshots. Add/remove events remain
+published outside all locks, and candidate rejection emits only the same
+removal event and gauge changes as the former in-place rebuild.
 
 ## Block Production
 

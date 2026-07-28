@@ -86,6 +86,7 @@ const (
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
 	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap = 64
 	DefaultMempoolImplementation       = "fifo"
 )
 
@@ -583,8 +584,9 @@ func defaultPluginsConfig() PluginsConfig {
 			Metadata: hostplugin.Selection{Provider: "sqlite", Config: map[string]any{}},
 		},
 		Mempool: hostplugin.Selection{Provider: "default", Config: map[string]any{
-			"evictionWatermark":  DefaultEvictionWatermark,
-			"rejectionWatermark": DefaultRejectionWatermark,
+			"evictionWatermark":    DefaultEvictionWatermark,
+			"rejectionWatermark":   DefaultRejectionWatermark,
+			"revalidationDeltaCap": DefaultMempoolRevalidationDeltaCap,
 		}},
 		API: APIPluginsConfig{
 			Blockfrost: hostplugin.Selection{Provider: "builtin", Config: map[string]any{"port": 3000}},
@@ -989,6 +991,10 @@ func (c *Config) ApplyDefaults() {
 	}
 	if pluginFloat64(c.Plugins.Mempool.Config["rejectionWatermark"]) == 0 {
 		c.Plugins.Mempool.Config["rejectionWatermark"] = DefaultRejectionWatermark
+	}
+	if _, ok := c.Plugins.Mempool.Config["revalidationDeltaCap"]; !ok {
+		defaultDeltaCap := DefaultMempoolRevalidationDeltaCap
+		c.Plugins.Mempool.Config["revalidationDeltaCap"] = defaultDeltaCap
 	}
 	if c.ForgeSyncToleranceSlots == 0 {
 		c.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
