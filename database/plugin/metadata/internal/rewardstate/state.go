@@ -642,30 +642,35 @@ func DeleteStateAfterSlot(
 	return db.Transaction(deleteRows)
 }
 
-// DeleteStateBeforeEpoch deletes reward-state rows older than the retained
-// snapshot window. When txn is non-nil, db is used as-is; otherwise the
-// deletes are wrapped in their own transaction.
+// DeleteStateBeforeEpoch deletes the reward-state rows older than the retained
+// snapshot window that scale with delegator count. When txn is non-nil, db is
+// used as-is; otherwise the deletes are wrapped in their own transaction.
+//
+// Only reward_stake_input and reward_account_output are pruned. Everything else
+// the reward path writes — reward_ada_pots and reward_snapshot at one row per
+// epoch, reward_pool_input and reward_pool_output at roughly one row per pool per
+// epoch — is retained for the life of the database, because that is the full
+// reward record a historical closed-epoch comparison needs: the pots the epoch
+// was paid from, the reward-side stake totals (which differ from epoch_summary's
+// leader-election totals), each pool's delegated/owner stake, pledge, cost,
+// margin, reward account and block counts, and each pool's resulting apparent
+// performance, leader reward and member reward total. See dingo #2987.
+//
+// The per-credential rows are the only ones that scale with delegator count
+// (~5k/epoch on preview, ~1.3M/epoch on mainnet), so they alone cannot be kept.
+//
+// Retaining the rest while pruning those cannot produce a wrong reward
+// calculation: applyStakeRewards detects a retained snapshot whose stake inputs
+// have aged out and skips the epoch, and the precompute-reuse path rejects the
+// same state through validateRewardCalculatorInputs and recalculates.
 func DeleteStateBeforeEpoch(
 	db *gorm.DB,
 	epoch uint64,
 	txn types.Txn,
 ) error {
 	deleteRows := func(tx *gorm.DB) error {
-		if err := tx.Where("epoch < ?", epoch).
-			Delete(&models.RewardAdaPots{}).Error; err != nil {
-			return fmt.Errorf("delete reward ADA pots before epoch: %w", err)
-		}
-		if err := tx.Where("epoch < ?", epoch).
-			Delete(&models.RewardSnapshot{}).Error; err != nil {
-			return fmt.Errorf("delete reward snapshots before epoch: %w", err)
-		}
-		if err := tx.Where("epoch < ?", epoch).
-			Delete(&models.RewardPoolInput{}).Error; err != nil {
-			return fmt.Errorf("delete reward pool inputs before epoch: %w", err)
-		}
 		for _, model := range []any{
 			&models.RewardStakeInput{},
-			&models.RewardPoolOutput{},
 			&models.RewardAccountOutput{},
 		} {
 			if err := tx.Where("epoch < ?", epoch).Delete(model).Error; err != nil {

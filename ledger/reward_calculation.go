@@ -204,6 +204,27 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			rewardSnapshotEpoch, err,
 		)
 	}
+	// reward_stake_input is the one reward table pruned to the retention window;
+	// reward_ada_pots, reward_snapshot, reward_pool_input and reward_pool_output
+	// are retained for the life of the database (see DATABASE.md, Snapshot and
+	// Reward-State Retention). An epoch whose per-credential rows have aged out
+	// therefore still presents complete-looking pots and snapshot rows here.
+	// Skip it, the way an epoch with no pots row is skipped above: proceeding
+	// would hand validateRewardCalculatorInputs a snapshot whose pool stake
+	// cannot reconcile against an empty credential set, and that error fails the
+	// whole epoch rollover. Reaching this needs a rewind across more than the
+	// retained epochs, far beyond k, so it is not expected on a healthy chain
+	// and is logged rather than passed over quietly.
+	if len(stakeInputs) == 0 && rewardSnapshot.TotalDelegators > 0 {
+		ls.config.Logger.Warn(
+			"skipping stake rewards: reward stake inputs for the snapshot epoch are no longer retained",
+			"component", "ledger",
+			"new_epoch", newEpoch,
+			"reward_snapshot_epoch", rewardSnapshotEpoch,
+			"snapshot_delegators", rewardSnapshot.TotalDelegators,
+		)
+		return nil, false, nil
+	}
 
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
 		txn,
