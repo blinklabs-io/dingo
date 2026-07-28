@@ -2608,7 +2608,7 @@ Key configuration areas:
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. Mark captures use slot-aware delegation and UTxO liveness at the boundary slot instead of the current live UTxO set. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point, before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 ### Ouroboros Praos Snapshot Model
 
@@ -2657,16 +2657,15 @@ construction in `node.go`/`internal/node/load.go` via
 `Manager.SetDelegatorInactivity`). The setting becomes permanently immutable
 when `Start` succeeds or any capture path is entered; a late setter call returns
 an error, and stopping/restarting the same manager does not unlock it. When
-enabled, the manager passes the snapshot slot, epoch (as `expiryEpoch`), and the
-period into the shared historical stake-aggregation chokepoint
-(`GetStakeByPoolsAtSlot`), which reconstructs expiration at the requested slot.
-The reward-input path (`GetRewardStakeInputsForPools`) sources the gated per-pool
-reward basis from that same historical `active_delegator_stake` CTE, so its
-inputs agree with the leader-election stake by construction (identical
-membership, stake values, and slot-historical expiry); only its gate-off path
-reads the live `account.expiration_epoch` aggregate. This closes the earlier
-divergence where a fallback capture running after the boundary could read a
-post-slot renewal from the live column. Together these filters exclude expired
+enabled, the authoritative SNAP-point path filters the maintained live
+aggregate through `account.expiration_epoch`; the activation/renewal writes
+that establish those values precede capture in the same rollover transaction.
+The same live rows produce leader-election totals, delegator counts, and reward
+inputs in one pass. A fallback whose transaction tip is already after the
+snapshot slot instead passes the slot, epoch (as `expiryEpoch`), and period into
+the shared historical stake-aggregation chokepoint (`GetStakeByPoolsAtSlot` and
+`GetRewardStakeInputsForPools`), which reconstructs stake and expiration at the
+requested slot. Together these filters exclude expired
 credentials from leader-election Mark stake, the per-pool reward basis, and SPO
 governance vote power. The gate and period must match the ledger config that
 stamps account expirations, and both are consensus-affecting. The public
@@ -2832,13 +2831,14 @@ includes zero-amount withdrawals: they move no rewards but still prove account
 activity under CIP-0163. Rollback affected-set and last-witness queries include
 this history, and rollback removes its orphaned rows.
 
-Reward snapshots consume `RewardLiveStake` instead of scanning the full UTxO
-table at the epoch boundary. The snapshot manager copies the registered,
-delegated subset into `RewardStakeInput` and derives `RewardPoolInput` rows,
-including reward snapshot aggregates, from those credential inputs. This
-freezes stake and pool parameters for delayed reward calculation without
-holding epoch rollover on a full live-state scan or replacing the independent
-leader-election Mark totals.
+At the authoritative SNAP point, both reward and leader-election Mark snapshots
+consume `RewardLiveStake` instead of scanning certificate and UTxO history. The
+snapshot manager reads every registered, delegated row (including zero-stake
+rows needed for delegator counts), copies the positive subset into
+`RewardStakeInput`, and derives `PoolStakeSnapshot`, `EpochSummary`, and
+`RewardPoolInput` from that single transaction view. This freezes stake and pool
+parameters for delayed reward calculation without holding epoch rollover on a
+genesis-to-boundary historical scan.
 
 Snapshot replacement removes stale pools or stake credentials from an earlier
 provisional capture and invalidates precomputed reward outputs for that snapshot
@@ -2895,7 +2895,11 @@ installed at node startup via `LedgerState.SetEpochBoundarySnapshotHook` (wired
 in `node.go` to the snapshot manager before block sync begins) and invoked from
 inside the `processEpochRollover` write transaction, so the epoch's Mark rows and
 reward input bundle commit atomically with the boundary state changes and share
-their transaction view. The hook runs at the end of the rollover, after the new
+their transaction view. Because no new-epoch block has been applied at this
+point, it derives pool totals, delegator counts, and reward inputs directly from
+the maintained `reward_live_stake` rows. This makes capture proportional to the
+current credential set rather than all certificate and tombstoned-UTxO history.
+The hook runs at the end of the rollover, after the new
 epoch row exists, because the capture needs that epoch's nonce and boundary slot.
 In dingo's rollover ordering this is after POOLREAP/MIR/governance/donations
 rather than the cardano-ledger "before POOLREAP" SNAP point; for Conway (MIR is a

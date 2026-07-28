@@ -166,8 +166,8 @@ func (d *MetadataStoreMysql) GetRewardStakeInputsForPools(poolKeyHashes [][]byte
 	}
 	// CIP-0163 gate on: reconstruct reward inputs at slot from the same
 	// historical CTE the leader-election path uses so both halves of the
-	// snapshot agree by construction. Gate off: read the live aggregate,
-	// byte-identical to the pre-CIP query.
+	// snapshot agree by construction. Gate off: read the live aggregate without
+	// an account join or expiration predicate.
 	if expiryEpoch > 0 {
 		inputs, err := stakequery.GetRewardStakeInputsByPoolsAtSlot(
 			db, poolKeyHashes, slot, expiryEpoch, inactivityPeriod,
@@ -180,6 +180,26 @@ func (d *MetadataStoreMysql) GetRewardStakeInputsForPools(poolKeyHashes [][]byte
 	inputs, err := rewardstate.StakeInputsForPools(db, poolKeyHashes, rewardStakeInputPoolBatchSize, expiryEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("GetRewardStakeInputsForPools: %w", err)
+	}
+	return inputs, nil
+}
+
+func (d *MetadataStoreMysql) GetLiveStakeInputsForPools(
+	poolKeyHashes [][]byte,
+	expiryEpoch uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetLiveStakeInputsForPools: resolve db: %w", err,
+		)
+	}
+	inputs, err := rewardstate.LiveStakeInputsForPools(
+		db, poolKeyHashes, rewardStakeInputPoolBatchSize, expiryEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
 	}
 	return inputs, nil
 }

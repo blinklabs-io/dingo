@@ -431,7 +431,6 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		txn,
 		evt.SnapshotSlot,
 		m.expiryEpoch(evt.NewEpoch),
-		m.inactivityPeriod(),
 	)
 	if err != nil {
 		if m.metrics != nil {
@@ -505,7 +504,7 @@ func (m *Manager) calculateSnapshotDistribution(
 	calculator := NewCalculator(m.db)
 	txn := m.db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
-	return calculator.calculateStakeDistributionInTxn(
+	return calculator.calculateBoundaryStakeDistributionInTxn(
 		ctx, txn, slot, expiryEpoch, m.inactivityPeriod(),
 	)
 }
