@@ -1814,9 +1814,33 @@ detector itself breaks a loop by skipping a rollback it can no longer cross,
 it feeds that same point-keyed tracker so the escalation and metric fire on
 the skip path too, rather than silently suppressing the rollback.
 
-A separate recovery path handles transaction-validation failures that occur
-after the node has reached the chain tip (`recoverAtTipFromTxValidationError`
-in `ledger/replay_recovery.go`). When a block fails per-tx validation at tip,
+A separate recovery path handles transaction-validation failures during replay
+and after the node has reached the chain tip (`ledger/replay_recovery.go`).
+Replay first resolves missing inputs to producer blocks from metadata, CBOR
+offsets, or a bounded primary-chain scan; when it can resolve the producer, it
+rolls metadata back to the earliest producer's parent and replays the retained
+primary chain. An unresolvable input instead uses the security-parameter
+fallback anchor. Because that condition means the retained primary chain
+contains a consumer without its producer, recovery prunes the primary-chain
+suffix and rolls metadata back to the same point, then publishes
+`chainsync.resync` through the metadata rollback's local-ledger-rollback event
+so peers can redeliver a consistent suffix. A corrective rewind may span more
+than `k` blocks because the primary-chain tip can be ahead of the failing replay
+block. It is therefore performed as a sequence of ordinary rollbacks of at most
+`k` blocks each. Every step publishes the normal `chain.ChainRollbackEvent` on
+`chain.update`, preserves the event's bounded contract, and limits retained
+block payloads to one security-parameter window. If a later step fails, the
+primary chain remains at the last committed intermediate point; the standard
+startup/live reconciliation paths can synchronize metadata to that valid tip.
+The chain moves before metadata because the retained rollback anchor must remain
+queryable while metadata reconstructs its tip and nonce. If that metadata step
+fails, the primary chain is already at a valid target and the same reconciliation
+paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
+the same bounded event-aware helper; startup-only speculative-tail cleanup stays
+eventless because subscribers have not begun consuming live chain events.
+Rewinding metadata alone would replay the same corrupt chain indefinitely.
+
+When a block fails per-tx validation at tip,
 the node rewinds the primary chain and rolls the ledger back so ChainSelection
 can re-pick a candidate chain; repeating the *same* `(block, tx)` failure
 escalates the rewind progressively deeper, up to the era stability window, to

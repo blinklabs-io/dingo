@@ -299,6 +299,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 		},
 	})
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 	shadowConnId := ouroboros.ConnectionId{
 		LocalAddr: &net.TCPAddr{
@@ -450,6 +451,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		),
 	})
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 
 	ledgerTip := ochainsync.Tip{
@@ -582,6 +584,7 @@ func newAtTipDescentLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 
 	ledgerTip := ochainsync.Tip{
@@ -793,6 +796,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 		},
 	})
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 
 	ledgerTip := ochainsync.Tip{
@@ -1071,6 +1075,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 		),
 	})
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
@@ -1219,6 +1224,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 		),
 	})
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
@@ -1252,7 +1258,10 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	cm, err := chain.NewManager(db, bus)
 	require.NoError(t, err)
 
 	blocks := []chain.RawBlock{
@@ -1266,15 +1275,55 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	blocks[3].PrevHash = blocks[2].Hash
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
 
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- resync:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubId)
+	})
+	rollbackCh := make(chan chain.ChainRollbackEvent, len(blocks))
+	rollbackSubId := bus.SubscribeFunc(
+		chain.ChainUpdateEventType,
+		func(evt event.Event) {
+			rollback, ok := evt.Data.(chain.ChainRollbackEvent)
+			if !ok {
+				return
+			}
+			select {
+			case rollbackCh <- rollback:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(chain.ChainUpdateEventType, rollbackSubId)
+	})
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().SecurityParam = 2
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
-		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		CardanoNodeConfig: nodeConfig,
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
 	})
 	require.NoError(t, err)
+	ls.currentEra.Id = 1
+	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
 
 	currentTip := ochainsync.Tip{
@@ -1292,6 +1341,20 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 		),
 	)
 	require.NoError(t, db.SetTip(currentTip, nil))
+	rewindTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(blocks[0].Slot, blocks[0].Hash),
+		BlockNumber: blocks[0].BlockNumber,
+	}
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			rewindTip.Point.Hash,
+			rewindTip.Point.Slot,
+			[]byte("nonce-rewind"),
+			false,
+			nil,
+		),
+	)
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
 	ls.publishSnapshotsLocked()
@@ -1311,7 +1374,47 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	)
 	require.NoError(t, err)
 	require.True(t, recovered)
-	assert.Equal(t, ochainsync.Tip{}, ls.currentTip)
+	assert.Equal(t, rewindTip, ls.currentTip)
+	assert.Equal(t, rewindTip, ls.chain.Tip())
+	_, err = database.BlockByPoint(db, currentTip.Point)
+	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		5*time.Second,
+		"expected chainsync resync after unresolved replay recovery",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalLedgerRollback,
+		resync.Reason,
+	)
+	assert.Equal(t, rewindTip.Point, resync.Point)
+
+	var rolledBackBlocks []models.Block
+	expectedRollbackCount := len(blocks) - 1
+	for len(rolledBackBlocks) < expectedRollbackCount {
+		rollback := testutil.RequireReceive(
+			t,
+			rollbackCh,
+			5*time.Second,
+			"expected chain rollback event after unresolved replay recovery",
+		)
+		assert.LessOrEqual(
+			t,
+			len(rollback.RolledBackBlocks),
+			ls.SecurityParam(),
+		)
+		rolledBackBlocks = append(
+			rolledBackBlocks,
+			rollback.RolledBackBlocks...,
+		)
+	}
+	require.Len(t, rolledBackBlocks, expectedRollbackCount)
+	for i, block := range rolledBackBlocks {
+		assert.Equal(t, blocks[len(blocks)-1-i].Hash, block.Hash)
+	}
 }
 
 func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
