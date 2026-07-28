@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build archive_demo
+
 // demo-fetch is a small CLI used by the archive-demo's demo.sh to make
 // the BlockFetch step of the demo visible: it connects to a Dingo NtN
 // endpoint, ChainSync-walks from origin to find a block at or past a

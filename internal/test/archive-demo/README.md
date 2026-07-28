@@ -31,6 +31,10 @@ once the chain has crossed the security window it runs a scripted
 BlockFetch from outside the stack against a pre-window block on the
 history-expiry node and prints the byte count and timing.
 
+All Go packages in this directory use the `archive_demo` build tag, so
+normal `go test ./...` runs exclude the demo. Use `run-tests.sh` to build
+the helpers and execute the integration test with the tag enabled.
+
 ## What it shows
 
 The demo and the integration test exercise the same three claims about a
