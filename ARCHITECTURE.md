@@ -817,9 +817,18 @@ All event types follow the `subsystem.snake_case_name` convention.
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
 - Default subscriber buffers of 1024 events, with opt-in 100000-entry burst
   buffers for high-volume ledger chainsync/blockfetch paths
-- Non-blocking `Publish`, blocking `PublishBlocking` for ordering-critical
-  streams, and `PublishAsync` for best-effort async work
-- Prometheus metrics for event delivery tracking and latency
+- Lossless delivery with producer backpressure: when a subscriber buffer or the
+  async queue is full, `Publish`, `PublishBlocking`, and `PublishAsync` all wait
+  for capacity instead of dropping the event. Waits end on `Stop`, `Close`, or
+  `Unsubscribe`. `PublishBlocking` differs only in returning
+  `ErrEventBusStopped` when the bus shuts down mid-delivery
+- A subscriber that stops draining stalls its publishers, and the shared async
+  worker pool means it also delays unrelated async event types. Consumers of
+  `Subscribe` channels must drain for the life of the subscription and
+  `Unsubscribe` when they stop
+- Prometheus metrics for event delivery tracking and latency, including
+  `event_delivery_blocked_total{type,kind}` and
+  `event_async_enqueue_blocked_total{type}` for backpressure
 
 ## Storage Architecture
 

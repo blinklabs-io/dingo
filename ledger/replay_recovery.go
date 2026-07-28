@@ -1030,7 +1030,11 @@ func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 func (ls *LedgerState) replayRecoveryParentPoint(
 	block models.Block,
 ) (ocommon.Point, error) {
-	if block.Slot == 0 || len(block.PrevHash) == 0 {
+	// The genesis predecessor is encoded as an all-zero hash, not an empty
+	// one, so a length check alone lets the first block after genesis fall
+	// through to a lookup for a block that cannot exist. Rolling back to
+	// origin is what the callers already do with the zero point.
+	if block.Slot == 0 || isGenesisPrevHash(block.PrevHash) {
 		return ocommon.Point{}, nil
 	}
 	parentBlock, err := database.BlockByHash(ls.db, block.PrevHash)
@@ -1042,4 +1046,24 @@ func (ls *LedgerState) replayRecoveryParentPoint(
 		)
 	}
 	return ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash), nil
+}
+
+// isGenesisPrevHash reports whether a block's PrevHash refers to the genesis
+// predecessor rather than to a stored block. Decoded blocks may carry no hash
+// at all; forged blocks carry an all-zero Blake2b-256 hash. Any other length
+// is malformed and is deliberately not treated as genesis, so it surfaces as a
+// failed parent lookup rather than being silently rolled back to origin.
+func isGenesisPrevHash(prevHash []byte) bool {
+	if len(prevHash) == 0 {
+		return true
+	}
+	if len(prevHash) != lcommon.Blake2b256Size {
+		return false
+	}
+	for _, b := range prevHash {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
