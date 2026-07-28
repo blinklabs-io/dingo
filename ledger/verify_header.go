@@ -787,17 +787,34 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	}
 
 	// Compute the Praos leadership threshold and compare.
-	threshold := consensus.CertifiedNatThresholdWithMode(
+	threshold, err := consensus.CertifiedNatThresholdWithMode(
 		poolStake,
 		totalStake,
 		activeSlotCoeffRat,
 		mode,
 	)
-	if !consensus.IsVRFOutputBelowThresholdWithMode(
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"compute leadership threshold: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	belowThreshold, err := consensus.IsVRFOutputBelowThresholdWithMode(
 		vrfResult.Output,
 		threshold,
 		mode,
-	) {
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"compare VRF output against threshold: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !belowThreshold {
 		// dingo's leadership stake is delegated UTxO only; staking rewards are
 		// not yet computed, so reward-account balances are missing from the
 		// stake distribution. On the prototype network the dominant pool's
