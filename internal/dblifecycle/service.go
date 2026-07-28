@@ -56,18 +56,31 @@ type LiveNode interface {
 // Restore/Truncate delegate to it instead of operating offline — see
 // SetLiveNode's doc comment for what that changes.
 type Service struct {
-	cfg      *config.Config
-	logger   *slog.Logger
-	liveNode LiveNode
+	cfg                 *config.Config
+	logger              *slog.Logger
+	destinationRegistry *lifecycle.DestinationRegistry
+	liveNode            LiveNode
 }
 
 // NewService creates a Service bound to cfg's database configuration
 // (DatabasePath, Plugins.Storage, StorageMode, Network).
-func NewService(cfg *config.Config, logger *slog.Logger) *Service {
+// destinationRegistry supplies the cloud destination schemes (s3, gcs)
+// available for cfg.DatabaseLifecycle.SnapshotCloudDestination and any
+// cloud snapshotDir passed to Restore — composition code owns
+// constructing it; nil is valid when no cloud destination is ever used.
+func NewService(
+	cfg *config.Config,
+	destinationRegistry *lifecycle.DestinationRegistry,
+	logger *slog.Logger,
+) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{cfg: cfg, logger: logger}
+	return &Service{
+		cfg:                 cfg,
+		destinationRegistry: destinationRegistry,
+		logger:              logger,
+	}
 }
 
 // SetLiveNode binds Service to a running node. Once set, Restore/Truncate
@@ -136,6 +149,7 @@ func (s *Service) Snapshot(
 	defer db.Close(ctx)
 	return lifecycle.SnapshotToCloud(
 		ctx,
+		s.destinationRegistry,
 		db.Database,
 		destDir,
 		lifecycle.TriggerManual,
@@ -170,6 +184,7 @@ func (s *Service) Restore(
 	}
 	manifest, err := lifecycle.RestoreValidated(
 		ctx,
+		s.destinationRegistry,
 		snapshotDir,
 		s.cfg.DatabasePath,
 		func(m lifecycle.Manifest) error {

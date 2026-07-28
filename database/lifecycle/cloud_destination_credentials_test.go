@@ -45,6 +45,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// cloudCredentialsTestRegistry registers the real, build-tag-gated S3/GCS
+// schemes this file's tests exercise — mirroring what composition code
+// registers at startup (see DestinationRegistry's doc comment), rather
+// than depending on a process-global registry.
+var cloudCredentialsTestRegistry = func() *lifecycle.DestinationRegistry {
+	r := lifecycle.NewDestinationRegistry()
+	lifecycle.RegisterBuiltinDestinations(r)
+	return r
+}()
+
 // hasS3Credentials mirrors internal/integration/cloud_test.go's helper of
 // the same name exactly, since that package's unexported helper can't be
 // imported from here.
@@ -129,15 +139,15 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	localDir := filepath.Join(t.TempDir(), snapshotID)
 
 	t.Cleanup(func() {
-		_, _ = lifecycle.DeleteCloudSnapshot(context.Background(), snapshotURI)
+		_, _ = lifecycle.DeleteCloudSnapshot(context.Background(), cloudCredentialsTestRegistry, snapshotURI)
 	})
 
 	manifest, err := lifecycle.SnapshotToCloud(
-		ctx, db, localDir, lifecycle.TriggerManual, "test", "badger", "sqlite", baseURI,
+		ctx, cloudCredentialsTestRegistry, db, localDir, lifecycle.TriggerManual, "test", "badger", "sqlite", baseURI,
 	)
 	require.NoError(t, err, "SnapshotToCloud (local write + cloud upload)")
 
-	entries, ok, err := lifecycle.ListCloudSnapshots(ctx, baseURI)
+	entries, ok, err := lifecycle.ListCloudSnapshots(ctx, cloudCredentialsTestRegistry, baseURI)
 	require.NoError(t, err, "ListCloudSnapshots")
 	require.True(t, ok, "cloud destination must report listing support")
 	found := false
@@ -150,7 +160,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	}
 	require.True(t, found, "uploaded snapshot %q not found in cloud listing", snapshotID)
 
-	fetched, ok, err := lifecycle.FetchCloudManifest(ctx, snapshotURI)
+	fetched, ok, err := lifecycle.FetchCloudManifest(ctx, cloudCredentialsTestRegistry, snapshotURI)
 	require.NoError(t, err, "FetchCloudManifest")
 	require.True(t, ok, "cloud destination must report manifest-fetch support")
 	require.Equal(t, manifest.Checksum, fetched.Checksum)
@@ -160,7 +170,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	// full manifest/tip/commit-timestamp consistency checks against real
 	// downloaded data, not just a local round-trip.
 	restoredDir := filepath.Join(t.TempDir(), "restored")
-	restoreMan, err := lifecycle.Restore(ctx, snapshotURI, restoredDir)
+	restoreMan, err := lifecycle.Restore(ctx, cloudCredentialsTestRegistry, snapshotURI, restoredDir)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)
 
@@ -173,10 +183,10 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), block2.ID)
 
-	deleted, err := lifecycle.DeleteCloudSnapshot(ctx, snapshotURI)
+	deleted, err := lifecycle.DeleteCloudSnapshot(ctx, cloudCredentialsTestRegistry, snapshotURI)
 	require.NoError(t, err, "DeleteCloudSnapshot")
 	require.True(t, deleted, "cloud destination must report delete support")
 
-	_, _, err = lifecycle.FetchCloudManifest(ctx, snapshotURI)
+	_, _, err = lifecycle.FetchCloudManifest(ctx, cloudCredentialsTestRegistry, snapshotURI)
 	require.Error(t, err, "manifest must no longer be fetchable after delete")
 }

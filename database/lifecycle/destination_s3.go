@@ -34,8 +34,12 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-func init() {
-	RegisterCloudDestinationScheme("s3", newS3Destination)
+// RegisterS3 registers the "s3" scheme (s3://bucket/prefix) on registry.
+// Composition code (node/CLI startup) calls this explicitly when S3 cloud
+// destination support should be available, rather than this package
+// registering itself process-globally via init().
+func RegisterS3(registry *DestinationRegistry) {
+	registry.Register("s3", newS3Destination)
 }
 
 // s3Destination uploads/downloads a snapshot directory's files as flat S3

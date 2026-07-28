@@ -66,9 +66,9 @@ func orderEntriesManifestLast(entries []os.DirEntry) []os.DirEntry {
 // addition to (not instead of) the local copy Snapshot/Restore already
 // produce/consume — see SnapshotToCloud and Restore's cloud-source
 // handling. Implementations live in build-tag-gated files (destination_s3.go,
-// destination_gcs.go) so this package doesn't itself pull in cloud SDKs;
-// they register themselves via RegisterCloudDestinationScheme from an
-// init().
+// destination_gcs.go); composition code registers the ones it wants
+// available on a *DestinationRegistry via RegisterS3/RegisterGCS (or
+// RegisterBuiltinDestinations for all schemes compiled into this build).
 type CloudDestination interface {
 	// UploadDir uploads every regular file directly inside localDir
 	// (Snapshot's manifest.json/blob.bak/metadata.sqlite — it is not
@@ -143,47 +143,67 @@ func closeCloudDestination(dest CloudDestination) {
 	}
 }
 
-var (
-	cloudDestinationMu    sync.RWMutex
-	cloudDestinationTypes = map[string]CloudDestinationFactory{}
-)
+// DestinationRegistry holds the set of cloud destination schemes (e.g.
+// "s3", "gcs") a caller has explicitly chosen to make available, resolved
+// at construction time rather than through a process-global registry.
+// Composition code (the node or CLI's startup path) owns creating one via
+// NewDestinationRegistry and registering whichever schemes this build and
+// configuration should support (RegisterS3, RegisterGCS, or
+// RegisterBuiltinDestinations for everything compiled in), then threads it
+// explicitly into every lifecycle call that needs cloud destination
+// support. A nil *DestinationRegistry is valid and behaves as if it had no
+// schemes registered — every method here is nil-safe — so callers with no
+// use for cloud destinations at all (e.g. a purely local restore) are not
+// forced to construct an empty one.
+type DestinationRegistry struct {
+	mu    sync.RWMutex
+	types map[string]CloudDestinationFactory
+}
 
-// RegisterCloudDestinationScheme registers factory as the constructor for
-// CloudDestination URIs with the given scheme (e.g. "s3", "gcs"). Intended
-// to be called from a build-tag-gated file's init(), not directly by
-// callers. Panics on a duplicate scheme registration, matching the
-// fail-fast-at-init-time convention already used by database/plugin's
-// registry.
-func RegisterCloudDestinationScheme(scheme string, factory CloudDestinationFactory) {
-	cloudDestinationMu.Lock()
-	defer cloudDestinationMu.Unlock()
-	if _, exists := cloudDestinationTypes[scheme]; exists {
+// NewDestinationRegistry returns an empty registry with no cloud
+// destination schemes registered.
+func NewDestinationRegistry() *DestinationRegistry {
+	return &DestinationRegistry{types: make(map[string]CloudDestinationFactory)}
+}
+
+// Register adds factory as the constructor for CloudDestination URIs with
+// the given scheme (e.g. "s3", "gcs"). Panics on a duplicate scheme
+// registration within this registry, matching the fail-fast-at-
+// composition-time convention already used by plugin.Host.Register.
+func (r *DestinationRegistry) Register(scheme string, factory CloudDestinationFactory) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.types[scheme]; exists {
 		panic(fmt.Sprintf("lifecycle: cloud destination scheme %q already registered", scheme))
 	}
-	cloudDestinationTypes[scheme] = factory
+	r.types[scheme] = factory
 }
 
 // recognizedCloudScheme reports whether uri parses as a URI whose scheme
-// has a registered CloudDestination factory. A plain local filesystem
-// path (no scheme, or an unrecognized one) returns false so callers can
-// fall back to treating uri as a local path unchanged — this is what
-// lets Restore accept either a local directory or a cloud URI in the
-// same string parameter without breaking existing local-path callers.
-func recognizedCloudScheme(uri string) (scheme string, ok bool) {
+// has a factory registered on r. A plain local filesystem path (no scheme,
+// or an unrecognized one) returns false so callers can fall back to
+// treating uri as a local path unchanged — this is what lets Restore
+// accept either a local directory or a cloud URI in the same string
+// parameter without breaking existing local-path callers.
+func recognizedCloudScheme(r *DestinationRegistry, uri string) (scheme string, ok bool) {
 	u, err := url.Parse(uri)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "", false
 	}
-	cloudDestinationMu.RLock()
-	_, ok = cloudDestinationTypes[u.Scheme]
-	cloudDestinationMu.RUnlock()
+	if r == nil {
+		return u.Scheme, false
+	}
+	r.mu.RLock()
+	_, ok = r.types[u.Scheme]
+	r.mu.RUnlock()
 	return u.Scheme, ok
 }
 
-// ParseCloudDestination resolves uri to a CloudDestination. uri's scheme
-// must have a registered factory (built with the corresponding build tag,
-// e.g. dingo_extra_plugins for s3/gcs) or this returns an error.
-func ParseCloudDestination(uri string) (CloudDestination, error) {
+// ParseCloudDestination resolves uri to a CloudDestination using r's
+// registered schemes. uri's scheme must have a factory registered on r
+// (see RegisterS3/RegisterGCS/RegisterBuiltinDestinations) or this returns
+// an error. r may be nil, which behaves as an empty registry.
+func ParseCloudDestination(r *DestinationRegistry, uri string) (CloudDestination, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
 		return nil, fmt.Errorf("parse cloud destination %q: %w", uri, err)
@@ -194,12 +214,16 @@ func ParseCloudDestination(uri string) (CloudDestination, error) {
 			uri,
 		)
 	}
-	cloudDestinationMu.RLock()
-	factory, ok := cloudDestinationTypes[u.Scheme]
-	cloudDestinationMu.RUnlock()
+	var factory CloudDestinationFactory
+	var ok bool
+	if r != nil {
+		r.mu.RLock()
+		factory, ok = r.types[u.Scheme]
+		r.mu.RUnlock()
+	}
 	if !ok {
 		return nil, fmt.Errorf(
-			"unsupported cloud destination scheme %q (was dingo built with -tags dingo_extra_plugins?)",
+			"unsupported cloud destination scheme %q (was dingo built with -tags dingo_extra_plugins, and was it registered with this component?)",
 			u.Scheme,
 		)
 	}
@@ -212,9 +236,10 @@ func ParseCloudDestination(uri string) (CloudDestination, error) {
 // it immediately after a successful call).
 func downloadCloudSnapshot(
 	ctx context.Context,
+	registry *DestinationRegistry,
 	uri string,
 ) (localDir string, cleanup func(), err error) {
-	dest, err := ParseCloudDestination(uri)
+	dest, err := ParseCloudDestination(registry, uri)
 	if err != nil {
 		return "", nil, err
 	}
@@ -272,12 +297,13 @@ func JoinCloudURI(base string, sub string) string {
 // implementation provides it.
 func ListCloudSnapshots(
 	ctx context.Context,
+	registry *DestinationRegistry,
 	cloudDest string,
 ) (entries []SnapshotEntry, ok bool, err error) {
 	if cloudDest == "" {
 		return nil, false, nil
 	}
-	dest, err := ParseCloudDestination(cloudDest)
+	dest, err := ParseCloudDestination(registry, cloudDest)
 	if err != nil {
 		return nil, false, err
 	}
@@ -306,9 +332,10 @@ func ListCloudSnapshots(
 // ever be treated as equivalent to "doesn't exist" by a caller.
 func FetchCloudManifest(
 	ctx context.Context,
+	registry *DestinationRegistry,
 	snapshotURI string,
 ) (m Manifest, ok bool, err error) {
-	dest, err := ParseCloudDestination(snapshotURI)
+	dest, err := ParseCloudDestination(registry, snapshotURI)
 	if err != nil {
 		return Manifest{}, false, err
 	}
@@ -326,8 +353,12 @@ func FetchCloudManifest(
 // CloudDeleter. ok=false (nil error) means the destination type doesn't
 // support deletion — distinct from a real deletion failure, which is a
 // non-nil err.
-func DeleteCloudSnapshot(ctx context.Context, snapshotURI string) (ok bool, err error) {
-	dest, err := ParseCloudDestination(snapshotURI)
+func DeleteCloudSnapshot(
+	ctx context.Context,
+	registry *DestinationRegistry,
+	snapshotURI string,
+) (ok bool, err error) {
+	dest, err := ParseCloudDestination(registry, snapshotURI)
 	if err != nil {
 		return false, err
 	}

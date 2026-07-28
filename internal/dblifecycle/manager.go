@@ -49,12 +49,13 @@ const epochSnapshotDirPrefix = "epoch-"
 // transaction. Because Badger's Backup and SQLite's VACUUM INTO are both
 // non-blocking for concurrent writers, this needs no node quiesce.
 type Manager struct {
-	db                 *database.Database
-	eventBus           *event.EventBus
-	cfg                config.DatabaseLifecycleConfig
-	blobPluginName     string
-	metadataPluginName string
-	logger             *slog.Logger
+	db                  *database.Database
+	eventBus            *event.EventBus
+	cfg                 config.DatabaseLifecycleConfig
+	blobPluginName      string
+	metadataPluginName  string
+	destinationRegistry *lifecycle.DestinationRegistry
+	logger              *slog.Logger
 
 	mu             sync.Mutex
 	running        bool
@@ -68,24 +69,29 @@ type Manager struct {
 // must not be nil once Start is called. blobPluginName/metadataPluginName
 // are recorded in every automatic snapshot's manifest (the running
 // database no longer tracks which provider names resolved its stores).
+// destinationRegistry supplies the cloud destination schemes (s3, gcs)
+// available for cfg.SnapshotCloudDestination — composition code owns
+// constructing it; nil is valid when no cloud destination is configured.
 func NewManager(
 	db *database.Database,
 	eventBus *event.EventBus,
 	cfg config.DatabaseLifecycleConfig,
 	blobPluginName string,
 	metadataPluginName string,
+	destinationRegistry *lifecycle.DestinationRegistry,
 	logger *slog.Logger,
 ) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Manager{
-		db:                 db,
-		eventBus:           eventBus,
-		cfg:                cfg,
-		blobPluginName:     blobPluginName,
-		metadataPluginName: metadataPluginName,
-		logger:             logger,
+		db:                  db,
+		eventBus:            eventBus,
+		cfg:                 cfg,
+		blobPluginName:      blobPluginName,
+		metadataPluginName:  metadataPluginName,
+		destinationRegistry: destinationRegistry,
+		logger:              logger,
 	}
 }
 
@@ -316,7 +322,7 @@ func (m *Manager) handleEpochTransition(
 			"dir", destDir,
 		)
 		if err := lifecycle.MirrorToCloud(
-			ctx, destDir, m.cfg.SnapshotCloudDestination,
+			ctx, m.destinationRegistry, destDir, m.cfg.SnapshotCloudDestination,
 		); err != nil {
 			return fmt.Errorf(
 				"retry epoch-boundary snapshot cloud mirror: %w", err,
@@ -335,6 +341,7 @@ func (m *Manager) handleEpochTransition(
 	}
 	_, err := lifecycle.SnapshotToCloud(
 		ctx,
+		m.destinationRegistry,
 		m.db,
 		destDir,
 		lifecycle.TriggerEpochBoundary,
@@ -415,7 +422,7 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 		// would no longer bound cloud storage at all.
 		if m.cfg.SnapshotCloudDestination != "" {
 			cloudURI := lifecycle.JoinCloudURI(m.cfg.SnapshotCloudDestination, epochName)
-			ok, err := lifecycle.DeleteCloudSnapshot(ctx, cloudURI)
+			ok, err := lifecycle.DeleteCloudSnapshot(ctx, m.destinationRegistry, cloudURI)
 			if err != nil {
 				m.logger.Warn(
 					"failed to prune old automatic snapshot's cloud mirror, "+

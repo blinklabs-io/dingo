@@ -50,24 +50,29 @@ func IsCloudMirrored(dir string) bool {
 }
 
 // MirrorToCloud uploads dir's contents to cloudDest (a base URI like
-// "s3://bucket/prefix" or "gcs://bucket/prefix"; see
-// RegisterCloudDestinationScheme), nested one level under this snapshot's
-// own ID (dir's base name), mirroring the local SnapshotDir/<snapshotID>
-// layout — see SnapshotToCloud's doc comment for why. Writes
-// CloudMirrorMarkerPath(dir) the moment the upload actually succeeds, so
-// a caller can later tell a fully-mirrored snapshot apart from one whose
-// local copy exists but whose cloud upload never completed, and retry
-// only the upload in that case rather than mistaking the local-only
-// partial success for "already done".
+// "s3://bucket/prefix" or "gcs://bucket/prefix"; see DestinationRegistry),
+// nested one level under this snapshot's own ID (dir's base name),
+// mirroring the local SnapshotDir/<snapshotID> layout — see
+// SnapshotToCloud's doc comment for why. Writes CloudMirrorMarkerPath(dir)
+// the moment the upload actually succeeds, so a caller can later tell a
+// fully-mirrored snapshot apart from one whose local copy exists but
+// whose cloud upload never completed, and retry only the upload in that
+// case rather than mistaking the local-only partial success for
+// "already done".
 //
 // cloudDest == "" is a no-op (success, no marker written): nothing to
 // mirror.
-func MirrorToCloud(ctx context.Context, dir string, cloudDest string) error {
+func MirrorToCloud(
+	ctx context.Context,
+	registry *DestinationRegistry,
+	dir string,
+	cloudDest string,
+) error {
 	if cloudDest == "" {
 		return nil
 	}
 	snapshotCloudURI := JoinCloudURI(cloudDest, filepath.Base(dir))
-	dest, err := ParseCloudDestination(snapshotCloudURI)
+	dest, err := ParseCloudDestination(registry, snapshotCloudURI)
 	if err != nil {
 		return fmt.Errorf(
 			"cloud destination %q is invalid: %w", snapshotCloudURI, err,
@@ -93,17 +98,17 @@ func MirrorToCloud(ctx context.Context, dir string, cloudDest string) error {
 // SnapshotToCloud calls Snapshot to produce the local copy at dir exactly
 // as before, then — if cloudDest is non-empty — additionally uploads
 // dir's contents to that destination (a base URI like "s3://bucket/prefix"
-// or "gcs://bucket/prefix"; see RegisterCloudDestinationScheme), nested
-// one level under this snapshot's own ID (dir's base name), mirroring the
-// local SnapshotDir/<snapshotID> layout: the actual upload target is
-// cloudDest + "/" + filepath.Base(dir), not cloudDest itself. This is what
-// makes ListCloudSnapshots able to enumerate multiple snapshots stored at
-// the same configured cloudDest — a flat, unnested upload would silently
+// or "gcs://bucket/prefix"; see DestinationRegistry), nested one level
+// under this snapshot's own ID (dir's base name), mirroring the local
+// SnapshotDir/<snapshotID> layout: the actual upload target is cloudDest +
+// "/" + filepath.Base(dir), not cloudDest itself. This is what makes
+// ListCloudSnapshots able to enumerate multiple snapshots stored at the
+// same configured cloudDest — a flat, unnested upload would silently
 // overwrite every previous snapshot's files with the newest one's. The
 // local copy is always kept; cloudDest is a mirror, not a replacement.
 //
 // cloudDest == "" skips the upload — existing local-only callers are
-// unaffected.
+// unaffected, and registry may be nil in that case.
 //
 // If the upload fails, the local snapshot is still valid and left in
 // place, but this still returns an error: the operator asked for both
@@ -111,6 +116,7 @@ func MirrorToCloud(ctx context.Context, dir string, cloudDest string) error {
 // silent degrade to local-only.
 func SnapshotToCloud(
 	ctx context.Context,
+	registry *DestinationRegistry,
 	db *database.Database,
 	dir string,
 	trigger string,
@@ -125,7 +131,7 @@ func SnapshotToCloud(
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := MirrorToCloud(ctx, dir, cloudDest); err != nil {
+	if err := MirrorToCloud(ctx, registry, dir, cloudDest); err != nil {
 		return manifest, fmt.Errorf(
 			"snapshot written locally to %q, but %w", dir, err,
 		)

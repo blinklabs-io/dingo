@@ -32,6 +32,7 @@ import (
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/internal/tlsutil"
@@ -69,10 +70,16 @@ type BarkConfig struct {
 	// path doesn't need this field since it goes through Lifecycle, which
 	// already has its own copy of the same config value.
 	SnapshotCloudDestination string
-	TlsCertFilePath          string
-	TlsKeyFilePath           string
-	Host                     string
-	Port                     uint
+	// DestinationRegistry supplies the cloud destination schemes (s3, gcs)
+	// this Bark instance's DatabaseService handler can resolve
+	// SnapshotCloudDestination/cloud snapshot URIs against — composition
+	// code owns constructing it; nil is valid when no cloud destination
+	// is ever configured.
+	DestinationRegistry *lifecycle.DestinationRegistry
+	TlsCertFilePath     string
+	TlsKeyFilePath      string
+	Host                string
+	Port                uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string

@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
@@ -65,6 +66,7 @@ type Node struct {
 	chainSelector                    *chainselection.ChainSelector
 	eventBus                         *event.EventBus
 	pluginHost                       *plugin.Host
+	destinationRegistry              *lifecycle.DestinationRegistry
 	mempool                          mempool.Service
 	chainManager                     *chain.ChainManager
 	db                               *database.Database
@@ -122,9 +124,17 @@ func New(cfg Config) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create plugin host: %w", err)
 	}
+	// Cloud destination schemes (s3, gcs) are registered explicitly here,
+	// at composition time, rather than via a process-global registry each
+	// scheme's own package would otherwise populate through an init() —
+	// see database/lifecycle/destination.go's DestinationRegistry doc
+	// comment.
+	destinationRegistry := lifecycle.NewDestinationRegistry()
+	lifecycle.RegisterBuiltinDestinations(destinationRegistry)
 	n := &Node{
-		config:     cfg,
-		pluginHost: pluginHost,
+		config:              cfg,
+		pluginHost:          pluginHost,
+		destinationRegistry: destinationRegistry,
 	}
 	for capability, selection := range cfg.pluginSelections {
 		if err := pluginHost.ValidateSelection(
@@ -293,6 +303,16 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 	})
+
+	// Reconcile a live Restore's directory swap (node_lifecycle.go's
+	// swapInRestoredDataDir) that was interrupted by a crash, process
+	// kill, or power failure before it could be confirmed and cleaned up
+	// -- must run before anything else below opens n.config.dataDir.
+	if err := n.reconcileInterruptedLiveRestoreSwap(); err != nil {
+		return fmt.Errorf(
+			"reconcile interrupted live restore swap: %w", err,
+		)
+	}
 
 	// Resolve provider-owned storage before constructing the database that uses
 	// it. The startup cleanup stack stops any provider that started before a
@@ -815,6 +835,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.config.databaseLifecycle,
 		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
 		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
+		n.destinationRegistry,
 		n.config.logger,
 	)
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -1302,12 +1323,13 @@ func (n *Node) Run(ctx context.Context) error {
 
 	if n.config.barkPort > 0 {
 		barkConfig := bark.BarkConfig{
-			Logger:             n.config.logger,
-			DB:                 db,
-			TlsCertFilePath:    n.config.tlsCertFilePath,
-			TlsKeyFilePath:     n.config.tlsKeyFilePath,
-			Port:               n.config.barkPort,
-			CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			Logger:              n.config.logger,
+			DB:                  db,
+			TlsCertFilePath:     n.config.tlsCertFilePath,
+			TlsKeyFilePath:      n.config.tlsKeyFilePath,
+			Port:                n.config.barkPort,
+			CORSAllowedOrigins:  n.config.corsAllowedOrigins,
+			DestinationRegistry: n.destinationRegistry,
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and
@@ -1319,6 +1341,7 @@ func (n *Node) Run(ctx context.Context) error {
 			// Snapshot rather than the offline path that would use it.
 			dbLifecycleService := dblifecycle.NewService(
 				&internalconfig.Config{},
+				n.destinationRegistry,
 				n.config.logger,
 			)
 			dbLifecycleService.SetLiveNode(n)
@@ -1561,6 +1584,13 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// All components started successfully
 	success = true
+
+	// Only now -- every component above has actually started against
+	// n.config.dataDir -- is a pre-restore backup left over from an
+	// interrupted live restore swap (reconcileInterruptedLiveRestoreSwap,
+	// above) confirmed unneeded; see swapInRestoredDataDir's doc comment
+	// on why it must not be removed any earlier than this.
+	n.removeConfirmedRestoreBackup()
 
 	// Wait for shutdown signal
 	<-n.ctx.Done()

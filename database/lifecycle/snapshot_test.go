@@ -199,7 +199,7 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	require.NoError(t, err)
 
 	restoredDir := filepath.Join(t.TempDir(), "restored")
-	_, err = lifecycle.Restore(context.Background(), dir, restoredDir)
+	_, err = lifecycle.Restore(context.Background(), nil, dir, restoredDir)
 	require.NoError(t, err)
 
 	_, err = dbtest.NewDatabase(t, &database.Config{DataDir: restoredDir})

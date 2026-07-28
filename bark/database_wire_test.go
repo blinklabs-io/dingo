@@ -86,7 +86,7 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 				Metadata: plugin.Selection{Provider: "sqlite"},
 			},
 		},
-	}, nil)
+	}, nil, nil)
 
 	b, err := NewBark(BarkConfig{
 		DB:          db,

@@ -38,6 +38,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testDestinationRegistry is this test package's own instance-owned
+// registry (mirroring what composition code builds at startup — see
+// lifecycle.DestinationRegistry's doc comment), shared by every fake cloud
+// scheme this file registers below instead of the removed package-global
+// process registry.
+var testDestinationRegistry = lifecycle.NewDestinationRegistry()
+
 func newManagerTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -66,7 +73,7 @@ func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
 	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 		SnapshotEnabled: false,
 		SnapshotDir:     snapshotDir,
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -89,7 +96,7 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -113,7 +120,7 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 2,
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -140,7 +147,7 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -174,7 +181,7 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
 		SnapshotRetention:    2,
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -250,7 +257,7 @@ var (
 )
 
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"managerfaketest",
 		func(uri *url.URL) (lifecycle.CloudDestination, error) {
 			managerFakeCloudMu.Lock()
@@ -297,7 +304,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -343,7 +350,7 @@ func (failingCloudDestination) DownloadDir(context.Context, string) error {
 }
 
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"faketestfail",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
 			return failingCloudDestination{}, nil
@@ -375,7 +382,7 @@ func (panickingCloudDestination) DownloadDir(context.Context, string) error {
 }
 
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"faketestpanic",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
 			return panickingCloudDestination{panicOnDirBase: "epoch-20"}, nil
@@ -411,7 +418,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestpanic://bucket/prefix",
-	}, "badger", "sqlite", logger)
+	}, "badger", "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -495,7 +502,7 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestfail://bucket/prefix",
-	}, "badger", "sqlite", logger)
+	}, "badger", "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -536,7 +543,7 @@ var (
 )
 
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"faketestblocking",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
 			blockingCloudMu.Lock()
@@ -592,7 +599,7 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(t *t
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestblocking://bucket/prefix",
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(ctx))
 	// Registered immediately after Start succeeds (before any assertion
 	// that could fail): if this test fails before reaching the explicit
@@ -666,7 +673,7 @@ func (flakyCloudDestination) DownloadDir(context.Context, string) error {
 func init() {
 	failed := false
 	var mu sync.Mutex
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"faketestflaky",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
 			return flakyCloudDestination{failed: &failed, mu: &mu}, nil
@@ -702,7 +709,7 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *tes
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestflaky://bucket/prefix",
-	}, "badger", "sqlite", logger)
+	}, "badger", "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -805,7 +812,7 @@ var (
 )
 
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"managerfaketest-flakydelete",
 		func(uri *url.URL) (lifecycle.CloudDestination, error) {
 			flakyDeleteCloudMu.Lock()
@@ -862,7 +869,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotRetention:        2,
 		SnapshotCloudDestination: cloudDest,
-	}, "badger", "sqlite", nil)
+	}, "badger", "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 

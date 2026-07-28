@@ -43,7 +43,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	restoreMan, err := lifecycle.Restore(
-		context.Background(), snapshotDir, targetDir,
+		context.Background(), testDestinationRegistry, snapshotDir, targetDir,
 	)
 	require.NoError(t, err)
 	require.Equal(t, snapMan.CommitTimestamp, restoreMan.CommitTimestamp)
@@ -80,7 +80,7 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 		filepath.Join(targetDir, "existing.txt"), []byte("data"), 0o644,
 	))
 
-	_, err = lifecycle.Restore(context.Background(), snapshotDir, targetDir)
+	_, err = lifecycle.Restore(context.Background(), testDestinationRegistry, snapshotDir, targetDir)
 	require.Error(t, err)
 }
 
@@ -126,7 +126,7 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = lifecycle.RestoreValidated(
-		context.Background(), snapshotDir, targetDir,
+		context.Background(), testDestinationRegistry, snapshotDir, targetDir,
 		func(m lifecycle.Manifest) error {
 			return m.CheckPluginMatch("gcs", "sqlite")
 		},
@@ -164,8 +164,12 @@ func (d *manifestOnlyCloudDestination) FetchManifest(context.Context) (lifecycle
 
 var _ lifecycle.CloudManifestFetcher = &manifestOnlyCloudDestination{}
 
+// Registered directly on the package's shared testDestinationRegistry
+// (defined in destination_test.go) — package-level var initializers all
+// complete before any init() runs, regardless of which file they're in, so
+// referencing it here is safe.
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"faketest-manifestonly",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
 			return &manifestOnlyCloudDestination{manifest: manifestOnlyFixture}, nil
@@ -189,7 +193,7 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // the lightweight FetchCloudManifest path and never called DownloadDir
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
-	m, err := lifecycle.PeekManifest(context.Background(), "faketest-manifestonly://bucket/prefix")
+	m, err := lifecycle.PeekManifest(context.Background(), testDestinationRegistry, "faketest-manifestonly://bucket/prefix")
 	require.NoError(t, err)
 	require.Equal(t, manifestOnlyFixture, m)
 }
@@ -210,13 +214,13 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap-peek")
 	m, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, snapshotDir,
+		context.Background(), testDestinationRegistry, db, snapshotDir,
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", "faketest://bucket/prefix",
 	)
 	require.NoError(t, err)
 
 	peeked, err := lifecycle.PeekManifest(
-		context.Background(), "faketest://bucket/prefix/snap-peek",
+		context.Background(), testDestinationRegistry, "faketest://bucket/prefix/snap-peek",
 	)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)

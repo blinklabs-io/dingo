@@ -116,11 +116,10 @@ var (
 	_ lifecycle.CloudDeleter         = &fakeCloudDestination{}
 )
 
-// fakeCloudBackingDir is set by TestMain-less package init below to the
-// directory the fake scheme's factory should resolve paths under; tests
-// each get their own by resetting this under a lock before use, since
-// RegisterCloudDestinationScheme's factory signature carries no per-call
-// test context.
+// fakeCloudBackingDir is set below to the directory the fake scheme's
+// factory should resolve paths under; tests each get their own by
+// resetting this under a lock before use, since the registered factory's
+// signature carries no per-call test context.
 var (
 	fakeCloudMu  sync.Mutex
 	fakeCloudDir string
@@ -139,19 +138,23 @@ var (
 	fakeCloudFixtureMu sync.Mutex
 )
 
-func init() {
-	lifecycle.RegisterCloudDestinationScheme(
-		"faketest",
-		func(uri *url.URL) (lifecycle.CloudDestination, error) {
-			fakeCloudMu.Lock()
-			base := fakeCloudDir
-			fakeCloudMu.Unlock()
-			return &fakeCloudDestination{
-				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
-			}, nil
-		},
-	)
-}
+// testDestinationRegistry is this test package's own instance-owned
+// registry (mirroring what composition code builds at startup — see
+// DestinationRegistry's doc comment), with the "faketest" scheme
+// registered on it once at package load, instead of the package-global
+// process registry this used to be built against.
+var testDestinationRegistry = func() *lifecycle.DestinationRegistry {
+	r := lifecycle.NewDestinationRegistry()
+	r.Register("faketest", func(uri *url.URL) (lifecycle.CloudDestination, error) {
+		fakeCloudMu.Lock()
+		base := fakeCloudDir
+		fakeCloudMu.Unlock()
+		return &fakeCloudDestination{
+			dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+		}, nil
+	})
+	return r
+}()
 
 // setFakeCloudBackingDir configures the "faketest://" scheme's backing
 // directory for the calling test, and reserves exclusive use of the
@@ -262,7 +265,7 @@ func TestSetFakeCloudBackingDirSerializesConcurrentTests(t *testing.T) {
 // TestParseCloudDestinationUnknownScheme verifies that a URI whose scheme
 // has no registered factory returns an error.
 func TestParseCloudDestinationUnknownScheme(t *testing.T) {
-	_, err := lifecycle.ParseCloudDestination("s3unknown://bucket/prefix")
+	_, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "s3unknown://bucket/prefix")
 	require.Error(t, err)
 }
 
@@ -273,7 +276,7 @@ func TestParseCloudDestinationUnknownScheme(t *testing.T) {
 // comment on why — so an error telling an operator to try "gs://..." would
 // send them to a scheme ParseCloudDestination itself rejects).
 func TestParseCloudDestinationMissingHost(t *testing.T) {
-	_, err := lifecycle.ParseCloudDestination("faketest:///prefix")
+	_, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "faketest:///prefix")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "s3://bucket/prefix")
 	require.Contains(t, err.Error(), "gcs://bucket/prefix")
@@ -283,7 +286,7 @@ func TestParseCloudDestinationMissingHost(t *testing.T) {
 // TestParseCloudDestinationMalformed verifies that an unparseable URI
 // string returns an error rather than panicking.
 func TestParseCloudDestinationMalformed(t *testing.T) {
-	_, err := lifecycle.ParseCloudDestination("not a uri at all ://")
+	_, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "not a uri at all ://")
 	require.Error(t, err)
 }
 
@@ -291,7 +294,7 @@ func TestParseCloudDestinationMalformed(t *testing.T) {
 // a registered scheme resolves to a usable CloudDestination.
 func TestParseCloudDestinationRegisteredScheme(t *testing.T) {
 	setFakeCloudBackingDir(t, t.TempDir())
-	dest, err := lifecycle.ParseCloudDestination("faketest://bucket/prefix")
+	dest, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "faketest://bucket/prefix")
 	require.NoError(t, err)
 	require.NotNil(t, dest)
 }
@@ -304,7 +307,7 @@ func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "snap-local-only")
 	m, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite", "",
+		context.Background(), testDestinationRegistry, db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite", "",
 	)
 	require.NoError(t, err)
 	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
@@ -324,6 +327,7 @@ func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "snap-cloud")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(),
+		testDestinationRegistry,
 		db,
 		dir,
 		lifecycle.TriggerManual,
@@ -361,6 +365,7 @@ func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(t *testing.T)
 	dir := filepath.Join(t.TempDir(), "snap-bad-cloud")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(),
+		testDestinationRegistry,
 		db,
 		dir,
 		lifecycle.TriggerManual,
@@ -387,6 +392,7 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 	localDir := filepath.Join(t.TempDir(), "snap-src")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(),
+		testDestinationRegistry,
 		db,
 		localDir,
 		lifecycle.TriggerManual,
@@ -403,7 +409,7 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 	// many snapshots, not one restorable directory.
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	m, err := lifecycle.Restore(
-		context.Background(), "faketest://bucket/prefix/snap-src", restoredDir,
+		context.Background(), testDestinationRegistry, "faketest://bucket/prefix/snap-src", restoredDir,
 	)
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)
@@ -422,6 +428,7 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 	for _, name := range []string{"snap-a", "snap-b"} {
 		_, err := lifecycle.SnapshotToCloud(
 			context.Background(),
+			testDestinationRegistry,
 			db,
 			filepath.Join(t.TempDir(), name),
 			lifecycle.TriggerManual,
@@ -433,7 +440,7 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	entries, ok, err := lifecycle.ListCloudSnapshots(context.Background(), cloudDest)
+	entries, ok, err := lifecycle.ListCloudSnapshots(context.Background(), testDestinationRegistry, cloudDest)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, entries, 2)
@@ -444,7 +451,7 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 // TestListCloudSnapshotsEmptyDestReturnsNotOK verifies that an empty
 // cloudDest returns ok=false and no error, not a failure.
 func TestListCloudSnapshotsEmptyDestReturnsNotOK(t *testing.T) {
-	entries, ok, err := lifecycle.ListCloudSnapshots(context.Background(), "")
+	entries, ok, err := lifecycle.ListCloudSnapshots(context.Background(), nil, "")
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Empty(t, entries)
@@ -454,7 +461,7 @@ func TestListCloudSnapshotsEmptyDestReturnsNotOK(t *testing.T) {
 // unsupported cloud scheme returns a real error, not ok=false.
 func TestListCloudSnapshotsInvalidDestReturnsError(t *testing.T) {
 	_, ok, err := lifecycle.ListCloudSnapshots(
-		context.Background(), "unsupported-scheme://bucket/prefix",
+		context.Background(), testDestinationRegistry, "unsupported-scheme://bucket/prefix",
 	)
 	require.Error(t, err)
 	require.False(t, ok)

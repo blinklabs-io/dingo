@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
@@ -61,6 +62,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
@@ -671,6 +673,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		n.config.databaseLifecycle,
 		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
 		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
+		n.destinationRegistry,
 		n.config.logger,
 	)
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -1160,6 +1163,7 @@ func (n *Node) Snapshot(
 	}
 	return lifecycle.SnapshotToCloud(
 		ctx,
+		n.destinationRegistry,
 		n.db,
 		destDir,
 		lifecycle.TriggerManual,
@@ -1193,14 +1197,14 @@ func (n *Node) Restore(
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
 
-	stagingDir := n.config.dataDir + ".restore-staging"
+	stagingDir := n.config.dataDir + restoreStagingSuffix
 	if err := os.RemoveAll(stagingDir); err != nil {
 		return lifecycle.Manifest{}, fmt.Errorf(
 			"clear restore staging directory: %w", err,
 		)
 	}
 
-	manifest, err := lifecycle.Restore(ctx, snapshotDir, stagingDir)
+	manifest, err := lifecycle.Restore(ctx, n.destinationRegistry, snapshotDir, stagingDir)
 	if err != nil {
 		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
 	}
@@ -1261,7 +1265,8 @@ func (n *Node) Restore(
 		return lifecycle.Manifest{}, fmt.Errorf("close storage: %w", err)
 	}
 
-	if err := n.swapInRestoredDataDir(stagingDir); err != nil {
+	backupDir, err := n.swapInRestoredDataDir(stagingDir)
+	if err != nil {
 		if errors.Is(err, errRestoreSwapUnrecoverable) {
 			n.cancel()
 			return lifecycle.Manifest{}, err
@@ -1277,8 +1282,32 @@ func (n *Node) Restore(
 		return lifecycle.Manifest{}, err
 	}
 
+	// The swap itself succeeded: n.config.dataDir now holds the restored
+	// data, and backupDir still holds the pre-restore original. It stays
+	// in place until reinitializeAndResume actually proves the restored
+	// data starts — a directory swap succeeding is not by itself proof of
+	// that (see swapInRestoredDataDir's doc comment).
 	if err := n.reinitializeAndResume(context.WithoutCancel(ctx)); err != nil {
-		return lifecycle.Manifest{}, err
+		// The swap already happened and cannot be undone from here (every
+		// storage-dependent subsystem has already begun reinitializing
+		// against the restored data): bring the process down for a
+		// supervised restart rather than leaving it running in an unknown
+		// state, and surface backupDir's location so an operator has a
+		// last-known-good fallback instead of it silently having been
+		// deleted. reconcileInterruptedLiveRestoreSwap resolves this same
+		// state (backupDir present, dataDir present) at the next startup.
+		n.cancel()
+		return lifecycle.Manifest{}, fmt.Errorf(
+			"%w (pre-restore backup preserved at %q pending a restart)",
+			err, backupDir,
+		)
+	}
+	if err := os.RemoveAll(backupDir); err != nil {
+		n.config.logger.Warn(
+			"failed to remove pre-restore backup after a successful restore",
+			"dir", backupDir,
+			"error", err,
+		)
 	}
 	return manifest, nil
 }
@@ -1332,28 +1361,183 @@ var errRestoreSwapUnrecoverable = errors.New(
 	"data directory swap left no usable data directory in place",
 )
 
+// preRestoreBackupSuffix and restoreStagingSuffix name the sibling
+// directories swapInRestoredDataDir and Restore use as n.config.dataDir's
+// own crash-recovery marker: their mere presence (checked by
+// reconcileInterruptedLiveRestoreSwap at every startup, before dataDir is
+// ever opened) is what identifies an interrupted swap and which
+// intermediate state it was interrupted in, without a separate marker
+// file to keep in sync with the directories themselves.
+const (
+	preRestoreBackupSuffix = ".pre-restore"
+	restoreStagingSuffix   = ".restore-staging"
+)
+
 // swapInRestoredDataDir atomically replaces n.config.dataDir with
 // stagingDir (both must be on the same filesystem for the renames to be
-// atomic), keeping the original data around as a same-directory backup
-// until the swap fully succeeds, and rolling back to it if activating the
-// restored directory fails.
-func (n *Node) swapInRestoredDataDir(stagingDir string) error {
-	backupDir := n.config.dataDir + ".pre-restore"
+// atomic), keeping the original data around as a same-directory backup at
+// backupDir and rolling back to it if activating the restored directory
+// fails.
+//
+// On success, backupDir is returned but deliberately NOT removed: a
+// completed rename only proves the two directories swapped names, not
+// that the restored data actually starts. The caller must keep backupDir
+// in place until reinitializeAndResume has actually proven the restored
+// node starts, and only remove it then — see Restore's call site.
+//
+// Both renames are followed by an fsync of dataDir's parent directory:
+// POSIX rename() is atomic the instant it returns, but that instant
+// isn't necessarily durable — the containing directory's own updated
+// entry can still be lost to a crash or power failure before it reaches
+// disk, independently of the renamed data's own content being fsynced.
+// Without this, a crash immediately after a rename returns could leave
+// the directory listing showing either the pre- or post-rename state on
+// the next boot, regardless of what this function itself observed.
+// reconcileInterruptedLiveRestoreSwap is what makes every one of those
+// intermediate states — including one this fsync doesn't quite manage to
+// make durable before a crash — safe to resume from at the next startup.
+func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err error) {
+	dataDir := n.config.dataDir
+	parentDir := filepath.Dir(dataDir)
+	backupDir = dataDir + preRestoreBackupSuffix
 	_ = os.RemoveAll(backupDir)
-	if err := os.Rename(n.config.dataDir, backupDir); err != nil {
-		return fmt.Errorf("move aside current data directory: %w", err)
+	if err := os.Rename(dataDir, backupDir); err != nil {
+		return "", fmt.Errorf("move aside current data directory: %w", err)
 	}
-	if err := os.Rename(stagingDir, n.config.dataDir); err != nil {
-		if rbErr := os.Rename(backupDir, n.config.dataDir); rbErr != nil {
-			return fmt.Errorf(
+	if err := fsyncdir.Sync(parentDir); err != nil {
+		return "", fmt.Errorf(
+			"sync %q after moving aside current data directory: %w",
+			parentDir, err,
+		)
+	}
+	if err := os.Rename(stagingDir, dataDir); err != nil {
+		if rbErr := os.Rename(backupDir, dataDir); rbErr != nil {
+			return "", fmt.Errorf(
 				"%w: activate restored data directory: %w (rollback also failed: %w; restored data preserved at %q)",
 				errRestoreSwapUnrecoverable, err, rbErr, stagingDir,
 			)
 		}
-		return fmt.Errorf("activate restored data directory: %w", err)
+		if syncErr := fsyncdir.Sync(parentDir); syncErr != nil {
+			return "", fmt.Errorf(
+				"activate restored data directory: %w (rolled back, but sync %q after rollback failed: %w)",
+				err, parentDir, syncErr,
+			)
+		}
+		return "", fmt.Errorf("activate restored data directory: %w", err)
 	}
-	_ = os.RemoveAll(backupDir)
-	return nil
+	if err := fsyncdir.Sync(parentDir); err != nil {
+		return "", fmt.Errorf(
+			"sync %q after activating restored data directory: %w",
+			parentDir, err,
+		)
+	}
+	return backupDir, nil
+}
+
+// reconcileInterruptedLiveRestoreSwap inspects n.config.dataDir's sibling
+// preRestoreBackupSuffix/restoreStagingSuffix paths for a live Restore's
+// directory swap (swapInRestoredDataDir) that was interrupted -- by a
+// process kill, crash, or power failure -- before this node could confirm
+// and clean it up, and reconciles whichever intermediate state it finds.
+// Must run before anything else opens n.config.dataDir (Run() calls this
+// first, before ResolveStorage/database.New).
+//
+// The two directories' mere presence or absence is the marker: no
+// separate marker file is needed; see swapInRestoredDataDir's own doc
+// comment on why backupDir outlives a merely-successful swap.
+//
+//   - Neither exists, or only stagingDir exists (no completed swap ever
+//     started, or one was interrupted before the first rename): nothing to
+//     reconcile. A leftover stagingDir is harmless -- the next Restore
+//     call's own os.RemoveAll(stagingDir) clears it -- and is deliberately
+//     left in place here rather than removed, so an operator has
+//     something to inspect if a restore keeps failing before ever
+//     reaching the swap.
+//   - backupDir exists, dataDir does not: interrupted between the swap's
+//     two renames (dataDir was moved aside, but the restored data was
+//     never moved into its place). Rolled back by renaming backupDir back
+//     to dataDir.
+//   - backupDir and dataDir both exist: the swap's second rename already
+//     completed (dataDir already holds the restored data) before the
+//     interruption landed. dataDir is left as-is -- it's what Run() is
+//     about to start on -- and backupDir is left in place too: only
+//     Run() successfully completing startup on it is proof the restored
+//     data actually works, at which point Run() removes backupDir itself
+//     (mirroring Restore's own in-process backup removal once
+//     reinitializeAndResume proves the same thing without a restart).
+func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
+	dataDir := n.config.dataDir
+	backupDir := dataDir + preRestoreBackupSuffix
+	stagingDir := dataDir + restoreStagingSuffix
+
+	_, backupErr := os.Stat(backupDir)
+	switch {
+	case os.IsNotExist(backupErr):
+		return nil
+	case backupErr != nil:
+		return fmt.Errorf("stat pre-restore backup %q: %w", backupDir, backupErr)
+	}
+
+	_, dataErr := os.Stat(dataDir)
+	switch {
+	case os.IsNotExist(dataErr):
+		n.config.logger.Warn(
+			"found an interrupted live restore's pre-restore backup with "+
+				"no data directory in its place; rolling back to it",
+			"backup_dir", backupDir,
+			"data_dir", dataDir,
+		)
+		if err := os.Rename(backupDir, dataDir); err != nil {
+			return fmt.Errorf(
+				"roll back interrupted restore swap: move %q to %q: %w",
+				backupDir, dataDir, err,
+			)
+		}
+		if err := fsyncdir.Sync(filepath.Dir(dataDir)); err != nil {
+			return fmt.Errorf(
+				"sync %q after rolling back interrupted restore swap: %w",
+				filepath.Dir(dataDir), err,
+			)
+		}
+		_ = os.RemoveAll(stagingDir)
+		return nil
+	case dataErr != nil:
+		return fmt.Errorf("stat data directory %q: %w", dataDir, dataErr)
+	default:
+		n.config.logger.Warn(
+			"found a completed live restore swap whose pre-restore backup "+
+				"was never confirmed and removed; starting on the restored "+
+				"data directory and will remove the backup once startup succeeds",
+			"backup_dir", backupDir,
+			"data_dir", dataDir,
+		)
+		_ = os.RemoveAll(stagingDir)
+		return nil
+	}
+}
+
+// removeConfirmedRestoreBackup removes n.config.dataDir's pre-restore
+// backup, if one is present, once Run() has fully started on dataDir --
+// the proof (matching reinitializeAndResume's role for the in-process
+// Restore path) that the restored data this backup was kept around for
+// actually works. A no-op when there is nothing to remove.
+func (n *Node) removeConfirmedRestoreBackup() {
+	backupDir := n.config.dataDir + preRestoreBackupSuffix
+	if _, err := os.Stat(backupDir); err != nil {
+		return
+	}
+	if err := os.RemoveAll(backupDir); err != nil {
+		n.config.logger.Warn(
+			"failed to remove confirmed pre-restore backup after startup",
+			"dir", backupDir,
+			"error", err,
+		)
+		return
+	}
+	n.config.logger.Info(
+		"removed confirmed pre-restore backup after successful startup",
+		"dir", backupDir,
+	)
 }
 
 // Truncate reverts this running node's database to target, per

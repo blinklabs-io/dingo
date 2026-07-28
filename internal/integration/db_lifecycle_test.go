@@ -85,7 +85,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	restoredManifest, err := lifecycle.Restore(
-		context.Background(), snapDir, restoredDir,
+		context.Background(), nil, snapDir, restoredDir,
 	)
 	require.NoError(t, err)
 	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)

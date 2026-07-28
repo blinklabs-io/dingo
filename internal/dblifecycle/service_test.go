@@ -48,7 +48,7 @@ func uint64Ptr(v uint64) *uint64 { return &v }
 // Service.Snapshot writes a manifest, and Service.Restore reads it back.
 func TestServiceSnapshotAndRestore(t *testing.T) {
 	srcDir := filepath.Join(t.TempDir(), "src")
-	svc := dblifecycle.NewService(testConfig(srcDir), nil)
+	svc := dblifecycle.NewService(testConfig(srcDir), nil, nil)
 
 	// Seed the source database directly since Service has no block-write
 	// API of its own.
@@ -62,7 +62,7 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 	require.Equal(t, "badger", m.BlobPlugin)
 
 	restoreSvc := dblifecycle.NewService(
-		testConfig(filepath.Join(t.TempDir(), "restored")), nil,
+		testConfig(filepath.Join(t.TempDir(), "restored")), nil, nil,
 	)
 	restoredManifest, err := restoreSvc.Restore(context.Background(), snapDir)
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 	srcDir := filepath.Join(t.TempDir(), "src")
 	srcCfg := testConfig(srcDir)
-	svc := dblifecycle.NewService(srcCfg, nil)
+	svc := dblifecycle.NewService(srcCfg, nil, nil)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 
 	restoreCfg := testConfig(filepath.Join(t.TempDir(), "restored"))
 	restoreCfg.Network = "mainnet"
-	restoreSvc := dblifecycle.NewService(restoreCfg, nil)
+	restoreSvc := dblifecycle.NewService(restoreCfg, nil, nil)
 
 	_, err = restoreSvc.Restore(context.Background(), snapDir)
 	require.Error(t, err)
@@ -108,7 +108,7 @@ func TestServiceTruncateRequiresExactlyOneTarget(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	svc := dblifecycle.NewService(testConfig(dir), nil)
+	svc := dblifecycle.NewService(testConfig(dir), nil, nil)
 
 	_, err = svc.Truncate(context.Background(), dblifecycle.TruncateTarget{})
 	require.Error(t, err)
@@ -162,7 +162,7 @@ func (f *fakeLiveNode) Truncate(
 // TestServiceDelegatesToLiveNodeWhenSet verifies that once SetLiveNode is
 // called, Snapshot/Restore/Truncate delegate to it instead of the offline path.
 func TestServiceDelegatesToLiveNodeWhenSet(t *testing.T) {
-	svc := dblifecycle.NewService(testConfig(t.TempDir()), nil)
+	svc := dblifecycle.NewService(testConfig(t.TempDir()), nil, nil)
 	live := &fakeLiveNode{}
 	svc.SetLiveNode(live)
 

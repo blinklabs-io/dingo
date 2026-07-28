@@ -137,7 +137,7 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 func runRestoreInterruptHelper() {
 	snapshotDir := os.Getenv("DINGO_TEST_RESTORE_SNAPSHOT_DIR")
 	targetDir := os.Getenv("DINGO_TEST_RESTORE_TARGET_DIR")
-	_, _ = lifecycle.Restore(context.Background(), snapshotDir, targetDir)
+	_, _ = lifecycle.Restore(context.Background(), nil, snapshotDir, targetDir)
 	// Only reached if the parent's kill lands after Restore already
 	// finished (not expected: the FIFO blocks it first); exit quietly
 	// either way, since the parent's own assertion is what actually

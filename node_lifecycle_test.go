@@ -736,9 +736,9 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 	}
 
 	// No leftover staging or backup directory should remain.
-	_, statErr := os.Stat(n.config.dataDir + ".restore-staging")
+	_, statErr := os.Stat(n.config.dataDir + restoreStagingSuffix)
 	require.True(t, os.IsNotExist(statErr))
-	_, statErr = os.Stat(n.config.dataDir + ".pre-restore")
+	_, statErr = os.Stat(n.config.dataDir + preRestoreBackupSuffix)
 	require.True(t, os.IsNotExist(statErr))
 }
 
@@ -796,6 +796,184 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 			"block at slot %d missing after a rejected restore", p.Slot,
 		)
 	}
+}
+
+// --- Crash-recoverable directory swap (dingo#1651 follow-up) ---
+//
+// These exercise swapInRestoredDataDir, reconcileInterruptedLiveRestoreSwap,
+// and removeConfirmedRestoreBackup directly against a minimal *Node
+// carrying only the config fields those functions actually read (dataDir,
+// logger) -- unlike the live-node tests above, no real database/ledger/
+// chain manager is needed to test the directory-swap state machine
+// itself, and constructing one for every intermediate crash state would
+// only make these tests slower without making them any more precise.
+
+// newSwapTestNode returns a *Node with just enough config to exercise the
+// directory-swap functions above, none of which touch anything else on
+// Node.
+func newSwapTestNode(t *testing.T, dataDir string) *Node {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return &Node{config: NewConfig(WithDatabasePath(dataDir), WithLogger(logger))}
+}
+
+// writeMarkerFile creates dir (and any missing parents) and writes a
+// small file called name directly inside it, so a later assertion can
+// tell which of two directories' original contents ended up at a given
+// path after a swap/rollback, without needing a real database there.
+func writeMarkerFile(t *testing.T, dir string, name string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(
+		t, os.WriteFile(filepath.Join(dir, name), []byte("marker"), 0o644),
+	)
+}
+
+func requireMarkerFile(t *testing.T, dir string, name string) {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(dir, name))
+	require.NoErrorf(t, err, "expected marker file %q in %q", name, dir)
+}
+
+func requireNoDir(t *testing.T, dir string) {
+	t.Helper()
+	_, err := os.Stat(dir)
+	require.Truef(t, os.IsNotExist(err), "expected %q to not exist", dir)
+}
+
+// TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms guards the
+// core fix: a directory swap succeeding is not by itself proof the
+// restored data actually works, so swapInRestoredDataDir must never
+// remove the pre-restore backup on its own -- only a caller that has
+// separately confirmed the restored data starts (Restore's
+// reinitializeAndResume call, or -- across a restart --
+// removeConfirmedRestoreBackup once Run() itself succeeds) may do that.
+func TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms(t *testing.T) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	stagingDir := dataDir + restoreStagingSuffix
+	writeMarkerFile(t, dataDir, "original")
+	writeMarkerFile(t, stagingDir, "restored")
+
+	n := newSwapTestNode(t, dataDir)
+	backupDir, err := n.swapInRestoredDataDir(stagingDir)
+	require.NoError(t, err)
+	require.Equal(t, dataDir+preRestoreBackupSuffix, backupDir)
+
+	requireMarkerFile(t, dataDir, "restored")
+	// The backup must still be there, holding the original content --
+	// swapInRestoredDataDir itself must never remove it.
+	requireMarkerFile(t, backupDir, "original")
+	requireNoDir(t, stagingDir)
+}
+
+// TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption verifies
+// the common (no crash at all) case does nothing and reports no error,
+// whether or not a stray staging directory from an earlier restore
+// attempt that never reached the swap happens to exist alongside a
+// perfectly normal data directory -- left for the next Restore call's own
+// cleanup, not this one's, per reconcileInterruptedLiveRestoreSwap's doc
+// comment.
+func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(t *testing.T) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	writeMarkerFile(t, dataDir, "original")
+
+	n := newSwapTestNode(t, dataDir)
+	require.NoError(t, n.reconcileInterruptedLiveRestoreSwap())
+	requireMarkerFile(t, dataDir, "original")
+
+	stagingDir := dataDir + restoreStagingSuffix
+	writeMarkerFile(t, stagingDir, "stale-attempt")
+	require.NoError(t, n.reconcileInterruptedLiveRestoreSwap())
+	requireMarkerFile(t, dataDir, "original")
+	requireMarkerFile(t, stagingDir, "stale-attempt")
+}
+
+// TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenames
+// simulates a crash landing exactly between swapInRestoredDataDir's two
+// renames: dataDir has already been moved aside to backupDir, but the
+// restored data was never moved into dataDir's place, so dataDir doesn't
+// exist at all. Reconciliation must restore the original by renaming
+// backupDir back into place, rather than leaving the node with no data
+// directory to start on at all.
+func TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenames(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	backupDir := dataDir + preRestoreBackupSuffix
+	stagingDir := dataDir + restoreStagingSuffix
+	writeMarkerFile(t, backupDir, "original")
+	writeMarkerFile(t, stagingDir, "restored")
+
+	n := newSwapTestNode(t, dataDir)
+	require.NoError(t, n.reconcileInterruptedLiveRestoreSwap())
+
+	requireMarkerFile(t, dataDir, "original")
+	requireNoDir(t, backupDir)
+	requireNoDir(t, stagingDir)
+}
+
+// TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent
+// simulates a crash landing after swapInRestoredDataDir's second rename
+// completed (dataDir already holds the restored data) but before this
+// node could confirm the restored data actually works and remove the
+// backup. Reconciliation must leave dataDir exactly as-is -- it's what
+// Run() is about to start on -- and must NOT remove the backup itself:
+// only removeConfirmedRestoreBackup, called once startup actually
+// succeeds, does that -- otherwise a node that crashes on every attempt
+// to start on genuinely bad restored data would silently lose its last
+// good backup on the very first restart attempt.
+func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	backupDir := dataDir + preRestoreBackupSuffix
+	stagingDir := dataDir + restoreStagingSuffix
+	writeMarkerFile(t, dataDir, "restored")
+	writeMarkerFile(t, backupDir, "original")
+	writeMarkerFile(t, stagingDir, "leftover")
+
+	n := newSwapTestNode(t, dataDir)
+	require.NoError(t, n.reconcileInterruptedLiveRestoreSwap())
+
+	requireMarkerFile(t, dataDir, "restored")
+	requireMarkerFile(t, backupDir, "original")
+	requireNoDir(t, stagingDir)
+
+	// Only once startup is confirmed successful does the backup go away.
+	n.removeConfirmedRestoreBackup()
+	requireNoDir(t, backupDir)
+	requireMarkerFile(t, dataDir, "restored")
+}
+
+// TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure verifies
+// that a rollback failure -- not expected in ordinary operation, since
+// backupDir and dataDir are always siblings on the same filesystem, but a
+// permissions or filesystem error is always possible -- is surfaced as a
+// real error rather than silently leaving the node with no usable data
+// directory and no indication anything went wrong.
+func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits don't apply the same way on windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("permission checks don't apply when running as root")
+	}
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	backupDir := dataDir + preRestoreBackupSuffix
+	writeMarkerFile(t, backupDir, "original")
+
+	// The rollback rename needs to create a new entry named dataDir
+	// directly inside base, which a read-only base refuses.
+	require.NoError(t, os.Chmod(base, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(base, 0o755) })
+
+	n := newSwapTestNode(t, dataDir)
+	require.Error(t, n.reconcileInterruptedLiveRestoreSwap())
 }
 
 // smallEpochGenesisCfgForLifecycleTest returns a CardanoNodeConfig with

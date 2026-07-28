@@ -21,10 +21,21 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/spf13/cobra"
 )
+
+// newCLIDestinationRegistry builds the set of cloud destination schemes
+// (s3, gcs) available to the offline `dingo database` commands, explicitly
+// at this composition boundary rather than through a process-global
+// registry populated by each scheme's own package.
+func newCLIDestinationRegistry() *lifecycle.DestinationRegistry {
+	registry := lifecycle.NewDestinationRegistry()
+	lifecycle.RegisterBuiltinDestinations(registry)
+	return registry
+}
 
 // databaseCommand is the parent for the offline database lifecycle
 // maintenance commands. Each subcommand operates directly against the
@@ -56,7 +67,7 @@ func databaseSnapshotCommand() *cobra.Command {
 				return errors.New("--dir is required")
 			}
 			logger := commonRun(cfg)
-			svc := dblifecycle.NewService(cfg, logger)
+			svc := dblifecycle.NewService(cfg, newCLIDestinationRegistry(), logger)
 			manifest, err := svc.Snapshot(cmd.Context(), destDir)
 			if err != nil {
 				return fmt.Errorf("snapshot: %w", err)
@@ -90,7 +101,7 @@ func databaseRestoreCommand() *cobra.Command {
 				return errors.New("no config found in context")
 			}
 			logger := commonRun(cfg)
-			svc := dblifecycle.NewService(cfg, logger)
+			svc := dblifecycle.NewService(cfg, newCLIDestinationRegistry(), logger)
 
 			// Restore can run for a long time against a large database,
 			// and Cobra's default cmd.Context() is a plain
@@ -166,7 +177,10 @@ from the target point.`,
 				target.BlockNumber = &blockNumber
 			}
 			logger := commonRun(cfg)
-			svc := dblifecycle.NewService(cfg, logger)
+			// Truncate never resolves a cloud destination, so a nil
+			// registry here is fine — see DestinationRegistry's doc
+			// comment.
+			svc := dblifecycle.NewService(cfg, nil, logger)
 			blocksRemoved, err := svc.Truncate(cmd.Context(), target)
 			if err != nil {
 				return fmt.Errorf("truncate: %w", err)

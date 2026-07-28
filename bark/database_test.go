@@ -74,12 +74,13 @@ func newTestDatabaseServiceHandler(
 				Metadata: plugin.Selection{Provider: "sqlite"},
 			},
 		},
-	}, nil)
+	}, testDestinationRegistry, nil)
 	b, err := NewBark(BarkConfig{
-		DB:          barkDB,
-		Lifecycle:   svc,
-		SnapshotDir: t.TempDir(),
-		Port:        1,
+		DB:                  barkDB,
+		Lifecycle:           svc,
+		SnapshotDir:         t.TempDir(),
+		Port:                1,
+		DestinationRegistry: testDestinationRegistry,
 	})
 	require.NoError(t, err)
 	return newDatabaseServiceHandler(b)

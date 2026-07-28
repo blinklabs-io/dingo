@@ -32,12 +32,15 @@ import (
 	"google.golang.org/api/option"
 )
 
-func init() {
-	// Registered as "gcs" (not "gs") to match the scheme
-	// database/plugin/blob/gcs already uses for its dataDir URIs
-	// ("gcs://<bucket>"), keeping the convention consistent across the
-	// codebase.
-	RegisterCloudDestinationScheme("gcs", newGCSDestination)
+// RegisterGCS registers the "gcs" scheme (gcs://bucket/prefix) on registry
+// — named "gcs" (not "gs") to match the scheme database/plugin/blob/gcs
+// already uses for its dataDir URIs ("gcs://<bucket>"), keeping the
+// convention consistent across the codebase. Composition code (node/CLI
+// startup) calls this explicitly when GCS cloud destination support should
+// be available, rather than this package registering itself
+// process-globally via init().
+func RegisterGCS(registry *DestinationRegistry) {
+	registry.Register("gcs", newGCSDestination)
 }
 
 // gcsDestination uploads/downloads a snapshot directory's files as flat GCS

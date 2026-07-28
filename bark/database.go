@@ -507,7 +507,7 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 	}
 
 	cloudEntries, ok, err := lifecycle.ListCloudSnapshots(
-		ctx, h.bark.config.SnapshotCloudDestination,
+		ctx, h.bark.config.DestinationRegistry, h.bark.config.SnapshotCloudDestination,
 	)
 	if err != nil {
 		return nil, "", connect.NewError(
@@ -599,7 +599,7 @@ func (h *databaseServiceHandler) cloudSnapshotExists(
 		return "", false, nil
 	}
 	cloudURI = lifecycle.JoinCloudURI(h.bark.config.SnapshotCloudDestination, snapshotID)
-	_, ok, fetchErr := lifecycle.FetchCloudManifest(ctx, cloudURI)
+	_, ok, fetchErr := lifecycle.FetchCloudManifest(ctx, h.bark.config.DestinationRegistry, cloudURI)
 	if !ok {
 		return cloudURI, false, nil
 	}
@@ -729,7 +729,7 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 		}
 	}
 	if cloudExists {
-		ok, delErr := lifecycle.DeleteCloudSnapshot(ctx, cloudURI)
+		ok, delErr := lifecycle.DeleteCloudSnapshot(ctx, h.bark.config.DestinationRegistry, cloudURI)
 		if delErr != nil {
 			return nil, connect.NewError(
 				connect.CodeInternal,
@@ -759,13 +759,17 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 // comparison) as the actual integrity check, rather than duplicating any
 // of that logic. The temporary directory is always removed before
 // returning.
-func verifySnapshotIntegrity(ctx context.Context, snapshotDir string) error {
+func verifySnapshotIntegrity(
+	ctx context.Context,
+	registry *lifecycle.DestinationRegistry,
+	snapshotDir string,
+) error {
 	tempDir, err := os.MkdirTemp("", "dingo-verify-snapshot-*")
 	if err != nil {
 		return fmt.Errorf("create verification directory: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
-	if _, err := lifecycle.Restore(ctx, snapshotDir, tempDir); err != nil {
+	if _, err := lifecycle.Restore(ctx, registry, snapshotDir, tempDir); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
 	return nil
@@ -795,7 +799,7 @@ func (h *databaseServiceHandler) VerifySnapshot(
 		defer h.finishOperation()
 		op.setRunning()
 		op.complete(runProtected(func() error {
-			return verifySnapshotIntegrity(opCtx, source)
+			return verifySnapshotIntegrity(opCtx, h.bark.config.DestinationRegistry, source)
 		}), 0)
 	}()
 

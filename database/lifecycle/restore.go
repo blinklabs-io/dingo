@@ -45,11 +45,11 @@ import (
 // half-restored.
 //
 // snapshotDir may instead be a cloud destination URI (s3://bucket/prefix
-// or gcs://bucket/prefix; see RegisterCloudDestinationScheme) — Restore
-// downloads it into a local temp directory first, then proceeds exactly
-// as it would for a local snapshotDir. This is also how a snapshot
-// created on one node can be restored onto another, since the two never
-// need to share a filesystem.
+// or gcs://bucket/prefix; see DestinationRegistry) — Restore downloads it
+// into a local temp directory first, then proceeds exactly as it would
+// for a local snapshotDir. This is also how a snapshot created on one node
+// can be restored onto another, since the two never need to share a
+// filesystem. registry may be nil if snapshotDir is always a local path.
 //
 // This is an offline operation: targetDataDir must not be concurrently
 // held open by another *database.Database (e.g. a running node), since it
@@ -59,10 +59,11 @@ import (
 // cannot safely interleave with.
 func Restore(
 	ctx context.Context,
+	registry *DestinationRegistry,
 	snapshotDir string,
 	targetDataDir string,
 ) (Manifest, error) {
-	return RestoreValidated(ctx, snapshotDir, targetDataDir, nil)
+	return RestoreValidated(ctx, registry, snapshotDir, targetDataDir, nil)
 }
 
 // RestoreValidated is Restore, but — when validate is non-nil — calls
@@ -94,11 +95,12 @@ func Restore(
 // own os.RemoveAll(stagingDir) clears on its next attempt.
 func RestoreValidated(
 	ctx context.Context,
+	registry *DestinationRegistry,
 	snapshotDir string,
 	targetDataDir string,
 	validate func(Manifest) error,
 ) (m Manifest, err error) {
-	manifest, snapshotDir, cleanup, err := resolveManifest(ctx, snapshotDir)
+	manifest, snapshotDir, cleanup, err := resolveManifest(ctx, registry, snapshotDir)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -212,11 +214,15 @@ func RestoreValidated(
 // is the right move, so its own error (if any) from the failed
 // FetchCloudManifest attempt is deliberately discarded here rather than
 // duplicating PeekManifest's cloud-vs-local branching a second time.
-func PeekManifest(ctx context.Context, snapshotDir string) (Manifest, error) {
-	if m, ok, err := FetchCloudManifest(ctx, snapshotDir); ok {
+func PeekManifest(
+	ctx context.Context,
+	registry *DestinationRegistry,
+	snapshotDir string,
+) (Manifest, error) {
+	if m, ok, err := FetchCloudManifest(ctx, registry, snapshotDir); ok {
 		return m, err
 	}
-	manifest, _, cleanup, err := resolveManifest(ctx, snapshotDir)
+	manifest, _, cleanup, err := resolveManifest(ctx, registry, snapshotDir)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -231,11 +237,12 @@ func PeekManifest(ctx context.Context, snapshotDir string) (Manifest, error) {
 // before deferring it.
 func resolveManifest(
 	ctx context.Context,
+	registry *DestinationRegistry,
 	snapshotDir string,
 ) (manifest Manifest, resolvedDir string, cleanup func(), err error) {
 	resolvedDir = snapshotDir
-	if _, ok := recognizedCloudScheme(snapshotDir); ok {
-		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(ctx, snapshotDir)
+	if _, ok := recognizedCloudScheme(registry, snapshotDir); ok {
+		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(ctx, registry, snapshotDir)
 		if downloadErr != nil {
 			return Manifest{}, "", nil, downloadErr
 		}

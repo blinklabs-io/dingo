@@ -123,8 +123,16 @@ var (
 	barkFakeCloudDir string
 )
 
+// testDestinationRegistry is this test package's own instance-owned
+// registry (mirroring what composition code builds at startup — see
+// lifecycle.DestinationRegistry's doc comment), shared by every fake cloud
+// scheme this file registers below and threaded into
+// newTestDatabaseServiceHandler's Service/BarkConfig, instead of the
+// removed package-global process registry.
+var testDestinationRegistry = lifecycle.NewDestinationRegistry()
+
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"barkfaketest",
 		func(uri *url.URL) (lifecycle.CloudDestination, error) {
 			barkFakeCloudMu.Lock()
@@ -181,7 +189,7 @@ var (
 )
 
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"barkfaketest-nodelete",
 		func(uri *url.URL) (lifecycle.CloudDestination, error) {
 			barkFakeCloudNoDeleteMu.Lock()
@@ -231,7 +239,7 @@ func (d *barkFakeCloudDestinationCommError) FetchManifest(
 var _ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationCommError{}
 
 func init() {
-	lifecycle.RegisterCloudDestinationScheme(
+	testDestinationRegistry.Register(
 		"barkfaketest-commerror",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
 			return &barkFakeCloudDestinationCommError{}, nil
@@ -297,14 +305,14 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 
 	localAndCloudDir := filepath.Join(snapshotDir, "local-and-cloud")
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, localAndCloudDir,
+		context.Background(), testDestinationRegistry, db, localAndCloudDir,
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
 
 	cloudOnlyDir := filepath.Join(snapshotDir, "cloud-only")
 	_, err = lifecycle.SnapshotToCloud(
-		context.Background(), db, cloudOnlyDir,
+		context.Background(), testDestinationRegistry, db, cloudOnlyDir,
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
@@ -454,7 +462,7 @@ func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), sourceDB, filepath.Join(snapshotDir, "cloud-snap"),
+		context.Background(), testDestinationRegistry, sourceDB, filepath.Join(snapshotDir, "cloud-snap"),
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
@@ -536,7 +544,7 @@ func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, filepath.Join(snapshotDir, "cloud-verify"),
+		context.Background(), testDestinationRegistry, db, filepath.Join(snapshotDir, "cloud-verify"),
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
@@ -580,7 +588,7 @@ func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, filepath.Join(snapshotDir, "cloud-delete"),
+		context.Background(), testDestinationRegistry, db, filepath.Join(snapshotDir, "cloud-delete"),
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
@@ -597,7 +605,7 @@ func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
 	require.NoError(t, err)
 
 	_, ok, err := lifecycle.FetchCloudManifest(
-		context.Background(), lifecycle.JoinCloudURI(cloudDest, "cloud-delete"),
+		context.Background(), testDestinationRegistry, lifecycle.JoinCloudURI(cloudDest, "cloud-delete"),
 	)
 	require.True(t, ok)
 	require.Error(t, err, "cloud copy must actually be gone after delete")
@@ -614,7 +622,7 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, filepath.Join(snapshotDir, "both"),
+		context.Background(), testDestinationRegistry, db, filepath.Join(snapshotDir, "both"),
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
@@ -631,7 +639,7 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 
 	require.NoDirExists(t, filepath.Join(snapshotDir, "both"))
 	_, ok, err := lifecycle.FetchCloudManifest(
-		context.Background(), lifecycle.JoinCloudURI(cloudDest, "both"),
+		context.Background(), testDestinationRegistry, lifecycle.JoinCloudURI(cloudDest, "both"),
 	)
 	require.True(t, ok)
 	require.Error(t, err, "cloud copy must actually be gone after delete")
@@ -687,7 +695,7 @@ func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
 
 	localDir := filepath.Join(snapshotDir, "no-delete-support")
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), db, localDir,
+		context.Background(), testDestinationRegistry, db, localDir,
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 	)
 	require.NoError(t, err)
@@ -735,7 +743,7 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 	for _, name := range []string{"cloud-a", "cloud-b"} {
 		dir := filepath.Join(snapshotDir, name)
 		_, err := lifecycle.SnapshotToCloud(
-			context.Background(), db, dir,
+			context.Background(), testDestinationRegistry, db, dir,
 			lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
 		)
 		require.NoError(t, err)
