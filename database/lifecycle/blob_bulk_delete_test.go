@@ -133,7 +133,7 @@ func TestDeleteBlocksAfterRespectsSmallBatchSize(t *testing.T) {
 }
 
 // TestDeleteBlocksAfterNoticesCancellationMidBatch guards against
-// comment-18's original bug: ctx was only checked once per batch (before
+// a real bug: ctx was only checked once per batch (before
 // entering that batch's transaction), so with the default 10,000-block
 // batch size, a cancellation landing partway through a single large batch
 // used to sit unnoticed until the entire batch finished deleting —

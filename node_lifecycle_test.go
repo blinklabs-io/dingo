@@ -578,7 +578,7 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(t *te
 }
 
 // TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure guards against
-// a real storage-lock leak (comment-16): Truncate's tmpDB (opened purely
+// a real storage-lock leak: Truncate's tmpDB (opened purely
 // to resolve the truncate target) used to only be deferred-closed AFTER
 // checking database.New's error — but database.New can return a non-nil
 // *Database alongside a non-nil, recoverable CommitTimestampError (see

@@ -72,7 +72,7 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 // TestServiceRestoreRejectsIncompatibleTarget verifies that Service.
 // Restore refuses a snapshot whose recorded network doesn't match the
 // restoring Service's own configured network, before ever creating the
-// target data directory — guarding against comment-11's original gap,
+// target data directory — guarding against a real gap,
 // where the offline restore path had no check against the caller's own
 // configuration at all (only Restore's internal self-consistency check
 // against the manifest's own recorded plugins).

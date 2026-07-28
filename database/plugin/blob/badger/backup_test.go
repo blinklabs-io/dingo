@@ -267,7 +267,7 @@ func (c *cancelAfterNSeekableReads) Seek(offset int64, whence int) (int64, error
 }
 
 // TestRestoreCancelledDuringRecordSizeValidationStopsBeforeCompleting
-// guards against comment-54's gap: validateLoadRecordSizes's own read
+// guards against a real gap: validateLoadRecordSizes's own read
 // pass over an already-seekable input used to ignore ctx entirely, unlike
 // the buffering copy the non-seekable branch goes through (see
 // TestRestoreCancelledMidStreamStopsBeforeCompleting above) and unlike the

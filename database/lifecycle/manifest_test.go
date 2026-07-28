@@ -127,7 +127,7 @@ func TestWriteManifestLeavesNoLeftoverTempFile(t *testing.T) {
 }
 
 // TestWriteManifestFailureLeavesExistingManifestUntouched guards against
-// comment-35's original gap: WriteManifest used to write directly to
+// a real gap: WriteManifest used to write directly to
 // manifest.json (truncating any existing content first), so an
 // interruption partway through could leave a corrupt, partially-written
 // file in its place -- most dangerous for LabelSnapshot, which rewrites

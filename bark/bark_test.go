@@ -48,7 +48,7 @@ func TestAcquireReturnsCurrentDB(t *testing.T) {
 	release()
 }
 
-// TestAcquireFailsFastWhilePaused guards against comment-34's original bug:
+// TestAcquireFailsFastWhilePaused guards against a real bug:
 // a live Restore/Truncate closes the old *database.Database out from under
 // any in-flight Bark request that's still holding a stale pointer to it —
 // anywhere from a confusing internal error (sqlite) to an outright panic
@@ -118,7 +118,7 @@ func TestResumeDBPublishesNewDBAndUnpauses(t *testing.T) {
 	release()
 }
 
-// TestAddrClearsAfterStop guards against comment-46's original bug: Stop
+// TestAddrClearsAfterStop guards against a real bug: Stop
 // (and the ctx-cancellation-triggered auto-shutdown goroutine Start
 // starts) reset b.server to nil but left b.listenerAddr pointing at the
 // now-closed listener's address, so Addr() kept returning that stale,
@@ -140,8 +140,8 @@ func TestAddrClearsAfterStop(t *testing.T) {
 	require.Empty(t, b.Addr(), "Addr must be cleared, not stale, once the server has stopped")
 }
 
-// TestAddrClearsAfterStopTimesOut guards against comment-63's original
-// bug: Stop only cleared b.server/b.listenerAddr in the branch where
+// TestAddrClearsAfterStopTimesOut guards against a real bug: Stop
+// only cleared b.server/b.listenerAddr in the branch where
 // server.Shutdown returned nil, so a Stop call whose ctx deadline was hit
 // before an active connection finished draining (Shutdown returns
 // ctx.Err() in that case) left Addr() reporting the old listener address

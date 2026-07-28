@@ -55,7 +55,7 @@ func (b *blockingRegisterer) Unregister(c prometheus.Collector) bool {
 var _ prometheus.Registerer = &blockingRegisterer{}
 
 // TestRebuildableRegistererRegisterIsAtomicWithUnregisterAll guards against
-// comment-23's original bug: Register only held r.mu around appending c to
+// a real bug: Register only held r.mu around appending c to
 // r.collectors, not around the call into the underlying registerer. A
 // concurrent unregisterAll snapshotting r.collectors while a Register call
 // had already succeeded against the real registry but not yet appended

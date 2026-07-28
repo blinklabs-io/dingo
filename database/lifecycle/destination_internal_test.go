@@ -22,8 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestOrderEntriesManifestLastSortsManifestToEnd guards against
-// comment-27: a snapshot's manifest.json must never upload before every
+// TestOrderEntriesManifestLastSortsManifestToEnd guards against a real
+// invariant: a snapshot's manifest.json must never upload before every
 // other backup payload has succeeded, since a concurrent lister/fetcher
 // treats a cloud-visible manifest as "this snapshot is fully there" (see
 // FetchCloudManifest/ListCloudSnapshots) and could otherwise download or

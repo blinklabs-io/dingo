@@ -149,7 +149,7 @@ func TestBlobOnlyTxnDoesNotBlockOnPendingPauseCommits(t *testing.T) {
 }
 
 // TestPauseCommitsContextReturnsPromptlyWhenCancelled guards against
-// comment-31's original gap: PauseCommits blocks on a plain
+// a real gap: PauseCommits blocks on a plain
 // sync.RWMutex.Lock() with no way for a caller to abandon that wait, so a
 // caller like lifecycle.Snapshot — which already accepts a ctx for its
 // own work — had no way to give up on a Snapshot call stuck waiting
@@ -219,7 +219,7 @@ func TestPauseCommitsContextReturnsPromptlyWhenCancelled(t *testing.T) {
 }
 
 // TestPauseCommitsContextCancellationDoesNotStallLaterTxns guards against
-// comment-48's original bug: PauseCommitsContext's cancellation path used
+// a real bug: PauseCommitsContext's cancellation path used
 // to just stop waiting on the result of a background goroutine's blocked
 // sync.RWMutex.Lock() call — that Lock() call itself kept running (and
 // stayed queued) regardless. Because sync.RWMutex gives writers
@@ -311,7 +311,7 @@ func TestUnlockPanicsOnDoubleUnlock(t *testing.T) {
 }
 
 // TestUnlockRejectsStaleTokenAfterLaterAcquisition guards against
-// comment-66's original bug: Unlock unconditionally cleared the
+// a real bug: Unlock unconditionally cleared the
 // barrier's held state regardless of which acquisition it was called
 // for, so a duplicate/stale resume call -- one whose own Lock/
 // LockContext call already released -- would silently release whatever

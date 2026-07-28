@@ -270,8 +270,8 @@ func setManagerFakeCloudBackingDir(t *testing.T, dir string) {
 	managerFakeCloudMu.Unlock()
 }
 
-// TestManagerPruningDeletesCloudMirror guards against comment-30's
-// original gap: retention pruning only removed the local snapshot
+// TestManagerPruningDeletesCloudMirror guards against a real
+// gap: retention pruning only removed the local snapshot
 // directory, leaving every epoch's mirrored cloud copy in object storage
 // forever, growing without bound regardless of SnapshotRetention. With a
 // working cloud destination configured, pruning an epoch beyond
@@ -383,7 +383,7 @@ func init() {
 	)
 }
 
-// TestManagerSurvivesHandlerPanic guards against comment-42's original
+// TestManagerSurvivesHandlerPanic guards against a real
 // bug: Manager used to subscribe via the EventBus's raw channel Subscribe
 // and run its own hand-rolled per-event loop, bypassing SubscribeFunc's
 // safeHandlerCall panic recovery entirely -- a panic anywhere in the
@@ -547,7 +547,7 @@ func init() {
 }
 
 // TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation
-// guards against comment-50's original bug: Start's cleanup goroutine
+// guards against a real bug: Start's cleanup goroutine
 // (which reacts to the parent ctx passed to Start being cancelled
 // directly, not just to a call to Stop) used to race Stop() to decide
 // which of them was responsible for unsubscribing. If the parent ctx was
@@ -742,5 +742,178 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *tes
 	require.Len(
 		t, entries, 1,
 		"the retry must reuse the existing local snapshot directory, not create a second one",
+	)
+}
+
+// flakyDeleteCloudDestination mirrors managerFakeCloudDestination's
+// directory-backed UploadDir/DownloadDir (so this test's epoch snapshots
+// actually get mirrored for real), but Delete fails for as long as
+// failDelete points at true, then succeeds once it's flipped to false —
+// simulating a transient cloud outage specifically on the delete path,
+// distinct from flakyCloudDestination's upload-path flakiness above.
+type flakyDeleteCloudDestination struct {
+	dir        string
+	failDelete *bool
+	mu         *sync.Mutex
+}
+
+func (d *flakyDeleteCloudDestination) UploadDir(_ context.Context, localDir string) error {
+	if err := os.MkdirAll(d.dir, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(localDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(d.dir, entry.Name()), data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *flakyDeleteCloudDestination) DownloadDir(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func (d *flakyDeleteCloudDestination) Delete(context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if *d.failDelete {
+		return errors.New("simulated transient cloud delete failure")
+	}
+	return os.RemoveAll(d.dir)
+}
+
+var (
+	_ lifecycle.CloudDestination = &flakyDeleteCloudDestination{}
+	_ lifecycle.CloudDeleter     = &flakyDeleteCloudDestination{}
+)
+
+var (
+	flakyDeleteCloudMu      sync.Mutex
+	flakyDeleteCloudBaseDir string
+	flakyDeleteCloudFail    bool
+)
+
+func init() {
+	lifecycle.RegisterCloudDestinationScheme(
+		"managerfaketest-flakydelete",
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			flakyDeleteCloudMu.Lock()
+			base := flakyDeleteCloudBaseDir
+			flakyDeleteCloudMu.Unlock()
+			return &flakyDeleteCloudDestination{
+				dir:        filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+				failDelete: &flakyDeleteCloudFail,
+				mu:         &flakyDeleteCloudMu,
+			}, nil
+		},
+	)
+}
+
+func setFlakyDeleteCloudBackingDir(t *testing.T, dir string) {
+	t.Helper()
+	flakyDeleteCloudMu.Lock()
+	flakyDeleteCloudBaseDir = dir
+	flakyDeleteCloudFail = true
+	flakyDeleteCloudMu.Unlock()
+	t.Cleanup(func() {
+		flakyDeleteCloudMu.Lock()
+		flakyDeleteCloudBaseDir = ""
+		flakyDeleteCloudFail = false
+		flakyDeleteCloudMu.Unlock()
+	})
+}
+
+// TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds guards the
+// actual bug this fix addresses: pruneOldSnapshots used to remove
+// the local snapshot directory before attempting to delete its cloud
+// mirror. If that cloud delete then failed, the local directory (the only
+// record a later pruning pass uses to rediscover retry candidates) was
+// already gone, so the cloud copy was never revisited and retention no
+// longer bounded cloud storage at all -- a permanent orphan. This proves
+// the opposite: while the cloud delete keeps failing, the local directory
+// must survive so a later pass keeps retrying, and once the transient
+// outage clears, that same later pass must actually finish the job (both
+// copies gone), not leave the survived local copy behind forever either.
+func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
+	db := newManagerTestDB(t)
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setFlakyDeleteCloudBackingDir(t, cloudBackingDir)
+	const cloudDest = "managerfaketest-flakydelete://bucket/prefix"
+	cloudPrefixDir := filepath.Join(cloudBackingDir, "prefix")
+
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:          true,
+		SnapshotDir:              snapshotDir,
+		SnapshotEveryNEpochs:     1,
+		SnapshotRetention:        2,
+		SnapshotCloudDestination: cloudDest,
+	}, "badger", "sqlite", nil)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	for epoch := uint64(1); epoch <= 3; epoch++ {
+		publishEpochTransition(eb, epoch)
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(filepath.Join(
+				cloudPrefixDir,
+				"epoch-"+strconv.FormatUint(epoch, 10),
+				"manifest.json",
+			))
+			return err == nil
+		}, 5*time.Second, 10*time.Millisecond)
+	}
+
+	// epoch-1 is beyond retention (2): pruning must have attempted to
+	// delete its cloud mirror, failed (flakyDeleteCloudFail starts true),
+	// and therefore left the local copy in place -- neither gone.
+	require.Eventually(t, func() bool {
+		_, localErr := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
+		return localErr == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	require.DirExists(
+		t, filepath.Join(cloudPrefixDir, "epoch-1"),
+		"cloud mirror must survive a failed delete attempt too, not just the local copy",
+	)
+
+	// Clear the transient outage and redeliver a later epoch's transition
+	// (the same "restart or bus redelivery" trigger
+	// TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent
+	// above uses) so pruning runs again and retries epoch-1's cloud delete.
+	flakyDeleteCloudMu.Lock()
+	flakyDeleteCloudFail = false
+	flakyDeleteCloudMu.Unlock()
+
+	publishEpochTransition(eb, 4)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(
+			cloudPrefixDir,
+			"epoch-4",
+			"manifest.json",
+		))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		_, localErr := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
+		_, cloudErr := os.Stat(filepath.Join(cloudPrefixDir, "epoch-1"))
+		return os.IsNotExist(localErr) && os.IsNotExist(cloudErr)
+	}, 5*time.Second, 10*time.Millisecond,
+		"once the cloud outage clears, a later pruning pass must finish "+
+			"removing both the local and cloud copies of the retried epoch",
 	)
 }

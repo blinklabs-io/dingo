@@ -215,14 +215,14 @@ func ResolveTargetByNumber(
 // subtracting index values there would wildly overcount how many blocks
 // actually existed to remove.
 //
-// Known narrow limitation: DeleteBlocksAfter deletes blob-store blocks by
-// ID range, while database.TruncateAfterSlot deletes metadata by slot
-// cutoff. These agree for any normal chain (slots strictly increase with
-// ID) except same-slot blocks — notably Byron epoch boundary blocks — where
-// a higher-ID block sharing target's slot would be removed from the blob
-// store (ID > target.ID) but retained in metadata (slot not > target.Slot).
-// This is pre-Shelley and, in practice, almost always below any recorded
-// Mithril trust boundary; recovering from it is not implemented today.
+// DeleteBlocksAfter deletes blob-store blocks by ID range, while
+// database.TruncateAfterSlot deletes metadata by slot cutoff; these agree
+// for any normal chain (slots strictly increase with ID) except same-slot
+// blocks — notably Byron epoch boundary blocks — where a later block
+// sharing target's own slot would be removed from the blob store (ID >
+// target.ID) but retained in metadata (slot not > target.Slot),
+// diverging the two. Truncate refuses such a target outright (see the
+// same-slot check above) rather than let that divergence happen.
 func Truncate(
 	ctx context.Context,
 	db *database.Database,
@@ -289,6 +289,41 @@ func Truncate(
 			target.Hash,
 			onLineage.Slot,
 			onLineage.Hash,
+		)
+	}
+
+	// Reject, rather than silently diverge, a target immediately followed
+	// by a later block sharing its exact slot (Byron epoch-boundary blocks
+	// are the only case this occurs in practice): DeleteBlocksAfter below
+	// deletes blob-store blocks by ID range, so that later same-slot block
+	// would be removed from the blob store, but database.TruncateAfterSlot
+	// deletes metadata by slot cutoff and would keep its metadata rows,
+	// since they share target's own slot -- leaving transactions,
+	// certificates, UTxOs, and other metadata referencing a block no
+	// longer present in the blob store. BlockAtOrAfterIndex (not
+	// BlockByIndex) seeks past any never-imported ID gap to the next
+	// actually-indexed block, matching ResolveTargetBySlot/ByNumber above;
+	// a gap here means nothing was imported for the chronologically next
+	// block either, so there is no same-slot metadata left to diverge.
+	nextBlock, err := db.BlockAtOrAfterIndex(target.ID+1, nil)
+	if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+		return 0, fmt.Errorf(
+			"%w: check for a same-slot successor block: %w",
+			ErrTruncateNotStarted,
+			err,
+		)
+	}
+	if err == nil && nextBlock.Slot == target.Slot {
+		return 0, fmt.Errorf(
+			"%w: target at id=%d (slot=%d) is immediately followed by "+
+				"another block (id=%d) at the exact same slot -- truncating "+
+				"here would remove that block from the blob store while "+
+				"keeping its metadata, diverging the two; choose a "+
+				"different target",
+			ErrTruncateNotStarted,
+			target.ID,
+			target.Slot,
+			nextBlock.ID,
 		)
 	}
 

@@ -211,7 +211,7 @@ func setBarkFakeCloudNoDeleteBackingDir(t *testing.T, dir string) {
 // manifest: FetchManifest always returns a plain error, never wrapped in
 // lifecycle.ErrCloudSnapshotNotFound. Used to prove that a probe failure
 // distinct from "confirmed not there" is surfaced to the caller rather
-// than silently folded into "not found" (comment-20).
+// than silently folded into "not found".
 type barkFakeCloudDestinationCommError struct{}
 
 func (d *barkFakeCloudDestinationCommError) UploadDir(context.Context, string) error {
@@ -240,7 +240,7 @@ func init() {
 }
 
 // TestBarkFakeCloudBackingDirsResetBetweenTests guards against a leaked
-// global (comment-45): setBarkFakeCloudBackingDir/
+// global: setBarkFakeCloudBackingDir/
 // setBarkFakeCloudNoDeleteBackingDir used to set their package-level
 // backing-dir globals with no corresponding reset, so whichever test
 // happened to set one last left that directory in place for every
@@ -504,7 +504,7 @@ func TestRestoreUnknownIDReturnsNotFound(t *testing.T) {
 }
 
 // TestRestoreReturnsUnavailableOnCloudCommunicationFailure guards against
-// comment-20's original bug: a real cloud communication failure (auth,
+// a real bug: a real cloud communication failure (auth,
 // network, timeout — anything other than a confirmed-absent manifest)
 // while probing the configured cloud destination used to be silently
 // folded into "doesn't exist," so an operator restoring a snapshot whose
@@ -651,7 +651,7 @@ func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
 }
 
 // TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure is
-// DeleteSnapshot's half of the comment-20 regression guard: a snapshot
+// DeleteSnapshot's half of the same regression guard above: a snapshot
 // with no local copy must not be reported (or treated) as "not found"
 // when the cloud probe itself failed to communicate — that could delete
 // nothing while telling the operator there was nothing to delete, when

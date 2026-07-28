@@ -197,7 +197,7 @@ func TestFakeCloudBackingDirResetsBetweenTests(t *testing.T) {
 }
 
 // TestSetFakeCloudBackingDirSerializesConcurrentTests guards against
-// comment-62's gap: setFakeCloudBackingDir previously only guarded each
+// a real gap: setFakeCloudBackingDir previously only guarded each
 // individual read/write of fakeCloudDir, not the whole span of the test
 // that configured it -- so two tests using this fixture concurrently
 // (nothing currently runs them with t.Parallel(), but nothing stops a

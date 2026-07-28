@@ -59,7 +59,7 @@ func TestListSnapshotsSkipsEntriesWithoutValidManifest(t *testing.T) {
 }
 
 // TestListSnapshotsSurfacesCorruptedManifestWithoutHidingGoodEntries guards
-// against a real bug (comment-41): the same blanket "continue" ListSnapshots
+// against a real bug: the same blanket "continue" ListSnapshots
 // used for a snapshot still being written (no manifest.json yet — an
 // expected transient state, covered by
 // TestListSnapshotsSkipsEntriesWithoutValidManifest above) used to also

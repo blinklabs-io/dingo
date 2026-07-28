@@ -171,8 +171,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	// cancellation) and return immediately, while this goroutine was
 	// still blocked inside UnsubscribeAndWait waiting for an in-flight
 	// snapshot handler call to finish — reporting "stopped" to Stop's
-	// caller before an in-flight snapshot handler had actually exited
-	// (comment-50).
+	// caller before an in-flight snapshot handler had actually exited.
 	m.loopWg.Go(func() {
 		<-childCtx.Done()
 		m.mu.Lock()
@@ -406,6 +405,36 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 	for _, epoch := range toRemove {
 		epochName := fmt.Sprintf("%s%d", epochSnapshotDirPrefix, epoch)
 		dir := filepath.Join(m.cfg.SnapshotDir, epochName)
+
+		// Cloud deletion must happen before the local directory is
+		// removed, not after: the next pruning pass rediscovers retry
+		// candidates by scanning this local SnapshotDir for epoch-*
+		// directories, so removing dir first and then failing to delete
+		// its cloud mirror would permanently orphan that cloud copy —
+		// nothing would ever select it for a retry again, and retention
+		// would no longer bound cloud storage at all.
+		if m.cfg.SnapshotCloudDestination != "" {
+			cloudURI := lifecycle.JoinCloudURI(m.cfg.SnapshotCloudDestination, epochName)
+			ok, err := lifecycle.DeleteCloudSnapshot(ctx, cloudURI)
+			if err != nil {
+				m.logger.Warn(
+					"failed to prune old automatic snapshot's cloud mirror, "+
+						"keeping local copy so a later pruning pass can retry",
+					"component", "dblifecycle",
+					"cloud_uri", cloudURI,
+					"error", err,
+				)
+				continue
+			}
+			if ok {
+				m.logger.Info(
+					"pruned old automatic database snapshot's cloud mirror",
+					"component", "dblifecycle",
+					"cloud_uri", cloudURI,
+				)
+			}
+		}
+
 		if err := os.RemoveAll(dir); err != nil {
 			m.logger.Warn(
 				"failed to prune old automatic snapshot",
@@ -420,30 +449,5 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 			"component", "dblifecycle",
 			"dir", dir,
 		)
-
-		if m.cfg.SnapshotCloudDestination == "" {
-			continue
-		}
-		// Best-effort, like the local removal above: logged, not
-		// propagated, since a cloud-delete failure must never be
-		// reported as a snapshot failure or retried by this same code
-		// path (the local copy is already gone either way).
-		cloudURI := lifecycle.JoinCloudURI(m.cfg.SnapshotCloudDestination, epochName)
-		ok, err := lifecycle.DeleteCloudSnapshot(ctx, cloudURI)
-		switch {
-		case err != nil:
-			m.logger.Warn(
-				"failed to prune old automatic snapshot's cloud mirror",
-				"component", "dblifecycle",
-				"cloud_uri", cloudURI,
-				"error", err,
-			)
-		case ok:
-			m.logger.Info(
-				"pruned old automatic database snapshot's cloud mirror",
-				"component", "dblifecycle",
-				"cloud_uri", cloudURI,
-			)
-		}
 	}
 }

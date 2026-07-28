@@ -312,6 +312,56 @@ func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
 	}
 }
 
+// TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock guards
+// against a real blob/metadata divergence bug: if the block
+// immediately after target shares its exact slot (the Byron epoch-
+// boundary-block pattern), DeleteBlocksAfter would remove that later
+// block from the blob store by ID, while database.TruncateAfterSlot's
+// slot-based cutoff would keep its metadata rows, since they share
+// target's own slot -- leaving transactions/certificates/UTxOs and other
+// metadata for a block no longer present in the blob store. Truncate must
+// refuse such a target outright, before deleting anything, rather than
+// let that divergence happen.
+func TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock(t *testing.T) {
+	db := newTestDB(t)
+
+	block1 := testBlock(1, 0x01)
+	require.NoError(t, db.BlockCreate(block1, nil))
+
+	// block2 shares block1's slot -- the Byron pattern where an epoch
+	// boundary block and the epoch's first regular block occupy the same
+	// slot -- and immediately follows it in the ID space.
+	block2 := testBlock(2, 0x02)
+	block2.Slot = block1.Slot
+	require.NoError(t, db.BlockCreate(block2, nil))
+
+	block3 := testBlock(3, 0x03)
+	require.NoError(t, db.BlockCreate(block3, nil))
+
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: block3.Slot, Hash: block3.Hash},
+		BlockNumber: block3.Number,
+	}, nil))
+
+	_, err := lifecycle.Truncate(context.Background(), db, block1, 0, false, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+	require.ErrorContains(t, err, "same slot")
+
+	// Nothing must have been touched: block2 and block3 must still exist.
+	_, err = database.BlockByHash(db, block2.Hash)
+	require.NoError(t, err, "block2 must survive a rejected truncate")
+	_, err = database.BlockByHash(db, block3.Hash)
+	require.NoError(t, err, "block3 must survive a rejected truncate")
+
+	// A target with no same-slot successor (block2 itself: block3's slot
+	// differs) must still be allowed -- the rejection is specific to the
+	// same-slot case, not a blanket block on this chain.
+	blocksRemoved, err := lifecycle.Truncate(context.Background(), db, block2, 0, false, 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), blocksRemoved)
+}
+
 // TestTruncateRejectsTargetBeforeMithrilBoundary verifies that a target
 // before the recorded Mithril floor is refused, but exactly at it is allowed.
 func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {

@@ -1144,7 +1144,7 @@ func TestChainsyncStallRecyclerExitsOnCancel(t *testing.T) {
 }
 
 // TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu guards
-// against comment-49's original bug: the recycler's one-time startup read
+// against a real bug: the recycler's one-time startup read
 // of n.ledgerState.Tip() (run whenever the loop (re)starts, e.g. after a
 // caught panic restarts it) took n.liveLifecycleMu.Lock() unconditionally
 // -- a plain blocking Lock() that cancellation cannot interrupt. Since
@@ -1229,7 +1229,7 @@ func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.
 }
 
 // TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds guards
-// against comment-22's original bug: the recycler's tick handler
+// against a real bug: the recycler's tick handler
 // dereferenced n.ledgerState/n.chainsyncState many times (well past its
 // own initial nil-check) without holding any lock, while a live
 // restore/truncate reassigns those exact fields concurrently under

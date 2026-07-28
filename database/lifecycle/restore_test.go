@@ -179,7 +179,7 @@ var manifestOnlyFixture = lifecycle.Manifest{
 }
 
 // TestPeekManifestUsesLightweightCloudFetchWithoutDownloading guards
-// against comment-60's original gap: PeekManifest used to always go
+// against a real gap: PeekManifest used to always go
 // through the full download-based resolveManifest path, even for a
 // cloud snapshotDir whose destination type supports fetching just the
 // one manifest.json object via CloudManifestFetcher -- downloading the

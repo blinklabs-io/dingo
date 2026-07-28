@@ -66,7 +66,7 @@ func TestSnapshotRefusesExistingDirectory(t *testing.T) {
 }
 
 // TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents guards
-// against a real data-loss bug (comment-15): two concurrent Snapshot
+// against a real data-loss bug: two concurrent Snapshot
 // calls racing to the same dir used to both pass an initial
 // os.Stat-then-MkdirAll check (MkdirAll doesn't error on an existing
 // directory, and the Stat-then-MkdirAll gap is a TOCTOU race even if it
@@ -97,7 +97,7 @@ func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(t *testing.T)
 }
 
 // TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact is the
-// direct concurrency regression test for comment-15: several Snapshot
+// direct concurrency regression test for the same data-loss bug above: several Snapshot
 // calls racing to create the exact same, not-yet-existing dir used to be
 // able to all pass an os.Stat-then-MkdirAll check (MkdirAll doesn't error
 // on an existing directory, and Stat-then-MkdirAll has a TOCTOU gap

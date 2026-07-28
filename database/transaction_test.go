@@ -203,7 +203,7 @@ func (m *mockBlobTxn) Rollback() error {
 }
 
 // TestMithrilTrustBoundarySlotStrictPropagatesReadError guards against
-// comment-14's original bug: database/lifecycle.Truncate's safety check
+// a real bug: database/lifecycle.Truncate's safety check
 // against the Mithril trust boundary used MithrilTrustBoundarySlot, which
 // silently treats a failed sync-state read the same as "no boundary
 // recorded" (returns 0) — bypassing the safety check entirely on a

@@ -37,6 +37,13 @@ import (
 // is closed again before returning — the caller is responsible for
 // (re)opening it for real use.
 //
+// The actual restore work happens in a sibling staging directory, only
+// atomically renamed into targetDataDir once fully validated — see
+// RestoreValidated's doc comment for why: an interruption (including one
+// the caller's process cannot catch, e.g. a plain, non-signal-handled
+// process kill) leaves targetDataDir completely untouched rather than
+// half-restored.
+//
 // snapshotDir may instead be a cloud destination URI (s3://bucket/prefix
 // or gcs://bucket/prefix; see RegisterCloudDestinationScheme) — Restore
 // downloads it into a local temp directory first, then proceeds exactly
@@ -70,6 +77,21 @@ func Restore(
 // restore, without paying for a second cloud download to re-resolve the
 // manifest it already checked: calling PeekManifest and then Restore
 // separately would download a cloud snapshotDir twice.
+//
+// Interruption safety: every actual restore step (metadata restore, blob
+// restore, validateRestoredDatabase) runs against a sibling staging
+// directory (targetDataDir + ".restore-staging"), never targetDataDir
+// itself. Only once all of them succeed is the staging directory
+// atomically renamed into targetDataDir's place. A caller whose context
+// is cancelled mid-restore, or whose process is killed outright (a plain
+// SIGKILL, or any termination path that skips Go's deferred cleanup —
+// notably, the offline `dingo database restore` CLI's default process
+// termination does not install a signal-aware context, so an operator's
+// Ctrl+C takes this path, not graceful cancellation), is left with
+// targetDataDir exactly as it was before the call: absent, or the same
+// empty directory requireEmptyOrAbsent confirmed. The half-restored
+// staging directory (if any) is simply an orphaned sibling that a retry's
+// own os.RemoveAll(stagingDir) clears on its next attempt.
 func RestoreValidated(
 	ctx context.Context,
 	snapshotDir string,
@@ -92,16 +114,41 @@ func RestoreValidated(
 	if err := requireEmptyOrAbsent(targetDataDir); err != nil {
 		return Manifest{}, err
 	}
-	if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
+
+	// Restore into a sibling staging directory rather than targetDataDir
+	// directly, and only atomically rename it into place once every step
+	// below has fully succeeded. This is what makes an interruption
+	// partway through -- a process kill via SIGINT/SIGTERM, which the
+	// default Go runtime does not run deferred cleanup for -- leave
+	// targetDataDir completely untouched (absent, or still the empty
+	// directory requireEmptyOrAbsent just confirmed) instead of half-
+	// restored: the rename below is a single atomic filesystem operation
+	// on the same volume, so there is no window where targetDataDir could
+	// ever observe a partial write. Mirrors node_lifecycle.go's identical
+	// staging-then-swap pattern for the live restore path.
+	stagingDir := targetDataDir + ".restore-staging"
+	if err := os.RemoveAll(stagingDir); err != nil {
 		return Manifest{}, fmt.Errorf(
-			"create target data directory %q: %w", targetDataDir, err,
+			"clear restore staging directory %q: %w", stagingDir, err,
+		)
+	}
+	if err := os.MkdirAll(filepath.Dir(targetDataDir), 0o755); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"create parent directory for %q: %w", targetDataDir, err,
+		)
+	}
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"create restore staging directory %q: %w", stagingDir, err,
 		)
 	}
 	// Best-effort cleanup on any failure below so a retry doesn't hit a
-	// half-restored directory that looks superficially non-empty.
+	// half-restored staging directory that looks superficially non-empty
+	// -- targetDataDir itself is never touched until the rename below
+	// succeeds, so it needs no equivalent cleanup.
 	defer func() {
 		if err != nil {
-			_ = os.RemoveAll(targetDataDir)
+			_ = os.RemoveAll(stagingDir)
 		}
 	}()
 
@@ -111,14 +158,32 @@ func RestoreValidated(
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 
-	if err := restoreMetadataStore(ctx, host, manifest, snapshotDir, targetDataDir); err != nil {
+	if err := restoreMetadataStore(ctx, host, manifest, snapshotDir, stagingDir); err != nil {
 		return Manifest{}, err
 	}
-	if err := restoreBlobStore(ctx, host, manifest, snapshotDir, targetDataDir); err != nil {
+	if err := restoreBlobStore(ctx, host, manifest, snapshotDir, stagingDir); err != nil {
 		return Manifest{}, err
 	}
-	if err := validateRestoredDatabase(ctx, host, manifest, targetDataDir); err != nil {
+	if err := validateRestoredDatabase(ctx, host, manifest, stagingDir); err != nil {
 		return Manifest{}, err
+	}
+
+	// Every step above is validated against the staging copy; activate it
+	// with one atomic rename. targetDataDir was already confirmed empty
+	// or absent above and has not been touched since, so clearing it
+	// first (a no-op if absent, and safe since it's empty if present --
+	// some platforms' rename cannot replace an existing directory at
+	// all) cannot lose anything.
+	if err := os.RemoveAll(targetDataDir); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"clear target data directory %q before activating restore: %w",
+			targetDataDir, err,
+		)
+	}
+	if err := os.Rename(stagingDir, targetDataDir); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"activate restored data directory: %w", err,
+		)
 	}
 
 	return manifest, nil

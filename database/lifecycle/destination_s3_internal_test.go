@@ -39,7 +39,7 @@ func TestIsS3NotFoundErrorMatchesTypedNotFound(t *testing.T) {
 }
 
 // TestIsS3NotFoundErrorMatchesGenericNotFoundCode guards against
-// comment-59's original gap: an S3-compatible (non-AWS) endpoint can
+// a real gap: an S3-compatible (non-AWS) endpoint can
 // report a missing key as a generic, untyped API error whose ErrorCode()
 // is "NotFound" without the SDK ever deserializing it into the strongly-
 // typed s3types.NotFound struct -- errors.As for that concrete type alone

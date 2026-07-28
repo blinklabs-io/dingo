@@ -11,7 +11,7 @@ import (
 )
 
 // TestUnsubscribeAndWaitStillWaitsAfterConcurrentPlainUnsubscribe guards
-// against comment-28's original bug: unsubscribe only found the
+// against a real bug: unsubscribe only found the
 // subscriber to Close/wait on via e.subscribers, which holds exactly one
 // entry per subId -- so whichever of two concurrent calls for the same
 // subId ran first (here, a plain Unsubscribe) removed that entry, leaving
@@ -62,7 +62,7 @@ func TestUnsubscribeAndWaitStillWaitsAfterConcurrentPlainUnsubscribe(t *testing.
 	)
 }
 
-// TestUnsubscribeIgnoresMismatchedEventType guards against comment-56's
+// TestUnsubscribeIgnoresMismatchedEventType guards against a real
 // bug: channelSubsById is keyed by subId alone, with no eventType
 // dimension, so Unsubscribe/UnsubscribeAndWait called with a subId that's
 // valid but registered under a DIFFERENT eventType than the one passed in
@@ -120,7 +120,7 @@ func TestUnsubscribeIgnoresMismatchedEventType(t *testing.T) {
 }
 
 // TestStopClearsPlainSubscribeEntriesFromChannelSubsById guards against
-// comment-57's original leak: shutdown (run by both Stop and Close)
+// a real leak: shutdown (run by both Stop and Close)
 // closed every subscriber but never removed a plain Subscribe/
 // SubscribeWithBuffer subscriber's channelSubsById entry -- a
 // SubscribeFunc dispatch goroutine self-removes its own entry as it

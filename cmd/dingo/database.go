@@ -18,6 +18,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os/signal"
+	"syscall"
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -89,7 +91,28 @@ func databaseRestoreCommand() *cobra.Command {
 			}
 			logger := commonRun(cfg)
 			svc := dblifecycle.NewService(cfg, logger)
-			manifest, err := svc.Restore(cmd.Context(), args[0])
+
+			// Restore can run for a long time against a large database,
+			// and Cobra's default cmd.Context() is a plain
+			// context.Background() with no signal handling wired in
+			// anywhere above this command -- without this, an operator's
+			// Ctrl+C (SIGINT) or a SIGTERM would not cancel ctx at all,
+			// leaving Restore no way to notice the interrupt and return
+			// cleanly (only the default Go runtime behavior of killing
+			// the process outright, skipping every deferred cleanup).
+			// database/lifecycle.RestoreValidated's staging-directory-
+			// plus-atomic-rename design already ensures the configured
+			// data directory itself is left untouched either way, but a
+			// signal-aware context here is what lets a well-behaved
+			// interrupt (this one) actually be observed by Restore and
+			// fail fast, matching how internal/node/node.go's serve path
+			// installs the same signal handling for the live node.
+			ctx, stop := signal.NotifyContext(
+				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
+			)
+			defer stop()
+
+			manifest, err := svc.Restore(ctx, args[0])
 			if err != nil {
 				return fmt.Errorf("restore: %w", err)
 			}
