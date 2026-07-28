@@ -420,8 +420,7 @@ func TestGetBlock_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
 	_, _, err := store.GetBlock(
 		rTxn, requested.SlotNumber(), requestedHash[:],
 	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hash")
+	require.ErrorIs(t, err, ErrArchiveBlockHashMismatch)
 }
 
 // TestGetBlock_RejectsUndecodableArchiveBlock covers an archive response that
@@ -441,8 +440,7 @@ func TestGetBlock_RejectsUndecodableArchiveBlock(t *testing.T) {
 
 	hash := block.Hash()
 	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decod")
+	require.ErrorIs(t, err, ErrArchiveBlockUndecodable)
 }
 
 // TestGetBlock_RejectsArchiveBlockSlotMismatch covers a block whose bytes are
@@ -461,8 +459,7 @@ func TestGetBlock_RejectsArchiveBlockSlotMismatch(t *testing.T) {
 
 	hash := block.Hash()
 	_, _, err := store.GetBlock(rTxn, block.SlotNumber()+1, hash[:])
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "slot")
+	require.ErrorIs(t, err, ErrArchiveBlockSlotMismatch)
 }
 
 // TestGetBlock_RejectsArchiveMetadataMismatch covers Bark-supplied metadata
@@ -503,7 +500,9 @@ func TestGetBlock_RejectsArchiveMetadataMismatch(t *testing.T) {
 			t.Cleanup(func() { _ = rTxn.Rollback() })
 
 			_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrArchiveMetadataMismatch)
+			// The sentinel pins the code path; the detail distinguishes
+			// which field disagreed.
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
@@ -560,9 +559,8 @@ func TestBarkIterator_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
 		}
 		sawExpired = true
 		_, err := item.ValueCopy(nil)
-		require.Error(t, err,
+		require.ErrorIs(t, err, ErrArchiveBlockHashMismatch,
 			"iterator must not surface a block the archive substituted")
-		assert.Contains(t, err.Error(), "hash")
 	}
 	require.NoError(t, it.Err())
 	require.True(t, sawExpired, "iterator did not visit the bp key")

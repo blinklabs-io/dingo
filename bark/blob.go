@@ -420,6 +420,33 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	return blockBody, meta, nil
 }
 
+// Errors reported when an archive response fails local verification. They are
+// distinct from transport failures on purpose: a transport error is worth
+// retrying, whereas these mean the archive served something that is not the
+// block that was asked for, and its answers cannot be trusted as chain data.
+var (
+	// ErrArchiveBlockUndecodable reports an archive response body that does
+	// not decode as a block of the type the archive claimed.
+	ErrArchiveBlockUndecodable = errors.New(
+		"bark: archive block could not be decoded",
+	)
+	// ErrArchiveBlockHashMismatch reports a decoded block whose computed
+	// hash is not the hash that was requested.
+	ErrArchiveBlockHashMismatch = errors.New(
+		"bark: archive block hash does not match the requested hash",
+	)
+	// ErrArchiveBlockSlotMismatch reports a decoded block that does not sit
+	// at the slot that was requested.
+	ErrArchiveBlockSlotMismatch = errors.New(
+		"bark: archive block slot does not match the requested slot",
+	)
+	// ErrArchiveMetadataMismatch reports archive-supplied metadata that
+	// contradicts the contents of the verified block it accompanied.
+	ErrArchiveMetadataMismatch = errors.New(
+		"bark: archive metadata contradicts the block",
+	)
+)
+
 // verifyArchiveBlock establishes locally that the bytes the archive returned
 // really are the block that was requested. Bark chooses both the download URL
 // and the response body, so it can only be trusted to store blocks, not to
@@ -440,19 +467,21 @@ func verifyArchiveBlock(
 	decoded, err := gledger.NewBlockFromCbor(blockType, body)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"bark: decoding archive block for slot %d: %w", slot, err,
+			"%w: slot %d, type %d: %w",
+			ErrArchiveBlockUndecodable, slot, blockType, err,
 		)
 	}
 	decodedHash := decoded.Hash()
 	if !bytes.Equal(decodedHash[:], hash) {
 		return nil, fmt.Errorf(
-			"bark: archive returned block with hash %x for requested hash %x",
-			decodedHash[:], hash,
+			"%w: got %x, requested %x",
+			ErrArchiveBlockHashMismatch, decodedHash[:], hash,
 		)
 	}
 	if decoded.SlotNumber() != slot {
 		return nil, fmt.Errorf(
-			"bark: archive block %x is at slot %d, requested slot %d",
+			"%w: block %x is at slot %d, requested slot %d",
+			ErrArchiveBlockSlotMismatch,
 			decodedHash[:], decoded.SlotNumber(), slot,
 		)
 	}
@@ -475,15 +504,15 @@ func archiveBlockMetadata(
 	height := decoded.BlockNumber()
 	if archiveHeight != 0 && archiveHeight != height {
 		return types.BlockMetadata{}, fmt.Errorf(
-			"bark: archive reported height %d for block at height %d",
-			archiveHeight, height,
+			"%w: reported height %d, block height %d",
+			ErrArchiveMetadataMismatch, archiveHeight, height,
 		)
 	}
 	prevHash := decoded.PrevHash()
 	if len(archivePrevHash) > 0 && !bytes.Equal(archivePrevHash, prevHash[:]) {
 		return types.BlockMetadata{}, fmt.Errorf(
-			"bark: archive reported previous hash %x for block whose previous hash is %x",
-			archivePrevHash, prevHash[:],
+			"%w: reported previous hash %x, block previous hash %x",
+			ErrArchiveMetadataMismatch, archivePrevHash, prevHash[:],
 		)
 	}
 	blockType := decoded.Type()
