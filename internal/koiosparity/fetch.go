@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,31 @@ type FetchResult struct {
 	PoolsFetched  int
 	FromEpoch     uint64
 	ThroughEpoch  uint64
+	// FailedEpochs lists epochs that hit a transient, isolated fetch failure
+	// (see transientEpochFetchErr) and were skipped rather than aborting the
+	// rest of the run. They remain uncached and are retried by a future
+	// fetch run via GetUncachedEpochs.
+	FailedEpochs []uint64
+}
+
+// transientEpochFetchErr marks a per-epoch HTTP-level fetch failure (epoch
+// info, totals, or a single pool's history request exhausting its retries)
+// as isolated to that one epoch rather than systematic. Unlike a validation
+// error (e.g. an unexpected null active_stake, which recurs on every
+// subsequent epoch and is worth stopping the whole batch for immediately),
+// a transient failure — most often a brief Koios backend blip on one request
+// among many thousands — has no reason to affect any other epoch, so the
+// dispatcher in Fetch skips just this epoch instead of cancelling every
+// other in-flight epoch in the batch.
+type transientEpochFetchErr struct {
+	err error
+}
+
+func (e *transientEpochFetchErr) Error() string { return e.err.Error() }
+func (e *transientEpochFetchErr) Unwrap() error { return e.err }
+
+func transientErr(err error) error {
+	return &transientEpochFetchErr{err: err}
 }
 
 // Fetch pulls Koios data into the cache, resuming from the last cached epoch.
@@ -94,6 +120,15 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	poolIDs, err := koios.GetAllHistoricalPoolIDs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get historical pool IDs: %w", err)
+	}
+
+	// Each pool's true first-active epoch, used to skip /pool_history calls
+	// for epochs before a pool could possibly have any data — see
+	// GetPoolFirstActiveEpochs for why this must come from /pool_updates and
+	// not /pool_list's active_epoch_no. Also hoisted once per Fetch run.
+	firstActiveEpochs, err := koios.GetPoolFirstActiveEpochs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get pool first-active epochs: %w", err)
 	}
 
 	// Build list of epochs to fetch.
@@ -193,8 +228,24 @@ loop:
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			cnt, fetchErr := fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, logger)
+			cnt, fetchErr := fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, firstActiveEpochs, logger)
 			if fetchErr != nil {
+				if transient, ok := errors.AsType[*transientEpochFetchErr](fetchErr); ok {
+					// Isolated to this epoch (e.g. one flaky Koios 5xx among
+					// thousands of requests this run makes) — skip it rather
+					// than cancelling every other in-flight epoch. It stays
+					// uncached and is retried by a future fetch run.
+					mu.Lock()
+					result.FailedEpochs = append(result.FailedEpochs, epoch)
+					mu.Unlock()
+					logger.Warn("koiosparity: epoch fetch failed transiently, skipping (will retry on next run)",
+						"network", cfg.Network,
+						"epoch", epoch,
+						"error", transient,
+					)
+					epochsDone.Add(1)
+					return
+				}
 				select {
 				case errCh <- fmt.Errorf("epoch %d: %w", epoch, fetchErr):
 				default:
@@ -237,6 +288,17 @@ loop:
 	default:
 	}
 
+	if len(result.FailedEpochs) > 0 {
+		slices.Sort(result.FailedEpochs)
+		logger.Warn("koiosparity: fetch complete with transient failures",
+			"network", cfg.Network,
+			"epochs", result.EpochsFetched,
+			"pools", result.PoolsFetched,
+			"failed_epochs", result.FailedEpochs,
+		)
+		return result, nil
+	}
+
 	logger.Info("koiosparity: fetch complete",
 		"network", cfg.Network,
 		"epochs", result.EpochsFetched,
@@ -258,12 +320,13 @@ func fetchEpoch(
 	network string,
 	epoch uint64,
 	poolIDs []string,
+	firstActiveEpochs map[string]uint64,
 	logger *slog.Logger,
 ) (int, error) {
 	// 1. Fetch epoch info (not written yet).
 	info, err := koios.GetEpochInfo(ctx, epoch)
 	if err != nil {
-		return 0, fmt.Errorf("get epoch info: %w", err)
+		return 0, transientErr(fmt.Errorf("get epoch info: %w", err))
 	}
 
 	// Validate all rejection conditions before any DB writes so an incomplete
@@ -304,7 +367,7 @@ func fetchEpoch(
 			LastBlockTime:  unixTime(info.LastBlockTime),
 			AvgBlkReward:   strOrEmpty(info.AvgBlkReward),
 			FetchedAt:      time.Now(),
-		}, nil); err != nil {
+		}, nil, nil); err != nil {
 			return 0, fmt.Errorf("commit pre-staking marker: %w", err)
 		}
 		logger.Info("koiosparity: epoch predates staking, marking permanently unfetchable",
@@ -341,7 +404,31 @@ func fetchEpoch(
 	outSum := strOrEmpty(info.OutSum)
 	avgBlkReward := strOrEmpty(info.AvgBlkReward)
 
+	// 1b. Fetch /totals — a single extra request, so fetched sequentially
+	// rather than added to the per-pool worker pool below. Any failure aborts
+	// the epoch the same way an epoch_info failure does, rather than caching
+	// epoch_info/pool rows with a permanently missing totals row.
+	totalsResp, err := koios.GetTotals(ctx, epoch)
+	if err != nil {
+		return 0, transientErr(fmt.Errorf("get totals: %w", err))
+	}
+
 	now := time.Now()
+
+	// 1c. Skip pools that could not possibly have any history yet this
+	// epoch — cuts wasted requests substantially on early epochs, when most
+	// of the network's ever-registered pools (firstActiveEpochs is hoisted
+	// once for the whole historical pool set) don't exist yet.
+	activePoolIDs := poolIDs
+	if len(firstActiveEpochs) > 0 {
+		activePoolIDs = make([]string, 0, len(poolIDs))
+		for _, id := range poolIDs {
+			if first, ok := firstActiveEpochs[id]; ok && epoch < first {
+				continue
+			}
+			activePoolIDs = append(activePoolIDs, id)
+		}
+	}
 
 	// 2. Fetch per-pool epoch history rows in parallel.
 	// Pool rows are accumulated in memory and written atomically at the end so
@@ -353,7 +440,7 @@ func fetchEpoch(
 	var poolMu sync.Mutex
 	poolErrCh := make(chan error, 1)
 	var poolsDone atomic.Int64
-	poolTotal := len(poolIDs)
+	poolTotal := len(activePoolIDs)
 
 	// A single epoch can require a request per pool (up to ~1200 on preview),
 	// so surface progress mid-epoch rather than only after it fully commits.
@@ -382,7 +469,7 @@ func fetchEpoch(
 	// An early return here would let running goroutines race poolRows after
 	// the caller proceeds.
 outer:
-	for _, poolID := range poolIDs {
+	for _, poolID := range activePoolIDs {
 		select {
 		case <-ctx.Done():
 			break outer
@@ -451,7 +538,7 @@ outer:
 
 	select {
 	case err := <-poolErrCh:
-		return 0, err
+		return 0, transientErr(err)
 	default:
 	}
 
@@ -477,7 +564,21 @@ outer:
 		LastBlockTime:  unixTime(info.LastBlockTime),
 		AvgBlkReward:   avgBlkReward,
 		FetchedAt:      now,
-	}, poolRows); err != nil {
+	}, poolRows, &KoiosTotals{
+		Treasury:           totalsResp.Treasury,
+		Reserves:           totalsResp.Reserves,
+		Fees:               totalsResp.Fees,
+		Reward:             totalsResp.Reward,
+		Circulation:        totalsResp.Circulation,
+		Supply:             totalsResp.Supply,
+		DepositsStake:      totalsResp.DepositsStake,
+		DepositsDRep:       totalsResp.DepositsDRep,
+		DepositsProposal:   totalsResp.DepositsProposal,
+		TreasuryDonation:   totalsResp.TreasuryDonation,
+		TreasuryWithdrawal: totalsResp.TreasuryWithdrawal,
+		ReservesWithdrawal: totalsResp.ReservesWithdrawal,
+		FetchedAt:          now,
+	}); err != nil {
 		return 0, fmt.Errorf("commit epoch: %w", err)
 	}
 

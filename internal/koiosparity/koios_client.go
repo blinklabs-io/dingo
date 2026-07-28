@@ -117,6 +117,47 @@ type KoiosTipResp struct {
 	EpochNo uint64 `json:"epoch_no"`
 }
 
+// KoiosTotalsResp is the Koios /totals response shape, covering every field
+// in the documented schema (components/schemas/totals in
+// https://api.koios.rest/koiosapi.yaml).
+//
+// /totals and /epoch_info both have a "fees" field, and /totals additionally
+// has "reward" versus /epoch_info's "total_rewards" — these are NOT the same
+// quantities despite the naming overlap:
+//   - epoch_info.fees is the sum of transaction fees for txs included in that
+//     epoch's blocks (raw block/tx accounting).
+//   - totals.fees is "the amount in the fee pot" — the ledger AdaPots fee-pot
+//     value at the epoch boundary, which is what Dingo's reward_ada_pots.Fees
+//     actually stores. Verified empirically against a live preview node: for
+//     the same epoch, totals.fees matched Dingo's reward_ada_pots.Fees
+//     exactly while epoch_info.fees did not.
+//   - Similarly, totals.reward ("rewards accumulated as of given epoch", the
+//     AdaPots reward-pot value) is compared against reward_ada_pots.Rewards
+//     independently of epoch_info.total_rewards — see CompareEpochTotals.
+type KoiosTotalsResp struct {
+	EpochNo uint64 `json:"epoch_no"`
+	// Circulation, Supply, DepositsStake, DepositsDRep, DepositsProposal,
+	// TreasuryDonation, TreasuryWithdrawal, and ReservesWithdrawal are stored
+	// for reference (see KoiosTotals) but not compared: Dingo's AdaPots model
+	// (models.RewardAdaPots) only tracks treasury/reserves/rewards/fees — the
+	// same four pots the core ledger AdaPots type tracks. Circulation/supply
+	// require a live UTxO-set scan and the deposit/donation/withdrawal fields
+	// require replaying registration/deregistration/governance events; both
+	// are out of scope for this cache-based checker.
+	Circulation        string `json:"circulation"`
+	Treasury           string `json:"treasury"`
+	Reward             string `json:"reward"`
+	Supply             string `json:"supply"`
+	Reserves           string `json:"reserves"`
+	Fees               string `json:"fees"`
+	DepositsStake      string `json:"deposits_stake"`
+	DepositsDRep       string `json:"deposits_drep"`
+	DepositsProposal   string `json:"deposits_proposal"`
+	TreasuryDonation   string `json:"treasury_donation"`
+	TreasuryWithdrawal string `json:"treasury_withdrawal"`
+	ReservesWithdrawal string `json:"reserves_withdrawal"`
+}
+
 // KoiosClient queries the Koios v1 REST API.
 type KoiosClient struct {
 	baseURL string
@@ -397,6 +438,27 @@ func (k *KoiosClient) GetEpochInfo(ctx context.Context, epoch uint64) (*KoiosEpo
 	return &items[0], nil
 }
 
+// GetTotals fetches network-wide tokenomic totals (treasury, reserves,
+// rewards, fees, etc.) for a specific epoch.
+func (k *KoiosClient) GetTotals(ctx context.Context, epoch uint64) (*KoiosTotalsResp, error) {
+	path := fmt.Sprintf("/totals?_epoch_no=%d", epoch)
+	resp, err := k.get(ctx, path, -1, -1)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("koios /totals: status %d body: %s", resp.StatusCode, resp.Body)
+	}
+	var items []KoiosTotalsResp
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return nil, fmt.Errorf("koios /totals decode: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("koios /totals: no data for epoch %d", epoch)
+	}
+	return &items[0], nil
+}
+
 // GetAllHistoricalPoolIDs returns the bech32 ID of every pool known to Koios,
 // including pools that have since retired (pool_status = "retired").
 //
@@ -437,6 +499,61 @@ func (k *KoiosClient) GetAllHistoricalPoolIDs(ctx context.Context) ([]string, er
 		}
 	}
 	return ids, nil
+}
+
+// GetPoolFirstActiveEpochs returns, for every pool with at least one
+// documented update, the earliest active_epoch_no across its full
+// registration/update history — the epoch it first became eligible for
+// delegation and could have any /pool_history row.
+//
+// /pool_list's own active_epoch_no is NOT usable for this: it reflects only
+// the pool's CURRENT (most recent) registration. A pool that updated its
+// pledge/margin/etc. after its original registration would report an
+// active_epoch_no long after its true first-active epoch, and treating that
+// later epoch as a lower bound would wrongly skip real history for every
+// epoch in between. /pool_updates instead returns one row per historical
+// update (across ALL pools, paginated, no per-pool request needed), so the
+// minimum active_epoch_no per pool here is a safe, correct lower bound.
+func (k *KoiosClient) GetPoolFirstActiveEpochs(ctx context.Context) (map[string]uint64, error) {
+	type updateItem struct {
+		PoolIDBech32  string  `json:"pool_id_bech32"`
+		ActiveEpochNo *uint64 `json:"active_epoch_no"`
+	}
+	first := make(map[string]uint64)
+	for start := 0; ; start += koiosPageSize {
+		end := start + koiosPageSize - 1
+		resp, err := k.get(ctx, "/pool_updates?select=pool_id_bech32,active_epoch_no", start, end)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			return nil, fmt.Errorf("koios /pool_updates: status %d body: %s", resp.StatusCode, resp.Body)
+		}
+		var page []updateItem
+		if err := json.Unmarshal(resp.Body, &page); err != nil {
+			return nil, fmt.Errorf("koios /pool_updates decode: %w", err)
+		}
+		for _, item := range page {
+			// Null active_epoch_no is not documented but defensively skipped
+			// rather than treated as epoch 0 — better to miss this
+			// optimization for one pool than to draw a wrong conclusion from
+			// a null value.
+			if item.ActiveEpochNo == nil {
+				continue
+			}
+			if cur, ok := first[item.PoolIDBech32]; !ok || *item.ActiveEpochNo < cur {
+				first[item.PoolIDBech32] = *item.ActiveEpochNo
+			}
+		}
+		if len(page) < koiosPageSize {
+			break
+		}
+		total := parseTotalFromContentRange(resp.Header.Get("Content-Range"))
+		if total > 0 && start+len(page) >= total {
+			break
+		}
+	}
+	return first, nil
 }
 
 // GetPoolEpochHistory fetches a pool's history entry for a specific epoch.

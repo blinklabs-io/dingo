@@ -76,5 +76,12 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		result.EpochsFetched, result.PoolsFetched,
 		result.FromEpoch, result.ThroughEpoch,
 	)
+	if len(result.FailedEpochs) > 0 {
+		fmt.Printf("warning: %d epoch(s) hit a transient fetch failure and remain uncached: %v\n"+
+			"  they will be retried automatically on the next `fetch` run\n",
+			len(result.FailedEpochs), result.FailedEpochs,
+		)
+		return fmt.Errorf("%d epoch(s) failed transiently; rerun fetch to retry", len(result.FailedEpochs))
+	}
 	return nil
 }

@@ -53,6 +53,8 @@ type DingoEpochData struct {
 	TotalActiveStake string // lovelace decimal string (matches Koios format)
 	Fees             string // lovelace decimal string; empty when reward_ada_pots row absent
 	TotalRewards     string // lovelace decimal string from reward_ada_pots.rewards; empty when absent
+	Treasury         string // lovelace decimal string from reward_ada_pots.treasury; empty when absent
+	Reserves         string // lovelace decimal string from reward_ada_pots.reserves; empty when absent
 }
 
 // DingoPoolEpochData holds per-pool reward-input data for one epoch,
@@ -190,6 +192,8 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 	} else {
 		data.Fees = strconv.FormatUint(uint64(pots.Fees), 10)
 		data.TotalRewards = strconv.FormatUint(uint64(pots.Rewards), 10)
+		data.Treasury = strconv.FormatUint(uint64(pots.Treasury), 10)
+		data.Reserves = strconv.FormatUint(uint64(pots.Reserves), 10)
 	}
 
 	return data, nil

@@ -179,6 +179,96 @@ func CompareEpochAggregates(
 	return out
 }
 
+// CompareEpochTotals compares Koios /totals fields against Dingo's database
+// for the given epoch.
+//
+// This is independent of CompareEpochAggregates, which compares /epoch_info
+// fields. /totals and /epoch_info share a "fees" field name (and "reward" /
+// "total_rewards" name similarly) that are NOT the same quantity — see the
+// KoiosTotalsResp doc comment for the distinction, confirmed empirically
+// against a live preview node. Field names below are prefixed "totals_" so a
+// mismatch report never conflates a /totals discrepancy with an /epoch_info
+// one, even though both may ultimately compare against the same Dingo
+// reward_ada_pots column.
+//
+// koiosTotals is nil when no /totals row has been cached for this epoch yet
+// (e.g. cached before totals fetching was added) — comparison is skipped
+// rather than flagged, since that is a reference-data gap, not a Dingo/Koios
+// disagreement. dingoEpoch is nil when epoch_summary/reward_ada_pots aren't
+// available yet; CompareEpochAggregates already reports that condition once
+// (as "epoch_summary"), so this function skips silently rather than
+// duplicating the same root cause under a second field name.
+func CompareEpochTotals(
+	network string,
+	epoch uint64,
+	koiosTotals *KoiosTotals,
+	dingoEpoch *DingoEpochData,
+	now time.Time,
+) []CheckMismatch {
+	if koiosTotals == nil || dingoEpoch == nil {
+		return nil
+	}
+
+	var out []CheckMismatch
+
+	// totals_treasury
+	if dingoEpoch.Treasury != "" && dingoEpoch.Treasury != koiosTotals.Treasury {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "totals_treasury",
+			DingoValue: dingoEpoch.Treasury,
+			KoiosValue: koiosTotals.Treasury,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
+	// totals_reserves
+	if dingoEpoch.Reserves != "" && dingoEpoch.Reserves != koiosTotals.Reserves {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "totals_reserves",
+			DingoValue: dingoEpoch.Reserves,
+			KoiosValue: koiosTotals.Reserves,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
+	// totals_fees — reward_ada_pots.Fees vs Koios totals.fees (the fee-pot
+	// value), independent of the totals.fees vs epoch_info.fees comparison in
+	// CompareEpochAggregates.
+	if dingoEpoch.Fees != "" && dingoEpoch.Fees != koiosTotals.Fees {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "totals_fees",
+			DingoValue: dingoEpoch.Fees,
+			KoiosValue: koiosTotals.Fees,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
+	// totals_reward — reward_ada_pots.Rewards vs Koios totals.reward,
+	// independent of the epoch_total_rewards comparison in CompareEpochAggregates.
+	if dingoEpoch.TotalRewards != "" && dingoEpoch.TotalRewards != koiosTotals.Reward {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "totals_reward",
+			DingoValue: dingoEpoch.TotalRewards,
+			KoiosValue: koiosTotals.Reward,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
+	return out
+}
+
 // ComparePoolEpoch compares per-pool reward-input fields from Dingo's database
 // against the Koios reference row for (pool, epoch).
 // dingoPool is nil when the pool has no reward_pool_input row for this epoch.

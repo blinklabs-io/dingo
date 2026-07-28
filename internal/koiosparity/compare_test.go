@@ -42,6 +42,47 @@ func TestCompareEpochAggregatesTotalRewards(t *testing.T) {
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 }
 
+func TestCompareEpochTotals(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosTotals{
+		Treasury: "6931231163186226",
+		Reserves: "7792082362166766",
+		Fees:     "1245791321",
+		Reward:   "292608261256804",
+	}
+	dingo := &DingoEpochData{
+		Fees:         "1245791321",
+		TotalRewards: "292608261256804",
+		Treasury:     "6931231163186226",
+		Reserves:     "7792082362166766",
+	}
+	require.Empty(t, CompareEpochTotals("preview", 1367, koios, dingo, now))
+
+	// totals.fees is the fee-pot value (reward_ada_pots.Fees), a different
+	// quantity from epoch_info.fees compared by CompareEpochAggregates —
+	// verify a totals-only fees divergence is reported as totals_fees, not
+	// epoch_fees.
+	dingo.Fees = "1245791322"
+	ms := CompareEpochTotals("preview", 1367, koios, dingo, now)
+	require.Len(t, ms, 1)
+	require.Equal(t, "totals_fees", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	dingo.Fees = "1245791321"
+
+	dingo.Treasury = "0"
+	ms = CompareEpochTotals("preview", 1367, koios, dingo, now)
+	require.Len(t, ms, 1)
+	require.Equal(t, "totals_treasury", ms[0].Field)
+
+	// A missing /totals cache row (not yet fetched) skips comparison rather
+	// than flagging anything.
+	require.Empty(t, CompareEpochTotals("preview", 1367, nil, dingo, now))
+
+	// A missing Dingo row is left to CompareEpochAggregates' "epoch_summary"
+	// report; CompareEpochTotals must not duplicate it under a second field.
+	require.Empty(t, CompareEpochTotals("preview", 1367, koios, nil, now))
+}
+
 func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 	now := time.Now()
 	koios := &KoiosPoolEpoch{

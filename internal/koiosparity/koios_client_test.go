@@ -156,6 +156,31 @@ func TestIsDailyQuotaExceeded(t *testing.T) {
 	require.False(t, isDailyQuotaExceeded(""))
 }
 
+func TestGetPoolFirstActiveEpochsTakesMinAcrossUpdates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// pool1re-registered: two updates, must take the earlier (500), not the
+		// current/latest one (1400) that /pool_list alone would report.
+		// pool1once: a single registration, no re-registration.
+		// pool1nullupdate: a null active_epoch_no row that must not corrupt the result.
+		_, _ = w.Write([]byte(`[
+			{"pool_id_bech32":"pool1re-registered","active_epoch_no":1400},
+			{"pool_id_bech32":"pool1re-registered","active_epoch_no":500},
+			{"pool_id_bech32":"pool1once","active_epoch_no":1356},
+			{"pool_id_bech32":"pool1nullupdate","active_epoch_no":null}
+		]`))
+	}))
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	first, err := k.GetPoolFirstActiveEpochs(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, uint64(500), first["pool1re-registered"])
+	require.Equal(t, uint64(1356), first["pool1once"])
+	_, ok := first["pool1nullupdate"]
+	require.False(t, ok)
+}
+
 func TestRationalsEqual(t *testing.T) {
 	require.True(t, rationalsEqual("0.1", "1/10"))
 	require.True(t, rationalsEqual("1/20", "0.05"))

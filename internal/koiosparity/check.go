@@ -16,11 +16,14 @@ package koiosparity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // CheckConfig holds parameters for a parity check run.
@@ -227,6 +230,18 @@ func checkEpoch(
 	dingoEpoch, epochErr := dingo.GetEpochData(epoch)
 	allMismatches = append(allMismatches,
 		CompareEpochAggregates(network, epoch, koiosEpoch, dingoEpoch, epochErr, now, graceHours)...,
+	)
+
+	// 1b. Compare /totals fields (treasury, reserves, and totals' own
+	// fees/reward) — independent of the /epoch_info comparison above despite
+	// overlapping field names; see CompareEpochTotals. A missing totals row
+	// (cached before this check existed) is not an error — skip silently.
+	koiosTotals, totalsErr := cache.GetTotals(network, epoch)
+	if totalsErr != nil && !errors.Is(totalsErr, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("get koios totals: %w", totalsErr)
+	}
+	allMismatches = append(allMismatches,
+		CompareEpochTotals(network, epoch, koiosTotals, dingoEpoch, now)...,
 	)
 
 	// 2. Bulk-load all pool reward inputs for this epoch from Dingo's DB.

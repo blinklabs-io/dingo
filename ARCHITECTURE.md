@@ -2309,11 +2309,11 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 
 **Data sources:**
 - **Reference (Koios):** fetched once into `cache.db` (default `.koios/cache.db`)
-  via the `fetch` subcommand. The cache holds `koios_epoch_info` and
-  `koios_pool_epoch` rows per closed epoch, storing the full documented
-  `/epoch_info` and `/pool_history` field sets (not just the subset compared
-  against Dingo) so the cache is a complete Koios reference even as new
-  comparisons are added later.
+  via the `fetch` subcommand. The cache holds `koios_epoch_info`,
+  `koios_pool_epoch`, and `koios_totals` rows per closed epoch, storing the
+  full documented `/epoch_info`, `/pool_history`, and `/totals` field sets
+  (not just the subset compared against Dingo) so the cache is a complete
+  Koios reference even as new comparisons are added later.
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported via `--metadata-plugin` (defaulting to `sqlite`):
@@ -2324,7 +2324,27 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `reward_pool_output` (per-pool `member_reward_total`, merged into the same
   per-pool map keyed by pool-key-hash — a pool may have an input row before
   its output row is computed), `epoch_summary` (total active stake, pool
-  count, delegator count), `reward_ada_pots` (epoch fees).
+  count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
+  rewards — Dingo's full AdaPots).
+
+  `/totals` and `/epoch_info` both have a `fees` field (and near-identically
+  named `reward` / `total_rewards` fields), but they are *not* the same
+  quantity: `/epoch_info.fees` is the raw sum of transaction fees for that
+  epoch's blocks, while `/totals.fees` is "the amount in the fee pot" — the
+  ledger AdaPots fee-pot value, which is what `reward_ada_pots.Fees` actually
+  stores. Verified empirically against a live preview node: for the same
+  epoch, `/totals.fees` matched `reward_ada_pots.Fees` exactly while
+  `/epoch_info.fees` did not. `CompareEpochTotals` therefore checks
+  `/totals.treasury`/`reserves`/`fees`/`reward` against
+  `reward_ada_pots.Treasury`/`Reserves`/`Fees`/`Rewards` independently of
+  (and under distinct `totals_*` field names from) `CompareEpochAggregates`'s
+  `/epoch_info`-based checks, so a mismatch report never conflates the two.
+  `/totals.circulation`, `supply`, `deposits_stake`, `deposits_drep`,
+  `deposits_proposal`, `treasury_donation`, `treasury_withdrawal`, and
+  `reserves_withdrawal` are fetched and cached for reference but not compared
+  — Dingo's AdaPots model has no circulating-supply or deposit-pot aggregate;
+  computing one would require a live UTxO-set scan or replaying every
+  registration/deregistration/governance event.
 
   Koios's `pool_fees`/`deleg_rewards` pool_history fields are intentionally
   *not* compared against Dingo's `LeaderReward`/`TotalReward`: Koios recomputes
@@ -2348,10 +2368,28 @@ commits a `pre_staking` marker row instead of erroring, so `check` skips
 comparison for that epoch and it's never re-proposed by future `fetch` runs.
 A null `active_stake` on any other epoch is treated as a real, retryable
 error (Koios backend lag or an upstream problem), not silently marked
-permanent. `fetch` also cancels the rest of its in-flight batch as soon as any
-epoch hits such an error, rather than continuing to grind through a
-potentially hours-long backfill before surfacing the failure — a rerun
-resumes only the epochs still missing from the cache.
+permanent. `fetch` cancels the rest of its in-flight batch as soon as any
+epoch hits this or the analogous `end_time=0` ("epoch not fully closed yet")
+condition — both are systematic (every subsequent epoch in the batch would
+hit the same wall), so failing fast avoids grinding through a potentially
+hours-long backfill before surfacing it.
+
+An isolated HTTP-level failure on one request — `/epoch_info`, `/totals`, or
+a single pool's `/pool_history` call exhausting its retries (e.g. a brief
+Koios 5xx blip) — is different: it has no reason to affect any other epoch,
+so it only drops that one epoch (`FetchResult.FailedEpochs`; the epoch stays
+uncached and is retried by a future `fetch` run) instead of cancelling the
+whole batch's shared context.
+
+`fetch` also hoists each pool's true first-active epoch once per run (the
+minimum `active_epoch_no` across every row `/pool_updates` returns for that
+pool, paginated across all pools in one pass) and skips `/pool_history`
+requests for any epoch before it — most of the network's ever-registered
+pools don't exist yet on early epochs, so this avoids a large number of
+guaranteed-empty requests. `/pool_list`'s own `active_epoch_no` is not used
+for this: it reflects only a pool's *current* (possibly re-registered)
+parameters, which can be well after its true first-active epoch and would
+unsafely skip epochs where the pool genuinely had history.
 
 **Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
 

@@ -91,6 +91,39 @@ type KoiosPoolEpoch struct {
 
 func (KoiosPoolEpoch) TableName() string { return "koios_pool_epoch" }
 
+// KoiosTotals holds Koios /totals reference data for a closed epoch.
+//
+// Fees and Reward are deliberately named to match the Koios /totals field
+// names verbatim, NOT epoch_info's Fees/TotalRewards column names on
+// KoiosEpochInfo — they are different quantities (see KoiosTotalsResp) and
+// CompareEpochTotals checks them against Dingo independently of
+// CompareEpochAggregates' epoch_info-based checks.
+type KoiosTotals struct {
+	ID        uint      `gorm:"primarykey;autoIncrement"`
+	Network   string    `gorm:"uniqueIndex:idx_kt_net_epoch;not null"`
+	Epoch     uint64    `gorm:"uniqueIndex:idx_kt_net_epoch;not null"`
+	Treasury  string    `gorm:"not null"`
+	Reserves  string    `gorm:"not null"`
+	Fees      string    `gorm:"not null"`
+	Reward    string    `gorm:"not null"`
+	FetchedAt time.Time `gorm:"not null"`
+
+	// Remaining fields are stored for reference from the full Koios totals
+	// schema but are not currently compared against any Dingo value — Dingo's
+	// AdaPots model has no circulating-supply or deposit-pot aggregate (see
+	// KoiosTotalsResp for why).
+	Circulation        string `gorm:"not null;default:''"`
+	Supply             string `gorm:"not null;default:''"`
+	DepositsStake      string `gorm:"not null;default:''"`
+	DepositsDRep       string `gorm:"not null;default:''"`
+	DepositsProposal   string `gorm:"not null;default:''"`
+	TreasuryDonation   string `gorm:"not null;default:''"`
+	TreasuryWithdrawal string `gorm:"not null;default:''"`
+	ReservesWithdrawal string `gorm:"not null;default:''"`
+}
+
+func (KoiosTotals) TableName() string { return "koios_totals" }
+
 // KoiosAccountRewards is schema-only; populated when #1875 is resolved.
 type KoiosAccountRewards struct {
 	ID           uint      `gorm:"primarykey;autoIncrement"`
@@ -151,6 +184,7 @@ func (CheckMismatch) TableName() string { return "check_mismatches" }
 var migrateModels = []any{
 	&KoiosEpochInfo{},
 	&KoiosPoolEpoch{},
+	&KoiosTotals{},
 	&KoiosAccountRewards{},
 	&CheckEpochStatus{},
 	&CheckRun{},
@@ -232,7 +266,8 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 const sqlitePoolBatchSize = 1000
 
 // CommitEpochData atomically replaces all pool rows for the epoch and upserts
-// the epoch-info record in a single transaction. Committing both together means:
+// the epoch-info and totals records in a single transaction. Committing all
+// three together means:
 //
 //   - The pool set and koios_epoch_info.fetched_at are always in sync.
 //     GetEpochsNeedingCheck uses fetched_at > last_checked_at to detect stale
@@ -244,7 +279,10 @@ const sqlitePoolBatchSize = 1000
 //
 //   - Each pool row's Network and Epoch fields are normalised from info before
 //     insertion so a mismatched caller cannot corrupt a different epoch's data.
-func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch) error {
+//
+// totals is nil for pre-staking marker commits, which have no /totals data to
+// store (see fetchEpoch).
+func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch, totals *KoiosTotals) error {
 	return c.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("network = ? AND epoch = ?", info.Network, info.Epoch).
 			Delete(&KoiosPoolEpoch{}).Error; err != nil {
@@ -259,7 +297,7 @@ func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch) erro
 				return err
 			}
 		}
-		return tx.Clauses(clause.OnConflict{
+		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "network"},
 				{Name: "epoch"},
@@ -267,7 +305,25 @@ func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch) erro
 			DoUpdates: clause.AssignmentColumns([]string{
 				"active_stake", "fees", "total_rewards", "epoch_end_time", "pre_staking", "fetched_at",
 			}),
-		}).Create(&info).Error
+		}).Create(&info).Error; err != nil {
+			return err
+		}
+		if totals == nil {
+			return nil
+		}
+		totals.Network = info.Network
+		totals.Epoch = info.Epoch
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "network"},
+				{Name: "epoch"},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"treasury", "reserves", "fees", "reward", "fetched_at",
+				"circulation", "supply", "deposits_stake", "deposits_drep", "deposits_proposal",
+				"treasury_donation", "treasury_withdrawal", "reserves_withdrawal",
+			}),
+		}).Create(totals).Error
 	})
 }
 
@@ -298,6 +354,21 @@ func (c *Cache) GetEpochInfo(network string, epoch uint64) (*KoiosEpochInfo, err
 		return nil, err
 	}
 	return &info, nil
+}
+
+// GetTotals retrieves a cached Koios /totals record. Returns gorm.ErrRecordNotFound
+// when absent — e.g. an epoch cached before totals fetching was added, and not
+// yet re-fetched. Callers should skip totals comparison rather than treat this
+// as an error.
+func (c *Cache) GetTotals(network string, epoch uint64) (*KoiosTotals, error) {
+	var totals KoiosTotals
+	err := c.db.
+		Where("network = ? AND epoch = ?", network, epoch).
+		First(&totals).Error
+	if err != nil {
+		return nil, err
+	}
+	return &totals, nil
 }
 
 // GetAllPoolsForEpoch retrieves all cached pool rows for (network, epoch).
