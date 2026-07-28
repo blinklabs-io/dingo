@@ -103,7 +103,7 @@ command -v go     >/dev/null || die "go is not installed"
 say "Building demo-fetch helper..."
 DEMO_BIN_DIR="$(mktemp -d)"
 DEMO_FETCH="${DEMO_BIN_DIR}/demo-fetch"
-( cd "${PROJECT_ROOT}" && go build -o "${DEMO_FETCH}" ./internal/test/archive-demo/cmd/demo-fetch )
+( cd "${PROJECT_ROOT}" && go build -tags archive_demo -o "${DEMO_FETCH}" ./internal/test/archive-demo/cmd/demo-fetch )
 note "built: ${DEMO_FETCH}"
 
 # ---------------------------------------------------------------------------

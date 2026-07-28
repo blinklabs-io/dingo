@@ -67,7 +67,7 @@ command -v go     >/dev/null || die "go is not installed"
 log "Building inspect-blob helper..."
 INSPECT_DIR="$(mktemp -d)"
 INSPECT_BIN="${INSPECT_DIR}/inspect-blob"
-( cd "${PROJECT_ROOT}" && go build -o "${INSPECT_BIN}" ./internal/test/archive-demo/cmd/inspect-blob )
+( cd "${PROJECT_ROOT}" && go build -tags archive_demo -o "${INSPECT_BIN}" ./internal/test/archive-demo/cmd/inspect-blob )
 
 log "Bringing up archive-demo stack..."
 mkdir -p "${PRUNING_DATA_DIR}"

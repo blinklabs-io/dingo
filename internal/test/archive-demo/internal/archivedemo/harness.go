@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build archive_demo
+
 // Package archivedemo provides shared helpers for the archive-node demo
 // at internal/test/archive-demo/. The integration test (under build tag
 // archive_demo) and the demo-fetch CLI both consume it.

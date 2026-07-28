@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build archive_demo
+
 // inspect-blob is a CLI used by the archive-demo integration test to
 // verify whether a block (slot, hash) is present in a Dingo node's
 // local Badger blob store. It exits 0 if present, 1 if absent, 2 on
