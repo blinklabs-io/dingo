@@ -1307,6 +1307,20 @@ rolled the applied chain back to its common ancestor, so permitted epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
 
+Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
+chains so callers can defer until the ledger advances. `EpochInfo` serves an
+already materialized epoch directly from the immutable epoch cache before
+forecasting. The operational slot clock is the deliberate exception to
+wall-clock forecast refusal: a near-now `TimeToSlot` call extrapolates the
+current era while a stale node catches up, but arbitrary time queries and all
+header validation remain bounded. Blockfrost epoch/era end timestamps are
+calculated as interval endpoints from cached epoch durations rather than
+treating the exclusive end as a forecastable header slot.
+When the next-epoch nonce becomes stable before that header horizon opens,
+the node-level leader adapter derives only the immediate next Praos epoch's
+slot range from the current epoch dimensions so schedule precomputation can
+proceed without broadening general ledger forecasts.
+
 ### Operational Certificate Validation
 
 Inbound operational-certificate (opcert) validation is split by its data

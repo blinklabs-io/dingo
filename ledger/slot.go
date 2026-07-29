@@ -16,8 +16,10 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -55,10 +57,10 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 
 // TimeToSlot returns the slot containing the given wall-clock time.
 //
-// Returns ErrBeforeGenesis when t is before SystemStart. When the epoch cache
-// is empty but t is within 5 seconds of now, falls back to a coarse
-// approximation using the Shelley genesis slot length — this is useful at
-// chain genesis before any epochs have been persisted.
+// Returns ErrBeforeGenesis when t is before SystemStart. Near-now calls used by
+// the operational slot clock retain current-era extrapolation when the ledger
+// is empty or behind the HFC forecast horizon; arbitrary time queries remain
+// bounded.
 func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
@@ -69,18 +71,23 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	}
 	sum, err := ls.HardForkSummary()
 	if err != nil {
-		// time.Since(t) == now - t, so it is negative for future times.
-		// Guard both directions so arbitrary future times don't match the
-		// "near now" fallback.
-		if d := time.Since(t); d >= -5*time.Second && d < 5*time.Second {
+		if isNearNow(t) {
 			return nearNowSlot(shelleyGenesis), nil
 		}
 		return 0, errors.New("time not found in known epochs")
 	}
 	slot, sumErr := sum.TimeToSlot(t)
 	if sumErr != nil {
-		// Do not project wall-clock time past the HFC forecast horizon.
-		return 0, errors.New("time not found in known epochs")
+		// CurrentSlot drives operational timing while a node catches up after
+		// downtime. Preserve its legacy current-era extrapolation without
+		// weakening the bounded Summary used by header validation and arbitrary
+		// time queries.
+		if errors.Is(sumErr, hardfork.ErrPastHorizon) && isNearNow(t) {
+			if currentSlot, ok := currentEraSlotAtTime(sum, t); ok {
+				return currentSlot, nil
+			}
+		}
+		return 0, fmt.Errorf("time not found in known epochs: %w", sumErr)
 	}
 	return slot, nil
 }
@@ -99,11 +106,9 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	info, err := sum.SlotToEpoch(slot)
 	if err != nil {
 		if errors.Is(err, hardfork.ErrPastHorizon) {
-			// ErrPastHorizon fires for slots outside every era's bounds —
-			// either below the first era's start or past the last bounded
-			// era's end. Don't claim a direction we don't know.
-			return models.Epoch{}, errors.New(
-				"slot is outside the known epoch range",
+			return models.Epoch{}, fmt.Errorf(
+				"slot is outside the known epoch range: %w",
+				err,
 			)
 		}
 		return models.Epoch{}, err
@@ -129,6 +134,13 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 // the configured safe-zone horizon. Returns an error for an empty cache or for
 // epochs outside that range.
 func (ls *LedgerState) EpochInfo(epoch uint64) (models.Epoch, error) {
+	cache := ls.loadConsensusSnapshot().epochCache
+	for _, cachedEpoch := range slices.Backward(cache) {
+		if cachedEpoch.EpochId == epoch {
+			return epochBoundaryInfo(cachedEpoch), nil
+		}
+	}
+
 	sum, err := ls.HardForkSummary()
 	if err != nil {
 		return models.Epoch{}, errors.New("no epochs in cache")
@@ -136,8 +148,9 @@ func (ls *LedgerState) EpochInfo(epoch uint64) (models.Epoch, error) {
 	info, err := sum.EpochInfo(epoch)
 	if err != nil {
 		if errors.Is(err, hardfork.ErrPastHorizon) {
-			return models.Epoch{}, errors.New(
-				"epoch is outside the known epoch range",
+			return models.Epoch{}, fmt.Errorf(
+				"epoch is outside the known epoch range: %w",
+				err,
 			)
 		}
 		return models.Epoch{}, err
@@ -153,6 +166,46 @@ func (ls *LedgerState) EpochInfo(epoch uint64) (models.Epoch, error) {
 		// #nosec G115
 		LengthInSlots: uint(info.LengthInSlots),
 	}, nil
+}
+
+func epochBoundaryInfo(epoch models.Epoch) models.Epoch {
+	return models.Epoch{
+		EpochId:       epoch.EpochId,
+		StartSlot:     epoch.StartSlot,
+		EraId:         epoch.EraId,
+		SlotLength:    epoch.SlotLength,
+		LengthInSlots: epoch.LengthInSlots,
+	}
+}
+
+func isNearNow(t time.Time) bool {
+	// time.Since(t) == now - t, so it is negative for future times. Guard both
+	// directions so arbitrary future times do not match the operational fallback.
+	d := time.Since(t)
+	return d >= -5*time.Second && d < 5*time.Second
+}
+
+func currentEraSlotAtTime(
+	sum *hardfork.Summary,
+	t time.Time,
+) (uint64, bool) {
+	if sum == nil || len(sum.Eras) == 0 {
+		return 0, false
+	}
+	current := sum.Eras[len(sum.Eras)-1]
+	relativeTime := t.Sub(sum.SystemStart)
+	if relativeTime < current.Start.RelativeTime ||
+		current.Params.SlotLength <= 0 {
+		return 0, false
+	}
+	slotOffset := (relativeTime - current.Start.RelativeTime) /
+		current.Params.SlotLength
+	// slotOffset is non-negative and time.Duration-bounded.
+	slotsIntoEra := uint64(slotOffset) // #nosec G115
+	if slotsIntoEra > math.MaxUint64-current.Start.Slot {
+		return 0, false
+	}
+	return current.Start.Slot + slotsIntoEra, true
 }
 
 // shelleySlotLengthMs returns the Shelley genesis slot length in milliseconds,

@@ -169,9 +169,9 @@ func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 		},
 	}
 	// A resolved zero safe zone is valid and must still flow through
-	// BuildSummary so TransitionKnown can set the confirmed era boundary.
+	// BuildSummary so TransitionKnown can set the confirmed era boundary. Its
+	// zero SystemStart must not replace the Shelley genesis value.
 	shape := hardfork.Shape{
-		SystemStart: time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC),
 		Eras: []hardfork.ShapeEntry{{
 			EraID: 1,
 			Params: hardfork.EraParams{
@@ -186,6 +186,11 @@ func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 	sum, err := ls.HardForkSummary()
 	require.NoError(t, err)
 	assert.Equal(t, hardfork.NewTransitionKnown(7), sum.Transition)
+	assert.Equal(
+		t,
+		time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC),
+		sum.SystemStart,
+	)
 	require.Len(t, sum.Eras, 1)
 	require.NotNil(t, sum.Eras[0].End)
 	assert.Zero(t, sum.Eras[0].Params.SafeZoneSlots)
@@ -224,6 +229,137 @@ func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 	require.NoError(t, err)
 	_, err = sum.SlotToEpoch(532_000)
 	assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
+}
+
+func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {
+	testCases := []struct {
+		name          string
+		tipSlot       uint64
+		wantEndSlot   uint64
+		nextEpochOpen bool
+	}{
+		{
+			name:        "before nonce cutoff",
+			tipSlot:     302_399,
+			wantEndSlot: 432_000,
+		},
+		{
+			name:          "at nonce cutoff",
+			tipSlot:       302_400,
+			wantEndSlot:   864_000,
+			nextEpochOpen: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := minimalShelleyGenesisCfg(t)
+			ls := &LedgerState{
+				epochCache: []models.Epoch{{
+					EpochId:       0,
+					StartSlot:     0,
+					SlotLength:    1_000,
+					LengthInSlots: 432_000,
+					EraId:         eras.ConwayEraDesc.Id,
+				}},
+				currentEra: eras.ConwayEraDesc,
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(
+						testCase.tipSlot,
+						[]byte("tip"),
+					),
+				},
+				config: LedgerStateConfig{CardanoNodeConfig: cfg},
+			}
+			shape := hardfork.Shape{
+				SystemStart: cfg.ShelleyGenesis().SystemStart,
+				Eras: []hardfork.ShapeEntry{{
+					EraID: eras.ConwayEraDesc.Id,
+					Params: hardfork.EraParams{
+						EpochSize:     432_000,
+						SlotLength:    time.Second,
+						SafeZoneSlots: 129_600,
+						GenesisWindow: 129_600,
+					},
+				}},
+			}
+			ls.cachedShape.Store(&shape)
+			ls.publishSnapshotsLocked()
+
+			sum, err := ls.HardForkSummary()
+			require.NoError(t, err)
+			require.Len(t, sum.Eras, 1)
+			require.NotNil(t, sum.Eras[0].End)
+			assert.Equal(t, testCase.wantEndSlot, sum.Eras[0].End.Slot)
+
+			_, err = ls.EpochInfo(1)
+			if testCase.nextEpochOpen {
+				require.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
+			}
+
+			// Arbitrary time queries stay bounded at the exclusive end.
+			endTime := sum.SystemStart.Add(
+				time.Duration(testCase.wantEndSlot) * time.Second,
+			)
+			_, err = ls.TimeToSlot(endTime)
+			assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
+
+			// Operational near-now timing remains available to a node whose
+			// ledger is catching up from behind the forecast.
+			currentSlot, err := ls.TimeToSlot(time.Now())
+			require.NoError(t, err)
+			assert.Greater(t, currentSlot, testCase.wantEndSlot)
+		})
+	}
+}
+
+func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
+	cfg := minimalShelleyGenesisCfg(t)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         eras.ShelleyEraDesc.Id,
+			},
+			{
+				EpochId:       10,
+				StartSlot:     1_000,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         eras.ShelleyEraDesc.Id,
+			},
+		},
+		currentEra: eras.ShelleyEraDesc,
+		config:     LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+	shape := hardfork.Shape{
+		SystemStart: cfg.ShelleyGenesis().SystemStart,
+		Eras: []hardfork.ShapeEntry{{
+			EraID: eras.ShelleyEraDesc.Id,
+			Params: hardfork.EraParams{
+				EpochSize:     100,
+				SlotLength:    time.Second,
+				SafeZoneSlots: 1,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	_, err = sum.EpochInfo(10)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+
+	info, err := ls.EpochInfo(10)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1_000), info.StartSlot)
+	assert.Equal(t, uint(100), info.LengthInSlots)
 }
 
 func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(

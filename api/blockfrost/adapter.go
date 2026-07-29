@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -537,15 +538,7 @@ func (a *NodeAdapter) CurrentEpoch() (
 			err,
 		)
 	}
-	endSlot := tipEpoch.StartSlot + uint64(tipEpoch.LengthInSlots)
-	endTime, err := a.ledgerState.SlotToTime(endSlot)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"get epoch end time for slot %d: %w",
-			endSlot,
-			err,
-		)
-	}
+	endTime := epochEndTime(startTime, tipEpoch)
 	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
 		tipEpoch.StartSlot,
 		tip.Point.Slot,
@@ -836,13 +829,9 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 			)
 		}
 		endSlot := last.StartSlot + uint64(last.LengthInSlots)
-		endTime, err := a.ledgerState.SlotToTime(endSlot)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"get era %s end time: %w",
-				era.Name,
-				err,
-			)
+		endTime := startTime
+		for _, epoch := range epochs {
+			endTime = epochEndTime(endTime, epoch)
 		}
 		slotLengthMs := uint64(last.SlotLength)
 		slotLengthSeconds := (slotLengthMs + 500) / 1000
@@ -869,6 +858,14 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 		})
 	}
 	return ret, nil
+}
+
+func epochEndTime(startTime time.Time, epoch models.Epoch) time.Time {
+	// Epoch length and slot length are protocol-bounded.
+	// #nosec G115
+	duration := time.Duration(epoch.LengthInSlots) *
+		time.Duration(epoch.SlotLength) * time.Millisecond
+	return startTime.Add(duration)
 }
 
 // Genesis returns Shelley genesis configuration values.

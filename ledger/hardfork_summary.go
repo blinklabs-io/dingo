@@ -126,7 +126,9 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	if shapeAvailable {
 		current.Params.SafeZoneSlots = shapeEntry.Params.SafeZoneSlots
 		current.Params.GenesisWindow = shapeEntry.Params.GenesisWindow
-		systemStart = shape.SystemStart
+		if !shape.SystemStart.IsZero() {
+			systemStart = shape.SystemStart
+		}
 	}
 	if !shapeAvailable {
 		return &hardfork.Summary{
