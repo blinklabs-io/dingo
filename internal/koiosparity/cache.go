@@ -31,10 +31,16 @@ import (
 // KoiosEpochInfo holds Koios reference data for a closed epoch.
 // Note: pool_cnt and delegator_cnt are not returned by preview/preprod Koios and are omitted.
 type KoiosEpochInfo struct {
-	ID           uint      `gorm:"primarykey;autoIncrement"`
-	Network      string    `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
-	Epoch        uint64    `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
-	ActiveStake  string    `gorm:"not null"`
+	ID          uint   `gorm:"primarykey;autoIncrement"`
+	Network     string `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
+	Epoch       uint64 `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
+	ActiveStake string `gorm:"not null"`
+	// Fees and TotalRewards (/epoch_info.fees, /epoch_info.total_rewards) are
+	// raw block/tx accounting quantities — stored for reference only. Dingo has
+	// no matching aggregate, so CompareEpochAggregates does not compare them;
+	// see that function's doc comment and KoiosTotalsResp for why /totals.fees
+	// and /totals.reward (compared in CompareEpochTotals) are the correct
+	// counterpart to reward_ada_pots.Fees/Rewards instead.
 	Fees         string    `gorm:"not null"`
 	TotalRewards string    `gorm:"not null"`
 	EpochEndTime time.Time // when the epoch actually closed (from Koios end_time); zero for old cache rows

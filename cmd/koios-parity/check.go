@@ -88,5 +88,5 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Println()
 	}
-	return nil
+	return checkResultErr(result)
 }

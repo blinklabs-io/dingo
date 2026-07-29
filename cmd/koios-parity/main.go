@@ -20,18 +20,24 @@
 // (reward_pool_input, epoch_summary, reward_ada_pots). No Blockfrost or any
 // other HTTP endpoint on the Dingo node is contacted for the comparison.
 //
-// Three metadata backends are supported (matching Dingo's --metadata-plugin):
+// Three metadata backends are supported, matching Dingo's own
+// plugins.storage.metadata selection (see resolveDingoDB):
 //   - sqlite (default): opens {data-dir}/metadata.sqlite in read-only WAL mode
-//   - postgres: connects via --metadata-dsn or DINGO_DATABASE_METADATA_POSTGRES_DSN
-//   - mysql:    connects via --metadata-dsn or DINGO_DATABASE_METADATA_MYSQL_DSN
+//   - postgres: connects via --metadata-dsn or Dingo's resolved metadata DSN/config
+//   - mysql:    connects via --metadata-dsn or Dingo's resolved metadata DSN/config
 package main
 
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 
+	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/spf13/cobra"
 )
@@ -45,9 +51,10 @@ const (
 
 // Global flags shared across subcommands.
 var globalFlags struct {
-	cachePath string
-	network   string
-	dingoData string // Dingo node data directory (contains metadata.sqlite + cache subdir)
+	cachePath       string
+	network         string
+	dingoData       string // Dingo node data directory (contains metadata.sqlite + cache subdir)
+	dingoConfigFile string // path to Dingo's own dingo.yaml, mirroring dingo's own --config flag
 }
 
 func main() {
@@ -63,13 +70,19 @@ Data sources:
   Reference: Koios public REST API (cached in cache.db via 'fetch')
   Dingo:     Node's metadata.sqlite read directly (reward_pool_input, epoch_summary)
 
+Metadata backend resolution (plugin, DSN, data directory) is loaded from
+Dingo's own configuration — the same dingo.yaml/env vars/CARDANO_DATABASE_PATH
+the Dingo process itself resolves — so this tool inspects whichever database
+that node is actually configured for. See --dingo-config, --metadata-plugin,
+--metadata-dsn, and --dingo-data to override any part of it explicitly.
+
 Environment:
-  DINGO_DATA_DIR                       path to Dingo data directory (default: .dingo)
-  DINGO_DATABASE_METADATA_PLUGIN       metadata backend: sqlite (default), postgres, mysql
-  DINGO_DATABASE_METADATA_POSTGRES_DSN postgres DSN (when plugin=postgres)
-  DINGO_DATABASE_METADATA_MYSQL_DSN    mysql DSN    (when plugin=mysql)
-  CARDANO_NETWORK                      cardano network name (preview or preprod)
-  KOIOS_API_KEY                        Koios Bearer token for rate-limited access`,
+  CARDANO_DATABASE_PATH                    Dingo data directory (same var Dingo itself reads)
+  DINGO_PLUGINS_STORAGE_METADATA_PROVIDER  metadata backend: sqlite (default), postgres, mysql
+  DINGO_PLUGINS_STORAGE_METADATA_CONFIG_*  metadata provider config (e.g. _DSN, _HOST, _DATA_DIR)
+  DINGO_DATA_DIR                           koios-parity-only override for the data directory
+  CARDANO_NETWORK                          cardano network name (preview or preprod)
+  KOIOS_API_KEY                            Koios Bearer token for rate-limited access`,
 		RunE: runCommand,
 	}
 
@@ -84,7 +97,13 @@ Environment:
 	)
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.dingoData, "dingo-data", "",
-		"Dingo node data directory containing metadata.sqlite (default: $DINGO_DATA_DIR or .dingo)",
+		"Dingo node data directory containing metadata.sqlite "+
+			"(default: resolved from Dingo's own config, then $DINGO_DATA_DIR, then .dingo)",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&globalFlags.dingoConfigFile, "dingo-config", "",
+		"path to the Dingo node's dingo.yaml (default: same search Dingo itself uses — "+
+			"~/.dingo/dingo.yaml, then /etc/dingo/dingo.yaml)",
 	)
 
 	// Wire up run-mode flags directly on the root command.
@@ -102,8 +121,42 @@ Environment:
 	}
 }
 
+// dingoConfigOnce/dingoConfigCached memoize loadedDingoConfig within a single
+// process run: every subcommand resolves the data dir and/or metadata plugin
+// exactly once, so loading (and warning on failure) more than once would just
+// be noisy repetition of the same result.
+var (
+	dingoConfigOnce   sync.Once
+	dingoConfigCached *config.Config
+)
+
+// loadedDingoConfig loads Dingo's own resolved configuration — dingo.yaml
+// (searched the same way Dingo's binary does, or --dingo-config), then
+// CARDANO_*/DINGO_PLUGINS_* environment overlays via config.LoadConfig — so
+// this tool's DB resolution mirrors the real node's instead of guessing from
+// koios-parity-invented env var names that Dingo never reads. Returns nil
+// (logging a warning) if the config can't be loaded; callers fall back to
+// their own defaults in that case.
+func loadedDingoConfig() *config.Config {
+	dingoConfigOnce.Do(func() {
+		cfg, err := config.LoadConfig(globalFlags.dingoConfigFile)
+		if err != nil {
+			slog.Default().Warn(
+				"koios-parity: could not load dingo config; falling back to sqlite/.dingo defaults",
+				"error", err,
+			)
+			return
+		}
+		dingoConfigCached = cfg
+	})
+	return dingoConfigCached
+}
+
 // resolveDingoDataDir returns the Dingo data directory.
-// Priority: --dingo-data flag > DINGO_DATA_DIR env > .dingo default.
+// Priority: --dingo-data flag > DINGO_DATA_DIR env (koios-parity-only override,
+// for pointing at a separate copy of the database) > the metadata plugin's own
+// dataDir config override > Dingo's resolved DatabasePath (CARDANO_DATABASE_PATH
+// or dingo.yaml's databaseName, same as the real node) > .dingo default.
 func resolveDingoDataDir() string {
 	if globalFlags.dingoData != "" {
 		return globalFlags.dingoData
@@ -111,7 +164,120 @@ func resolveDingoDataDir() string {
 	if v := os.Getenv("DINGO_DATA_DIR"); v != "" {
 		return v
 	}
+	if cfg := loadedDingoConfig(); cfg != nil {
+		if dataDir, ok := stringConfigValue(cfg.Plugins.Storage.Metadata.Config, "dataDir"); ok && dataDir != "" {
+			return dataDir
+		}
+		if cfg.DatabasePath != "" {
+			return cfg.DatabasePath
+		}
+	}
 	return defaultDingoData
+}
+
+// stringConfigValue reads a string field out of a plugin Selection.Config map
+// (values arrive as `any` from YAML/env parsing — see plugin.ApplyEnvironment).
+func stringConfigValue(cfg map[string]any, key string) (string, bool) {
+	v, ok := cfg[key]
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
+}
+
+// intConfigValue reads a numeric field (e.g. a port number) out of a plugin
+// Selection.Config map. gopkg.in/yaml.v3's Unmarshal-into-`any` (used by
+// plugin.ApplyEnvironment for every env-var scalar, and by YAML config
+// parsing) only ever produces `int` or `float64` for a numeric scalar.
+// Returns 0 if absent or not numeric.
+func intConfigValue(cfg map[string]any, key string) int {
+	switch v := cfg[key].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+// dsnFromMetadataConfig builds a connection string from Dingo's resolved
+// plugins.storage.metadata.config map. A flat "dsn" key (the pattern used by
+// this repo's own k8s examples, e.g. examples/dingo-gov-lens/k8s/
+// dingo-values.yaml) is used verbatim; otherwise it's assembled from discrete
+// fields the same way database/plugin/metadata/{postgres,mysql}'s Start()
+// methods do internally, so this tool connects with the exact credentials the
+// running Dingo node was configured with. Returns "" if cfg has neither.
+func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
+	if cfg == nil {
+		return ""
+	}
+	if dsn, ok := stringConfigValue(cfg, "dsn"); ok && dsn != "" {
+		return dsn
+	}
+
+	host, hasHost := stringConfigValue(cfg, "host")
+	user, hasUser := stringConfigValue(cfg, "user")
+	database, hasDatabase := stringConfigValue(cfg, "database")
+	if !hasHost && !hasUser && !hasDatabase {
+		return "" // no discrete fields set either; nothing to build a DSN from.
+	}
+	password, _ := stringConfigValue(cfg, "password")
+	sslMode, _ := stringConfigValue(cfg, "sslMode")
+	timeZone, _ := stringConfigValue(cfg, "timeZone")
+	port := intConfigValue(cfg, "port")
+
+	switch plugin {
+	case "postgres":
+		if host == "" {
+			host = "localhost"
+		}
+		if user == "" {
+			user = "postgres"
+		}
+		if database == "" {
+			database = "postgres"
+		}
+		if sslMode == "" {
+			sslMode = "disable"
+		}
+		if port == 0 {
+			port = 5432
+		}
+		parts := []string{
+			"host=" + host,
+			"user=" + user,
+			"password=" + password,
+			"dbname=" + database,
+			"port=" + strconv.Itoa(port),
+			"sslmode=" + sslMode,
+		}
+		if timeZone != "" {
+			parts = append(parts, "TimeZone="+timeZone)
+		}
+		return strings.Join(parts, " ")
+	case "mysql":
+		if host == "" {
+			host = "localhost"
+		}
+		if user == "" {
+			user = "root"
+		}
+		if database == "" {
+			database = "dingo"
+		}
+		if port == 0 {
+			port = 3306
+		}
+		params := "parseTime=true"
+		if sslMode != "" {
+			params += "&tls=" + sslMode
+		}
+		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?%s", user, password, host, port, database, params)
+	default:
+		return ""
+	}
 }
 
 // resolveCachePath returns the effective cache path.
@@ -151,6 +317,33 @@ func requireNetwork() (string, error) {
 	return net, nil
 }
 
+// checkResultErr returns a non-nil error when result reports any FAIL or
+// ERROR epoch, so 'check' and the default 'run' command signal an incomplete
+// or failed parity check through the process exit code — automation invoking
+// either must not be able to mistake FailEpochs/ErrorEpochs for success just
+// because RunE returned nil. Both callers propagate this error up to main's
+// rootCmd.Execute() error path (os.Exit(1)) rather than calling os.Exit
+// themselves from within RunE.
+func checkResultErr(result *koiosparity.CheckResult) error {
+	if result == nil {
+		return nil
+	}
+	switch {
+	case len(result.FailEpochs) > 0 && len(result.ErrorEpochs) > 0:
+		return fmt.Errorf(
+			"parity check failed: %d failing epoch(s) %v, %d error epoch(s) %v",
+			len(result.FailEpochs), result.FailEpochs,
+			len(result.ErrorEpochs), result.ErrorEpochs,
+		)
+	case len(result.FailEpochs) > 0:
+		return fmt.Errorf("parity check failed: %d failing epoch(s) %v", len(result.FailEpochs), result.FailEpochs)
+	case len(result.ErrorEpochs) > 0:
+		return fmt.Errorf("parity check incomplete: %d error epoch(s) %v", len(result.ErrorEpochs), result.ErrorEpochs)
+	default:
+		return nil
+	}
+}
+
 // koiosAPIKey returns the Koios Bearer token from flag or environment.
 func koiosAPIKey(cmd *cobra.Command) string {
 	if key, _ := cmd.Flags().GetString("api-key"); key != "" {
@@ -169,40 +362,34 @@ func addDingoDBFlags(cmd *cobra.Command) {
 }
 
 // resolveDingoDB returns the DingoDBConfig for cmd.
-// Plugin defaults to "sqlite"; DataDir is always set for cache-path resolution.
 //
-// Env var priority (highest first):
-//  1. --metadata-plugin / --metadata-dsn flags
-//  2. DINGO_DATABASE_METADATA_PLUGIN  (Dingo's canonical env var)
-//  3. DINGO_METADATA_PLUGIN           (koios-parity override, for non-standard setups)
-//
-// DSN priority after plugin is known:
-//  1. --metadata-dsn flag
-//  2. DINGO_DATABASE_METADATA_POSTGRES_DSN / DINGO_DATABASE_METADATA_MYSQL_DSN
-//     (Dingo's per-plugin DSN env vars, consumed by the real Dingo process)
-//  3. DINGO_METADATA_DSN (generic override)
+// Priority (highest first):
+//  1. --metadata-plugin / --metadata-dsn flags — explicit overrides for
+//     pointing this tool at a different copy of the database than the one
+//     the live Dingo node itself is configured for.
+//  2. Dingo's own resolved plugins.storage.metadata selection: loaded via
+//     loadedDingoConfig(), which applies DINGO_PLUGINS_STORAGE_METADATA_PROVIDER
+//     and DINGO_PLUGINS_STORAGE_METADATA_CONFIG_* the same way the real Dingo
+//     process does (see internal/config.LoadConfig and plugin.ApplyEnvironment).
+//  3. "sqlite" default, with no DSN (dingo_db.go's OpenDingoDB already
+//     defaults an empty plugin to sqlite; this mirrors that explicitly).
 func resolveDingoDB(cmd *cobra.Command) koiosparity.DingoDBConfig {
 	plugin, _ := cmd.Flags().GetString("metadata-plugin")
 	dsn, _ := cmd.Flags().GetString("metadata-dsn")
 
-	if plugin == "" {
-		if v := os.Getenv("DINGO_DATABASE_METADATA_PLUGIN"); v != "" {
-			plugin = v
-		} else if v := os.Getenv("DINGO_METADATA_PLUGIN"); v != "" {
-			plugin = v
+	var metadataConfig map[string]any
+	if cfg := loadedDingoConfig(); cfg != nil {
+		if plugin == "" {
+			plugin = cfg.Plugins.Storage.Metadata.Provider
 		}
+		metadataConfig = cfg.Plugins.Storage.Metadata.Config
+	}
+	if plugin == "" {
+		plugin = "sqlite"
 	}
 
 	if dsn == "" {
-		switch plugin {
-		case "postgres":
-			dsn = os.Getenv("DINGO_DATABASE_METADATA_POSTGRES_DSN")
-		case "mysql":
-			dsn = os.Getenv("DINGO_DATABASE_METADATA_MYSQL_DSN")
-		}
-		if dsn == "" {
-			dsn = os.Getenv("DINGO_METADATA_DSN")
-		}
+		dsn = dsnFromMetadataConfig(plugin, metadataConfig)
 	}
 
 	return koiosparity.DingoDBConfig{

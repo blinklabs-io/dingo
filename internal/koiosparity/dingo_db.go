@@ -52,9 +52,20 @@ type DingoDBConfig struct {
 type DingoEpochData struct {
 	TotalActiveStake string // lovelace decimal string (matches Koios format)
 	Fees             string // lovelace decimal string; empty when reward_ada_pots row absent
-	TotalRewards     string // lovelace decimal string from reward_ada_pots.rewards; empty when absent
-	Treasury         string // lovelace decimal string from reward_ada_pots.treasury; empty when absent
-	Reserves         string // lovelace decimal string from reward_ada_pots.reserves; empty when absent
+	// TotalRewards is reward_ada_pots.rewards for this epoch alone: a fresh
+	// per-epoch FLOW value (rewards.Result.TotalRewardPot, overwritten every
+	// epoch — see ledger/reward_calculation.go:389,1955 and
+	// ledger/rewards/rewards.go's Pots type, which carries no "rewards" field
+	// forward between epochs). Koios's /totals.reward, by contrast, is a
+	// monotonically increasing cumulative accumulator (verified against live
+	// preview data — see CompareEpochTotals), not a per-epoch snapshot. Since
+	// Dingo has no stored aggregate matching that cumulative quantity, and this
+	// checker does not compute cross-epoch aggregates on Dingo's behalf (that
+	// belongs in Dingo's own schema, not the checker), TotalRewards is kept for
+	// reference only and is not compared against /totals.reward.
+	TotalRewards string // lovelace decimal string from reward_ada_pots.rewards; empty when absent
+	Treasury     string // lovelace decimal string from reward_ada_pots.treasury; empty when absent
+	Reserves     string // lovelace decimal string from reward_ada_pots.reserves; empty when absent
 }
 
 // DingoPoolEpochData holds per-pool reward-input data for one epoch,

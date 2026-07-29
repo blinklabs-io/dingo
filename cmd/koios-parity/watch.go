@@ -113,16 +113,27 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 				logger.Info("koios-parity: new closed epochs detected",
 					"from", fromClosed, "through", toClosed)
 
-				fetchErr := error(nil)
-				if _, fetchErr = koiosparity.Fetch(ctx, koiosparity.FetchConfig{
+				fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 					Network:      network,
 					APIKey:       apiKey,
 					CachePath:    cachePath,
 					Concurrency:  concurrency,
 					FromEpoch:    fromClosed,
 					ThroughEpoch: toClosed,
-				}, logger); fetchErr != nil {
+				}, logger)
+				if fetchErr != nil {
 					logger.Warn("koios-parity: fetch error", "error", fetchErr)
+				}
+				// A non-nil fetchErr already leaves this range uncached (so the
+				// cursor logic below already retries it); an isolated per-epoch
+				// failure instead returns fetchErr == nil with the epoch listed in
+				// fetchResult.FailedEpochs, so it must be checked separately —
+				// otherwise the failed epoch's absence from the cache lets Check
+				// pass over it silently and the cursor advances past it forever.
+				partialFetch := fetchErr == nil && fetchResult != nil && len(fetchResult.FailedEpochs) > 0
+				if partialFetch {
+					logger.Warn("koios-parity: fetch had transient per-epoch failures, will retry next tick",
+						"failed_epochs", fetchResult.FailedEpochs)
 				}
 
 				result, checkErr := koiosparity.Check(ctx, koiosparity.CheckConfig{
@@ -134,20 +145,32 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 					ThroughEpoch: toClosed,
 					GraceHours:   graceHours,
 				}, logger)
+				if checkErr != nil {
+					logger.Warn("koios-parity: check error", "error", checkErr)
+				}
 
-				if fetchErr != nil || checkErr != nil {
+				switch {
+				case fetchErr != nil || partialFetch || checkErr != nil:
 					// Keep lastEpoch unchanged so the next tick retries this range.
-					if checkErr != nil {
-						logger.Warn("koios-parity: check error", "error", checkErr)
-					}
-				} else if result != nil {
-					// Only advance the cursor after both fetch and check succeed.
+				case len(result.ErrorEpochs) > 0:
+					// ERROR covers dingo_db_error/dingo_db_missing/reference_lag —
+					// conditions that are typically transient (a snapshot still
+					// being computed, or Dingo lagging Koios) and must be retried
+					// on the next tick rather than cached as permanently skipped
+					// by advancing past them here.
+					logger.Warn("koios-parity: epochs had ERROR status, will retry next tick",
+						"from", fromClosed, "through", toClosed,
+						"error_epochs", result.ErrorEpochs,
+					)
+				default:
+					// Only advance the cursor once fetch and check both fully
+					// succeeded and no epoch in this range came back ERROR. A FAIL
+					// (a real, confirmed mismatch) does not hold the cursor back:
+					// retrying it every tick would not change the outcome.
 					lastEpoch = current
 					status := "PASS"
 					if len(result.FailEpochs) > 0 {
 						status = fmt.Sprintf("FAIL (%d mismatches)", result.MismatchCount)
-					} else if len(result.ErrorEpochs) > 0 {
-						status = "ERROR"
 					}
 					logger.Info("koios-parity: epochs result",
 						"from", fromClosed, "through", toClosed,

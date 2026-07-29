@@ -51,7 +51,13 @@ type EpochCompareResult struct {
 }
 
 // CompareEpochAggregates compares epoch-level fields from Dingo's database
-// against the Koios reference row for that epoch.
+// against the Koios /epoch_info reference row for that epoch.
+// Only total_active_stake is compared here — koios.Fees and koios.TotalRewards
+// (/epoch_info.fees and /epoch_info.total_rewards) are raw block/tx accounting
+// quantities that have no corresponding Dingo aggregate; see the comment below
+// and KoiosTotalsResp's doc comment. The AdaPots pot values Dingo does track
+// (reward_ada_pots.Fees/Rewards) are compared against their correct Koios
+// counterpart, /totals, in CompareEpochTotals instead.
 // dingoEpoch may be nil when the epoch_summary row is absent (not yet computed).
 // fetchErr is set when the DB query itself failed.
 // graceHours: if the Koios row was fetched within this many hours and Dingo's
@@ -112,69 +118,15 @@ func CompareEpochAggregates(
 		})
 	}
 
-	// fees — sourced from reward_ada_pots. Koios returns null (stored as "") for
-	// early epochs that predate fee accounting; skip if there is no reference value.
-	if koios.Fees != "" {
-		if dingoEpoch.Fees == "" {
-			// No reward_ada_pots row: the epoch should have one; flag it explicitly
-			// so the epoch is never silently classified as PASS without fees checked.
-			cat := CategoryDBMissing
-			if graceHours > 0 && !koios.EpochEndTime.IsZero() &&
-				now.Sub(koios.EpochEndTime) < time.Duration(graceHours)*time.Hour {
-				cat = CategoryReferenceLag
-			}
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				Field:      "epoch_fees",
-				DingoValue: "",
-				KoiosValue: koios.Fees,
-				Category:   cat,
-				CheckedAt:  now,
-			})
-		} else if dingoEpoch.Fees != koios.Fees {
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				Field:      "epoch_fees",
-				DingoValue: dingoEpoch.Fees,
-				KoiosValue: koios.Fees,
-				Category:   CategoryValueMismatch,
-				CheckedAt:  now,
-			})
-		}
-	}
-
-	// total_rewards — Koios epoch_info.total_rewards vs reward_ada_pots.rewards.
-	// Skip when Koios has no reference (null → "") for early pre-reward epochs.
-	if koios.TotalRewards != "" {
-		if dingoEpoch.TotalRewards == "" {
-			cat := CategoryDBMissing
-			if graceHours > 0 && !koios.EpochEndTime.IsZero() &&
-				now.Sub(koios.EpochEndTime) < time.Duration(graceHours)*time.Hour {
-				cat = CategoryReferenceLag
-			}
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				Field:      "epoch_total_rewards",
-				DingoValue: "",
-				KoiosValue: koios.TotalRewards,
-				Category:   cat,
-				CheckedAt:  now,
-			})
-		} else if dingoEpoch.TotalRewards != koios.TotalRewards {
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				Field:      "epoch_total_rewards",
-				DingoValue: dingoEpoch.TotalRewards,
-				KoiosValue: koios.TotalRewards,
-				Category:   CategoryValueMismatch,
-				CheckedAt:  now,
-			})
-		}
-	}
+	// koios.Fees (/epoch_info.fees) and koios.TotalRewards (/epoch_info.total_rewards)
+	// are deliberately NOT compared here. Both are raw block/tx accounting
+	// quantities (the sum of transaction fees for txs included in that epoch's
+	// blocks, and total rewards earned in the epoch) — Dingo has no matching
+	// aggregate; reward_ada_pots.Fees/Rewards are AdaPots *pot* values (balances
+	// at the epoch boundary), a different quantity entirely (see
+	// KoiosTotalsResp's doc comment). reward_ada_pots is compared against its
+	// correct Koios counterpart, /totals.fees and /totals.reward, in
+	// CompareEpochTotals instead.
 
 	return out
 }
@@ -190,6 +142,14 @@ func CompareEpochAggregates(
 // mismatch report never conflates a /totals discrepancy with an /epoch_info
 // one, even though both may ultimately compare against the same Dingo
 // reward_ada_pots column.
+//
+// totals.fees and totals.treasury/reserves are single point-in-time pot
+// balances, matching what Dingo already stores per epoch (Fees is that
+// epoch's fee-pot snapshot; Treasury/Reserves are running ledger balances
+// Dingo already carries forward — see ledger/reward_calculation.go's
+// NetworkState updates), so those three are compared directly. totals.reward
+// is different in kind — a cumulative accumulator, not a snapshot — and is
+// not compared at all; see the comment after the totals_fees check below.
 //
 // koiosTotals is nil when no /totals row has been cached for this epoch yet
 // (e.g. cached before totals fetching was added) — comparison is skipped
@@ -252,19 +212,18 @@ func CompareEpochTotals(
 		})
 	}
 
-	// totals_reward — reward_ada_pots.Rewards vs Koios totals.reward,
-	// independent of the epoch_total_rewards comparison in CompareEpochAggregates.
-	if dingoEpoch.TotalRewards != "" && dingoEpoch.TotalRewards != koiosTotals.Reward {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			Field:      "totals_reward",
-			DingoValue: dingoEpoch.TotalRewards,
-			KoiosValue: koiosTotals.Reward,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
-	}
+	// totals.reward is deliberately NOT compared: verified against live preview
+	// data, it is a monotonically increasing cumulative accumulator (flat
+	// through epoch 11, then totals.reward(12) - totals.reward(11) =
+	// 13101661554 — an exact match to epoch_info.total_rewards for epoch 10,
+	// not 11 or 12, i.e. a 2-epoch-lagged running sum), not a per-epoch pot
+	// snapshot the way totals.treasury/reserves/fees are. Dingo has no stored
+	// aggregate matching that cumulative quantity — reward_ada_pots.Rewards is
+	// a fresh per-epoch flow value, overwritten every epoch (see
+	// DingoEpochData.TotalRewards). This checker does not derive one on
+	// Dingo's behalf by summing across epochs itself: a missing aggregate is a
+	// Dingo data-model gap to fix at the source (see epoch10-koios-parity-issue.md,
+	// Finding 3), not something for the parity checker to compute and paper over.
 
 	return out
 }

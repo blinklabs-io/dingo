@@ -59,13 +59,26 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 
 	if !skipFetch {
 		slog.Info("koios-parity: fetch phase starting", "network", network)
-		if _, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
+		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 			Network:     network,
 			APIKey:      koiosAPIKey(cmd),
 			CachePath:   cachePath,
 			Concurrency: concurrency,
-		}, logger); fetchErr != nil {
+		}, logger)
+		if fetchErr != nil {
 			return fmt.Errorf("fetch: %w", fetchErr)
+		}
+		// FailedEpochs means one or more epochs hit an isolated, transient fetch
+		// failure and were left uncached rather than aborting the whole run (see
+		// FetchResult.FailedEpochs). Unlike watch's continuous loop, a one-shot
+		// run has no "next tick" to retry them, so surface it as a hard failure
+		// now instead of silently proceeding to check phase against an
+		// incomplete cache.
+		if len(fetchResult.FailedEpochs) > 0 {
+			return fmt.Errorf(
+				"fetch: %d epoch(s) failed transiently and are not cached: %v",
+				len(fetchResult.FailedEpochs), fetchResult.FailedEpochs,
+			)
 		}
 	}
 
@@ -133,9 +146,9 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Exit code: 1 if any FAIL epoch.
-	if checkResult != nil && len(checkResult.FailEpochs) > 0 {
-		os.Exit(1)
-	}
-	return nil
+	// A FAIL or ERROR epoch must surface as a non-zero exit so automation can't
+	// mistake an incomplete or failed parity check for success; propagated via
+	// RunE's error return (main's rootCmd.Execute() handles os.Exit(1)) rather
+	// than exiting directly here.
+	return checkResultErr(checkResult)
 }
