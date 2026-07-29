@@ -25,7 +25,18 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
+	"gorm.io/gorm"
 )
+
+// runVacuumInto executes "VACUUM INTO" against dstPath, indirected through
+// a variable so a test can inject a failure at this exact point --
+// deterministically, including one that leaves a partial destination file
+// behind first -- instead of racing a real VACUUM's completion against a
+// timed context cancellation (scheduler/storage-speed dependent even when
+// it happens to pass repeatedly).
+var runVacuumInto = func(ctx context.Context, db *gorm.DB, dstPath string) error {
+	return db.WithContext(ctx).Exec("VACUUM INTO ?", dstPath).Error
+}
 
 // BackupTo writes a standalone, defragmented copy of the store's current
 // contents to dstPath (which must not already exist) using SQLite's
@@ -51,8 +62,7 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 			err,
 		)
 	}
-	if err := d.DB().WithContext(ctx).
-		Exec("VACUUM INTO ?", dstPath).Error; err != nil {
+	if err := runVacuumInto(ctx, d.DB(), dstPath); err != nil {
 		// VACUUM INTO can create dstPath before failing partway through
 		// (a cancelled context, a disk-full mid-write) -- remove it so a
 		// retry hits the real cause instead of the pre-existing-

@@ -81,6 +81,32 @@ func (r *rebuildableRegisterer) Unregister(c prometheus.Collector) bool {
 	return r.inner.Unregister(c)
 }
 
+// retainedComponentPromRegistry returns the registry a component that live
+// restore/truncate never reconstructs (currently just n.ouroboros) should
+// register its own metrics against: the real registry underneath
+// n.rebuildableMetrics, not the wrapper itself.
+//
+// n.ouroboros is built in Run(), after New() has already replaced
+// n.config.promRegistry with n.rebuildableMetrics — so a collector
+// registered via n.config.promRegistry at that point (as every genuinely
+// rebuilt component's constructor call correctly does) is indistinguishable
+// from one belonging to chainManager/ledgerState/mempool/etc. once it's in
+// r.collectors. n.rebuildableMetrics.unregisterAll() (node_lifecycle.go,
+// called before every live restore/truncate rebuild) has no way to tell
+// them apart, so it would unregister n.ouroboros's collectors right along
+// with the components actually being rebuilt -- and since n.ouroboros is
+// never reconstructed to re-register them, its blockfetch/protocol/Leios
+// metrics would permanently vanish from every scrape after the very first
+// live restore/truncate. Registering directly against the pre-wrap
+// registry instead means those collectors are never tracked by the
+// wrapper in the first place, so unregisterAll cannot touch them.
+func (n *Node) retainedComponentPromRegistry() prometheus.Registerer {
+	if n.rebuildableMetrics != nil {
+		return n.rebuildableMetrics.inner
+	}
+	return n.config.promRegistry
+}
+
 // unregisterAll removes every collector registered through this wrapper
 // from the underlying registry, so the next live rebuild can register
 // fresh collectors under the same names without a duplicate-registration

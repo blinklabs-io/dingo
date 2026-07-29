@@ -109,3 +109,52 @@ func TestRebuildableRegistererRegisterIsAtomicWithUnregisterAll(t *testing.T) {
 		"unregisterAll must complete once the concurrent Register call finishes",
 	)
 }
+
+// TestRetainedComponentPromRegistryBypassesRebuildableWrapper guards a
+// real bug: n.ouroboros is built in Run() after New() has already
+// replaced n.config.promRegistry with n.rebuildableMetrics, so a collector
+// registered via n.config.promRegistry directly there -- the way every
+// genuinely rebuilt component's constructor call correctly does -- is
+// indistinguishable from one belonging to a component live restore/
+// truncate actually reconstructs. node_lifecycle.go's unregisterAll call
+// (run before every live rebuild) would then permanently wipe it, since
+// n.ouroboros itself is never reconstructed to re-register it -- its
+// metrics would vanish from every scrape after the very first live
+// restore/truncate. This proves retainedComponentPromRegistry instead
+// resolves to the real registry underneath the wrapper, so a collector
+// registered against it survives an unregisterAll call untouched, while a
+// collector registered the normal (rebuilt-component) way is correctly
+// cleared.
+func TestRetainedComponentPromRegistryBypassesRebuildableWrapper(t *testing.T) {
+	real := prometheus.NewRegistry()
+	n := &Node{config: NewConfig()}
+	n.rebuildableMetrics = newRebuildableRegisterer(real)
+	n.config.promRegistry = n.rebuildableMetrics
+
+	// A component live restore/truncate DOES rebuild registers the normal
+	// way: through the wrapper.
+	require.NoError(t, n.config.promRegistry.Register(prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "test_rebuilt_component_gauge"},
+	)))
+
+	// n.ouroboros -- retained, never rebuilt -- must register through
+	// retainedComponentPromRegistry instead.
+	require.NoError(t, n.retainedComponentPromRegistry().Register(prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "test_retained_component_gauge"},
+	)))
+
+	// Simulate node_lifecycle.go's cleanup before a live rebuild.
+	n.rebuildableMetrics.unregisterAll()
+
+	// The rebuilt component's collector must be gone, so a fresh one can
+	// register under the same name without a duplicate-registration panic.
+	require.NoError(t, real.Register(prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "test_rebuilt_component_gauge"},
+	)))
+	// The retained component's collector must still be registered --
+	// registering a second one under the same name must fail as a
+	// duplicate.
+	require.Error(t, real.Register(prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "test_retained_component_gauge"},
+	)))
+}

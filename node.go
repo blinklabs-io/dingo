@@ -455,7 +455,7 @@ func (n *Node) Run(ctx context.Context) error {
 		PeerSharing:           n.config.peerSharing,
 		IntersectTip:          n.config.intersectTip,
 		IntersectPoints:       n.config.intersectPoints,
-		PromRegistry:          n.config.promRegistry,
+		PromRegistry:          n.retainedComponentPromRegistry(),
 		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
 		EnableLeios:           enableLeiosNetworking,
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo

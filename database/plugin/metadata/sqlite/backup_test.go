@@ -17,13 +17,14 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // TestBackupToRestoreFromRoundTrip verifies that a backed-up store
@@ -173,14 +174,18 @@ func TestCopyReaderToFileRemovesPartialDestinationOnCancellation(t *testing.T) {
 
 // TestBackupToRemovesPartialDestinationOnFailure guards the same
 // leftover-file bug on BackupTo's own write path: VACUUM INTO can create
-// the destination file before failing partway through, and without
-// cleanup a retried BackupTo would fail at the pre-existing-destination
-// check with a misleading "already exists" instead of the real cause.
-// Cancelling the context almost immediately after issuing VACUUM INTO
-// reliably surfaces SQLite's own SQLITE_INTERRUPT partway through
-// execution -- confirmed empirically to leave a (possibly empty)
-// destination file behind before this fix's cleanup was added -- rather
-// than relying on a slow/large database to create a wider timing window.
+// the destination file before failing partway through (a cancelled
+// context, a disk-full mid-write), and without cleanup a retried BackupTo
+// would fail at the pre-existing-destination check with a misleading
+// "already exists" instead of the real cause.
+//
+// Fails runVacuumInto deterministically via its test-injectable seam,
+// simulating VACUUM INTO having already created dstPath before failing,
+// rather than racing a real VACUUM's completion against a timed context
+// cancellation -- an earlier version of this test did that and, even
+// though it passed repeatedly in practice, remained scheduler/storage-
+// speed dependent (and used time.Sleep for synchronization, which this
+// repository's testing rules prohibit).
 func TestBackupToRemovesPartialDestinationOnFailure(t *testing.T) {
 	srcDir := t.TempDir()
 	src, err := New(srcDir, nil, nil)
@@ -190,12 +195,14 @@ func TestBackupToRemovesPartialDestinationOnFailure(t *testing.T) {
 
 	dstPath := filepath.Join(t.TempDir(), "out.sqlite")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(time.Millisecond)
-		cancel()
-	}()
-	err = src.BackupTo(ctx, dstPath)
+	orig := runVacuumInto
+	t.Cleanup(func() { runVacuumInto = orig })
+	runVacuumInto = func(_ context.Context, _ *gorm.DB, path string) error {
+		require.NoError(t, os.WriteFile(path, []byte("partial"), 0o644))
+		return errors.New("simulated vacuum failure")
+	}
+
+	err = src.BackupTo(context.Background(), dstPath)
 	require.Error(t, err)
 
 	_, statErr := os.Stat(dstPath)
