@@ -2781,6 +2781,12 @@ func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 			wantDeniesPeer: false,
 		},
 		{
+			reason: event.
+				ChainsyncResyncReasonReplayRecoveryNonConverging,
+			wantFresh:      true,
+			wantDeniesPeer: false,
+		},
+		{
 			reason:         event.ChainsyncResyncReasonChainSwitchCursorAhead,
 			wantFresh:      true,
 			wantDeniesPeer: false,

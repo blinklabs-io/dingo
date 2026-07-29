@@ -1417,6 +1417,214 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	}
 }
 
+// TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds
+// reproduces the terminal #3005 recovery cycle after prior, distinct failures
+// failed to advance the applied ledger high-water mark. Once the guard trips,
+// recovery must keep the applied tip instead of pruning another
+// security-parameter window and must force a fresh ChainSync connection even
+// when the primary chain was already pruned below that tip.
+func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
+	t *testing.T,
+) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	cm, err := chain.NewManager(db, bus)
+	require.NoError(t, err)
+
+	parentBlock := testRawBlock("nonconverging-parent", 100, 1, nil)
+	replayOneBlock := testRawBlock(
+		"nonconverging-replay-1",
+		120,
+		2,
+		parentBlock.Hash,
+	)
+	ledgerTipBlock := testRawBlock(
+		"nonconverging-ledger-tip",
+		140,
+		3,
+		replayOneBlock.Hash,
+	)
+	failingBlock := testRawBlock(
+		"nonconverging-failure",
+		162,
+		4,
+		ledgerTipBlock.Hash,
+	)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(
+			[]chain.RawBlock{
+				parentBlock,
+				replayOneBlock,
+			},
+		),
+	)
+	// Preserve the replay candidates in the block store while leaving the
+	// primary chain tip below the applied ledger tip. This is the #3005
+	// topology: an earlier recovery rewind has already moved the primary
+	// chain back, but ledger replay rebuilt to its previous high-water mark.
+	for _, block := range []chain.RawBlock{ledgerTipBlock, failingBlock} {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash:     block.Hash,
+			PrevHash: block.PrevHash,
+			Cbor:     block.Cbor,
+			Slot:     block.Slot,
+			Number:   block.BlockNumber,
+			Type:     block.Type,
+		}, nil))
+	}
+
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 3000,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.ParseIP("192.0.2.30"),
+			Port: 3001,
+		},
+	}
+	freshResyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncSubId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok ||
+				resync.Reason != event.
+					ChainsyncResyncReasonReplayRecoveryNonConverging {
+				return
+			}
+			select {
+			case freshResyncCh <- resync:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, resyncSubId)
+	})
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().SecurityParam = 2
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		EventBus:          bus,
+		CardanoNodeConfig: nodeConfig,
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+			return &activeConnId
+		},
+	})
+	require.NoError(t, err)
+	ls.currentEra.Id = 1
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+
+	ledgerTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			ledgerTipBlock.Slot,
+			ledgerTipBlock.Hash,
+		),
+		BlockNumber: ledgerTipBlock.BlockNumber,
+	}
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			ledgerTip.Point.Hash,
+			ledgerTip.Point.Slot,
+			[]byte("nonce-nonconverging-tip"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.currentTipBlockNonce = []byte("nonce-nonconverging-tip")
+	ls.publishSnapshotsLocked()
+
+	// Model the two earlier recovery cycles. Failure identities are
+	// intentionally absent from this tracker: #3005 showed that their slots
+	// can creep forward while the applied tip remains unchanged.
+	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
+	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
+
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		&txValidationError{
+			BlockPoint: ocommon.NewPoint(
+				failingBlock.Slot,
+				failingBlock.Hash,
+			),
+			TxHash: testHashBytes("nonconverging-tx"),
+			Inputs: []lcommon.TransactionInput{
+				&replayRecoveryInput{
+					txId:  testHashBytes("missing-producer"),
+					index: 0,
+				},
+			},
+			Cause: errors.New("bad input"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	require.True(t, ls.replayRecoveryHolding)
+	assert.Equal(
+		t,
+		maxReplayRecoveryNoProgress,
+		ls.replayRecoveryNoProgressCount,
+	)
+	assert.Equal(t, ledgerTip, ls.currentTip)
+	primaryTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			replayOneBlock.Slot,
+			replayOneBlock.Hash,
+		),
+		BlockNumber: replayOneBlock.BlockNumber,
+	}
+	assert.Equal(t, primaryTip, ls.chain.Tip())
+	assert.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(ls.metrics.replayRecoveryNonConverging),
+	)
+	freshResync := testutil.RequireReceive(
+		t,
+		freshResyncCh,
+		5*time.Second,
+		"expected a fresh ChainSync intersection after replay recovery stopped converging",
+	)
+	assert.Equal(t, activeConnId.String(), freshResync.ConnectionId.String())
+	assert.Equal(t, ledgerTip.Point, freshResync.Point)
+}
+
+func TestResetReplayRecoveryNonProgressRequiresNewHighWater(t *testing.T) {
+	ls := &LedgerState{}
+	require.False(t, ls.observeReplayRecoveryTip(140))
+	require.False(t, ls.observeReplayRecoveryTip(140))
+	require.True(t, ls.observeReplayRecoveryTip(139))
+	require.True(t, ls.replayRecoveryHolding)
+
+	ls.resetReplayRecoveryNonProgress(140)
+	assert.True(t, ls.replayRecoveryHolding)
+	assert.True(t, ls.replayRecoveryTipTracked)
+
+	ls.resetReplayRecoveryNonProgress(141)
+	assert.False(t, ls.replayRecoveryHolding)
+	assert.False(t, ls.replayRecoveryTipTracked)
+	assert.Zero(t, ls.replayRecoveryHighWaterSlot)
+	assert.Zero(t, ls.replayRecoveryNoProgressCount)
+}
+
 func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),

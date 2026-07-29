@@ -87,6 +87,15 @@ const maxAtTipRecoveryAttempts = 3
 // false-positive validation rejection).
 const maxAtTipRecoveryDescents = 2
 
+// maxReplayRecoveryNoProgress caps consecutive unresolved-producer replay
+// recoveries that rebuild only to the same (or an older) applied ledger tip.
+// The failing block may change and creep forward while the applied high-water
+// mark remains fixed, so the ledger tip—not the failure identity—is the
+// convergence signal. Once tripped, recovery stops pruning another
+// security-parameter window and holds at the applied tip while forcing a fresh
+// ChainSync connection (issue #3005).
+const maxReplayRecoveryNoProgress = 2
+
 type atTipRecoveryAttempt struct {
 	BlockPoint ocommon.Point
 	TxHash     []byte
@@ -188,8 +197,32 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if candidate.ProducerTx != nil {
 		producerTxHash = hex.EncodeToString(candidate.ProducerTx.Hash)
 	}
+	if ls.recoveryRollbackExceedsMithrilBoundary(candidate.RollbackPoint) {
+		if err := ls.rejectReplayRecoveryAtMithrilBoundary(
+			validationErr,
+			candidate,
+			producerTxHash,
+		); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	rewindPrimaryChain := candidate.ProducerUnresolved &&
 		ls.config.ChainManager != nil
+	rewindPoint := candidate.RollbackPoint
+	replayHolding := false
+	primaryChainAlreadyHeld := false
+	var ledgerTip ochainsync.Tip
+	if rewindPrimaryChain {
+		ls.RLock()
+		ledgerTip = ls.currentTip
+		ls.RUnlock()
+		replayHolding = ls.observeReplayRecoveryTip(ledgerTip.Point.Slot)
+		if replayHolding {
+			rewindPoint = ledgerTip.Point
+			primaryChainAlreadyHeld = ls.chain.Tip().Point.Slot < rewindPoint.Slot
+		}
+	}
 	recoveryAction := "rewinding metadata state"
 	if rewindPrimaryChain {
 		recoveryAction = "rewinding primary chain and metadata state"
@@ -203,22 +236,33 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		"missing_input", candidate.Input.String(),
 		"producer_tx_hash", producerTxHash,
 		"producer_block_slot", candidate.ProducerBlock.Slot,
-		"rollback_slot", candidate.RollbackPoint.Slot,
-		"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
+		"rollback_slot", rewindPoint.Slot,
+		"rollback_hash", hex.EncodeToString(rewindPoint.Hash),
+		"holding", replayHolding,
 	)
-	if ls.recoveryRollbackExceedsMithrilBoundary(candidate.RollbackPoint) {
-		if err := ls.rejectReplayRecoveryAtMithrilBoundary(
-			validationErr,
-			candidate,
-			producerTxHash,
-		); err != nil {
-			return false, err
-		}
-		return true, nil
+	if replayHolding {
+		ls.metrics.replayRecoveryNonConverging.Inc()
+		ls.config.Logger.Warn(
+			"replay recovery not converging after unresolved-producer failures, holding at applied ledger tip",
+			"component", "ledger",
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot", validationErr.BlockPoint.Slot,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+			"primary_chain_tip_slot", ls.chain.Tip().Point.Slot,
+			"primary_chain_already_held", primaryChainAlreadyHeld,
+			"no_progress_count", ls.replayRecoveryNoProgressCount,
+			"fallback_rollback_slot", candidate.RollbackPoint.Slot,
+			"hint", "forcing a fresh chainsync intersection; persistent failures may require operator intervention",
+		)
+		// Peer rotation is the escape mechanism for a held recovery. Publish
+		// it before the rollback calls so an unexpected local rollback error
+		// cannot suppress the fresh ChainSync intersection.
+		ls.publishReplayRecoveryNonConvergingResync(rewindPoint)
 	}
-	if rewindPrimaryChain {
+	if rewindPrimaryChain && !primaryChainAlreadyHeld {
 		if err := ls.rollbackPrimaryChainInSecurityParamWindows(
-			candidate.RollbackPoint,
+			rewindPoint,
 		); err != nil {
 			return false, fmt.Errorf(
 				"rewind primary chain for replay recovery: %w",
@@ -230,13 +274,76 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	// available. If metadata synchronization fails, the primary chain is still
 	// at a valid retained point and the standard divergence reconciler can
 	// finish rolling metadata back to its common ancestor.
-	if err := ls.rollback(candidate.RollbackPoint); err != nil {
+	if err := ls.rollback(rewindPoint); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state for replay recovery: %w",
 			err,
 		)
 	}
 	return true, nil
+}
+
+// observeReplayRecoveryTip records the applied tip seen immediately before an
+// unresolved-producer fallback. Recovery is non-converging when repeated
+// attempts fail to exceed the first observed high-water mark, even if peers
+// offer different failing blocks at slightly higher slots each cycle.
+func (ls *LedgerState) observeReplayRecoveryTip(tipSlot uint64) bool {
+	if !ls.replayRecoveryTipTracked {
+		ls.replayRecoveryTipTracked = true
+		ls.replayRecoveryHighWaterSlot = tipSlot
+		return false
+	}
+	if tipSlot <= ls.replayRecoveryHighWaterSlot {
+		ls.replayRecoveryNoProgressCount++
+	} else {
+		ls.replayRecoveryHighWaterSlot = tipSlot
+		ls.replayRecoveryNoProgressCount = 0
+		ls.replayRecoveryHolding = false
+	}
+	if ls.replayRecoveryNoProgressCount >= maxReplayRecoveryNoProgress {
+		ls.replayRecoveryHolding = true
+	}
+	return ls.replayRecoveryHolding
+}
+
+// resetReplayRecoveryNonProgress clears a replay hold only after block
+// application advances beyond the high-water mark that recovery could not
+// cross. Replaying blocks back up to that exact point is not progress.
+func (ls *LedgerState) resetReplayRecoveryNonProgress(newTipSlot uint64) {
+	if !ls.replayRecoveryTipTracked ||
+		newTipSlot <= ls.replayRecoveryHighWaterSlot {
+		return
+	}
+	ls.replayRecoveryTipTracked = false
+	ls.replayRecoveryHighWaterSlot = 0
+	ls.replayRecoveryNoProgressCount = 0
+	ls.replayRecoveryHolding = false
+}
+
+func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
+	point ocommon.Point,
+) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	var activeConnId ouroboros.ConnectionId
+	if ls.config.GetActiveConnectionFunc != nil {
+		if connId := ls.config.GetActiveConnectionFunc(); connId != nil {
+			activeConnId = *connId
+		}
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: activeConnId,
+				Reason: event.
+					ChainsyncResyncReasonReplayRecoveryNonConverging,
+				Point: point,
+			},
+		),
+	)
 }
 
 // rollbackPrimaryChainInSecurityParamWindows reaches a deep corrective rewind

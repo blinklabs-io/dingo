@@ -1882,6 +1882,22 @@ paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
 the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
+The unresolved-producer fallback also tracks the applied ledger high-water
+mark across attempts. Different candidate continuations can move the failing
+block forward slightly while rebuilding to the same applied tip, so failure
+slot or transaction identity is not a reliable convergence signal. After
+`maxReplayRecoveryNoProgress` consecutive attempts fail to cross that applied
+tip, recovery holds there instead of pruning another security-parameter
+window, emits `dingo_ledger_replay_recovery_nonconverging_total`, and publishes
+a `chainsync.resync` event with reason
+`replay tx validation recovery not converging`. Node composition routes that
+neutral event to Ouroboros, which closes the active ChainSync connection and
+forces a fresh intersection. The resync is published before local rollback
+work so a rollback error cannot suppress peer rotation. If an earlier recovery
+step has already pruned the primary chain below the applied ledger tip, the
+primary-chain rewind is an already-held no-op while ChainSync refills it.
+Successful block application beyond the recorded high-water mark clears the
+hold and restores the normal fallback budget.
 
 When a block fails per-tx validation at tip,
 the node rewinds the primary chain and rolls the ledger back so ChainSelection
