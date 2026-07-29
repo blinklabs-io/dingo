@@ -414,6 +414,9 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
+	if err := assertBodyFullyAuthenticated(era); err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
 	meta, err := archiveBlockMetadata(
 		decoded, era, block.GetBlock().GetHeight(), archivePrevHash,
 	)
@@ -454,7 +457,39 @@ var (
 	ErrArchiveBlockTypeMismatch = errors.New(
 		"bark: archive block era does not match the block header",
 	)
+	// ErrArchiveBlockNotFullyAuthenticated reports a block whose body cannot
+	// be bound to its header in full, so the archive could alter the
+	// unauthenticated part without changing anything checked here.
+	ErrArchiveBlockNotFullyAuthenticated = errors.New(
+		"bark: archive block body cannot be fully authenticated",
+	)
 )
+
+// assertBodyFullyAuthenticated refuses blocks whose body is only partly bound
+// to their header.
+//
+// Byron main blocks are the sole case. gouroboros checks their transaction,
+// delegation, and update proofs but not ssc_proof, because the SSC proof
+// hashes cardano-ledger's own encoding of the sub-payloads rather than the
+// bytes carried in the block. An alteration confined to the SSC payload
+// therefore changes nothing this package verifies — hash, slot, height, and
+// previous hash all come from the untouched header — so the archive could
+// still substitute part of a historical block.
+//
+// Epoch boundary blocks are unaffected: they carry no transactions and no SSC
+// payload, and a single body hash covers the whole body.
+//
+// This restriction can be lifted once Byron SSC proof validation exists
+// upstream.
+func assertBodyFullyAuthenticated(blockType uint) error {
+	if blockType == gledger.BlockTypeByronMain {
+		return fmt.Errorf(
+			"%w: byron main block ssc payload is unverified",
+			ErrArchiveBlockNotFullyAuthenticated,
+		)
+	}
+	return nil
+}
 
 // blockEraFromHeader derives a block's era from its own header rather than
 // from the era the archive nominated.

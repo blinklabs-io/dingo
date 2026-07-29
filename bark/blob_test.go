@@ -479,6 +479,70 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 	}
 }
 
+// TestGetBlock_RejectsByronMainArchiveBlock covers the one era whose body
+// cannot be fully bound to its header.
+//
+// gouroboros validates a Byron main block's transaction, delegation, and
+// update proofs but not ssc_proof, so an alteration confined to the SSC
+// payload changes no value this package checks: the hash, slot, height, and
+// previous hash all come from the untouched header. Rather than serve bytes
+// whose body is only partly authenticated, the fetch is refused.
+func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
+	raw, trueType := realEraBlock(t, "Block_Byron_regular")
+	require.Equal(t, uint(gledger.BlockTypeByronMain), trueType,
+		"fixture must be a Byron main block")
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType_BLOCK_TYPE_BYRON_MAIN
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, ErrArchiveBlockNotFullyAuthenticated)
+}
+
+// TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock is the boundary of that
+// restriction. An epoch boundary block carries no transactions and no SSC
+// payload, so a single body hash covers the whole body and the block is fully
+// bound to its header. Refusing it too would give up history for no gain.
+func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
+	raw, trueType := realEraBlock(t, "Block_Byron_EBB")
+	require.Equal(t, uint(gledger.BlockTypeByronEbb), trueType,
+		"fixture must be a Byron epoch boundary block")
+	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	db := newTestDB(t)
+	baseURL, fakeArch, httpClient := startFakeArchive(
+		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
+	)
+	fakeArch.blockType = archive.BlockType_BLOCK_TYPE_BYRON_EBB_UNSPECIFIED
+	fakeArch.height = decoded.BlockNumber()
+	prevHash := decoded.PrevHash()
+	fakeArch.prevHash = prevHash[:]
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+	require.NoError(t, err)
+	assert.Equal(t, raw, cbor)
+	assert.Equal(t, uint(gledger.BlockTypeByronEbb), meta.Type)
+}
+
 // TestGetBlock_RejectsUnclassifiableEra pins the fail-closed behaviour when a
 // block's era cannot be derived from its header.
 //

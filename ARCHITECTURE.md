@@ -2305,8 +2305,19 @@ local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 
 Because the archive controls both the download URL and the response body, the
 client re-establishes block identity locally rather than trusting the response.
-Downloaded bytes are decoded with body-hash validation enabled, and the block's
+Downloaded bytes are decoded with body validation enabled, and the block's
 computed hash and slot must match the point that was requested.
+
+That binding is complete for every era except Byron main. gouroboros checks a
+Byron main block's transaction, delegation, and update proofs but not
+`ssc_proof`, whose hashes cover cardano-ledger's own encoding of the SSC
+sub-payloads rather than the bytes carried in the block. An alteration confined
+to the SSC payload would therefore leave the hash, slot, height, and previous
+hash — all taken from the untouched header — unchanged. Rather than serve a
+body that is only partly authenticated, Bark refuses Byron main archive reads
+outright; the restriction lifts once Byron SSC proof validation exists
+upstream. Byron epoch boundary blocks are unaffected, carrying neither
+transactions nor an SSC payload, so one body hash covers their whole body.
 
 The block era needs its own check. For Shelley and later the hash covers the
 header alone, and adjacent eras share that header layout, so one set of bytes
