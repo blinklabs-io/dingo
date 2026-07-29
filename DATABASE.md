@@ -220,7 +220,7 @@ added for retired pools. This uses the `metadata.MetadataStore` methods
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
-| `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `(credential_tag, staking_key)`, `transaction_id`, `slot` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. |
+| `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key` (`idx_addr_tx_payment`), `transaction_id`, `slot`; composite `idx_addr_tx_stake_position` (`credential_tag`, `staking_key`, `slot`, `tx_index`, `payment_key`) | API-mode address-to-transaction index: one row per (payment address, transaction) pair. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. `idx_addr_tx_stake_position` backs `GetAddressTransactionsByCredential` (below): its leading `(credential_tag, staking_key)` columns serve every equality lookup the older `idx_addr_tx_staking` index did (`GetAddressesByCredential`, `GetTransactionsByAddress`'s credential-tag branch), and the trailing `(slot, tx_index, payment_key)` columns additionally let a credential-scoped, paginated, ordered range query run as a single index seek instead of sorting the credential's entire history in a temp B-tree. `MigrateAddressTransactionStakePositionIndex` drops the now-redundant `idx_addr_tx_staking` on upgrade, since it is a strict prefix of the new index and every one of its callers is served identically by the new one; `slot`'s standalone single-column index is kept separately because `DeleteAddressTransactionsAfterSlot`'s rollback cleanup (`WHERE slot > ?`, no credential filter) cannot use the composite index. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. |
@@ -1484,11 +1484,31 @@ FROM address_transaction at
 JOIN "transaction" tx ON tx.id = at.transaction_id
 WHERE at.credential_tag = $1
   AND at.staking_key = decode($2, 'hex')
-  AND (at.slot > $3 OR (at.slot = $3 AND at.tx_index >= $4))  -- from, optional
-  AND (at.slot < $5 OR (at.slot = $5 AND at.tx_index <= $6))  -- to, optional
+  AND (at.slot, at.tx_index) >= ($3, $4)  -- from, optional
+  AND (at.slot, at.tx_index) <= ($5, $6)  -- to, optional
 ORDER BY at.slot ASC, at.tx_index ASC, at.payment_key ASC
 LIMIT 50;
 ```
+
+The `from`/`to` bound is written as a row-value comparison rather than the
+logically equivalent `slot > $3 OR (slot = $3 AND tx_index >= $4)` form,
+because only the row-value form is recognized (verified with `EXPLAIN QUERY
+PLAN` on SQLite) as an index range scan against `idx_addr_tx_stake_position`
+(see the `address_transaction` table entry above): the OR form still uses
+the index for the `credential_tag`/`staking_key` equality but degrades the
+`slot`/`tx_index` bound to a row-by-row filter after that point, while the
+row-value form folds the full range into the same index seek. Both forms
+are correct; only one avoids scanning past disqualifying rows. The
+`ORDER BY` is satisfied entirely by `idx_addr_tx_stake_position` in both
+directions (SQLite walks a B-tree index backwards for `DESC` without a
+temp B-tree), so together with `LIMIT`/`OFFSET` this query costs work
+proportional to the requested page, not to the credential's full
+transaction history — see
+`database/plugin/metadata/internal/accounthistory/transactions_test.go`
+for the `EXPLAIN QUERY PLAN` regression coverage (asc, desc, and a
+from/to range case), following the pattern established in
+`sqlite/utxo_test.go`, `sqlite/drep_test.go`, and
+`internal/rewardstate/livestake_test.go`.
 
 The Blockfrost adapter resolves each `from`/`to` block number to a slot via
 two bounded block-store index lookups (`Database.BlockByIndex`,

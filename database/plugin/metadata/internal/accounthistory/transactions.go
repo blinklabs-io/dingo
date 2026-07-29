@@ -113,6 +113,19 @@ func CountAddressTransactionsByCredential(
 // already carries slot/tx_index directly (no join needed for the range
 // predicate); the join to the transaction table only resolves tx_hash and
 // block_hash, which are not duplicated onto address_transaction.
+//
+// The from/to bound is written as a row-value comparison, "(slot,
+// tx_index) >= (?, ?)", rather than the logically equivalent "slot > ? OR
+// (slot = ? AND tx_index >= ?)". Both are correct, but only the row-value
+// form is recognized as an index range scan against
+// idx_addr_tx_stake_position: verified via EXPLAIN QUERY PLAN, the OR form
+// still matches the index for the leading credential_tag/staking_key
+// equality but degrades the slot/tx_index bound to a row-by-row filter
+// (the index's USING clause shows only "credential_tag=? AND
+// staking_key=?"), while the row-value form shows the full "(slot,
+// tx_index)>(?,?) AND (slot,tx_index)<(?,?)" range folded into the same
+// index seek. Row-value comparisons are standard SQL, supported the same
+// way by SQLite, Postgres, and MySQL.
 func addressTransactionRangeQuery(
 	db *gorm.DB,
 	credentialTag uint8,
@@ -134,12 +147,12 @@ func addressTransactionRangeQuery(
 	)
 	args := []any{credentialTag, stakingKey}
 	if from != nil {
-		query += " AND (at.slot > ? OR (at.slot = ? AND at.tx_index >= ?))"
-		args = append(args, from.Slot, from.Slot, from.TxIndex)
+		query += " AND (at.slot, at.tx_index) >= (?, ?)"
+		args = append(args, from.Slot, from.TxIndex)
 	}
 	if to != nil {
-		query += " AND (at.slot < ? OR (at.slot = ? AND at.tx_index <= ?))"
-		args = append(args, to.Slot, to.Slot, to.TxIndex)
+		query += " AND (at.slot, at.tx_index) <= (?, ?)"
+		args = append(args, to.Slot, to.TxIndex)
 	}
 	return query, args
 }

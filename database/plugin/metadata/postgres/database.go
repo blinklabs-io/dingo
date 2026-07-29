@@ -351,6 +351,16 @@ func (d *MetadataStorePostgres) Start() error {
 			"reward_live_stake dedup failed: %w", err,
 		)
 	}
+	// Drop the now-redundant address_transaction credential/staking index;
+	// AutoMigrate creates its idx_addr_tx_stake_position replacement below.
+	if err := models.MigrateAddressTransactionStakePositionIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"address_transaction stake position index migration failed: %w",
+			err,
+		)
+	}
 	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
 	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
 	// was enabled never enforced these cascades, so orphaned children
