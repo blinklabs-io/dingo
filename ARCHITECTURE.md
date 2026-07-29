@@ -2198,11 +2198,18 @@ header validation recognizes that shape as unsuitable for hard stake-threshold
 rejection and skips that portion of validation until live boundary-captured Mark
 rows are available.
 
-The Mithril snapshot also acts as the local trust anchor during live
-chainsync. The ledger refuses any rollback below the imported ledger slot
-(`mithrilLedgerSlot`), since blocks at or below that boundary were certified
-as a single ledger state and intermediate UTxO states for a replacement fork
-cannot be reconstructed. Mithril sync persists the full boundary point in
+Mithril sync only uses a ledger state as the local trust anchor when its point
+is at or below the certificate-backed ImmutableDB tip. Ancillary archives can
+contain a newer ledger state and volatile blocks signed by the ancillary
+publisher, but that signature authenticates the archive; it does not establish
+Ouroboros consensus validity for the volatile suffix. State-file selection is
+therefore capped at the certified immutable tip, the selected point is checked
+against the copied immutable chain, and sync fails closed when no such state is
+available.
+
+The ledger refuses any rollback below the selected stable ledger slot
+(`mithrilLedgerSlot`), since intermediate UTxO states before that imported
+state cannot be reconstructed. Mithril sync persists the full boundary point in
 `sync_state` (`mithril_ledger_slot` and `mithril_ledger_hash`) so outbound
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
@@ -2227,47 +2234,29 @@ ingestion (`ensureGapConsumedUtxos`, used while closing the range between the
 snapshot and the chain tip) is unconditionally strict already, since that range
 is always expected to be fully recoverable from the snapshot import.
 
-Historical block validation is controlled independently. With
+Certified immutable blocks after the selected anchor remain in the primary
+chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
+node startup therefore replays that stable suffix through the ordinary ledger
+path. Blocks beyond the ImmutableDB tip are not imported from ancillary
+volatile state or pre-processed as gap blocks; chainsync/blockfetch obtains and
+validates them normally. API-mode historical metadata backfill is capped at the
+anchor so it cannot pre-apply and thereby bypass the ledger path for either
+suffix.
+
+Historical block validation before the stable anchor is controlled
+independently. With
 `ValidateHistorical: false` (the default), ledger replay skips validation
 outside the near-tip stability window; certificate verification of a Mithril
 artifact establishes a signed trust boundary but is not equivalent to
 independent from-genesis replay. With complete historical state,
 `ValidateHistorical: true` validates the older replay window as well.
 
-The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
-`processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
-(the "gap blocks") for their transaction effects, including consumed-input
-reconciliation via `ensureGapConsumedUtxos`, but without VRF folding. Because a
-phase-2-invalid transaction's collateral fee is computed from the metadata UTxO
-rows and those consumed inputs are only recovered by `ensureGapConsumedUtxos`
-after the transaction row is created, `SetGapBlockTransaction` then calls
-`RecomputeGapCollateralFee` to recompute and persist `transaction.collateral_fee`
-once the inputs exist, so the epoch fee pot is not undercounted. The trust
-boundary is then recorded at the post-gap chain tip (`mithril/sync_import.go`),
-ahead of the evolving nonce persisted at the ledger-state slot. Because live
-chainsync folds nonces only past the trust boundary, the candidate nonce carried
-into the first post-bootstrap epoch
-boundary would otherwise omit every gap block's VRF output, diverging the
-computed epoch nonce from the network and failing every leader-VRF check in that
-epoch (a node runs clean through the bootstrap epoch — whose nonce was imported,
-not computed — then wedges rejecting the first block of the next epoch).
-`LedgerState.healMithrilGapBlockNonces` closes this at startup: it re-folds the
-evolving nonce (the shared `foldBlockEtaV`, Byron-skipped) from the anchor
-block's stored `block_nonce` through every canonical-chain block up to the tip,
-persisting a corrected `block_nonce` for each and checkpointing the
-trust-boundary block. Blocks come from the primary chain index — a raw
-block-blob slot scan would also fold retained fork blobs and synthetic Leios
-endorser blobs, silently corrupting every subsequent nonce. Writes commit in
-batches, with the trust-boundary row committed last as the completion marker,
-so the heal is idempotent — once the recorded trust-boundary point carries a
-folded nonce it detects completion and no-ops — and a crash mid-heal resumes on
-the next start from the highest valid canonical row below the boundary. It
-repairs an already-bootstrapped node in place with no re-bootstrap and never
-reconstructs from an unknown seed: when no usable anchor nonce exists below the
-boundary, or no valid anchor candidate is on the primary chain, it declines
-rather than guess. If a higher valid nonce row below the boundary belongs to a
-retained fork, the heal falls back to the next lower canonical candidate instead
-of treating the fork row as the seed.
+`processGapBlocks`, `SetGapBlockTransaction`, and
+`LedgerState.healMithrilGapBlockNonces` remain compatibility/recovery machinery
+for databases produced by older releases that advanced
+`mithril_ledger_slot` across an unvalidated gap. New imports do not create that
+shape: nonce folding and transaction effects after the stable anchor are
+produced by ordinary ledger replay.
 
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce`, where the carried

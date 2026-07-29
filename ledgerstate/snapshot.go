@@ -45,6 +45,19 @@ var ErrLedgerDirNotFound = errors.New("ledger directory not found")
 //
 // Returns the path to the state file.
 func FindLedgerStateFile(extractedDir string) (string, error) {
+	return FindLedgerStateFileAtOrBefore(extractedDir, ^uint64(0))
+}
+
+// FindLedgerStateFileAtOrBefore searches the extracted snapshot directory for
+// the newest ledger state whose filename slot is at or before maxSlot. Mithril
+// ancillary archives can contain a newer ledger state from the node's volatile
+// database in addition to states anchored by certified ImmutableDB content.
+// Callers that use a ledger state as a trust anchor must cap selection at the
+// certified immutable tip.
+func FindLedgerStateFileAtOrBefore(
+	extractedDir string,
+	maxSlot uint64,
+) (string, error) {
 	ledgerDir, err := findLedgerDir(extractedDir)
 	if err != nil {
 		return "", err
@@ -64,6 +77,14 @@ func FindLedgerStateFile(extractedDir string) (string, error) {
 
 	for _, e := range entries {
 		name := e.Name()
+		slot, parseErr := strconv.ParseUint(
+			stripLedgerSuffix(name),
+			10,
+			64,
+		)
+		if parseErr != nil || slot > maxSlot {
+			continue
+		}
 		if e.IsDir() {
 			// UTxO-HD format: directory named by slot number
 			statePath := filepath.Join(
@@ -96,7 +117,8 @@ func FindLedgerStateFile(extractedDir string) (string, error) {
 	}
 
 	return "", fmt.Errorf(
-		"no ledger state files found in %s",
+		"no ledger state files at or before slot %d found in %s",
+		maxSlot,
 		ledgerDir,
 	)
 }
@@ -146,6 +168,17 @@ func FindUTxOTableFile(extractedDir string) string {
 	path, _ := findUTxOTableInSlot(
 		filepath.Join(ledgerDir, dirs[0]),
 	)
+	return path
+}
+
+// FindUTxOTableFileForState returns the UTxO-HD table that belongs to the
+// selected ledger state. Legacy ledger-state files embed their UTxO table and
+// return an empty path.
+func FindUTxOTableFileForState(statePath string) string {
+	if filepath.Base(statePath) != "state" {
+		return ""
+	}
+	path, _ := findUTxOTableInSlot(filepath.Dir(statePath))
 	return path
 }
 

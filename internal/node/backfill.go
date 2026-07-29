@@ -93,6 +93,12 @@ type Backfill struct {
 	// field; auto-detect from the sync-state key".
 	immutableUtxoOffsetsTipSet bool
 
+	// endSlot optionally bounds historical metadata replay. Mithril imports
+	// use the stable ledger-state anchor here so blocks from the artifact's
+	// volatile suffix are left for the normal validating ledger pipeline.
+	endSlot    uint64
+	endSlotSet bool
+
 	// Counters surfaced in the completion log to make the optimisation
 	// observable.
 	skippedBlocks   uint64
@@ -150,6 +156,14 @@ func (b *Backfill) SetProgressFunc(onProgress func(BackfillProgress)) {
 func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
 	b.immutableUtxoOffsetsTipSlot = slot
 	b.immutableUtxoOffsetsTipSet = true
+}
+
+// SetEndSlot limits backfill to blocks at or below slot. The checkpoint is
+// completed at that boundary; later blocks are intentionally handled by the
+// normal ledger replay path.
+func (b *Backfill) SetEndSlot(slot uint64) {
+	b.endSlot = slot
+	b.endSlotSet = true
 }
 
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
@@ -694,6 +708,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return nil
 	}
 	tipSlot := tipBlocks[0].Slot
+	if b.endSlotSet && b.endSlot < tipSlot {
+		tipSlot = b.endSlot
+	}
 
 	// Load epoch boundaries for slot-to-epoch mapping.
 	if err := b.loadEpochs(); err != nil {
@@ -744,6 +761,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// misinterpret the first block as an era change.
 		b.initializeFromFirstEpoch()
 	} else {
+		cp.TotalSlots = tipSlot
 		startSlot = cp.LastSlot + 1
 		if cp.LastSlot == 0 {
 			// LastSlot 0 is ambiguous: it can mean either
@@ -885,6 +903,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 		if blk == nil {
 			break // iteration complete
+		}
+		if blk.Slot > tipSlot {
+			break
 		}
 		ensureBatchTxn()
 

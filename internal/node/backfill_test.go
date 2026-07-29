@@ -347,6 +347,50 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	require.Equal(t, uint64(1), got.LastSlot)
 }
 
+func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
+	db := newTestDB(t)
+
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 2,
+			StartedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			Completed:  false,
+		},
+		nil,
+	))
+	for _, slot := range []uint64{0, 1, 2} {
+		hash := make([]byte, 32)
+		hash[0] = byte(slot + 1)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot: slot,
+			Hash: hash,
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		}, nil))
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	bf := NewBackfill(db, nil, logger)
+	bf.SetEndSlot(1)
+
+	require.NoError(t, bf.Run(context.Background()))
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, checkpoint.Completed)
+	require.Equal(t, uint64(1), checkpoint.LastSlot)
+	require.Equal(t, uint64(1), checkpoint.TotalSlots)
+	require.Contains(t, logs.String(), `"slot":0`)
+	require.Contains(t, logs.String(), `"slot":1`)
+	require.NotContains(t, logs.String(), `"slot":2`)
+}
+
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
 // published even when the run finishes before the normal 10s progress tick.
 func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {

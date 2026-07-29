@@ -26,6 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/node"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -116,17 +118,21 @@ func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
 	require.True(t, cp.UpdatedAt.After(startedAt))
 }
 
-func TestUpdateMithrilReadyStateStoresTrustBoundaryFromRecentTip(
+func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 	t *testing.T,
 ) {
 	db := newMithrilTestDB(t)
 	tipHash := bytes.Repeat([]byte{0x11}, 32)
 	ledgerStateHash := bytes.Repeat([]byte{0x22}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, ledgerStateHash),
+		BlockNumber: 1,
+	}, nil))
 	require.NoError(t, db.BlockCreate(models.Block{
-		ID:     1,
+		ID:     2,
 		Slot:   42,
 		Hash:   tipHash,
-		Number: 1,
+		Number: 2,
 		Type:   1,
 		Cbor:   []byte{0x80},
 	}, nil))
@@ -143,10 +149,64 @@ func TestUpdateMithrilReadyStateStoresTrustBoundaryFromRecentTip(
 
 	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
 	require.NoError(t, err)
-	require.Equal(t, "42", slot)
+	require.Equal(t, "30", slot)
 	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
 	require.NoError(t, err)
-	require.Equal(t, hex.EncodeToString(tipHash), hash)
+	require.Equal(t, hex.EncodeToString(ledgerStateHash), hash)
+	storedTip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(30), storedTip.Point.Slot)
+	require.Equal(t, ledgerStateHash, storedTip.Point.Hash)
+}
+
+func TestSetStableMithrilLedgerTipUsesCertifiedBlockNumber(t *testing.T) {
+	db := newMithrilTestDB(t)
+	ledgerStateHash := bytes.Repeat([]byte{0x23}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   30,
+		Hash:   ledgerStateHash,
+		Number: 123,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+
+	require.NoError(t, setStableMithrilLedgerTip(
+		db,
+		30,
+		ledgerStateHash,
+	))
+
+	storedTip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(30), storedTip.Point.Slot)
+	require.Equal(t, ledgerStateHash, storedTip.Point.Hash)
+	require.Equal(t, uint64(123), storedTip.BlockNumber)
+}
+
+func TestSetStableMithrilLedgerTipRejectsPointOutsideCertifiedChain(
+	t *testing.T,
+) {
+	db := newMithrilTestDB(t)
+	certifiedHash := bytes.Repeat([]byte{0x24}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   30,
+		Hash:   certifiedHash,
+		Number: 123,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+
+	err := setStableMithrilLedgerTip(
+		db,
+		30,
+		bytes.Repeat([]byte{0x25}, 32),
+	)
+	require.ErrorContains(t, err, "is not present in certified ImmutableDB")
 }
 
 func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
@@ -154,6 +214,9 @@ func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
 ) {
 	db := newMithrilTestDB(t)
 	ledgerStateHash := bytes.Repeat([]byte{0x33}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
 
 	require.NoError(t, updateMithrilReadyState(
 		db,
@@ -177,6 +240,9 @@ func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 	t *testing.T,
 ) {
 	db := newMithrilTestDB(t)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, nil),
+	}, nil))
 	require.NoError(t, db.SetSyncState(
 		mithrilLedgerHashSyncKey,
 		hex.EncodeToString(bytes.Repeat([]byte{0x44}, 32)),
