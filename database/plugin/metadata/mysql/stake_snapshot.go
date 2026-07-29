@@ -345,25 +345,3 @@ func (d *MetadataStoreMysql) DeleteEpochSummariesAfterEpoch(
 	}
 	return nil
 }
-
-// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
-func (d *MetadataStoreMysql) DeleteEpochSummariesBeforeEpoch(
-	epoch uint64,
-	txn types.Txn,
-) error {
-	db, err := d.resolveDB(txn)
-	if err != nil {
-		return fmt.Errorf(
-			"DeleteEpochSummariesBeforeEpoch: resolve db: %w",
-			err,
-		)
-	}
-	if err := db.Where("epoch < ?", epoch).Delete(&models.EpochSummary{}).Error; err != nil {
-		return fmt.Errorf(
-			"DeleteEpochSummariesBeforeEpoch: failed to delete summaries before epoch %d: %w",
-			epoch,
-			err,
-		)
-	}
-	return nil
-}

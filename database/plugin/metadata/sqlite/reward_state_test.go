@@ -304,23 +304,26 @@ func TestDeleteRewardStateBeforeEpoch(t *testing.T) {
 
 	require.NoError(t, store.DeleteRewardStateBeforeEpoch(2, nil))
 
+	// reward_ada_pots, reward_snapshot and reward_pool_input are retained for the
+	// life of the database (dingo #2987), so the out-of-window epoch 1 rows
+	// survive. Only reward_stake_input and reward_account_output are pruned.
 	pots, err := store.GetRewardAdaPots(1, nil)
 	require.NoError(t, err)
-	require.Nil(t, pots)
+	require.NotNil(t, pots)
 	pots, err = store.GetRewardAdaPots(2, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots)
 
 	snapshot, err := store.GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
-	require.Nil(t, snapshot)
+	require.NotNil(t, snapshot)
 	snapshot, err = store.GetRewardSnapshot(2, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 
 	inputs, err := store.GetRewardPoolInputs(1, nil)
 	require.NoError(t, err)
-	require.Empty(t, inputs)
+	require.Len(t, inputs, 1)
 	inputs, err = store.GetRewardPoolInputs(2, nil)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1)

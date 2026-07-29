@@ -950,9 +950,19 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 }
 
 // cleanupOldSnapshots removes snapshots older than needed for the rotation and
-// delayed reward models. We keep 4 epochs of snapshots: current, current-1,
-// current-2 for Go, and current-3 so reward calculation can be replayed after a
-// rollback across the boundary where those rewards were applied.
+// delayed reward models. We keep 4 epochs of per-pool and per-credential rows:
+// current, current-1, current-2 for Go, and current-3 so reward calculation can
+// be replayed after a rollback across the boundary where those rewards were
+// applied.
+//
+// epoch_summary is deliberately NOT pruned. It is a single small row per epoch
+// (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
+// slot), so retaining the full history costs one row per epoch — roughly a
+// thousand rows over a network's lifetime — while making historical epoch
+// aggregates permanently queryable. Pruning it also made a legitimately
+// captured boundary indistinguishable from one that was never captured, which
+// is what made dingo #2987 read as a missing epoch-2 snapshot on a node that
+// had in fact captured it correctly 400 epochs earlier.
 func (m *Manager) cleanupOldSnapshots(
 	ctx context.Context,
 	currentEpoch uint64,
@@ -977,14 +987,6 @@ func (m *Manager) cleanupOldSnapshots(
 		metaTxn,
 	); err != nil {
 		return fmt.Errorf("cleanup pool snapshots: %w", err)
-	}
-
-	// Delete old epoch summaries
-	if err := meta.DeleteEpochSummariesBeforeEpoch(
-		deleteBeforeEpoch,
-		metaTxn,
-	); err != nil {
-		return fmt.Errorf("cleanup epoch summaries: %w", err)
 	}
 
 	if err := meta.DeleteRewardStateBeforeEpoch(

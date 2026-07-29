@@ -1435,11 +1435,16 @@ type MetadataStore interface {
 	// DeletePoolStakeSnapshotsBeforeEpoch deletes all snapshots before a given epoch.
 	DeletePoolStakeSnapshotsBeforeEpoch(uint64, types.Txn) error
 
-	// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given epoch.
+	// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given
+	// epoch, for discarding boundaries that a rollback rewound. Rollback does
+	// not currently call it: epoch numbering is slot-derived, so the boundary is
+	// re-crossed on the selected chain and SaveEpochSummary upserts the row.
+	//
+	// There is deliberately no before-epoch counterpart. epoch_summary is one
+	// small row per epoch and is retained for the life of the database, unlike
+	// the per-pool snapshot and reward-input rows that cleanupOldSnapshots
+	// prunes to the rotation window.
 	DeleteEpochSummariesAfterEpoch(uint64, types.Txn) error
-
-	// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
-	DeleteEpochSummariesBeforeEpoch(uint64, types.Txn) error
 
 	// GetTransactionHashesAfterSlot returns transaction hashes for transactions added after the given slot.
 	// This is used for blob cleanup during rollback/truncation.
