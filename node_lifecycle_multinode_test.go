@@ -208,12 +208,16 @@ func newDevnetForgerNode(
 }
 
 // newDevnetSyncNode builds a real normal-mode Node configured to dial
-// forgerAddr as its sole bootstrap peer.
+// forgerAddr as its sole bootstrap peer, accepting inbound connections on
+// ln (mirroring newDevnetForgerNode's own explicit-listener parameter, so
+// a caller can capture ln and later verify the syncer itself still
+// accepts inbound connections after a live Restore/Truncate).
 func newDevnetSyncNode(
 	t *testing.T,
 	cardanoCfg *cardano.CardanoNodeConfig,
 	logger *slog.Logger,
 	forgerAddr *net.TCPAddr,
+	ln net.Listener,
 ) *Node {
 	t.Helper()
 	cfg := NewConfig(
@@ -225,7 +229,7 @@ func newDevnetSyncNode(
 		WithCardanoNodeConfig(cardanoCfg),
 		WithGenesisBootstrap(false),
 		WithIntersectTip(false),
-		WithListeners(ListenerConfig{Listener: newLoopbackListener(t)}),
+		WithListeners(ListenerConfig{Listener: ln}),
 		WithTopologyConfig(&topology.TopologyConfig{
 			BootstrapPeers: []topology.TopologyConfigP2PBootstrapPeer{
 				{
@@ -270,7 +274,13 @@ func runNodeInBackground(t *testing.T, n *Node) {
 // that starts polling n.db immediately — as waitForTipSlotAtLeast does —
 // would otherwise race that assignment. The dbReady channel receive gives
 // the race detector a real happens-before edge; a raw poll loop would not.
-func startTwoNodeDevnet(t *testing.T) (forger, syncer *Node) {
+//
+// syncerLn is the syncer's own inbound listener's original address (the
+// listener object itself is single-use — see ConnectionManager.
+// ResolvedListeners's doc comment — so a caller that wants to dial the
+// syncer after a live Restore/Truncate must redial syncerLn.Addr(), not
+// reuse the object).
+func startTwoNodeDevnet(t *testing.T) (forger, syncer *Node, syncerLn net.Listener) {
 	t.Helper()
 	cardanoCfg := devnetCardanoConfig(t)
 	ln := newLoopbackListener(t)
@@ -288,7 +298,8 @@ func startTwoNodeDevnet(t *testing.T) (forger, syncer *Node) {
 	}
 
 	syncerLogger, syncerDBReady := newDBReadyLogger(io.Discard)
-	syncer = newDevnetSyncNode(t, cardanoCfg, syncerLogger, forgerAddr)
+	syncerLn = newLoopbackListener(t)
+	syncer = newDevnetSyncNode(t, cardanoCfg, syncerLogger, forgerAddr, syncerLn)
 	runNodeInBackground(t, syncer)
 
 	select {
@@ -297,7 +308,7 @@ func startTwoNodeDevnet(t *testing.T) (forger, syncer *Node) {
 		t.Fatal("timed out waiting for syncer node's database to initialize")
 	}
 
-	return forger, syncer
+	return forger, syncer, syncerLn
 }
 
 // waitForTipSlotAtLeast polls n's persisted tip (direct field access —
@@ -320,8 +331,33 @@ func waitForTipSlotAtLeast(t *testing.T, n *Node, minSlot uint64) {
 	}, 90*time.Second, 20*time.Millisecond)
 }
 
+// requireInboundListenerAcceptsConnections dials ln's own resolved address
+// -- not the ln object itself, which a live Restore/Truncate's quiesce step
+// always closes, single-use, regardless of who created it (see
+// ConnectionManager.ResolvedListeners's doc comment) -- and requires the
+// dial to succeed, proving the node behind it still accepts new inbound
+// connections. Guards a real regression: a live Restore/Truncate used to
+// leave the node's own listener permanently dead (the accept loop launched
+// straight onto the already-closed original object, exiting immediately on
+// net.ErrClosed) while still reporting the operation as fully successful --
+// invisible to every existing assertion here, since none of them ever
+// dialed back into the node they'd just operated on.
+func requireInboundListenerAcceptsConnections(t *testing.T, ln net.Listener) {
+	t.Helper()
+	addr := ln.Addr()
+	require.Eventually(t, func() bool {
+		conn, err := net.DialTimeout(addr.Network(), addr.String(), time.Second)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}, 5*time.Second, 50*time.Millisecond,
+		"node must still accept inbound connections on %s after the live operation", addr)
+}
+
 func TestTwoNodeDevnetSyncOverRealNetworking(t *testing.T) {
-	_, syncer := startTwoNodeDevnet(t)
+	_, syncer, _ := startTwoNodeDevnet(t)
 	waitForTipSlotAtLeast(t, syncer, 5)
 }
 
@@ -332,7 +368,7 @@ func TestTwoNodeDevnetSyncOverRealNetworking(t *testing.T) {
 // storage in isolation (already proven by node_lifecycle_test.go), but do
 // so while a real peer connection is live and blocks keep arriving.
 func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
-	_, syncer := startTwoNodeDevnet(t)
+	_, syncer, syncerLn := startTwoNodeDevnet(t)
 	waitForTipSlotAtLeast(t, syncer, 10)
 
 	// Capture an actually-observed early tip to use as the truncate
@@ -358,6 +394,7 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotZero(t, blocksRemoved)
+	requireInboundListenerAcceptsConnections(t, syncerLn)
 
 	syncer.liveLifecycleMu.Lock()
 	tipAfterTruncate, err := syncer.db.GetTip(nil)
@@ -377,7 +414,7 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 // same snapshot back onto it mid-flight, and confirm it keeps syncing
 // from the still-forging peer afterward.
 func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
-	_, syncer := startTwoNodeDevnet(t)
+	_, syncer, syncerLn := startTwoNodeDevnet(t)
 	waitForTipSlotAtLeast(t, syncer, 10)
 
 	snapshotDir := t.TempDir() + "/snap"
@@ -395,6 +432,7 @@ func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
 	// later GetTip above. The snapshot must not be ahead of that observed
 	// live tip; equality is not guaranteed by this concurrent test.
 	require.LessOrEqual(t, manifest.TipSlot, tipBeforeRestore.Point.Slot)
+	requireInboundListenerAcceptsConnections(t, syncerLn)
 
 	waitForTipSlotAtLeast(t, syncer, tipBeforeRestore.Point.Slot+5)
 }

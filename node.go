@@ -1270,6 +1270,16 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
+	// A caller-supplied net.Listener (e.g. a test harness binding an
+	// OS-assigned port up front) is single-use: Stop always closes every
+	// listener it owns, including one it didn't create, so the exact
+	// object can never be reused after a live Restore/Truncate's
+	// quiesce-then-reinit cycle. Recording the concrete address it
+	// actually resolved to now lets reinitializeNetworkingCore rebind a
+	// fresh listener at that same address later, instead of trying (and
+	// silently failing) to reuse the original, by-then-permanently-closed
+	// object. See ConnectionManager.ResolvedListeners's doc comment.
+	n.config.listeners = n.connManager.ResolvedListeners()
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.connManager.Stop(context.Background()); err != nil {
 			n.config.logger.Error(

@@ -520,6 +520,56 @@ func (c *ConnectionManager) stopListeners() {
 	}
 }
 
+// ResolvedListeners returns c's listener configs with Listener cleared and
+// ListenNetwork/ListenAddress set to the concrete address each one is
+// actually bound to. Must be called after a successful Start.
+//
+// This is what makes a caller-supplied net.Listener (e.g. a test harness
+// binding an OS-assigned loopback port up front, to hand a peer its exact
+// address with no discovery race) safe to carry across a live
+// Restore/Truncate's quiesce-then-reinit cycle: Stop closes every
+// listener it owns unconditionally, including one it didn't create, so
+// the original object can never be reused once closed. But the concrete
+// network+address it resolved to is stable and can be redialed to
+// produce a fresh listener -- the same thing that already happens
+// naturally for an address-configured (Listener == nil) entry, since
+// startListener only ever binds fresh when Listener is nil. Without this,
+// a caller-supplied listener stayed non-nil in the node's stored config
+// forever, so every reinit kept trying to reuse the exact same
+// now-permanently-closed object, and the accept loop launched on it
+// exited immediately on net.ErrClosed with the reinit still reporting
+// success -- silently leaving that listener deaf to new inbound
+// connections until the whole process restarted.
+func (c *ConnectionManager) ResolvedListeners() []ListenerConfig {
+	c.listenersMutex.Lock()
+	defer c.listenersMutex.Unlock()
+	resolved := make([]ListenerConfig, len(c.config.Listeners))
+	for i, cfg := range c.config.Listeners {
+		// Only rewrite an entry that came in with a caller-supplied
+		// Listener -- an already address-configured entry (Listener nil)
+		// already rebinds correctly on its own via ListenNetwork/
+		// ListenAddress and needs no help; leaving it untouched also
+		// avoids overwriting a Windows named-pipe entry's ListenNetwork
+		// ("unix", checked explicitly by startListener's pipe branch)
+		// with whatever network name its winio.PipeAddr.Network() call
+		// happens to report, which could otherwise break its own
+		// self-healing rebind.
+		if cfg.Listener != nil && i < len(c.listeners) && c.listeners[i] != nil {
+			addr := c.listeners[i].Addr()
+			cfg.Listener = nil
+			cfg.ListenNetwork = addr.Network()
+			cfg.ListenAddress = addr.String()
+			// The rebind happens moments after this exact address's
+			// previous listener was closed; SO_REUSEADDR maximizes the
+			// chance that succeeds immediately rather than racing the
+			// OS's own socket-teardown bookkeeping.
+			cfg.ReuseAddress = true
+		}
+		resolved[i] = cfg
+	}
+	return resolved
+}
+
 func (c *ConnectionManager) AddConnection(
 	conn *ouroboros.Connection,
 	isInbound bool,

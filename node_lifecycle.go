@@ -840,6 +840,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to restart connection manager: %w", err)
 	}
+	// See node.go's identical call after its own connManager.Start for why:
+	// a caller-supplied listener is single-use, so its concrete resolved
+	// address (not the now-closed object) is what must carry forward to
+	// the NEXT reinit.
+	n.config.listeners = n.connManager.ResolvedListeners()
 	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("peer governor restart failed: %w", err)
 	}
