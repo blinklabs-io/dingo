@@ -1204,7 +1204,23 @@ func (n *Node) Restore(
 		)
 	}
 
-	manifest, err := lifecycle.Restore(ctx, n.destinationRegistry, snapshotDir, stagingDir)
+	// A fresh, single-use plugin host built just for staging this restore
+	// -- not n.pluginHost, the live node's own app-wide host, which must
+	// not be stopped out from under the still-running node the way this
+	// host is stopped right below. Mirrors Truncate's identical tmpDB
+	// pattern (internalplugins.OpenDatabase builds its own scratch host
+	// the same way).
+	restoreHost, err := internalplugins.NewHost()
+	if err != nil {
+		return lifecycle.Manifest{}, fmt.Errorf(
+			"build storage plugin host for restore: %w", err,
+		)
+	}
+	defer restoreHost.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+
+	manifest, err := lifecycle.Restore(
+		ctx, restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
+	)
 	if err != nil {
 		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
 	}

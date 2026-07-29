@@ -51,6 +51,16 @@ import (
 // can be restored onto another, since the two never need to share a
 // filesystem. registry may be nil if snapshotDir is always a local path.
 //
+// host resolves the manifest-recorded blob/metadata plugins against
+// targetDataDir; composition code (node.go, cmd/dingo, internal/dblifecycle,
+// bark) builds and owns it — typically a fresh, single-use host built
+// just for this call via internal/plugins.NewHost, mirroring how
+// internal/plugins.OpenDatabase builds its own scratch host for a
+// temporary open elsewhere. This package never constructs one itself: a
+// domain package under the database import boundary registering
+// providers or owning a plugin host of its own would split provider
+// ownership away from the application's composition root.
+//
 // This is an offline operation: targetDataDir must not be concurrently
 // held open by another *database.Database (e.g. a running node), since it
 // restores the metadata store before starting it (metadata.Restorer) and
@@ -59,11 +69,12 @@ import (
 // cannot safely interleave with.
 func Restore(
 	ctx context.Context,
+	host *plugin.Host,
 	registry *DestinationRegistry,
 	snapshotDir string,
 	targetDataDir string,
 ) (Manifest, error) {
-	return RestoreValidated(ctx, registry, snapshotDir, targetDataDir, nil)
+	return RestoreValidated(ctx, host, registry, snapshotDir, targetDataDir, nil)
 }
 
 // RestoreValidated is Restore, but — when validate is non-nil — calls
@@ -95,6 +106,7 @@ func Restore(
 // own os.RemoveAll(stagingDir) clears on its next attempt.
 func RestoreValidated(
 	ctx context.Context,
+	host *plugin.Host,
 	registry *DestinationRegistry,
 	snapshotDir string,
 	targetDataDir string,
@@ -153,12 +165,6 @@ func RestoreValidated(
 			_ = os.RemoveAll(stagingDir)
 		}
 	}()
-
-	host, err := newStorageHost()
-	if err != nil {
-		return Manifest{}, fmt.Errorf("build storage plugin host: %w", err)
-	}
-	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 
 	if err := restoreMetadataStore(ctx, host, manifest, snapshotDir, stagingDir); err != nil {
 		return Manifest{}, err

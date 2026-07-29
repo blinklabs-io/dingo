@@ -182,8 +182,19 @@ func (s *Service) Restore(
 	if storageMode == "" {
 		storageMode = types.StorageModeCore
 	}
+	// A fresh, single-use plugin host built just for this restore, per
+	// lifecycle.RestoreValidated's doc comment on why database/lifecycle
+	// never builds one itself.
+	host, err := internalplugins.NewHost()
+	if err != nil {
+		return lifecycle.Manifest{}, fmt.Errorf(
+			"build storage plugin host: %w", err,
+		)
+	}
+	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	manifest, err := lifecycle.RestoreValidated(
 		ctx,
+		host,
 		s.destinationRegistry,
 		snapshotDir,
 		s.cfg.DatabasePath,

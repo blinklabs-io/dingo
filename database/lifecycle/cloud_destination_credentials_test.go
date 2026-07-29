@@ -170,7 +170,9 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	// full manifest/tip/commit-timestamp consistency checks against real
 	// downloaded data, not just a local round-trip.
 	restoredDir := filepath.Join(t.TempDir(), "restored")
-	restoreMan, err := lifecycle.Restore(ctx, cloudCredentialsTestRegistry, snapshotURI, restoredDir)
+	restoreMan, err := lifecycle.Restore(
+		ctx, newTestStorageHost(t), cloudCredentialsTestRegistry, snapshotURI, restoredDir,
+	)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)
 

@@ -12,31 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package lifecycle
+package lifecycle_test
 
 import (
-	"fmt"
+	"context"
+	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/stretchr/testify/require"
 )
 
-// newStorageHost builds a plugin host with only the storage-capability
-// providers registered — not internal/plugins.NewHost, which additionally
-// wires up API and mempool providers this package has no use for and
-// would otherwise pull database/lifecycle (under the database import
-// boundary) into depending on the api/mempool package trees.
-func newStorageHost() (*plugin.Host, error) {
+// newTestStorageHost builds a plugin host with just the badger/sqlite
+// providers registered, mirroring internal/test/dbtest's identical
+// registration -- lifecycle.Restore/RestoreValidated take a host as an
+// explicit parameter rather than building one themselves (composition
+// code's job in production; a test's job here), so every test calling
+// them directly needs one of its own.
+func newTestStorageHost(t *testing.T) *plugin.Host {
+	t.Helper()
 	host := plugin.NewHost()
-	if err := badger.RegisterProvider(host); err != nil {
-		return nil, fmt.Errorf("register badger provider: %w", err)
-	}
-	if err := sqlite.RegisterProvider(host); err != nil {
-		return nil, fmt.Errorf("register sqlite provider: %w", err)
-	}
-	if err := registerExtraStorage(host); err != nil {
-		return nil, err
-	}
-	return host, nil
+	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, sqlite.RegisterProvider(host))
+	t.Cleanup(func() { _ = host.Stop(context.Background()) })
+	return host
 }

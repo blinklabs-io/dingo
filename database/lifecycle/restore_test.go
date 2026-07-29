@@ -43,7 +43,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	restoreMan, err := lifecycle.Restore(
-		context.Background(), testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
 	)
 	require.NoError(t, err)
 	require.Equal(t, snapMan.CommitTimestamp, restoreMan.CommitTimestamp)
@@ -80,7 +80,9 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 		filepath.Join(targetDir, "existing.txt"), []byte("data"), 0o644,
 	))
 
-	_, err = lifecycle.Restore(context.Background(), testDestinationRegistry, snapshotDir, targetDir)
+	_, err = lifecycle.Restore(
+		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+	)
 	require.Error(t, err)
 }
 
@@ -126,7 +128,7 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = lifecycle.RestoreValidated(
-		context.Background(), testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
 		func(m lifecycle.Manifest) error {
 			return m.CheckPluginMatch("gcs", "sqlite")
 		},

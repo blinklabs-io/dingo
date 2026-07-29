@@ -426,6 +426,7 @@ sequenceDiagram
         BB->>BB: sign with KES key, attach VRF proof
         BB-->>BF: block + CBOR
         BF->>ChM: AddBlock(forgedBlock)
+        BF->>MP: remove confirmed transactions
         ChM->>EB: publish ChainUpdateEvent
         BF->>EB: publish BlockForgedEvent
     end
@@ -2153,6 +2154,13 @@ script validation and large forging snapshots. Add/remove events remain
 published outside all locks, and candidate rejection emits only the same
 removal event and gauge changes as the former in-place rebuild.
 
+After a locally forged block is accepted by the chain manager, the production
+forger synchronously removes that block's transaction hashes through the
+backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild remains
+responsible for transactions confirmed by peer blocks. This local fast path
+prevents confirmed transactions from accumulating when sustained admissions
+make a long rebuild repeatedly lose its pinned ledger generation.
+
 ## Block Production
 
 When running as a stake pool operator, Dingo can produce blocks. This involves three subsystems under `ledger/`:
@@ -2170,6 +2178,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 4. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
 5. Optionally self-validates the forged block before adoption (see below)
 6. Broadcasts the forged block through the chain manager
+7. After successful local adoption, synchronously removes the block's confirmed transactions from the mempool
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.

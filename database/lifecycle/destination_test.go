@@ -409,7 +409,8 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 	// many snapshots, not one restorable directory.
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	m, err := lifecycle.Restore(
-		context.Background(), testDestinationRegistry, "faketest://bucket/prefix/snap-src", restoredDir,
+		context.Background(), newTestStorageHost(t), testDestinationRegistry,
+		"faketest://bucket/prefix/snap-src", restoredDir,
 	)
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)

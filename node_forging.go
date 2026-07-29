@@ -323,6 +323,7 @@ func (n *Node) initBlockForger(
 		LeaderChecker:                   election,
 		BlockBuilder:                    builder,
 		BlockBroadcaster:                broadcaster,
+		ConfirmedTxs:                    mempoolAdapter,
 		BlockForged:                     n.ledgerState.RecordForgedBlock,
 		SlotClock:                       slotClock,
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
@@ -422,6 +423,10 @@ func (a *forgingMempoolAdapter) Transactions() []forging.MempoolTransaction {
 		}
 	}
 	return result
+}
+
+func (a *forgingMempoolAdapter) RemoveTxsByHash(hashes []string) {
+	a.source.RemoveTxsByHash(hashes)
 }
 
 // blockBroadcaster implements forging.BlockBroadcaster by proposing locally

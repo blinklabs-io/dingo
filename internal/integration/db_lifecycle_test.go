@@ -24,11 +24,27 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+// newTestStorageHost builds a plugin host with just the badger/sqlite
+// providers registered -- lifecycle.Restore takes a host as an explicit
+// parameter rather than building one itself (composition code's job in
+// production; a test's job here).
+func newTestStorageHost(t *testing.T) *plugin.Host {
+	t.Helper()
+	host := plugin.NewHost()
+	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, sqlite.RegisterProvider(host))
+	t.Cleanup(func() { _ = host.Stop(context.Background()) })
+	return host
+}
 
 // setupLifecycleTestChain opens a fresh database in tmpDir, loads
 // numBlocks real blocks from the immutable testdata into it via a chain
@@ -85,7 +101,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	restoredManifest, err := lifecycle.Restore(
-		context.Background(), nil, snapDir, restoredDir,
+		context.Background(), newTestStorageHost(t), nil, snapDir, restoredDir,
 	)
 	require.NoError(t, err)
 	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)

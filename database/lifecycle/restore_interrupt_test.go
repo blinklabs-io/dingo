@@ -26,6 +26,9 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -137,7 +140,10 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 func runRestoreInterruptHelper() {
 	snapshotDir := os.Getenv("DINGO_TEST_RESTORE_SNAPSHOT_DIR")
 	targetDir := os.Getenv("DINGO_TEST_RESTORE_TARGET_DIR")
-	_, _ = lifecycle.Restore(context.Background(), nil, snapshotDir, targetDir)
+	host := plugin.NewHost()
+	_ = badger.RegisterProvider(host)
+	_ = sqlite.RegisterProvider(host)
+	_, _ = lifecycle.Restore(context.Background(), host, nil, snapshotDir, targetDir)
 	// Only reached if the parent's kill lands after Restore already
 	// finished (not expected: the FIFO blocks it first); exit quietly
 	// either way, since the parent's own assertion is what actually

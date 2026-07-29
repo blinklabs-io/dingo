@@ -31,6 +31,7 @@ import (
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -769,7 +770,15 @@ func verifySnapshotIntegrity(
 		return fmt.Errorf("create verification directory: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
-	if _, err := lifecycle.Restore(ctx, registry, snapshotDir, tempDir); err != nil {
+	// A fresh, single-use plugin host built just for this verification
+	// restore, per lifecycle.Restore's doc comment on why database/lifecycle
+	// never builds one itself.
+	host, err := internalplugins.NewHost()
+	if err != nil {
+		return fmt.Errorf("build storage plugin host: %w", err)
+	}
+	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+	if _, err := lifecycle.Restore(ctx, host, registry, snapshotDir, tempDir); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
 	return nil

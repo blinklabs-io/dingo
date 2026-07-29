@@ -441,6 +441,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 	ls := &LedgerState{
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId1,
+		batchBlocksReceived:          1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -498,6 +499,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	ls := &LedgerState{
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId,
+		batchBlocksReceived:          1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1731,6 +1733,53 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 
 	ls.blockfetchRequestRangeCleanup()
+}
+
+func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRequestsResync(
+	t *testing.T,
+) {
+	testChain := &chain.Chain{}
+	err := testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("near-tip-header")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        4,
+	})
+	require.NoError(t, err)
+
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	requestCount := 0
+	ls := &LedgerState{
+		chain:                        testChain,
+		activeBlockfetchConnId:       connId,
+		selectedBlockfetchConnId:     connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				_ ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ ocommon.Point,
+			) error {
+				requestCount++
+				return nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+		ConnectionId: connId,
+		BatchDone:    true,
+	})
+	require.NoError(t, err)
+	assert.Zero(t, requestCount)
+	assert.Zero(t, testChain.HeaderCount())
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
+	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
 }
 
 func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(

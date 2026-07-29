@@ -398,16 +398,6 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
-	// chainsyncMutex outer, chainsyncBlockfetchMutex inner: the same
-	// nested-lock order handleChainSwitchEvent and others already use.
-	// handleEventBlockfetchBatchDone (below) can call clearQueuedHeaders,
-	// which mutates headerPipelineConnId -- state handleEventChainsync's
-	// discardBufferedPeerHeaders path also mutates while holding only
-	// chainsyncMutex. Without also taking chainsyncMutex here, those two
-	// EventBus dispatch goroutines (one per subscription) race on that
-	// field with no lock in common.
-	ls.chainsyncMutex.Lock()
-	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	e, ok := evt.Data.(BlockfetchEvent)
@@ -1382,10 +1372,19 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	return nil
 }
 
+// discardBufferedPeerHeaders is called from handleEventChainsync's dispatch
+// goroutine, which holds only chainsyncMutex -- clearQueuedHeaders mutates
+// headerPipelineConnId, which every other mutator (handleChainSwitchEvent,
+// handleEventBlockfetch's batch-done path, etc.) guards with
+// chainsyncBlockfetchMutex. Taking it here too, self-contained, closes that
+// gap without widening handleEventBlockfetch's own critical section to
+// cover chainsyncMutex as well.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
 ) {
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
@@ -1806,8 +1805,12 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.headerMismatchCount = 0
 	ls.bufferedHeaderEvents = nil
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
-	ls.clearQueuedHeaders()
 	ls.chainsyncBlockfetchMutex.Lock()
+	// clearQueuedHeaders mutates headerPipelineConnId, which every other
+	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
+	// lock (rather than called before it, as this used to) to close that
+	// gap.
+	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
@@ -1966,8 +1969,13 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				continue
 			}
 			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
+				// clearQueuedHeaders (and the headerPipelineConnId write
+				// below) mutate a field every other mutator guards with
+				// chainsyncBlockfetchMutex -- take it here too, scoped
+				// tightly around just these writes.
+				ls.chainsyncBlockfetchMutex.Lock()
 				ls.clearQueuedHeaders()
-				ls.headerPipelineConnId = ouroboros.ConnectionId{}
+				ls.chainsyncBlockfetchMutex.Unlock()
 				return 0, err
 			}
 			added++
@@ -1975,7 +1983,9 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if added == 0 {
 			continue
 		}
+		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
+		ls.chainsyncBlockfetchMutex.Unlock()
 		ls.selectedBlockfetchConnId = connId
 		return ls.chain.HeaderCount(), nil
 	}
@@ -2239,7 +2249,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
+			//
+			// clearQueuedHeaders mutates headerPipelineConnId, which
+			// every other mutator guards with chainsyncBlockfetchMutex
+			// -- take it here too, scoped tightly around just this call.
+			ls.chainsyncBlockfetchMutex.Lock()
 			ls.clearQueuedHeaders()
+			ls.chainsyncBlockfetchMutex.Unlock()
 			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
 				"block header does not fit chain tip",
@@ -4587,11 +4603,11 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 			"remaining_headers", remainingHeaders,
 		)
 	}
-	upstreamTipSlot := ls.UpstreamTipSlot()
-	if receivedBlockCount == 0 &&
-		remainingHeaders > 0 &&
-		upstreamTipSlot > ls.Tip().Point.Slot &&
-		upstreamTipSlot-ls.Tip().Point.Slot >= blockfetchMinBatchGapSlots {
+	// An empty batch cannot consume the queued header at any distance from
+	// the tip. Recover immediately instead of continuously requesting the
+	// same unavailable block. The old minimum-gap guard skipped recovery
+	// near the tip, producing a tight empty-batch retry loop.
+	if receivedBlockCount == 0 && remainingHeaders > 0 {
 		retryConnId := ls.selectRetryBlockfetchConn(e.ConnectionId)
 		ls.blockfetchRequestRangeCleanup()
 		if connIdKey(retryConnId) != "" &&
