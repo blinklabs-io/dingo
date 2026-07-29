@@ -14,7 +14,61 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func TestRewardLiveStakeRefreshQueriesOnlyPoolCertificateTables(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	key := bytes.Repeat([]byte{0xA3}, 28)
+	require.NoError(t, store.DB().Create(&models.Account{
+		CredentialTag: 0,
+		StakingKey:    key,
+		Active:        true,
+		Reward:        types.Uint64(1),
+	}).Error)
+
+	recorder := &importSQLRecorder{}
+	db := store.DB().Session(&gorm.Session{Logger: recorder})
+	ref := models.StakeCredentialRef{Tag: 0, Key: key}
+	err := refreshRewardLiveStakeAggregates(
+		db,
+		map[string]rewardCredentialSlotRef{
+			ref.MapKey(): {ref: ref, slot: 100},
+		},
+	)
+	require.NoError(t, err)
+
+	recorder.mu.Lock()
+	var statements []string
+	for _, statement := range recorder.statements {
+		if strings.Contains(strings.ToLower(statement), "with ranked as") {
+			statements = append(statements, statement)
+		}
+	}
+	recorder.mu.Unlock()
+	require.Len(t, statements, 4)
+
+	queries := strings.ToLower(strings.Join(statements, "\n"))
+	for _, table := range []string{
+		"stake_registration_delegation",
+		"stake_vote_registration_delegation",
+		"stake_delegation",
+		"stake_vote_delegation",
+	} {
+		require.Contains(t, queries, "from "+table+" t")
+	}
+	for _, table := range []string{
+		"stake_registration",
+		"vote_registration_delegation",
+		"registration",
+		"stake_deregistration",
+		"deregistration",
+		"vote_delegation",
+	} {
+		require.NotContains(t, queries, "from "+table+" t")
+	}
+}
 
 func TestRewardLiveStakeNeedsBackfillAcceptsReadTransaction(t *testing.T) {
 	t.Parallel()

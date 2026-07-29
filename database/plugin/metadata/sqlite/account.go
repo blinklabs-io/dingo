@@ -224,6 +224,81 @@ func batchFetchCerts(
 	return cache, nil
 }
 
+// batchFetchPoolDelegations fetches only certificate types that can update a
+// credential's pool delegation. Reward-live-stake refreshes do not consume
+// registration, deregistration, or DRep-only state, so using batchFetchCerts
+// there would execute six additional windowed queries whose results are
+// discarded.
+func batchFetchPoolDelegations(
+	db *gorm.DB,
+	refs []models.StakeCredentialRef,
+	slot uint64,
+) (*accountCertCache, error) {
+	cache := newAccountCertCache(len(refs))
+
+	// The SQL IN clause filters by staking-key hash. Keep the composite
+	// credential keys so results for an unrequested credential variant can be
+	// removed after the queries.
+	requested := make(map[string]struct{}, len(refs))
+	seenHash := make(map[string]struct{}, len(refs))
+	var stakingKeys [][]byte
+	for _, ref := range refs {
+		requested[accountCertCacheKey(ref.Tag, ref.Key)] = struct{}{}
+		h := string(ref.Key)
+		if _, ok := seenHash[h]; !ok {
+			seenHash[h] = struct{}{}
+			stakingKeys = append(stakingKeys, ref.Key)
+		}
+	}
+
+	if len(stakingKeys) == 0 {
+		return cache, nil
+	}
+
+	for keyChunk := range slices.Chunk(stakingKeys, sqliteBindVarLimit) {
+		if err := batchFetchStakeRegistrationDelegation(
+			db,
+			keyChunk,
+			slot,
+			cache,
+		); err != nil {
+			return nil, err
+		}
+		if err := batchFetchStakeVoteRegistrationDelegation(
+			db,
+			keyChunk,
+			slot,
+			cache,
+		); err != nil {
+			return nil, err
+		}
+		if err := batchFetchStakeDelegation(
+			db,
+			keyChunk,
+			slot,
+			cache,
+		); err != nil {
+			return nil, err
+		}
+		if err := batchFetchStakeVoteDelegation(
+			db,
+			keyChunk,
+			slot,
+			cache,
+		); err != nil {
+			return nil, err
+		}
+	}
+
+	for key := range cache.poolDelegation {
+		if _, ok := requested[key]; !ok {
+			delete(cache.poolDelegation, key)
+		}
+	}
+
+	return cache, nil
+}
+
 func batchFetchStakeRegistration(
 	db *gorm.DB,
 	stakingKeys [][]byte,
