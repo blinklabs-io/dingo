@@ -37,9 +37,11 @@ import (
 
 // newDBBackedAccountAdapter builds a NodeAdapter like newDBBackedAdapter
 // (adapter_block_db_test.go), but additionally configures a minimal Shelley
-// genesis so slot-0 transactions/withdrawals resolve their block_time via
-// SlotToTime's genesis short-circuit, without needing a populated epoch
-// cache.
+// genesis and a single wide-covering epoch (0..10,000,000 slots) so
+// SlotToTime resolves any slot used by these tests, not just slot 0 (the
+// genesis short-circuit), without needing the full epoch-boundary/nonce
+// machinery a real epoch cache would otherwise require. ls.PrepareEpochCacheForStartup
+// only works before LedgerState.Start(), which is never called here.
 func newDBBackedAccountAdapter(
 	t *testing.T,
 ) (*NodeAdapter, *sqliteplugin.MetadataStoreSqlite, *database.Database) {
@@ -65,11 +67,18 @@ func newDBBackedAccountAdapter(
 	})
 	require.NoError(t, err)
 
-	adapter, err := NewNodeAdapter(ls, nil)
-	require.NoError(t, err)
-
 	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
 	require.True(t, ok)
+	require.NoError(t, store.DB().Create(&models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    1000,
+		LengthInSlots: 10_000_000,
+	}).Error)
+	require.NoError(t, ls.PrepareEpochCacheForStartup())
+
+	adapter, err := NewNodeAdapter(ls, nil)
+	require.NoError(t, err)
 
 	return adapter, store, db
 }
@@ -89,16 +98,20 @@ func testStakeCredential(t *testing.T, fill byte) (string, []byte) {
 	return addr.String(), stakeKey
 }
 
+// createTestBlock creates a block at the given Cardano height (Number).
+// The blob-store index ID must be height + database.BlockInitialIndex to
+// match how BlockByIndex/BlockAtOrAfterIndex resolve a Blockfrost block
+// number to a block (see resolveBlockRangeBound in
+// adapter_account_activity.go and nextBlockHash in adapter.go).
 func createTestBlock(
 	t *testing.T,
 	db *database.Database,
-	id uint64,
 	hash []byte,
 	number uint64,
 ) {
 	t.Helper()
 	require.NoError(t, db.BlockCreate(models.Block{
-		ID:     id,
+		ID:     number + database.BlockInitialIndex,
 		Hash:   hash,
 		Slot:   number,
 		Number: number,
@@ -297,8 +310,8 @@ func TestNodeAdapterAccountWithdrawals(t *testing.T) {
 		Active:        true,
 	}).Error)
 
-	createTestBlock(t, db, 1, fill32(0xb1), 100)
-	createTestBlock(t, db, 2, fill32(0xb2), 200)
+	createTestBlock(t, db, fill32(0xb1), 100)
+	createTestBlock(t, db, fill32(0xb2), 200)
 
 	require.NoError(t, store.DB().Create(&models.Transaction{
 		Hash: fill32(0x01), BlockHash: fill32(0xb1), Slot: 0, BlockIndex: 0,
@@ -411,6 +424,58 @@ func TestNodeAdapterAccountWithdrawalsQueryFailure(t *testing.T) {
 
 // --- AccountTransactions ---
 
+// createAccountTransactionFixture creates a Transaction row (with an
+// explicit ID) and its corresponding AddressTransaction association row
+// under the given stake credential and payment key, mirroring what the
+// real indexer populates for one (payment address, transaction) pair.
+// slot/txIndex are shared by both rows exactly as production indexing
+// does, since the account-transactions query filters and orders using
+// address_transaction's own (slot, tx_index) columns.
+func createAccountTransactionFixture(
+	t *testing.T,
+	store *sqliteplugin.MetadataStoreSqlite,
+	txID uint,
+	txHash []byte,
+	blockHash []byte,
+	slot uint64,
+	txIndex uint32,
+	paymentKey []byte,
+	stakeKey []byte,
+	credentialTag uint8,
+) {
+	t.Helper()
+	require.NoError(t, store.DB().Create(&models.Transaction{
+		ID: txID, Hash: txHash, BlockHash: blockHash,
+		Slot: slot, BlockIndex: txIndex,
+	}).Error)
+	addAccountTransactionAssociation(
+		t, store, txID, slot, txIndex, paymentKey, stakeKey, credentialTag,
+	)
+}
+
+// addAccountTransactionAssociation creates one more AddressTransaction
+// association row for a transaction that already exists (e.g. a second
+// output of the same transaction paying a different address under the
+// same stake credential), without re-creating the Transaction row (whose
+// hash is unique).
+func addAccountTransactionAssociation(
+	t *testing.T,
+	store *sqliteplugin.MetadataStoreSqlite,
+	txID uint,
+	slot uint64,
+	txIndex uint32,
+	paymentKey []byte,
+	stakeKey []byte,
+	credentialTag uint8,
+) {
+	t.Helper()
+	require.NoError(t, store.DB().Create(&models.AddressTransaction{
+		PaymentKey: paymentKey, StakingKey: stakeKey,
+		CredentialTag: credentialTag, TransactionID: txID,
+		Slot: slot, TxIndex: txIndex,
+	}).Error)
+}
+
 func TestNodeAdapterAccountTransactions(t *testing.T) {
 	adapter, store, db := newDBBackedAccountAdapter(t)
 
@@ -421,106 +486,70 @@ func TestNodeAdapterAccountTransactions(t *testing.T) {
 		Active:        true,
 	}).Error)
 
-	createTestBlock(t, db, 1, fill32(0xc1), 100)
-	createTestBlock(t, db, 2, fill32(0xc2), 101)
-	createTestBlock(t, db, 3, fill32(0xc3), 105)
+	// Blocks at heights 100, 101, and 105; slot mirrors height for
+	// readability (only their relative order matters here).
+	createTestBlock(t, db, fill32(0xc1), 100)
+	createTestBlock(t, db, fill32(0xc2), 101)
+	createTestBlock(t, db, fill32(0xc3), 105)
 
+	addr1Payment := bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize)
+	addr2Payment := bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize)
 	addr1, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyKey,
 		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0x01}, lcommon.AddressHashSize),
+		addr1Payment,
 		stakeKey,
 	)
 	require.NoError(t, err)
 	addr2, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyKey,
 		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize),
+		addr2Payment,
 		stakeKey,
 	)
 	require.NoError(t, err)
 
-	// tx1 in block 100, output under addr1.
-	txID1 := uint(1)
-	require.NoError(t, store.DB().Create(&models.Transaction{
-		ID: txID1, Hash: fill32(0x01), BlockHash: fill32(0xc1),
-		Slot: 0, BlockIndex: 0,
-		Outputs: []models.Utxo{{
-			TxId: fill32(0x01), OutputIdx: 0,
-			PaymentKey: addr1.PaymentKeyHash().Bytes(),
-			StakingKey: stakeKey, CredentialTag: 0,
-			Amount: types.Uint64(1_000_000),
-		}},
+	// A UTxO row per payment key backs the GetUtxoPaymentScriptByCredential
+	// lookup the adapter uses to reconstruct each row's exact address;
+	// both are plain key-hash payment credentials here (PaymentScript
+	// defaults false).
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId: fill32(0x01), OutputIdx: 0,
+		PaymentKey: addr1Payment, StakingKey: stakeKey, CredentialTag: 0,
+		Amount: types.Uint64(1_000_000),
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId: fill32(0x02), OutputIdx: 1,
+		PaymentKey: addr2Payment, StakingKey: stakeKey, CredentialTag: 0,
+		Amount: types.Uint64(700_000),
 	}).Error)
 
-	// tx2 in block 101, two outputs under addr1 and addr2 (must yield two
-	// distinct rows, not a duplicate of the same association).
-	txID2 := uint(2)
-	require.NoError(t, store.DB().Create(&models.Transaction{
-		ID: txID2, Hash: fill32(0x02), BlockHash: fill32(0xc2),
-		Slot: 0, BlockIndex: 2,
-		Outputs: []models.Utxo{
-			{
-				TxId: fill32(0x02), OutputIdx: 0,
-				PaymentKey: addr1.PaymentKeyHash().Bytes(),
-				StakingKey: stakeKey, CredentialTag: 0,
-				Amount: types.Uint64(500_000),
-			},
-			{
-				TxId: fill32(0x02), OutputIdx: 1,
-				PaymentKey: addr2.PaymentKeyHash().Bytes(),
-				StakingKey: stakeKey, CredentialTag: 0,
-				Amount: types.Uint64(700_000),
-			},
-			// A second output to addr1 in the same tx must not duplicate
-			// the (address, tx) association already captured above.
-			{
-				TxId: fill32(0x02), OutputIdx: 2,
-				PaymentKey: addr1.PaymentKeyHash().Bytes(),
-				StakingKey: stakeKey, CredentialTag: 0,
-				Amount: types.Uint64(1),
-			},
-		},
-	}).Error)
+	// tx1 in block 100 (slot 100), one association with addr1.
+	createAccountTransactionFixture(
+		t, store, 1, fill32(0x01), fill32(0xc1), 100, 0,
+		addr1Payment, stakeKey, 0,
+	)
+	// tx2 in block 101 (slot 101), associations with both addr1 and addr2
+	// (two outputs sharing the credential in one tx must yield two rows,
+	// not a duplicate of the same association -- and a second output to
+	// addr1 in the same tx, represented by inserting the addr1 row only
+	// once here, must not create a third row for the same pair).
+	createAccountTransactionFixture(
+		t, store, 2, fill32(0x02), fill32(0xc2), 101, 2,
+		addr1Payment, stakeKey, 0,
+	)
+	addAccountTransactionAssociation(
+		t, store, 2, 101, 2, addr2Payment, stakeKey, 0,
+	)
 
 	// tx3 in block 105 under a different stake credential; must never
 	// appear in results.
 	otherStakeKey := bytes.Repeat([]byte{0x88}, lcommon.AddressHashSize)
-	txID3 := uint(3)
-	require.NoError(t, store.DB().Create(&models.Transaction{
-		ID: txID3, Hash: fill32(0x03), BlockHash: fill32(0xc3),
-		Slot: 0, BlockIndex: 0,
-		Outputs: []models.Utxo{{
-			TxId: fill32(0x03), OutputIdx: 0,
-			PaymentKey: bytes.Repeat([]byte{0x09}, lcommon.AddressHashSize),
-			StakingKey: otherStakeKey, CredentialTag: 0,
-			Amount: types.Uint64(1),
-		}},
-	}).Error)
-	// Also index the address associations, mirroring what the real
-	// indexing path populates for GetTransactionsByAddressKeys/
-	// CountTransactionsByAddressKeys to select from.
-	for _, at := range []models.AddressTransaction{
-		{
-			PaymentKey: addr1.PaymentKeyHash().Bytes(), StakingKey: stakeKey,
-			CredentialTag: 0, TransactionID: txID1, Slot: 0, TxIndex: 0,
-		},
-		{
-			PaymentKey: addr1.PaymentKeyHash().Bytes(), StakingKey: stakeKey,
-			CredentialTag: 0, TransactionID: txID2, Slot: 0, TxIndex: 2,
-		},
-		{
-			PaymentKey: addr2.PaymentKeyHash().Bytes(), StakingKey: stakeKey,
-			CredentialTag: 0, TransactionID: txID2, Slot: 0, TxIndex: 2,
-		},
-		{
-			PaymentKey:    bytes.Repeat([]byte{0x09}, lcommon.AddressHashSize),
-			StakingKey:    otherStakeKey,
-			CredentialTag: 0, TransactionID: txID3, Slot: 0, TxIndex: 0,
-		},
-	} {
-		require.NoError(t, store.DB().Create(&at).Error)
-	}
+	createAccountTransactionFixture(
+		t, store, 4, fill32(0x03), fill32(0xc3), 105, 0,
+		bytes.Repeat([]byte{0x09}, lcommon.AddressHashSize),
+		otherStakeKey, 0,
+	)
 
 	rows, total, err := adapter.AccountTransactions(
 		stakeAddress,
@@ -535,7 +564,7 @@ func TestNodeAdapterAccountTransactions(t *testing.T) {
 	require.Len(t, rows, 3)
 
 	// Ascending chain order: tx1 (block 100) first, then the two addr1/addr2
-	// rows for tx2 (block 101), sorted deterministically by address.
+	// rows for tx2 (block 101), sorted deterministically by payment key.
 	assert.Equal(t, hex.EncodeToString(fill32(0x01)), rows[0].TxHash)
 	assert.Equal(t, addr1.String(), rows[0].Address)
 	assert.Equal(t, uint64(100), rows[0].BlockHeight)
@@ -549,7 +578,7 @@ func TestNodeAdapterAccountTransactions(t *testing.T) {
 		assert.Equal(t, uint32(2), r.TxIndex)
 	}
 
-	// from=101 excludes tx1 (block 100).
+	// from=101 excludes tx1 (block 100, slot 100 < resolved from-slot 101).
 	fromRows, total, err := adapter.AccountTransactions(
 		stakeAddress,
 		AccountTransactionsParams{
@@ -561,11 +590,13 @@ func TestNodeAdapterAccountTransactions(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 2, total)
+	require.Len(t, fromRows, 2)
 	for _, r := range fromRows {
 		assert.NotEqual(t, hex.EncodeToString(fill32(0x01)), r.TxHash)
 	}
 
-	// to=100 keeps only tx1.
+	// to=100 keeps only tx1 (slot 100 <= resolved to-slot 100; tx2's slot
+	// 101 is excluded).
 	toRows, total, err := adapter.AccountTransactions(
 		stakeAddress,
 		AccountTransactionsParams{
@@ -596,6 +627,54 @@ func TestNodeAdapterAccountTransactions(t *testing.T) {
 	assert.Equal(t, 0, total)
 	assert.Empty(t, noneRows)
 
+	// from=101:2 (exactly tx2's index) still includes tx2: the range is
+	// inclusive at the boundary.
+	idx2 := uint32(2)
+	exactRows, total, err := adapter.AccountTransactions(
+		stakeAddress,
+		AccountTransactionsParams{
+			Pagination: PaginationParams{
+				Count: 100, Page: 1, Order: PaginationOrderAsc,
+			},
+			From: &BlockRangePosition{Block: 101, Index: &idx2},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, exactRows, 2)
+
+	// to=101:1 (before tx2's index of 2) excludes tx2, leaving only tx1.
+	idx1 := uint32(1)
+	beforeIdxRows, total, err := adapter.AccountTransactions(
+		stakeAddress,
+		AccountTransactionsParams{
+			Pagination: PaginationParams{
+				Count: 100, Page: 1, Order: PaginationOrderAsc,
+			},
+			To: &BlockRangePosition{Block: 101, Index: &idx1},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, beforeIdxRows, 1)
+	assert.Equal(t, hex.EncodeToString(fill32(0x01)), beforeIdxRows[0].TxHash)
+
+	// An inverted-looking from/to still resolves each side independently
+	// (the handler rejects a genuinely inverted range before this is ever
+	// called; a from beyond every known block is unsatisfiable on its own).
+	fromBeyondTip, total, err := adapter.AccountTransactions(
+		stakeAddress,
+		AccountTransactionsParams{
+			Pagination: PaginationParams{
+				Count: 100, Page: 1, Order: PaginationOrderAsc,
+			},
+			From: &BlockRangePosition{Block: 999},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 0, total)
+	assert.Empty(t, fromBeyondTip)
+
 	// Pagination over the expanded (address, tx) row set.
 	paged, total, err := adapter.AccountTransactions(
 		stakeAddress,
@@ -608,6 +687,122 @@ func TestNodeAdapterAccountTransactions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, total)
 	require.Len(t, paged, 1)
+}
+
+// TestNodeAdapterAccountTransactionsScriptPaymentCredential verifies that a
+// script payment credential (as opposed to the default key-hash
+// assumption AccountAssociatedAddresses makes) is reconstructed correctly,
+// using GetUtxoPaymentScriptByCredential rather than decoding UTxO CBOR.
+func TestNodeAdapterAccountTransactionsScriptPaymentCredential(t *testing.T) {
+	adapter, store, db := newDBBackedAccountAdapter(t)
+
+	stakeAddress, stakeKey := testStakeCredential(t, 0x66)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Active:        true,
+	}).Error)
+	createTestBlock(t, db, fill32(0xd1), 50)
+
+	scriptPayment := bytes.Repeat([]byte{0x0a}, lcommon.AddressHashSize)
+	wantAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptKey,
+		lcommon.AddressNetworkTestnet,
+		scriptPayment,
+		stakeKey,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId: fill32(0x10), OutputIdx: 0,
+		PaymentKey: scriptPayment, StakingKey: stakeKey, CredentialTag: 0,
+		PaymentScript: true,
+		Amount:        types.Uint64(1),
+	}).Error)
+	createAccountTransactionFixture(
+		t, store, 1, fill32(0x10), fill32(0xd1), 50, 0,
+		scriptPayment, stakeKey, 0,
+	)
+
+	rows, total, err := adapter.AccountTransactions(
+		stakeAddress,
+		AccountTransactionsParams{
+			Pagination: PaginationParams{
+				Count: 100, Page: 1, Order: PaginationOrderAsc,
+			},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	assert.Equal(t, wantAddr.String(), rows[0].Address)
+}
+
+// TestNodeAdapterAccountTransactionsBounded is the regression test for the
+// unbounded-history bug: per-request work must be bounded by the requested
+// page size, not by the credential's full transaction history. It creates
+// five transactions, each in its own block, but only creates a Block row
+// for the one transaction that will actually appear on a count=1 page. If
+// the implementation resolved block height for every matching transaction
+// up front (the original bug), it would fail looking up one of the four
+// missing blocks before pagination ever discarded them; a correctly
+// bounded implementation only resolves the page's own transaction's block
+// and succeeds.
+func TestNodeAdapterAccountTransactionsBounded(t *testing.T) {
+	adapter, store, db := newDBBackedAccountAdapter(t)
+
+	stakeAddress, stakeKey := testStakeCredential(t, 0x55)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Active:        true,
+	}).Error)
+
+	const total = 5
+	// Only the first (oldest, ascending-order-first) transaction's block
+	// is ever created; the other four blocks are deliberately absent.
+	createTestBlock(t, db, fill32(0xe0), 0)
+
+	for i := range total {
+		paymentKey := bytes.Repeat([]byte{byte(0x20 + i)}, lcommon.AddressHashSize)
+		blockHash := fill32(byte(0xe0 + i))
+		require.NoError(t, store.DB().Create(&models.Utxo{
+			TxId: fill32(byte(i)), OutputIdx: 0,
+			PaymentKey: paymentKey, StakingKey: stakeKey, CredentialTag: 0,
+			Amount: types.Uint64(1),
+		}).Error)
+		createAccountTransactionFixture(
+			t, store, uint(i+1), fill32(byte(i)), blockHash,
+			uint64(i), 0, paymentKey, stakeKey, 0,
+		)
+	}
+
+	rows, gotTotal, err := adapter.AccountTransactions(
+		stakeAddress,
+		AccountTransactionsParams{
+			Pagination: PaginationParams{
+				Count: 1, Page: 1, Order: PaginationOrderAsc,
+			},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, total, gotTotal)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hex.EncodeToString(fill32(0)), rows[0].TxHash)
+
+	// A later page whose transaction's block is also missing must fail:
+	// this confirms the test's missing-block setup would actually have
+	// caught the original bug (it only "passes" the count=1/page=1 case
+	// above because that happens to be the one block that exists).
+	_, _, err = adapter.AccountTransactions(
+		stakeAddress,
+		AccountTransactionsParams{
+			Pagination: PaginationParams{
+				Count: 1, Page: 2, Order: PaginationOrderAsc,
+			},
+		},
+	)
+	require.Error(t, err)
 }
 
 func TestNodeAdapterAccountTransactionsEmpty(t *testing.T) {

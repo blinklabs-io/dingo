@@ -73,6 +73,36 @@ type AccountWithdrawalHistoryRow struct {
 	BlockHash []byte
 }
 
+// AddressTransactionPosition is an inclusive (slot, tx_index) boundary
+// used to filter address_transaction rows for the Blockfrost account
+// transactions endpoint's from/to block-range query. Both fields are
+// compared as one tuple: a row qualifies as a lower bound when its (slot,
+// tx_index) is greater than or equal to this position, and as an upper
+// bound when it is less than or equal to it.
+type AddressTransactionPosition struct {
+	Slot    uint64
+	TxIndex uint32
+}
+
+// AccountTransactionAssociationRow holds one (payment address,
+// transaction) association row for a stake credential, backing the
+// Blockfrost account transactions endpoint. It is the direct, final page
+// of results: ordering, the from/to range filter, and LIMIT/OFFSET are
+// all applied in SQL, so building a response from these rows does not
+// require any further application-level fan-out or filtering.
+type AccountTransactionAssociationRow struct {
+	PaymentKey []byte
+	TxHash     []byte
+	// TxSlot and TxIndex are the transaction's position, used for
+	// ordering and from/to range filtering.
+	TxSlot  uint64
+	TxIndex uint32
+	// BlockHash is the hash of the block containing the transaction. The
+	// block height is resolved from the block store, which is not part
+	// of the metadata SQL schema.
+	BlockHash []byte
+}
+
 // AccountSums holds aggregated lovelace totals for a stake
 // account, summed from persisted withdrawal and MIR state.
 type AccountSums struct {

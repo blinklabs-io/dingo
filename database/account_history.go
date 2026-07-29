@@ -188,6 +188,72 @@ func (d *Database) CountAccountWithdrawalHistoryByCredential(
 	return count, nil
 }
 
+// GetAddressTransactionsByCredential returns one page of (payment address,
+// transaction) association rows for a stake credential, optionally bounded
+// by an inclusive from/to (slot, tx_index) range.
+func (d *Database) GetAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn *Txn,
+) ([]models.AccountTransactionAssociationRow, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	rows, err := d.metadata.GetAddressTransactionsByCredential(
+		credentialTag,
+		stakeKey,
+		limit,
+		offset,
+		order,
+		from,
+		to,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get address transactions by credential: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAddressTransactionsByCredential returns the total number of
+// (payment address, transaction) association rows for a stake credential
+// within the same optional from/to range.
+func (d *Database) CountAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountAddressTransactionsByCredential(
+		credentialTag,
+		stakeKey,
+		from,
+		to,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count address transactions by credential: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
 // GetAccountSumsByCredential returns the aggregated withdrawal, reserves, and
 // treasury lovelace totals for a stake credential.
 func (d *Database) GetAccountSumsByCredential(

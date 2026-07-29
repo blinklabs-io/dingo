@@ -752,6 +752,72 @@ func (d *MetadataStoreSqlite) CountAccountWithdrawalHistoryByCredential(
 	return count, nil
 }
 
+func (d *MetadataStoreSqlite) GetAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn types.Txn,
+) ([]models.AccountTransactionAssociationRow, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve read DB for address transactions by credential: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryAddressTransactionsByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		from,
+		to,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query address transactions by credential: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+func (d *MetadataStoreSqlite) CountAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve read DB for count address transactions by credential: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountAddressTransactionsByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+		from,
+		to,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count address transactions by credential: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
 func (d *MetadataStoreSqlite) GetAccountSumsByCredential(
 	credentialTag uint8,
 	stakingKey []byte,

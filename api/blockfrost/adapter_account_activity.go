@@ -15,13 +15,13 @@
 package blockfrost
 
 import (
-	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -188,12 +188,13 @@ func (a *NodeAdapter) AccountWithdrawals(
 // controlled by the stake credential behind stakeAddress, optionally
 // filtered by an inclusive from/to block-range position.
 //
-// Block height is not part of the metadata SQL schema (only block hash
-// and slot are persisted on the transaction row), so an explicit
-// block-range filter cannot be pushed down into SQL: every transaction
-// associated with the credential is fetched in chain order, resolved
-// against the block store to recover its height, filtered, and only
-// then paged in memory.
+// Every step here is bounded by the requested page size, not by the
+// credential's full transaction history: the (payment address,
+// transaction) association rows are paginated in SQL against
+// address_transaction (which already carries slot/tx_index, so the
+// from/to range is a SQL predicate, not an in-memory filter), and the
+// payment-credential script/key bit and block height/time are then
+// resolved only for the <= count rows on the page.
 func (a *NodeAdapter) AccountTransactions(
 	stakeAddress string,
 	params AccountTransactionsParams,
@@ -214,13 +215,51 @@ func (a *NodeAdapter) AccountTransactions(
 		return nil, 0, err
 	}
 
-	txs, err := a.ledgerState.GetTransactionsByAddressKeys(
-		nil,
+	from, fromSatisfiable, err := a.resolveBlockRangeBound(params.From, true)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve account transactions from range: %w",
+			err,
+		)
+	}
+	if !fromSatisfiable {
+		return []AccountTransactionInfo{}, 0, nil
+	}
+	to, _, err := a.resolveBlockRangeBound(params.To, false)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve account transactions to range: %w",
+			err,
+		)
+	}
+
+	offset := (params.Pagination.Page - 1) * params.Pagination.Count
+	total, err := a.ledgerState.Database().CountAddressTransactionsByCredential(
 		credentialTag,
 		stakeKey,
-		0,
-		0,
+		from,
+		to,
+		nil,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count account transactions for %q: %w",
+			stakeAddress,
+			err,
+		)
+	}
+	if offset >= total {
+		return []AccountTransactionInfo{}, total, nil
+	}
+	rows, err := a.ledgerState.Database().GetAddressTransactionsByCredential(
+		credentialTag,
+		stakeKey,
+		params.Pagination.Count,
+		offset,
 		params.Pagination.Order,
+		from,
+		to,
+		nil,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -230,181 +269,160 @@ func (a *NodeAdapter) AccountTransactions(
 		)
 	}
 
-	blockNumbers := make(map[string]uint64, len(txs))
-	filtered := make([]AccountTransactionInfo, 0, len(txs))
-	for _, tx := range txs {
-		blockHashKey := hex.EncodeToString(tx.BlockHash)
+	// Resolve the payment-credential script/key bit only for the distinct
+	// payment keys on this page (<= len(rows)), not the credential's full
+	// history.
+	paymentKeys := make(map[string][]byte, len(rows))
+	for _, row := range rows {
+		paymentKeys[hex.EncodeToString(row.PaymentKey)] = row.PaymentKey
+	}
+	keyList := make([][]byte, 0, len(paymentKeys))
+	for _, key := range paymentKeys {
+		keyList = append(keyList, key)
+	}
+	scriptFlags, err := a.ledgerState.Database().
+		GetUtxoPaymentScriptByCredential(credentialTag, stakeKey, keyList, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve account transaction payment credential types: %w",
+			err,
+		)
+	}
+
+	blockNumbers := make(map[string]uint64, len(rows))
+	ret := make([]AccountTransactionInfo, 0, len(rows))
+	for _, row := range rows {
+		blockHashKey := hex.EncodeToString(row.BlockHash)
 		blockHeight, ok := blockNumbers[blockHashKey]
 		if !ok {
-			block, err := a.ledgerState.BlockByHash(tx.BlockHash)
+			block, err := a.ledgerState.BlockByHash(row.BlockHash)
 			if err != nil {
 				return nil, 0, fmt.Errorf(
 					"get block for transaction %x: %w",
-					tx.Hash,
+					row.TxHash,
 					err,
 				)
 			}
 			blockHeight = block.Number
 			blockNumbers[blockHashKey] = blockHeight
 		}
-		if !inBlockRange(blockHeight, tx.BlockIndex, params.From, params.To) {
-			continue
-		}
-
-		blockTime, err := a.transactionBlockTime(tx)
+		blockTime, err := a.ledgerState.SlotToTime(row.TxSlot)
 		if err != nil {
 			return nil, 0, fmt.Errorf(
 				"get block time for transaction %x: %w",
-				tx.Hash,
+				row.TxHash,
 				err,
 			)
 		}
 
-		addresses, err := accountTransactionAddresses(
-			tx,
-			networkID,
-			credentialTag,
-			stakeKey,
-		)
-		if err != nil {
-			return nil, 0, fmt.Errorf(
-				"get addresses for transaction %x: %w",
-				tx.Hash,
-				err,
-			)
-		}
-		txHash := hex.EncodeToString(tx.Hash)
-		for _, address := range addresses {
-			filtered = append(filtered, AccountTransactionInfo{
-				Address:     address,
-				TxHash:      txHash,
-				TxIndex:     tx.BlockIndex,
-				BlockHeight: blockHeight,
-				BlockTime:   blockTime,
-			})
-		}
-	}
-
-	total := len(filtered)
-	start, end := paginationRange(total, params.Pagination)
-	if start >= end {
-		return []AccountTransactionInfo{}, total, nil
-	}
-	return filtered[start:end], total, nil
-}
-
-// accountTransactionAddresses derives the distinct payment addresses
-// sharing the given stake credential that participate in tx, across
-// every UTxO group that populates the AddressTransaction index (inputs,
-// collateral inputs, reference inputs, outputs, and collateral return),
-// mirroring collectAddressTransactions at indexing time. The result is
-// sorted for deterministic ordering, since a transaction may associate
-// more than one address with the same stake credential.
-func accountTransactionAddresses(
-	tx models.Transaction,
-	networkID uint8,
-	credentialTag uint8,
-	stakeKey []byte,
-) ([]string, error) {
-	utxos := make(
-		[]models.Utxo,
-		0,
-		len(tx.Inputs)+len(tx.Collateral)+len(tx.ReferenceInputs)+len(tx.Outputs)+1,
-	)
-	utxos = append(utxos, tx.Inputs...)
-	utxos = append(utxos, tx.Collateral...)
-	utxos = append(utxos, tx.ReferenceInputs...)
-	utxos = append(utxos, tx.Outputs...)
-	if tx.CollateralReturn != nil {
-		utxos = append(utxos, *tx.CollateralReturn)
-	}
-
-	seen := make(map[string]struct{}, len(utxos))
-	addresses := make([]string, 0, len(utxos))
-	for _, utxo := range utxos {
-		if utxo.CredentialTag != credentialTag ||
-			!bytes.Equal(utxo.StakingKey, stakeKey) ||
-			len(utxo.PaymentKey) == 0 {
-			continue
-		}
-		key := hex.EncodeToString(utxo.PaymentKey)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-
+		// A payment key with no matching UTxO row (should not happen: every
+		// address_transaction row is sourced from a UTxO row) defaults to
+		// key-hash, matching the fallback used elsewhere.
 		addressType := credentialTag << 1
-		if utxo.PaymentScript {
+		if scriptFlags[hex.EncodeToString(row.PaymentKey)] {
 			addressType |= 1
 		}
 		addr, err := lcommon.NewAddressFromParts(
 			addressType,
 			networkID,
-			utxo.PaymentKey,
+			row.PaymentKey,
 			stakeKey,
 		)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return nil, 0, fmt.Errorf(
 				"build account transaction address: %w",
 				err,
 			)
 		}
-		addresses = append(addresses, addr.String())
+
+		ret = append(ret, AccountTransactionInfo{
+			Address:     addr.String(),
+			TxHash:      hex.EncodeToString(row.TxHash),
+			TxIndex:     row.TxIndex,
+			BlockHeight: blockHeight,
+			BlockTime:   blockTime.Unix(),
+		})
 	}
-	sort.Strings(addresses)
-	return addresses, nil
+	return ret, total, nil
 }
 
-// inBlockRange reports whether a transaction at the given block
-// height/index falls within the inclusive [from, to] block-range
-// position filter. A nil bound is unconstrained on that side. A bound
-// with no explicit index matches the entire block on that side (index 0
-// for from, the maximum index for to).
-func inBlockRange(
-	blockHeight uint64,
-	txIndex uint32,
-	from *BlockRangePosition,
-	to *BlockRangePosition,
-) bool {
-	if from != nil {
-		idx := uint32(0)
-		if from.Index != nil {
-			idx = *from.Index
-		}
-		if comparePosition(blockHeight, txIndex, from.Block, idx) < 0 {
-			return false
-		}
+// resolveBlockRangeBound resolves a Blockfrost account-transactions
+// from/to block-number position to an inclusive (slot, tx_index) bound
+// for the address_transaction SQL filter. A nil pos is unconstrained
+// (returns a nil bound, satisfiable=true).
+//
+// When the exact block number exists, its slot is used directly (the
+// common case: callers pass a block number they actually observed). When
+// it does not:
+//   - for a lower ("from") bound, this falls forward to the next block
+//     that does exist, which still correctly captures "at or after this
+//     position" even though the literal target block is absent (a sparse
+//     import gap). If no block at or after it exists at all (the position
+//     is beyond every known block), the range is unsatisfiable and the
+//     caller should return an empty result without querying further.
+//   - for an upper ("to") bound, there is no equivalent "last existing
+//     block at or before" index lookup available, so the bound is instead
+//     treated as unconstrained. This can only return more rows than a
+//     literal reading of an unresolvable "to" would (never fewer), which
+//     is the safe direction for an inclusive range filter.
+//
+// An explicit ":index" sub-position is honored only when the exact block
+// was found; a gap-fallback ignores it and defaults to the start (from)
+// or end (to) of the resolved block, since the requested index was
+// scoped to a block that does not exist.
+func (a *NodeAdapter) resolveBlockRangeBound(
+	pos *BlockRangePosition,
+	lower bool,
+) (*models.AddressTransactionPosition, bool, error) {
+	if pos == nil {
+		return nil, true, nil
 	}
-	if to != nil {
-		idx := uint32(math.MaxUint32)
-		if to.Index != nil {
-			idx = *to.Index
+	if pos.Block > math.MaxUint64-database.BlockInitialIndex {
+		if lower {
+			return nil, false, nil
 		}
-		if comparePosition(blockHeight, txIndex, to.Block, idx) > 0 {
-			return false
-		}
+		return nil, true, nil
 	}
-	return true
-}
+	idx := pos.Block + database.BlockInitialIndex
 
-// comparePosition orders (block, index) tuples: -1 if the first
-// position sorts before the second, 1 if after, 0 if equal.
-func comparePosition(
-	block uint64,
-	index uint32,
-	boundBlock uint64,
-	boundIndex uint32,
-) int {
+	block, err := a.ledgerState.Database().BlockByIndex(idx, nil)
 	switch {
-	case block < boundBlock:
-		return -1
-	case block > boundBlock:
-		return 1
-	case index < boundIndex:
-		return -1
-	case index > boundIndex:
-		return 1
+	case err == nil:
+		txIndex := uint32(0)
+		if !lower {
+			txIndex = math.MaxUint32
+		}
+		if pos.Index != nil {
+			txIndex = *pos.Index
+		}
+		return &models.AddressTransactionPosition{
+			Slot:    block.Slot,
+			TxIndex: txIndex,
+		}, true, nil
+	case errors.Is(err, models.ErrBlockNotFound):
+		if !lower {
+			return nil, true, nil
+		}
+		next, err := a.ledgerState.Database().BlockAtOrAfterIndex(idx, nil)
+		if err == nil {
+			return &models.AddressTransactionPosition{
+				Slot:    next.Slot,
+				TxIndex: 0,
+			}, true, nil
+		}
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf(
+			"resolve next block at or after %d: %w",
+			pos.Block,
+			err,
+		)
 	default:
-		return 0
+		return nil, false, fmt.Errorf(
+			"resolve block %d: %w",
+			pos.Block,
+			err,
+		)
 	}
 }

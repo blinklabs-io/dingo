@@ -938,6 +938,22 @@ WHERE credential_tag = $1
   AND deleted_slot = 0;
 ```
 
+Payment credential type (key hash vs script hash) for a bounded set of
+payment keys under a stake credential (`GetUtxoPaymentScriptByCredential`).
+Used by the Blockfrost account transactions endpoint to reconstruct the
+exact address for one page of results without a full-history scan or CBOR
+decode: `paymentKeys` is the small (`<=` page size) distinct set drawn from
+an already-paginated `GetAddressTransactionsByCredential` page, not the
+credential's full history.
+
+```sql
+SELECT DISTINCT payment_key, payment_script
+FROM utxo
+WHERE credential_tag = $1
+  AND staking_key = decode($2, 'hex')
+  AND payment_key IN (decode($3, 'hex'), decode($4, 'hex'), ...);
+```
+
 ### `GetScriptLockedSupply`
 
 Network script-locked supply (sum of lovelace in live UTxOs whose payment
@@ -1444,6 +1460,42 @@ WHERE ard.withdrawal = true
 ORDER BY tx_slot ASC, block_index ASC, tx_hash ASC
 LIMIT 50;
 ```
+
+### `GetAddressTransactionsByCredential`
+
+Backs the Blockfrost `/accounts/{stake_address}/transactions` endpoint.
+`address_transaction` already carries one row per (payment address,
+transaction) association for a stake credential — populated at indexing
+time from a transaction's inputs, collateral inputs, reference inputs,
+outputs, and collateral return, deduplicated per transaction (see
+`GetAddressesByCredential` above for the equivalent distinct-address
+projection) — with its own `slot`/`tx_index` columns. Unlike every other
+credential-keyed history query on this page, this one needs no
+application-level fan-out, filtering, or re-derivation after it returns:
+the SQL `ORDER BY`/`LIMIT`/`OFFSET` and the optional inclusive `(slot,
+tx_index)` range predicate (the resolved form of the endpoint's `from`/`to`
+block-number filter) are the final word, so a page-size request costs work
+proportional to the page, not to the credential's full transaction history.
+
+```sql
+SELECT at.payment_key, tx.hash AS tx_hash, at.slot AS tx_slot,
+       at.tx_index, tx.block_hash AS block_hash
+FROM address_transaction at
+JOIN "transaction" tx ON tx.id = at.transaction_id
+WHERE at.credential_tag = $1
+  AND at.staking_key = decode($2, 'hex')
+  AND (at.slot > $3 OR (at.slot = $3 AND at.tx_index >= $4))  -- from, optional
+  AND (at.slot < $5 OR (at.slot = $5 AND at.tx_index <= $6))  -- to, optional
+ORDER BY at.slot ASC, at.tx_index ASC, at.payment_key ASC
+LIMIT 50;
+```
+
+The Blockfrost adapter resolves each `from`/`to` block number to a slot via
+two bounded block-store index lookups (`Database.BlockByIndex`,
+`Database.BlockAtOrAfterIndex`) before this query runs, and resolves
+`block_height`/`block_time` and the payment-credential script/key bit
+(`GetUtxoPaymentScriptByCredential` above) only for the returned page's own
+blocks and payment keys.
 
 ### `GetAccountSumsByCredential`
 
