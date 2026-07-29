@@ -54,6 +54,25 @@ type AccountRegistrationHistoryRow struct {
 	BlockHash []byte
 }
 
+// AccountWithdrawalHistoryRow holds withdrawal history
+// query results for a stake account.
+type AccountWithdrawalHistoryRow struct {
+	TxHash []byte
+	Amount uint64
+	// TxSlot is the slot of the transaction containing the
+	// withdrawal.
+	TxSlot uint64
+	// BlockIndex is the withdrawal transaction's position within
+	// its containing block, used as an ordering tie-break for
+	// transactions sharing a slot.
+	BlockIndex uint32
+	// BlockHash is the hash of the block containing the
+	// withdrawal transaction. The block height is resolved from
+	// the block store, which is not part of the metadata SQL
+	// schema.
+	BlockHash []byte
+}
+
 // AccountSums holds aggregated lovelace totals for a stake
 // account, summed from persisted withdrawal and MIR state.
 type AccountSums struct {

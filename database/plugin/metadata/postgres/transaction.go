@@ -643,6 +643,64 @@ func (d *MetadataStorePostgres) CountAccountRegistrationHistoryByCredential(
 	return count, nil
 }
 
+func (d *MetadataStorePostgres) GetAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountWithdrawalHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for account withdrawal history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryWithdrawalHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account withdrawal history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+func (d *MetadataStorePostgres) CountAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count account withdrawal history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountWithdrawalHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account withdrawal history: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
 func (d *MetadataStorePostgres) GetAccountSumsByCredential(
 	credentialTag uint8,
 	stakingKey []byte,

@@ -2312,12 +2312,33 @@ epochs/parameters, network/eras, genesis, assets, pools/extended, retiring
 pools, pool metadata, governance DRep list and lookup, address summary,
 address UTxOs and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
-signers, and account/delegation/registration/reward endpoints. It uses an
-adapter pattern to translate between Dingo's internal state and Blockfrost
-response types and supports Blockfrost-style pagination headers. The root
-document is served only at the literal `/` path (`GET /{$}`); any other
-unregistered path falls through to a catch-all `404` handler instead of the
-root document, matching real Blockfrost's behavior for unimplemented routes.
+signers, and account/delegation/registration/reward/UTxOs/withdrawals/
+transactions endpoints. It uses an adapter pattern to translate between
+Dingo's internal state and Blockfrost response types and supports
+Blockfrost-style pagination headers. The root document is served only at the
+literal `/` path (`GET /{$}`); any other unregistered path falls through to a
+catch-all `404` handler instead of the root document, matching real
+Blockfrost's behavior for unimplemented routes.
+
+The account UTxOs, withdrawals, and transactions endpoints resolve everything
+by stake credential rather than a single address. Account UTxOs reuse the
+UTxO address-pattern query with a delegation-part-only pattern (matching
+every payment address sharing the stake credential) and recover each row's
+exact payment address from decoded output CBOR, the same CBOR-derived
+datum/reference-script recovery `/addresses/{address}/utxos` uses. Account
+withdrawals read the rollback-aware `account_reward_delta` withdrawal journal
+joined to its transaction. Account transactions reuse the address-transaction
+credential lookup (payment key `NULL`) to get one row per matching
+transaction, then derive the set of distinct addresses each transaction
+associates with the stake credential from the transaction's already-loaded
+input/collateral/reference-input/output/collateral-return UTxOs (mirroring
+the same grouping the indexer uses to populate `address_transaction`), one
+response row per (transaction, address) pair. Its optional `from`/`to`
+block-range filter cannot be pushed into SQL because block height is not
+part of the metadata schema (only block hash and slot are persisted on the
+transaction row); every transaction associated with the credential is
+fetched in chain order, resolved against the block store for its height,
+filtered, and paged in memory.
 
 Address summaries run balance, asset, CBOR, and existence reads through one
 coordinated read transaction. Pointer addresses require an exact decoded-output

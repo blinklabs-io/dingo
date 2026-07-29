@@ -132,6 +132,62 @@ func (d *Database) CountAccountRegistrationHistoryByCredential(
 	return count, nil
 }
 
+// GetAccountWithdrawalHistoryByCredential returns withdrawal history rows for
+// a stake credential.
+func (d *Database) GetAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.AccountWithdrawalHistoryRow, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	rows, err := d.metadata.GetAccountWithdrawalHistoryByCredential(
+		credentialTag,
+		stakeKey,
+		limit,
+		offset,
+		order,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get account withdrawal history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAccountWithdrawalHistoryByCredential returns the total number of
+// withdrawal history rows for a stake credential.
+func (d *Database) CountAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountAccountWithdrawalHistoryByCredential(
+		credentialTag,
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account withdrawal history: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
 // GetAccountSumsByCredential returns the aggregated withdrawal, reserves, and
 // treasury lovelace totals for a stake credential.
 func (d *Database) GetAccountSumsByCredential(

@@ -199,6 +199,29 @@ type BlockfrostNode interface {
 		string,
 		PaginationParams,
 	) ([]AccountRewardHistoryInfo, int, error)
+
+	// AccountUTXOs returns the current UTxOs controlled by the
+	// stake credential behind the requested stake address.
+	AccountUTXOs(
+		string,
+		PaginationParams,
+	) ([]AccountUTXOInfo, int, error)
+
+	// AccountWithdrawals returns withdrawal history rows for
+	// the requested stake address.
+	AccountWithdrawals(
+		string,
+		PaginationParams,
+	) ([]AccountWithdrawalInfo, int, error)
+
+	// AccountTransactions returns transactions associated with
+	// addresses controlled by the stake credential behind the
+	// requested stake address, optionally filtered by an
+	// inclusive from/to block-range position.
+	AccountTransactions(
+		string,
+		AccountTransactionsParams,
+	) ([]AccountTransactionInfo, int, error)
 }
 
 // ChainTipInfo holds chain tip data needed by the API.
@@ -757,4 +780,57 @@ type AccountRewardHistoryInfo struct {
 	Epoch  int32
 	Amount string
 	PoolID string
+}
+
+// AccountUTXOInfo holds a stake-account UTxO row.
+type AccountUTXOInfo struct {
+	Address string
+	TxHash  string
+	// TxIndex is the deprecated Blockfrost alias for OutputIndex (the UTxO's
+	// index within its producing transaction); it carries the same value.
+	TxIndex             uint32
+	OutputIndex         uint32
+	Amount              []AddressAmountInfo
+	Block               string
+	DataHash            *string
+	InlineDatum         *string
+	ReferenceScriptHash *string
+}
+
+// AccountWithdrawalInfo holds a stake-account withdrawal
+// history row.
+type AccountWithdrawalInfo struct {
+	TxHash      string
+	Amount      string
+	TxSlot      int64
+	BlockTime   int64
+	BlockHeight int64
+}
+
+// BlockRangePosition holds a parsed Blockfrost account-transactions
+// from/to query value: a block number and an optional transaction
+// index within that block (the "block:index" form).
+type BlockRangePosition struct {
+	Block uint64
+	Index *uint32
+}
+
+// AccountTransactionsParams holds query parameters for the account
+// transactions endpoint: standard pagination plus the optional
+// inclusive from/to block-range filter.
+type AccountTransactionsParams struct {
+	Pagination PaginationParams
+	From       *BlockRangePosition
+	To         *BlockRangePosition
+}
+
+// AccountTransactionInfo holds a stake-account transaction row: one
+// entry per distinct address (sharing the stake credential) involved in
+// the transaction.
+type AccountTransactionInfo struct {
+	Address     string
+	TxHash      string
+	TxIndex     uint32
+	BlockHeight uint64
+	BlockTime   int64
 }

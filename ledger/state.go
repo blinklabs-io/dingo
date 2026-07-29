@@ -6751,6 +6751,62 @@ func (ls *LedgerState) CountTransactionsByAddress(
 	return count, nil
 }
 
+// GetTransactionsByAddressKeys returns transactions involving the given
+// payment/staking credential pair with explicit ordering. A nil paymentKey
+// matches every address sharing the staking credential, which is how the
+// Blockfrost account transactions endpoint resolves every transaction
+// associated with a stake address.
+func (ls *LedgerState) GetTransactionsByAddressKeys(
+	paymentKey []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+) ([]models.Transaction, error) {
+	txs, err := ls.db.GetTransactionsByAddressKeys(
+		paymentKey,
+		credentialTag,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get transactions by address keys (limit=%d offset=%d order=%s): %w",
+			limit,
+			offset,
+			order,
+			err,
+		)
+	}
+	return txs, nil
+}
+
+// CountTransactionsByAddressKeys returns the total number of transactions
+// involving the given payment/staking credential pair.
+func (ls *LedgerState) CountTransactionsByAddressKeys(
+	paymentKey []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+) (int, error) {
+	count, err := ls.db.CountTransactionsByAddressKeys(
+		paymentKey,
+		credentialTag,
+		stakingKey,
+		nil,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count transactions by address keys: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
 // CountTransactionsByMetadataLabel returns the total number of transactions
 // that include metadata for the requested label.
 func (ls *LedgerState) CountTransactionsByMetadataLabel(

@@ -1420,6 +1420,31 @@ deposit (`deposit_amount` for registrations, the refund `amount` for the legacy
 (`tx_slot`), and `tx.block_hash` (`block_hash`, resolved to `block_height` by
 the adapter as above).
 
+### `GetAccountWithdrawalHistory`
+
+Backs the Blockfrost `/accounts/{stake_address}/withdrawals` endpoint. Unlike
+`GetAccountSumsByCredential`'s `withdrawals_sum` (a single aggregate), this
+returns one row per withdrawal, joining the rollback-aware
+`account_reward_delta` withdrawal rows against the transaction that made each
+withdrawal to recover its slot, block-internal position, and block hash;
+`transaction.hash` is unique, so the join never fans a withdrawal row into
+duplicates. As with the delegation/registration history queries, the
+Blockfrost adapter resolves `block_height` from the block store by hash
+(block numbers are not in the metadata SQL schema) and derives `block_time`
+from the slot.
+
+```sql
+SELECT ard.tx_hash, ard.amount, tx.slot AS tx_slot,
+       tx.block_index AS block_index, tx.block_hash AS block_hash
+FROM account_reward_delta ard
+JOIN "transaction" tx ON tx.hash = ard.tx_hash
+WHERE ard.withdrawal = true
+  AND ard.credential_tag = $1
+  AND ard.staking_key = decode($2, 'hex')
+ORDER BY tx_slot ASC, block_index ASC, tx_hash ASC
+LIMIT 50;
+```
+
 ### `GetAccountSumsByCredential`
 
 Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and

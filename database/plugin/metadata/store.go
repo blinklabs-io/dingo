@@ -907,6 +907,25 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
+	// GetAccountWithdrawalHistoryByCredential retrieves withdrawal history
+	// rows for a stake credential tag/hash pair.
+	GetAccountWithdrawalHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountWithdrawalHistoryRow, error)
+
+	// CountAccountWithdrawalHistoryByCredential retrieves the total count of
+	// withdrawal history rows for a stake credential tag/hash pair.
+	CountAccountWithdrawalHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
 	// GetAccountSumsByCredential retrieves the aggregated withdrawal, reserves,
 	// and treasury lovelace totals for a stake credential tag/hash pair.
 	GetAccountSumsByCredential(
