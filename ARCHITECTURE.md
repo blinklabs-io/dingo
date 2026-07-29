@@ -2466,17 +2466,29 @@ everything downstream of `Bootstrap()` is backend-agnostic.
 
 `ExtractArchive` treats the destination filesystem as untrusted, because an
 archive's contents being safe does not make the directory it is written into
-safe. Extracted paths are lstat-checked at every component **below the
-extraction root**, and files open with `O_NOFOLLOW` where the platform provides
-it, so a symlink already present in the destination is rejected rather than
-followed.
+safe.
 
-The check deliberately stops at the root. Directories above it are chosen by
-the operator and are not part of this threat, which is content planted inside
-the destination; walking higher would reject ordinary layouts, since on macOS
-every temporary path resolves through `/var`, itself a symlink to
-`/private/var`. The root entry is still checked, so a destination that is
-itself a symlink is refused.
+Every write goes through an `os.Root` handle opened on the extraction root, so
+paths are resolved relative to that handle rather than re-walked as strings.
+This is what makes the guarantee hold under mutation: a directory replaced
+after any inspection cannot redirect a later write, because the handle refers
+to the directory itself and not to a name someone else can repoint. An entry
+resolving outside the root is refused by the runtime, so containment does not
+depend on a check that a writer could invalidate between inspection and open.
+Inspecting components and then opening by absolute path cannot offer that, and
+`O_NOFOLLOW` would not close it either — it constrains only the final
+component, not traversal through a replaced parent.
+
+Entries are additionally rejected if a symlink already sits at the target, so
+extraction never writes through one even when it points back inside the root.
+That check produces a clearer error; the containment guarantee above does not
+rest on it.
+
+The root entry itself is checked before the handle is opened, so a destination
+that is a symlink is refused. Directories *above* the root are not inspected:
+they are chosen by the operator and are not part of this threat, and walking
+higher would reject ordinary layouts, since on macOS every temporary path
+resolves through `/var`, itself a symlink to `/private/var`.
 
 Destinations come in two shapes, selected by the caller:
 
@@ -2485,14 +2497,13 @@ Destinations come in two shapes, selected by the caller:
   once complete, so a failed run publishes nothing and a pre-existing entry is
   discarded rather than merged with. A non-empty destination is refused unless
   the caller passes `WithReplaceDestination` to recover from an interrupted
-  run. Because publishing resolves the destination through its parent — the
-  shared download directory — and extraction can run for minutes, the parent's
-  identity is re-checked immediately before the swap: a directory that is no
-  longer the same one staging was created in fails the publish. Identity is
-  compared rather than rejecting symlinks outright, so a data directory placed
-  behind a stable symlink keeps working. This narrows the race to two syscalls
-  rather than closing it; closing it entirely needs `openat`-style
-  directory-relative resolution.
+  run. Publishing is a rename, which is pathname-based and so cannot be bound to
+  the handle; the parent's identity is therefore re-checked immediately before
+  the swap, and a directory that is no longer the one staging was created in
+  fails the publish. Identity is compared rather than rejecting symlinks
+  outright, so a data directory placed behind a stable symlink keeps working.
+  Extraction writes are unaffected by a parent swapped mid-run — they follow
+  the handle — so this check guards only the final placement.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
   into it directly and accumulates. Staging is unavailable here, and the

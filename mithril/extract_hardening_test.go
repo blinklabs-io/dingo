@@ -255,6 +255,110 @@ func TestExtractArchiveLeavesNoDestinationOnFailure(t *testing.T) {
 		"a failed extraction must not publish a partial destination")
 }
 
+// TestExtractRootWritesSurviveParentSwap is the damage path the publish-time
+// check cannot cover on its own: a parent replaced partway through a
+// multi-minute extraction, with writes still to come.
+//
+// The staging tree is held by a directory handle, so a later write goes to the
+// directory extraction started in regardless of what the pathname now resolves
+// to. Publication is refused separately, but by then nothing has leaked.
+func TestExtractRootWritesSurviveParentSwap(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+
+	extractRoot, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	stagingPath := extractRoot.Name()
+
+	// An early write, before any tampering.
+	require.NoError(t, extractRoot.MkdirAll("immutable", 0o750))
+
+	// Swap the parent out from under the staging pathname, as an attacker
+	// with write access to the download directory could mid-extraction.
+	elsewhere := filepath.Join(root, "elsewhere")
+	require.NoError(t, os.MkdirAll(elsewhere, 0o750))
+	require.NoError(t, os.Rename(parent, filepath.Join(root, "downloads.real")))
+	requireSymlinkSupport(t, elsewhere, parent)
+
+	// A later write must still land in the original staging directory.
+	f, err := extractRoot.OpenFile(
+		filepath.Join("immutable", "00000.chunk"),
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640,
+	)
+	require.NoError(t, err)
+	_, err = f.Write([]byte("chunk0"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	// The handle tracks the directory itself, so the bytes are in the real
+	// staging directory at its new location — never at the pathname the
+	// attacker now controls.
+	movedStaging := filepath.Join(
+		root, "downloads.real", filepath.Base(stagingPath),
+	)
+	data, err := os.ReadFile(
+		filepath.Join(movedStaging, "immutable", "00000.chunk"),
+	)
+	require.NoError(t, err,
+		"write must land in the directory the handle was opened on")
+	assert.Equal(t, "chunk0", string(data))
+
+	_, statErr := os.Stat(
+		filepath.Join(parent, filepath.Base(stagingPath), "immutable"),
+	)
+	assert.True(t, os.IsNotExist(statErr),
+		"nothing may appear under the substituted parent pathname")
+
+	var leaked []string
+	_ = filepath.Walk(elsewhere,
+		func(p string, info os.FileInfo, _ error) error {
+			if info != nil && !info.IsDir() {
+				leaked = append(leaked, p)
+			}
+			return nil
+		})
+	assert.Empty(t, leaked,
+		"no extracted write may reach the substituted directory")
+
+	// Publication is still refused, so the swapped parent cannot be used to
+	// place the tree either.
+	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
+}
+
+// TestExtractRootRefusesEscapingEntry covers an archive entry that resolves
+// outside the extraction root through a pre-existing symlink. The root handle
+// refuses it rather than relying on a prior path inspection that a writer
+// could invalidate between check and open.
+func TestExtractRootRefusesEscapingEntry(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	destDir := filepath.Join(root, "extracted")
+	require.NoError(t, os.MkdirAll(destDir, 0o750))
+	requireSymlinkSupport(t, outside, filepath.Join(destDir, "immutable"))
+
+	extractRoot, _, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{merge: true},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+
+	_, err = extractRoot.OpenFile(
+		filepath.Join("immutable", "00000.chunk"),
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640,
+	)
+	require.Error(t, err, "a path escaping the root must not open")
+
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries)
+}
+
 // TestExtractPublishRejectsSwappedParent covers the window between staging and
 // publishing. Extraction of a mainnet snapshot takes minutes, and the parent
 // is the shared download directory, so a directory checked once at the start
@@ -272,9 +376,7 @@ func TestExtractPublishRejectsSwappedParent(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(cleanup)
-	require.NoError(t,
-		os.WriteFile(filepath.Join(workDir, "chunk"), []byte("data"), 0o640),
-	)
+	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
 
 	// Swap the parent for a symlink pointing at somewhere else, as an
 	// attacker with write access to the download directory could.
@@ -310,9 +412,7 @@ func TestExtractPublishAllowsStableSymlinkedParent(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(cleanup)
-	require.NoError(t,
-		os.WriteFile(filepath.Join(workDir, "chunk"), []byte("data"), 0o640),
-	)
+	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
 
 	require.NoError(t, publish())
 

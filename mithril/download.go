@@ -1047,26 +1047,16 @@ func ExtractArchive(
 			)
 		}
 
-		// Zip Slip prevention: join the cleaned name to the working
-		// directory, then verify the result stays within it using
-		// both HasPrefix and Rel checks.
-		cleanDest := filepath.Clean(workDir)
-		target := filepath.Join(
-			cleanDest, filepath.FromSlash(name),
-		)
-		if !strings.HasPrefix(
-			target,
-			cleanDest+string(filepath.Separator),
-		) {
-			return "", fmt.Errorf(
-				"path escapes destination: %s",
-				header.Name,
-			)
-		}
+		// Entry paths stay relative and are resolved through the
+		// extraction root handle, which refuses anything landing outside
+		// it. validRelPath above already rejected absolute paths and ".."
+		// components, so this is belt and braces rather than the only
+		// containment check.
+		target := filepath.FromSlash(name)
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := mkdirExtracted(cleanDest, target); err != nil {
+			if err := mkdirExtracted(workDir, target); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
 					target,
@@ -1087,7 +1077,7 @@ func ExtractArchive(
 
 			// Ensure parent directory exists
 			parent := filepath.Dir(target)
-			if err := mkdirExtracted(cleanDest, parent); err != nil {
+			if err := mkdirExtracted(workDir, parent); err != nil {
 				return "", fmt.Errorf(
 					"creating parent directory %s: %w",
 					parent,
@@ -1095,7 +1085,7 @@ func ExtractArchive(
 				)
 			}
 
-			outFile, err := createExtractedFile(cleanDest, target)
+			outFile, err := createExtractedFile(workDir, target)
 			if err != nil {
 				return "", fmt.Errorf(
 					"creating file %s: %w",
@@ -1112,7 +1102,7 @@ func ExtractArchive(
 			)
 			closeErr := outFile.Close()
 			if err != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"extracting file %s: %w",
 					target,
@@ -1120,7 +1110,7 @@ func ExtractArchive(
 				)
 			}
 			if closeErr != nil {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"closing file %s: %w",
 					target,
@@ -1128,7 +1118,7 @@ func ExtractArchive(
 				)
 			}
 			if written > maxExtractFileSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"file %s decompressed beyond maximum size (%d > %d)",
 					header.Name, written, maxExtractFileSize,
@@ -1138,7 +1128,7 @@ func ExtractArchive(
 			// header.Size) for cumulative extraction limit.
 			totalExtracted += written
 			if totalExtracted > maxTotalExtractSize {
-				_ = os.Remove(target) //nolint:gosec // target validated above
+				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
 					"archive extraction exceeds maximum total size (%d)",
 					maxTotalExtractSize,
