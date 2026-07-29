@@ -224,7 +224,6 @@ func checkEpoch(
 	graceHours int,
 	logger *slog.Logger,
 ) (*EpochCompareResult, error) {
-	_ = ctx // reserved for future cancellation within DB calls
 	now := time.Now()
 
 	// Load Koios reference data.
@@ -269,7 +268,7 @@ func checkEpoch(
 	var allMismatches []CheckMismatch
 
 	// 1. Compare epoch-level aggregates.
-	dingoEpoch, epochErr := dingo.GetEpochData(epoch)
+	dingoEpoch, epochErr := dingo.GetEpochData(ctx, epoch)
 	allMismatches = append(allMismatches,
 		CompareEpochAggregates(network, epoch, koiosEpoch, dingoEpoch, epochErr, now, graceHours)...,
 	)
@@ -288,7 +287,7 @@ func checkEpoch(
 
 	// 2. Bulk-load all pool reward inputs for this epoch from Dingo's DB.
 	// This is a single query regardless of how many pools Koios knows about.
-	dingoPoolMap, dingoPoolErr := dingo.GetPoolEpochDataMap(epoch)
+	dingoPoolMap, dingoPoolErr := dingo.GetPoolEpochDataMap(ctx, epoch)
 	if dingoPoolErr != nil {
 		// Record the DB failure and skip all per-pool comparisons.
 		// Continuing with dingoPoolMap == nil would make every Koios pool appear

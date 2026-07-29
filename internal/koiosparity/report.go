@@ -59,6 +59,7 @@ func BuildStatusSummary(
 	}
 
 	checkedSet := make(map[uint64]bool, len(statuses))
+	minSet := false
 	for _, st := range statuses {
 		checkedSet[st.Epoch] = true
 		switch st.Status {
@@ -71,8 +72,11 @@ func BuildStatusSummary(
 			s.ErrorCount++
 			s.ErrorEpochs = append(s.ErrorEpochs, st.Epoch)
 		}
-		if s.CheckedMin == 0 || st.Epoch < s.CheckedMin {
+		// Epoch 0 is a legitimate checked epoch, so "not yet set" can't be
+		// represented by CheckedMin == 0 — track it explicitly instead.
+		if !minSet || st.Epoch < s.CheckedMin {
 			s.CheckedMin = st.Epoch
+			minSet = true
 		}
 		if st.Epoch > s.CheckedMax {
 			s.CheckedMax = st.Epoch

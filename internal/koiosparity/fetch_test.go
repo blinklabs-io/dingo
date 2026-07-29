@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -193,12 +192,14 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 				_, _ = w.Write([]byte("invalid API key"))
 				return
 			}
-			// Slow down the remaining pools so pool0's near-instant failure
-			// has time to cancel the loop before they'd otherwise all be
-			// dispatched anyway.
-			time.Sleep(50 * time.Millisecond)
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[]`)) // pool wasn't active this epoch
+			// Block until the client cancels this request rather than
+			// sleeping a fixed duration: every pool worker shares poolCtx, so
+			// once pool0's failure calls poolCancel, the client aborts this
+			// in-flight request and net/http cancels r.Context() in lockstep
+			// — no arbitrary timing margin needed to hold this pool's
+			// concurrency slot open until the dispatch loop observes
+			// cancellation.
+			<-r.Context().Done()
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)

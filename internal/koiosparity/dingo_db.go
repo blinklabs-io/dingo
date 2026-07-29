@@ -185,9 +185,10 @@ func (d *DingoDB) GetLatestEpoch(ctx context.Context) (uint64, error) {
 
 // GetEpochData returns epoch-level aggregates for the given epoch.
 // Returns nil, nil when Dingo has not yet recorded an epoch_summary row.
-func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
+// ctx is forwarded to the DB driver so that a cancelled context aborts the query.
+func (d *DingoDB) GetEpochData(ctx context.Context, epoch uint64) (*DingoEpochData, error) {
 	var summary models.EpochSummary
-	if err := d.db.Where("epoch = ?", epoch).First(&summary).Error; err != nil {
+	if err := d.db.WithContext(ctx).Where("epoch = ?", epoch).First(&summary).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -207,7 +208,7 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 	}
 
 	var pots models.RewardAdaPots
-	if err := d.db.Where("epoch = ?", epoch).First(&pots).Error; err != nil {
+	if err := d.db.WithContext(ctx).Where("epoch = ?", epoch).First(&pots).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("reward_ada_pots epoch %d: %w", epoch, err)
 		}
@@ -230,9 +231,10 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 // (reward outputs are computed later than inputs, so an output row may not
 // exist yet for a pool that already has an input row — that pool's
 // MemberRewardTotal is simply left ""). One bulk query per table per epoch.
-func (d *DingoDB) GetPoolEpochDataMap(epoch uint64) (map[string]*DingoPoolEpochData, error) {
+// ctx is forwarded to the DB driver so that a cancelled context aborts the query.
+func (d *DingoDB) GetPoolEpochDataMap(ctx context.Context, epoch uint64) (map[string]*DingoPoolEpochData, error) {
 	var inputs []models.RewardPoolInput
-	if err := d.db.Where("epoch = ?", epoch).Find(&inputs).Error; err != nil {
+	if err := d.db.WithContext(ctx).Where("epoch = ?", epoch).Find(&inputs).Error; err != nil {
 		return nil, fmt.Errorf("reward_pool_input epoch %d: %w", epoch, err)
 	}
 
@@ -257,7 +259,7 @@ func (d *DingoDB) GetPoolEpochDataMap(epoch uint64) (map[string]*DingoPoolEpochD
 	}
 
 	var outputs []models.RewardPoolOutput
-	if err := d.db.Where("epoch = ?", epoch).Find(&outputs).Error; err != nil {
+	if err := d.db.WithContext(ctx).Where("epoch = ?", epoch).Find(&outputs).Error; err != nil {
 		return nil, fmt.Errorf("reward_pool_output epoch %d: %w", epoch, err)
 	}
 	for i := range outputs {

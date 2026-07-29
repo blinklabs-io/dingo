@@ -145,6 +145,33 @@ func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
 		"only the persisted FAIL within [FromEpoch, ThroughEpoch] should surface")
 }
 
+// TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch documents the
+// invariant `explain --live` relies on to detect a mistyped or out-of-range
+// --epoch: with All:true and FromEpoch==ThroughEpoch==epoch, an epoch that
+// was never fetched is simply absent from GetAllFetchedEpochs, so
+// EpochsChecked stays 0 — as opposed to some other "nothing to do" reason
+// that would also need distinguishing.
+func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	// Only epoch 100 is fetched; 999 never appears in the cache.
+	seedFreshStatus(t, cache, "preview", 100, StatusPass)
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:      "preview",
+		DingoDB:      DingoDBConfig{Plugin: "sqlite", DataDir: newTestDingoDataDir(t)},
+		CachePath:    cachePath,
+		All:          true,
+		FromEpoch:    999,
+		ThroughEpoch: 999,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 0, result.EpochsChecked, "epoch 999 was never fetched")
+}
+
 func TestEffectiveCheckOutcome(t *testing.T) {
 	statuses := []CheckEpochStatus{
 		{Epoch: 1, Status: StatusPass},

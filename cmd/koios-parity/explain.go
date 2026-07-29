@@ -77,7 +77,15 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 		if checkErr != nil {
 			return fmt.Errorf("live check: %w", checkErr)
 		}
-		_ = checkResult
+		// With All:true and FromEpoch==ThroughEpoch==epoch, EpochsChecked is 0
+		// only when epoch isn't in the fetched set at all — otherwise it's
+		// always in scope and gets (re)checked. Without this, an out-of-range
+		// or mistyped --epoch silently falls through to the cache read below
+		// and prints "no mismatches recorded", indistinguishable from a real
+		// pass, even though no live comparison ever ran.
+		if checkResult.EpochsChecked == 0 {
+			return fmt.Errorf("epoch %d has not been fetched for network %q; run `koios-parity fetch` first", epoch, network)
+		}
 	}
 
 	mismatches, err := cache.GetMismatches(network, epoch, poolFilter)

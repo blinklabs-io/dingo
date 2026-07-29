@@ -451,7 +451,13 @@ func fetchEpoch(
 	poolSem := make(chan struct{}, 5)
 	var poolWg sync.WaitGroup
 	var poolMu sync.Mutex
-	poolErrCh := make(chan error, 1)
+	// poolErrMu guards poolErr. A mutex (rather than a buffered channel) is
+	// used so a permanent error can never be lost to a same-instant transient
+	// one: whichever goroutine takes the lock next always applies the "a
+	// permanent error always wins" rule below instead of racing for a single
+	// buffer slot.
+	var poolErrMu sync.Mutex
+	var poolErr error
 	var poolsDone atomic.Int64
 	poolTotal := len(activePoolIDs)
 
@@ -507,11 +513,16 @@ outer:
 
 			item, histErr := koios.GetPoolEpochHistory(poolCtx, id, epoch)
 			if histErr != nil {
-				select {
-				case poolErrCh <- fmt.Errorf("pool %s history: %w", id, histErr):
-				default:
+				wrapped := fmt.Errorf("pool %s history: %w", id, histErr)
+				isPermanent := errors.Is(histErr, ErrKoiosPermanent)
+				poolErrMu.Lock()
+				// A permanent error always wins so a concurrent transient
+				// error can never mask the reason scheduling stopped.
+				if poolErr == nil || (isPermanent && !errors.Is(poolErr, ErrKoiosPermanent)) {
+					poolErr = wrapped
 				}
-				if errors.Is(histErr, ErrKoiosPermanent) {
+				poolErrMu.Unlock()
+				if isPermanent {
 					// Stop scheduling further pools for this epoch — retrying
 					// or continuing through the rest of the pool set cannot
 					// succeed once auth/quota has failed.
@@ -565,10 +576,11 @@ outer:
 		return 0, ctx.Err()
 	}
 
-	select {
-	case err := <-poolErrCh:
+	poolErrMu.Lock()
+	err = poolErr
+	poolErrMu.Unlock()
+	if err != nil {
 		return 0, classifyFetchErr(err)
-	default:
 	}
 
 	// 3. Commit pool rows and epoch info atomically.
