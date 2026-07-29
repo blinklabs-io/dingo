@@ -168,18 +168,21 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 		return PoolDetailInfo{}, err
 	}
 
-	// nOpt drives live_saturation. Protocol parameters may not be loaded
-	// yet early in a node's life (before the first epoch boundary); that is
-	// treated as nOpt = 0 (no saturation figure) rather than failing pool
-	// detail entirely, the same way other pool queries in this package
-	// degrade when startup-dependent state isn't ready yet (see
-	// GetActivePoolRelays and GetPool's retirement check).
-	nOpt := 0
-	if protocolParams, ppErr := a.CurrentProtocolParams(); ppErr == nil {
-		nOpt = protocolParams.NOpt
+	// nOpt drives live_saturation, which is a required, non-nullable float
+	// in the OpenAPI schema: there is no schema-compatible way to signal
+	// "unknown" for it, and 0.0 is a legitimate saturation value (a pool
+	// with no live stake), so it cannot double as a placeholder for
+	// "protocol parameters aren't loaded yet". Propagate the error instead
+	// of guessing.
+	protocolParams, err := a.CurrentProtocolParams()
+	if err != nil {
+		return PoolDetailInfo{}, fmt.Errorf(
+			"get protocol parameters: %w", err,
+		)
 	}
 	liveSize, activeSize, liveSaturation := poolSizeSaturation(
-		liveStake, activeStake, totalLiveStake, totalActiveStake, nOpt,
+		liveStake, activeStake, totalLiveStake, totalActiveStake,
+		protocolParams.NOpt,
 	)
 
 	// Live pledge: the live stake currently delegated to this pool by its
@@ -286,9 +289,11 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 // protocol parameter, matching Blockfrost's live_size, active_size, and
 // live_saturation semantics: live_size and active_size are the pool's share
 // of total live/active stake, and live_saturation is live stake relative to
-// the per-pool saturation threshold (total active stake / nOpt). Each ratio
-// is zero when its denominator is zero (network totals not yet available,
-// or nOpt not yet configured) rather than dividing by zero.
+// the per-pool saturation threshold (total active stake / nOpt). The caller
+// is responsible for nOpt being a real, loaded protocol parameter value —
+// this function only guards the pathological case of a zero denominator
+// (e.g. a network with no active stake yet captured) to avoid dividing by
+// zero; it does not stand in for "nOpt unavailable".
 func poolSizeSaturation(
 	liveStake uint64,
 	activeStake uint64,

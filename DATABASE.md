@@ -1353,6 +1353,27 @@ needed. The upper slot bound passed for "no bound" is `math.MaxInt64`, not
 `database/sql`, and a `uint64` value with the high bit set is rejected by the
 sqlite driver.
 
+`blocks_minted` undercounts on a Mithril-bootstrapped node. `pool_opcert_sequence`
+is populated only by `UpdatePoolOpCertSequence`, called from the same
+block-apply path documented above ("Observed operational certificate sequence
+by slot"); the Mithril ledger-state importer (`ledgerstate.ImportLedgerState`)
+calls `ImportPool` to seed the pool's registration state but never calls
+`UpdatePoolOpCertSequence` or otherwise writes this table — confirmed by
+inspecting `ledgerstate/import.go` and the rest of the `mithril` package,
+neither of which references `PoolOpCertSequence` at all. A node bootstrapped
+from a Mithril snapshot therefore has no rows for any slot before the
+snapshot's boundary, so a pool's lifetime `blocks_minted` only reflects blocks
+dingo has itself applied block-by-block since that boundary, not the pool's
+true full-history total; the gap is silent (no error, just a smaller count)
+and permanent (it does not shrink or get backfilled as the node runs). This
+is the same class of Mithril-boundary gap as the `account` table's
+pre-snapshot registration history documented above. `blocks_epoch` (current
+epoch only) is not affected in ordinary steady-state operation, since a
+caught-up node's current epoch is entirely post-boundary, but it inherits the
+same gap for the one epoch that straddles the snapshot's boundary slot: if
+that epoch has not yet rolled over, `blocks_epoch` only counts the
+post-boundary portion of it.
+
 ### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
 
 All three DRep voting-power queries take an `expiryEpoch uint64` argument that

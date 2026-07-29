@@ -16,23 +16,79 @@ package blockfrost
 
 import (
 	"encoding/hex"
+	"io"
+	"log/slog"
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// newDBBackedAdapterWithProtocolParams builds a NodeAdapter over a real
+// LedgerState that has actually completed Start(), using the embedded
+// devnet genesis (all hard forks at epoch 0, nOpt = 100 per
+// config/cardano/devnet/shelley-genesis.json). Unlike newDBBackedAdapter
+// (adapter_block_db_test.go), this loads real protocol parameters, which
+// PoolDetail now requires in order to compute live_saturation -- a
+// required, non-nullable schema field that cannot be faked with a zero
+// placeholder. Start() completes synchronously against the empty, freshly
+// created database (no chain synced yet), so this stays a fast unit test.
+func newDBBackedAdapterWithProtocolParams(
+	t *testing.T,
+) (*NodeAdapter, *sqliteplugin.MetadataStoreSqlite, *database.Database) {
+	t.Helper()
+	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS, "devnet/config.json",
+	)
+	require.NoError(t, err)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cfg,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
+			Disabled: true,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ls.Start(t.Context()))
+
+	adapter, err := NewNodeAdapter(ls, nil)
+	require.NoError(t, err)
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok)
+
+	return adapter, store, db
+}
+
 // TestNodeAdapterPoolDetailFullResponse seeds a pool with a real
 // transaction-backed registration, an owner delegating its own stake back
-// to the pool, a separate delegator, and observed block production across
-// two epochs, then verifies every PoolDetailInfo field the adapter
-// computes from real DB state.
+// to the pool, a separate delegator, a captured active-stake snapshot, and
+// observed block production across two epochs, then verifies every
+// PoolDetailInfo field the adapter computes from real DB state, including
+// live_saturation computed from the real devnet nOpt (100).
 func TestNodeAdapterPoolDetailFullResponse(t *testing.T) {
-	adapter, store, db := newDBBackedAdapter(t)
+	adapter, store, db := newDBBackedAdapterWithProtocolParams(t)
 
 	poolKeyHash := fill32(0x11)[:28]
 	vrfKeyHash := fill32(0x22)
@@ -56,7 +112,7 @@ func TestNodeAdapterPoolDetailFullResponse(t *testing.T) {
 				Cost:          types.Uint64(340_000_000),
 				Margin:        &types.Rat{Rat: big.NewRat(5, 100)},
 				AddedSlot:     1,
-				CertificateID: 1,
+				CertificateID: 90001,
 			},
 		},
 	}
@@ -72,13 +128,16 @@ func TestNodeAdapterPoolDetailFullResponse(t *testing.T) {
 	}).Error)
 
 	// Registration certificate history: a real transaction backing the
-	// registration row's certificate_id = 1.
+	// registration row's certificate_id = 90001. Both IDs use a large,
+	// distinctive value because Start() against the devnet genesis writes
+	// its own low-numbered genesis-staking transaction/cert rows, which
+	// low hardcoded IDs like 1 would collide with.
 	regTxHash := fill32(0x66)
 	require.NoError(t, store.DB().Create(&models.Transaction{
-		ID: 1, Hash: regTxHash, Slot: 1, BlockIndex: 0,
+		ID: 90001, Hash: regTxHash, Slot: 1, BlockIndex: 0,
 	}).Error)
 	require.NoError(t, store.DB().Exec(
-		"INSERT INTO certs (id, transaction_id, cert_index, cert_type, slot) VALUES (1, 1, 0, 0, 1)",
+		"INSERT INTO certs (id, transaction_id, cert_index, cert_type, slot) VALUES (90001, 90001, 0, 0, 1)",
 	).Error)
 
 	// A plain delegator (not an owner) with a live UTxO delegated to the
@@ -119,19 +178,34 @@ func TestNodeAdapterPoolDetailFullResponse(t *testing.T) {
 	pkh := lcommon.PoolKeyHash(poolKeyHash)
 	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 1, 10, nil))
 	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 2, 500, nil))
-	// ls.CurrentEpoch() is 0 in this lightweight harness (no ls.Start()),
-	// so the adapter resolves "current epoch" to epoch_id 0 regardless of
-	// slot; giving it a start_slot of 100 excludes the block at slot 10
-	// from blocks_epoch while still counting it in the lifetime total.
-	require.NoError(t, store.DB().Create(&models.Epoch{
-		EpochId:       0,
-		StartSlot:     100,
-		LengthInSlots: 1000,
+	// ls.CurrentEpoch() stays 0 on a freshly started ledger with no synced
+	// chain (Start() only loads persisted state; it does not advance the
+	// epoch by wall-clock time), so the adapter resolves "current epoch"
+	// to epoch_id 0 regardless of slot. Start() against the devnet genesis
+	// already wrote the epoch_id = 0 row; update its start_slot to 100 so
+	// the block at slot 10 is excluded from blocks_epoch while still
+	// counting toward the lifetime total.
+	require.NoError(t, store.DB().Model(&models.Epoch{}).
+		Where("epoch_id = ?", 0).
+		Update("start_slot", 100).Error)
+
+	// A captured Mark active-stake snapshot for epoch 0 (activeStakeEpoch
+	// is currentEpoch-2, clamped to 0 below epoch 2): this pool is the only
+	// one in the snapshot, so active_size should come out to exactly 1.0.
+	const activeStake = uint64(4_200_000_000)
+	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		PoolKeyHash:  poolKeyHash,
+		TotalStake:   types.Uint64(activeStake),
 	}).Error)
 
 	poolID := hex.EncodeToString(poolKeyHash)
 	info, err := adapter.PoolDetail(poolID)
 	require.NoError(t, err)
+
+	const wantLiveStake = uint64(11_900_000_001) // 6_900_000_000 + 5_000_000_001
+	const wantNOpt = 100                         // config/cardano/devnet/shelley-genesis.json
 
 	assert.Equal(t, poolID, info.Hex)
 	assert.Equal(t,
@@ -153,21 +227,45 @@ func TestNodeAdapterPoolDetailFullResponse(t *testing.T) {
 	assert.Empty(t, info.Retirement)
 	assert.NotNil(t, info.Retirement)
 	assert.Nil(t, info.CalidusKey)
-	// Protocol parameters are never loaded in this lightweight harness
-	// (ls.Start() is not called), so nOpt is unavailable and saturation
-	// degrades to zero rather than the request failing outright.
-	assert.Zero(t, info.LiveSaturation)
-	// Active stake/size are likewise zero: no pool_stake_snapshot row was
-	// seeded for this test, which is a legitimate "not captured yet" state
-	// distinct from a query failure.
-	assert.Equal(t, "0", info.ActiveStake)
+	// Active stake and active_size: this pool is the network's only
+	// captured snapshot row, so it holds the entire active-stake total.
+	assert.Equal(t, "4200000000", info.ActiveStake)
+	assert.InDelta(t, 1.0, info.ActiveSize, 1e-9)
+	// live_saturation is computed from the real devnet nOpt (100), not a
+	// placeholder: saturation_threshold = totalActiveStake / nOpt, and
+	// live_saturation = liveStake / saturation_threshold.
+	wantSaturation := float64(wantLiveStake) / (float64(activeStake) / float64(wantNOpt))
+	assert.InDelta(t, wantSaturation, info.LiveSaturation, 1e-6)
+}
+
+// TestNodeAdapterPoolDetailProtocolParamsUnavailable covers the case where
+// protocol parameters have not been loaded yet (e.g. very early in a
+// node's life, before Start() has run): live_saturation is a required,
+// non-nullable float in the OpenAPI schema, and 0.0 is itself a legitimate
+// saturation value, so there is no schema-compatible placeholder for
+// "unknown". PoolDetail must fail the whole request rather than guess.
+func TestNodeAdapterPoolDetailProtocolParamsUnavailable(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	poolKeyHash := fill32(0xe1)[:28]
+	pool := &models.Pool{
+		PoolKeyHash: poolKeyHash,
+		VrfKeyHash:  fill32(0xe2),
+		Registration: []models.PoolRegistration{
+			{PoolKeyHash: poolKeyHash, AddedSlot: 1},
+		},
+	}
+	require.NoError(t, store.DB().Create(pool).Error)
+
+	_, err := adapter.PoolDetail(hex.EncodeToString(poolKeyHash))
+	require.ErrorContains(t, err, "protocol parameters")
 }
 
 // TestNodeAdapterPoolDetailBech32AndHexSameResult is the ID-format
 // acceptance criterion: bech32 and hex forms of the same pool key hash must
 // resolve to an identical PoolDetailInfo.
 func TestNodeAdapterPoolDetailBech32AndHexSameResult(t *testing.T) {
-	adapter, store, _ := newDBBackedAdapter(t)
+	adapter, store, _ := newDBBackedAdapterWithProtocolParams(t)
 
 	poolKeyHash := fill32(0x99)[:28]
 	pool := &models.Pool{

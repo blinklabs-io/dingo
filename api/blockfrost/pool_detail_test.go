@@ -269,7 +269,11 @@ func TestPoolSizeSaturation(t *testing.T) {
 			wantLiveSaturation: 0,
 		},
 		{
-			name:               "nOpt not yet available",
+			// Defensive zero-denominator guard only: PoolDetail never calls
+			// this with nOpt == 0 in practice, since it now requires
+			// CurrentProtocolParams to succeed before computing saturation
+			// at all.
+			name:               "nOpt is zero",
 			liveStake:          1000,
 			totalLive:          10_000,
 			activeStake:        500,
