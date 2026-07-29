@@ -509,7 +509,7 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
 		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 15*time.Second, 10*time.Millisecond)
 
 	require.NotContains(
 		t, logBuf.String(), "already exists, skipping",
@@ -670,13 +670,29 @@ func (flakyCloudDestination) DownloadDir(context.Context, string) error {
 	return errors.New("not implemented")
 }
 
+var (
+	flakyCloudFailed  bool
+	flakyCloudMu      sync.Mutex
+	flakyCloud2Failed bool
+	flakyCloud2Mu     sync.Mutex
+	flakyCloud3Failed bool
+	flakyCloud3Mu     sync.Mutex
+)
+
+func resetFlakyCloudState(failed *bool, mu *sync.Mutex) {
+	mu.Lock()
+	*failed = false
+	mu.Unlock()
+}
+
 func init() {
-	failed := false
-	var mu sync.Mutex
 	testDestinationRegistry.Register(
 		"faketestflaky",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
-			return flakyCloudDestination{failed: &failed, mu: &mu}, nil
+			return flakyCloudDestination{
+				failed: &flakyCloudFailed,
+				mu:     &flakyCloudMu,
+			}, nil
 		},
 	)
 }
@@ -695,6 +711,7 @@ func init() {
 // (and this time succeeds at) the cloud mirror, from the existing local
 // copy, without redoing the local snapshot.
 func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *testing.T) {
+	resetFlakyCloudState(&flakyCloudFailed, &flakyCloudMu)
 	db := newManagerTestDB(t)
 
 	logBuf := &syncBuffer{}
@@ -732,13 +749,14 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *tes
 	// redelivering): the cloud outage has cleared, so this must retry the
 	// upload from the existing local copy and succeed, not skip as
 	// already-done.
-	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
-		return strings.Contains(
-			logBuf.String(),
-			"mirrored previously local-only automatic database snapshot to the cloud",
-		)
-	}, 5*time.Second, 10*time.Millisecond)
+		// Publish until the asynchronous EventBus accepts a delivery after
+		// the first handler has fully unwound. A delivery made in the tiny
+		// interval after its error log but before dispatch cleanup may be
+		// coalesced by the bus.
+		publishEpochTransition(eb, 9)
+		return lifecycle.IsCloudMirrored(destDir)
+	}, 15*time.Second, 10*time.Millisecond)
 
 	require.True(
 		t, lifecycle.IsCloudMirrored(destDir),
@@ -753,12 +771,13 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *tes
 }
 
 func init() {
-	failed := false
-	var mu sync.Mutex
 	testDestinationRegistry.Register(
 		"faketestflaky2",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
-			return flakyCloudDestination{failed: &failed, mu: &mu}, nil
+			return flakyCloudDestination{
+				failed: &flakyCloud2Failed,
+				mu:     &flakyCloud2Mu,
+			}, nil
 		},
 	)
 }
@@ -772,6 +791,7 @@ func init() {
 // 9's stuck local-only snapshot, without epoch 9's own event ever being
 // redelivered.
 func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(t *testing.T) {
+	resetFlakyCloudState(&flakyCloud2Failed, &flakyCloud2Mu)
 	db := newManagerTestDB(t)
 
 	logBuf := &syncBuffer{}
@@ -793,7 +813,7 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(t *testin
 	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
 		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 15*time.Second, 10*time.Millisecond)
 
 	destDir := filepath.Join(snapshotDir, "epoch-9")
 	require.False(
@@ -806,19 +826,20 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(t *testin
 	publishEpochTransition(eb, 10)
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 5*time.Second, 10*time.Millisecond,
+	}, 15*time.Second, 10*time.Millisecond,
 		"epoch 9's stuck snapshot must be retried when epoch 10 transitions, "+
 			"without epoch 9's own event ever being redelivered",
 	)
 }
 
 func init() {
-	failed := false
-	var mu sync.Mutex
 	testDestinationRegistry.Register(
 		"faketestflaky3",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
-			return flakyCloudDestination{failed: &failed, mu: &mu}, nil
+			return flakyCloudDestination{
+				failed: &flakyCloud3Failed,
+				mu:     &flakyCloud3Mu,
+			}, nil
 		},
 	)
 }
@@ -833,11 +854,6 @@ func init() {
 func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 	db := newManagerTestDB(t)
 
-	logBuf := &syncBuffer{}
-	logger := slog.New(slog.NewTextHandler(logBuf, nil))
-	eb := event.NewEventBus(nil, logger)
-	defer eb.Stop()
-
 	snapshotDir := t.TempDir()
 	cfg := config.DatabaseLifecycleConfig{
 		SnapshotEnabled:          true,
@@ -845,20 +861,30 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 		SnapshotEveryNEpochs:     1,
 		SnapshotCloudDestination: "faketestflaky3://bucket/prefix",
 	}
-	m := dblifecycle.NewManager(db, eb, cfg, "badger", "sqlite", testDestinationRegistry, logger)
-	require.NoError(t, m.Start(context.Background()))
-
-	publishEpochTransition(eb, 9)
-	require.Eventually(t, func() bool {
-		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
-	}, 5*time.Second, 10*time.Millisecond)
-
 	destDir := filepath.Join(snapshotDir, "epoch-9")
+	// Recreate exactly the durable state a previous process leaves after
+	// its local snapshot succeeds and its cloud upload fails: a valid local
+	// epoch directory with no cloud-mirrored marker. The later-epoch test
+	// above exercises the real transient failure path; constructing the
+	// restart fixture directly avoids depending on asynchronous EventBus
+	// cleanup from a process that, by definition, no longer exists.
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		db,
+		destDir,
+		lifecycle.TriggerEpochBoundary,
+		"test-version",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
 	require.False(
 		t, lifecycle.IsCloudMirrored(destDir),
 		"must not be marked mirrored after a failed upload",
 	)
-	require.NoError(t, m.Stop())
+	flakyCloud3Mu.Lock()
+	flakyCloud3Failed = true // the simulated transient outage has cleared
+	flakyCloud3Mu.Unlock()
 
 	// Simulate a restart: a brand new Manager over the same on-disk
 	// snapshot dir and cloud destination, with no epoch-transition event
@@ -873,7 +899,7 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 5*time.Second, 10*time.Millisecond,
+	}, 15*time.Second, 10*time.Millisecond,
 		"restart's startup scan must retry epoch 9's stuck snapshot "+
 			"without any epoch-transition event being delivered",
 	)

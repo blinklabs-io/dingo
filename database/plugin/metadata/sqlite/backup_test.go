@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -139,37 +138,30 @@ func TestCopyFileSyncsDestinationDirectory(t *testing.T) {
 	require.Equal(t, []byte("hello"), data)
 }
 
-// TestCopyFileRemovesPartialDestinationOnCancellation guards a real bug:
-// copyFile used to leave a partially-written destination file in place
-// when the copy failed partway through (a cancelled context, or a
+// TestCopyReaderToFileRemovesPartialDestinationOnCancellation guards a
+// real bug: copyFile used to leave a partially-written destination file in
+// place when the copy failed partway through (a cancelled context, or a
 // disk-full mid-write), which then made a retried RestoreFrom fail at its
 // pre-existing-destination check with a misleading "already exists"
-// instead of the real cause. The source is large enough that io.Copy must
-// call Read many times, giving cancel (fired from the main goroutine as
-// soon as the destination file is observed to exist) ample room to land
-// before the copy completes -- contextReader then surfaces
-// context.Canceled on the very next Read, deterministically failing the
-// copy after the destination has already been created.
-func TestCopyFileRemovesPartialDestinationOnCancellation(t *testing.T) {
-	srcPath := filepath.Join(t.TempDir(), "src.bin")
-	require.NoError(t, os.WriteFile(
-		srcPath, bytes.Repeat([]byte("z"), 8*1024*1024), 0o644,
-	))
+// instead of the real cause.
+//
+// Exercises copyReaderToFile (copyFile's inner, reader-based half)
+// directly with an already-cancelled context: the destination file is
+// still created unconditionally by os.OpenFile before io.Copy ever runs,
+// so io.Copy's very first Read call on the wrapping contextReader sees
+// ctx already done and fails immediately -- deterministically reaching
+// the cleanup path every time, on every platform and at any speed. An
+// earlier version of this test raced a concurrent cancel() against a real
+// filesystem copy's completion, which a small/cached copy could simply
+// outrun before the cancellation landed (observed as a flaky failure on
+// CI runners without -race's extra scheduling overhead).
+func TestCopyReaderToFileRemovesPartialDestinationOnCancellation(t *testing.T) {
 	dstPath := filepath.Join(t.TempDir(), "dst.bin")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- copyFile(ctx, srcPath, dstPath)
-	}()
-
-	testutil.WaitForCondition(t, func() bool {
-		_, err := os.Stat(dstPath)
-		return err == nil
-	}, 5*time.Second, "destination file must be created before the copy completes")
 	cancel()
 
-	err := testutil.RequireReceive(t, done, 5*time.Second, "copyFile must return after cancellation")
+	err := copyReaderToFile(ctx, bytes.NewReader([]byte("hello")), dstPath)
 	require.Error(t, err)
 
 	_, statErr := os.Stat(dstPath)

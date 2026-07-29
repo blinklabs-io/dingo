@@ -142,7 +142,7 @@ func createDirDurable(dir string) error {
 // directory entry is persisted -- a power loss right after could leave
 // the synced file unreachable (or absent) after a crash without that
 // second, directory-level fsync.
-func copyFile(ctx context.Context, srcPath, dstPath string) (retErr error) {
+func copyFile(ctx context.Context, srcPath, dstPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -151,7 +151,20 @@ func copyFile(ctx context.Context, srcPath, dstPath string) (retErr error) {
 		return fmt.Errorf("open source %q: %w", srcPath, err)
 	}
 	defer src.Close()
+	if err := copyReaderToFile(ctx, src, dstPath); err != nil {
+		return fmt.Errorf("copy %q to %q: %w", srcPath, dstPath, err)
+	}
+	return nil
+}
 
+// copyReaderToFile does copyFile's actual write/durability work against an
+// already-open source reader, factored out so a cancellation's
+// destination-cleanup path (see the retErr!=nil branch below) can be
+// exercised with a deterministic, pre-cancelled context and a plain
+// bytes.Reader in tests -- rather than a real filesystem copy racing a
+// concurrent cancellation's wall-clock timing, which a fast/cached copy
+// can simply outrun before the cancellation ever lands.
+func copyReaderToFile(ctx context.Context, src io.Reader, dstPath string) (retErr error) {
 	dst, err := os.OpenFile(
 		dstPath,
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
@@ -183,7 +196,7 @@ func copyFile(ctx context.Context, srcPath, dstPath string) (retErr error) {
 	// during a large metadata restore takes effect within a chunk or two
 	// rather than only once the whole file has already been copied.
 	if _, err := io.Copy(dst, &contextReader{ctx: ctx, r: src}); err != nil {
-		return fmt.Errorf("copy %q to %q: %w", srcPath, dstPath, err)
+		return fmt.Errorf("copy to %q: %w", dstPath, err)
 	}
 	if err := dst.Sync(); err != nil {
 		return fmt.Errorf("sync %q: %w", dstPath, err)

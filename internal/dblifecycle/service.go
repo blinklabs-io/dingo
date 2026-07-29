@@ -246,6 +246,19 @@ func (s *Service) Truncate(
 	}
 	defer db.Close(ctx)
 
+	if pending, pendingErr := lifecycle.GetPendingTruncate(db.Database); pendingErr != nil {
+		return 0, pendingErr
+	} else if pending != nil {
+		return lifecycle.Truncate(
+			ctx,
+			db.Database,
+			models.Block{},
+			0,
+			s.cfg.DelegatorInactivityEnabled,
+			s.cfg.DelegatorInactivity,
+		)
+	}
+
 	block, err := ResolveTarget(db.Database, target)
 	if err != nil {
 		return 0, err

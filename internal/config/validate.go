@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -494,6 +495,21 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"invalid databaseLifecycle.snapshotEveryNEpochs: %d (must not be negative)",
 			c.DatabaseLifecycle.SnapshotEveryNEpochs,
 		))
+	}
+	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {
+		u, err := url.Parse(dest)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			errs = append(errs, fmt.Errorf(
+				"invalid databaseLifecycle.snapshotCloudDestination %q: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
+				dest,
+			))
+		} else if !snapshotCloudSchemeSupported(u.Scheme) {
+			errs = append(errs, fmt.Errorf(
+				"invalid databaseLifecycle.snapshotCloudDestination %q: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
+				dest,
+				u.Scheme,
+			))
+		}
 	}
 
 	return errors.Join(errs...)
