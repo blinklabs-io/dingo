@@ -73,12 +73,14 @@ logging:
   format: text
   level: info
 
-# TLS certificate file path (for HTTPS)
+# TLS certificate file path for the built-in UTxO RPC listener.
+# Blockfrost and Mesh do not currently consume this setting; place public API
+# listeners behind a TLS-terminating and authenticating reverse proxy.
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
 tlsCertFilePath: ""
 
-# TLS key file path (for HTTPS)
+# TLS private key file path for the built-in UTxO RPC listener.
 #
 # Can be overridden with the TLS_KEY_FILE_PATH environment variable
 tlsKeyFilePath: ""
@@ -275,14 +277,18 @@ startEra: ""
 # CLI: --immutable-db-path
 immutableDbPath: ""
 
-# Validate historical blocks during ledger processing (default: false)
+# Validate historical blocks during ledger processing (default: false).
+# Enabling this is part of a strict replay configuration, but the source must
+# also contain the complete historical state required for validation.
 validateHistorical: false
 
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # Leave disabled when bootstrapping from a non-genesis chainsync intersect
 # point without a Mithril snapshot import, where pre-intersect UTxOs are
-# legitimately absent. (default: false)
+# legitimately absent. A verified Mithril snapshot is a trusted bootstrap
+# boundary, not an independently validated replay from genesis. (default:
+# false)
 #
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
