@@ -1010,6 +1010,28 @@ The worker is intentionally composed at the node boundary. Ledger and database
 indexing code persist the URL/hash pointers; APIs read the local cache through
 the metadata store when they need off-chain documents.
 
+Pool-sourced (`source_type = "pool"`) documents get source-specific
+enforcement inside the fetcher, ahead of every other source type: `fetchOne`
+caps the read at 512 bytes rather than the generic `maxBytes`, and, once the
+Blake2b-256 hash matches, decodes and validates the body with
+`internal/offchainmetadata.ValidatePoolMetadata` before marking the row
+fetched. That validator mirrors cardano-api's
+`validateAndHashStakePoolMetadata` (`name` <=50 characters, `description`
+<=255 characters, `ticker` 3-5 characters, `homepage` required) and the
+Blockfrost `pool_metadata` schema. A hash-valid pool document that is
+oversized or fails validation is recorded as a failed fetch, with `LastError`
+prefixed the same way an oversized generic response or a hash mismatch is, so
+the classification lives in one place (`api/blockfrost/adapter.go`'s
+`offchainFetchError`) rather than being recomputed by every reader. This is a
+deliberate fetch-vs-serve split: validation happens once, in the worker, at
+fetch time, and `NodeAdapter.PoolMetadata` mostly reads the persisted
+`Status`/`LastError` rather than re-validating on every request. The one
+exception is a defensive read-time fallback for `status = "fetched"` rows
+that predate this validation (there is no in-place migration of already-cached
+rows): `PoolMetadata` re-runs `ValidatePoolMetadata` against `Content` before
+returning it, so a stale cached document that would fail today's validation
+does not keep serving as if it were valid, without writing back to the row.
+
 ### Archive And History Expiry Topology
 
 Dingo's blob-store abstraction supports independent history expiry and archive

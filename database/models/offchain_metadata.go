@@ -34,6 +34,13 @@ const (
 	// OffchainFetchErrBodyTooLargePrefix prefixes the LastError recorded
 	// when the response body exceeds the fetch size limit.
 	OffchainFetchErrBodyTooLargePrefix = "response body exceeds"
+	// OffchainFetchErrDecodeErrorPrefix prefixes the LastError recorded
+	// when hash-valid content fails schema validation for its off-chain
+	// metadata source (for example, stake-pool metadata missing a
+	// required field or violating a field length constraint). The API
+	// error classification matches on it, so the fetcher and API must
+	// agree on the text.
+	OffchainFetchErrDecodeErrorPrefix = "metadata decode error"
 
 	OffchainMetadataStatusPending = "pending"
 	OffchainMetadataStatusFetched = "fetched"

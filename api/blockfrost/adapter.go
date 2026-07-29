@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -1715,6 +1716,18 @@ func offchainFetchError(
 				url,
 			),
 		}
+	case strings.HasPrefix(
+		doc.LastError, models.OffchainFetchErrDecodeErrorPrefix,
+	):
+		return &OffchainFetchErrorInfo{
+			Code: "DECODE_ERROR",
+			Message: fmt.Sprintf(
+				"Error Offchain %s: JSON decode error when "+
+					"fetching metadata from %s.",
+				sourceLabel,
+				url,
+			),
+		}
 	case doc.LastHTTPStatus > 0 &&
 		(doc.LastHTTPStatus < 200 || doc.LastHTTPStatus >= 300):
 		statusText := http.StatusText(int(doc.LastHTTPStatus))
@@ -1877,30 +1890,34 @@ func (a *NodeAdapter) PoolMetadata(
 		)
 		return ret, nil
 	}
-	if len(doc.Content) == 0 {
+	// Validation now happens in the fetcher at fetch time
+	// (internal/offchainmetadata.ValidatePoolMetadata, invoked from
+	// fetchOne): a hash-valid pool document that is oversized or fails
+	// stake-pool schema validation is persisted with Status ==
+	// OffchainMetadataStatusFailed and a classified LastError, handled by
+	// the branch above. Content reaching this point from a fetch
+	// performed under the current code is already known-valid.
+	//
+	// Rows persisted as "fetched" before this validation existed were
+	// never checked, so this defensive re-validation is a read-time
+	// fallback that keeps already-cached legacy documents (empty
+	// content, "{}", a missing field, an over-length field, or an
+	// over-limit body that happened to still match its on-chain hash)
+	// from serving as if they were valid. It is a no-op for any row
+	// fetched under the current code, since such content already passed
+	// this exact validator once.
+	fields, err := offchainmetadata.ValidatePoolMetadata(doc.Content)
+	if err != nil {
+		legacyFailure := &models.OffchainMetadata{LastError: err.Error()}
+		ret.Error = offchainFetchError(
+			"Pool", metadataURL, metadataHash, legacyFailure,
+		)
 		return ret, nil
 	}
-	var offchain struct {
-		Name        *string `json:"name"`
-		Description *string `json:"description"`
-		Ticker      *string `json:"ticker"`
-		Homepage    *string `json:"homepage"`
-	}
-	if err := json.Unmarshal(doc.Content, &offchain); err != nil {
-		ret.Error = &OffchainFetchErrorInfo{
-			Code: "DECODE_ERROR",
-			Message: fmt.Sprintf(
-				"Error Offchain Pool: JSON decode error when "+
-					"fetching metadata from %s.",
-				metadataURL,
-			),
-		}
-		return ret, nil
-	}
-	ret.Name = offchain.Name
-	ret.Description = offchain.Description
-	ret.Ticker = offchain.Ticker
-	ret.Homepage = offchain.Homepage
+	ret.Name = &fields.Name
+	ret.Description = &fields.Description
+	ret.Ticker = &fields.Ticker
+	ret.Homepage = &fields.Homepage
 	return ret, nil
 }
 
