@@ -15,11 +15,16 @@
 package dingo
 
 import (
+	"context"
 	"math/big"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -113,4 +118,54 @@ func TestLeiosCommitteeParamsFromPParamsRejectsDefaultInvariantViolation(
 	}
 	_, _, err := leiosCommitteeParamsFromPParams(pp)
 	require.Error(t, err)
+}
+
+// TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles guards a
+// real bug: initLeiosVoteManager's VoteEmittedEventType subscription used
+// to discard its subscriber ID, and this function runs again on every live
+// database Restore/Truncate reinit for a Dijkstra/Leios-enabled node — but
+// the EventBus itself is never recreated across that cycle. Without
+// unsubscribing the previous cycle's handler first (mirroring the three
+// other Node subscriber-ID fields this exact quiesce function already
+// tracks for the identical reason), each cycle left one more permanently
+// active subscription behind, so a single emitted vote got enqueued (and
+// would be diffused to peers) once per accumulated cycle instead of once.
+//
+// Runs initLeiosVoteManager, then the real quiesceForLiveLifecycleOp
+// (which now unsubscribes leiosVoteEmittedSubId), three times in a row —
+// simulating three live Restore/Truncate cycles — then publishes exactly
+// one VoteEmittedEvent and asserts exactly one vote is queued for
+// diffusion, not three.
+func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 1)
+
+	const cycles = 3
+	for range cycles {
+		require.NoError(t, n.initLeiosVoteManager(context.Background()))
+		require.NoError(t, n.quiesceForLiveLifecycleOp(context.Background()))
+	}
+	// The last cycle's quiesce stopped leiosVoteManager without a
+	// subsequent reinit rebuilding it; re-create it once more so a
+	// handler is actually live to receive the event published below,
+	// matching the shape of a real live-lifecycle op (quiesce always
+	// pairs with a reinit that calls initLeiosVoteManager again).
+	require.NoError(t, n.initLeiosVoteManager(context.Background()))
+
+	require.Zero(t, n.ouroboros.LeiosVoteEnqueueCount())
+	n.eventBus.Publish(leios.VoteEmittedEventType, event.NewEvent(
+		leios.VoteEmittedEventType,
+		leios.VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{}},
+	))
+
+	require.Eventually(t, func() bool {
+		return n.ouroboros.LeiosVoteEnqueueCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "the live subscription must receive the published event")
+
+	// Give any stale (buggy) extra subscriptions a moment to also fire,
+	// then check the settled final count.
+	time.Sleep(50 * time.Millisecond)
+	require.EqualValues(
+		t, 1, n.ouroboros.LeiosVoteEnqueueCount(),
+		"a single emitted vote must be enqueued exactly once, not once per accumulated live-lifecycle cycle",
+	)
 }

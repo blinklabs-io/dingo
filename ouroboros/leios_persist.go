@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -212,4 +213,33 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) {
 			"timeout", drainTimeout,
 		)
 	}
+}
+
+// PauseLeiosPersistWriterForLiveLifecycleOp stops the persistence writer
+// (draining whatever is already queued against the current, about-to-close
+// database) and resets its start-once guard, so a later enqueueLeiosPersist
+// call -- once LedgerState has been reassigned to the reinitialized
+// database after a live Restore/Truncate -- lazily relaunches a fresh
+// writer against the new database, the same way the very first call ever
+// does.
+//
+// Without this, the writer (once started) ran for the whole Ouroboros
+// object's lifetime, since that object is retained (not rebuilt) across a
+// live Restore/Truncate. A job already queued before quiesce began could
+// still be mid-drain when closeStorageForLiveLifecycleOp closed the
+// database out from under it, or -- worse -- could still be sitting
+// untouched in the pending map when LedgerState was reassigned, so the
+// eventual drain would silently write pre-operation data into the freshly
+// restored/truncated store.
+//
+// Must be called late in the quiesce sequence, after inbound network
+// traffic has actually stopped (connManager.Stop): enqueueLeiosPersist
+// doesn't take leiosPersistMu before touching leiosPersistOnce, so a
+// concurrent enqueue from still-live Leios fetch traffic could otherwise
+// race this reset.
+func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() {
+	o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout)
+	o.leiosPersistOnce = sync.Once{}
+	o.leiosPersistStopOnce = sync.Once{}
+	o.leiosPersistStarted.Store(false)
 }

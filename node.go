@@ -106,6 +106,7 @@ type Node struct {
 	chainManagerBlockProposedSubId event.EventSubscriberId
 	chainsyncClientRemoveSubId     event.EventSubscriberId
 	connManagerRecycleSubId        event.EventSubscriberId
+	leiosVoteEmittedSubId          event.EventSubscriberId
 
 	// liveLifecycleMu serializes live database Restore/Truncate calls
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.

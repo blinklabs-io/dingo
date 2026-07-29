@@ -134,3 +134,56 @@ func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
 		"enqueue after stop must not strand a job in the pending map",
 	)
 }
+
+// TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB
+// guards the gap a live Restore/Truncate used to leave open: unlike
+// StopLeiosPersistWriter (a genuine, permanent shutdown --
+// TestLeiosPersistEnqueueAfterStopIsRejected above documents that a
+// post-stop enqueue is rejected forever), PauseLeiosPersistWriterForLive
+// LifecycleOp must (1) flush whatever was already queued against the
+// CURRENT database before anything reassigns LedgerState -- so a
+// pre-operation write never lands after the database has moved on -- and
+// (2) still accept and eventually persist a job enqueued afterward, once
+// LedgerState has been reassigned to a new database, mirroring
+// node_lifecycle.go's live restore/truncate reinit reassigning
+// n.ouroboros.LedgerState.
+func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(t *testing.T) {
+	o := newTestOuroborosWithLeiosDB(t)
+	oldDB := o.leiosDatabase()
+	require.NotNil(t, oldDB)
+
+	point1, blockRaw1 := testLeiosEndorserBlockRawWithRefs(t, 20, 1)
+	o.enqueueLeiosPersist(point1, blockRaw1, nil)
+
+	// Pause immediately -- this must drain the just-queued job against
+	// oldDB before returning, exactly like a live Restore/Truncate's
+	// quiesce step pausing right before the database closes.
+	o.PauseLeiosPersistWriterForLiveLifecycleOp()
+
+	_, manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw1), manifest1)
+
+	// Simulate reinitializeAndResume reassigning LedgerState to a freshly
+	// built database, the way node_lifecycle.go's reinit does.
+	newOuroboros := newTestOuroborosWithLeiosDB(t)
+	newDB := newOuroboros.leiosDatabase()
+	require.NotNil(t, newDB)
+	o.LedgerState = newOuroboros.LedgerState
+
+	// A job enqueued after the pause must actually be accepted (not
+	// silently dropped, unlike a plain post-Stop enqueue) and land in the
+	// NEW database, proving the writer actually restarted rather than
+	// staying permanently paused.
+	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
+	o.enqueueLeiosPersist(point2, blockRaw2, nil)
+	o.StopLeiosPersistWriter()
+
+	_, manifest2, err := newDB.GetLeiosEBManifest(point2.Hash)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw2), manifest2)
+
+	// And it must not have leaked into the old database.
+	_, _, err = oldDB.GetLeiosEBManifest(point2.Hash)
+	require.Error(t, err)
+}

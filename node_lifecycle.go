@@ -31,7 +31,18 @@
 // n.eventBus, n.ouroboros (its LedgerState/Mempool/ChainsyncState/PeerGov/
 // ConnManager fields are plain exported fields, reassigned below once their
 // new dependencies exist), n.chainSelector (holds only a one-time
-// SecurityParam snapshot and closures over n).
+// SecurityParam snapshot and closures over n). n.ouroboros has one
+// deliberate, narrow exception to "left running": its background Leios
+// endorser-block persistence writer is paused (not merely left alone) by
+// quiesceForLiveLifecycleOp, since — unlike everything else on
+// n.ouroboros — that writer directly calls Database.SetLeiosEB on
+// whatever n.ouroboros.LedgerState currently resolves to, on its own
+// timer, entirely independent of the request/response flow every other
+// n.ouroboros field only reacts to. Left unpaused, a write already queued
+// before quiesce began could still be draining when the database closes
+// out from under it, or could still be sitting queued when LedgerState is
+// reassigned post-reinit, silently writing pre-operation data into the
+// freshly restored/truncated store.
 //
 // Everything else that depends on n.db or n.ledgerState — chainManager,
 // ledgerState, mempool, chainsyncState, peerGov, connManager, the
@@ -69,6 +80,7 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
@@ -82,7 +94,10 @@ import (
 // quiesceForLiveLifecycleOp stops every subsystem that touches storage, or
 // holds a direct (non-self-healing) reference to n.db/n.ledgerState, in
 // preparation for closing the database out from under this running node.
-// It does not touch n.eventBus, n.ouroboros, n.chainSelector, or n.ctx.
+// It does not touch n.eventBus, n.chainSelector, or n.ctx. It does touch
+// n.ouroboros exactly once, to pause its Leios persistence writer — see
+// this file's top doc comment for why that one piece of n.ouroboros can't
+// simply be left running like everything else on it.
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
 
@@ -255,6 +270,28 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		)
 		n.connManagerRecycleSubId = 0
 	}
+	// leiosVoteManager is stopped above and rebuilt by initLeiosVoteManager
+	// (called again for a Dijkstra/Leios-enabled node during reinit), which
+	// re-subscribes a fresh handler -- without unsubscribing the old one
+	// here first, the EventBus (never recreated across this cycle) would
+	// accumulate one extra permanently-active subscription per live
+	// restore/truncate cycle, and a single emitted vote would be enqueued
+	// (and diffused to peers) once per accumulated subscription.
+	if n.leiosVoteEmittedSubId != 0 {
+		n.eventBus.UnsubscribeAndWait(
+			leios.VoteEmittedEventType,
+			n.leiosVoteEmittedSubId,
+		)
+		n.leiosVoteEmittedSubId = 0
+	}
+
+	// Last, now that connManager.Stop above has closed every connection —
+	// so no more inbound Leios fetch traffic can call enqueueLeiosPersist
+	// concurrently with the reset this performs (see
+	// PauseLeiosPersistWriterForLiveLifecycleOp's own doc comment for why
+	// that ordering matters, and this file's top doc comment for why
+	// n.ouroboros needs this one exception at all).
+	n.ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp()
 
 	return err
 }
