@@ -1291,6 +1291,22 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 - KES signature verification with period checks
 - Slot leader eligibility checking
 
+Before resolving or eagerly forecasting an epoch for a live header,
+`headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
+The in-memory summary uses the same configured era safe zone and
+`TransitionInfo` as the NtC era-history query: an unknown transition is bounded
+from the applied tip by the era's stability window (`3k/f` for Shelley and
+later), a known transition is bounded at the announced era boundary, and an
+impossible transition keeps the same rolling safe-zone bound so live slot
+processing can cross a confirmed same-era epoch boundary. (The point-in-time
+NtC query may conservatively stop its reported range at that confirmed
+boundary.) A header at or past the live bound fails with
+`hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
+epoch/nonce cache. Candidate fork blockfetch begins after fork resolution has
+rolled the applied chain back to its common ancestor, so permitted epoch-nonce
+forecasts and the epoch-specific Mark stake snapshot used for leader
+eligibility are read from that intersection state.
+
 ### Operational Certificate Validation
 
 Inbound operational-certificate (opcert) validation is split by its data

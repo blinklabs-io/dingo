@@ -33,10 +33,8 @@ var ErrBeforeGenesis = errors.New("time is before genesis start")
 //
 // Slot 0 always maps to Shelley genesis SystemStart, regardless of whether
 // the epoch cache is populated. Other slots are resolved via the
-// hardfork.Summary built from the LedgerState's epoch cache; slots past the
-// last known epoch are projected using the current era's slot length (the
-// Summary's current era is unbounded, mirroring the legacy projection
-// behavior).
+// hardfork.Summary built from the LedgerState's epoch cache. The current era
+// can be projected only through its configured safe-zone horizon.
 func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot > math.MaxInt64 {
 		return time.Time{}, errors.New("slot is larger than time.Duration")
@@ -81,9 +79,7 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	}
 	slot, sumErr := sum.TimeToSlot(t)
 	if sumErr != nil {
-		// With an unbounded current era in HardForkSummary this is
-		// unreachable for t >= SystemStart, but we preserve the legacy
-		// error message for any future bounded-summary configuration.
+		// Do not project wall-clock time past the HFC forecast horizon.
 		return 0, errors.New("time not found in known epochs")
 	}
 	return slot, nil
@@ -91,10 +87,10 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 
 // SlotToEpoch returns the epoch containing the given slot.
 //
-// Slots within the known epoch cache resolve to the cached epoch's
-// parameters; slots past the cache are projected using the current era's
-// parameters. Returns an error for an empty cache or for slots before the
-// first known epoch (matching legacy error messages).
+// Slots within the known epoch cache resolve to the cached epoch's parameters;
+// slots past the cache are projected using the current era's parameters only
+// through the configured safe-zone horizon. Returns an error for an empty
+// cache or for slots outside that range.
 func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	sum, err := ls.HardForkSummary()
 	if err != nil {
@@ -128,10 +124,10 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 
 // EpochInfo returns boundary information for the given epoch.
 //
-// Epochs within the known epoch cache resolve to cached-era parameters;
-// epochs past the cache are projected using the current era's parameters.
-// Returns an error for an empty cache or for epochs before the first known
-// era.
+// Epochs within the known epoch cache resolve to cached-era parameters; epochs
+// past the cache are projected using the current era's parameters only through
+// the configured safe-zone horizon. Returns an error for an empty cache or for
+// epochs outside that range.
 func (ls *LedgerState) EpochInfo(epoch uint64) (models.Epoch, error) {
 	sum, err := ls.HardForkSummary()
 	if err != nil {

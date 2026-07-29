@@ -26,11 +26,10 @@ import (
 // transition info.
 //
 // The returned Summary's past eras are closed with bounds computed by walking
-// the epoch cache grouped by EraId. The current era (the last group) is left
-// unbounded (SafeZoneSlots == 0), preserving the existing "project forward
-// using the current era's parameters" behavior of LedgerState.SlotToTime and
-// friends. Once dingo tracks per-era safe zones end-to-end, this will flip to
-// a bounded end sourced from BuildSummary + the real TransitionInfo.
+// the epoch cache grouped by EraId. The current era is passed through
+// hardfork.BuildSummary with the safe zone from the configured era Shape and
+// the ledger's current TransitionInfo. This gives in-memory callers the same
+// bounded forecast inputs used by the NtC HardForkEraHistory query.
 func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	// SystemStart is sourced from the Shelley genesis when available. When it
 	// isn't (e.g. SlotToEpoch-style callers that work from the epoch cache
@@ -43,9 +42,10 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		}
 	}
 
-	snapshot := ls.loadConsensusSnapshot()
-	cache := snapshot.epochCache
-	transitionInfo := snapshot.transitionInfo
+	consensusState, tipState := ls.loadStateSnapshots()
+	cache := consensusState.epochCache
+	transitionInfo := consensusState.transitionInfo
+	tipSlot := tipState.currentTip.Point.Slot
 
 	if len(cache) == 0 {
 		return nil, errors.New("ledger: no epochs in cache")
@@ -54,7 +54,7 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	// Walk the epoch cache grouping contiguous epochs by EraId. Each group
 	// becomes one EraSummary; its Start is derived from the first epoch of
 	// the group, and its End (for past eras) is the Start of the next group.
-	var eras []hardfork.EraSummary
+	eraSummaries := make([]hardfork.EraSummary, 0, len(cache))
 	relTime := time.Duration(0)
 
 	i := 0
@@ -93,13 +93,13 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 			Epoch:        last.EpochId + 1,
 		}
 
-		era := hardfork.EraSummary{
+		eraSummary := hardfork.EraSummary{
 			EraID: eraID,
 			Start: start,
 			Params: hardfork.EraParams{
 				EpochSize:     epochSize,
 				SlotLength:    slotLen,
-				SafeZoneSlots: 0, // UnsafeIndefiniteSafeZone — preserve projection
+				SafeZoneSlots: 0,
 				GenesisWindow: 0,
 			},
 		}
@@ -107,16 +107,55 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		isLast := j == len(cache)
 		if !isLast {
 			// Close this era at the next era's start.
-			era.End = &end
+			eraSummary.End = &end
 		}
-		eras = append(eras, era)
+		eraSummaries = append(eraSummaries, eraSummary)
 
 		i = j
 	}
 
-	return &hardfork.Summary{
-		SystemStart: systemStart,
-		Eras:        eras,
-		Transition:  transitionInfo,
-	}, nil
+	current := eraSummaries[len(eraSummaries)-1]
+	past := eraSummaries[:len(eraSummaries)-1]
+
+	// Use the same configured safe-zone source as the NtC era-history query.
+	// Tests and early bootstrap callers may construct a LedgerState without a
+	// complete node configuration; in that case eraShape is unavailable and
+	// the legacy indefinite safe zone remains the only defensible answer.
+	shape := ls.eraShape()
+	shapeEntry, shapeAvailable := shape.EraForID(current.EraID)
+	if shapeAvailable {
+		current.Params.SafeZoneSlots = shapeEntry.Params.SafeZoneSlots
+		current.Params.GenesisWindow = shapeEntry.Params.GenesisWindow
+		systemStart = shape.SystemStart
+	}
+	if !shapeAvailable {
+		return &hardfork.Summary{
+			SystemStart: systemStart,
+			Eras:        append(past, current),
+			Transition:  transitionInfo,
+		}, nil
+	}
+
+	effectiveTransition := transitionInfo
+	if transitionInfo.State == hardfork.TransitionImpossible {
+		// queryHardForkEraHistory can stop at the confirmed current epoch
+		// boundary because it serves a point-in-time answer. Live slot and
+		// header processing must remain able to cross that boundary in the
+		// same era. Apply the rolling safe zone from the tip while preserving
+		// TransitionImpossible on the returned Summary.
+		effectiveTransition = hardfork.NewTransitionUnknown()
+	}
+
+	summary, err := hardfork.BuildSummary(
+		hardfork.Shape{SystemStart: systemStart},
+		past,
+		current,
+		tipSlot,
+		effectiveTransition,
+	)
+	if err != nil {
+		return nil, err
+	}
+	summary.Transition = transitionInfo
+	return &summary, nil
 }

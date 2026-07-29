@@ -113,6 +113,10 @@ func registerAPIProbe(
 func newAPIPluginRuntimeNode(t *testing.T) *Node {
 	t.Helper()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	// The embedded Preview genesis is historical, while this fixture starts
+	// with a zero-slot ledger. Keep wall-clock startup inside the bounded HFC
+	// forecast so these API lifecycle tests can reach their intended path.
+	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Minute)
 	n, err := New(NewConfig(
 		WithDatabasePath(t.TempDir()),
 		WithCardanoNodeConfig(cardanoCfg),

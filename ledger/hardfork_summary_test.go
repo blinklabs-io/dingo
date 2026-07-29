@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -29,15 +28,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// minimalShelleyGenesisCfg loads a shelley genesis with only SystemStart
-// populated — matching the pattern used by slot_test.go.
+// minimalShelleyGenesisCfg returns the smallest test configuration that also
+// provides the era shape and stability-window inputs used by HardForkSummary.
 func minimalShelleyGenesisCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
-	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
-		strings.NewReader(`{"systemStart": "2022-10-25T00:00:00Z"}`),
-	))
-	return cfg
+	return newTestEraHistoryCfg(t)
 }
 
 // TestHardForkSummary_SingleEra verifies the simple case: one era spanning
@@ -66,14 +61,17 @@ func TestHardForkSummary_SingleEra(t *testing.T) {
 	era := sum.Eras[0]
 	assert.Equal(t, uint(1), era.EraID)
 	assert.Equal(t, hardfork.Bound{RelativeTime: 0, Slot: 0, Epoch: 0}, era.Start)
-	assert.Nil(t, era.End, "current era should be unbounded")
+	require.NotNil(t, era.End, "current era should be safe-zone bounded")
+	assert.Equal(t, uint64(26_200), era.End.Slot)
+	assert.Equal(t, uint64(262), era.End.Epoch)
 	assert.Equal(t, uint64(100), era.Params.EpochSize)
 	assert.Equal(t, time.Second, era.Params.SlotLength)
-	assert.Equal(t, uint64(0), era.Params.SafeZoneSlots, "current era unbounded ⇒ SafeZoneSlots=0")
+	assert.Equal(t, uint64(25_920), era.Params.SafeZoneSlots)
+	assert.Equal(t, uint64(25_920), era.Params.GenesisWindow)
 }
 
 // TestHardForkSummary_TwoEras verifies two contiguous eras produce a Summary
-// with the first era bounded and the second (current) era unbounded.
+// with the first era bounded and the second (current) era safe-zone bounded.
 func TestHardForkSummary_TwoEras(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
@@ -111,7 +109,9 @@ func TestHardForkSummary_TwoEras(t *testing.T) {
 	assert.Equal(t, uint(1), shelley.EraID)
 	// Shelley's Start must line up with Byron's End.
 	assert.Equal(t, *byron.End, shelley.Start)
-	assert.Nil(t, shelley.End, "current era unbounded")
+	require.NotNil(t, shelley.End, "current era should be safe-zone bounded")
+	assert.Equal(t, uint64(26_984), shelley.End.Slot)
+	assert.Equal(t, uint64(64), shelley.End.Epoch)
 	assert.Equal(t, uint64(432), shelley.Params.EpochSize)
 	assert.Equal(t, time.Second, shelley.Params.SlotLength)
 
@@ -168,8 +168,96 @@ func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
 	}
+	// A resolved zero safe zone is valid and must still flow through
+	// BuildSummary so TransitionKnown can set the confirmed era boundary.
+	shape := hardfork.Shape{
+		SystemStart: time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC),
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     100,
+				SlotLength:    time.Second,
+				SafeZoneSlots: 0,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
 	ls.publishSnapshotsLocked()
 	sum, err := ls.HardForkSummary()
 	require.NoError(t, err)
 	assert.Equal(t, hardfork.NewTransitionKnown(7), sum.Transition)
+	require.Len(t, sum.Eras, 1)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Zero(t, sum.Eras[0].Params.SafeZoneSlots)
+	assert.Equal(t, uint64(700), sum.Eras[0].End.Slot)
+	assert.Equal(t, uint64(7), sum.Eras[0].End.Epoch)
+}
+
+func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       500,
+				StartSlot:     100_000,
+				SlotLength:    1_000,
+				LengthInSlots: 432_000,
+				EraId:         eras.ConwayEraDesc.Id,
+			},
+		},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(200_000, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.Len(t, sum.Eras, 1)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(t, uint64(532_000), sum.Eras[0].End.Slot)
+
+	_, err = sum.SlotToEpoch(531_999)
+	require.NoError(t, err)
+	_, err = sum.SlotToEpoch(532_000)
+	assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
+}
+
+func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
+	t *testing.T,
+) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1_000,
+				LengthInSlots: 500,
+				EraId:         eras.ConwayEraDesc.Id,
+			},
+		},
+		currentEra:     eras.ConwayEraDesc,
+		transitionInfo: hardfork.NewTransitionImpossible(),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(455, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	assert.Equal(t, hardfork.NewTransitionImpossible(), sum.Transition)
+	require.Len(t, sum.Eras, 1)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(t, uint64(26_500), sum.Eras[0].End.Slot)
+
+	_, err = sum.SlotToEpoch(500)
+	require.NoError(t, err,
+		"a known same-era epoch boundary must remain forecastable")
 }
