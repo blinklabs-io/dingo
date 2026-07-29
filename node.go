@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"sync"
@@ -584,6 +585,12 @@ func (n *Node) Run(ctx context.Context) error {
 					Rollback:     h.Rollback,
 				}, prevHash, true
 			},
+			GenesisSelectionStateFunc: func() (bool, uint64) {
+				if n.chainSelector == nil {
+					return false, 0
+				}
+				return n.chainSelector.GenesisSelectionState()
+			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
 					"fatal ledger error, initiating shutdown",
@@ -822,6 +829,21 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
 	chainsyncCfg.PromRegistry = n.config.promRegistry
+	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
+		if n.chainSelector == nil {
+			return 0
+		}
+		active, window := n.chainSelector.GenesisSelectionState()
+		if !active {
+			return 0
+		}
+		if window > uint64(math.MaxInt) {
+			return math.MaxInt
+		}
+		// The MaxInt check above makes this conversion safe on both 32- and
+		// 64-bit platforms.
+		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+	}
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,

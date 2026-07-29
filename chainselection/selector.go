@@ -274,9 +274,8 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 // tip is trustworthy and becomes the exit target — reached exactly when the
 // local tip has caught up.
 //
-// Residual (documented, deferred): an uncorroborated source ahead in block
-// number could win Praos selection after exit; closing that needs
-// density-at-intersection (see ARCHITECTURE.md).
+// Once this transition fires, both peer ranking and authoritative ledger fork
+// resolution intentionally return to Praos.
 func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
 	window := cs.genesisWindowSlotsLocked()
 	var best uint64
@@ -799,6 +798,16 @@ func (cs *ChainSelector) GenesisWindowSlots() uint64 {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	return cs.genesisWindowSlotsLocked()
+}
+
+// GenesisSelectionState returns an atomic snapshot of whether Genesis
+// selection is active and the density window it is using. Composition code
+// injects this narrow state query into fork resolution so the authoritative
+// local decision follows the selector's one-way Genesis-to-Praos transition.
+func (cs *ChainSelector) GenesisSelectionState() (bool, uint64) {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.mode == SelectionModeGenesis, cs.genesisWindowSlotsLocked()
 }
 
 // GetBestPeer returns the connection ID of the peer with the best chain, or

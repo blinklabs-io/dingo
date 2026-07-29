@@ -50,8 +50,11 @@ Assumptions (the security property holds only under these):
 
 Under these assumptions a bad or divergent fast source can at worst stall the
 node. A fork that diverges only in blocks no honest peer has yet observed is not
-detected until a corroborator advances past it — full Ouroboros Genesis
-density-at-intersection would resolve such cases sooner (see Limitations).
+independently contradicted until a corroborator advances past it. If that fork
+conflicts with the local chain, the authoritative resolver still compares the
+fully fetched peer and local paths by density from their exact common
+intersection. That comparison does not provide independent witness confirmation
+of the unseen suffix.
 
 ## Configuration
 
@@ -157,24 +160,23 @@ fast source, and per-peer density/corroboration for metrics or debugging.
 
 ## Limitations (deferred)
 
-This is a corroboration gate, not the reference implementation's full Ouroboros
-Genesis. Specifically **not** implemented:
+Dingo implements intersection-anchored density for authoritative local fork
+choice, but not every optimization in the reference implementation.
+Specifically **not** implemented:
 
-- **ChainSync Jumping** and devoted BlockFetch dynamics (a
+- **ChainSync Jumping** and **Devoted BlockFetch** (a
   performance/robustness optimization for downloading across many peers).
-- **Density-at-intersection** resolution of a fork whose intersection is *inside*
-  the window. The gate confirms a witness's chain is a prefix of the candidate's
-  within their overlap; it does not count blocks after an exact intersection, and
-  it cannot testify about blocks the fast source produced *beyond* every
-  witness's frontier. A fast source that stays consistent with honest peers up to
-  their frontiers but forks in the not-yet-witnessed suffix is followed until a
-  corroborator advances past the fork. This is a **security** limitation for that
-  window (not merely performance), mitigated but not closed by the fail-closed
-  overlap requirement and the per-header density comparison.
+- **Independent testimony beyond every witness frontier.** The corroboration
+  gate confirms a witness's chain within their overlap, but cannot testify about
+  a not-yet-witnessed suffix. A fast source that forks only after every honest
+  witness's frontier remains corroborated until a witness advances past the
+  fork. Intersection-anchored density still resolves a conflict with the local
+  candidate; independent confirmation of the suffix cannot happen before a
+  witness observes it.
 - **Peer-governance demotion** wired to the corroboration-failure event; today
   the source is denied selection (stall) but kept connected so it can serve
   blocks once corroboration arrives.
 
-The first and third are performance/refinement work; the second is a residual
-security limitation of the density-based approach, documented here so operators
-do not over-rely on the gate to resolve every in-window fork.
+The first and third are performance/refinement work; the second is an inherent
+limit on what the configured corroborators have observed, documented here so
+operators do not mistake current overlap for testimony about a future suffix.

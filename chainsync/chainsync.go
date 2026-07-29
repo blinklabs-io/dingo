@@ -142,6 +142,11 @@ type Config struct {
 	// derived from the ledger's current stability window (falling back to
 	// defaultSeenHeadersRetention when no ledger state is available).
 	SeenHeadersRetention uint64
+	// ObservedHeaderLimitFunc returns the per-connection ancestry limit used
+	// by fork resolution. A non-positive result uses the bounded default.
+	// Genesis composition raises this to the active density window so a fully
+	// fetched candidate remains reconstructable from its intersection.
+	ObservedHeaderLimitFunc func() int
 	// PromRegistry, when non-nil, is used to register chainsync metrics
 	// such as the current header deduplication cache size.
 	PromRegistry prometheus.Registerer
@@ -814,12 +819,21 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 		header:   h,
 		prevHash: append([]byte(nil), prevHash...),
 	}
-	if len(chainHistory.order) <= maxObservedHeadersPerConn {
-		return
+	limit := s.observedHeaderLimit()
+	for len(chainHistory.order) > limit {
+		evictKey := chainHistory.order[0]
+		chainHistory.order = chainHistory.order[1:]
+		delete(chainHistory.byHash, evictKey)
 	}
-	evictKey := chainHistory.order[0]
-	chainHistory.order = chainHistory.order[1:]
-	delete(chainHistory.byHash, evictKey)
+}
+
+func (s *State) observedHeaderLimit() int {
+	if s.config.ObservedHeaderLimitFunc != nil {
+		if limit := s.config.ObservedHeaderLimitFunc(); limit > 0 {
+			return limit
+		}
+	}
+	return maxObservedHeadersPerConn
 }
 
 // LookupObservedHeader returns a previously observed header for the given

@@ -30,10 +30,10 @@ import (
 // divergent source on a private fork that no honest peer reports — is denied
 // chain selection so it stalls rather than steering the local chain.
 //
-// This is a corroboration gate, not full Ouroboros Genesis density-at-
-// intersection with ChainSync Jumping. See ARCHITECTURE.md ("Ouroboros Genesis
-// trust model") for the supported trust model and the explicitly deferred
-// pieces.
+// This gate supplies the independent-peer trust check. Authoritative
+// density-at-intersection is performed by ledger fork resolution; ChainSync
+// Jumping remains separate deferred work. See ARCHITECTURE.md ("Ouroboros
+// Genesis trust model").
 
 // genesisCorroborationActiveLocked reports whether the Genesis corroboration
 // gate is in effect (Genesis mode with a positive threshold). When false the
