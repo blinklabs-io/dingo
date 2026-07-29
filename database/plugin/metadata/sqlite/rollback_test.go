@@ -580,11 +580,15 @@ func TestRollbackDeletesAccountRegisteredAfterSlot(t *testing.T) {
 
 	stakeKey := bytes.Repeat([]byte{0x02}, 28)
 
-	// Create account registered at slot 300 (after rollback point)
+	// Create account registered at slot 300 (after rollback point).
+	// CreatedSlot is set explicitly because the production insert paths always
+	// stamp it (SetAccount directly, saveAccount via the
+	// AccountCreatedSlotUnset sentinel) and raw DB().Create bypasses them.
 	account := &models.Account{
-		StakingKey: stakeKey,
-		Active:     true,
-		AddedSlot:  300,
+		StakingKey:  stakeKey,
+		Active:      true,
+		AddedSlot:   300,
+		CreatedSlot: 300,
 	}
 	require.NoError(t, store.DB().Create(account).Error)
 

@@ -1770,11 +1770,15 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 
 		stakingKey := bytes.Repeat([]byte{0x34}, 28)
 
-		// Create an account registered at slot 2000 (after rollback point)
+		// Create an account registered at slot 2000 (after rollback point).
+		// CreatedSlot is set explicitly because the production insert paths
+		// always stamp it (SetAccount directly, saveAccount via the
+		// AccountCreatedSlotUnset sentinel) and raw DB().Create bypasses them.
 		account := models.Account{
-			StakingKey: stakingKey,
-			AddedSlot:  2000,
-			Active:     true,
+			StakingKey:  stakingKey,
+			AddedSlot:   2000,
+			CreatedSlot: 2000,
+			Active:      true,
 		}
 		if result := sqliteStore.DB().Create(&account); result.Error != nil {
 			t.Fatalf("failed to create account: %v", result.Error)

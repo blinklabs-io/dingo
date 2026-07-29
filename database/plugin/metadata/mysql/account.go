@@ -17,6 +17,7 @@
 package mysql
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -535,10 +536,37 @@ func (d *MetadataStoreMysql) DeleteAccountRewardsAfterSlot(
 				delta.CredentialTag,
 				delta.StakingKey,
 			).First(&account); result.Error != nil {
-				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-					return models.ErrAccountNotFound
+				if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+					return result.Error
 				}
-				return result.Error
+				// No account row left to credit back. Reverting this delta is a
+				// no-op rather than an error: the balance it journals lives on
+				// the account row, so with that row gone there is nothing to
+				// restore. Failing here would abort the entire rollback, and
+				// startup reconciliation rolls the ledger back to the chain tip
+				// through this path -- so a database holding even one such
+				// orphan could never finish booting, a deterministic crash-loop
+				// with no recovery short of discarding the database. Drop the
+				// stale journal row below and refresh the credential's
+				// aggregate so it reflects the absent account.
+				d.logger.Warn(
+					"reward delta references a missing account during rollback, dropping stale journal row",
+					"component", "database",
+					"credential_tag", delta.CredentialTag,
+					"staking_key", hex.EncodeToString(delta.StakingKey),
+					"delta_slot", delta.AddedSlot,
+					"rollback_slot", slot,
+					"withdrawal", delta.Withdrawal,
+				)
+				addRewardStakeRef(
+					refs,
+					models.NewStakeCredentialRef(
+						delta.CredentialTag,
+						delta.StakingKey,
+					),
+					slot,
+				)
+				continue
 			}
 			if delta.Withdrawal {
 				if result := tx.Model(&models.Account{}).
@@ -1409,9 +1437,48 @@ func (d *MetadataStoreMysql) RestoreAccountStateAtSlot(
 		latestReg, hasReg := cache.latestReg[key], cache.hasReg[key]
 
 		if !hasReg {
-			// Account was registered after rollback slot, delete it
-			if result := db.Delete(&account); result.Error != nil {
-				return result.Error
+			if account.CreatedSlot > slot {
+				// Row was first created after the rollback slot, so nothing on
+				// the surviving chain registered this account: delete it.
+				if result := db.Delete(&account); result.Error != nil {
+					return result.Error
+				}
+				addRewardStakeRef(
+					rewardRefs,
+					models.NewStakeCredentialRef(
+						account.CredentialTag,
+						account.StakingKey,
+					),
+					slot,
+				)
+				continue
+			}
+			// The row predates the rollback slot, yet this database holds no
+			// registration certificate for it at or before that slot. That is
+			// the normal state for every reward account imported from a Mithril
+			// snapshot: ImportAccount writes the live account row and, unlike
+			// ImportPool, synthesizes no registration record, so the account's
+			// real certificate history is simply absent. Reading that absence
+			// as "registered after the rollback slot" deletes an account that
+			// demonstrably existed at it, destroying stake, rewards and DRep
+			// delegation no replayed block will restore, and orphaning its
+			// account_reward_delta rows -- which then make any deeper rollback
+			// fail outright (see DeleteAccountRewardsAfterSlot).
+			//
+			// Keep the row and leave its live fields alone: there is no
+			// certificate evidence to rebuild them from, so the account's state
+			// as of the rollback slot is unknowable here. It may therefore
+			// retain an active flag or delegation set by a rolled-away
+			// certificate until a replayed block overwrites it -- imprecise but
+			// self-correcting, whereas deleting the row is permanent. Restoring
+			// these fields exactly would need the import to lay down baseline
+			// certificate history, which it does not. Clamp added_slot to the
+			// rollback point so the row no longer reads as modified past it.
+			if account.AddedSlot > slot {
+				if result := db.Model(&account).
+					Update("added_slot", slot); result.Error != nil {
+					return result.Error
+				}
 			}
 			addRewardStakeRef(
 				rewardRefs,

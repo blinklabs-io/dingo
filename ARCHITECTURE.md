@@ -854,6 +854,35 @@ and release binaries opt into that tag, while a plain `go build ./cmd/dingo`
 omits the cloud blob SDKs and SQL driver dependencies for non-default metadata
 stores.
 
+### Cross-Store Commit Ordering
+
+A transaction spanning both stores is coordinated by `database.Txn`, which
+treats them as first-class siblings rather than nesting one inside the other.
+`Txn.Commit` runs three steps in a fixed order: commit the blob transaction,
+`BlobStore.Sync`, then commit the metadata transaction. The invariant it
+maintains is that the blob store is never *behind* the metadata tip on disk,
+only ever ahead.
+
+That asymmetry is deliberate, because only one direction is recoverable.
+A blob store ahead of the metadata tip holds orphaned blocks that startup
+trims (`LedgerState.cleanupOrphanedBlobs`). A blob store behind the metadata tip
+is missing blocks the ledger has already applied, and nothing local can rebuild
+them, so `reconcilePrimaryChainTipWithLedgerTip` rolls the ledger back to the
+blob tip — a rollback whose depth is set by however far the two stores drifted,
+and which on a Mithril-bootstrapped node can reach the `mithril_ledger_slot`
+trust boundary, past which rollback is refused outright and the database must be
+discarded.
+
+Ordering the commits is not sufficient on its own: a commit is not durable.
+SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
+128MiB memtable, so the durability order inverts on an unclean host shutdown
+unless the blob store is explicitly flushed between the two commits. See
+DATABASE.md, "Cross-Store Durability Contract", for the per-store settings and
+the cost of the barrier. If either the metadata commit or the sync fails after
+the blob commit succeeded, the result is a `PartialCommitError`, which
+`SubmitAsyncDBTxn` answers by running `RecoverCommitTimestampConflict` once
+(guarded against recursion) before failing the operation so the caller retries.
+
 ### Storage Modes
 
 Dingo supports two storage modes, configured via `storageMode`:

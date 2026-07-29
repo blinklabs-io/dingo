@@ -1435,11 +1435,15 @@ func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
 
 		stakingKey := bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize)
 
-		// Create account registered at slot 2000 (no prior registration)
+		// Create account registered at slot 2000 (no prior registration).
+		// CreatedSlot is set explicitly because the production insert paths
+		// always stamp it (SetAccount directly, saveAccount via the
+		// AccountCreatedSlotUnset sentinel) and raw DB().Create bypasses them.
 		account := models.Account{
-			StakingKey: stakingKey,
-			AddedSlot:  2000,
-			Active:     true,
+			StakingKey:  stakingKey,
+			AddedSlot:   2000,
+			CreatedSlot: 2000,
+			Active:      true,
 		}
 		pgStore.DB().Create(&account)
 

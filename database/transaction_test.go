@@ -42,6 +42,21 @@ type mockBlobStore struct {
 	iterator         types.BlobIterator
 	txns             []*mockBlobTxn
 	utxoData         map[string][]byte
+	// syncErr is returned by Sync. syncCount counts calls, and
+	// syncAtBlobCommitCount snapshots the blob transaction's commit count as
+	// observed from inside Sync, so tests can assert the durability barrier
+	// fires after the blob commit rather than before it.
+	syncErr               error
+	syncCount             int
+	syncAtBlobCommitCount int
+}
+
+func (m *mockBlobStore) Sync() error {
+	m.syncCount++
+	if len(m.txns) > 0 {
+		m.syncAtBlobCommitCount = m.txns[0].commitCount
+	}
+	return m.syncErr
 }
 
 type mockBlobTxn struct {
