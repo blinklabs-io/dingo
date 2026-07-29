@@ -244,12 +244,15 @@ func (c *Calculator) CalculateSchedule(
 	// for the epoch — so computing it inside the per-slot loop (which
 	// is what IsSlotLeaderWithMode does) wastes two 20-term big.Rat
 	// Taylor series and a 2^N multiply per slot.
-	threshold := consensus.CertifiedNatThresholdWithMode(
+	threshold, err := consensus.CertifiedNatThresholdWithMode(
 		poolStake,
 		totalStake,
 		activeSlotCoeff,
 		mode,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("compute leadership threshold: %w", err)
+	}
 
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {
 		vrfInput, err := vrfInputForMode(mode, slot, epochNonce)
@@ -260,11 +263,15 @@ func (c *Calculator) CalculateSchedule(
 		if err != nil {
 			return nil, fmt.Errorf("check slot %d: %w", slot, err)
 		}
-		if consensus.IsVRFOutputBelowThresholdWithMode(
+		belowThreshold, err := consensus.IsVRFOutputBelowThresholdWithMode(
 			output,
 			threshold,
 			mode,
-		) {
+		)
+		if err != nil {
+			return nil, fmt.Errorf("check slot %d: %w", slot, err)
+		}
+		if belowThreshold {
 			schedule.AddLeaderSlot(slot)
 		}
 	}

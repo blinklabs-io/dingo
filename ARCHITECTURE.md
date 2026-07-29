@@ -2377,6 +2377,36 @@ remote Bark archive and downloading the signed URL. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 
+Because the archive controls both the download URL and the response body, the
+client re-establishes block identity locally rather than trusting the response.
+Downloaded bytes are decoded with body validation enabled, and the block's
+computed hash and slot must match the point that was requested.
+
+That binding is complete for every era except Byron main. gouroboros checks a
+Byron main block's transaction, delegation, and update proofs but not
+`ssc_proof`, whose hashes cover cardano-ledger's own encoding of the SSC
+sub-payloads rather than the bytes carried in the block. An alteration confined
+to the SSC payload would therefore leave the hash, slot, height, and previous
+hash — all taken from the untouched header — unchanged. Rather than serve a
+body that is only partly authenticated, Bark refuses Byron main archive reads
+outright; the restriction lifts once Byron SSC proof validation exists
+upstream. Byron epoch boundary blocks are unaffected, carrying neither
+transactions nor an SSC payload, so one body hash covers their whole body.
+
+The block era needs its own check. For Shelley and later the hash covers the
+header alone, and adjacent eras share that header layout, so one set of bytes
+decodes under several eras with an identical hash and slot — the hash cannot
+police the era. The era is therefore derived from the header itself via
+`ledger.DetermineBlockType` and must equal what the archive claimed. Byron is
+exempt because its hash is taken over the block type byte followed by the
+header, so the hash already binds it. An era that cannot be derived at all is
+refused rather than taken on the archive's word.
+
+Block metadata is derived from the decoded block, and archive-reported height
+or previous hash that disagrees with it fails the fetch. Both entry points — `GetBlock` and the iterator's expired-history
+resolution — share this path, so neither is an unchecked route into archive
+data.
+
 ### Midnight Indexer (`midnight/indexer/`)
 
 An optional block scanner that indexes Midnight chain events into multiple
