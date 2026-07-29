@@ -2377,8 +2377,8 @@ fields protect every API listener.
 A Blockfrost-compatible REST API that provides read access to chain data and
 transaction submission. The current router includes health/root, blocks,
 epochs/parameters, network/eras, genesis, assets, pools/extended, retiring
-pools, pool metadata, governance DRep list and lookup, address summary,
-address UTxOs and transactions, metadata label JSON/CBOR,
+pools, pool detail, pool metadata, governance DRep list and lookup, address
+summary, address UTxOs and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward endpoints. It uses an
 adapter pattern to translate between Dingo's internal state and Blockfrost

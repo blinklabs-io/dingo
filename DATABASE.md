@@ -1315,6 +1315,44 @@ WHERE r.rn = 1
 ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index;
 ```
 
+### `GetPoolCertificateHistory`
+
+Backs the Blockfrost pool-detail `registration`/`retirement` transaction-hash
+arrays. Two independent queries, one per certificate type, each an inner join
+from the certificate table to `certs` to `transaction` ordered chronologically
+(`added_slot`, `block_index`, `cert_index` ascending). The inner joins
+naturally exclude certificates with no linked transaction — rows synthesized
+by the Mithril ledger-state import carry `certificate_id = 0`, which matches
+no `certs` row — since they have no originating transaction to report; a
+Mithril-bootstrapped node therefore cannot show registration/retirement
+history that predates its snapshot, the same inherent gap documented for
+`account` above. Both `pool_registration.pool_key_hash` and
+`pool_retirement.pool_key_hash` are indexed, so each query is a small, indexed
+lookup rather than a table scan:
+
+```sql
+-- One of two symmetric queries (registration shown; retirement is the same
+-- shape over pool_retirement).
+SELECT "transaction".hash AS tx_hash
+FROM pool_registration
+JOIN certs ON certs.id = pool_registration.certificate_id
+JOIN "transaction" ON "transaction".id = certs.transaction_id
+WHERE pool_registration.pool_key_hash = $1
+ORDER BY pool_registration.added_slot ASC,
+         "transaction".block_index ASC,
+         certs.cert_index ASC;
+```
+
+The Blockfrost pool-detail endpoint's `blocks_minted` (lifetime) and
+`blocks_epoch` (current epoch) fields reuse the existing `pool_opcert_sequence`
+table and `CountPoolBlocksInSlotRange` query documented above, with the slot
+range widened to the pool's full history (`blocks_minted`) or narrowed to the
+current epoch's slot range (`blocks_epoch`); no new storage or index was
+needed. The upper slot bound passed for "no bound" is `math.MaxInt64`, not
+`math.MaxUint64`: slot columns are bound as signed 64-bit integers through
+`database/sql`, and a `uint64` value with the high bit set is rejected by the
+sqlite driver.
+
 ### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
 
 All three DRep voting-power queries take an `expiryEpoch uint64` argument that

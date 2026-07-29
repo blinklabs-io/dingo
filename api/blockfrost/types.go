@@ -321,6 +321,44 @@ type OffchainFetchErrorResponse struct {
 	Message string `json:"message"`
 }
 
+// PoolDetailResponse represents a Blockfrost pool detail object (OpenAPI
+// 0.1.90 pool schema).
+type PoolDetailResponse struct {
+	PoolID         string                  `json:"pool_id"`
+	Hex            string                  `json:"hex"`
+	VrfKey         string                  `json:"vrf_key"`
+	BlocksMinted   uint64                  `json:"blocks_minted"`
+	BlocksEpoch    uint64                  `json:"blocks_epoch"`
+	LiveStake      string                  `json:"live_stake"`
+	LiveSize       float64                 `json:"live_size"`
+	LiveSaturation float64                 `json:"live_saturation"`
+	LiveDelegators uint64                  `json:"live_delegators"`
+	ActiveStake    string                  `json:"active_stake"`
+	ActiveSize     float64                 `json:"active_size"`
+	DeclaredPledge string                  `json:"declared_pledge"`
+	LivePledge     string                  `json:"live_pledge"`
+	MarginCost     float64                 `json:"margin_cost"`
+	FixedCost      string                  `json:"fixed_cost"`
+	RewardAccount  string                  `json:"reward_account"`
+	Owners         []string                `json:"owners"`
+	Registration   []string                `json:"registration"`
+	Retirement     []string                `json:"retirement"`
+	CalidusKey     *PoolCalidusKeyResponse `json:"calidus_key"`
+}
+
+// PoolCalidusKeyResponse represents a pool's latest valid CIP-0088 Calidus
+// key registration. dingo does not ingest Calidus key registrations from
+// any source, so this field is always null in responses.
+type PoolCalidusKeyResponse struct {
+	ID          string `json:"id"`
+	PubKey      string `json:"pub_key"`
+	Nonce       uint64 `json:"nonce"`
+	TxHash      string `json:"tx_hash"`
+	BlockHeight uint64 `json:"block_height"`
+	BlockTime   int64  `json:"block_time"`
+	Epoch       uint64 `json:"epoch"`
+}
+
 // ErrorResponse represents a Blockfrost error response.
 type ErrorResponse struct {
 	StatusCode int    `json:"status_code"`
