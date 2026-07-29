@@ -15,12 +15,40 @@
 package sqlite
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"github.com/blinklabs-io/dingo/database/models"
 )
+
+// explainRewardAccountOutputsByCredentialPlan runs EXPLAIN QUERY PLAN for the
+// exact query GetAccountOutputsByCredential issues and returns the "detail"
+// column of every plan row. SQLite's EXPLAIN QUERY PLAN output has columns
+// (id, parent, notused, detail); only detail is needed here.
+func explainRewardAccountOutputsByCredentialPlan(
+	t *testing.T,
+	db *gorm.DB,
+) []string {
+	t.Helper()
+	var plan []struct {
+		Detail string `gorm:"column:detail"`
+	}
+	require.NoError(t, db.Raw(
+		`EXPLAIN QUERY PLAN SELECT * FROM reward_account_output
+		 WHERE credential_tag = ? AND staking_key = ?
+		 ORDER BY epoch ASC, pool_key_hash ASC, reward_type ASC
+		 LIMIT ? OFFSET ?`,
+		0, rewardStateTestHash(0x01), 100, 0,
+	).Scan(&plan).Error)
+	details := make([]string, 0, len(plan))
+	for _, row := range plan {
+		details = append(details, row.Detail)
+	}
+	return details
+}
 
 // TestGetRewardAccountOutputsByCredential covers an account with reward rows
 // spanning more than one epoch and pool, verifying the credential filter,
@@ -140,4 +168,48 @@ func TestDeleteRewardStakeInputBeforeEpoch(t *testing.T) {
 	accountOutputs2, err := store.GetRewardAccountOutputs(2, nil)
 	require.NoError(t, err)
 	require.Len(t, accountOutputs2, 1)
+}
+
+// TestGetRewardAccountOutputsByCredentialUsesIndex pins that
+// idx_reward_account_output_credential (credential_tag, staking_key, epoch,
+// pool_key_hash, reward_type) is what makes GetRewardAccountOutputsByCredential
+// affordable once dingo #1875 lets reward_account_output grow without bound in
+// API storage mode: without a credential-leading index, the existing
+// idx_reward_account_output_epoch_cred_pool_type index (which leads with
+// epoch) cannot serve the credential_tag/staking_key predicate, and SQLite
+// falls back to a full index/table scan — the query returns the same rows
+// either way, so a plain correctness test would not catch an index being
+// dropped or renamed out from under this query. This asserts on the query
+// plan itself so that regression fails loudly instead of silently degrading
+// to O(table size) per request.
+func TestGetRewardAccountOutputsByCredentialUsesIndex(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		{
+			Epoch: 1, CredentialTag: 0, StakingKey: rewardStateTestHash(0x01),
+			PoolKeyHash: rewardStateTestHash(0xaa), RewardType: "member", Amount: 1,
+		},
+	}, nil))
+
+	plan := explainRewardAccountOutputsByCredentialPlan(t, store.DB())
+	require.NotEmpty(t, plan)
+
+	sawCredentialIndex := false
+	for _, detail := range plan {
+		upper := strings.ToUpper(detail)
+		require.NotContains(
+			t, upper, "SCAN REWARD_ACCOUNT_OUTPUT",
+			"query must not fall back to a full scan: %v", plan,
+		)
+		if strings.Contains(detail, "idx_reward_account_output_credential") {
+			sawCredentialIndex = true
+		}
+	}
+	require.True(
+		t, sawCredentialIndex,
+		"expected the query plan to use idx_reward_account_output_credential, got: %v",
+		plan,
+	)
 }

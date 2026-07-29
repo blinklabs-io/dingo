@@ -30,7 +30,7 @@ import (
 // and ordering.
 func TestGetRewardAccountOutputsByCredentialPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	stakingKey := testHash28("reward-history-cred")
@@ -64,7 +64,7 @@ func TestGetRewardAccountOutputsByCredentialPostgres(t *testing.T) {
 // reward_account_output is left untouched.
 func TestDeleteRewardStakeInputBeforeEpochPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	poolKeyHash := testHash28("reward-history-retention-pool")

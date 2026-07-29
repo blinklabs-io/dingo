@@ -150,13 +150,26 @@ func (RewardPoolOutput) TableName() string {
 }
 
 // RewardAccountOutput captures per-account reward calculation output.
+//
+// idx_reward_account_output_credential leads with (credential_tag,
+// staking_key) so GetRewardAccountOutputsByCredential (the Blockfrost account
+// reward-history endpoint, dingo #1875) is an index range scan over one
+// credential's rows rather than a full-table scan: the epoch/pool_key_hash/
+// reward_type tail matches that query's ORDER BY, so an ascending request is
+// served directly from the index and a descending one only sorts the
+// (typically tiny, single-credential) matched rows rather than the whole
+// table. This matters specifically because dingo #1875 also makes API storage
+// mode retain this table without bound (see the retention note in
+// DATABASE.md), so the existing idx_reward_account_output_epoch_cred_pool_type
+// index — which leads with epoch, not credential — cannot serve this query
+// without scanning every retained row.
 type RewardAccountOutput struct {
-	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null"`
-	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null"`
-	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null"`
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null;index:idx_reward_account_output_credential,priority:2"`
+	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null;index:idx_reward_account_output_credential,priority:4"`
+	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null;index:idx_reward_account_output_credential,priority:5"`
 	ID            uint         `gorm:"primarykey"`
-	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null"`
-	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0"`
+	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null;index:idx_reward_account_output_credential,priority:3"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0;index:idx_reward_account_output_credential,priority:1"`
 	Amount        types.Uint64 `gorm:"not null"`
 	Spendable     bool         `gorm:"not null"`
 	CapturedSlot  uint64       `gorm:"index;not null"`

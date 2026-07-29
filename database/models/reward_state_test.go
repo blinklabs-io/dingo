@@ -52,6 +52,29 @@ func (legacyRewardPoolInput) TableName() string {
 	return "reward_pool_input"
 }
 
+// legacyRewardAccountOutput is the reward_account_output schema from before
+// dingo #1875 added idx_reward_account_output_credential (credential_tag,
+// staking_key, epoch, pool_key_hash, reward_type). Every other tag is
+// identical to the current RewardAccountOutput, so migrating from this shape
+// to the current one exercises exactly what an operator upgrading an
+// existing database sees.
+type legacyRewardAccountOutput struct {
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null"`
+	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null"`
+	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null"`
+	ID            uint         `gorm:"primarykey"`
+	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0"`
+	Amount        types.Uint64 `gorm:"not null"`
+	Spendable     bool         `gorm:"not null"`
+	CapturedSlot  uint64       `gorm:"index;not null"`
+	BoundarySlot  uint64       `gorm:"index;not null"`
+}
+
+func (legacyRewardAccountOutput) TableName() string {
+	return "reward_account_output"
+}
+
 func TestRewardPoolInputMigrationDefaultsOwnerStake(t *testing.T) {
 	db := openMemoryDB(t)
 	require.NoError(t, db.AutoMigrate(&legacyRewardPoolInput{}))
@@ -189,4 +212,69 @@ func TestDedupeRewardLiveStake(t *testing.T) {
 
 	// Idempotent: a second run with no duplicates is a no-op.
 	require.NoError(t, DedupeRewardLiveStake(db, nil))
+}
+
+// TestMigrateRewardAccountOutputCredentialIndex pins that AutoMigrate adds
+// idx_reward_account_output_credential to a database that predates dingo
+// #1875 (an in-place upgrade), not only to a freshly created one, and that
+// pre-existing rows survive untouched. Unlike idx_reward_live_stake_pool_order
+// (MigrateRewardLiveStakePoolIndex) this index needs no pre-migration repair
+// step: it is a new, non-unique secondary index over columns whose types are
+// unchanged, so AutoMigrate creates it directly with CREATE INDEX rather than
+// rebuilding the table.
+func TestMigrateRewardAccountOutputCredentialIndex(t *testing.T) {
+	db := openMemoryDB(t)
+	require.NoError(t, db.AutoMigrate(&legacyRewardAccountOutput{}))
+	require.False(
+		t,
+		db.Migrator().HasIndex(
+			&legacyRewardAccountOutput{},
+			"idx_reward_account_output_credential",
+		),
+	)
+
+	stakingKey := make([]byte, 28)
+	stakingKey[0] = 0x41
+	poolKeyHash := make([]byte, 28)
+	poolKeyHash[0] = 0x42
+	require.NoError(t, db.Create(&legacyRewardAccountOutput{
+		Epoch:         7,
+		CredentialTag: 0,
+		StakingKey:    stakingKey,
+		PoolKeyHash:   poolKeyHash,
+		RewardType:    "member",
+		Amount:        123,
+		Spendable:     true,
+		CapturedSlot:  10,
+		BoundarySlot:  11,
+	}).Error)
+
+	require.NoError(t, db.AutoMigrate(&RewardAccountOutput{}))
+
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&RewardAccountOutput{},
+			"idx_reward_account_output_credential",
+		),
+	)
+	// The pre-existing unique index survives alongside the new one.
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&RewardAccountOutput{},
+			"idx_reward_account_output_epoch_cred_pool_type",
+		),
+	)
+
+	var migrated RewardAccountOutput
+	require.NoError(t, db.First(&migrated).Error)
+	require.Equal(t, uint64(7), migrated.Epoch)
+	require.Equal(t, stakingKey, migrated.StakingKey)
+	require.Equal(t, poolKeyHash, migrated.PoolKeyHash)
+	require.Equal(t, "member", migrated.RewardType)
+	require.Equal(t, uint64(123), uint64(migrated.Amount))
+
+	// Idempotent: migrating an already-migrated database is a no-op.
+	require.NoError(t, db.AutoMigrate(&RewardAccountOutput{}))
 }
