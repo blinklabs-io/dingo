@@ -49,6 +49,26 @@ func requireSymlinkSupport(t *testing.T, oldname, newname string) {
 	}
 }
 
+// requireDirectorySwap renames oldpath to newpath, modelling a writer
+// replacing a directory while extraction is under way.
+//
+// Windows refuses to rename a directory that has open handles beneath it, so
+// the scenario cannot be staged there at all. That is a constraint on the
+// attack rather than a gap in the guarantee, but it does mean these tests can
+// only run where the swap is possible.
+func requireDirectorySwap(t *testing.T, oldpath, newpath string) {
+	t.Helper()
+	if err := os.Rename(oldpath, newpath); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf(
+				"cannot swap a directory with open handles beneath it: %v",
+				err,
+			)
+		}
+		require.NoError(t, err)
+	}
+}
+
 // TestExtractArchiveRefusesNonEmptyDestination covers the default exclusive
 // mode: a destination that already holds content is not extracted into, so
 // archive contents can never be merged with files placed there by someone
@@ -282,7 +302,7 @@ func TestExtractRootWritesSurviveParentSwap(t *testing.T) {
 	// with write access to the download directory could mid-extraction.
 	elsewhere := filepath.Join(root, "elsewhere")
 	require.NoError(t, os.MkdirAll(elsewhere, 0o750))
-	require.NoError(t, os.Rename(parent, filepath.Join(root, "downloads.real")))
+	requireDirectorySwap(t, parent, filepath.Join(root, "downloads.real"))
 	requireSymlinkSupport(t, elsewhere, parent)
 
 	// A later write must still land in the original staging directory.
@@ -382,7 +402,7 @@ func TestExtractPublishRejectsSwappedParent(t *testing.T) {
 	// attacker with write access to the download directory could.
 	elsewhere := filepath.Join(root, "elsewhere")
 	require.NoError(t, os.MkdirAll(elsewhere, 0o750))
-	require.NoError(t, os.Rename(parent, filepath.Join(root, "downloads.real")))
+	requireDirectorySwap(t, parent, filepath.Join(root, "downloads.real"))
 	requireSymlinkSupport(t, elsewhere, parent)
 
 	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
