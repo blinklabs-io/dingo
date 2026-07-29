@@ -21,7 +21,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,6 +137,80 @@ func TestCopyFileSyncsDestinationDirectory(t *testing.T) {
 	data, err := os.ReadFile(dstPath)
 	require.NoError(t, err)
 	require.Equal(t, []byte("hello"), data)
+}
+
+// TestCopyFileRemovesPartialDestinationOnCancellation guards a real bug:
+// copyFile used to leave a partially-written destination file in place
+// when the copy failed partway through (a cancelled context, or a
+// disk-full mid-write), which then made a retried RestoreFrom fail at its
+// pre-existing-destination check with a misleading "already exists"
+// instead of the real cause. The source is large enough that io.Copy must
+// call Read many times, giving cancel (fired from the main goroutine as
+// soon as the destination file is observed to exist) ample room to land
+// before the copy completes -- contextReader then surfaces
+// context.Canceled on the very next Read, deterministically failing the
+// copy after the destination has already been created.
+func TestCopyFileRemovesPartialDestinationOnCancellation(t *testing.T) {
+	srcPath := filepath.Join(t.TempDir(), "src.bin")
+	require.NoError(t, os.WriteFile(
+		srcPath, bytes.Repeat([]byte("z"), 8*1024*1024), 0o644,
+	))
+	dstPath := filepath.Join(t.TempDir(), "dst.bin")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- copyFile(ctx, srcPath, dstPath)
+	}()
+
+	testutil.WaitForCondition(t, func() bool {
+		_, err := os.Stat(dstPath)
+		return err == nil
+	}, 5*time.Second, "destination file must be created before the copy completes")
+	cancel()
+
+	err := testutil.RequireReceive(t, done, 5*time.Second, "copyFile must return after cancellation")
+	require.Error(t, err)
+
+	_, statErr := os.Stat(dstPath)
+	require.True(
+		t, os.IsNotExist(statErr),
+		"partial destination file must be removed on copy failure",
+	)
+}
+
+// TestBackupToRemovesPartialDestinationOnFailure guards the same
+// leftover-file bug on BackupTo's own write path: VACUUM INTO can create
+// the destination file before failing partway through, and without
+// cleanup a retried BackupTo would fail at the pre-existing-destination
+// check with a misleading "already exists" instead of the real cause.
+// Cancelling the context almost immediately after issuing VACUUM INTO
+// reliably surfaces SQLite's own SQLITE_INTERRUPT partway through
+// execution -- confirmed empirically to leave a (possibly empty)
+// destination file behind before this fix's cleanup was added -- rather
+// than relying on a slow/large database to create a wider timing window.
+func TestBackupToRemovesPartialDestinationOnFailure(t *testing.T) {
+	srcDir := t.TempDir()
+	src, err := New(srcDir, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, src.Start())
+	defer src.Close() //nolint:errcheck
+
+	dstPath := filepath.Join(t.TempDir(), "out.sqlite")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(time.Millisecond)
+		cancel()
+	}()
+	err = src.BackupTo(ctx, dstPath)
+	require.Error(t, err)
+
+	_, statErr := os.Stat(dstPath)
+	require.True(
+		t, os.IsNotExist(statErr),
+		"partial destination file must be removed on backup failure",
+	)
 }
 
 // TestCreateDirDurableCreatesNestedDirectories verifies createDirDurable

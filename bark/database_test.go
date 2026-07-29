@@ -220,6 +220,36 @@ func TestCreateSnapshotRejectsConcurrentOperation(t *testing.T) {
 	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
 }
 
+// TestDeleteSnapshotRejectsConcurrentOperation guards a real gap:
+// DeleteSnapshot used to never check the handler's busy flag at all, so it
+// could run concurrently with an in-flight CreateSnapshot/Restore/
+// VerifySnapshot and remove a snapshot directory while it was still being
+// written to or read from. Simulates the in-flight operation
+// deterministically (same approach as
+// TestCreateSnapshotRejectsConcurrentOperation) rather than racing a real
+// one.
+func TestDeleteSnapshotRejectsConcurrentOperation(t *testing.T) {
+	snapshotDir := t.TempDir()
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.bark.config.SnapshotDir = snapshotDir
+	require.NoError(t, os.Mkdir(filepath.Join(snapshotDir, "some-snapshot"), 0o755))
+
+	h.busy = true
+
+	_, err := h.DeleteSnapshot(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{
+			SnapshotId: "some-snapshot",
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+	require.DirExists(
+		t, filepath.Join(snapshotDir, "some-snapshot"),
+		"the snapshot must be left untouched when the delete is rejected",
+	)
+}
+
 // TestTruncateRejectsInvalidTarget verifies that Truncate rejects both a
 // nil target and a request with more than one target field set.
 func TestTruncateRejectsInvalidTarget(t *testing.T) {

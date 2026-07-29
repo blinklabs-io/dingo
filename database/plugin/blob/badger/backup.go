@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	badger "github.com/dgraph-io/badger/v4"
 )
 
 // defaultLoadMaxPendingWrites bounds in-flight writes during Restore,
@@ -63,10 +65,30 @@ func (d *BlobStoreBadger) Backup(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
+// isEmptyBadgerStore reports whether db has no keys at all. db.Load only
+// inserts entries -- it never clears existing keys first -- so calling it
+// against a non-empty store silently merges the backup into whatever was
+// already there instead of failing loudly, contrary to Restore's own
+// documented "freshly created, empty store" contract.
+func isEmptyBadgerStore(db *badger.DB) (bool, error) {
+	empty := true
+	err := db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Rewind()
+		empty = !it.Valid()
+		return nil
+	})
+	return empty, err
+}
+
 // Restore replaces the store's contents by loading a backup stream
 // produced by Backup. It must only be called against a freshly opened,
-// empty store. See Backup's doc comment for why r is wrapped the same
-// way w is there: Badger's Load has no context parameter of its own.
+// empty store -- enforced below, unlike relying on callers to honor the
+// contract unchecked. See Backup's doc comment for why r is wrapped the
+// same way w is there: Badger's Load has no context parameter of its own.
 //
 // Some malformed inputs make Badger's Load return a clean error (e.g. a
 // proto-unmarshal failure), but others make it panic outright (observed
@@ -91,6 +113,13 @@ func (d *BlobStoreBadger) Restore(ctx context.Context, r io.Reader) (err error) 
 	db := d.DB()
 	if db == nil || db.IsClosed() {
 		return errors.New("badger restore: store is not open")
+	}
+	if empty, emptyErr := isEmptyBadgerStore(db); emptyErr != nil {
+		return fmt.Errorf("badger restore: check store is empty: %w", emptyErr)
+	} else if !empty {
+		return errors.New(
+			"badger restore: store already contains data -- Restore must only be called against a freshly created, empty store",
+		)
 	}
 	defer func() {
 		if p := recover(); p != nil {

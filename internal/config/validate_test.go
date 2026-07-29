@@ -559,6 +559,59 @@ func TestValidateDelegatorInactivity(t *testing.T) {
 	}
 }
 
+// TestValidateDatabaseLifecycleSnapshotCloudDestination guards a config
+// that reaches Manager.Start with a malformed SnapshotCloudDestination:
+// without this check, the only place a bad URI ever surfaced was a
+// logged-and-swallowed failure inside handleEpochTransitionEvent, up to a
+// full epoch after the node had already started running with it.
+func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
+	tests := []struct {
+		name    string
+		dest    string
+		wantErr string
+	}{
+		{name: "empty is fine, no cloud mirroring configured", dest: ""},
+		{
+			name:    "well-formed s3 URI",
+			dest:    "s3://bucket/prefix",
+			wantErr: unsupportedCloudSchemeTestError("s3"),
+		},
+		{
+			name:    "well-formed gcs URI",
+			dest:    "gcs://bucket/prefix",
+			wantErr: unsupportedCloudSchemeTestError("gcs"),
+		},
+		{
+			name:    "typoed scheme",
+			dest:    "s33://bucket/prefix",
+			wantErr: "snapshotCloudDestination",
+		},
+		{
+			name:    "missing scheme separator",
+			dest:    "s3bucket/prefix",
+			wantErr: "snapshotCloudDestination",
+		},
+		{
+			name:    "scheme with no host",
+			dest:    "s3://",
+			wantErr: "snapshotCloudDestination",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotCloudDestination = tt.dest
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 // TestValidatePrivilegedPortAllowedWhenBindable covers a process that
 // may bind any port (root, Windows, or CAP_NET_BIND_SERVICE):
 // minBindable is 0, so a sub-1024 port passes.

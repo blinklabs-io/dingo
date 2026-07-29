@@ -53,6 +53,13 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 	}
 	if err := d.DB().WithContext(ctx).
 		Exec("VACUUM INTO ?", dstPath).Error; err != nil {
+		// VACUUM INTO can create dstPath before failing partway through
+		// (a cancelled context, a disk-full mid-write) -- remove it so a
+		// retry hits the real cause instead of the pre-existing-
+		// destination check above failing with a misleading "already
+		// exists", or a caller mistaking the partial file for a
+		// complete backup.
+		_ = os.Remove(dstPath)
 		return fmt.Errorf("sqlite backup: VACUUM INTO %q: %w", dstPath, err)
 	}
 	return nil
@@ -135,7 +142,7 @@ func createDirDurable(dir string) error {
 // directory entry is persisted -- a power loss right after could leave
 // the synced file unreachable (or absent) after a crash without that
 // second, directory-level fsync.
-func copyFile(ctx context.Context, srcPath, dstPath string) error {
+func copyFile(ctx context.Context, srcPath, dstPath string) (retErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -157,6 +164,16 @@ func copyFile(ctx context.Context, srcPath, dstPath string) error {
 	defer func() {
 		if !dstClosed {
 			_ = dst.Close()
+		}
+		if retErr != nil {
+			// dstPath is a partial/corrupt copy at this point (a
+			// cancelled context, or a mid-copy/sync failure), not a
+			// usable restore target -- remove it so a retry hits the
+			// real cause instead of the pre-existing-destination check
+			// in RestoreFrom failing with a misleading "already exists",
+			// or a caller mistaking the partial file for a complete
+			// restore.
+			_ = os.Remove(dstPath)
 		}
 	}()
 

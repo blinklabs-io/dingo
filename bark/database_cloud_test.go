@@ -236,7 +236,16 @@ func (d *barkFakeCloudDestinationCommError) FetchManifest(
 	return lifecycle.Manifest{}, errors.New("simulated cloud communication failure")
 }
 
-var _ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationCommError{}
+func (d *barkFakeCloudDestinationCommError) ListSnapshots(
+	context.Context,
+) ([]lifecycle.SnapshotEntry, error) {
+	return nil, errors.New("simulated cloud communication failure")
+}
+
+var (
+	_ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationCommError{}
+	_ lifecycle.SnapshotLister       = &barkFakeCloudDestinationCommError{}
+)
 
 func init() {
 	testDestinationRegistry.Register(
@@ -358,6 +367,47 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 		filepath.Join(snapshotDir, "local-only"),
 		byID["local-only"].GetLocation(),
 	)
+}
+
+// TestListAvailableSnapshotsSurvivesCloudListingFailure guards a real bug:
+// a cloud listing communication failure used to discard the local entries
+// mergedSnapshotCatalogPage had already built and fail the whole call with
+// CodeInternal, hiding known-good local snapshots from an operator over
+// what is often just a transient cloud outage -- exactly the class of
+// failure cloudSnapshotExists/resolveSnapshotSource/DeleteSnapshot
+// elsewhere in this file already report as CodeUnavailable rather than
+// CodeInternal. This proves the fix: a local-only snapshot still comes
+// back successfully even when the configured cloud destination's listing
+// call errors out.
+func TestListAvailableSnapshotsSurvivesCloudListingFailure(t *testing.T) {
+	snapshotDir := t.TempDir()
+
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		db,
+		filepath.Join(snapshotDir, "local-only"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
+
+	resp, err := h.ListAvailableSnapshots(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 1)
+	require.Equal(t, "local-only", resp.Msg.GetSnapshots()[0].GetSnapshotId())
 }
 
 func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {

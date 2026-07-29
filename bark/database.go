@@ -216,6 +216,27 @@ func (o *operation) record() *databasev1alpha1.OperationRecord {
 	return rec
 }
 
+// acquireBusy claims the handler's single system-wide busy flag, or
+// returns CodeFailedPrecondition if it's already held. Released via
+// finishOperation. Factored out of startOperation so DeleteSnapshot (which
+// has no operation record/ID of its own to track, being synchronous) can
+// still participate in the same "only one thing at a time" invariant --
+// without this, DeleteSnapshot could run concurrently with an in-flight
+// CreateSnapshot/Restore/VerifySnapshot and remove a snapshot directory
+// while it was still being written to or read from.
+func (h *databaseServiceHandler) acquireBusy() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.busy {
+		return connect.NewError(
+			connect.CodeFailedPrecondition,
+			errors.New("another database operation is already in progress"),
+		)
+	}
+	h.busy = true
+	return nil
+}
+
 // startOperation registers a new operation and marks the handler busy, or
 // returns CodeFailedPrecondition if one is already running. The returned
 // context is cancelled by CancelOperation (or by the caller, on request
@@ -224,14 +245,11 @@ func (o *operation) record() *databasev1alpha1.OperationRecord {
 func (h *databaseServiceHandler) startOperation(
 	opType databasev1alpha1.OperationType,
 ) (*operation, context.Context, error) {
+	if err := h.acquireBusy(); err != nil {
+		return nil, nil, err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.busy {
-		return nil, nil, connect.NewError(
-			connect.CodeFailedPrecondition,
-			errors.New("another database operation is already in progress"),
-		)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	op := &operation{
 		id:        uuid.NewString(),
@@ -243,7 +261,6 @@ func (h *databaseServiceHandler) startOperation(
 		updatedAt: time.Now(),
 	}
 	h.operations[op.id] = op
-	h.busy = true
 	return op, ctx, nil
 }
 
@@ -511,10 +528,21 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		ctx, h.bark.config.DestinationRegistry, h.bark.config.SnapshotCloudDestination,
 	)
 	if err != nil {
-		return nil, "", connect.NewError(
-			connect.CodeInternal,
-			fmt.Errorf("list cloud snapshots: %w", err),
+		// A cloud listing failure is typically connectivity/auth (the same
+		// class of failure cloudSnapshotExists/resolveSnapshotSource/
+		// DeleteSnapshot elsewhere in this file report as CodeUnavailable,
+		// not CodeInternal), and the local entries built above are already
+		// known-good -- failing the whole call here would hide real,
+		// currently-available local snapshots from an operator over what
+		// is often just a transient cloud outage. Log and continue with
+		// local-only results instead, the same best-effort convention
+		// Manager.pruneOldSnapshots uses for a cloud-side failure.
+		h.bark.config.Logger.Warn(
+			"list cloud snapshots failed, returning local snapshots only",
+			"component", "bark",
+			"error", err,
 		)
+		ok = false
 	}
 	if ok {
 		for _, e := range cloudEntries {
@@ -684,6 +712,16 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 	if err != nil {
 		return nil, err
 	}
+
+	// Claims the same busy flag CreateSnapshot/Restore/Truncate/
+	// VerifySnapshot use, so this can't run concurrently with (and
+	// possibly remove a snapshot directory out from under) one of those --
+	// see acquireBusy's doc comment.
+	if err := h.acquireBusy(); err != nil {
+		return nil, err
+	}
+	defer h.finishOperation()
+
 	// Check the directory's existence directly rather than gating on a
 	// readable manifest: a corrupted/hand-edited manifest must still be
 	// deletable, or an operator would have no way to clean up a snapshot

@@ -1674,6 +1674,19 @@ func (n *Node) Truncate(
 		}
 		tmpDB := tmpRuntime.Database
 
+		if pending, pendingErr := lifecycle.GetPendingTruncate(tmpDB); pendingErr != nil {
+			return 0, pendingErr
+		} else if pending != nil {
+			return lifecycle.Truncate(
+				ctx,
+				tmpDB,
+				models.Block{},
+				0,
+				n.config.delegatorInactivityEnabled,
+				n.config.delegatorInactivity,
+			)
+		}
+
 		block, err := dblifecycle.ResolveTarget(tmpDB, target)
 		if err != nil {
 			return 0, fmt.Errorf(

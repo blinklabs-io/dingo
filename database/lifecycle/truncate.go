@@ -17,6 +17,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -33,6 +34,50 @@ import (
 // after a failed live truncate (rather than treat the data directory as
 // possibly inconsistent) should check errors.Is against this.
 var ErrTruncateNotStarted = errors.New("truncate: not started, no data was modified")
+
+const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
+
+// PendingTruncate records enough information to resume a truncate whose
+// batched blob deletion was interrupted before metadata was truncated.
+type PendingTruncate struct {
+	TargetID     uint64 `json:"targetId"`
+	TargetSlot   uint64 `json:"targetSlot"`
+	TargetHash   []byte `json:"targetHash"`
+	TipID        uint64 `json:"tipId"`
+	MithrilFloor uint64 `json:"mithrilFloor"`
+}
+
+// GetPendingTruncate reports a previously-started truncate that still needs
+// completion. Its durable metadata marker prevents a partially committed blob
+// deletion from going unnoticed on restart.
+func GetPendingTruncate(db *database.Database) (*PendingTruncate, error) {
+	value, err := db.GetSyncState(pendingTruncateSyncKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read pending truncate marker: %w", err)
+	}
+	if value == "" {
+		return nil, nil
+	}
+	var pending PendingTruncate
+	if err := json.Unmarshal([]byte(value), &pending); err != nil {
+		return nil, fmt.Errorf("decode pending truncate marker: %w", err)
+	}
+	if pending.TipID < pending.TargetID {
+		return nil, errors.New("invalid pending truncate marker")
+	}
+	return &pending, nil
+}
+
+func setPendingTruncate(
+	db *database.Database,
+	pending PendingTruncate,
+) error {
+	value, err := json.Marshal(pending)
+	if err != nil {
+		return err
+	}
+	return db.SetSyncState(pendingTruncateSyncKey, string(value), nil)
+}
 
 // ResolveTargetByHash resolves a truncate target identified by block hash.
 func ResolveTargetByHash(db *database.Database, hash []byte) (models.Block, error) {
@@ -231,6 +276,19 @@ func Truncate(
 	delegatorInactivityEnabled bool,
 	delegatorInactivity uint64,
 ) (blocksRemoved uint64, err error) {
+	if pending, err := GetPendingTruncate(db); err != nil {
+		return 0, fmt.Errorf("truncate: %w", err)
+	} else if pending != nil {
+		return finishPendingTruncate(
+			ctx,
+			db,
+			*pending,
+			batchSize,
+			delegatorInactivityEnabled,
+			delegatorInactivity,
+		)
+	}
+
 	tip, err := db.GetTip(nil)
 	if err != nil {
 		return 0, fmt.Errorf("%w: get tip: %w", ErrTruncateNotStarted, err)
@@ -351,18 +409,59 @@ func Truncate(
 		)
 	}
 
+	pending := PendingTruncate{
+		TargetID:     target.ID,
+		TargetSlot:   target.Slot,
+		TargetHash:   append([]byte(nil), target.Hash...),
+		TipID:        tipBlock.ID,
+		MithrilFloor: mithrilFloor,
+	}
+	if err := setPendingTruncate(db, pending); err != nil {
+		return 0, fmt.Errorf(
+			"%w: record pending truncate: %w",
+			ErrTruncateNotStarted,
+			err,
+		)
+	}
+	return finishPendingTruncate(
+		ctx,
+		db,
+		pending,
+		batchSize,
+		delegatorInactivityEnabled,
+		delegatorInactivity,
+	)
+}
+
+func finishPendingTruncate(
+	ctx context.Context,
+	db *database.Database,
+	pending PendingTruncate,
+	batchSize int,
+	delegatorInactivityEnabled bool,
+	delegatorInactivity uint64,
+) (uint64, error) {
 	// Everything above this point is read-only validation; DeleteBlocksAfter
 	// is where on-disk mutation actually begins (and, for a truncate
 	// spanning more than one delete batch, may partially commit before an
 	// error or context cancellation is noticed) — so an error from here on
 	// is deliberately NOT wrapped in ErrTruncateNotStarted, unlike the
 	// validation failures above.
-	blocksDeleted, err := DeleteBlocksAfter(ctx, db, target.ID, tipBlock.ID, batchSize)
+	blocksDeleted, err := DeleteBlocksAfter(
+		ctx,
+		db,
+		pending.TargetID,
+		pending.TipID,
+		batchSize,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("truncate: delete blocks after target: %w", err)
 	}
 
-	point := ocommon.Point{Slot: target.Slot, Hash: target.Hash}
+	point := ocommon.Point{
+		Slot: pending.TargetSlot,
+		Hash: pending.TargetHash,
+	}
 	// CIP-0163: collect the reward-account credentials witnessed in the
 	// truncated-away blocks (added_slot > target.Slot) before
 	// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
@@ -389,7 +488,11 @@ func Truncate(
 				)
 			}
 		}
-		if _, _, err := db.TruncateAfterSlot(point, mithrilFloor, txn); err != nil {
+		if _, _, err := db.TruncateAfterSlot(
+			point,
+			pending.MithrilFloor,
+			txn,
+		); err != nil {
 			return fmt.Errorf("truncate metadata: %w", err)
 		}
 		if err := database.RecomputeAccountExpirationsAfterTruncate(
@@ -404,6 +507,9 @@ func Truncate(
 				"recompute account expirations after truncate: %w",
 				err,
 			)
+		}
+		if err := db.DeleteSyncState(pendingTruncateSyncKey, txn); err != nil {
+			return fmt.Errorf("clear pending truncate marker: %w", err)
 		}
 		return nil
 	})

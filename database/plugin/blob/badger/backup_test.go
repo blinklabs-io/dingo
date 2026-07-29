@@ -65,6 +65,46 @@ func TestBackupClosedStoreErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestRestoreRejectsNonEmptyStore guards a real gap: db.Load only inserts
+// entries -- it never clears existing keys first -- so calling Restore
+// against a store that already has data would silently merge the backup
+// into it instead of failing loudly, contrary to Restore's own documented
+// "freshly created, empty store" contract. The sqlite metadata store's
+// RestoreFrom already enforces the equivalent precondition (refusing an
+// existing destination file); this brings the badger blob store in line.
+func TestRestoreRejectsNonEmptyStore(t *testing.T) {
+	src, err := New(WithDataDir(t.TempDir()))
+	require.NoError(t, err)
+	defer src.Close()
+
+	txn := src.NewTransaction(true)
+	require.NoError(t, src.Set(txn, []byte("key1"), []byte("value1")))
+	require.NoError(t, txn.Commit())
+
+	var buf bytes.Buffer
+	require.NoError(t, src.Backup(context.Background(), &buf))
+
+	dst, err := New(WithDataDir(t.TempDir()))
+	require.NoError(t, err)
+	defer dst.Close()
+
+	dstTxn := dst.NewTransaction(true)
+	require.NoError(t, dst.Set(dstTxn, []byte("preexisting"), []byte("data")))
+	require.NoError(t, dstTxn.Commit())
+
+	err = dst.Restore(context.Background(), &buf)
+	require.Error(t, err)
+
+	// The pre-existing key must survive untouched -- confirming Restore
+	// refused before touching anything, not that it merged and happened
+	// to still have this key afterward.
+	readTxn := dst.NewTransaction(false)
+	defer readTxn.Rollback() //nolint:errcheck
+	val, err := dst.Get(readTxn, []byte("preexisting"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("data"), val)
+}
+
 // TestRestoreRecoversFromMalformedStreamPanic guards against a real crash
 // found via manual live testing (dingo#1651 follow-up): some malformed
 // backup streams don't just fail Badger's Load() with a clean error, they

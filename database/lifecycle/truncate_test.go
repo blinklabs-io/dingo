@@ -382,3 +382,52 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), blocksRemoved)
 }
+
+// TestTruncateDetectsAndResumesInterruptedBatchedDelete verifies that a
+// cancellation after one blob-delete batch cannot leave an undetectable
+// database with metadata pointing at missing blocks. The durable marker must
+// survive the failure, and a later call must finish the original operation
+// without needing to resolve the now-missing old tip first.
+func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
+	f := buildTestChain(t, 5)
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 2}
+
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	require.Equal(t, f.blocks[1].ID, pending.TargetID)
+	require.Equal(t, f.blocks[4].ID, pending.TipID)
+
+	// The first batch committed, while metadata still reports the old tip.
+	_, err = f.db.BlockByIndex(f.blocks[2].ID, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	tip, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[4].Slot, tip.Point.Slot)
+
+	// A retry resumes from the marker. The target argument is deliberately
+	// empty because the durable marker is now the authoritative operation.
+	_, err = lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		models.Block{},
+		1,
+		false,
+		0,
+	)
+	require.NoError(t, err)
+
+	pending, err = lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.Nil(t, pending)
+	tip, err = f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[1].Slot, tip.Point.Slot)
+	for _, block := range f.blocks[2:] {
+		_, err := f.db.BlockByIndex(block.ID, nil)
+		require.ErrorIs(t, err, models.ErrBlockNotFound)
+	}
+}

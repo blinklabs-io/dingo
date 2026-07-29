@@ -382,6 +382,15 @@ func (n *Node) Run(ctx context.Context) error {
 		)
 		dbNeedsRecovery = true
 	}
+	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
+		return fmt.Errorf("check for interrupted database truncate: %w", pendingErr)
+	} else if pending != nil {
+		return fmt.Errorf(
+			"database truncate was interrupted after it started (target slot %d, target id %d); rerun the truncate operation before starting the node",
+			pending.TargetSlot,
+			pending.TargetID,
+		)
+	}
 	// Load chain manager
 	cm, err := chain.NewManager(
 		n.db,
