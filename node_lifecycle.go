@@ -1389,6 +1389,11 @@ const (
 	restoreStagingSuffix   = ".restore-staging"
 )
 
+// syncDataDirParent is fsyncdir.Sync, indirected through a variable so
+// tests can inject a sync failure at any of swapInRestoredDataDir's three
+// call sites without needing real filesystem-level fault injection.
+var syncDataDirParent = fsyncdir.Sync
+
 // swapInRestoredDataDir atomically replaces n.config.dataDir with
 // stagingDir (both must be on the same filesystem for the renames to be
 // atomic), keeping the original data around as a same-directory backup at
@@ -1420,7 +1425,25 @@ func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err e
 	if err := os.Rename(dataDir, backupDir); err != nil {
 		return "", fmt.Errorf("move aside current data directory: %w", err)
 	}
-	if err := fsyncdir.Sync(parentDir); err != nil {
+	if err := syncDataDirParent(parentDir); err != nil {
+		// dataDir was already renamed to backupDir above -- unlike the
+		// rename itself failing, dataDir is NOT left in place here, so
+		// the caller's usual "swap failed, dataDir still holds the
+		// original, safe to resume on it" assumption does not hold
+		// unless this rollback actually succeeds. Roll back immediately
+		// rather than returning an ordinary error with dataDir absent.
+		if rbErr := os.Rename(backupDir, dataDir); rbErr != nil {
+			return "", fmt.Errorf(
+				"%w: sync %q after moving aside current data directory: %w (rollback also failed: %w; original data preserved at %q)",
+				errRestoreSwapUnrecoverable, parentDir, err, rbErr, backupDir,
+			)
+		}
+		if syncErr := syncDataDirParent(parentDir); syncErr != nil {
+			return "", fmt.Errorf(
+				"sync %q after moving aside current data directory: %w (rolled back, but sync after rollback failed too: %w)",
+				parentDir, err, syncErr,
+			)
+		}
 		return "", fmt.Errorf(
 			"sync %q after moving aside current data directory: %w",
 			parentDir, err,
@@ -1433,7 +1456,7 @@ func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err e
 				errRestoreSwapUnrecoverable, err, rbErr, stagingDir,
 			)
 		}
-		if syncErr := fsyncdir.Sync(parentDir); syncErr != nil {
+		if syncErr := syncDataDirParent(parentDir); syncErr != nil {
 			return "", fmt.Errorf(
 				"activate restored data directory: %w (rolled back, but sync %q after rollback failed: %w)",
 				err, parentDir, syncErr,
@@ -1441,7 +1464,7 @@ func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err e
 		}
 		return "", fmt.Errorf("activate restored data directory: %w", err)
 	}
-	if err := fsyncdir.Sync(parentDir); err != nil {
+	if err := syncDataDirParent(parentDir); err != nil {
 		return "", fmt.Errorf(
 			"sync %q after activating restored data directory: %w",
 			parentDir, err,

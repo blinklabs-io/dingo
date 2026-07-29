@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
 )
@@ -47,6 +48,27 @@ func CloudMirrorMarkerPath(dir string) string {
 func IsCloudMirrored(dir string) bool {
 	_, err := os.Stat(CloudMirrorMarkerPath(dir))
 	return err == nil
+}
+
+// IsCloudMirroredTo reports whether dir's cloud mirror marker records the
+// destination cloudDest resolves to right now, not merely that some marker
+// is present. This matters because cloudDest is operator-configured and can
+// change (e.g. pointed at a new bucket) between when a snapshot was
+// mirrored and now: a marker left over from a since-abandoned destination
+// must not be mistaken for "already mirrored to the currently configured
+// destination" -- that destination has never actually received this
+// snapshot's data, and treating it as done would silently skip mirroring
+// it there.
+func IsCloudMirroredTo(dir string, cloudDest string) bool {
+	if cloudDest == "" {
+		return false
+	}
+	recorded, err := os.ReadFile(CloudMirrorMarkerPath(dir))
+	if err != nil {
+		return false
+	}
+	want := JoinCloudURI(cloudDest, filepath.Base(dir))
+	return strings.TrimSpace(string(recorded)) == want
 }
 
 // MirrorToCloud uploads dir's contents to cloudDest (a base URI like

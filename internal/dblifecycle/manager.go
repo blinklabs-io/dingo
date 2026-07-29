@@ -63,6 +63,12 @@ type Manager struct {
 	cancel         context.CancelFunc
 	subscriptionId event.EventSubscriberId
 	loopWg         sync.WaitGroup
+
+	// retryMu serializes retryUnmirroredSnapshots so the startup scan
+	// (launched from Start) and an epoch transition's opportunistic scan
+	// (from handleEpochTransition) never race each other into uploading
+	// the same local-only snapshot to the cloud twice concurrently.
+	retryMu sync.Mutex
 }
 
 // NewManager creates a new automatic-snapshot manager. db and eventBus
@@ -193,6 +199,18 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	})
 
+	// A normal restart never redelivers an old epoch's own transition
+	// event, so without this, a snapshot that was written locally but
+	// never mirrored (a transient upload failure) before the last
+	// shutdown would sit unmirrored until retention deleted the only copy
+	// of it that ever existed. Runs in the background (tracked by loopWg,
+	// same as the subscription-cleanup goroutine above, so Stop still
+	// waits for it) since it may need to re-upload a multi-gigabyte
+	// snapshot and must not delay Start's return.
+	m.loopWg.Go(func() {
+		m.retryUnmirroredSnapshots(childCtx)
+	})
+
 	m.logger.Info(
 		"database lifecycle manager started",
 		"component", "dblifecycle",
@@ -269,6 +287,14 @@ func (m *Manager) handleEpochTransition(
 	ctx context.Context,
 	evt event.EpochTransitionEvent,
 ) error {
+	// Give every epoch transition -- not just a redelivery of the exact
+	// epoch that failed to mirror -- a chance to heal an older epoch's
+	// snapshot that was written locally but never made it to the cloud.
+	// Without this, advancing past the failed epoch (the normal case)
+	// never retries it: the old epoch's own transition event is gone for
+	// good once a newer epoch has begun.
+	m.retryUnmirroredSnapshots(ctx)
+
 	everyN := m.cfg.SnapshotEveryNEpochs
 	if everyN <= 0 {
 		everyN = 1
@@ -306,7 +332,7 @@ func (m *Manager) handleEpochTransition(
 		// upload from the already-valid local copy, not the whole
 		// snapshot.
 		if m.cfg.SnapshotCloudDestination == "" ||
-			lifecycle.IsCloudMirrored(destDir) {
+			lifecycle.IsCloudMirroredTo(destDir, m.cfg.SnapshotCloudDestination) {
 			m.logger.Debug(
 				"automatic snapshot for epoch already exists, skipping",
 				"component", "dblifecycle",
@@ -365,6 +391,91 @@ func (m *Manager) handleEpochTransition(
 		m.pruneOldSnapshots(ctx)
 	}
 	return nil
+}
+
+// retryUnmirroredSnapshots scans cfg.SnapshotDir for existing epoch-*
+// snapshot directories that are not mirrored to the currently configured
+// SnapshotCloudDestination, and retries the upload for each one. Called
+// both from Start (so a restart heals a snapshot stranded local-only by
+// the last run, without waiting for another epoch transition) and from
+// handleEpochTransition (so a long-running node heals it as soon as any
+// later epoch boundary occurs, without needing the failed epoch's own
+// event redelivered). Uses IsCloudMirroredTo, not IsCloudMirrored, so a
+// marker left over from a since-reconfigured cloud destination is treated
+// as still needing an upload to the destination actually configured now.
+// Best-effort like pruneOldSnapshots: failures are logged, never returned,
+// since this is opportunistic healing on top of whatever handling already
+// happened for the snapshot that triggered this call.
+func (m *Manager) retryUnmirroredSnapshots(ctx context.Context) {
+	if m.cfg.SnapshotCloudDestination == "" {
+		return
+	}
+	m.retryMu.Lock()
+	defer m.retryMu.Unlock()
+
+	entries, err := os.ReadDir(m.cfg.SnapshotDir)
+	if err != nil {
+		// Most commonly: no snapshot has ever been captured yet, so
+		// SnapshotDir doesn't exist. Nothing to retry either way.
+		return
+	}
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		if !entry.IsDir() ||
+			!strings.HasPrefix(entry.Name(), epochSnapshotDirPrefix) {
+			continue
+		}
+		dir := filepath.Join(m.cfg.SnapshotDir, entry.Name())
+		if lifecycle.IsCloudMirroredTo(dir, m.cfg.SnapshotCloudDestination) {
+			continue
+		}
+		m.logger.Warn(
+			"found an automatic database snapshot not mirrored to the "+
+				"currently configured cloud destination, retrying upload",
+			"component", "dblifecycle",
+			"dir", dir,
+		)
+		if err := m.retryMirrorToCloud(ctx, dir); err != nil {
+			m.logger.Warn(
+				"retrying cloud mirror for a previously unmirrored "+
+					"automatic database snapshot failed, will retry again later",
+				"component", "dblifecycle",
+				"dir", dir,
+				"error", err,
+			)
+			continue
+		}
+		m.logger.Info(
+			"mirrored previously local-only automatic database snapshot to the cloud",
+			"component", "dblifecycle",
+			"dir", dir,
+		)
+	}
+}
+
+// retryMirrorToCloud calls lifecycle.MirrorToCloud with its own panic
+// recovery, converting a panic into an ordinary error. Unlike the direct
+// call in handleEpochTransition's own-epoch retry path (which relies on
+// EventBus's safeHandlerCall to catch a panic from a genuinely broken
+// destination plugin, exactly the scenario TestManagerSurvivesHandlerPanic
+// exercises), retryUnmirroredSnapshots iterates every unmirrored snapshot
+// dir in one call: an unrecovered panic on one older, already-broken
+// snapshot would otherwise abort the loop before later directories are
+// even considered, and -- since this whole scan also runs synchronously
+// at the top of handleEpochTransition -- would prevent the current epoch's
+// own snapshot from ever running, for every future epoch, for as long as
+// that one old snapshot's cloud destination keeps panicking.
+func (m *Manager) retryMirrorToCloud(ctx context.Context, dir string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic retrying cloud mirror: %v", r)
+		}
+	}()
+	return lifecycle.MirrorToCloud(
+		ctx, m.destinationRegistry, dir, m.cfg.SnapshotCloudDestination,
+	)
 }
 
 // pruneOldSnapshots removes automatic snapshot directories beyond the

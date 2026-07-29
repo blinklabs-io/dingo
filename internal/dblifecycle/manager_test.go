@@ -752,6 +752,133 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *tes
 	)
 }
 
+func init() {
+	failed := false
+	var mu sync.Mutex
+	testDestinationRegistry.Register(
+		"faketestflaky2",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return flakyCloudDestination{failed: &failed, mu: &mu}, nil
+		},
+	)
+}
+
+// TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery guards
+// the gap the redelivery-only retry left: the old epoch whose upload
+// failed never gets its own transition event again once a later epoch has
+// begun, so a fix that only retries on an exact redelivery never actually
+// heals it in the normal case (a node simply keeps running and epochs keep
+// advancing). This proves epoch 10's transition notices and retries epoch
+// 9's stuck local-only snapshot, without epoch 9's own event ever being
+// redelivered.
+func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(t *testing.T) {
+	db := newManagerTestDB(t)
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:          true,
+		SnapshotDir:              snapshotDir,
+		SnapshotEveryNEpochs:     1,
+		SnapshotCloudDestination: "faketestflaky2://bucket/prefix",
+	}, "badger", "sqlite", testDestinationRegistry, logger)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	publishEpochTransition(eb, 9)
+	require.Eventually(t, func() bool {
+		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
+	}, 5*time.Second, 10*time.Millisecond)
+
+	destDir := filepath.Join(snapshotDir, "epoch-9")
+	require.False(
+		t, lifecycle.IsCloudMirrored(destDir),
+		"must not be marked mirrored after a failed upload",
+	)
+
+	// Advance to a genuinely different epoch -- epoch 9's own event is
+	// never redelivered.
+	publishEpochTransition(eb, 10)
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirrored(destDir)
+	}, 5*time.Second, 10*time.Millisecond,
+		"epoch 9's stuck snapshot must be retried when epoch 10 transitions, "+
+			"without epoch 9's own event ever being redelivered",
+	)
+}
+
+func init() {
+	failed := false
+	var mu sync.Mutex
+	testDestinationRegistry.Register(
+		"faketestflaky3",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return flakyCloudDestination{failed: &failed, mu: &mu}, nil
+		},
+	)
+}
+
+// TestManagerRetriesUnmirroredSnapshotOnRestart guards the other half of
+// the same gap: a plain node restart never redelivers the failed epoch's
+// transition event either, and could otherwise wait indefinitely (up to
+// the next epoch boundary, days later on mainnet) before ever retrying.
+// This proves a fresh Manager's Start alone -- with no epoch-transition
+// event of any kind delivered to it -- notices and retries a snapshot left
+// unmirrored by a previous run.
+func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
+	db := newManagerTestDB(t)
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	cfg := config.DatabaseLifecycleConfig{
+		SnapshotEnabled:          true,
+		SnapshotDir:              snapshotDir,
+		SnapshotEveryNEpochs:     1,
+		SnapshotCloudDestination: "faketestflaky3://bucket/prefix",
+	}
+	m := dblifecycle.NewManager(db, eb, cfg, "badger", "sqlite", testDestinationRegistry, logger)
+	require.NoError(t, m.Start(context.Background()))
+
+	publishEpochTransition(eb, 9)
+	require.Eventually(t, func() bool {
+		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
+	}, 5*time.Second, 10*time.Millisecond)
+
+	destDir := filepath.Join(snapshotDir, "epoch-9")
+	require.False(
+		t, lifecycle.IsCloudMirrored(destDir),
+		"must not be marked mirrored after a failed upload",
+	)
+	require.NoError(t, m.Stop())
+
+	// Simulate a restart: a brand new Manager over the same on-disk
+	// snapshot dir and cloud destination, with no epoch-transition event
+	// delivered to it at all.
+	logBuf2 := &syncBuffer{}
+	logger2 := slog.New(slog.NewTextHandler(logBuf2, nil))
+	eb2 := event.NewEventBus(nil, logger2)
+	defer eb2.Stop()
+	m2 := dblifecycle.NewManager(db, eb2, cfg, "badger", "sqlite", testDestinationRegistry, logger2)
+	require.NoError(t, m2.Start(context.Background()))
+	defer m2.Stop()
+
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirrored(destDir)
+	}, 5*time.Second, 10*time.Millisecond,
+		"restart's startup scan must retry epoch 9's stuck snapshot "+
+			"without any epoch-transition event being delivered",
+	)
+}
+
 // flakyDeleteCloudDestination mirrors managerFakeCloudDestination's
 // directory-backed UploadDir/DownloadDir (so this test's epoch snapshots
 // actually get mirrored for real), but Delete fails for as long as

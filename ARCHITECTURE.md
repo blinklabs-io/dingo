@@ -3713,14 +3713,32 @@ not redo a snapshot that already completed. That check alone cannot tell
 "fully completed, including its cloud mirror" apart from "the local
 snapshot completed but a configured cloud upload failed or never ran" —
 both leave the same local snapshot directory present.
-`database.MirrorToCloud` (`database/lifecycle/snapshot_cloud.go`) writes a
-small marker file (`database.CloudMirrorMarkerPath`) inside the local
-snapshot directory the moment its cloud upload actually succeeds, and
-`database.IsCloudMirrored` checks for it. When a cloud destination is
-configured and the local directory exists but is not marked mirrored, the
-manager retries just the cloud upload from the existing local copy (via
-`MirrorToCloud` directly) rather than treating the directory's mere
-existence as proof the epoch is fully done — which would otherwise
-permanently skip the cloud mirror for that epoch, and, combined with
-retention eventually pruning the local-only copy, could silently lose the
-only copy of that snapshot ever having existed.
+`lifecycle.MirrorToCloud` (`database/lifecycle/snapshot_cloud.go`) writes a
+small marker file (`lifecycle.CloudMirrorMarkerPath`) inside the local
+snapshot directory the moment its cloud upload actually succeeds, recording
+the exact destination URI it was mirrored to.
+`lifecycle.IsCloudMirroredTo(dir, cloudDest)` checks both that the marker
+is present *and* that it names the currently configured `cloudDest`, not
+just `lifecycle.IsCloudMirrored`'s bare presence check — a marker left over
+from a since-reconfigured cloud destination (operator repointed
+`SnapshotCloudDestination` at a new bucket) must not be mistaken for
+"already mirrored to the destination configured now".
+
+Retrying a stranded local-only snapshot cannot rely on that epoch's own
+transition event ever recurring: a normal restart or a later epoch's
+boundary never redelivers an old epoch's event, so a fix that only acted on
+an exact redelivery would leave one transient upload failure permanently
+local-only until retention deleted the only copy of that snapshot ever
+existing. `Manager.retryUnmirroredSnapshots` instead scans `SnapshotDir`
+for every `epoch-*` directory not mirrored (per `IsCloudMirroredTo`) to the
+currently configured destination and retries each from its existing local
+copy (via `MirrorToCloud` directly, not a full re-`Snapshot`). It runs from
+two places: once in the background from `Start` (so a restart heals a
+stranded snapshot immediately, without waiting for another epoch boundary),
+and synchronously at the top of every `handleEpochTransition` call (so a
+long-running node heals it as soon as any later epoch transitions, without
+needing the failed epoch's own event redelivered). The retry loop recovers
+its own panics per-directory (`Manager.retryMirrorToCloud`) so one
+already-broken snapshot's cloud destination can't abort the scan for other
+directories or, since the scan runs synchronously ahead of the current
+epoch's own handling, block that epoch's own snapshot from ever running.
