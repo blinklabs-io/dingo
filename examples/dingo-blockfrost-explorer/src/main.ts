@@ -29,6 +29,9 @@ type BlockResponse = {
   tx_count: number;
   output: string | null;
   fees: string | null;
+  block_vrf: string | null;
+  op_cert: string | null;
+  op_cert_counter: string | null;
   previous_block: string;
   next_block: string | null;
   confirmations: number;
@@ -64,6 +67,7 @@ type NetworkResponse = {
 
 type GenesisResponse = {
   active_slots_coefficient: number;
+  update_quorum: number;
   max_lovelace_supply: string;
   network_magic: number;
   epoch_length: number;
@@ -136,6 +140,7 @@ type TransactionResponse = {
   block: string;
   deposit: string;
   fees: string;
+  treasury_donation: string;
   slot: number;
   block_height: number;
   block_time: number;
@@ -165,6 +170,7 @@ type TransactionInputResponse = {
   amount: Amount[];
   output_index: number;
   collateral: boolean;
+  reference: boolean | null;
   data_hash: string | null;
   inline_datum: string | null;
   reference_script_hash: string | null;
@@ -196,9 +202,20 @@ type TransactionMetadataCBORResponse = {
   metadata: string;
 };
 
+type AddressResponse = {
+  address: string;
+  amount: Amount[];
+  stake_address: string | null;
+  type: string;
+  script: boolean;
+};
+
 type AddressUTXOResponse = {
   address: string;
   tx_hash: string;
+  // tx_index is Blockfrost's deprecated alias for output_index and
+  // carries the same value.
+  tx_index: number;
   output_index: number;
   amount: Amount[];
   block: string;
@@ -245,6 +262,8 @@ type AccountResponse = {
   treasury_sum: string;
   withdrawable_amount: string;
   pool_id: string | null;
+  drep_id: string | null;
+  registered: boolean;
 };
 
 type AccountAssociatedAddressResponse = {
@@ -256,11 +275,18 @@ type AccountDelegationHistoryResponse = {
   tx_hash: string;
   amount: string;
   pool_id: string;
+  tx_slot: number;
+  block_time: number;
+  block_height: number;
 };
 
 type AccountRegistrationHistoryResponse = {
   tx_hash: string;
   action: string;
+  deposit: string;
+  tx_slot: number;
+  block_time: number;
+  block_height: number;
 };
 
 type AccountRewardHistoryResponse = {
@@ -271,14 +297,59 @@ type AccountRewardHistoryResponse = {
 
 type DRepResponse = {
   drep_id: string;
+  // hex is empty for the predefined always-abstain and
+  // always-no-confidence DReps, which carry no credential hash.
   hex: string;
-  has_script: boolean;
-  registered: boolean;
-  epoch: number;
   amount: string;
   active: boolean;
-  active_epoch: number;
-  live_stake: string;
+  active_epoch: number | null;
+  has_script: boolean;
+  retired: boolean;
+  expired: boolean;
+  last_active_epoch: number | null;
+};
+
+type DRepListItemResponse = {
+  drep_id: string;
+  hex: string;
+  amount: string;
+  has_script: boolean;
+  retired: boolean;
+  expired: boolean;
+  last_active_epoch: number | null;
+  metadata: DRepMetadataResponse | null;
+};
+
+type DRepMetadataResponse = {
+  url: string;
+  hash: string;
+  json_metadata: unknown;
+  bytes: string;
+};
+
+type PoolRetiringResponse = {
+  pool_id: string;
+  epoch: number;
+};
+
+// Dingo answers with an empty JSON object for a pool that registered no
+// metadata anchor, so every field is optional here. error is only
+// present when the off-chain document fetch failed.
+type PoolMetadataResponse = {
+  pool_id?: string;
+  hex?: string;
+  url?: string | null;
+  hash?: string | null;
+  ticker?: string | null;
+  name?: string | null;
+  description?: string | null;
+  homepage?: string | null;
+  error?: OffchainFetchErrorResponse;
+};
+
+type OffchainFetchErrorResponse = {
+  code: string;
+  message: string;
 };
 
 type PoolExtendedResponse = {
@@ -314,6 +385,20 @@ type ErrorResponse = {
   error: string;
   message: string;
 };
+
+// HTTPError carries the response status so callers can separate a
+// Blockfrost 404 (unknown resource, or a route this Dingo build does not
+// serve) from a transport or server-side failure. Declared before the
+// bootstrap below because class bindings are not hoisted.
+class HTTPError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HTTPError";
+    this.status = status;
+  }
+}
 
 type HTMLContent = {
   readonly html: string;
@@ -362,6 +447,8 @@ type AppState = {
   eras: NetworkEraResponse[];
   pools: PoolExtendedResponse[];
   poolTotal?: number;
+  retiringPools: PoolRetiringResponse[];
+  retiringPoolTotal?: number;
   poolsLoading: boolean;
   networkUpdatedAt?: number;
   poolsUpdatedAt?: number;
@@ -427,8 +514,8 @@ const tabConfig: Record<Tab, { label: string; placeholder: string; emptySearch: 
   },
   drep: {
     label: "DRep",
-    placeholder: "DRep bech32 ID or credential hex",
-    emptySearch: false,
+    placeholder: "DRep bech32 ID, credential hex, or empty for list",
+    emptySearch: true,
     visible: true,
   },
   metadata: {
@@ -454,6 +541,7 @@ const state: AppState = {
   blockTxPanelTitle: "Block Transactions",
   eras: [],
   pools: [],
+  retiringPools: [],
   poolsLoading: false,
   activeTab: "dashboard",
   loading: false,
@@ -681,6 +769,10 @@ function updateSearchButton(): void {
   }
   if (state.activeTab === "epoch" && els.queryInput.value.trim() === "") {
     els.searchButton.textContent = "Latest Epoch";
+    return;
+  }
+  if (state.activeTab === "drep" && els.queryInput.value.trim() === "") {
+    els.searchButton.textContent = "Load DReps";
     return;
   }
   els.searchButton.textContent = "Search";
@@ -1137,10 +1229,10 @@ async function renderDefaultDetailView(tab: DetailTab, syncRoute = true): Promis
     case "address":
     case "account":
     case "asset":
-    case "drep":
     case "metadata":
       renderDetailHome(tab);
       return;
+    case "drep":
     case "epoch":
     case "network":
     case "pools":
@@ -1288,9 +1380,11 @@ async function runDetailLookup(tab: DetailTab, query: string, syncRoute = true):
         await renderNetworkLookup();
         break;
       case "drep":
-        renderDRepResult(
-          await blockfrostFetch<DRepResponse>(`/api/v0/governance/dreps/${encodeURIComponent(query)}`),
-        );
+        if (query) {
+          await renderDRepLookup(query);
+        } else {
+          await renderDRepsLookup();
+        }
         break;
       case "metadata":
         await renderMetadataLookup(query);
@@ -1304,7 +1398,7 @@ async function runDetailLookup(tab: DetailTab, query: string, syncRoute = true):
         break;
     }
   } catch (error) {
-    renderErrorResult(config.label, errorMessage(error));
+    renderErrorResult(config.label, errorMessage(error), isNotFound(error));
   }
 }
 
@@ -1467,19 +1561,19 @@ async function performSmartSearch(query: string): Promise<{ hits: SearchHit[]; n
 
   if (normalized.startsWith("addr")) {
     tasks.push(
-      optionalFetchPage<AddressUTXOResponse>(
-        `/api/v0/addresses/${encodeURIComponent(normalized)}/utxos?count=1&page=1&order=desc`,
-      ).then((rows) => {
-        if (rows) {
-          addHit({
-            title: `Address ${shortAddress(normalized)}`,
-            category: "address",
-            meta: `${formatMaybeTotal(rows.total)} UTxOs`,
-            tab: "address",
-            query: normalized,
-          });
-        }
-      }),
+      optionalFetch<AddressResponse>(`/api/v0/addresses/${encodeURIComponent(normalized)}`).then(
+        (address) => {
+          if (address) {
+            addHit({
+              title: `Address ${shortAddress(normalized)}`,
+              category: "address",
+              meta: `${formatAda(lovelaceFromAmounts(address.amount).toString())} | ${address.type}`,
+              tab: "address",
+              query: normalized,
+            });
+          }
+        },
+      ),
     );
   }
 
@@ -1526,7 +1620,7 @@ async function performSmartSearch(query: string): Promise<{ hits: SearchHit[]; n
           addHit({
             title: `DRep ${shortHash(drep.drep_id)}`,
             category: "drep",
-            meta: drep.active ? `${formatAda(drep.live_stake)} live stake` : "inactive",
+            meta: `${drepStatusText(drep)} | ${formatAda(drep.amount)} voting power`,
             tab: "drep",
             query: drep.drep_id,
           });
@@ -1642,8 +1736,8 @@ function detailHomeSpec(tab: DetailTab): {
         meta: "No selection",
         fields: [
           ["Lookup", "addr1 payment address"],
-          ["Shows", "Visible UTxOs, recent transactions, visible balance"],
-          ["Endpoint", "/addresses/{address}/utxos and /transactions"],
+          ["Shows", "Balance, type, stake address, UTxOs, transactions"],
+          ["Endpoint", "/addresses/{address} plus /utxos and /transactions"],
         ],
       };
     case "account":
@@ -1655,7 +1749,7 @@ function detailHomeSpec(tab: DetailTab): {
         meta: "No selection",
         fields: [
           ["Lookup", "stake1 reward account"],
-          ["Shows", "Controlled amount, rewards, delegation, registrations"],
+          ["Shows", "Controlled amount, rewards, pool and DRep delegation, registrations"],
           ["Endpoint", "/accounts/{stake_address}"],
         ],
       };
@@ -1702,13 +1796,13 @@ function detailHomeSpec(tab: DetailTab): {
       return {
         title: "DRep",
         eyebrow: "Governance representative",
-        headline: "No DRep selected",
-        summary: "DRep detail is loaded by bech32 DRep ID or 56-character credential hex.",
-        meta: "No selection",
+        headline: "DRep list",
+        summary: "Registered DReps load without a query; a bech32 DRep ID or 56-character credential hex opens one DRep.",
+        meta: "Latest available",
         fields: [
-          ["Lookup", "drep1 ID or credential hex"],
-          ["Shows", "Registration, script flag, deposit amount, live stake"],
-          ["Endpoint", "/governance/dreps/{drep_id}"],
+          ["Lookup", "drep1 ID, credential hex, or empty"],
+          ["Shows", "Voting power, retired and expired state, anchor metadata"],
+          ["Endpoint", "/governance/dreps and /governance/dreps/{drep_id}"],
         ],
       };
     case "metadata":
@@ -1729,12 +1823,12 @@ function detailHomeSpec(tab: DetailTab): {
         title: "Stake Pools",
         eyebrow: "Pool detail",
         headline: state.poolTotal !== undefined ? `${formatMaybeTotal(state.poolTotal)} pools` : "Pool list",
-        summary: "Active extended pool state loads without a query.",
+        summary: "Active extended pool state and pending retirements load without a query.",
         meta: state.pools.length > 0 ? `${formatInteger(state.pools.length)} cached` : "Latest available",
         fields: [
           ["Lookup", "pool1 ID, pool key hash, or empty"],
-          ["Shows", "Live stake, active stake, pledge, margin, relays"],
-          ["Cached", formatInteger(state.pools.length)],
+          ["Shows", "Live stake, pledge, margin, relays, retirement, metadata"],
+          ["Retiring", formatMaybeTotal(state.retiringPoolTotal)],
         ],
       };
   }
@@ -1903,6 +1997,7 @@ async function renderNetworkLookup(): Promise<void> {
       ["Epoch length", `${formatInteger(genesis.epoch_length)} slots`],
       ["Network magic", formatInteger(genesis.network_magic)],
       ["Security param", formatInteger(genesis.security_param)],
+      ["Update quorum", formatInteger(genesis.update_quorum)],
       ["Circulating supply", formatAda(network.supply.circulating)],
       ["Treasury", formatAda(network.supply.treasury)],
       ["Reserves", formatAda(network.supply.reserves)],
@@ -1956,6 +2051,7 @@ async function renderTransactionLookup(hash: string): Promise<void> {
       ["Index", formatInteger(tx.index)],
       ["Fee", formatAda(tx.fees)],
       ["Deposit", formatAda(tx.deposit)],
+      ["Treasury donation", formatMaybeAda(tx.treasury_donation)],
       ["Size", `${formatInteger(tx.size)} bytes`],
       ["Valid contract", tx.valid_contract ? "yes" : "no"],
       ["Invalid before", tx.invalid_before ?? "-"],
@@ -2007,7 +2103,8 @@ async function renderTransactionLookup(hash: string): Promise<void> {
 }
 
 async function renderAddressLookup(address: string): Promise<void> {
-  const [utxos, txs] = await Promise.all([
+  const [summary, utxos, txs] = await Promise.all([
+    fetchAllowingNotFound<AddressResponse>(`/api/v0/addresses/${encodeURIComponent(address)}`),
     blockfrostFetchPage<AddressUTXOResponse>(
       `/api/v0/addresses/${encodeURIComponent(address)}/utxos?count=25&page=1&order=desc`,
     ),
@@ -2019,20 +2116,36 @@ async function renderAddressLookup(address: string): Promise<void> {
   const visibleAmounts = aggregateVisibleAmounts(utxos.items);
   const totalAda = lovelaceFromAmounts(visibleAmounts);
   const visibleAssetCount = visibleAmounts.filter((amount) => amount.unit !== "lovelace").length;
+  // The summary endpoint reports the whole address balance; the visible
+  // totals only cover the UTxO page rendered below.
+  const balanceAmounts = summary?.amount ?? visibleAmounts;
+  const balanceAda = lovelaceFromAmounts(balanceAmounts);
+  const balanceAssetCount = balanceAmounts.filter((amount) => amount.unit !== "lovelace").length;
 
   els.resultTitle.textContent = "Address";
   setResultMeta(`${formatInteger(utxos.items.length)} UTxOs | ${formatInteger(txs.items.length)} tx rows`);
   els.resultContent.innerHTML = `
     ${detailGrid([
       ["Address", html(copyField(address))],
+      ["Type", summary ? `${summary.type}${summary.script ? " script" : ""}` : "-"],
+      ["Stake address", summary?.stake_address ? html(accountCell(summary.stake_address)) : "-"],
+      ["Balance", formatAda(balanceAda.toString())],
+      ["Assets", formatInteger(balanceAssetCount)],
       ["Visible ADA", formatAda(totalAda.toString())],
       ["Visible assets", formatInteger(visibleAssetCount)],
       ["UTxO page total", formatMaybeTotal(utxos.total)],
       ["Tx page total", formatMaybeTotal(txs.total)],
     ])}
     <section class="subsection">
-      <h3>Visible Balance</h3>
-      ${amountList(visibleAmounts)}
+      <h3>${summary ? "Balance" : "Visible Balance"}</h3>
+      ${amountList(balanceAmounts)}
+      ${
+        summary
+          ? ""
+          : capabilityNote(
+              "Dingo has no address summary for this address, so the balance shown is the sum of the UTxO page below.",
+            )
+      }
     </section>
     <div class="two-column">
       <section class="subsection">
@@ -2083,7 +2196,9 @@ async function renderAccountLookup(stakeAddress: string): Promise<void> {
       ["Withdrawals", formatAda(account.withdrawals_sum)],
       ["Reserves", formatAda(account.reserves_sum)],
       ["Treasury", formatAda(account.treasury_sum)],
+      ["Registered", account.registered ? "yes" : "no"],
       ["Pool", account.pool_id ? html(poolID(account.pool_id)) : "-"],
+      ["DRep", account.drep_id ? html(drepCell(account.drep_id)) : "-"],
     ])}
     <div class="two-column">
       <section class="subsection">
@@ -2101,13 +2216,19 @@ async function renderAccountLookup(stakeAddress: string): Promise<void> {
             `Epoch ${formatInteger(item.active_epoch)}`,
             html(poolID(item.pool_id)),
             formatAda(item.amount),
+            formatDate(item.block_time),
           ]),
         )}
       </section>
     </div>
     ${renderSimpleSection(
       "Registrations",
-      registrations.items.map((item) => [item.action, html(txCell(item.tx_hash))]),
+      registrations.items.map((item) => [
+        item.action,
+        html(txCell(item.tx_hash)),
+        formatMaybeAda(item.deposit),
+        formatDate(item.block_time),
+      ]),
     )}
     ${renderSimpleSection(
       "Rewards",
@@ -2167,18 +2288,96 @@ function renderAssetResult(
   `;
 }
 
+async function renderDRepLookup(drepQuery: string): Promise<void> {
+  renderDRepResult(
+    await blockfrostFetch<DRepResponse>(`/api/v0/governance/dreps/${encodeURIComponent(drepQuery)}`),
+  );
+}
+
 function renderDRepResult(drep: DRepResponse): void {
   els.resultTitle.textContent = "DRep";
-  setResultMeta(drep.active ? `Active epoch ${formatInteger(drep.active_epoch)}` : "Inactive");
+  setResultMeta(`${drepStatusText(drep)} | ${formatAda(drep.amount)} voting power`);
   els.resultContent.innerHTML = detailGrid([
     ["DRep ID", html(copyField(drep.drep_id))],
-    ["Credential", html(copyField(drep.hex))],
-    ["Registered", drep.registered ? "yes" : "no"],
+    ["Credential", drep.hex ? html(copyField(drep.hex)) : "-"],
+    ["Voting power", formatAda(drep.amount)],
+    ["Active", drep.active ? "yes" : "no"],
     ["Script", drep.has_script ? "yes" : "no"],
-    ["Epoch", formatInteger(drep.epoch)],
-    ["Amount", formatAda(drep.amount)],
-    ["Live stake", formatAda(drep.live_stake)],
+    ["Retired", drep.retired ? "yes" : "no"],
+    ["Expired", drep.expired ? "yes" : "no"],
+    ["Registration epoch", drep.active_epoch === null ? "-" : html(epochButton(drep.active_epoch))],
+    ["Last active epoch", drep.last_active_epoch === null ? "-" : html(epochButton(drep.last_active_epoch))],
   ]);
+}
+
+async function renderDRepsLookup(): Promise<void> {
+  const dreps = await blockfrostFetchPage<DRepListItemResponse>(
+    "/api/v0/governance/dreps?count=25&page=1&order=desc&order_by=amount",
+  );
+  els.resultTitle.textContent = "DReps";
+  setResultMeta(`${formatInteger(dreps.items.length)} visible | ${formatMaybeTotal(dreps.total)} total`);
+  els.resultContent.innerHTML = `
+    <section class="subsection">
+      <h3>Registered DReps</h3>
+      ${renderDRepList(dreps.items)}
+    </section>
+    ${renderDRepMetadataSection(dreps.items)}
+    ${capabilityNote("DReps are ordered by delegated voting power. Vote history and individual governance actions need additional Dingo explorer endpoints.")}
+  `;
+}
+
+function renderDRepList(dreps: DRepListItemResponse[]): string {
+  return dataTable(
+    ["DRep", "Voting power", "Status", "Last active", "Metadata"],
+    dreps.map((drep) => [
+      html(drepCell(drep.drep_id)),
+      formatAda(drep.amount),
+      drepStatusText(drep),
+      drep.last_active_epoch === null ? "-" : html(epochButton(drep.last_active_epoch)),
+      drep.metadata ? html(copyField(drep.metadata.url, shortAddress(drep.metadata.url))) : "-",
+    ]),
+    "No DReps returned.",
+  );
+}
+
+function renderDRepMetadataSection(dreps: DRepListItemResponse[]): string {
+  const documented = dreps.filter((drep) => drep.metadata !== null);
+  if (documented.length === 0) {
+    return "";
+  }
+  return `
+    <section class="subsection">
+      <h3>Anchor Documents</h3>
+      ${documented
+        .map(
+          (drep) => `
+            <article class="metadata-card">
+              <div class="row-title">
+                ${drepCell(drep.drep_id)}
+              </div>
+              <pre>${escapeHtml(JSON.stringify(drep.metadata?.json_metadata, null, 2))}</pre>
+            </article>
+          `,
+        )
+        .join("")}
+    </section>
+  `;
+}
+
+function drepStatusText(drep: { hex: string; retired: boolean; expired: boolean }): string {
+  // Dingo returns an empty credential only for the predefined
+  // always-abstain and always-no-confidence DReps, which never register,
+  // retire, or expire.
+  if (drep.hex === "") {
+    return "predefined";
+  }
+  if (drep.retired) {
+    return "retired";
+  }
+  if (drep.expired) {
+    return "expired";
+  }
+  return "registered";
 }
 
 async function renderMetadataLookup(label: string): Promise<void> {
@@ -2220,37 +2419,82 @@ async function renderPoolsLookup(): Promise<void> {
   beginPoolLoad();
   renderOverview();
   try {
-    const pools = await blockfrostFetchPage<PoolExtendedResponse>(
-      "/api/v0/pools/extended?count=25&page=1&order=desc",
-    );
+    const [pools, retiring] = await Promise.all([
+      blockfrostFetchPage<PoolExtendedResponse>("/api/v0/pools/extended?count=25&page=1&order=desc"),
+      loadRetiringPools(),
+    ]);
     state.pools = pools.items;
     state.poolTotal = pools.total;
     state.poolsUpdatedAt = Date.now();
     els.resultTitle.textContent = "Stake Pools";
-    setResultMeta(`${formatInteger(pools.items.length)} visible | ${formatMaybeTotal(pools.total)} total`);
-    els.resultContent.innerHTML = renderPoolList(pools.items);
+    setResultMeta(
+      `${formatInteger(pools.items.length)} visible | ${formatMaybeTotal(pools.total)} total | ${formatMaybeTotal(retiring?.total)} retiring`,
+    );
+    els.resultContent.innerHTML = `
+      <section class="subsection">
+        <h3>Active Pools</h3>
+        ${renderPoolList(pools.items)}
+      </section>
+      <section class="subsection">
+        <h3>Pending Retirements</h3>
+        ${
+          retiring
+            ? renderRetiringPoolList(retiring.items)
+            : capabilityNote("This Dingo build does not serve the retiring pools endpoint.")
+        }
+      </section>
+    `;
   } finally {
     endPoolLoad();
     renderOverview();
   }
 }
 
-async function renderPoolLookup(poolID: string): Promise<void> {
+async function renderPoolLookup(poolQuery: string): Promise<void> {
   els.resultTitle.textContent = "Stake Pool";
   setResultMeta("Loading");
   beginPoolLoad();
   renderOverview();
   try {
-    const pool = await findPool(poolID);
-    if (!pool) {
-      renderErrorResult("Stake Pool", "Pool not found in active extended pools.");
+    const [pool, metadata] = await Promise.all([
+      findPool(poolQuery),
+      fetchAllowingNotFound<PoolMetadataResponse>(
+        `/api/v0/pools/${encodeURIComponent(poolQuery)}/metadata`,
+      ),
+      loadRetiringPools(),
+    ]);
+    if (!pool && !metadata) {
+      renderErrorResult(
+        "Stake Pool",
+        "Pool not found in active extended pools or pool metadata.",
+        true,
+      );
       return;
     }
-    renderPoolResult(pool);
+    renderPoolResult(poolQuery, pool, metadata);
   } finally {
     endPoolLoad();
     renderOverview();
   }
+}
+
+// loadRetiringPools refreshes the cached retirement schedule and returns
+// undefined when the endpoint is not served.
+async function loadRetiringPools(): Promise<
+  { items: PoolRetiringResponse[]; total?: number } | undefined
+> {
+  const retiring = await fetchPageAllowingNotFound<PoolRetiringResponse>(
+    "/api/v0/pools/retiring?count=100&page=1&order=asc",
+  );
+  if (retiring) {
+    state.retiringPools = retiring.items;
+    state.retiringPoolTotal = retiring.total;
+  }
+  return retiring;
+}
+
+function retiringEpochFor(...poolIDs: Array<string | undefined>): number | undefined {
+  return state.retiringPools.find((item) => poolIDs.includes(item.pool_id))?.epoch;
 }
 
 async function findPool(poolID: string): Promise<PoolExtendedResponse | undefined> {
@@ -2293,26 +2537,86 @@ function mergePools(pools: PoolExtendedResponse[], total?: number): void {
   state.poolsUpdatedAt = Date.now();
 }
 
-function renderPoolResult(pool: PoolExtendedResponse): void {
+function renderPoolResult(
+  poolQuery: string,
+  pool: PoolExtendedResponse | undefined,
+  metadata: PoolMetadataResponse | undefined,
+): void {
+  const identifier = pool?.pool_id ?? metadata?.pool_id ?? poolQuery;
+  const hex = pool?.hex ?? metadata?.hex;
+  const retiringEpoch = retiringEpochFor(identifier, hex, poolQuery);
   els.resultTitle.textContent = "Stake Pool";
-  setResultMeta(`${formatAdaShort(pool.live_stake)} ADA live stake | ${formatInteger(pool.relays.length)} relays`);
+  setResultMeta(
+    pool
+      ? `${formatAdaShort(pool.live_stake)} ADA live stake | ${formatInteger(pool.relays.length)} relays`
+      : "registered metadata only",
+  );
   els.resultContent.innerHTML = `
     ${detailGrid([
-      ["Pool ID", html(poolID(pool.pool_id))],
-      ["Hex", html(copyField(pool.hex))],
-      ["VRF key", html(copyField(pool.vrf_key))],
-      ["Live stake", formatAda(pool.live_stake)],
-      ["Active stake", formatAda(pool.active_stake)],
-      ["Declared pledge", formatAda(pool.declared_pledge)],
-      ["Fixed cost", formatAda(pool.fixed_cost)],
-      ["Margin", formatPercent(pool.margin_cost)],
+      ["Pool ID", html(poolID(identifier))],
+      ["Hex", hex ? html(copyField(hex)) : "-"],
+      ["VRF key", pool ? html(copyField(pool.vrf_key)) : "-"],
+      ["Live stake", pool ? formatAda(pool.live_stake) : "-"],
+      ["Active stake", pool ? formatAda(pool.active_stake) : "-"],
+      ["Declared pledge", pool ? formatAda(pool.declared_pledge) : "-"],
+      ["Fixed cost", pool ? formatAda(pool.fixed_cost) : "-"],
+      ["Margin", pool ? formatPercent(pool.margin_cost) : "-"],
+      ["Retiring", retiringEpoch === undefined ? "-" : html(epochButton(retiringEpoch))],
     ])}
-    <section class="subsection">
-      <h3>Relays</h3>
-      ${renderRelayList(pool.relays)}
-    </section>
-    ${capabilityNote("Dingo's current Blockfrost endpoints expose active extended pool state. Delegator lists, pool blocks, and historical pool stats need additional Dingo explorer endpoints.")}
+    ${
+      pool
+        ? `
+          <section class="subsection">
+            <h3>Relays</h3>
+            ${renderRelayList(pool.relays)}
+          </section>
+        `
+        : capabilityNote("This pool is not in the active extended pool list, so only its registered metadata is shown.")
+    }
+    ${renderPoolMetadataSection(metadata)}
+    ${capabilityNote("Dingo's current Blockfrost endpoints expose active extended pool state, the retirement schedule, and registered pool metadata. Delegator lists, pool blocks, and historical pool stats need additional Dingo explorer endpoints.")}
   `;
+}
+
+function renderPoolMetadataSection(metadata: PoolMetadataResponse | undefined): string {
+  let body: string;
+  if (!metadata) {
+    body = capabilityNote("Dingo returned no pool metadata for this pool ID.");
+  } else if (!metadata.url) {
+    body = capabilityNote("This pool registered no off-chain metadata anchor.");
+  } else {
+    body = `
+      ${detailGrid([
+        ["Ticker", metadata.ticker ?? "-"],
+        ["Name", metadata.name ?? "-"],
+        ["Homepage", metadata.homepage ?? "-"],
+        ["Description", metadata.description ?? "-"],
+        ["Anchor URL", html(copyField(metadata.url, shortAddress(metadata.url)))],
+        ["Anchor hash", metadata.hash ? html(copyField(metadata.hash, shortHash(metadata.hash))) : "-"],
+      ])}
+      ${
+        metadata.error
+          ? capabilityNote(
+              `Off-chain metadata fetch failed (${metadata.error.code}): ${metadata.error.message}`,
+            )
+          : ""
+      }
+    `;
+  }
+  return `
+    <section class="subsection">
+      <h3>Pool Metadata</h3>
+      ${body}
+    </section>
+  `;
+}
+
+function renderRetiringPoolList(pools: PoolRetiringResponse[]): string {
+  return dataTable(
+    ["Pool", "Retiring epoch"],
+    pools.map((pool) => [html(poolID(pool.pool_id)), html(epochButton(pool.epoch))]),
+    "No pending pool retirements.",
+  );
 }
 
 function renderRelayList(poolRelays: PoolExtendedResponse["relays"]): string {
@@ -2360,6 +2664,9 @@ function renderBlockResult(block: BlockResponse): void {
         ["Epoch", html(epochButton(block.epoch))],
         ["Output", block.output ? formatAda(block.output) : "-"],
         ["Fees", block.fees ? formatAda(block.fees) : "-"],
+        ["Block VRF", block.block_vrf ? html(copyField(block.block_vrf, shortHash(block.block_vrf))) : "-"],
+        ["Operational cert", block.op_cert ? html(copyField(block.op_cert, shortHash(block.op_cert))) : "-"],
+        ["Op cert counter", block.op_cert_counter ?? "-"],
         ["Time", formatDate(block.time)],
         ["Previous", block.previous_block ? html(blockCell(block.previous_block)) : "-"],
         ["Next", block.next_block ? html(blockCell(block.next_block)) : "-"],
@@ -2745,6 +3052,10 @@ function blockTransactionsTitle(block: BlockResponse): string {
   return `Block #${formatInteger(block.height)} Transactions`;
 }
 
+function isNotFound(error: unknown): boolean {
+  return error instanceof HTTPError && error.status === 404;
+}
+
 async function blockfrostFetch<T>(path: string): Promise<T> {
   const response = await fetch(path, {
     headers: {
@@ -2752,7 +3063,7 @@ async function blockfrostFetch<T>(path: string): Promise<T> {
     },
   });
   if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
+    throw new HTTPError(response.status, await responseErrorMessage(response));
   }
   return (await response.json()) as T;
 }
@@ -2764,7 +3075,7 @@ async function blockfrostFetchPage<T>(path: string): Promise<{ items: T[]; total
     },
   });
   if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
+    throw new HTTPError(response.status, await responseErrorMessage(response));
   }
   const totalHeader = response.headers.get("X-Pagination-Count-Total");
   const total = totalHeader ? Number(totalHeader) : undefined;
@@ -2790,6 +3101,32 @@ async function optionalFetchPage<T>(path: string): Promise<{ items: T[]; total?:
   }
 }
 
+// Resolves to undefined only for a 404. Every other failure is rethrown
+// so the view reports it instead of rendering an empty panel.
+async function fetchAllowingNotFound<T>(path: string): Promise<T | undefined> {
+  try {
+    return await blockfrostFetch<T>(path);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function fetchPageAllowingNotFound<T>(
+  path: string,
+): Promise<{ items: T[]; total?: number } | undefined> {
+  try {
+    return await blockfrostFetchPage<T>(path);
+  } catch (error) {
+    if (isNotFound(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 async function responseErrorMessage(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as Partial<ErrorResponse>;
@@ -2808,9 +3145,9 @@ function setResultLoading(label: string): void {
   els.resultContent.innerHTML = `<div class="loading-bar"></div>`;
 }
 
-function renderErrorResult(title: string, message: string): void {
+function renderErrorResult(title: string, message: string, notFound = false): void {
   els.resultTitle.textContent = title;
-  setResultMeta("Request failed");
+  setResultMeta(notFound ? "Not found" : "Request failed");
   els.resultContent.innerHTML = `<p class="error-text">${escapeHtml(message)}</p>`;
 }
 
@@ -3122,17 +3459,57 @@ function addressCell(address: string): string {
   return actionCell(addressButton(address), address);
 }
 
+function accountButton(stakeAddress: string): string {
+  return `
+    <button class="link-button mono" type="button" data-account="${escapeHtml(stakeAddress)}">
+      ${escapeHtml(shortAddress(stakeAddress))}
+    </button>
+  `;
+}
+
+function accountCell(stakeAddress: string): string {
+  return actionCell(accountButton(stakeAddress), stakeAddress);
+}
+
+function drepButton(drep: string): string {
+  return `
+    <button
+      class="link-button mono"
+      type="button"
+      data-jump-tab="drep"
+      data-jump-query="${escapeHtml(drep)}"
+    >
+      ${escapeHtml(shortHash(drep))}
+    </button>
+  `;
+}
+
+function drepCell(drep: string): string {
+  return actionCell(drepButton(drep), drep);
+}
+
 function renderInputList(inputs: TransactionInputResponse[]): string {
   return dataTable(
-    ["Address", "Input", "Amount", "Datum / script"],
+    ["Address", "Input", "Amount", "Kind", "Datum / script"],
     inputs.map((input) => [
       html(addressCell(input.address)),
       html(`${txCell(input.tx_hash)} #${formatInteger(input.output_index)}`),
       html(formatAmountSummary(input.amount)),
+      inputKind(input),
       html(renderUtxoFeatures(input)),
     ]),
     "No inputs returned.",
   );
+}
+
+function inputKind(input: TransactionInputResponse): string {
+  if (input.collateral) {
+    return "collateral";
+  }
+  if (input.reference) {
+    return "reference";
+  }
+  return "spend";
 }
 
 function renderOutputList(outputs: TransactionOutputResponse[]): string {
