@@ -117,6 +117,14 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handlePoolsExtended,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/pools/retiring",
+		b.handlePoolsRetiring,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}/metadata",
+		b.handlePoolMetadata,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/governance/dreps",
 		b.handleDReps,
 	)

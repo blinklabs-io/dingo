@@ -65,6 +65,14 @@ type BlockfrostNode interface {
 	// including balances aggregated across its live UTxOs.
 	Address(address string) (AddressInfo, error)
 
+	// PoolsRetiring returns the paginated list of pools with a
+	// pending retirement announcement, along with the total number
+	// of matching results before pagination.
+	PoolsRetiring(PaginationParams) ([]PoolRetiringInfo, int, error)
+
+	// PoolMetadata returns the registered metadata for a pool.
+	PoolMetadata(poolID string) (PoolMetadataInfo, error)
+
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
@@ -357,6 +365,35 @@ type GenesisInfo struct {
 	SlotLength             int
 	MaxKESEvolutions       int
 	SecurityParam          int
+}
+
+// PoolRetiringInfo is one entry of the retiring pools list.
+type PoolRetiringInfo struct {
+	PoolID string
+	Epoch  uint64
+}
+
+// PoolMetadataInfo holds a pool's registered metadata: the on-chain
+// anchor (URL and hash) plus the off-chain document fields when the
+// document has been fetched and validated. Error carries the fetch
+// failure when the document could not be retrieved or validated.
+type PoolMetadataInfo struct {
+	PoolID      string
+	Hex         string
+	URL         *string
+	Hash        *string
+	Ticker      *string
+	Name        *string
+	Description *string
+	Homepage    *string
+	Error       *OffchainFetchErrorInfo
+}
+
+// OffchainFetchErrorInfo describes a failed off-chain metadata fetch in
+// Blockfrost's error-object form.
+type OffchainFetchErrorInfo struct {
+	Code    string
+	Message string
 }
 
 // PoolExtendedInfo holds pool data needed by the

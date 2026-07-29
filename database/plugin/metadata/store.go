@@ -321,6 +321,17 @@ type MetadataStore interface {
 		txn types.Txn,
 	) (*models.OffchainMetadata, error)
 
+	// GetRetiringPools returns pools whose latest retirement
+	// certificate targets an epoch after currentEpoch and has not been
+	// cancelled by a later registration certificate. Certificate
+	// recency compares (added_slot, synthetic-import precedence,
+	// block_index, cert_index). Results are ordered by retirement
+	// epoch, then announcement position, matching Blockfrost.
+	GetRetiringPools(
+		currentEpoch uint64,
+		txn types.Txn,
+	) ([]models.PoolRetiringRow, error)
+
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,

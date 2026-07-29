@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net/http"
 	"slices"
 	"sort"
 	"strconv"
@@ -58,6 +59,7 @@ var (
 	ErrAssetNotFound       = errors.New("asset not found")
 	ErrDRepNotFound        = errors.New("drep not found")
 	ErrInvalidTransaction  = errors.New("invalid transaction")
+	ErrInvalidPoolID       = errors.New("invalid pool id")
 	ErrMempoolUnavailable  = errors.New("mempool unavailable")
 	ErrMempoolFull         = errors.New("mempool full")
 	ErrTransactionNotFound = errors.New("transaction not found")
@@ -1676,8 +1678,232 @@ func (a *NodeAdapter) liveStake() (uint64, error) {
 	return total, nil
 }
 
+// offchainFetchError maps a failed off-chain metadata cache row to
+// Blockfrost's error object, matching the hosted API's codes and
+// message formats. sourceLabel is the capitalized source name used in
+// the message ("Pool", "Drep").
+func offchainFetchError(
+	sourceLabel string,
+	url string,
+	expectedHash []byte,
+	doc *models.OffchainMetadata,
+) *OffchainFetchErrorInfo {
+	// LastError and LastHTTPStatus describe the most recent fetch
+	// attempt; BodyHash persists across attempts and is only
+	// meaningful for the hash-mismatch case.
+	switch {
+	case doc.LastError == models.OffchainFetchErrHashMismatch:
+		return &OffchainFetchErrorInfo{
+			Code: "HASH_MISMATCH",
+			Message: fmt.Sprintf(
+				"Hash mismatch when fetching metadata from %s. "+
+					"Expected %q but got %q.",
+				url,
+				hex.EncodeToString(expectedHash),
+				hex.EncodeToString(doc.BodyHash),
+			),
+		}
+	case strings.HasPrefix(
+		doc.LastError, models.OffchainFetchErrBodyTooLargePrefix,
+	):
+		return &OffchainFetchErrorInfo{
+			Code: "SIZE_EXCEEDED",
+			Message: fmt.Sprintf(
+				"Error Offchain %s: Size error when fetching "+
+					"metadata from %s.",
+				sourceLabel,
+				url,
+			),
+		}
+	case doc.LastHTTPStatus > 0 &&
+		(doc.LastHTTPStatus < 200 || doc.LastHTTPStatus >= 300):
+		statusText := http.StatusText(int(doc.LastHTTPStatus))
+		return &OffchainFetchErrorInfo{
+			Code: "HTTP_RESPONSE_ERROR",
+			Message: fmt.Sprintf(
+				"Error Offchain %s: HTTP Response error from %s "+
+					"resulted in HTTP status code : %d %q",
+				sourceLabel,
+				url,
+				doc.LastHTTPStatus,
+				statusText,
+			),
+		}
+	default:
+		return &OffchainFetchErrorInfo{
+			Code: "CONNECTION_ERROR",
+			Message: fmt.Sprintf(
+				"Error Offchain %s: Connection failure error when "+
+					"fetching metadata from %s.",
+				sourceLabel,
+				url,
+			),
+		}
+	}
+}
+
 // PoolsExtended returns the current active pools with
 // extended details.
+// parsePoolID parses a pool identifier in bech32 ("pool1...") or raw
+// 56-character hex form into the 28-byte pool key hash.
+func parsePoolID(id string) ([]byte, error) {
+	if len(id) == 56 {
+		if hash, err := hex.DecodeString(id); err == nil {
+			return hash, nil
+		}
+	}
+	hrp, data, err := bech32.Decode(id)
+	if err != nil {
+		return nil, fmt.Errorf("decode pool bech32: %w", ErrInvalidPoolID)
+	}
+	if strings.ToLower(hrp) != "pool" {
+		return nil, fmt.Errorf("pool prefix %q: %w", hrp, ErrInvalidPoolID)
+	}
+	payload, err := bech32.ConvertBits(data, 5, 8, false)
+	if err != nil || len(payload) != 28 {
+		return nil, fmt.Errorf("pool payload: %w", ErrInvalidPoolID)
+	}
+	return payload, nil
+}
+
+// PoolsRetiring returns the paginated list of pools with a pending
+// retirement: a retirement certificate for a future epoch that has not
+// been cancelled by a later re-registration. Entries are ordered by
+// retirement epoch and then announcement position, matching hosted
+// Blockfrost.
+func (a *NodeAdapter) PoolsRetiring(
+	params PaginationParams,
+) ([]PoolRetiringInfo, int, error) {
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	rows, err := db.Metadata().GetRetiringPools(
+		a.ledgerState.CurrentEpoch(), txn.Metadata(),
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get retiring pools: %w", err)
+	}
+	if params.Order == PaginationOrderDesc {
+		slices.Reverse(rows)
+	}
+	total := len(rows)
+
+	start := (params.Page - 1) * params.Count
+	if start >= len(rows) {
+		return []PoolRetiringInfo{}, total, nil
+	}
+	end := min(start+params.Count, len(rows))
+
+	ret := make([]PoolRetiringInfo, 0, end-start)
+	for _, row := range rows[start:end] {
+		poolID := lcommon.PoolId(lcommon.NewBlake2b224(row.PoolKeyHash))
+		ret = append(ret, PoolRetiringInfo{
+			PoolID: poolID.String(),
+			Epoch:  row.Epoch,
+		})
+	}
+	return ret, total, nil
+}
+
+// PoolMetadata returns the registered metadata for the requested pool:
+// the on-chain anchor from the latest registration plus the off-chain
+// document fields when the cached fetch succeeded.
+func (a *NodeAdapter) PoolMetadata(
+	poolID string,
+) (PoolMetadataInfo, error) {
+	poolKeyHash, err := parsePoolID(poolID)
+	if err != nil {
+		return PoolMetadataInfo{}, err
+	}
+
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	pool, err := db.Metadata().GetPool(
+		lcommon.PoolKeyHash(poolKeyHash), true, txn.Metadata(),
+	)
+	if err != nil {
+		return PoolMetadataInfo{}, fmt.Errorf(
+			"get pool %x: %w", poolKeyHash, err,
+		)
+	}
+	// The metadata store returns (nil, nil) for unknown pools.
+	if pool == nil {
+		return PoolMetadataInfo{}, fmt.Errorf(
+			"pool %x: %w", poolKeyHash, models.ErrPoolNotFound,
+		)
+	}
+
+	var metadataURL string
+	var metadataHash []byte
+	if len(pool.Registration) > 0 {
+		metadataURL = pool.Registration[0].MetadataUrl
+		metadataHash = pool.Registration[0].MetadataHash
+	}
+
+	ret := PoolMetadataInfo{
+		PoolID: lcommon.PoolId(
+			lcommon.NewBlake2b224(poolKeyHash),
+		).String(),
+		Hex: hex.EncodeToString(poolKeyHash),
+	}
+	if metadataURL == "" {
+		return ret, nil
+	}
+	url := metadataURL
+	hash := hex.EncodeToString(metadataHash)
+	ret.URL = &url
+	ret.Hash = &hash
+
+	doc, err := db.Metadata().GetOffchainMetadata(
+		models.OffchainMetadataSourcePool,
+		metadataURL,
+		metadataHash,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return PoolMetadataInfo{}, fmt.Errorf(
+			"get offchain metadata for pool %x: %w", poolKeyHash, err,
+		)
+	}
+	if doc == nil || doc.Status == models.OffchainMetadataStatusPending {
+		return ret, nil
+	}
+	if doc.Status == models.OffchainMetadataStatusFailed {
+		ret.Error = offchainFetchError(
+			"Pool", metadataURL, metadataHash, doc,
+		)
+		return ret, nil
+	}
+	if len(doc.Content) == 0 {
+		return ret, nil
+	}
+	var offchain struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+		Ticker      *string `json:"ticker"`
+		Homepage    *string `json:"homepage"`
+	}
+	if err := json.Unmarshal(doc.Content, &offchain); err != nil {
+		ret.Error = &OffchainFetchErrorInfo{
+			Code: "DECODE_ERROR",
+			Message: fmt.Sprintf(
+				"Error Offchain Pool: JSON decode error when "+
+					"fetching metadata from %s.",
+				metadataURL,
+			),
+		}
+		return ret, nil
+	}
+	ret.Name = offchain.Name
+	ret.Description = offchain.Description
+	ret.Ticker = offchain.Ticker
+	ret.Homepage = offchain.Homepage
+	return ret, nil
+}
+
 func (a *NodeAdapter) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {

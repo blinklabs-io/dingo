@@ -320,7 +320,7 @@ func (f *Fetcher) fetchOne(
 		f.markFailure(
 			doc,
 			uint(resp.StatusCode),
-			errors.New("metadata hash mismatch"),
+			errors.New(models.OffchainFetchErrHashMismatch),
 		)
 		return nil
 	}
@@ -357,7 +357,11 @@ func readLimited(r io.Reader, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("response body exceeds %d bytes", maxBytes)
+		return nil, fmt.Errorf(
+			"%s %d bytes",
+			models.OffchainFetchErrBodyTooLargePrefix,
+			maxBytes,
+		)
 	}
 	return body, nil
 }

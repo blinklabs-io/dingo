@@ -1184,6 +1184,38 @@ SELECT drep_type, MIN(slot) AS slot FROM (
 ) u GROUP BY drep_type;
 ```
 
+### `GetRetiringPools`
+
+Pools whose latest retirement certificate targets a future epoch and has
+not been cancelled by a later registration. Certificate recency compares
+`(added_slot, synthetic-import precedence, block_index, cert_index)` —
+rows written by the Mithril ledger-state import carry
+`certificate_id = 0` and take precedence within their slot, mirroring
+the `GetPools` preload ordering. Results order by retirement epoch and
+then announcement position, matching hosted Blockfrost:
+
+```sql
+WITH latest_reg AS (
+    SELECT pool_key_hash, added_slot, ...,
+           ROW_NUMBER() OVER (PARTITION BY pool_key_hash
+               ORDER BY added_slot DESC, synth DESC,
+                        block_index DESC, cert_index DESC) AS rn
+    FROM pool_registration
+    LEFT JOIN certs ON certs.id = certificate_id
+    LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id
+),
+latest_ret AS (SELECT ... FROM pool_retirement ...)
+SELECT r.pool_key_hash, r.epoch
+FROM latest_ret r
+LEFT JOIN latest_reg g ON g.pool_key_hash = r.pool_key_hash AND g.rn = 1
+WHERE r.rn = 1
+  AND r.epoch > $1
+  AND (g.pool_key_hash IS NULL
+       OR (r.added_slot, r.synth, r.block_index, r.cert_index)
+          > (g.added_slot, g.synth, g.block_index, g.cert_index))
+ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index;
+```
+
 ### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
 
 All three DRep voting-power queries take an `expiryEpoch uint64` argument that

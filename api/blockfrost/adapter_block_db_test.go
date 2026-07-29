@@ -420,3 +420,43 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, next)
 }
+
+// TestNodeAdapterPoolMetadataOffchainStoreError guards the error path at the
+// PoolMetadata boundary: a failing off-chain metadata store query must
+// propagate as an error rather than degrade into a successful URL/hash-only
+// response that hides the store failure.
+func TestNodeAdapterPoolMetadataOffchainStoreError(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	poolKeyHash := bytes.Repeat([]byte{0x0a}, 28)
+	pool := &models.Pool{
+		PoolKeyHash: poolKeyHash,
+		Registration: []models.PoolRegistration{
+			{
+				PoolKeyHash:  poolKeyHash,
+				MetadataUrl:  "https://example.com/pool.json",
+				MetadataHash: fill32(0x0b),
+				AddedSlot:    1,
+			},
+		},
+	}
+	require.NoError(t, store.DB().Create(pool).Error)
+
+	poolID := hex.EncodeToString(poolKeyHash)
+
+	// Sanity check: with an intact store and no cached document, the lookup
+	// succeeds as a URL/hash-only partial response.
+	info, err := adapter.PoolMetadata(poolID)
+	require.NoError(t, err)
+	require.NotNil(t, info.URL)
+	assert.Equal(t, "https://example.com/pool.json", *info.URL)
+	assert.Nil(t, info.Name)
+
+	// Break the store so GetOffchainMetadata fails; the failure must surface
+	// instead of producing a successful partial response.
+	require.NoError(
+		t, store.DB().Exec("DROP TABLE offchain_metadata").Error,
+	)
+	_, err = adapter.PoolMetadata(poolID)
+	require.ErrorContains(t, err, "get offchain metadata")
+}
