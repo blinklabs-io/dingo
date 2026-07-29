@@ -46,9 +46,10 @@ func TestCompareEpochAggregatesIgnoresEpochInfoFeesAndRewards(t *testing.T) {
 		Reward: "500000000", // /totals.reward: not compared — see CompareEpochTotals
 	}
 	dingo := &DingoEpochData{
-		TotalActiveStake: "100",
-		Fees:             "484716590", // reward_ada_pots.Fees — matches /totals, not /epoch_info
-		TotalRewards:     "999999999", // reward_ada_pots.Rewards — not compared against either Koios field
+		TotalActiveStake:     "100",
+		Fees:                 "484716590", // reward_ada_pots.Fees — matches /totals, not /epoch_info
+		TotalRewards:         "999999999", // reward_ada_pots.Rewards — not compared against either Koios field
+		RewardAdaPotsPresent: true,
 	}
 
 	require.Empty(t, CompareEpochAggregates("preview", 10, koiosEpochInfo, dingo, nil, now, 0),
@@ -66,10 +67,11 @@ func TestCompareEpochTotals(t *testing.T) {
 		Reward:   "292608261256804",
 	}
 	dingo := &DingoEpochData{
-		Fees:         "1245791321",
-		TotalRewards: "1", // arbitrary — must never affect the result; totals.reward isn't compared
-		Treasury:     "6931231163186226",
-		Reserves:     "7792082362166766",
+		Fees:                 "1245791321",
+		TotalRewards:         "1", // arbitrary — must never affect the result; totals.reward isn't compared
+		Treasury:             "6931231163186226",
+		Reserves:             "7792082362166766",
+		RewardAdaPotsPresent: true,
 	}
 	require.Empty(t, CompareEpochTotals("preview", 1367, koios, dingo, now))
 
@@ -99,6 +101,32 @@ func TestCompareEpochTotals(t *testing.T) {
 	require.Empty(t, CompareEpochTotals("preview", 1367, koios, nil, now))
 }
 
+// TestCompareEpochTotalsMissingRewardAdaPots guards against the false-PASS
+// bug where a ready epoch_summary row with no corresponding reward_ada_pots
+// row (RewardAdaPotsPresent == false, all pot fields left as their zero value
+// "") was indistinguishable from "nothing to compare" because the field-level
+// "!= \"\"" guards suppressed every comparison. A missing pot row combined
+// with a cached Koios /totals row must be reported explicitly instead of
+// silently passing.
+func TestCompareEpochTotalsMissingRewardAdaPots(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosTotals{
+		Treasury: "6931231163186226",
+		Reserves: "7792082362166766",
+		Fees:     "1245791321",
+	}
+	dingo := &DingoEpochData{
+		TotalActiveStake:     "100",
+		RewardAdaPotsPresent: false, // epoch_summary ready, reward_ada_pots absent
+	}
+
+	ms := CompareEpochTotals("preview", 1367, koios, dingo, now)
+	require.Len(t, ms, 1)
+	require.Equal(t, "reward_ada_pots", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
 // TestCompareEpochTotalsRewardIsNeverCompared guards against reintroducing
 // the bug this was fixed for: comparing Koios's /totals.reward (a
 // monotonically increasing, 2-epoch-lagged cumulative accumulator — verified
@@ -112,7 +140,10 @@ func TestCompareEpochTotals(t *testing.T) {
 func TestCompareEpochTotalsRewardIsNeverCompared(t *testing.T) {
 	now := time.Now()
 	koios := &KoiosTotals{Reward: "13601661554"}
-	dingo := &DingoEpochData{TotalRewards: "21543976446"} // epoch 12's own single-epoch flow
+	dingo := &DingoEpochData{
+		TotalRewards:         "21543976446", // epoch 12's own single-epoch flow
+		RewardAdaPotsPresent: true,
+	}
 
 	ms := CompareEpochTotals("preview", 12, koios, dingo, now)
 	require.Empty(t, ms, "totals_reward has no Dingo counterpart and must never be reported")

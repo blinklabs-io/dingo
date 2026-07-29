@@ -82,18 +82,16 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	var checkResult *koiosparity.CheckResult
 	if !skipCheck {
 		slog.Info("koios-parity: check phase starting", "network", network)
-		checkResult, err = koiosparity.Check(ctx, koiosparity.CheckConfig{
+		if _, err := koiosparity.Check(ctx, koiosparity.CheckConfig{
 			Network:    network,
 			DingoDB:    resolveDingoDB(cmd),
 			CachePath:  cachePath,
 			Workers:    workers,
 			All:        all,
 			GraceHours: graceHours,
-		}, logger)
-		if err != nil {
+		}, logger); err != nil {
 			return fmt.Errorf("check: %w", err)
 		}
 	}
@@ -149,6 +147,11 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	// A FAIL or ERROR epoch must surface as a non-zero exit so automation can't
 	// mistake an incomplete or failed parity check for success; propagated via
 	// RunE's error return (main's rootCmd.Execute() handles os.Exit(1)) rather
-	// than exiting directly here.
-	return checkResultErr(checkResult)
+	// than exiting directly here. This is derived from `statuses` (the
+	// persisted, network-wide status just printed above) rather than
+	// checkResult directly: checkResult is nil when --skip-check is set, and
+	// even when the check phase ran, Check may have found nothing needing
+	// (re)check and so performed no fresh work — in both cases a prior FAIL or
+	// ERROR still sitting in the cache must not be reported as success.
+	return checkResultErr(koiosparity.EffectiveCheckOutcome(statuses, 0, 0))
 }

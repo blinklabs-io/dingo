@@ -66,6 +66,18 @@ type DingoEpochData struct {
 	TotalRewards string // lovelace decimal string from reward_ada_pots.rewards; empty when absent
 	Treasury     string // lovelace decimal string from reward_ada_pots.treasury; empty when absent
 	Reserves     string // lovelace decimal string from reward_ada_pots.reserves; empty when absent
+
+	// RewardAdaPotsPresent distinguishes "no reward_ada_pots row for this
+	// epoch" from "row exists with legitimately empty/zero values" — an empty
+	// Fees/TotalRewards/Treasury/Reserves string is not itself a reliable
+	// missing-data signal. On live chainsync, epoch_summary.SnapshotReady is
+	// only ever set true after reward_ada_pots is written in the same
+	// transaction (see ledger/chainsync.go's processEpochRollover), so the two
+	// should always agree; a bootstrap-from-snapshot import, however, can set
+	// SnapshotReady=true without ever writing reward_ada_pots for that epoch,
+	// which is exactly the case this flag lets the comparer detect instead of
+	// silently skipping the treasury/reserves/fees comparison.
+	RewardAdaPotsPresent bool
 }
 
 // DingoPoolEpochData holds per-pool reward-input data for one epoch,
@@ -199,12 +211,15 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("reward_ada_pots epoch %d: %w", epoch, err)
 		}
-		// Pots absent for some epochs; leave Fees/TotalRewards empty.
+		// Pots absent for some epochs (e.g. a bootstrap-imported epoch); leave
+		// Fees/TotalRewards/Treasury/Reserves empty and RewardAdaPotsPresent
+		// false so the comparer reports this rather than silently skipping it.
 	} else {
 		data.Fees = strconv.FormatUint(uint64(pots.Fees), 10)
 		data.TotalRewards = strconv.FormatUint(uint64(pots.Rewards), 10)
 		data.Treasury = strconv.FormatUint(uint64(pots.Treasury), 10)
 		data.Reserves = strconv.FormatUint(uint64(pots.Reserves), 10)
+		data.RewardAdaPotsPresent = true
 	}
 
 	return data, nil

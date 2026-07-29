@@ -2373,6 +2373,15 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   directly (both sides are already point-in-time balances) — the correct
   Koios counterparts to that Dingo data, reported under distinct `totals_*`
   field names so a mismatch report never conflates the two comparisons.
+  `CompareEpochTotals` distinguishes a `reward_ada_pots` row being *absent*
+  from its pot fields merely being empty: `DingoEpochData.RewardAdaPotsPresent`
+  is set only when `GetEpochData` finds the row, so a ready `epoch_summary`
+  with no matching `reward_ada_pots` (e.g. a bootstrap-from-snapshot import,
+  which sets `epoch_summary.SnapshotReady=true` without ever writing
+  `reward_ada_pots` for that epoch) is reported as a single `reward_ada_pots`
+  / `dingo_db_missing` mismatch instead of silently skipping the
+  treasury/reserves/fees comparison.
+
   `koios_epoch_info.fees`/`total_rewards` are still fetched and cached for
   reference (the cache stores the full documented `/epoch_info` schema) but
   play no part in any comparison. `/totals.circulation`, `supply`,
@@ -2413,10 +2422,26 @@ hours-long backfill before surfacing it.
 
 An isolated HTTP-level failure on one request — `/epoch_info`, `/totals`, or
 a single pool's `/pool_history` call exhausting its retries (e.g. a brief
-Koios 5xx blip) — is different: it has no reason to affect any other epoch,
-so it only drops that one epoch (`FetchResult.FailedEpochs`; the epoch stays
-uncached and is retried by a future `fetch` run) instead of cancelling the
-whole batch's shared context.
+Koios 5xx blip or a burst 429) — is different: it has no reason to affect any
+other epoch, so it only drops that one epoch (`FetchResult.FailedEpochs`; the
+epoch stays uncached and is retried by a future `fetch` run) instead of
+cancelling the whole batch's shared context.
+
+`koios_client.go`'s `get()` distinguishes this from a *permanent* failure —
+daily-quota exhaustion, or any other non-2xx/206 status it doesn't already
+retry internally (401/403 auth rejections, 400/404/422 bad request or
+unsupported query, etc.; 429 bursts and 5xx are retried in `get()` and only
+reach the caller once exhausted, so those remain transient) — by wrapping the
+error with the `ErrKoiosPermanent` sentinel. `fetchEpoch` checks
+`errors.Is(err, ErrKoiosPermanent)` at both the whole-epoch level
+(`/epoch_info`, `/totals`) and the per-pool `/pool_history` level: a permanent
+error is returned as-is (not wrapped in `transientEpochFetchErr`), which the
+`Fetch` dispatcher then treats as a hard failure — cancelling the shared
+`fetchCtx` so no further epochs are dispatched and in-flight ones stop early.
+Within the failing epoch's own pool loop, the same permanent error also
+cancels a pool-loop-local context, stopping the loop from scheduling any of
+the epoch's remaining pools once one has already hit a quota/auth failure,
+rather than fanning out doomed requests for every other pool first.
 
 `fetch` also hoists each pool's true first-active epoch once per run (the
 minimum `active_epoch_no` across every row `/pool_updates` returns for that
@@ -2429,9 +2454,15 @@ parameters, which can be well after its true first-active epoch and would
 unsafely skip epochs where the pool genuinely had history.
 
 `check` and the default `run` command return a non-nil error (surfaced as a
-non-zero process exit) whenever any epoch in the run comes back `FAIL` or
-`ERROR`, so CI/automation can't mistake an incomplete or failed parity check
-for success. `watch`'s continuous loop only advances its own resume cursor
+non-zero process exit) whenever any epoch comes back `FAIL` or `ERROR`. This
+is based on the *persisted* `check_epoch_status` for the run's scope
+(`EffectiveCheckOutcome`, restricted to `--from-epoch`/`--through-epoch` when
+given), not just epochs freshly (re)checked during this invocation — a prior
+FAIL/ERROR whose reference row is still fresh (so `Check` found nothing
+needing rechecking and did no fresh work at all) must still surface, or
+CI/automation could mistake an already-known failure for success just because
+nothing new happened to fail this run. `watch`'s continuous loop only advances
+its own resume cursor
 past an epoch range once `fetch` reports no `FailedEpochs` and `check` reports
 no `ErrorEpochs` for it — `ERROR` (`dingo_db_error`/`dingo_db_missing`/
 `reference_lag`) and an isolated fetch failure are typically transient

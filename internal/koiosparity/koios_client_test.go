@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -114,6 +115,46 @@ func TestGetDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "daily tier quota exceeded"))
 	require.EqualValues(t, 1, attempts.Load())
+	require.ErrorIs(t, err, ErrKoiosPermanent,
+		"daily quota exhaustion must be classified permanent so Fetch aborts rather than retrying")
+}
+
+// TestGetDoesNotRetryOnAuthFailure covers the "hard 4xx" class (401/403 and
+// similar) that get() never retries: unlike burst-429/5xx, which are retried
+// internally and only reach the caller once exhausted, these reach the caller
+// on the very first attempt and must be marked permanent so Fetch aborts the
+// whole run instead of recording a misleading, isolated per-epoch failure.
+func TestGetDoesNotRetryOnAuthFailure(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("invalid API key"))
+	}))
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.get(context.Background(), "/tip", -1, -1)
+	require.Error(t, err)
+	require.EqualValues(t, 1, attempts.Load(), "a 401 must not be retried")
+	require.ErrorIs(t, err, ErrKoiosPermanent)
+}
+
+// TestGetExhausted503IsNotPermanent guards against over-classifying: a
+// transient failure that exhausts its retries (e.g. sustained 503s) must
+// remain an isolated, resumable per-epoch failure, not a hard abort.
+func TestGetExhausted503IsNotPermanent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("no server available"))
+	}))
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	_, err := k.get(context.Background(), "/tip", -1, -1)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrKoiosPermanent),
+		"an exhausted transient 503 must remain retryable/isolated, not permanent")
 }
 
 func TestGetRetriesBurst429HonoringRetryAfter(t *testing.T) {

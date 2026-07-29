@@ -40,11 +40,45 @@ type CheckConfig struct {
 
 // CheckResult summarises a completed check run.
 type CheckResult struct {
-	EpochsChecked int
+	EpochsChecked int // epochs freshly (re)checked this run
 	PoolsChecked  int
-	MismatchCount int
-	FailEpochs    []uint64
-	ErrorEpochs   []uint64
+	MismatchCount int // mismatches recorded for epochs freshly (re)checked this run
+
+	// FailEpochs/ErrorEpochs are the *persisted* status for every epoch within
+	// the requested scope (CheckConfig.FromEpoch/ThroughEpoch, 0 = unbounded on
+	// that side) — not just epochs freshly (re)checked this run. This is
+	// deliberate: when nothing needs (re)checking (e.g. a prior FAIL/ERROR's
+	// reference row is still fresh), the persisted failure must still surface
+	// here rather than reading as success just because no work was performed.
+	// See EffectiveCheckOutcome.
+	FailEpochs  []uint64
+	ErrorEpochs []uint64
+}
+
+// EffectiveCheckOutcome derives FailEpochs/ErrorEpochs from persisted
+// CheckEpochStatus rows, restricted to [fromEpoch, throughEpoch] (0 = no
+// bound on that side). Used both internally by Check (for its requested
+// scope) and by callers that need the exit-code-relevant outcome for a status
+// summary they already fetched (e.g. the default 'run' command), so a stale
+// CheckResult (nil, or empty because nothing needed rechecking) never masks a
+// persisted FAIL/ERROR.
+func EffectiveCheckOutcome(statuses []CheckEpochStatus, fromEpoch, throughEpoch uint64) *CheckResult {
+	result := &CheckResult{}
+	for _, s := range statuses {
+		if fromEpoch > 0 && s.Epoch < fromEpoch {
+			continue
+		}
+		if throughEpoch > 0 && s.Epoch > throughEpoch {
+			continue
+		}
+		switch s.Status {
+		case StatusFail:
+			result.FailEpochs = append(result.FailEpochs, s.Epoch)
+		case StatusError:
+			result.ErrorEpochs = append(result.ErrorEpochs, s.Epoch)
+		}
+	}
+	return result
 }
 
 // Check compares the Koios reference cache against Dingo's metadata database
@@ -91,77 +125,85 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	}
 	epochs = filtered
 
-	if len(epochs) == 0 {
-		logger.Info("koiosparity: nothing to check", "network", cfg.Network)
-		return &CheckResult{}, nil
-	}
-
-	logger.Info("koiosparity: checking epochs",
-		"network", cfg.Network,
-		"count", len(epochs),
-		"workers", cfg.Workers,
-	)
-
 	result := &CheckResult{}
-	var mu sync.Mutex
-	sem := make(chan struct{}, cfg.Workers)
-	var wg sync.WaitGroup
-	errCh := make(chan error, 1)
 
-loop:
-	for _, epoch := range epochs {
-		select {
-		case <-ctx.Done():
-			break loop
-		case sem <- struct{}{}:
+	if len(epochs) == 0 {
+		logger.Info("koiosparity: nothing to (re)check", "network", cfg.Network)
+	} else {
+		logger.Info("koiosparity: checking epochs",
+			"network", cfg.Network,
+			"count", len(epochs),
+			"workers", cfg.Workers,
+		)
+
+		var mu sync.Mutex
+		sem := make(chan struct{}, cfg.Workers)
+		var wg sync.WaitGroup
+		errCh := make(chan error, 1)
+
+	loop:
+		for _, epoch := range epochs {
+			select {
+			case <-ctx.Done():
+				break loop
+			case sem <- struct{}{}:
+			}
+
+			wg.Add(1)
+			go func(epoch uint64) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				res, checkErr := checkEpoch(ctx, cache, dingo, cfg.Network, epoch, cfg.GraceHours, logger)
+				if checkErr != nil {
+					select {
+					case errCh <- fmt.Errorf("epoch %d: %w", epoch, checkErr):
+					default:
+					}
+					return
+				}
+
+				mu.Lock()
+				result.EpochsChecked++
+				result.PoolsChecked += res.KoiosPoolCount
+				result.MismatchCount += len(res.Mismatches)
+				mu.Unlock()
+			}(epoch)
 		}
 
-		wg.Add(1)
-		go func(epoch uint64) {
-			defer wg.Done()
-			defer func() { <-sem }()
+		wg.Wait()
 
-			res, checkErr := checkEpoch(ctx, cache, dingo, cfg.Network, epoch, cfg.GraceHours, logger)
-			if checkErr != nil {
-				select {
-				case errCh <- fmt.Errorf("epoch %d: %w", epoch, checkErr):
-				default:
-				}
-				return
-			}
-
-			mu.Lock()
-			result.EpochsChecked++
-			result.PoolsChecked += res.KoiosPoolCount
-			result.MismatchCount += len(res.Mismatches)
-			switch res.Status {
-			case StatusFail:
-				result.FailEpochs = append(result.FailEpochs, epoch)
-			case StatusError:
-				result.ErrorEpochs = append(result.ErrorEpochs, epoch)
-			}
-			mu.Unlock()
-		}(epoch)
+		// Check cancellation before consuming errCh so a clean shutdown returns
+		// ctx.Err() rather than a mid-flight epoch error.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		select {
+		case err := <-errCh:
+			return nil, err
+		default:
+		}
 	}
 
-	wg.Wait()
-
-	// Check cancellation before consuming errCh so a clean shutdown returns
-	// ctx.Err() rather than a mid-flight epoch error.
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	// FailEpochs/ErrorEpochs reflect the persisted status of every epoch in
+	// scope (see EffectiveCheckOutcome), computed after the loop above so a
+	// prior FAIL/ERROR whose reference row is still fresh — and therefore
+	// wasn't re-checked above — still surfaces here instead of reading as
+	// success just because len(epochs) was 0 or nothing new failed.
+	statuses, err := cache.GetStatusSummary(cfg.Network)
+	if err != nil {
+		return nil, fmt.Errorf("get status summary: %w", err)
 	}
-	select {
-	case err := <-errCh:
-		return nil, err
-	default:
-	}
+	effective := EffectiveCheckOutcome(statuses, cfg.FromEpoch, cfg.ThroughEpoch)
+	result.FailEpochs = effective.FailEpochs
+	result.ErrorEpochs = effective.ErrorEpochs
 
 	logger.Info("koiosparity: check complete",
 		"network", cfg.Network,
-		"epochs", result.EpochsChecked,
+		"epochs_checked", result.EpochsChecked,
 		"mismatches", result.MismatchCount,
 		"fail_epochs", len(result.FailEpochs),
+		"error_epochs", len(result.ErrorEpochs),
 	)
 	return result, nil
 }

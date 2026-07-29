@@ -70,6 +70,19 @@ func transientErr(err error) error {
 	return &transientEpochFetchErr{err: err}
 }
 
+// classifyFetchErr wraps a Koios client error as either permanent (returned
+// as-is, which the caller then propagates as a hard Fetch error that aborts
+// the whole run) or transient (wrapped in transientEpochFetchErr, isolated to
+// this one epoch and retried on a future Fetch run), based on whether err
+// wraps the ErrKoiosPermanent sentinel — daily-quota exhaustion, auth
+// failures, and other hard 4xx the client already identifies as non-retryable.
+func classifyFetchErr(err error) error {
+	if errors.Is(err, ErrKoiosPermanent) {
+		return err
+	}
+	return transientErr(err)
+}
+
 // Fetch pulls Koios data into the cache, resuming from the last cached epoch.
 func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchResult, error) {
 	if cfg.Concurrency <= 0 {
@@ -326,7 +339,7 @@ func fetchEpoch(
 	// 1. Fetch epoch info (not written yet).
 	info, err := koios.GetEpochInfo(ctx, epoch)
 	if err != nil {
-		return 0, transientErr(fmt.Errorf("get epoch info: %w", err))
+		return 0, classifyFetchErr(fmt.Errorf("get epoch info: %w", err))
 	}
 
 	// Validate all rejection conditions before any DB writes so an incomplete
@@ -410,7 +423,7 @@ func fetchEpoch(
 	// epoch_info/pool rows with a permanently missing totals row.
 	totalsResp, err := koios.GetTotals(ctx, epoch)
 	if err != nil {
-		return 0, transientErr(fmt.Errorf("get totals: %w", err))
+		return 0, classifyFetchErr(fmt.Errorf("get totals: %w", err))
 	}
 
 	now := time.Now()
@@ -442,6 +455,16 @@ func fetchEpoch(
 	var poolsDone atomic.Int64
 	poolTotal := len(activePoolIDs)
 
+	// poolCtx is cancelled the moment any pool request hits a permanent
+	// (non-retryable) error, so a quota/auth failure stops the loop below from
+	// scheduling every remaining pool as a doomed request. Deriving from ctx
+	// means an outer Fetch-level cancellation (a permanent error in another
+	// epoch) also stops this loop, while the ctx.Err() check after
+	// poolWg.Wait() below still inspects the original ctx so a locally
+	// triggered poolCancel is never confused with real caller cancellation.
+	poolCtx, poolCancel := context.WithCancel(ctx)
+	defer poolCancel()
+
 	// A single epoch can require a request per pool (up to ~1200 on preview),
 	// so surface progress mid-epoch rather than only after it fully commits.
 	poolProgressDone := make(chan struct{})
@@ -471,7 +494,7 @@ func fetchEpoch(
 outer:
 	for _, poolID := range activePoolIDs {
 		select {
-		case <-ctx.Done():
+		case <-poolCtx.Done():
 			break outer
 		case poolSem <- struct{}{}:
 		}
@@ -482,11 +505,17 @@ outer:
 			defer func() { <-poolSem }()
 			defer poolsDone.Add(1)
 
-			item, histErr := koios.GetPoolEpochHistory(ctx, id, epoch)
+			item, histErr := koios.GetPoolEpochHistory(poolCtx, id, epoch)
 			if histErr != nil {
 				select {
 				case poolErrCh <- fmt.Errorf("pool %s history: %w", id, histErr):
 				default:
+				}
+				if errors.Is(histErr, ErrKoiosPermanent) {
+					// Stop scheduling further pools for this epoch — retrying
+					// or continuing through the rest of the pool set cannot
+					// succeed once auth/quota has failed.
+					poolCancel()
 				}
 				return
 			}
@@ -538,7 +567,7 @@ outer:
 
 	select {
 	case err := <-poolErrCh:
-		return 0, transientErr(err)
+		return 0, classifyFetchErr(err)
 	default:
 	}
 

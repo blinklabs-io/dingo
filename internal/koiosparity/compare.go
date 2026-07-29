@@ -154,10 +154,18 @@ func CompareEpochAggregates(
 // koiosTotals is nil when no /totals row has been cached for this epoch yet
 // (e.g. cached before totals fetching was added) — comparison is skipped
 // rather than flagged, since that is a reference-data gap, not a Dingo/Koios
-// disagreement. dingoEpoch is nil when epoch_summary/reward_ada_pots aren't
-// available yet; CompareEpochAggregates already reports that condition once
-// (as "epoch_summary"), so this function skips silently rather than
-// duplicating the same root cause under a second field name.
+// disagreement. dingoEpoch is nil when epoch_summary isn't available yet;
+// CompareEpochAggregates already reports that condition once (as
+// "epoch_summary"), so this function skips silently rather than duplicating
+// the same root cause under a second field name.
+//
+// dingoEpoch.RewardAdaPotsPresent == false is a distinct condition from
+// dingoEpoch == nil: epoch_summary is ready but reward_ada_pots (treasury/
+// reserves/fees) never got written for this epoch — see
+// DingoEpochData.RewardAdaPotsPresent's doc comment for how this happens
+// (bootstrap import). Unlike a merely-empty value string, this is reported
+// explicitly rather than having the "!= \"\"" value guards below silently
+// treat "missing" the same as "nothing to compare".
 func CompareEpochTotals(
 	network string,
 	epoch uint64,
@@ -169,10 +177,22 @@ func CompareEpochTotals(
 		return nil
 	}
 
+	if !dingoEpoch.RewardAdaPotsPresent {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "reward_ada_pots",
+			DingoValue: "",
+			KoiosValue: "present",
+			Category:   CategoryDBMissing,
+			CheckedAt:  now,
+		}}
+	}
+
 	var out []CheckMismatch
 
 	// totals_treasury
-	if dingoEpoch.Treasury != "" && dingoEpoch.Treasury != koiosTotals.Treasury {
+	if dingoEpoch.Treasury != koiosTotals.Treasury {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
@@ -185,7 +205,7 @@ func CompareEpochTotals(
 	}
 
 	// totals_reserves
-	if dingoEpoch.Reserves != "" && dingoEpoch.Reserves != koiosTotals.Reserves {
+	if dingoEpoch.Reserves != koiosTotals.Reserves {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
@@ -200,7 +220,7 @@ func CompareEpochTotals(
 	// totals_fees — reward_ada_pots.Fees vs Koios totals.fees (the fee-pot
 	// value), independent of the totals.fees vs epoch_info.fees comparison in
 	// CompareEpochAggregates.
-	if dingoEpoch.Fees != "" && dingoEpoch.Fees != koiosTotals.Fees {
+	if dingoEpoch.Fees != koiosTotals.Fees {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,

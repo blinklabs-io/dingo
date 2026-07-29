@@ -158,6 +158,15 @@ type KoiosTotalsResp struct {
 	ReservesWithdrawal string `json:"reserves_withdrawal"`
 }
 
+// ErrKoiosPermanent marks a Koios failure that cannot succeed by retrying:
+// daily-quota exhaustion, or any other non-2xx/206 status get() didn't
+// already retry internally (401/403 auth failures, 400/404/422 bad request
+// or unsupported query, etc. — 429 bursts and 5xx are retried inside get()
+// and only reach the caller once their retries are exhausted, so those
+// remain unwrapped/transient). Callers use errors.Is(err, ErrKoiosPermanent)
+// to decide whether to keep scheduling further work or abort immediately.
+var ErrKoiosPermanent = errors.New("koios: permanent error")
+
 // KoiosClient queries the Koios v1 REST API.
 type KoiosClient struct {
 	baseURL string
@@ -364,7 +373,7 @@ func (k *KoiosClient) get(
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
-				return nil, fmt.Errorf("koios daily tier quota exceeded on %s: %s (%s)", path, bodyStr, hint)
+				return nil, fmt.Errorf("%w: koios daily tier quota exceeded on %s: %s (%s)", ErrKoiosPermanent, path, bodyStr, hint)
 			}
 			// Burst 429: OpenAPI documents a ~60s sleep for the IP; honour
 			// Retry-After when the gateway sends it.
@@ -389,6 +398,16 @@ func (k *KoiosClient) get(
 				return nil, err
 			}
 			continue
+		}
+
+		// Every other non-2xx status (401/403 auth failures, 400/404/422 bad
+		// request or unsupported query, etc.) was never retried above and
+		// will never succeed by retrying — mark it permanent so callers stop
+		// scheduling further doomed requests instead of treating it as an
+		// isolated, retryable blip.
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			return nil, fmt.Errorf("%w: koios GET %s: status %d body: %s",
+				ErrKoiosPermanent, path, resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
 		return &koiosResponse{StatusCode: resp.StatusCode, Body: body, Header: resp.Header}, nil
