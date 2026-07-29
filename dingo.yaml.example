@@ -130,6 +130,15 @@ relayPort: 3001
 # - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
 #   redeemers). All APIs start automatically on their default ports.
 #
+# Storage mode also controls how long per-account reward history is kept: in
+# "core" mode, per-account reward rows (reward_account_output) are pruned to
+# the same trailing 4-epoch window as the rest of the reward-calculation
+# snapshot state; in "api" mode they are retained for the life of the
+# database so the Blockfrost account reward-history endpoint
+# (GET /accounts/{stake_address}/rewards) can answer for any epoch, at the
+# cost of unbounded growth in that table. See DATABASE.md's "Snapshot and
+# Reward-State Retention" section for detail.
+#
 # Can be overridden with DINGO_STORAGE_MODE
 # CLI: --storage-mode
 storageMode: "core"

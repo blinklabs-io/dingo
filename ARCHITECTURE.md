@@ -2791,16 +2791,29 @@ off).
 Snapshot types: `"mark"` for epoch-boundary lovelace totals, `"set"` and `"go"` for historical rotation metadata, and `"actv"` for Mithril-imported active `pool-distr` fractions.
 
 The Cleanup step of each epoch transition (`cleanupOldSnapshots`) prunes only
-what scales with delegator count — `RewardStakeInput` and `RewardAccountOutput`,
-plus `PoolStakeSnapshot` — to the four epochs the rotation and delayed reward
-model need (current through current-3). `EpochSummary`, `RewardAdaPots`,
-`RewardSnapshot`, `RewardPoolInput`, and `RewardPoolOutput` are exempt and
-retained for the life of the database, so full per-epoch and per-pool reward
-history stays queryable and a missing summary row keeps its diagnostic meaning of
-a boundary that was never captured. Because a retained snapshot can outlive its
-per-credential rows, `applyStakeRewards` skips an epoch whose snapshot claims
-delegators over an empty `RewardStakeInput` set rather than failing the rollover.
-See the retention section in `DATABASE.md` for the per-table detail.
+what scales with delegator count — `RewardStakeInput` and (in `core` storage
+mode) `RewardAccountOutput`, plus `PoolStakeSnapshot` — to the four epochs the
+rotation and delayed reward model need (current through current-3).
+`EpochSummary`, `RewardAdaPots`, `RewardSnapshot`, `RewardPoolInput`, and
+`RewardPoolOutput` are exempt and retained for the life of the database, so
+full per-epoch and per-pool reward history stays queryable and a missing
+summary row keeps its diagnostic meaning of a boundary that was never
+captured. Because a retained snapshot can outlive its per-credential rows,
+`applyStakeRewards` skips an epoch whose snapshot claims delegators over an
+empty `RewardStakeInput` set rather than failing the rollover. See the
+retention section in `DATABASE.md` for the per-table detail.
+
+Since dingo #1875, `cleanupOldSnapshots` reads `Database.StorageMode()` and
+diverges for `RewardAccountOutput` only: in `api` storage mode it is exempted
+from the epoch-window prune and retained for the life of the database instead,
+so the Blockfrost account reward-history endpoint
+(`NodeAdapter.AccountRewardHistory`, `GET /accounts/{stake_address}/rewards`)
+can answer for any epoch rather than only the trailing four; `core` mode is
+unchanged. `RewardStakeInput` is pruned to the same four-epoch window in both
+modes regardless — it is not a Blockfrost-visible table and remains too large
+to retain unconditionally. The rollback path, `DeleteRewardStateAfterSlot`, is
+unaffected: it does not consult storage mode and always removes reward-state
+rows (including `RewardAccountOutput`) above the rollback slot in every mode.
 
 ### Reward Metadata State
 

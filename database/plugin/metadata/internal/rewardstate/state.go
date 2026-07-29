@@ -17,6 +17,7 @@ package rewardstate
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -593,6 +594,76 @@ func GetAccountOutputs(db *gorm.DB, epoch uint64) ([]*models.RewardAccountOutput
 	return outputs, result.Error
 }
 
+// GetAccountOutputsByCredential retrieves reward account output rows for a
+// stake credential across every epoch that has not yet been pruned,
+// paginated and ordered by epoch. Ties within an epoch (an account can have
+// more than one row per epoch: e.g. a pool owner's leader and member reward,
+// or rewards from two different pools around a delegation change) are broken
+// by pool_key_hash then reward_type so results are stable across pages. Used
+// by the Blockfrost account reward-history endpoint
+// (GET /accounts/{stake_address}/rewards, dingo #1875).
+func GetAccountOutputsByCredential(
+	db *gorm.DB,
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+) ([]*models.RewardAccountOutput, error) {
+	ret := make([]*models.RewardAccountOutput, 0)
+	if len(stakingKey) == 0 {
+		return ret, nil
+	}
+	query := db.Where(
+		"credential_tag = ? AND staking_key = ?",
+		credentialTag,
+		stakingKey,
+	)
+	if strings.EqualFold(order, "desc") {
+		query = query.Order("epoch DESC, pool_key_hash ASC, reward_type ASC")
+	} else {
+		query = query.Order("epoch ASC, pool_key_hash ASC, reward_type ASC")
+	}
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	if err := query.Find(&ret).Error; err != nil {
+		return nil, fmt.Errorf(
+			"get reward account outputs by credential: %w",
+			err,
+		)
+	}
+	return ret, nil
+}
+
+// CountAccountOutputsByCredential returns the total count of reward account
+// output rows for a stake credential across every epoch that has not yet
+// been pruned.
+func CountAccountOutputsByCredential(
+	db *gorm.DB,
+	credentialTag uint8,
+	stakingKey []byte,
+) (int, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	var count int64
+	if err := db.Model(&models.RewardAccountOutput{}).Where(
+		"credential_tag = ? AND staking_key = ?",
+		credentialTag,
+		stakingKey,
+	).Count(&count).Error; err != nil {
+		return 0, fmt.Errorf(
+			"count reward account outputs by credential: %w",
+			err,
+		)
+	}
+	return int(count), nil
+}
+
 // DeleteStateAfterSlot deletes reward-state rows captured from rolled-back
 // blocks. When txn is non-nil, db is used as-is; otherwise the deletes are
 // wrapped in their own transaction.
@@ -646,23 +717,40 @@ func DeleteStateAfterSlot(
 // snapshot window that scale with delegator count. When txn is non-nil, db is
 // used as-is; otherwise the deletes are wrapped in their own transaction.
 //
-// Only reward_stake_input and reward_account_output are pruned. Everything else
-// the reward path writes — reward_ada_pots and reward_snapshot at one row per
-// epoch, reward_pool_input and reward_pool_output at roughly one row per pool per
-// epoch — is retained for the life of the database, because that is the full
-// reward record a historical closed-epoch comparison needs: the pots the epoch
-// was paid from, the reward-side stake totals (which differ from epoch_summary's
+// This is the CORE storage-mode pruning path and unconditionally deletes both
+// reward_stake_input and reward_account_output, matching dingo's original
+// pre-#1875 pruning behavior exactly. Everything else the reward path writes —
+// reward_ada_pots and reward_snapshot at one row per epoch, reward_pool_input
+// and reward_pool_output at roughly one row per pool per epoch — is retained
+// for the life of the database, because that is the full reward record a
+// historical closed-epoch comparison needs: the pots the epoch was paid from,
+// the reward-side stake totals (which differ from epoch_summary's
 // leader-election totals), each pool's delegated/owner stake, pledge, cost,
 // margin, reward account and block counts, and each pool's resulting apparent
 // performance, leader reward and member reward total. See dingo #2987.
 //
-// The per-credential rows are the only ones that scale with delegator count
-// (~5k/epoch on preview, ~1.3M/epoch on mainnet), so they alone cannot be kept.
+// The per-credential rows (reward_stake_input and reward_account_output) are
+// the ones that scale with delegator count (~5k/epoch on preview, ~1.3M/epoch
+// on mainnet), which is why core mode cannot keep them.
 //
 // Retaining the rest while pruning those cannot produce a wrong reward
 // calculation: applyStakeRewards detects a retained snapshot whose stake inputs
 // have aged out and skips the epoch, and the precompute-reuse path rejects the
 // same state through validateRewardCalculatorInputs and recalculates.
+//
+// API storage mode does NOT call this function. It calls
+// DeleteStakeInputBeforeEpoch instead, which prunes only reward_stake_input and
+// leaves reward_account_output untouched. reward_account_output is
+// models.RewardAccountOutput, the only per-account, per-epoch reward record
+// dingo persists, and is the backing store for the Blockfrost account
+// reward-history endpoint (GET /accounts/{stake_address}/rewards, dingo #1875):
+// pruning it to a rolling window would make that endpoint silently go blank for
+// any epoch older than the window, the same kind of misleading "no data" #2987
+// already identified for epoch_summary. reward_account_output scales with
+// delegator count the same way reward_stake_input does, so retaining it
+// unbounded is a real, ongoing storage cost — one API storage mode operators
+// have already opted into in exchange for full API-queryable history, and one
+// core storage mode (which does not serve this API) has no reason to pay.
 func DeleteStateBeforeEpoch(
 	db *gorm.DB,
 	epoch uint64,
@@ -676,6 +764,34 @@ func DeleteStateBeforeEpoch(
 			if err := tx.Where("epoch < ?", epoch).Delete(model).Error; err != nil {
 				return fmt.Errorf("delete reward state before epoch: %w", err)
 			}
+		}
+		return nil
+	}
+
+	if txn != nil {
+		return deleteRows(db)
+	}
+	return db.Transaction(deleteRows)
+}
+
+// DeleteStakeInputBeforeEpoch deletes only reward_stake_input rows older than
+// the retained snapshot window, leaving reward_account_output intact. This is
+// the API storage-mode counterpart to DeleteStateBeforeEpoch: see that
+// function's doc comment for the full retention rationale (dingo #1875,
+// #2987). When txn is non-nil, db is used as-is; otherwise the delete is
+// wrapped in its own transaction.
+func DeleteStakeInputBeforeEpoch(
+	db *gorm.DB,
+	epoch uint64,
+	txn types.Txn,
+) error {
+	deleteRows := func(tx *gorm.DB) error {
+		if err := tx.Where("epoch < ?", epoch).
+			Delete(&models.RewardStakeInput{}).Error; err != nil {
+			return fmt.Errorf(
+				"delete reward stake input before epoch: %w",
+				err,
+			)
 		}
 		return nil
 	}

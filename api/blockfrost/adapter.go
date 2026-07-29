@@ -2413,11 +2413,70 @@ func (a *NodeAdapter) AccountRewardHistory(
 		); err != nil {
 		return nil, 0, err
 	}
-	// TODO(#1875): Implement reward history once Dingo persists
-	// per-account, per-epoch reward records. This endpoint remains
-	// stubbed in this PR because the backing reward-history storage
-	// and rollback-safe ledger/database plumbing do not exist yet.
-	return []AccountRewardHistoryInfo{}, 0, nil
+	offset := (params.Page - 1) * params.Count
+	total, err := a.ledgerState.Database().
+		CountRewardAccountOutputsByCredential(
+			credentialTag,
+			stakeKey,
+			nil,
+		)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count account reward history: %w",
+			err,
+		)
+	}
+	if offset >= total {
+		return []AccountRewardHistoryInfo{}, total, nil
+	}
+	rows, err := a.ledgerState.Database().
+		GetRewardAccountOutputsByCredential(
+			credentialTag,
+			stakeKey,
+			params.Count,
+			offset,
+			params.Order,
+			nil,
+		)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get account reward history: %w",
+			err,
+		)
+	}
+	// blockfrostRewardTypes maps dingo's stored reward_account_output.reward_type
+	// values (ledger/rewards.RewardType: "leader", "member") to the Blockfrost
+	// account_reward_content enum spelling (leader, member,
+	// pool_deposit_refund). The two overlapping spellings already match
+	// verbatim; this only defends against case variance and normalizes a
+	// not-yet-modeled reward type to lowercase rather than silently dropping
+	// it, so a future addition (e.g. a CIP-0163 pool deposit refund) still
+	// surfaces in the response.
+	blockfrostRewardTypes := map[string]string{
+		"leader":              "leader",
+		"member":              "member",
+		"pool_deposit_refund": "pool_deposit_refund",
+	}
+	ret := make([]AccountRewardHistoryInfo, 0, len(rows))
+	for _, row := range rows {
+		epoch, err := uint64ToInt32(row.Epoch, "reward epoch")
+		if err != nil {
+			return nil, 0, err
+		}
+		rewardType, ok := blockfrostRewardTypes[strings.ToLower(row.RewardType)]
+		if !ok {
+			rewardType = strings.ToLower(row.RewardType)
+		}
+		ret = append(ret, AccountRewardHistoryInfo{
+			Epoch:  epoch,
+			Amount: strconv.FormatUint(uint64(row.Amount), 10),
+			PoolID: lcommon.PoolId(
+				lcommon.NewBlake2b224(row.PoolKeyHash),
+			).String(),
+			Type: rewardType,
+		})
+	}
+	return ret, total, nil
 }
 
 func blockIssuer(issuer lcommon.IssuerVkey) string {

@@ -428,7 +428,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot` | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
-| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. |
+| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. Backs the Blockfrost `GET /accounts/{stake_address}/rewards` endpoint via `GetRewardAccountOutputsByCredential` / `CountRewardAccountOutputsByCredential` (see below). Pruning is storage-mode dependent (see the retention note below): pruned to the four-epoch window in `core` mode, retained for the life of the database in `api` mode. |
 
 #### Snapshot and Reward-State Retention
 
@@ -436,25 +436,49 @@ Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
 epochs the Shelley rotation and delayed reward model need: current, current-1,
 current-2 for Go, and current-3 so reward calculation can be replayed after a
 rollback across the boundary where those rewards were applied. Retention is not
-configurable, and it only ever deletes rows below that window.
+configurable per se, but since dingo #1875 it is storage-mode dependent for one
+table (`reward_account_output`, below); it always only ever deletes rows below
+that window.
 
-Pruned at `epoch < current-3`:
+Pruned at `epoch < current-3` in every storage mode:
 
 | Table | Scales with | Pruned by |
 |---|---|---|
 | `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` |
-| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
+| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (`core`) / `DeleteRewardStakeInputBeforeEpoch` (`api`) |
+
+Pruned at `epoch < current-3` in `core` storage mode only, retained for the
+life of the database in `api` storage mode:
+
+| Table | Scales with | Pruned by (`core` mode) |
+|---|---|---|
 | `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` |
 
-Retained for the life of the database: `epoch`, `epoch_summary`,
-`reward_ada_pots`, `reward_snapshot`, `reward_pool_input`, and
+`cleanupOldSnapshots` reads `Database.StorageMode()` once per cleanup pass and
+picks the call accordingly: `core` mode calls `DeleteRewardStateBeforeEpoch`,
+which prunes both `reward_stake_input` and `reward_account_output` exactly as
+before dingo #1875 (this is the "prune exactly as it does today" path).
+`api` mode calls `DeleteRewardStakeInputBeforeEpoch` instead, which prunes only
+`reward_stake_input` and leaves `reward_account_output` untouched, so
+`GetRewardAccountOutputsByCredential` (used by the Blockfrost account
+reward-history endpoint) can answer for any epoch in the database's history
+rather than only the trailing four. The trade is deliberate and paid only by
+operators who chose `api` mode: `reward_account_output` scales with delegator
+count the same way `reward_stake_input` does, so retaining it without bound is
+an ongoing, unbounded storage cost, not a one-time one. `core` mode never
+serves that endpoint and has no reason to pay it.
+
+Retained for the life of the database regardless of storage mode: `epoch`,
+`epoch_summary`, `reward_ada_pots`, `reward_snapshot`, `reward_pool_input`, and
 `reward_pool_output`. The first four are one row per epoch and the last two are
 roughly one row per pool per epoch, so full history is on the order of a few
 hundred thousand rows on a test network and a few million on mainnet. Only the
 two per-credential tables scale with delegator count — about 5k rows per epoch on
-preview and 1.3M on mainnet — which is why they alone stay windowed. No
-before-epoch delete method exists for any retained table on
-`metadata.MetadataStore`.
+preview and 1.3M on mainnet — which is why `reward_stake_input` alone stays
+windowed in every mode, and why `reward_account_output` staying windowed is the
+default (`core` mode) rather than something dingo can afford to do
+unconditionally. No before-epoch delete method exists for any of the other
+retained tables on `metadata.MetadataStore`.
 
 Together the retained tables are the full per-epoch reward record a historical
 closed-epoch comparison needs: the pots the epoch was paid from, both sets of
@@ -463,9 +487,12 @@ aggregates (leader-election totals in `epoch_summary` and reward-basis totals in
 `reward_live_stake` and excludes pools with degraded registration data), each
 pool's inputs (delegated and owner stake, pledge, cost, margin, reward account,
 block counts), and each pool's results (apparent performance, optimal and total
-reward, leader reward, member reward total). What is not answerable outside the
-window is anything per-delegator: which credentials backed a pool's stake, and
-what each account was paid.
+reward, leader reward, member reward total). In `core` storage mode, what is
+not answerable outside the window is anything per-delegator: which credentials
+backed a pool's stake, and what each account was paid. In `api` storage mode,
+`reward_account_output` (what each account was paid, and from which pool) IS
+answerable outside the window, for the reason above; only "which credentials
+backed a pool's stake" (`reward_stake_input`) stays windowed in both modes.
 
 Retaining a `reward_snapshot` whose `reward_stake_input` rows have been pruned
 cannot produce a wrong reward calculation. `applyStakeRewards` detects the
@@ -486,6 +513,11 @@ therefore re-crossed on the selected chain, where `SavePoolStakeSnapshots`
 replaces that epoch's rows and `SaveEpochSummary` upserts the summary.
 `DeleteEpochSummariesAfterEpoch` and `DeletePoolStakeSnapshotsAfterEpoch` exist
 on `metadata.MetadataStore` for that case but currently have no callers.
+`DeleteRewardStateAfterSlot` does not read storage mode: it unconditionally
+deletes every reward-state row (including `reward_account_output`) with
+`captured_slot`/`boundary_slot` above the rollback point in both `core` and
+`api` mode, so `api` mode's unbounded retention of `reward_account_output`
+does not leave stale rows above a rollback point.
 
 ## Blob Store Reference
 
@@ -1419,6 +1451,34 @@ deposit (`deposit_amount` for registrations, the refund `amount` for the legacy
 `deregistration` table, `0` where the certificate carries none), `tx.slot`
 (`tx_slot`), and `tx.block_hash` (`block_hash`, resolved to `block_height` by
 the adapter as above).
+
+### `GetRewardAccountOutputsByCredential` and `CountRewardAccountOutputsByCredential`
+
+Backs the Blockfrost `GET /accounts/{stake_address}/rewards` endpoint
+(dingo #1875). Unlike the certificate-history queries above, this is a plain
+filter over `reward_account_output` (no UNION across certificate tables:
+reward outputs already live in a single table), ordered by `epoch` with
+`pool_key_hash` then `reward_type` as tie-breakers so an account with more than
+one reward row in the same epoch (a pool owner's leader and member reward, or
+rewards from two different pools around a mid-epoch delegation change) paginates
+deterministically:
+
+```sql
+SELECT *
+FROM reward_account_output
+WHERE credential_tag = $1 AND staking_key = decode($2, 'hex')
+ORDER BY epoch ASC, pool_key_hash ASC, reward_type ASC   -- DESC ASC ASC when order=desc
+LIMIT $3 OFFSET $4;
+```
+
+The adapter maps `reward_type` (dingo's `ledger/rewards.RewardType`: `leader`,
+`member`) to the Blockfrost `account_reward_content` `type` enum (`leader`,
+`member`, `pool_deposit_refund`); the two currently-produced values already
+match verbatim, and any value dingo does not yet model is passed through
+lowercased rather than dropped. `pool_key_hash` is rendered as a bech32 pool ID
+the same way `GetAccountDelegationHistory` does. See the retention note above
+for how far back this query can answer: unbounded in `api` storage mode,
+windowed to the last four epochs in `core` mode.
 
 ### `GetAccountSumsByCredential`
 

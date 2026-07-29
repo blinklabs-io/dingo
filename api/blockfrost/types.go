@@ -581,4 +581,7 @@ type AccountRewardHistoryResponse struct {
 	Epoch  int32  `json:"epoch"`
 	Amount string `json:"amount"`
 	PoolID string `json:"pool_id"`
+	// Type is one of leader, member, or pool_deposit_refund, per the
+	// Blockfrost account_reward_content schema.
+	Type string `json:"type"`
 }
