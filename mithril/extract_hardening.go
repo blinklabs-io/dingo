@@ -237,9 +237,40 @@ func prepareExtractDestination(
 			"creating extraction staging directory: %w", err,
 		)
 	}
+	parentAtStaging, err := os.Stat(parent)
+	if err != nil {
+		_ = os.RemoveAll(staging)
+		return "", nil, nil, fmt.Errorf(
+			"inspecting extraction parent directory: %w", err,
+		)
+	}
 
 	cleanup = func() { _ = os.RemoveAll(staging) }
 	publish = func() error {
+		// Extraction can run for minutes, so the parent checked before
+		// staging is not still known-good here. Publishing resolves the
+		// destination through it, and an intermediate symlink is followed by
+		// RemoveAll and Rename even though the final component is not.
+		//
+		// Identity is compared rather than re-testing for a symlink: a data
+		// directory placed behind a stable symlink is an ordinary operator
+		// layout and still resolves to the same directory, while a genuine
+		// substitution does not. This narrows the window to the two syscalls
+		// below rather than closing it; eliminating it entirely needs
+		// openat-style directory-relative resolution.
+		parentNow, err := os.Stat(parent)
+		if err != nil {
+			return fmt.Errorf(
+				"%w: re-inspecting %s before publishing: %w",
+				ErrExtractUnsafePath, parent, err,
+			)
+		}
+		if !os.SameFile(parentAtStaging, parentNow) {
+			return fmt.Errorf(
+				"%w: %s changed during extraction",
+				ErrExtractUnsafePath, parent,
+			)
+		}
 		// Remove whatever occupies the destination. This discards a
 		// pre-existing symlink rather than following it, because RemoveAll
 		// unlinks the symlink itself.

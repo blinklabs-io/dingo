@@ -2485,7 +2485,14 @@ Destinations come in two shapes, selected by the caller:
   once complete, so a failed run publishes nothing and a pre-existing entry is
   discarded rather than merged with. A non-empty destination is refused unless
   the caller passes `WithReplaceDestination` to recover from an interrupted
-  run.
+  run. Because publishing resolves the destination through its parent — the
+  shared download directory — and extraction can run for minutes, the parent's
+  identity is re-checked immediately before the swap: a directory that is no
+  longer the same one staging was created in fails the publish. Identity is
+  compared rather than rejecting symlinks outright, so a data directory placed
+  behind a stable symlink keeps working. This narrows the race to two syscalls
+  rather than closing it; closing it entirely needs `openat`-style
+  directory-relative resolution.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
   into it directly and accumulates. Staging is unavailable here, and the

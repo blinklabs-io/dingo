@@ -255,6 +255,72 @@ func TestExtractArchiveLeavesNoDestinationOnFailure(t *testing.T) {
 		"a failed extraction must not publish a partial destination")
 }
 
+// TestExtractPublishRejectsSwappedParent covers the window between staging and
+// publishing. Extraction of a mainnet snapshot takes minutes, and the parent
+// is the shared download directory, so a directory checked once at the start
+// is not still known-good at the end. Publishing resolves the destination
+// through that parent, and unlike the final component, an intermediate symlink
+// is followed by RemoveAll and Rename.
+func TestExtractPublishRejectsSwappedParent(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t,
+		os.WriteFile(filepath.Join(workDir, "chunk"), []byte("data"), 0o640),
+	)
+
+	// Swap the parent for a symlink pointing at somewhere else, as an
+	// attacker with write access to the download directory could.
+	elsewhere := filepath.Join(root, "elsewhere")
+	require.NoError(t, os.MkdirAll(elsewhere, 0o750))
+	require.NoError(t, os.Rename(parent, filepath.Join(root, "downloads.real")))
+	requireSymlinkSupport(t, elsewhere, parent)
+
+	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
+
+	entries, err := os.ReadDir(elsewhere)
+	require.NoError(t, err)
+	assert.Empty(t, entries,
+		"publishing must not write through a parent swapped mid-extraction")
+}
+
+// TestExtractPublishAllowsStableSymlinkedParent is the counterpart that keeps
+// the check honest. Operators routinely place a data directory behind a
+// symlink, pointing it at a larger volume. Rejecting a parent merely for being
+// a symlink would break those installs, so the check compares directory
+// identity instead: a symlink that still resolves to the same directory is
+// fine, and only a genuine substitution is refused.
+func TestExtractPublishAllowsStableSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "volume", "downloads")
+	require.NoError(t, os.MkdirAll(real, 0o750))
+	parent := filepath.Join(root, "downloads")
+	requireSymlinkSupport(t, real, parent)
+
+	destDir := filepath.Join(parent, "extracted")
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t,
+		os.WriteFile(filepath.Join(workDir, "chunk"), []byte("data"), 0o640),
+	)
+
+	require.NoError(t, publish())
+
+	data, err := os.ReadFile(filepath.Join(destDir, "chunk"))
+	require.NoError(t, err)
+	assert.Equal(t, "data", string(data))
+}
+
 // TestExtractArchiveMergeAccumulates pins the behaviour the parallel
 // immutable-archive download depends on: successive archives extracted into
 // one shared destination add to it rather than replacing it.
