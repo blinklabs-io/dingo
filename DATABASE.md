@@ -1422,7 +1422,9 @@ current epoch's slot range (`blocks_epoch`); no new storage or index was
 needed. The upper slot bound passed for "no bound" is `math.MaxInt64`, not
 `math.MaxUint64`: slot columns are bound as signed 64-bit integers through
 `database/sql`, and a `uint64` value with the high bit set is rejected by the
-sqlite driver.
+sqlite driver. `/pools/extended` reuses the same lifetime query, called once
+with every active pool's key hash so the whole page's `blocks_minted` values
+come from a single call rather than one per pool.
 
 `blocks_minted` undercounts on a Mithril-bootstrapped node. `pool_opcert_sequence`
 is populated only by `UpdatePoolOpCertSequence`, called from the same
@@ -1438,12 +1440,36 @@ dingo has itself applied block-by-block since that boundary, not the pool's
 true full-history total; the gap is silent (no error, just a smaller count)
 and permanent (it does not shrink or get backfilled as the node runs). This
 is the same class of Mithril-boundary gap as the `account` table's
-pre-snapshot registration history documented above. `blocks_epoch` (current
-epoch only) is not affected in ordinary steady-state operation, since a
-caught-up node's current epoch is entirely post-boundary, but it inherits the
-same gap for the one epoch that straddles the snapshot's boundary slot: if
-that epoch has not yet rolled over, `blocks_epoch` only counts the
-post-boundary portion of it.
+pre-snapshot registration history documented above, and it applies equally to
+`/pools/extended`'s `blocks_minted`, which reads the same table the same way.
+`blocks_epoch` (current epoch only) is not affected in ordinary steady-state
+operation, since a caught-up node's current epoch is entirely post-boundary,
+but it inherits the same gap for the one epoch that straddles the snapshot's
+boundary slot: if that epoch has not yet rolled over, `blocks_epoch` only
+counts the post-boundary portion of it.
+
+### `GetOffchainMetadataBatch`
+
+`GetOffchainMetadataBatch(sourceType, urls, txn)` retrieves cached
+`offchain_metadata` rows for many URLs of one source type in a single query
+(`WHERE source_type = ? AND url IN (?, ...)`), for callers that need
+per-item off-chain metadata across a whole page of results without issuing
+one `GetOffchainMetadata` call per item. It uses the leading two columns
+(`source_type`, `url`) of the existing `(source_type, url, hash)` unique
+index (`idx_offchain_metadata_source_url_hash`); no new index was needed.
+Because a URL is only unique together with its hash, two returned rows can
+share a URL under different hashes (metadata republished at the same URL
+with new content); callers match each row against their own `(url, hash)`
+pointer rather than assuming one row per URL. The sqlite implementation
+chunks the `url IN (...)` list at the shared `sqliteBindVarLimit` (400, see
+above) to stay under sqlite's bound-parameter limit; postgres and MySQL,
+whose limits are far higher, issue one query regardless of list size. The
+Blockfrost `/pools/extended` endpoint uses this to resolve every active
+pool's registered metadata anchor in one query for the whole active-pool
+set, instead of one `GetOffchainMetadata` call per pool; its metadata
+object shares the same fetch/validation semantics as `PoolMetadata`
+documented above (pending/failed/fetched off-chain document classification,
+including the `source_type = 'pool'` schema re-validation on read).
 
 ### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
 

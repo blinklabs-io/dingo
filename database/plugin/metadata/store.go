@@ -321,6 +321,23 @@ type MetadataStore interface {
 		txn types.Txn,
 	) (*models.OffchainMetadata, error)
 
+	// GetOffchainMetadataBatch retrieves cached off-chain documents for
+	// many URLs of the given source type in a single query, rather than
+	// one GetOffchainMetadata call per item. Used by callers that need
+	// per-item off-chain metadata for a whole page of results (for
+	// example, pool metadata for /pools/extended): the unique index on
+	// (source_type, url, hash) covers source_type + url IN (...) as its
+	// leading columns, so this is index-backed the same way
+	// GetOffchainMetadata is. Because two documents can share a URL under
+	// different hashes (metadata republished at the same URL with new
+	// content), callers must still match each returned row against their
+	// own (url, hash) pointer rather than assuming one row per URL.
+	GetOffchainMetadataBatch(
+		sourceType string,
+		urls []string,
+		txn types.Txn,
+	) ([]models.OffchainMetadata, error)
+
 	// GetRetiringPools returns pools whose latest retirement
 	// certificate targets an epoch after currentEpoch and has not been
 	// cancelled by a later registration certificate. Certificate

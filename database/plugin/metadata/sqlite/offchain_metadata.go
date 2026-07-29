@@ -72,3 +72,27 @@ func (d *MetadataStoreSqlite) GetOffchainMetadata(
 	}
 	return offchain.Get(db, sourceType, url, hash)
 }
+
+// GetOffchainMetadataBatch retrieves cached off-chain documents for many
+// URLs in one or more queries, chunked at sqliteBindVarLimit to stay under
+// sqlite's bound-parameter limit for the url IN (...) clause.
+func (d *MetadataStoreSqlite) GetOffchainMetadataBatch(
+	sourceType string,
+	urls []string,
+	txn types.Txn,
+) ([]models.OffchainMetadata, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	docs := make([]models.OffchainMetadata, 0, len(urls))
+	for start := 0; start < len(urls); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(urls))
+		chunk, err := offchain.GetBatch(db, sourceType, urls[start:end])
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, chunk...)
+	}
+	return docs, nil
+}

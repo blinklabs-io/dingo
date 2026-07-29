@@ -366,26 +366,37 @@ type ErrorResponse struct {
 	Message    string `json:"message"`
 }
 
-// PoolRelayResponse represents a stake pool relay.
-type PoolRelayResponse struct {
-	IPv4 *string `json:"ipv4"`
-	IPv6 *string `json:"ipv6"`
-	DNS  *string `json:"dns"`
-	Port *int    `json:"port"`
+// PoolExtendedResponse represents an extended stake pool list item,
+// following the Blockfrost OpenAPI 0.1.90 pool_list_extended schema
+// exactly. Neither vrf_key nor relays is part of that schema (vrf_key
+// belongs to the pool-detail schema instead; see PoolDetailResponse), so
+// this type omits both.
+type PoolExtendedResponse struct {
+	PoolID         string                        `json:"pool_id"`
+	Hex            string                        `json:"hex"`
+	ActiveStake    string                        `json:"active_stake"`
+	LiveStake      string                        `json:"live_stake"`
+	BlocksMinted   uint64                        `json:"blocks_minted"`
+	LiveSaturation float64                       `json:"live_saturation"`
+	DeclaredPledge string                        `json:"declared_pledge"`
+	MarginCost     float64                       `json:"margin_cost"`
+	FixedCost      string                        `json:"fixed_cost"`
+	Metadata       *PoolExtendedMetadataResponse `json:"metadata"`
 }
 
-// PoolExtendedResponse represents an extended stake pool
-// list item.
-type PoolExtendedResponse struct {
-	PoolID         string              `json:"pool_id"`
-	Hex            string              `json:"hex"`
-	VrfKey         string              `json:"vrf_key"`
-	ActiveStake    string              `json:"active_stake"`
-	LiveStake      string              `json:"live_stake"`
-	DeclaredPledge string              `json:"declared_pledge"`
-	FixedCost      string              `json:"fixed_cost"`
-	MarginCost     float64             `json:"margin_cost"`
-	Relays         []PoolRelayResponse `json:"relays"`
+// PoolExtendedMetadataResponse represents pool_list_extended's nullable
+// metadata object. It mirrors PoolMetadataResponse's off-chain fields
+// (minus pool_id/hex, which pool_list_extended carries at the parent
+// level) and is omitted (metadata: null) entirely when the pool has no
+// registered metadata anchor.
+type PoolExtendedMetadataResponse struct {
+	URL         *string                     `json:"url"`
+	Hash        *string                     `json:"hash"`
+	Ticker      *string                     `json:"ticker"`
+	Name        *string                     `json:"name"`
+	Description *string                     `json:"description"`
+	Homepage    *string                     `json:"homepage"`
+	Error       *OffchainFetchErrorResponse `json:"error,omitempty"`
 }
 
 // MetadataTransactionJSONResponse represents a Blockfrost

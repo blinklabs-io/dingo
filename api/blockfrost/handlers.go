@@ -703,33 +703,32 @@ func (b *Blockfrost) handlePoolsExtended(
 
 	resp := make([]PoolExtendedResponse, 0, end-start)
 	for _, pool := range pools[start:end] {
-		relays := make([]PoolRelayResponse, 0, len(pool.Relays))
-		for _, relay := range pool.Relays {
-			tmpRelay := PoolRelayResponse{}
-			if relay.IPv4 != "" {
-				tmpRelay.IPv4 = &relay.IPv4
+		var metadata *PoolExtendedMetadataResponse
+		if pool.Metadata != nil {
+			metadata = &PoolExtendedMetadataResponse{
+				URL:         pool.Metadata.URL,
+				Hash:        pool.Metadata.Hash,
+				Ticker:      pool.Metadata.Ticker,
+				Name:        pool.Metadata.Name,
+				Description: pool.Metadata.Description,
+				Homepage:    pool.Metadata.Homepage,
 			}
-			if relay.IPv6 != "" {
-				tmpRelay.IPv6 = &relay.IPv6
+			if pool.Metadata.Error != nil {
+				respErr := OffchainFetchErrorResponse(*pool.Metadata.Error)
+				metadata.Error = &respErr
 			}
-			if relay.DNS != "" {
-				tmpRelay.DNS = &relay.DNS
-			}
-			if relay.Port != nil {
-				tmpRelay.Port = relay.Port
-			}
-			relays = append(relays, tmpRelay)
 		}
 		resp = append(resp, PoolExtendedResponse{
 			PoolID:         pool.PoolID,
 			Hex:            pool.Hex,
-			VrfKey:         pool.VrfKey,
 			ActiveStake:    pool.ActiveStake,
 			LiveStake:      pool.LiveStake,
+			BlocksMinted:   pool.BlocksMinted,
+			LiveSaturation: pool.LiveSaturation,
 			DeclaredPledge: pool.DeclaredPledge,
-			FixedCost:      pool.FixedCost,
 			MarginCost:     pool.MarginCost,
-			Relays:         relays,
+			FixedCost:      pool.FixedCost,
+			Metadata:       metadata,
 		})
 	}
 

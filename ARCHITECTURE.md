@@ -1034,6 +1034,18 @@ rows): `PoolMetadata` re-runs `ValidatePoolMetadata` against `Content` before
 returning it, so a stale cached document that would fail today's validation
 does not keep serving as if it were valid, without writing back to the row.
 
+`/pools/extended` needs the same classification for every active pool on a
+page, not one pool at a time, so it does not call `PoolMetadata` per pool
+(that would be one query per row). Instead `NodeAdapter.PoolsExtended`
+resolves every active pool's registered metadata URL in a single
+`MetadataStore.GetOffchainMetadataBatch` call, then applies the same
+pending/failed/fetched classification (including the `offchainFetchError`
+mapping and the read-time `ValidatePoolMetadata` fallback) as pure,
+in-memory logic over the already-fetched rows. The classification itself is
+intentionally duplicated rather than shared by refactoring `PoolMetadata`,
+since the single-pool and batched-page code paths have different callers
+and error-propagation needs.
+
 ### Archive And History Expiry Topology
 
 Dingo's blob-store abstraction supports independent history expiry and archive
@@ -2458,6 +2470,17 @@ as one ANDed address pattern; exact keyset queries scan through nonmatching
 coarse candidates before forming a limited page, preserving continuation-token
 correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
+
+`/pools/extended` computes `blocks_minted` and `live_saturation` for every
+active pool with one query each (`CountPoolBlocksInSlotRange`,
+`GetOffchainMetadataBatch`) rather than one query per pool; see the Off-chain
+Metadata Worker section above for the metadata half and DATABASE.md for both
+queries' index usage. `live_saturation` reuses pool detail's
+`poolSizeSaturation` and, like pool detail, requires the current protocol
+parameters' `nOpt` to be loaded (`LedgerState.Start()` having completed): a
+required, non-nullable schema field cannot fall back to a placeholder value,
+so the request fails outright rather than serving a fabricated 0.0 when
+protocol parameters are not yet available.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from

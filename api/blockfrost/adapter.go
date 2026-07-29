@@ -1925,6 +1925,11 @@ func (a *NodeAdapter) PoolMetadata(
 	return ret, nil
 }
 
+// PoolsExtended returns the current active pools with the fields required
+// by the Blockfrost OpenAPI 0.1.90 pool_list_extended schema (active/live
+// stake, blocks_minted, live_saturation, margin/pledge/cost, and the
+// nullable off-chain metadata object). Pagination and ordering are applied
+// by the caller (handlePoolsExtended); this returns every active pool.
 func (a *NodeAdapter) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
@@ -1976,6 +1981,22 @@ func (a *NodeAdapter) PoolsExtended() (
 		activeStakeByPool[hex.EncodeToString(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
 
+	// live_saturation is a required, non-nullable float in the OpenAPI
+	// schema (0.0 is itself a legitimate saturation value), so there is
+	// no schema-compatible placeholder for "protocol parameters
+	// unavailable"; propagate the error instead of guessing, matching
+	// PoolDetail (adapter_pool_detail.go).
+	protocolParams, err := a.CurrentProtocolParams()
+	if err != nil {
+		return nil, fmt.Errorf("get protocol parameters: %w", err)
+	}
+	totalActiveStake, err := db.Metadata().GetTotalActiveStake(
+		activeStakeEpoch, "mark", txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get total active stake: %w", err)
+	}
+
 	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolKeyHash))
@@ -1990,6 +2011,45 @@ func (a *NodeAdapter) PoolsExtended() (
 		poolsByHash[string(pool.PoolKeyHash)] = pool
 	}
 
+	// blocks_minted (lifetime): one query across every active pool,
+	// keyed by pool, exactly like CountPoolBlocksInSlotRange is already
+	// used for pool detail (adapter_pool_detail.go) -- not a per-pool
+	// query. Undercounts on a Mithril-bootstrapped node; see DATABASE.md.
+	blocksMintedByPool, _, err := db.Metadata().CountPoolBlocksInSlotRange(
+		poolHashes, 0, noSlotUpperBound, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("count lifetime blocks for pools: %w", err)
+	}
+
+	// Off-chain metadata: one batched query across every active pool's
+	// registered metadata URL (GetOffchainMetadataBatch), instead of one
+	// GetOffchainMetadata call per pool.
+	metadataURLs := make([]string, 0, len(pools))
+	for i := range pools {
+		if len(pools[i].Registration) > 0 &&
+			pools[i].Registration[0].MetadataUrl != "" {
+			metadataURLs = append(
+				metadataURLs, pools[i].Registration[0].MetadataUrl,
+			)
+		}
+	}
+	metadataDocs, err := db.Metadata().GetOffchainMetadataBatch(
+		models.OffchainMetadataSourcePool, metadataURLs, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get off-chain metadata for pools: %w", err)
+	}
+	metadataDocsByKey := make(
+		map[string]*models.OffchainMetadata, len(metadataDocs),
+	)
+	for i := range metadataDocs {
+		key := poolExtendedMetadataKey(
+			metadataDocs[i].URL, metadataDocs[i].Hash,
+		)
+		metadataDocsByKey[key] = &metadataDocs[i]
+	}
+
 	ret := make([]PoolExtendedInfo, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		pool, ok := poolsByHash[string(poolKeyHash)]
@@ -1999,47 +2059,50 @@ func (a *NodeAdapter) PoolsExtended() (
 		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pool.PoolKeyHash))
 		poolHex := hex.EncodeToString(pool.PoolKeyHash)
 
-		latestRelays := pool.Relays
-		if len(pool.Registration) > 0 {
-			latestRelays = pool.Registration[0].Relays
-		}
-
-		relays := make([]PoolRelayInfo, 0, len(latestRelays))
-		for _, relay := range latestRelays {
-			tmpRelay := PoolRelayInfo{
-				DNS: relay.Hostname,
-			}
-			if relay.Port != 0 {
-				if relay.Port > uint(math.MaxInt) {
-					return nil, fmt.Errorf("relay port out of range for pool %x", pool.PoolKeyHash)
-				}
-				port := int(relay.Port)
-				tmpRelay.Port = &port
-			}
-			if relay.Ipv4 != nil {
-				tmpRelay.IPv4 = relay.Ipv4.String()
-			}
-			if relay.Ipv6 != nil {
-				tmpRelay.IPv6 = relay.Ipv6.String()
-			}
-			relays = append(relays, tmpRelay)
-		}
-
 		marginCost := 0.0
 		if pool.Margin != nil && pool.Margin.Rat != nil {
 			marginCost, _ = pool.Margin.Float64()
 		}
 
+		liveStake := liveStakeByPool[string(pool.PoolKeyHash)]
+		activeStake := activeStakeByPool[poolHex]
+		// pool_list_extended only needs live_saturation, which
+		// poolSizeSaturation derives from liveStake/totalActiveStake/nOpt
+		// alone; the live-size/active-size outputs (and the
+		// totalLiveStake input they need) are pool-detail-only fields, so
+		// totalLiveStake is passed as 0 rather than paying for another
+		// network-wide live-stake query just to compute values this
+		// endpoint discards.
+		_, _, liveSaturation := poolSizeSaturation(
+			liveStake, activeStake, 0, totalActiveStake,
+			protocolParams.NOpt,
+		)
+
+		var metadataURL string
+		var metadataHash []byte
+		if len(pool.Registration) > 0 {
+			metadataURL = pool.Registration[0].MetadataUrl
+			metadataHash = pool.Registration[0].MetadataHash
+		}
+		var doc *models.OffchainMetadata
+		if metadataURL != "" {
+			key := poolExtendedMetadataKey(metadataURL, metadataHash)
+			doc = metadataDocsByKey[key]
+		}
+
 		ret = append(ret, PoolExtendedInfo{
 			PoolID:         poolID.String(),
 			Hex:            poolHex,
-			VrfKey:         hex.EncodeToString(pool.VrfKeyHash),
-			ActiveStake:    strconv.FormatUint(activeStakeByPool[poolHex], 10),
-			LiveStake:      strconv.FormatUint(liveStakeByPool[string(pool.PoolKeyHash)], 10),
+			ActiveStake:    strconv.FormatUint(activeStake, 10),
+			LiveStake:      strconv.FormatUint(liveStake, 10),
+			BlocksMinted:   blocksMintedByPool[string(pool.PoolKeyHash)],
+			LiveSaturation: liveSaturation,
 			DeclaredPledge: strconv.FormatUint(uint64(pool.Pledge), 10),
-			FixedCost:      strconv.FormatUint(uint64(pool.Cost), 10),
 			MarginCost:     marginCost,
-			Relays:         relays,
+			FixedCost:      strconv.FormatUint(uint64(pool.Cost), 10),
+			Metadata: buildPoolExtendedMetadata(
+				metadataURL, metadataHash, doc,
+			),
 		})
 	}
 
