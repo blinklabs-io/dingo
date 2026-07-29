@@ -1,6 +1,15 @@
 import { Core } from "@blaze-cardano/sdk";
 import { U5C } from "@utxorpc/blaze-provider";
+import { bytesToHex, hexToBytes } from "./bytes";
 import type { DingoQueryClient, UtxoRpcBytes } from "./utxorpcTypes";
+
+// Preview network magic. Dingo reports this from the Shelley genesis it loaded,
+// so it is the authoritative answer for which chain the endpoint is serving.
+const PREVIEW_NETWORK_MAGIC = 2;
+
+// Cap on how many UTxOs a wallet summary resolves through ReadUtxos. Dingo
+// rejects more than 1000 keys per request; this stays well under that.
+const MAX_SUMMARY_UTXOS = 200;
 
 export function createDingoProvider(): U5C {
   const url = import.meta.env.VITE_UTXORPC_URL || window.location.origin;
@@ -19,6 +28,84 @@ export async function assertDingoReady(provider: U5C): Promise<string> {
   return `Protocol ${params.protocolVersion.major}.${params.protocolVersion.minor}, max tx ${params.maxTxSize} bytes`;
 }
 
+// assertDingoNetwork confirms the endpoint really serves Preview before the app
+// builds orders against Preview-only Sundae V3 script hashes. Without this a
+// proxy pointed at another network silently produces unusable transactions.
+export async function assertDingoNetwork(provider: U5C): Promise<string> {
+  const genesis = await queryClientFor(provider).readGenesis();
+  if (genesis.networkMagic !== PREVIEW_NETWORK_MAGIC) {
+    throw new Error(
+      `Dingo reports network magic ${genesis.networkMagic}; this example requires Preview (${PREVIEW_NETWORK_MAGIC}).`,
+    );
+  }
+  return `Preview genesis confirmed (network magic ${genesis.networkMagic}, ${genesis.networkId})`;
+}
+
+export type DingoUtxoSummary = {
+  lovelace: bigint;
+  utxoCount: number;
+  truncated: boolean;
+};
+
+// summarizeDingoAddress reports what Dingo holds for one complete address.
+// Dingo compares the full serialized address bytes, so a base address does not
+// pick up enterprise UTxOs that only share its payment credential.
+export async function summarizeDingoAddress(
+  provider: U5C,
+  address: Core.Address,
+): Promise<DingoUtxoSummary> {
+  return summarizeResolvedUtxos(await provider.getUnspentOutputs(address), false);
+}
+
+// summarizeDingoStakeCredential reports every UTxO whose address delegates to
+// the given stake credential, across all address forms that share it. This is
+// the closest view UTxO RPC offers of a stake address; live delegation, rewards,
+// and pool assignment are node-to-client LocalStateQuery only.
+export async function summarizeDingoStakeCredential(
+  provider: U5C,
+  stakeCredentialHash: string,
+): Promise<DingoUtxoSummary> {
+  const rpcUtxos = await queryClientFor(provider).searchUtxosByDelegationPart(
+    hexToBytes(stakeCredentialHash),
+  );
+  const truncated = rpcUtxos.length > MAX_SUMMARY_UTXOS;
+  const references = rpcUtxos
+    .slice(0, MAX_SUMMARY_UTXOS)
+    .map(
+      (utxo) =>
+        new Core.TransactionInput(
+          Core.TransactionId(bytesToHex(utxo.txoRef.hash)),
+          BigInt(utxo.txoRef.index),
+        ),
+    );
+  if (references.length === 0) {
+    return { lovelace: 0n, utxoCount: 0, truncated };
+  }
+
+  return summarizeResolvedUtxos(
+    await provider.resolveUnspentOutputs(references),
+    truncated,
+  );
+}
+
+// stakeCredentialHashFor returns the address delegation part, key hash or
+// script hash alike, and undefined for forms that carry none such as
+// enterprise, pointer, and Byron addresses.
+export function stakeCredentialHashFor(address: Core.Address): string | undefined {
+  return address.getProps().delegationPart?.hash;
+}
+
+function summarizeResolvedUtxos(
+  utxos: Core.TransactionUnspentOutput[],
+  truncated: boolean,
+): DingoUtxoSummary {
+  let lovelace = 0n;
+  for (const utxo of utxos) {
+    lovelace += utxo.output().amount().coin();
+  }
+  return { lovelace, utxoCount: utxos.length, truncated };
+}
+
 type QueryClientHost = {
   queryClient?: DingoQueryClient;
 };
@@ -31,6 +118,14 @@ type AssetPattern =
 
 const POLICY_ID_BYTES = 28;
 const MAX_ASSET_NAME_BYTES = 32;
+
+function queryClientFor(provider: U5C): DingoQueryClient {
+  const queryClient = (provider as unknown as QueryClientHost).queryClient;
+  if (!queryClient) {
+    throw new Error("Blaze U5C query client is not available.");
+  }
+  return queryClient;
+}
 
 function installDingoAssetSearchCompatibility(provider: U5C): void {
   const queryClient = (provider as unknown as QueryClientHost).queryClient;
