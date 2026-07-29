@@ -365,6 +365,10 @@ type PeerHeaderLookupFunc func(
 	hash []byte,
 ) (ChainsyncEvent, []byte, bool)
 
+// GenesisSelectionStateFunc returns whether authoritative fork resolution
+// should use Ouroboros Genesis density and the active window in slots.
+type GenesisSelectionStateFunc func() (active bool, window uint64)
+
 type LedgerStateConfig struct {
 	PromRegistry                prometheus.Registerer
 	Logger                      *slog.Logger
@@ -382,6 +386,7 @@ type LedgerStateConfig struct {
 	ConnectionSwitchFunc        ConnectionSwitchFunc
 	ClearSeenHeadersFromFunc    ClearSeenHeadersFromFunc
 	PeerHeaderLookupFunc        PeerHeaderLookupFunc
+	GenesisSelectionStateFunc   GenesisSelectionStateFunc
 	FatalErrorFunc              FatalErrorFunc
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder

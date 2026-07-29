@@ -37,6 +37,47 @@ func TestGenesisWindowSlotsForParams(t *testing.T) {
 	)
 }
 
+func TestDensityFromIntersection(t *testing.T) {
+	assert.Equal(
+		t,
+		uint64(3),
+		DensityFromIntersection(100, 30, []uint64{
+			99, 100, 101, 120, 130, 131,
+		}),
+		"exclude the common block and include the window end",
+	)
+	assert.Zero(t, DensityFromIntersection(100, 0, []uint64{101}))
+	assert.Equal(
+		t,
+		uint64(2),
+		DensityFromIntersection(
+			math.MaxUint64-2,
+			10,
+			[]uint64{math.MaxUint64 - 1, math.MaxUint64},
+		),
+		"an overflowing window saturates at MaxUint64",
+	)
+}
+
+func TestGenesisSelectionStateTransitionsAtomically(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		GenesisWindowSlots: 30,
+	})
+
+	active, window := cs.GenesisSelectionState()
+	require.True(t, active)
+	assert.Equal(t, uint64(30), window)
+
+	cs.mutex.Lock()
+	cs.mode = SelectionModePraos
+	cs.mutex.Unlock()
+
+	active, window = cs.GenesisSelectionState()
+	assert.False(t, active)
+	assert.Equal(t, uint64(30), window)
+}
+
 func TestChainSelectorGenesisObservedDensityTracksRollingWindow(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,

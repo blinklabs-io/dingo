@@ -1422,6 +1422,18 @@ genesis params (`GenesisWindowSlotsForParams`) or overridden by
 `genesisWindowSlots`. Each tracked peer keeps a bounded recent frontier of
 `(slot, hash)` points (`PeerChainTip.observedPoints`, in lockstep with the
 `observedSlots` used for density), trimmed to the window and on rollback.
+That rolling frontier ranks peers before a fork is available locally; it is not
+the authoritative fork-choice measurement. When an incoming header conflicts
+with the primary chain, ledger fork resolution reconstructs the peer's fetched
+header path with `findPeerForkPath`, locates the exact common ancestor, and
+counts both the peer and primary-chain blocks in
+`(intersectionSlot, intersectionSlot + genesisWindow]`. Greater density wins;
+equal density falls back to the normal Praos length/select-view comparison.
+Node composition injects an atomic Genesis-mode/window query from
+`ChainSelector` into ledger, so the same resolver automatically returns to
+Praos once the selector exits Genesis mode. Chainsync and ledger retain enough
+per-peer header ancestry for the active slot window while Genesis is active,
+then shrink back to their normal bounded history after exit.
 
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
@@ -1537,30 +1549,23 @@ once a corroborated peer has served its chain up to (near) it, which is reached
 exactly when the local tip has caught up. This satisfies both bounds — no
 single-peer liveness pin (an unbounded slot never counts until delivered) and no
 premature exit at the start of sync (delivered headers only reach the far tip
-once caught up). The trade-off is that an uncorroborated source ahead in block
-number could win Praos selection after exit; closing that residual needs
-density-at-intersection (deferred, below). A change
-to any tracked peer's frontier re-runs selection while corroboration is active,
-so corroboration granted or revoked takes effect immediately rather than on the
-next periodic tick.
+once caught up). A change to any tracked peer's frontier re-runs selection while
+corroboration is active, so corroboration granted or revoked takes effect
+immediately rather than on the next periodic tick.
 
-**Deferred / not implemented** (explicit scope boundary — some of these are
-security limitations, not only performance): the gate is a corroboration check,
-not the reference implementation's full Ouroboros Genesis density-at-intersection
-with **ChainSync Jumping** and devoted BlockFetch dynamics. It confirms that a
-witness's chain is a prefix of the candidate's within the overlapping window; it
-does **not** resolve a fork whose intersection lies *inside* the window by
-counting blocks after the exact intersection, and it cannot testify about blocks
-a fast source produced *beyond* every witness's frontier. Consequently a fast
+**Deferred / not implemented**: Dingo does not yet implement **ChainSync
+Jumping** or **Devoted BlockFetch**. The corroboration gate also cannot
+testify about blocks a fast source produced beyond every witness's frontier: a
 source that stays consistent with honest peers up to their frontiers but forks
-only in the not-yet-witnessed suffix is corroborated until a witness advances
-past the fork — full density-at-intersection would decide such cases sooner, so
-its absence is a **security** limitation for that window, mitigated (not closed)
-by the fail-closed overlap requirement and the per-header density comparison.
-Wiring peer-governance demotion to the corroboration-failure event is likewise
-deferred. These remain future work; the density comparison plus the corroboration
-gate provide the from-origin property that a fast source cannot steer the node
-onto a chain no independent witness shares.
+only in the not-yet-witnessed suffix remains corroborated until a witness
+advances past the fork. Intersection-anchored fork resolution still compares
+that fetched suffix against the local candidate, but independent corroboration
+of the suffix necessarily waits for witnesses to observe it. Wiring
+peer-governance demotion to the corroboration-failure event is likewise
+deferred. These remain future work; the corroboration gate confirms only the
+overlap that independent witnesses have observed. Density-at-intersection can
+compare an unseen suffix with the local candidate, but does not independently
+corroborate that suffix.
 
 #### Anti-flap incumbent pin
 

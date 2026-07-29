@@ -905,12 +905,58 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 		event:    e,
 		prevHash: append([]byte(nil), e.BlockHeader.PrevHash().Bytes()...),
 	}
-	if len(history.order) <= maxPeerHeaderHistoryPerConn {
-		return
+	limit := ls.peerHeaderHistoryLimit()
+	for len(history.order) > limit {
+		evictKey := history.order[0]
+		history.order = history.order[1:]
+		delete(history.byHash, evictKey)
 	}
-	evictKey := history.order[0]
-	history.order = history.order[1:]
-	delete(history.byHash, evictKey)
+}
+
+func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
+	if ls.config.GenesisSelectionStateFunc == nil {
+		return false, 0
+	}
+	active, window := ls.config.GenesisSelectionStateFunc()
+	return active && window > 0, window
+}
+
+func (ls *LedgerState) peerHeaderHistoryLimit() int {
+	limit := maxPeerHeaderHistoryPerConn
+	active, window := ls.genesisSelectionState()
+	if !active || window <= uint64(limit) {
+		return limit
+	}
+	if window > uint64(math.MaxInt) {
+		return math.MaxInt
+	}
+	// The MaxInt check above makes this conversion safe on both 32- and
+	// 64-bit platforms.
+	return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+}
+
+// headerAtOrImmediatelyBeforeTip recognizes only points already accepted into
+// the current queued chain: its exact tip or the tip's direct observed parent.
+// Other earlier headers may be genuine competing candidates and must continue
+// through fork resolution.
+func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
+	e ChainsyncEvent,
+) bool {
+	headerTip := ls.chain.HeaderTip()
+	if pointMatches(e.Point, headerTip.Point) {
+		return true
+	}
+	if len(e.Point.Hash) == 0 || len(headerTip.Point.Hash) == 0 {
+		return false
+	}
+	tipHashKey := hex.EncodeToString(headerTip.Point.Hash)
+	for _, history := range ls.peerHeaderHistory {
+		tipRecord, ok := history.byHash[tipHashKey]
+		if ok && bytes.Equal(tipRecord.prevHash, e.Point.Hash) {
+			return true
+		}
+	}
+	return false
 }
 
 func (ls *LedgerState) findPeerForkPath(
@@ -923,7 +969,8 @@ func (ls *LedgerState) findPeerForkPath(
 	visited := map[string]struct{}{
 		hex.EncodeToString(e.Point.Hash): {},
 	}
-	for depth := 0; depth < maxPeerHeaderHistoryPerConn &&
+	limit := ls.peerHeaderHistoryLimit()
+	for depth := 0; depth < limit &&
 		len(prevHash) > 0; depth++ {
 		// Resolve the ancestor by O(1) hash index only: database.BlockByHash
 		// no longer falls back to a sequential blob scan on a miss, so this
@@ -978,6 +1025,70 @@ func (ls *LedgerState) findPeerForkPath(
 		prevHash = append(prevHash[:0], record.prevHash...)
 	}
 	return nil, nil, nil
+}
+
+func (ls *LedgerState) localGenesisDensity(
+	ancestorPoint ocommon.Point,
+	window uint64,
+) (uint64, error) {
+	iter, err := ls.chain.FromPoint(ancestorPoint, false)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"iterate local candidate after intersection %d: %w",
+			ancestorPoint.Slot,
+			err,
+		)
+	}
+	defer iter.Cancel()
+
+	windowEnd := ancestorPoint.Slot + window
+	if windowEnd < ancestorPoint.Slot {
+		windowEnd = math.MaxUint64
+	}
+	slots := make([]uint64, 0)
+	for {
+		result, nextErr := iter.Next(false)
+		if errors.Is(nextErr, chain.ErrIteratorChainTip) {
+			break
+		}
+		if nextErr != nil {
+			return 0, fmt.Errorf(
+				"iterate local candidate after intersection %d: %w",
+				ancestorPoint.Slot,
+				nextErr,
+			)
+		}
+		if result.Rollback {
+			return 0, errors.New(
+				"local candidate changed while computing Genesis density",
+			)
+		}
+		if result.Point.Slot > windowEnd {
+			break
+		}
+		slots = append(slots, result.Point.Slot)
+	}
+	return chainselection.DensityFromIntersection(
+		ancestorPoint.Slot,
+		window,
+		slots,
+	), nil
+}
+
+func genesisForkPathDensity(
+	ancestorPoint ocommon.Point,
+	window uint64,
+	forkPath []ChainsyncEvent,
+) uint64 {
+	slots := make([]uint64, 0, len(forkPath))
+	for _, forkEvent := range forkPath {
+		slots = append(slots, forkEvent.Point.Slot)
+	}
+	return chainselection.DensityFromIntersection(
+		ancestorPoint.Slot,
+		window,
+		slots,
+	)
 }
 
 func (ls *LedgerState) blockByHash(hash []byte) (models.Block, error) {
@@ -2079,7 +2190,17 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	}
 	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
+			if ls.headerAtOrImmediatelyBeforeTip(e) {
+				ls.config.Logger.Debug(
+					"ignoring duplicate or reordered roll forward",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"connection_id", e.ConnectionId.String(),
+				)
+				return nil
+			}
 			localTip := ls.chain.Tip()
+			genesisActive, _ := ls.genesisSelectionState()
 			// A header behind the local tip is stale only if the
 			// Praos comparison also says it cannot beat the local
 			// tip. At equal block number, cardano-node resolves the
@@ -2089,6 +2210,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// headers and let a future observed header prove the
 			// advertised tip.
 			if e.Point.Slot < localTip.Point.Slot &&
+				!genesisActive &&
 				!ls.earlierHeaderCanBeatLocalTip(
 					e,
 					localTip,
@@ -2315,14 +2437,16 @@ func (ls *LedgerState) tryResolveFork(
 	e ChainsyncEvent,
 	notFitErr chain.BlockNotFitChainTipError,
 ) (bool, error) {
-	// Only resolve forks when the peer's chain is genuinely better than
-	// ours per Praos rules. Longer chains win first; at equal length,
-	// cardano-node uses the Praos VRF tiebreaker, not a lower-slot rule.
 	localTip := ls.chain.Tip()
-	if ls.compareIncomingHeaderToLocalTip(
+	praosComparison := ls.compareIncomingHeaderToLocalTip(
 		e,
 		localTip,
-	) != praos.ChainABetter {
+	)
+	genesisActive, genesisWindow := ls.genesisSelectionState()
+	// Once the selector has converged back to Praos, preserve the normal
+	// length-first decision and avoid the more expensive fork-path density
+	// walk for a candidate that cannot win.
+	if !genesisActive && praosComparison != praos.ChainABetter {
 		return false, nil
 	}
 
@@ -2365,6 +2489,38 @@ func (ls *LedgerState) tryResolveFork(
 			event.ChainsyncResyncReasonRollbackNotFound,
 		)
 		return true, nil
+	}
+	if genesisActive {
+		peerDensity := genesisForkPathDensity(
+			*ancestorPoint,
+			genesisWindow,
+			forkPath,
+		)
+		localDensity, densityErr := ls.localGenesisDensity(
+			*ancestorPoint,
+			genesisWindow,
+		)
+		if densityErr != nil {
+			return false, densityErr
+		}
+		ls.config.Logger.Debug(
+			"compared fork density from common intersection",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"intersection_slot", ancestorPoint.Slot,
+			"genesis_window_slots", genesisWindow,
+			"peer_density", peerDensity,
+			"local_density", localDensity,
+		)
+		switch {
+		case peerDensity < localDensity:
+			return false, nil
+		case peerDensity == localDensity &&
+			praosComparison != praos.ChainABetter:
+			// Equal density converges on the usual Praos length/VRF
+			// comparison, matching selector peer-ranking behavior.
+			return false, nil
+		}
 	}
 	ancestorBlock, err := ls.blockByHash(ancestorPoint.Hash)
 	if err != nil {
