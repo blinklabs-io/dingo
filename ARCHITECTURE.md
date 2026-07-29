@@ -1,5 +1,7 @@
 # Architecture
 
+Last reviewed: 2026-07-29
+
 ## In-process plugin host
 
 Dingo composition owns one `plugin.Host`. Providers are registered explicitly;
@@ -29,8 +31,6 @@ Composition injects the application `databasePath` into both storage provider
 dependency bundles, preserving `CARDANO_DATABASE_PATH` and `--data-dir` as a
 shortcut for both stores. Local providers can independently override that
 fallback through their typed `dataDir` configuration.
-
-Last reviewed: 2026-07-22
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -2222,6 +2222,13 @@ ingestion (`ensureGapConsumedUtxos`, used while closing the range between the
 snapshot and the chain tip) is unconditionally strict already, since that range
 is always expected to be fully recoverable from the snapshot import.
 
+Historical block validation is controlled independently. With
+`ValidateHistorical: false` (the default), ledger replay skips validation
+outside the near-tip stability window; certificate verification of a Mithril
+artifact establishes a signed trust boundary but is not equivalent to
+independent from-genesis replay. With complete historical state,
+`ValidateHistorical: true` validates the older replay window as well.
+
 The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
 `processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
 (the "gap blocks") for their transaction effects, including consumed-input
@@ -2284,6 +2291,13 @@ repairs the full manifest synchronously before serving.
 ## External Interfaces
 
 Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
+
+The current client-facing API security configuration is asymmetric. UTxO RPC
+receives the process-level TLS certificate/key pair; Blockfrost and Mesh do not,
+and none of the three authenticates clients in-process. Public deployments
+therefore require a reverse proxy or API gateway for uniform TLS,
+authentication, and rate limiting. Composition must not imply that the root TLS
+fields protect every API listener.
 
 ### Blockfrost API (`api/blockfrost/`)
 

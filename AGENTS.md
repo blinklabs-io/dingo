@@ -9,7 +9,7 @@ Go Cardano node (Ouroboros). See `CLAUDE.md` for detailed rules; this file has a
 ## Build / test
 
 ```
-make              # fmt, test, build
+make              # format and build
 make test         # tests with -race
 go test -v -race -run TestName ./path/to/pkg/
 ```

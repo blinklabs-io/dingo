@@ -107,9 +107,10 @@ The following environment variables modify Dingo's behavior:
   - Log output format: `text` (default, human-readable) or `json` (machine-parseable, for ELK/Loki ingestion)
 - `DINGO_LOGGING_LEVEL`
   - Minimum log level: `debug`, `info` (default), `warn`, or `error` (the `--debug` flag overrides this to `debug`)
-- `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
-    (default: empty)
-- `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
+- `TLS_CERT_FILE_PATH` - TLS certificate used by the built-in UTxO RPC
+  listener, requires `TLS_KEY_FILE_PATH` (default: empty)
+- `TLS_KEY_FILE_PATH` - TLS private key used by the built-in UTxO RPC listener
+  (default: empty)
 
 ### Block Production (SPO Mode)
 
@@ -120,17 +121,21 @@ To run Dingo as a stake pool operator producing blocks:
 - `CARDANO_SHELLEY_KES_KEY` - Path to KES signing key file
 - `CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE` - Path to operational certificate file
 
+Dingo block production is exercised by the all-Dingo DevNet and has produced
+blocks on preview and preprod. Current releases do not support mainnet
+operation.
+
 ### Quick Start
 
 ```bash
 # Preview network (default)
 ./dingo
 
-# Mainnet
-CARDANO_NETWORK=mainnet ./dingo
+# Preprod
+CARDANO_NETWORK=preprod ./dingo
 
 # Or with explicit config path
-CARDANO_NETWORK=mainnet CARDANO_CONFIG=path/to/mainnet/config.json ./dingo
+CARDANO_NETWORK=preprod CARDANO_CONFIG=path/to/preprod/config.json ./dingo
 ```
 
 Dingo creates a `dingo.socket` file that speaks Ouroboros node-to-client and is compatible with `cardano-cli`, `adder`, `kupo`, and other Cardano client tools.
@@ -143,9 +148,9 @@ Cardano configuration files are bundled in the Docker image. For local builds, y
 # Run on preview (default)
 docker run -p 3001:3001 ghcr.io/blinklabs-io/dingo
 
-# Run on mainnet with persistent storage
+# Run on preprod with persistent storage
 docker run -p 3001:3001 \
-  -e CARDANO_NETWORK=mainnet \
+  -e CARDANO_NETWORK=preprod \
   -v dingo-data:/data/db \
   -v dingo-ipc:/ipc \
   ghcr.io/blinklabs-io/dingo
@@ -165,12 +170,17 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 
 ## Storage Modes
 
-Dingo has two storage modes that control how much data is persisted:
+Dingo has two storage modes and three primary deployment profiles:
 
-| Mode | What's Stored | Use Case |
-|------|---------------|----------|
-| `core` (default) | UTxOs, certificates, pools, protocol parameters | Relays, block producers |
-| `api` | Core data + witnesses, scripts, datums, redeemers, tx metadata | Nodes serving API queries |
+| Profile | Configuration | Current behavior |
+|---|---|---|
+| Relay | `storageMode: core`, `blockProducer: false` | Validates and follows the chain, participates in NtN/NtC, relays blocks and transactions, and stores consensus state without API history |
+| Block producer | `storageMode: core`, `blockProducer: true` plus VRF/KES/opcert paths | Includes the relay behavior, leader election, block forging, forged-block self-validation, and block diffusion |
+| Data/API node | `storageMode: api`, `blockProducer: false` | Stores consensus state plus transaction, witness, script, datum, redeemer, governance, and metadata history; starts configured Blockfrost, Mesh, and UTxO RPC providers |
+
+`core` is the default and smallest storage/runtime surface. The producer
+profile adds forging and key operations to it. API mode adds historical
+indexing and query services; it is not a separate consensus implementation.
 
 ```bash
 # Relay or block producer (default)
@@ -188,7 +198,19 @@ storageMode: "api"
 
 ## API Servers and Bark
 
-Dingo includes three general-purpose external APIs plus Bark. UTxO RPC, Blockfrost, and Mesh are client-facing APIs and require `storageMode: "api"`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API. Set an individual port to 0 to disable a specific interface. The Blockfrost server currently exposes the latest, epoch, network, and pool subset.
+Dingo includes three general-purpose external APIs plus Bark. UTxO RPC,
+Blockfrost, and Mesh are client-facing APIs and require `storageMode: "api"`.
+Their built-in providers are registered with the instance-owned plugin host,
+start on their provider defaults in API mode, and can be configured
+independently under `plugins.api`. Set an individual port to 0 to disable that
+interface.
+
+Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
+API. It is configured separately with `barkPort` and `barkBaseUrl`.
+
+For public client access, place the API listeners behind a reverse proxy or API
+gateway. UTxO RPC currently supports the process TLS certificate/key pair;
+Blockfrost and Mesh do not, and the built-in APIs do not authenticate clients.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
 `DINGO_MESH_PORT` names remain supported for compatibility. If both a
@@ -362,6 +384,24 @@ This imports:
 
 Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot are not stored by the snapshot itself. In `core` mode these are not needed — consensus, block production, and serving blocks to peers work without them, and new blocks processed after bootstrap will have full metadata. In `api` mode, `dingo mithril sync` automatically runs a backfill step after loading the snapshot to populate this historical data, so API servers (Blockfrost, UTxO RPC, Mesh) have complete records from genesis.
 
+### Replay and bootstrap behavior
+
+Dingo supports two working startup paths:
+
+- A normal chain sync builds ledger and database state from downloaded blocks.
+  Near-tip blocks are validated during normal operation. Operators with a
+  complete from-genesis source can set `validateHistorical: true` to validate
+  the older replay window as well.
+- Mithril sync verifies the certificate chain and snapshot artifact, imports
+  the certified ledger state, stores immutable blocks, and strictly processes
+  the gap between the snapshot state and immutable tip. In API mode it then
+  backfills historical query records before the APIs are used.
+
+`strictUtxoValidation` controls whether an unrecoverable consumed input after
+the recorded bootstrap boundary fails ingestion. Leave it disabled only for
+intersect-based bootstrap where pre-intersect UTxOs are intentionally absent;
+enable it when the node is expected to possess complete input history.
+
 Performance (preview network, ~4M blocks):
 
 | Phase | core mode | api mode |
@@ -527,6 +567,10 @@ For information on developing custom storage plugins, see [PLUGIN_DEVELOPMENT.md
 
 ## Features
 
+This checklist is a compact map of implemented feature areas. The package tests,
+conformance suite, DevNet, and public-network evidence provide the detailed
+validation record.
+
 - [x] Network
   - [x] UTxO RPC
   - [x] Ouroboros
@@ -618,10 +662,10 @@ especially as there is functionality which has not yet been developed.
 
 ## Development / Building
 
-This requires Go 1.25 or later. You also need `make`.
+This requires Go 1.26 or later. You also need `make`.
 
 ```bash
-# Format, test, and build (default target)
+# Format and build (default target)
 make
 
 # Build only
@@ -655,25 +699,33 @@ go tool pprof mem.prof
 
 ## DevNet
 
-The DevNet runs a private Cardano network with Dingo and `cardano-node` producing blocks side by side. It validates that Dingo forges blocks, maintains consensus, and interoperates with the reference node.
+The default DevNet runs a private all-Dingo Cardano network: three Dingo block
+producers, one Dingo relay, and `txpump`. It validates Dingo-to-Dingo consensus,
+block diffusion, liveness, mempool behavior, and Dingo-only features.
+
+Pass `--conformance` to run Dingo beside `cardano-node` for compatibility and
+reference-conformance testing.
 
 ### Architecture
 
-The DevNet uses Docker Compose to run three Cardano nodes plus a load generator on a bridge network:
+The default Docker Compose profile contains:
 
 | Container | Role | Host Port |
 |-----------|------|-----------|
-| `dingo-producer` | Dingo block producer (pool 1) | 3010 |
-| `cardano-producer` | cardano-node block producer (pool 2) | 3011 |
-| `cardano-relay` | Relay node (no block production) | 3012 |
-| `txpump` | Submits payment transactions into Dingo's mempool | — |
+| `dingo-1` | Dingo block producer (pool 1) | 3010 |
+| `dingo-2` | Dingo block producer (pool 2) | 3013 |
+| `dingo-3` | Dingo block producer (pool 3) | 3014 |
+| `dingo-relay` | Dingo relay (no block production) | 3015 |
+| `txpump-dingo` | Submits transactions into Dingo's mempool | — |
 
-A `configurator` init container generates fresh pool keys and genesis files before nodes start. The `txpump` sidecar comes up after Dingo is healthy and continuously feeds the mempool so block bodies and tx-submission paths are exercised alongside consensus.
+The opt-in conformance profile contains `dingo-producer`,
+`cardano-producer`, `cardano-relay`, and `txpump`. A configurator init
+container generates fresh pool keys and genesis files for either profile.
 
 ### Prerequisites
 
 - Docker with the Compose plugin (`docker compose`)
-- Go 1.25+
+- Go 1.26+
 
 ### Running the Automated Tests
 
@@ -682,8 +734,11 @@ The test suite builds the Dingo Docker image, starts all containers, waits for h
 ```bash
 cd internal/test/devnet/
 
-# Run all devnet tests
+# Run the all-Dingo suite
 ./run-tests.sh
+
+# Run Dingo beside cardano-node
+./run-tests.sh --conformance
 
 # Run a specific test
 ./run-tests.sh -run TestBasicBlockForging
