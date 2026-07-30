@@ -137,12 +137,23 @@ func TwoColumnRangeCondition(
 	col1, col2, op string,
 	v1, v2 any,
 ) (string, []any) {
+	rowValue := fmt.Sprintf("(%s, %s) %s (?, ?)", col1, col2, op)
 	if Name(db) != "mysql" {
-		return fmt.Sprintf("(%s, %s) %s (?, ?)", col1, col2, op), []any{v1, v2}
+		return rowValue, []any{v1, v2}
 	}
-	strictOp := ">"
-	if op == "<=" {
+	// The expansion below is only equivalent for the two inclusive
+	// operators this helper documents. For anything else, fall back to the
+	// row-value form: on mysql that loses the index range scan, but it stays
+	// semantically correct, whereas expanding with the wrong leading
+	// comparison would silently return the wrong rows.
+	strictOp := ""
+	switch op {
+	case ">=":
+		strictOp = ">"
+	case "<=":
 		strictOp = "<"
+	default:
+		return rowValue, []any{v1, v2}
 	}
 	return fmt.Sprintf(
 		"(%s %s ? OR (%s = ? AND %s %s ?))",
