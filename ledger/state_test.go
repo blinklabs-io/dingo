@@ -4241,3 +4241,73 @@ func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "database worker pool")
 }
+
+// TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime covers
+// the root cause of the "persistent chain index gap" liveness failure seen
+// under TestLiveTruncateUnderRealForgingAndNetworking (real forging +
+// networking, only reproducible under contention/slower hardware): Close
+// previously never waited for ledgerProcessBlocks (the goroutine Start
+// launches to apply incoming chainsync blocks) at all, since Start ran it
+// against ctx directly rather than a child context Close could cancel. A
+// block landing mid-write exactly as Close proceeded to shut down
+// dbWorkerPool left the persisted block-ID index permanently inconsistent
+// with the in-memory tip already advanced for it -- a corruption no retry
+// recovers from, unlike a transient timing issue.
+func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(t *testing.T) {
+	origTimeout := CloseProcessBlocksDrainTimeout
+	CloseProcessBlocksDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.processBlocksCancel = func() {}
+	// Simulate an in-flight ledgerProcessBlocks goroutine that outlives the
+	// timeout -- e.g. mid-write on a block when Close is called.
+	ls.processBlocksWG.Add(1)
+	t.Cleanup(ls.processBlocksWG.Done)
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "block-processing pipeline")
+}
+
+// TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive
+// counterpart: a real Start/Close cycle (ledgerProcessBlocks genuinely
+// running, not simulated) must not report a timeout, and Close must
+// actually block until the goroutine has exited -- proving
+// processBlocksCancel's child context, not ctx directly, is what Start
+// wires ledgerProcessBlocks to run against.
+func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	processCtx, processCancel := context.WithCancel(ctx)
+	ls.processBlocksCancel = processCancel
+	ls.processBlocksWG.Add(1)
+	stopped := make(chan struct{})
+	go func() {
+		defer ls.processBlocksWG.Done()
+		<-processCtx.Done()
+		close(stopped)
+	}()
+
+	err := ls.Close()
+	require.NoError(t, err)
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("Close returned without processCtx actually being cancelled")
+	}
+}

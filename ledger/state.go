@@ -689,6 +689,27 @@ type LedgerState struct {
 	connClosedSubID          event.EventSubscriberId
 	rewardPrecomputeSubID    event.EventSubscriberId
 
+	// processBlocksCancel stops the ledgerProcessBlocks goroutine Start
+	// launches. It is deliberately its own child context, not the ctx Start
+	// was called with: that ctx is n.ctx, the node's long-lived context,
+	// which a live database restore/truncate never cancels (see
+	// node_lifecycle.go's package doc). Without a way to signal this
+	// goroutine specifically, it keeps applying incoming blocks with no
+	// awareness that Close is about to run — Close waited for every other
+	// background goroutine (rollbackWG, replayWG, rewardPrecomputeWG below)
+	// but not this one, the actual pipeline that writes blocks to the
+	// database. A block landing mid-write exactly as Close proceeds to
+	// shut down dbWorkerPool leaves the persisted block-ID index
+	// permanently inconsistent with the in-memory tip that already
+	// advanced for it -- surfacing later as a "persistent chain index gap"
+	// error that never resolves, since the corruption is on disk, not a
+	// transient condition a retry can recover from.
+	processBlocksCancel context.CancelFunc
+	// processBlocksWG tracks that same goroutine so Close can wait for it
+	// to actually exit before proceeding, the same way rollbackWG/replayWG/
+	// rewardPrecomputeWG already do for the others.
+	processBlocksWG sync.WaitGroup
+
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
 	// to prevent Add-after-Wait panics from the TOCTOU race between
 	// closed.Load() and Add(1) in handleEventChainUpdate.
@@ -1091,9 +1112,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		go ls.handleSlotTicks()
 	}
 	// Start goroutine to process new blocks unless the caller will feed trusted
-	// batches directly into the replay loop.
+	// batches directly into the replay loop. Uses its own child context
+	// (not ctx directly) so Close can stop it independently of ctx's own
+	// lifetime -- see processBlocksCancel's doc comment on the struct.
 	if !ls.config.ManualBlockProcessing {
-		go ls.ledgerProcessBlocks(ctx)
+		processCtx, processCancel := context.WithCancel(ctx)
+		ls.processBlocksCancel = processCancel
+		ls.processBlocksWG.Add(1)
+		go func() {
+			defer ls.processBlocksWG.Done()
+			ls.ledgerProcessBlocks(processCtx)
+		}()
 	}
 	return nil
 }
@@ -1413,14 +1442,16 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
-// CloseRollbackDrainTimeout and CloseDBWorkerPoolShutdownTimeout bound the
-// two waits in Close() below. Exported (not local consts) so tests —
-// including cross-package node-level tests exercising how a caller reacts
-// to Close failing to confirm drain — can shrink them instead of running
-// real multi-second timeouts.
+// CloseRollbackDrainTimeout, CloseDBWorkerPoolShutdownTimeout, and
+// CloseProcessBlocksDrainTimeout bound the corresponding waits in Close()
+// below. Exported (not local consts) so tests — including cross-package
+// node-level tests exercising how a caller reacts to Close failing to
+// confirm drain — can shrink them instead of running real multi-second
+// timeouts.
 var (
 	CloseRollbackDrainTimeout        = 10 * time.Second
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
+	CloseProcessBlocksDrainTimeout   = 10 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
@@ -1459,6 +1490,43 @@ func (ls *LedgerState) Close() error {
 	// returns.
 	if ls.Scheduler != nil {
 		ls.Scheduler.Stop()
+	}
+
+	// Stop the normal chainsync-driven block-processing pipeline next, for
+	// the identical reason as Scheduler.Stop above: ledgerProcessBlocks
+	// writes blocks to ls.chain/the database (via dbWorkerPool below), and
+	// Start launched it with its own child context specifically so this
+	// call can cancel it independently of ctx's own lifetime -- ctx is
+	// n.ctx, the node's long-lived context, which a live restore/truncate
+	// never cancels (see processBlocksCancel's doc comment on the struct).
+	// Bounded, like the rollback/dbWorkerPool waits below, so a genuinely
+	// stuck pipeline cannot hang Close forever -- but unlike those two
+	// before this fix, a timeout here must not be silently treated as
+	// success: a block landing mid-write exactly as dbWorkerPool shuts
+	// down below leaves the persisted block-ID index permanently
+	// inconsistent with the in-memory tip that already advanced for it,
+	// which is exactly the "persistent chain index gap" this whole
+	// function's Scheduler.Stop comment already describes for the
+	// dev-mode-forging case -- this is the same failure mode, just via the
+	// production chainsync path instead.
+	if ls.processBlocksCancel != nil {
+		ls.processBlocksCancel()
+		processBlocksDone := make(chan struct{})
+		go func() {
+			ls.processBlocksWG.Wait()
+			close(processBlocksDone)
+		}()
+		select {
+		case <-processBlocksDone:
+		case <-time.After(CloseProcessBlocksDrainTimeout):
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"timed out after %s waiting for block-processing pipeline to stop",
+					CloseProcessBlocksDrainTimeout,
+				),
+			)
+		}
 	}
 
 	// Unsubscribe from event bus to stop receiving new events. Use

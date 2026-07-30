@@ -289,26 +289,47 @@ func Truncate(
 		)
 	}
 
-	tip, err := db.GetTip(nil)
+	metadataTip, err := db.GetTip(nil)
 	if err != nil {
-		return 0, fmt.Errorf("%w: get tip: %w", ErrTruncateNotStarted, err)
+		return 0, fmt.Errorf("%w: get metadata tip: %w", ErrTruncateNotStarted, err)
 	}
-	tipBlock, err := database.BlockByPoint(db, tip.Point)
+	metadataTipBlock, err := database.BlockByPoint(db, metadataTip.Point)
 	if err != nil {
-		return 0, fmt.Errorf("%w: get tip block: %w", ErrTruncateNotStarted, err)
-	}
-	if target.ID == tipBlock.ID {
-		return 0, nil
-	}
-	if target.ID > tipBlock.ID {
 		return 0, fmt.Errorf(
-			"%w: target block (id=%d, slot=%d) is ahead of current tip (id=%d, slot=%d)",
+			"%w: get metadata tip block: %w",
+			ErrTruncateNotStarted,
+			err,
+		)
+	}
+	if target.ID > metadataTipBlock.ID {
+		return 0, fmt.Errorf(
+			"%w: target block (id=%d, slot=%d) is ahead of metadata tip (id=%d, slot=%d)",
 			ErrTruncateNotStarted,
 			target.ID,
 			target.Slot,
-			tipBlock.ID,
-			tip.Point.Slot,
+			metadataTipBlock.ID,
+			metadataTipBlock.Slot,
 		)
+	}
+
+	recentBlocks, err := database.BlocksRecent(db, 1)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%w: get indexed blob tip: %w",
+			ErrTruncateNotStarted,
+			err,
+		)
+	}
+	if len(recentBlocks) == 0 {
+		return 0, fmt.Errorf(
+			"%w: get indexed blob tip: %w",
+			ErrTruncateNotStarted,
+			models.ErrBlockNotFound,
+		)
+	}
+	tipBlock := recentBlocks[0]
+	if target.ID == tipBlock.ID {
+		return 0, nil
 	}
 
 	// Confirm target is genuinely the block occupying its ID on the

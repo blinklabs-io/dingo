@@ -37,8 +37,10 @@ import (
 )
 
 // databaseOperationTimeout allows for real Badger and SQLite file operations
-// running under the race detector alongside every other package in CI.
-const databaseOperationTimeout = 30 * time.Second
+// running under the race detector alongside every other package in CI. Linux
+// arm64 can spend more than 30 seconds restoring even this small fixture when
+// the full package matrix is contending for CPU and disk.
+const databaseOperationTimeout = 2 * time.Minute
 
 // newDiskTestDB builds a real on-disk database (badger + sqlite), unlike
 // blob_test.go's in-memory newTestDB: Snapshot/Restore need real files to

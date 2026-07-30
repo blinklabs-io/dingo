@@ -301,7 +301,19 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// PauseLeiosPersistWriterForLiveLifecycleOp's own doc comment for why
 	// that ordering matters, and this file's top doc comment for why
 	// n.ouroboros needs this one exception at all).
-	n.ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp()
+	//
+	// errStorageDrainUnconfirmed, not a bare join: an unconfirmed leios
+	// persist drain means that writer goroutine may still be running
+	// against the about-to-close database, exactly the same danger
+	// errStorageDrainUnconfirmed already makes Restore/Truncate fail
+	// closed on rather than attempt reinitializeAndResume.
+	if pauseErr := n.ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
+		err = errors.Join(
+			err,
+			errStorageDrainUnconfirmed,
+			fmt.Errorf("leios persist writer pause: %w", pauseErr),
+		)
+	}
 
 	return err
 }
@@ -1311,6 +1323,15 @@ func (n *Node) Restore(
 	// failure handling below.
 	if err := n.quiesceForLiveLifecycleOp(ctx); err != nil {
 		_ = os.RemoveAll(stagingDir)
+		if errors.Is(err, errStorageDrainUnconfirmed) {
+			// See errStorageDrainUnconfirmed's doc comment: reopening
+			// storage is not safe here either — reinitializeAndResume
+			// would reopen the same data directory a goroutine this
+			// quiesce step could not confirm had exited may still be
+			// using.
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf("quiesce: %w", err)
+		}
 		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, fmt.Errorf(
@@ -1445,19 +1466,22 @@ var errRestoreSwapUnrecoverable = errors.New(
 	"data directory swap left no usable data directory in place",
 )
 
-// errStorageDrainUnconfirmed marks a closeStorageForLiveLifecycleOp failure
-// where n.ledgerState.Close() could not confirm its background goroutines
-// (rollback event emission, dbWorkerPool workers) actually exited before
-// timing out — unlike every other error this function can return, this one
-// means a goroutine may still be reading/writing n.db, not merely that some
-// cleanup step reported failure after the resource was already unused.
-// Restore/Truncate must not treat this the way they treat every other
-// quiesce/close-storage error (attempt reinitializeAndResume against the
-// same on-disk data): reopening storage a still-running goroutine may be
-// touching is exactly the use-after-close race this whole path exists to
-// prevent, so this forces a supervised restart instead.
+// errStorageDrainUnconfirmed marks a quiesceForLiveLifecycleOp or
+// closeStorageForLiveLifecycleOp failure where a background goroutine could
+// not be confirmed to have exited before its bounded wait timed out —
+// currently either n.ledgerState.Close()'s rollback-event/dbWorkerPool
+// waits, or the leios persist writer's drain
+// (PauseLeiosPersistWriterForLiveLifecycleOp). Unlike every other error
+// these functions can return, this one means a goroutine may still be
+// reading/writing n.db, not merely that some cleanup step reported failure
+// after the resource was already unused. Restore/Truncate must not treat
+// this the way they treat every other quiesce/close-storage error (attempt
+// reinitializeAndResume against the same on-disk data): reopening storage a
+// still-running goroutine may be touching is exactly the use-after-close
+// race this whole path exists to prevent, so this forces a supervised
+// restart instead.
 var errStorageDrainUnconfirmed = errors.New(
-	"ledger state close could not confirm background goroutines drained",
+	"could not confirm a background goroutine's drain before timeout",
 )
 
 // preRestoreBackupSuffix and restoreStagingSuffix name the sibling
@@ -1694,6 +1718,15 @@ func (n *Node) Truncate(
 	// it there would strand the node running but silently unresponsive
 	// with no indication a restart is needed.
 	if err := n.quiesceForLiveLifecycleOp(ctx); err != nil {
+		if errors.Is(err, errStorageDrainUnconfirmed) {
+			// See errStorageDrainUnconfirmed's doc comment: reopening
+			// storage is not safe here either — reinitializeAndResume
+			// would reopen the same data directory a goroutine this
+			// quiesce step could not confirm had exited may still be
+			// using.
+			n.cancel()
+			return 0, fmt.Errorf("quiesce: %w", err)
+		}
 		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return 0, fmt.Errorf(

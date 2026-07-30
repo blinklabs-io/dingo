@@ -83,8 +83,9 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 	o.leiosPersistDone = make(chan struct{}) // deliberately never closed
 
 	returned := make(chan struct{})
+	var drained bool
 	go func() {
-		o.stopLeiosPersistWriter(50 * time.Millisecond)
+		drained = o.stopLeiosPersistWriter(50 * time.Millisecond)
 		close(returned)
 	}()
 
@@ -93,6 +94,7 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stopLeiosPersistWriter hung past the bounded drain timeout")
 	}
+	require.False(t, drained, "drain must be reported unconfirmed on timeout")
 
 	// The stop channel must still be closed so the writer goroutine can observe
 	// the stop and exit once the blob store unblocks.
@@ -158,7 +160,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(t *tes
 	// Pause immediately -- this must drain the just-queued job against
 	// oldDB before returning, exactly like a live Restore/Truncate's
 	// quiesce step pausing right before the database closes.
-	o.PauseLeiosPersistWriterForLiveLifecycleOp()
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
 
 	_, manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash)
 	require.NoError(t, err)
@@ -186,4 +188,56 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(t *tes
 	// And it must not have leaked into the old database.
 	_, _, err = oldDB.GetLeiosEBManifest(point2.Hash)
 	require.Error(t, err)
+}
+
+// TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain guards
+// the use-after-close/stolen-job race a timed-out pause used to leave open:
+// if the writer's drain cannot be confirmed, PauseLeiosPersistWriterForLive
+// LifecycleOp must return ErrLeiosPersistDrainUnconfirmed and leave
+// leiosPersistOnce/leiosPersistStopOnce/leiosPersistStarted untouched --
+// resetting them here, with the old writer goroutine still potentially
+// running drainLeiosPersist against the old database, would let the very
+// next enqueue start a second writer against a freshly reset pending map
+// while the old one is still reading and deleting from that same map
+// (now repointed) under the shared mutex.
+func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(t *testing.T) {
+	origTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = origTimeout })
+
+	o := newTestOuroborosWithLeiosDB(t)
+	// Simulate an already-started writer whose drain never completes, with
+	// no real goroutine involved (mirroring TestLeiosPersistStopDrainTimesOut)
+	// so there's nothing else touching these fields concurrently.
+	o.leiosPersistStarted.Store(true)
+	o.leiosPersistStop = make(chan struct{})
+	o.leiosPersistDone = make(chan struct{}) // deliberately never closed
+	o.leiosPersistPending = map[string]*leiosPersistJob{"stuck": {slot: 1}}
+	// Mark leiosPersistOnce as already used, matching a real prior start.
+	o.leiosPersistOnce.Do(func() {})
+
+	pauseErr := o.PauseLeiosPersistWriterForLiveLifecycleOp()
+	require.ErrorIs(t, pauseErr, ErrLeiosPersistDrainUnconfirmed)
+	require.True(
+		t, o.leiosPersistStarted.Load(),
+		"started flag must not be reset on unconfirmed drain",
+	)
+
+	// The real regression: a later enqueue must not start a second writer
+	// against a freshly reset pending map. leiosPersistStop is still
+	// closed (stopLeiosPersistWriter always closes it) and leiosPersistOnce
+	// was not reset, so this enqueue is correctly rejected rather than
+	// replacing the still-referenced pending map out from under whatever
+	// (real, in production) writer might still be draining it.
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 31, 1)
+	o.enqueueLeiosPersist(point, blockRaw, nil)
+	// A fresh map from a second startLeiosPersistWriter call would be
+	// empty (make(map[string]*leiosPersistJob)); the sentinel "stuck"
+	// entry surviving proves leiosPersistPending was never replaced.
+	_, stillPresent := o.leiosPersistPending["stuck"]
+	require.True(
+		t, stillPresent,
+		"a second writer must not start against a fresh pending map "+
+			"while the old drain is unconfirmed",
+	)
 }

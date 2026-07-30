@@ -249,6 +249,74 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	require.Zero(t, blocksRemoved)
 }
 
+// TestTruncateRemovesBlobTailAheadOfMetadataTip reproduces the live truncate
+// state where blockfetch has persisted blocks beyond the last block applied to
+// ledger metadata. The operator target can equal the metadata tip while the
+// indexed blob chain still has a speculative tail; that tail must be removed
+// rather than treating the truncate as a no-op.
+func TestTruncateRemovesBlobTailAheadOfMetadataTip(t *testing.T) {
+	f := buildTestChain(t, 5)
+	target := f.blocks[2]
+	require.NoError(t, f.db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: target.Slot,
+			Hash: target.Hash,
+		},
+		BlockNumber: target.Number,
+	}, nil))
+
+	blocksRemoved, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		target,
+		0,
+		false,
+		0,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), blocksRemoved)
+
+	for _, block := range f.blocks[:3] {
+		_, err := f.db.BlockByIndex(block.ID, nil)
+		require.NoError(t, err)
+	}
+	for _, block := range f.blocks[3:] {
+		_, err := f.db.BlockByIndex(block.ID, nil)
+		require.ErrorIs(t, err, models.ErrBlockNotFound)
+	}
+	tip, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, target.Slot, tip.Point.Slot)
+	require.Equal(t, target.Hash, tip.Point.Hash)
+}
+
+func TestTruncateRejectsTargetInUnappliedBlobTail(t *testing.T) {
+	f := buildTestChain(t, 5)
+	metadataTarget := f.blocks[2]
+	require.NoError(t, f.db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: metadataTarget.Slot,
+			Hash: metadataTarget.Hash,
+		},
+		BlockNumber: metadataTarget.Number,
+	}, nil))
+
+	_, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		f.blocks[3],
+		0,
+		false,
+		0,
+	)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+
+	for _, block := range f.blocks {
+		_, err := f.db.BlockByIndex(block.ID, nil)
+		require.NoError(t, err)
+	}
+}
+
 // TestTruncateRejectsTargetAheadOfTip verifies that a target block ahead
 // of the current tip is rejected with an error.
 func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
