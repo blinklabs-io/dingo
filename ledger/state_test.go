@@ -159,6 +159,61 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 3
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		<-start
+		for i := range 100 {
+			ls.Lock()
+			if i%2 == 0 {
+				ls.currentEra = eras.BabbageEraDesc
+			} else {
+				ls.currentEra = eras.ConwayEraDesc
+			}
+			ls.Unlock()
+		}
+		close(done)
+	})
+
+	for range 8 {
+		wg.Go(func() {
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					_ = ls.SecurityParam()
+				}
+			}
+		})
+	}
+
+	close(start)
+	wg.Wait()
+}
+
 func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
 	const securityParam uint64 = 37
 	cfg := newTestShelleyGenesisCfg(t)

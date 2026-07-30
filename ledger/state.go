@@ -2677,9 +2677,14 @@ func (ls *LedgerState) securityParamForEra(eraId uint) (uint64, bool) {
 	return uint64(k), true
 }
 
-// SecurityParam returns the security parameter for the current era
+// SecurityParam returns the security parameter for the current era. It
+// takes a brief read lock around ls.currentEra, which ledgerProcessBlocks
+// mutates under the write lock during epoch rollover/era transitions —
+// reading it unlocked here raced with those writes (caught by -race in
+// TestLiveTruncateUnderRealForgingAndNetworking, which runs real forging
+// concurrently with the stall recycler's periodic SecurityParam() calls).
 func (ls *LedgerState) SecurityParam() int {
-	return ls.securityParamForEraOrDefault(ls.currentEra.Id)
+	return ls.securityParamForCurrentEraSnapshot()
 }
 
 func (ls *LedgerState) securityParamForEraOrDefault(eraId uint) int {
