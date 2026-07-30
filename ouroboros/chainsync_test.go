@@ -39,11 +39,13 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/require"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
@@ -69,6 +71,54 @@ func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
 		10*time.Minute,
 		effectiveChainsyncBlockTimeout(10*time.Minute),
 	)
+}
+
+func TestChainsyncByronEbbHeaderRoundTrip(t *testing.T) {
+	ebbCbor := byronEbbFixtureCbor(t)
+
+	msg, err := ochainsync.NewMsgRollForwardNtN(
+		gledger.BlockHeaderTypeByron,
+		gledger.BlockTypeByronEbb,
+		ebbCbor,
+		ochainsync.Tip{},
+	)
+	require.NoError(t, err)
+	wire, err := gcbor.Encode(msg)
+	require.NoError(t, err)
+	var received ochainsync.MsgRollForwardNtN
+	_, err = gcbor.Decode(wire, &received)
+	require.NoError(t, err)
+	_, err = gledger.NewBlockHeaderFromCbor(
+		received.WrappedHeader.ByronType(),
+		received.WrappedHeader.HeaderCbor(),
+	)
+	require.NoError(t, err)
+}
+
+func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
+	ebbCbor := byronEbbFixtureCbor(t)
+	expected, err := gledger.NewBlockFromCbor(gledger.BlockTypeByronEbb, ebbCbor)
+	require.NoError(t, err)
+
+	o := NewOuroboros(OuroborosConfig{})
+	header, err := o.decodeChainsyncHeader(gledger.BlockTypeByronEbb, ebbCbor)
+	require.NoError(t, err)
+	require.Equal(t, expected.Header().Hash(), header.Hash())
+}
+
+func byronEbbFixtureCbor(t *testing.T) []byte {
+	t.Helper()
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	require.NoError(t, err)
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Block_Byron_EBB",
+	)
+	require.NoError(t, err)
+	data, err := fixture.ConsensusLedgerBlockBytes()
+	require.NoError(t, err)
+	return data
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
