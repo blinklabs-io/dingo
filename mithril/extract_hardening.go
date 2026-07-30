@@ -17,7 +17,6 @@ package mithril
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 )
@@ -123,29 +122,6 @@ func dirIsEmpty(dir string) (bool, error) {
 		if os.IsNotExist(err) {
 			return true, nil
 		}
-		return false, err
-	}
-	return len(entries) == 0, nil
-}
-
-// rootEntryIsEmptyDir reports whether name under root is absent or an empty
-// directory, read through the handle so the answer describes the same entry
-// the caller acted on.
-//
-// This classifies a failed rename; it is never used to decide whether
-// removing something is safe, because that decision cannot be separated from
-// the removal without a race.
-func rootEntryIsEmptyDir(root *os.Root, name string) (bool, error) {
-	dir, err := root.Open(name)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
-		}
-		return false, err
-	}
-	defer dir.Close()
-	entries, err := dir.ReadDir(1)
-	if err != nil && !errors.Is(err, io.EOF) {
 		return false, err
 	}
 	return len(entries) == 0, nil
@@ -276,23 +252,32 @@ func prepareExtractDestination(
 				)
 			}
 		}
-		// Without an explicit replacement request nothing is deleted at all.
-		// Checking that the destination is empty and then removing it can
-		// never be made safe, however narrow the gap: a writer populating it
-		// in between loses their content. Renaming onto the destination
-		// instead lets the kernel decide atomically — it refuses when
-		// anything occupies the name, and succeeds when the destination is
-		// absent or an empty directory, so no content can be destroyed by
-		// this path.
-		if err := parentRoot.Rename(stagingName, destName); err != nil {
-			if !cfg.replace {
-				occupied, checkErr := rootEntryIsEmptyDir(parentRoot, destName)
-				if checkErr == nil && !occupied {
-					return fmt.Errorf(
-						"%w: %s", ErrExtractDestinationNotEmpty, cleanDest,
-					)
-				}
+		// Without an explicit replacement request nothing is deleted at all,
+		// and anything occupying the destination means this extraction does
+		// not own the name.
+		//
+		// Checking and then removing can never be made safe however narrow
+		// the gap, because a writer populating the destination in between
+		// loses their content. Checking and then refusing has no such
+		// failure: the worst a stale answer can cost is a refusal, never
+		// data. Whether the occupant is empty is not asked, because the
+		// answer would only justify a removal.
+		if !cfg.replace {
+			if _, err := parentRoot.Lstat(destName); err == nil {
+				return fmt.Errorf(
+					"%w: %s already exists",
+					ErrExtractDestinationNotEmpty, cleanDest,
+				)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf(
+					"inspecting extraction destination: %w", err,
+				)
 			}
+		}
+		// The rename is the backstop the check cannot be: platforms differ on
+		// whether one may replace an existing directory, so relying on it
+		// alone would make the refusal above platform-dependent.
+		if err := parentRoot.Rename(stagingName, destName); err != nil {
 			return fmt.Errorf("publishing extraction: %w", err)
 		}
 		return nil

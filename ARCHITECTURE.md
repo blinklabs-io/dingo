@@ -2501,14 +2501,16 @@ Destinations come in two shapes, selected by the caller:
   resolves through that handle, so a parent replaced at any point cannot
   redirect it.
 
-  Without `WithReplaceDestination` nothing is deleted at all. Checking that a
-  destination is empty and then removing it cannot be made safe however narrow
-  the gap, because a writer populating it in between loses their content.
-  Publication instead renames onto the destination and lets the kernel decide
-  atomically: it refuses when anything occupies the name, and succeeds when the
-  destination is absent or an empty directory. `WithReplaceDestination` is the
-  only path that removes an existing destination, which is what that option
-  exists to authorise.
+  Without `WithReplaceDestination` nothing is deleted at all, and a destination
+  that already exists is refused. Checking that a destination is empty and then
+  removing it cannot be made safe however narrow the gap, because a writer
+  populating it in between loses their content; checking and then refusing has
+  no such failure, since the worst a stale answer costs is a refusal rather
+  than data. Whether an occupant is empty is deliberately not consulted — the
+  answer would only justify a removal — which also keeps the behaviour uniform
+  across platforms that differ on whether a rename may replace an existing
+  directory. `WithReplaceDestination` is the only path that removes an
+  existing destination, which is what that option exists to authorise.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
   into it directly and accumulates. Staging is unavailable here, and the

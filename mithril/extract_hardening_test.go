@@ -451,11 +451,14 @@ func TestExtractPublishRefusesConcurrentDestinationContent(t *testing.T) {
 	assert.Equal(t, "keep", string(data))
 }
 
-// TestExtractPublishAcceptsEmptyDestination pins that refusing to delete does
-// not cost the legitimate case: an empty directory already sitting at the
-// destination is still published into, because renaming onto it destroys
-// nothing.
-func TestExtractPublishAcceptsEmptyDestination(t *testing.T) {
+// TestExtractPublishRefusesExistingDestination covers a destination that
+// already exists when publication runs, even an empty one.
+//
+// Emptiness is deliberately not consulted. Knowing the occupant is empty
+// would only ever justify removing it, and that removal is the race this
+// mode exists to avoid; refusing instead is uniform across platforms, which
+// differ on whether a rename may replace an existing directory.
+func TestExtractPublishRefusesExistingDestination(t *testing.T) {
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -469,11 +472,12 @@ func TestExtractPublishAcceptsEmptyDestination(t *testing.T) {
 	t.Cleanup(cleanup)
 	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
 
-	require.NoError(t, publish())
+	require.ErrorIs(t, publish(), ErrExtractDestinationNotEmpty)
 
-	data, err := os.ReadFile(filepath.Join(destDir, "chunk"))
+	// The pre-existing directory is left exactly as it was found.
+	entries, err := os.ReadDir(destDir)
 	require.NoError(t, err)
-	assert.Equal(t, "data", string(data))
+	assert.Empty(t, entries)
 }
 
 // TestExtractPublishReplacesConcurrentDestinationContent is the counterpart:
