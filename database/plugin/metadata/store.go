@@ -918,6 +918,55 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
+	// GetAccountWithdrawalHistoryByCredential retrieves withdrawal history
+	// rows for a stake credential tag/hash pair.
+	GetAccountWithdrawalHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountWithdrawalHistoryRow, error)
+
+	// CountAccountWithdrawalHistoryByCredential retrieves the total count of
+	// withdrawal history rows for a stake credential tag/hash pair.
+	CountAccountWithdrawalHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// GetAddressTransactionsByCredential retrieves one page of (payment
+	// address, transaction) association rows for a stake credential
+	// tag/hash pair, ordered by (slot, tx_index, payment_key) and
+	// optionally bounded by an inclusive from/to (slot, tx_index) range
+	// (nil = unconstrained on that side). This is the direct SQL page: no
+	// caller-side fan-out or filtering is needed, so cost is bounded by
+	// limit/offset rather than by the credential's full transaction
+	// history.
+	GetAddressTransactionsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		*models.AddressTransactionPosition, // from
+		*models.AddressTransactionPosition, // to
+		types.Txn,
+	) ([]models.AccountTransactionAssociationRow, error)
+
+	// CountAddressTransactionsByCredential retrieves the total count of
+	// (payment address, transaction) association rows for a stake
+	// credential tag/hash pair within the same optional from/to range.
+	CountAddressTransactionsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		*models.AddressTransactionPosition, // from
+		*models.AddressTransactionPosition, // to
+		types.Txn,
+	) (int, error)
+
 	// GetAccountSumsByCredential retrieves the aggregated withdrawal, reserves,
 	// and treasury lovelace totals for a stake credential tag/hash pair.
 	GetAccountSumsByCredential(
@@ -1188,6 +1237,24 @@ type MetadataStore interface {
 	// GetControlledAmountByCredential returns the sum of live UTxO
 	// amounts controlled by the given stake credential.
 	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
+
+	// GetUtxoPaymentScriptByCredential returns, for the given bounded set
+	// of payment-key hashes previously observed under a stake credential,
+	// whether each payment credential is a script hash (true) or a key
+	// hash (false). Used by the Blockfrost account transactions endpoint
+	// to reconstruct the exact address type for one page of (payment
+	// address, transaction) rows without decoding UTxO CBOR or scanning
+	// the credential's full history: paymentKeys is expected to be the
+	// small (<= page size) distinct set drawn from an already-paginated
+	// GetAddressTransactionsByCredential page. A payment key with no
+	// matching UTxO row is omitted from the result; callers should
+	// default to key-hash for any omitted key.
+	GetUtxoPaymentScriptByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		[][]byte, // paymentKeys
+		types.Txn,
+	) (map[string]bool, error)
 
 	// GetMidnightCandidates retrieves live committee-candidate UTxOs with
 	// inline datum bytes from metadata rows, without materializing block CBOR.

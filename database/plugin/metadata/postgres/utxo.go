@@ -17,6 +17,7 @@
 package postgres
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -184,6 +185,51 @@ func (d *MetadataStorePostgres) GetControlledAmountByCredential(
 		)
 	}
 	return total, nil
+}
+
+// GetUtxoPaymentScriptByCredential returns, for the given bounded set of
+// payment-key hashes previously observed under a stake credential, whether
+// each payment credential is a script hash. See the interface doc comment
+// in store.go for the full contract.
+func (d *MetadataStorePostgres) GetUtxoPaymentScriptByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	paymentKeys [][]byte,
+	txn types.Txn,
+) (map[string]bool, error) {
+	ret := make(map[string]bool, len(paymentKeys))
+	if len(stakingKey) == 0 || len(paymentKeys) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for payment script by stake credential: %w",
+			err,
+		)
+	}
+	var rows []struct {
+		PaymentKey    []byte
+		PaymentScript bool
+	}
+	if err := db.Model(&models.Utxo{}).
+		Select("DISTINCT payment_key, payment_script").
+		Where(
+			"credential_tag = ? AND staking_key = ? AND payment_key IN ?",
+			credentialTag,
+			stakingKey,
+			paymentKeys,
+		).
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf(
+			"get payment script by stake credential: %w",
+			err,
+		)
+	}
+	for _, row := range rows {
+		ret[hex.EncodeToString(row.PaymentKey)] = row.PaymentScript
+	}
+	return ret, nil
 }
 
 // GetScriptLockedSupply returns the sum of lovelace held in live UTxOs

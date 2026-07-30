@@ -568,6 +568,35 @@ func (d *Database) GetControlledAmountByCredential(
 	return total, nil
 }
 
+// GetUtxoPaymentScriptByCredential returns, for the given bounded set of
+// payment-key hashes previously observed under a stake credential, whether
+// each payment credential is a script hash. See the metadata store
+// interface doc comment for the full contract.
+func (d *Database) GetUtxoPaymentScriptByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	paymentKeys [][]byte,
+	txn *Txn,
+) (map[string]bool, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	ret, err := d.metadata.GetUtxoPaymentScriptByCredential(
+		credentialTag,
+		stakingKey,
+		paymentKeys,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get payment script by stake credential: %w",
+			err,
+		)
+	}
+	return ret, nil
+}
+
 func (d *Database) UtxosByAddressWithOrdering(
 	q *models.UtxoWithOrderingQuery,
 	txn *Txn,

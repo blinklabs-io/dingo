@@ -534,6 +534,19 @@ func (d *MetadataStoreMysql) Start() error {
 			"reward account output credential index migration failed: %w", err,
 		)
 	}
+	// Drop the now-redundant address_transaction credential/staking index
+	// only now that AutoMigrate (above) has created its
+	// idx_addr_tx_stake_position replacement: this must run after
+	// AutoMigrate, not before, or a crash between the two steps would leave
+	// the table with neither index.
+	if err := models.MigrateAddressTransactionStakePositionIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"address_transaction stake position index migration failed: %w",
+			err,
+		)
+	}
 	if backfillAccountCreatedSlot {
 		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
 			return fmt.Errorf(

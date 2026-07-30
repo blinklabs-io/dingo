@@ -2395,12 +2395,49 @@ epochs/parameters, network/eras, genesis, assets, pools/extended, retiring
 pools, pool detail, pool metadata, governance DRep list and lookup, address
 summary, address UTxOs and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
-signers, and account/delegation/registration/reward endpoints. It uses an
-adapter pattern to translate between Dingo's internal state and Blockfrost
-response types and supports Blockfrost-style pagination headers. The root
-document is served only at the literal `/` path (`GET /{$}`); any other
-unregistered path falls through to a catch-all `404` handler instead of the
-root document, matching real Blockfrost's behavior for unimplemented routes.
+signers, and account/delegation/registration/reward/UTxOs/withdrawals/
+transactions endpoints. It uses an adapter pattern to translate between
+Dingo's internal state and Blockfrost response types and supports
+Blockfrost-style pagination headers. The root document is served only at the
+literal `/` path (`GET /{$}`); any other unregistered path falls through to a
+catch-all `404` handler instead of the root document, matching real
+Blockfrost's behavior for unimplemented routes.
+
+The account UTxOs, withdrawals, and transactions endpoints resolve everything
+by stake credential rather than a single address. Account UTxOs reuse the
+UTxO address-pattern query with a delegation-part-only pattern (matching
+every payment address sharing the stake credential) and recover each row's
+exact payment address from decoded output CBOR, the same CBOR-derived
+datum/reference-script recovery `/addresses/{address}/utxos` uses; like
+`/addresses/{address}/utxos`, pagination happens after fetching the
+credential's full live-UTxO set (there is no SQL `LIMIT`), which is an
+existing, accepted characteristic of that query shape rather than something
+introduced for this endpoint. Account withdrawals read the rollback-aware
+`account_reward_delta` withdrawal journal joined to its transaction, with
+`LIMIT`/`OFFSET` applied in SQL.
+
+Account transactions is bounded by the requested page size, not by the
+credential's full transaction history: `address_transaction` already carries
+one row per (payment address, transaction) association with its own
+`slot`/`tx_index` columns (populated by the same indexing step that fans a
+transaction's inputs/collateral/reference-inputs/outputs/collateral-return
+out into that table), so the query pages directly against it with SQL
+`ORDER BY`/`LIMIT`/`OFFSET` and an inclusive `(slot, tx_index)` range
+predicate for `from`/`to` — no application-level fan-out or filtering
+happens after the query returns. A block number in `from`/`to` is resolved
+to its slot via two bounded index lookups (`Database.BlockByIndex`,
+`Database.BlockAtOrAfterIndex`) rather than a scan: an unresolvable `from`
+(beyond every known block) makes the range unsatisfiable and short-circuits
+to an empty result; an unresolvable `to` degrades to unconstrained on that
+side rather than guessing at a boundary that cannot be looked up backward.
+The payment-credential script/key bit needed to reconstruct each row's
+exact address, and the block height/time needed for its response fields,
+are then resolved only for the page's own (<= page size) distinct payment
+keys and blocks — `MetadataStore.GetUtxoPaymentScriptByCredential` looks up
+the small bounded set of payment keys against the `utxo` table's persisted
+`payment_script` column, avoiding both a full-history scan and a CBOR
+decode, and correctly distinguishing key-hash from script-hash payment
+credentials (`AccountAssociatedAddresses` elsewhere assumes key-hash only).
 
 Address summaries run balance, asset, CBOR, and existence reads through one
 coordinated read transaction. Pointer addresses require an exact decoded-output

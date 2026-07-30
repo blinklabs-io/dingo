@@ -232,6 +232,18 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/accounts/{stake_address}/rewards",
 		b.handleAccountRewardHistory,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/utxos",
+		b.handleAccountUTXOs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/withdrawals",
+		b.handleAccountWithdrawals,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/transactions",
+		b.handleAccountTransactions,
+	)
 
 	// Catch-all for any path not matched above. Registered
 	// last so more specific patterns still take precedence;

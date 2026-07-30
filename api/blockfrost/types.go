@@ -623,3 +623,39 @@ type AccountRewardHistoryResponse struct {
 	// Blockfrost account_reward_content schema.
 	Type string `json:"type"`
 }
+
+// AccountUTXOResponse represents a Blockfrost stake-account
+// UTxO object.
+type AccountUTXOResponse struct {
+	Address string `json:"address"`
+	TxHash  string `json:"tx_hash"`
+	// TxIndex is a deprecated Blockfrost alias for OutputIndex ("UTXO index
+	// in the transaction"), kept for schema compatibility.
+	TxIndex             int                     `json:"tx_index"`
+	OutputIndex         int                     `json:"output_index"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	Block               string                  `json:"block"`
+	DataHash            *string                 `json:"data_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	ReferenceScriptHash *string                 `json:"reference_script_hash"`
+}
+
+// AccountWithdrawalResponse represents a stake-account
+// withdrawal history row.
+type AccountWithdrawalResponse struct {
+	TxHash      string `json:"tx_hash"`
+	Amount      string `json:"amount"`
+	TxSlot      int64  `json:"tx_slot"`
+	BlockTime   int64  `json:"block_time"`
+	BlockHeight int64  `json:"block_height"`
+}
+
+// AccountTransactionResponse represents a stake-account
+// transaction object.
+type AccountTransactionResponse struct {
+	Address     string `json:"address"`
+	TxHash      string `json:"tx_hash"`
+	TxIndex     int    `json:"tx_index"`
+	BlockHeight uint64 `json:"block_height"`
+	BlockTime   int    `json:"block_time"`
+}

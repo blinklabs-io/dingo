@@ -220,7 +220,7 @@ added for retired pools. This uses the `metadata.MetadataStore` methods
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
-| `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `(credential_tag, staking_key)`, `transaction_id`, `slot` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. |
+| `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key` (`idx_addr_tx_payment`), `transaction_id`, `slot`; composite `idx_addr_tx_stake_position` (`credential_tag`, `staking_key`, `slot`, `tx_index`, `payment_key`) | API-mode address-to-transaction index: one row per (payment address, transaction) pair. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. `idx_addr_tx_stake_position` backs `GetAddressTransactionsByCredential` (below): its leading `(credential_tag, staking_key)` columns serve every equality lookup the older `idx_addr_tx_staking` index did (`GetAddressesByCredential`, `GetTransactionsByAddress`'s credential-tag branch), and the trailing `(slot, tx_index, payment_key)` columns additionally let a credential-scoped, paginated, ordered range query run as a single index seek instead of sorting the credential's entire history in a temp B-tree. `MigrateAddressTransactionStakePositionIndex` drops the now-redundant `idx_addr_tx_staking` on upgrade, since it is a strict prefix of the new index and every one of its callers is served identically by the new one; it runs only after `AutoMigrate` has created `idx_addr_tx_stake_position` (all three plugins call it after their `AutoMigrate` pass) and additionally verifies the replacement index exists before dropping the legacy one, so a database can never be left with neither index, even if a process were to crash between the two steps or a caller invoked it out of order. `slot`'s standalone single-column index is kept separately because `DeleteAddressTransactionsAfterSlot`'s rollback cleanup (`WHERE slot > ?`, no credential filter) cannot use the composite index. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. |
@@ -1001,6 +1001,22 @@ WHERE credential_tag = $1
   AND deleted_slot = 0;
 ```
 
+Payment credential type (key hash vs script hash) for a bounded set of
+payment keys under a stake credential (`GetUtxoPaymentScriptByCredential`).
+Used by the Blockfrost account transactions endpoint to reconstruct the
+exact address for one page of results without a full-history scan or CBOR
+decode: `paymentKeys` is the small (`<=` page size) distinct set drawn from
+an already-paginated `GetAddressTransactionsByCredential` page, not the
+credential's full history.
+
+```sql
+SELECT DISTINCT payment_key, payment_script
+FROM utxo
+WHERE credential_tag = $1
+  AND staking_key = decode($2, 'hex')
+  AND payment_key IN (decode($3, 'hex'), decode($4, 'hex'), ...);
+```
+
 ### `GetScriptLockedSupply`
 
 Network script-locked supply (sum of lovelace in live UTxOs whose payment
@@ -1666,6 +1682,124 @@ index already exists first.
 `database/models` pins that upgrade path against a populated database: rows
 of both spendable states survive, the superseded index is gone afterward, and
 the replacement is in place throughout.
+
+### `GetAccountWithdrawalHistory`
+
+Backs the Blockfrost `/accounts/{stake_address}/withdrawals` endpoint. Unlike
+`GetAccountSumsByCredential`'s `withdrawals_sum` (a single aggregate), this
+returns one row per withdrawal, joining the rollback-aware
+`account_reward_delta` withdrawal rows against the transaction that made each
+withdrawal to recover its slot, block-internal position, and block hash;
+`transaction.hash` is unique, so the join never fans a withdrawal row into
+duplicates. As with the delegation/registration history queries, the
+Blockfrost adapter resolves `block_height` from the block store by hash
+(block numbers are not in the metadata SQL schema) and derives `block_time`
+from the slot.
+
+```sql
+SELECT ard.tx_hash, ard.amount, tx.slot AS tx_slot,
+       tx.block_index AS block_index, tx.block_hash AS block_hash
+FROM account_reward_delta ard
+JOIN "transaction" tx ON tx.hash = ard.tx_hash
+WHERE ard.withdrawal = true
+  AND ard.credential_tag = $1
+  AND ard.staking_key = decode($2, 'hex')
+ORDER BY tx_slot ASC, block_index ASC, tx_hash ASC
+LIMIT 50;
+```
+
+### `GetAddressTransactionsByCredential`
+
+Backs the Blockfrost `/accounts/{stake_address}/transactions` endpoint.
+`address_transaction` already carries one row per (payment address,
+transaction) association for a stake credential — populated at indexing
+time from a transaction's inputs, collateral inputs, reference inputs,
+outputs, and collateral return, deduplicated per transaction (see
+`GetAddressesByCredential` above for the equivalent distinct-address
+projection) — with its own `slot`/`tx_index` columns. Unlike every other
+credential-keyed history query on this page, this one needs no
+application-level fan-out, filtering, or re-derivation after it returns:
+the SQL `ORDER BY`/`LIMIT`/`OFFSET` and the optional inclusive `(slot,
+tx_index)` range predicate (the resolved form of the endpoint's `from`/`to`
+block-number filter) are the final word.
+
+```sql
+SELECT at.payment_key, tx.hash AS tx_hash, at.slot AS tx_slot,
+       at.tx_index, tx.block_hash AS block_hash
+FROM address_transaction at
+JOIN "transaction" tx ON tx.id = at.transaction_id
+WHERE at.credential_tag = $1
+  AND at.staking_key = decode($2, 'hex')
+  AND (at.slot, at.tx_index) >= ($3, $4)  -- from, optional; postgres/sqlite form, see below
+  AND (at.slot, at.tx_index) <= ($5, $6)  -- to, optional; postgres/sqlite form, see below
+ORDER BY at.slot ASC, at.tx_index ASC, at.payment_key ASC
+LIMIT 50;
+```
+
+The `from`/`to` bound has two logically equivalent forms — the row-value
+comparison shown above, and the expanded `slot > $3 OR (slot = $3 AND
+tx_index >= $4)` form — and which one folds into an index range scan
+against `idx_addr_tx_stake_position` (see the `address_transaction` table
+entry above) turned out to be backend-dependent, not universal. This was
+verified empirically, not assumed: scratch sqlite/postgres/mysql databases
+were seeded with a matching composite index and `EXPLAIN` was run for both
+forms against each backend (dingo PR #3016 review).
+
+* sqlite and postgres fold the row-value form directly into the index
+  range scan over all four bound columns (postgres `EXPLAIN ANALYZE`
+  showed the full `(slot, tx_index)` bound inside `Index Cond` with no
+  residual `Filter`; sqlite's `EXPLAIN QUERY PLAN` shows the same — see
+  `database/plugin/metadata/internal/accounthistory/transactions_test.go`).
+  The expanded OR form does not get folded on either: it still uses the
+  index for the `credential_tag`/`staking_key` equality but degrades the
+  `slot`/`tx_index` bound to a row-by-row filter after that point.
+* mysql does the opposite: `EXPLAIN` on a MySQL 8 container showed the
+  row-value form using only the index's two leading equality columns
+  (`ref` access type, `used_key_parts: [credential_tag, staking_key]`) and
+  applying the `(slot, tx_index)` bound as a residual filter — `EXPLAIN
+  ANALYZE` confirmed this costs work proportional to the row's offset
+  into the credential's full history, not to the page, exactly the
+  regression this query exists to avoid. This matches a known MySQL
+  optimizer limitation for row constructor inequalities (MySQL Bug
+  #104128, #111952 — Verified/S2, both still open as of 2026-07; MySQL's
+  own documentation recommends the expanded form for this reason). The
+  expanded OR form restored a genuine `range` access type using all four
+  index columns there.
+
+`sqldialect.TwoColumnRangeCondition` (used by
+`addressTransactionRangeQuery` in
+`database/plugin/metadata/internal/accounthistory/transactions.go`) picks
+the row-value form for sqlite/postgres and the expanded OR form for mysql
+accordingly, so each backend gets the form proven correct for it rather
+than one claim asserted for all three. `sqldialect`'s own test
+(`TestTwoColumnRangeConditionDialects`) and the accounthistory package's
+`TestAddressTransactionRangeQueryPerDialectForm` pin the chosen form per
+dialect; the sqlite-only `EXPLAIN QUERY PLAN` regression tests
+(`TestQueryAddressTransactionsByCredentialUsesStakePositionIndexAsc`/`Desc`/
+`RangeIsIndexSeek`) additionally verify the real query plan on sqlite.
+
+On sqlite (and postgres, by the same evidence above), the `ORDER BY` is
+also satisfied entirely by `idx_addr_tx_stake_position` in both directions
+(sqlite walks a B-tree index backwards for `DESC` without a temp B-tree),
+so together with `LIMIT`/`OFFSET` this query costs work proportional to
+the requested page, not to the credential's full transaction history, on
+those two backends — see
+`database/plugin/metadata/internal/accounthistory/transactions_test.go`
+for the `EXPLAIN QUERY PLAN` regression coverage (asc, desc, and a
+from/to range case), following the pattern established in
+`sqlite/utxo_test.go`, `sqlite/drep_test.go`, and
+`internal/rewardstate/livestake_test.go`. On mysql, the expanded OR form
+restores the same page-proportional cost for the `from`/`to` bound itself
+(confirmed via `EXPLAIN ANALYZE` above); mysql's handling of the `ORDER
+BY`/`LIMIT` combination against this index was not separately verified
+here and is not claimed either way.
+
+The Blockfrost adapter resolves each `from`/`to` block number to a slot via
+two bounded block-store index lookups (`Database.BlockByIndex`,
+`Database.BlockAtOrAfterIndex`) before this query runs, and resolves
+`block_height`/`block_time` and the payment-credential script/key bit
+(`GetUtxoPaymentScriptByCredential` above) only for the returned page's own
+blocks and payment keys.
 
 ### `GetAccountSumsByCredential`
 

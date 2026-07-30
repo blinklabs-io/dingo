@@ -101,3 +101,62 @@ func ArithmeticParam(db *gorm.DB) string {
 	}
 	return "?"
 }
+
+// TwoColumnRangeCondition returns the SQL fragment (with "?" placeholders)
+// and its ordered bind args for an inclusive two-column range bound against
+// (col1, col2), in whichever of the two logically equivalent forms actually
+// folds into a composite-index range scan for db's backend dialect. op must
+// be ">=" (an inclusive lower/"from" bound) or "<=" (an inclusive
+// upper/"to" bound).
+//
+// This was verified empirically, not assumed: scratch sqlite/postgres/mysql
+// databases were seeded with a real composite index and EXPLAIN was run for
+// both forms during the dingo PR #3016 review (see
+// database/plugin/metadata/internal/accounthistory/transactions_test.go and
+// DATABASE.md's GetAddressTransactionsByCredential entry for the recorded
+// plans).
+//
+//   - sqlite and postgres fold the row-value form, "(col1, col2) >= (v1,
+//     v2)", directly into an index range scan over both bound columns
+//     (confirmed via EXPLAIN QUERY PLAN on sqlite and EXPLAIN ANALYZE on
+//     postgres: both show the full two-column bound inside the index
+//     condition, not a post-scan filter).
+//   - mysql's optimizer does not perform that translation for row
+//     constructor inequalities (MySQL Bug #104128, #111952 - Verified/S2,
+//     both still open as of 2026-07): EXPLAIN there showed the row-value
+//     form using only the index's leading equality columns ("ref" access,
+//     2 used_key_parts) and applying the two-column bound as a residual
+//     filter, so a page-size request cost work proportional to the row's
+//     offset into the credential's full history rather than to the page.
+//     The logically equivalent expanded form, "col1 > v1 OR (col1 = v1 AND
+//     col2 op v2)", is what MySQL's documentation recommends for exactly
+//     this situation, and EXPLAIN confirmed it restores a genuine "range"
+//     access type using all four index columns there.
+func TwoColumnRangeCondition(
+	db *gorm.DB,
+	col1, col2, op string,
+	v1, v2 any,
+) (string, []any) {
+	rowValue := fmt.Sprintf("(%s, %s) %s (?, ?)", col1, col2, op)
+	if Name(db) != "mysql" {
+		return rowValue, []any{v1, v2}
+	}
+	// The expansion below is only equivalent for the two inclusive
+	// operators this helper documents. For anything else, fall back to the
+	// row-value form: on mysql that loses the index range scan, but it stays
+	// semantically correct, whereas expanding with the wrong leading
+	// comparison would silently return the wrong rows.
+	strictOp := ""
+	switch op {
+	case ">=":
+		strictOp = ">"
+	case "<=":
+		strictOp = "<"
+	default:
+		return rowValue, []any{v1, v2}
+	}
+	return fmt.Sprintf(
+		"(%s %s ? OR (%s = ? AND %s %s ?))",
+		col1, strictOp, col1, col2, op,
+	), []any{v1, v1, v2}
+}
