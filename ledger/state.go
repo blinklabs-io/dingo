@@ -1413,12 +1413,14 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
-// closeRollbackDrainTimeout and closeDBWorkerPoolShutdownTimeout bound the
-// two waits in Close() below. Package-level (not local consts) so tests can
-// shrink them instead of running real multi-second timeouts.
+// CloseRollbackDrainTimeout and CloseDBWorkerPoolShutdownTimeout bound the
+// two waits in Close() below. Exported (not local consts) so tests —
+// including cross-package node-level tests exercising how a caller reacts
+// to Close failing to confirm drain — can shrink them instead of running
+// real multi-second timeouts.
 var (
-	closeRollbackDrainTimeout        = 10 * time.Second
-	closeDBWorkerPoolShutdownTimeout = 15 * time.Second
+	CloseRollbackDrainTimeout        = 10 * time.Second
+	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
@@ -1515,7 +1517,7 @@ func (ls *LedgerState) Close() error {
 			"rollback goroutines finished",
 			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
 		)
-	case <-time.After(closeRollbackDrainTimeout):
+	case <-time.After(CloseRollbackDrainTimeout):
 		ls.config.Logger.Warn(
 			"timed out waiting for rollback goroutines",
 			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
@@ -1586,7 +1588,7 @@ func (ls *LedgerState) Close() error {
 				"database worker pool shut down",
 				"elapsed", time.Since(poolStart).Round(time.Millisecond),
 			)
-		case <-time.After(closeDBWorkerPoolShutdownTimeout):
+		case <-time.After(CloseDBWorkerPoolShutdownTimeout):
 			ls.config.Logger.Warn(
 				"timed out waiting for database worker pool shutdown",
 				"elapsed", time.Since(poolStart).Round(time.Millisecond),

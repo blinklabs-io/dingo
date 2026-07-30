@@ -64,7 +64,19 @@ func newLiveLifecycleTestNode(
 	numBlocks int,
 ) (*Node, []ocommon.Point) {
 	t.Helper()
-	return newLiveLifecycleTestNodeWithGenesis(t, numBlocks, nil)
+	return newLiveLifecycleTestNodeWithGenesis(
+		t, numBlocks, nil, disabledLiveLifecycleTestWorkerPoolCfg,
+	)
+}
+
+// disabledLiveLifecycleTestWorkerPoolCfg is the dbWorkerPool config every
+// live-lifecycle test used before workerPoolCfg became overridable —
+// disabled, so most tests don't pay for or synchronize around a real async
+// worker they don't care about.
+var disabledLiveLifecycleTestWorkerPoolCfg = ledger.DatabaseWorkerPoolConfig{
+	WorkerPoolSize: 1,
+	TaskQueueSize:  1,
+	Disabled:       true,
 }
 
 // newLiveLifecycleTestNodeWithGenesis is newLiveLifecycleTestNode with an
@@ -73,11 +85,13 @@ func newLiveLifecycleTestNode(
 // need epoch boundaries to actually fall within their loaded block range
 // (the real preview genesis's epochLength is far larger than any small
 // block count could reach) pass a custom config with a small epochLength
-// instead.
+// instead. workerPoolCfg is overridable too, for tests that need a real
+// (not disabled) dbWorkerPool worker to hold busy.
 func newLiveLifecycleTestNodeWithGenesis(
 	t *testing.T,
 	numBlocks int,
 	cardanoNodeCfgOverride *cardano.CardanoNodeConfig,
+	workerPoolCfg ledger.DatabaseWorkerPoolConfig,
 ) (*Node, []ocommon.Point) {
 	t.Helper()
 
@@ -135,12 +149,8 @@ func newLiveLifecycleTestNodeWithGenesis(
 		EventBus:           eventBus,
 		CardanoNodeConfig:  cardanoNodeCfg,
 		Logger:             logger,
-		ValidateHistorical: false,
-		DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
-			WorkerPoolSize: 1,
-			TaskQueueSize:  1,
-			Disabled:       true,
-		},
+		ValidateHistorical:       false,
+		DatabaseWorkerPoolConfig: workerPoolCfg,
 	})
 	require.NoError(t, err)
 	ouro.LedgerState = ledgerState
@@ -153,11 +163,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 		WithCardanoNodeConfig(cardanoNodeCfg),
 		WithPluginSelection(plugin.CapabilityStorageBlob, storageSelections.Blob),
 		WithPluginSelection(plugin.CapabilityStorageMetadata, storageSelections.Metadata),
-		WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
-			WorkerPoolSize: 1,
-			TaskQueueSize:  1,
-			Disabled:       true,
-		}),
+		WithDatabaseWorkerPoolConfig(workerPoolCfg),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -576,6 +582,69 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(t *te
 			"block at slot %d missing after a resumed truncate failure", p.Slot,
 		)
 	}
+}
+
+// TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed guards
+// against the actual use-after-close race errStorageDrainUnconfirmed exists
+// to prevent — the opposite of
+// TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode
+// above. That test's failure trigger (deferredIndexMaintenanceDone) is a
+// clean failure with no goroutine left running, so resuming on it is
+// safe. Here the trigger is a real dbWorkerPool worker still executing an
+// operation against the *old* database when Close's bounded wait gives up
+// on it, which is exactly the case reinitializeAndResume must not paper
+// over: reopening storage while that worker might still be using it would
+// race the new database instance against the old one. Truncate must
+// instead cancel the node for a supervised restart.
+func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(t *testing.T) {
+	const numBlocks = 10
+	n, points := newLiveLifecycleTestNodeWithGenesis(
+		t, numBlocks, nil,
+		ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: 1, TaskQueueSize: 1},
+	)
+
+	origTimeout := ledger.CloseDBWorkerPoolShutdownTimeout
+	ledger.CloseDBWorkerPoolShutdownTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { ledger.CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	oldDB := n.db
+	oldLedgerState := n.ledgerState
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	go func() {
+		_ = oldLedgerState.SubmitAsyncDBOperation(
+			func(db *database.Database) error {
+				close(started)
+				<-release
+				return nil
+			},
+		)
+	}()
+	<-started
+
+	targetSlot := points[len(points)/2].Slot
+	_, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "close storage")
+	require.ErrorContains(t, err, "could not confirm")
+
+	// The node must have been brought down for a supervised restart, not
+	// resumed against the same data directory the still-running worker
+	// above may still be using.
+	require.Error(t, n.ctx.Err())
+	require.Same(
+		t, oldDB, n.db,
+		"storage must not be reopened while drain is unconfirmed",
+	)
+	require.Same(
+		t, oldLedgerState, n.ledgerState,
+		"ledgerState must not be replaced while drain is unconfirmed",
+	)
 }
 
 // TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure guards against
@@ -1142,6 +1211,7 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),
+		disabledLiveLifecycleTestWorkerPoolCfg,
 	)
 	// Re-loaded separately (not added to any chain yet) so they can be fed
 	// back in one at a time after each truncate, simulating new blocks

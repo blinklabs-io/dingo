@@ -4191,9 +4191,9 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 // physically close/reopen the data directory even though a rollback
 // goroutine might still be running against it.
 func TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime(t *testing.T) {
-	origTimeout := closeRollbackDrainTimeout
-	closeRollbackDrainTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { closeRollbackDrainTimeout = origTimeout })
+	origTimeout := CloseRollbackDrainTimeout
+	CloseRollbackDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseRollbackDrainTimeout = origTimeout })
 
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -4213,9 +4213,9 @@ func TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime(t *testing.T) {
 // database-worker-pool wait, which had the same silent-timeout gap as the
 // rollback wait above.
 func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
-	origTimeout := closeDBWorkerPoolShutdownTimeout
-	closeDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { closeDBWorkerPoolShutdownTimeout = origTimeout })
+	origTimeout := CloseDBWorkerPoolShutdownTimeout
+	CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseDBWorkerPoolShutdownTimeout = origTimeout })
 
 	pool := NewDatabaseWorkerPool(nil, DatabaseWorkerPoolConfig{
 		WorkerPoolSize: 1,

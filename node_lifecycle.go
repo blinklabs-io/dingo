@@ -315,8 +315,15 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 
 	if n.ledgerState != nil {
 		if closeErr := n.ledgerState.Close(); closeErr != nil {
-			err = errors.Join(
-				err,
+			// Fail closed: do not nil n.ledgerState, close n.db, or stop
+			// the storage plugins below -- a goroutine this Close call
+			// could not confirm had exited may still be using them. Return
+			// immediately with errStorageDrainUnconfirmed so the caller
+			// (Restore/Truncate) skips reinitializeAndResume instead of
+			// reopening storage out from under it, and escalates to a
+			// supervised restart instead.
+			return errors.Join(
+				errStorageDrainUnconfirmed,
 				fmt.Errorf("ledger state close: %w", closeErr),
 			)
 		}
@@ -1324,6 +1331,15 @@ func (n *Node) Restore(
 	}
 	if err := n.closeStorageForLiveLifecycleOp(ctx); err != nil {
 		_ = os.RemoveAll(stagingDir)
+		if errors.Is(err, errStorageDrainUnconfirmed) {
+			// See errStorageDrainUnconfirmed's doc comment: unlike every
+			// other quiesce/close-storage error, reinitializeAndResume is
+			// not safe here — it would reopen the same data directory a
+			// goroutine this Close call could not confirm had exited may
+			// still be using.
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf("close storage: %w", err)
+		}
 		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, fmt.Errorf(
@@ -1427,6 +1443,21 @@ func (n *Node) validateRestoredAgainstNodeConfig(
 // bring the node down rather than resume on whatever is in place.
 var errRestoreSwapUnrecoverable = errors.New(
 	"data directory swap left no usable data directory in place",
+)
+
+// errStorageDrainUnconfirmed marks a closeStorageForLiveLifecycleOp failure
+// where n.ledgerState.Close() could not confirm its background goroutines
+// (rollback event emission, dbWorkerPool workers) actually exited before
+// timing out — unlike every other error this function can return, this one
+// means a goroutine may still be reading/writing n.db, not merely that some
+// cleanup step reported failure after the resource was already unused.
+// Restore/Truncate must not treat this the way they treat every other
+// quiesce/close-storage error (attempt reinitializeAndResume against the
+// same on-disk data): reopening storage a still-running goroutine may be
+// touching is exactly the use-after-close race this whole path exists to
+// prevent, so this forces a supervised restart instead.
+var errStorageDrainUnconfirmed = errors.New(
+	"ledger state close could not confirm background goroutines drained",
 )
 
 // preRestoreBackupSuffix and restoreStagingSuffix name the sibling
@@ -1678,6 +1709,15 @@ func (n *Node) Truncate(
 		n.bark.PauseDB()
 	}
 	if err := n.closeStorageForLiveLifecycleOp(ctx); err != nil {
+		if errors.Is(err, errStorageDrainUnconfirmed) {
+			// See errStorageDrainUnconfirmed's doc comment: unlike every
+			// other quiesce/close-storage error, reinitializeAndResume is
+			// not safe here — it would reopen the same data directory a
+			// goroutine this Close call could not confirm had exited may
+			// still be using.
+			n.cancel()
+			return 0, fmt.Errorf("close storage: %w", err)
+		}
 		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return 0, fmt.Errorf(
