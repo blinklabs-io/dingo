@@ -160,6 +160,7 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 		Margin:      "0.1",
 	}
 	dingo := &DingoPoolEpochData{
+		StakePresent:   true,
 		DelegatedStake: "1000",
 		ParamsPresent:  true,
 		BlocksProduced: 2,
@@ -198,6 +199,7 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 		Margin:      "0.1",
 	}
 	dingo := &DingoPoolEpochData{
+		StakePresent:   true,
 		DelegatedStake: "1000",
 		DelegatorCount: 3,
 		ParamsPresent:  false,
@@ -219,6 +221,53 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
 
+// TestComparePoolEpochStakeNotPresent guards against a false PASS/
+// value_mismatch when reward_pool_input hasn't been captured yet at the
+// "stake epoch" (K-1) — e.g. a freshly registered pool whose param-epoch
+// row exists but whose stake-epoch row hasn't landed yet. Before StakePresent
+// existed, GetPoolEpochDataMap's zero-value stub (DelegatedStake=""/
+// DelegatorCount=0) would compare directly against Koios's real figures here
+// and produce a false value_mismatch instead of the correct reference_lag/
+// dingo_db_missing classification.
+func TestComparePoolEpochStakeNotPresent(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "5000000",
+		BlockCnt:    4,
+		Delegators:  7,
+		FixedCost:   "340000000",
+		Margin:      "0.1",
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:   false,
+		ParamsPresent:  true,
+		BlocksProduced: 4,
+		FixedCost:      "340000000",
+		Margin:         "1/10",
+	}
+
+	// Historical (outside grace, or no grace configured): dingo_db_missing,
+	// never a value_mismatch against the zero-value stub.
+	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, "reward_pool_input_stake", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+	for _, m := range ms {
+		require.NotEqual(t, CategoryValueMismatch, m.Category)
+	}
+
+	// Recent (epoch closed within the grace window): reference_lag, not PASS
+	// and not a value_mismatch.
+	recentClose := now.Add(-time.Hour)
+	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose)
+	require.Len(t, ms, 1)
+	require.Equal(t, "reward_pool_input_stake", ms[0].Field)
+	require.Equal(t, CategoryReferenceLag, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
 func TestComparePoolEpochMemberRewards(t *testing.T) {
 	now := time.Now()
 	koios := &KoiosPoolEpoch{
@@ -231,6 +280,7 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 		MemberRewards: "123456789",
 	}
 	dingo := &DingoPoolEpochData{
+		StakePresent:        true,
 		DelegatedStake:      "1000",
 		ParamsPresent:       true,
 		BlocksProduced:      2,
@@ -278,6 +328,7 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 		MemberRewards: "123456789",
 	}
 	dingo := &DingoPoolEpochData{
+		StakePresent:        true,
 		DelegatedStake:      "1000",
 		DelegatorCount:      3,
 		ParamsPresent:       true,

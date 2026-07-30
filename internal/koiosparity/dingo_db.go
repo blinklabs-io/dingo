@@ -87,6 +87,17 @@ type DingoEpochData struct {
 // Parity Tracker "Epoch alignment" section for the full derivation of why a
 // single same-numbered row cannot supply every field.
 type DingoPoolEpochData struct {
+	// StakePresent distinguishes "no reward_pool_input row yet at the 'stake
+	// epoch' (K-1)" from "row exists with legitimately zero/empty
+	// DelegatedStake/DelegatorCount" — mirrors ParamsPresent/
+	// MemberRewardPresent below. Without this flag a pool present only in
+	// the param-epoch or output query (e.g. a freshly registered pool whose
+	// stake-epoch row hasn't landed yet) would get a bare zero-value stub
+	// from GetPoolEpochDataMap, and ComparePoolEpoch would compare that zero
+	// against Koios's real figures as a false value_mismatch instead of
+	// reporting the row as genuinely missing. See ComparePoolEpoch, which
+	// must never silently treat StakePresent == false as a comparison pass.
+	StakePresent bool
 	// DelegatedStake/DelegatorCount come from reward_pool_input at the "stake
 	// epoch" (Koios epoch K's K-1): the mark stake distribution Praos actually
 	// used as K's active-stake/reward-calculation basis.
@@ -274,12 +285,14 @@ func (d *DingoDB) GetEpochData(ctx context.Context, epoch uint64) (*DingoEpochDa
 // Parity Tracker "Epoch alignment" section for the full derivation.
 //
 // A pool present in only one of the two reward_pool_input reads (e.g. a pool
-// with a stake-epoch row but whose param-epoch row hasn't been captured yet)
-// still gets an entry — ParamsPresent/MemberRewardPresent record which pieces
-// are actually available so ComparePoolEpoch never mistakes "not yet
-// computed" for "compared and equal". One bulk query per table per epoch
-// (three total), independent of pool count. ctx is forwarded to the DB driver
-// so that a cancelled context aborts the query.
+// with a stake-epoch row but whose param-epoch row hasn't been captured yet,
+// or vice versa — a freshly registered pool whose param/output rows exist
+// before its stake-epoch row does) still gets an entry — StakePresent/
+// ParamsPresent/MemberRewardPresent record which pieces are actually
+// available so ComparePoolEpoch never mistakes "not yet computed" for
+// "compared and equal". One bulk query per table per epoch (three total),
+// independent of pool count. ctx is forwarded to the DB driver so that a
+// cancelled context aborts the query.
 func (d *DingoDB) GetPoolEpochDataMap(
 	ctx context.Context,
 	stakeEpoch, paramEpoch uint64,
@@ -293,6 +306,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	for i := range stakeInputs {
 		inp := &stakeInputs[i]
 		m[hex.EncodeToString(inp.PoolKeyHash)] = &DingoPoolEpochData{
+			StakePresent:   true,
 			DelegatedStake: strconv.FormatUint(uint64(inp.DelegatedStake), 10),
 			DelegatorCount: inp.DelegatorCount,
 		}
@@ -309,8 +323,9 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		if !ok {
 			// Present at the param epoch but not the stake epoch (e.g. a
 			// freshly registered pool) — still record what's available
-			// rather than dropping it; DelegatedStake/DelegatorCount stay at
-			// their zero value.
+			// rather than dropping it. StakePresent stays false so
+			// ComparePoolEpoch never compares the zero-value
+			// DelegatedStake/DelegatorCount below as if they were real.
 			data = &DingoPoolEpochData{}
 			m[key] = data
 		}

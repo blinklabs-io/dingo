@@ -287,34 +287,61 @@ func ComparePoolEpoch(
 		return out
 	}
 
-	// delegated_stake
-	if dingoPool.DelegatedStake != koiosPool.ActiveStake {
+	// delegated_stake/delegator_count both come from reward_pool_input at the
+	// "stake epoch" (K-1) — see DingoPoolEpochData's doc comment. That row
+	// not existing yet is never a silent pass: a pool present only in the
+	// param-epoch or output query (e.g. a freshly registered pool whose
+	// stake-epoch row hasn't landed yet) would otherwise carry zero-value
+	// DelegatedStake/DelegatorCount that compare as a real (and wrong) value
+	// against Koios's actual figures. Within the grace window this may
+	// simply not be captured yet (reference_lag); past it, it's a genuine
+	// gap in Dingo's own computation (dingo_db_missing).
+	if !dingoPool.StakePresent {
+		cat := CategoryDBMissing
+		if graceHours > 0 && !epochEndTime.IsZero() &&
+			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			cat = CategoryReferenceLag
+		}
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
 			PoolBech32: koiosPool.PoolBech32,
-			Field:      "delegated_stake",
-			DingoValue: dingoPool.DelegatedStake,
-			KoiosValue: koiosPool.ActiveStake,
-			Category:   CategoryValueMismatch,
+			Field:      "reward_pool_input_stake",
+			DingoValue: "",
+			KoiosValue: "present",
+			Category:   cat,
 			CheckedAt:  now,
 		})
-	}
+	} else {
+		// delegated_stake
+		if dingoPool.DelegatedStake != koiosPool.ActiveStake {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "delegated_stake",
+				DingoValue: dingoPool.DelegatedStake,
+				KoiosValue: koiosPool.ActiveStake,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
 
-	// delegator_count
-	dingoDelegStr := strconv.FormatUint(dingoPool.DelegatorCount, 10)
-	koiosDelegStr := strconv.Itoa(koiosPool.Delegators)
-	if dingoDelegStr != koiosDelegStr {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			PoolBech32: koiosPool.PoolBech32,
-			Field:      "delegator_count",
-			DingoValue: dingoDelegStr,
-			KoiosValue: koiosDelegStr,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
+		// delegator_count
+		dingoDelegStr := strconv.FormatUint(dingoPool.DelegatorCount, 10)
+		koiosDelegStr := strconv.Itoa(koiosPool.Delegators)
+		if dingoDelegStr != koiosDelegStr {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "delegator_count",
+				DingoValue: dingoDelegStr,
+				KoiosValue: koiosDelegStr,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
 	}
 
 	// blocks_produced/fixed_cost/margin all come from the same reward_pool_input

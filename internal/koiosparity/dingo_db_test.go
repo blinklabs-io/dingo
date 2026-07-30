@@ -184,6 +184,50 @@ func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
 	require.Equal(t, "1000", data.DelegatedStake)
 }
 
+// TestGetPoolEpochDataMapMissingStakeEpochRow proves a pool with a
+// param-epoch (and/or output) row but no stake-epoch row yet still gets an
+// entry, with StakePresent left false rather than silently defaulting to a
+// zero-value DelegatedStake/DelegatorCount that ComparePoolEpoch could
+// mistake for a real (and wrong) value — the mirror image of
+// TestGetPoolEpochDataMapMissingParamEpochRow, guarding the bug where a
+// freshly registered pool's param-epoch row lands before its stake-epoch row
+// does.
+func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	poolHash := testPoolKeyHash(t, 0x03)
+	blocksAtParamEpoch := uint64(4)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          11,
+		PoolKeyHash:    poolHash,
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+		BlocksProduced: &blocksAtParamEpoch,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             9,
+		PoolKeyHash:       poolHash,
+		MemberRewardTotal: types.Uint64(123_456),
+	}).Error)
+
+	m, err := dingo.GetPoolEpochDataMap(context.Background(), 9, 11)
+	require.NoError(t, err)
+
+	key := hex.EncodeToString(poolHash)
+	data, ok := m[key]
+	require.True(t, ok)
+	require.False(t, data.StakePresent, "no reward_pool_input row at the stake epoch yet")
+	require.Equal(t, "", data.DelegatedStake)
+	require.Equal(t, uint64(0), data.DelegatorCount)
+
+	// Fields from the other two queries are still recorded normally.
+	require.True(t, data.ParamsPresent)
+	require.Equal(t, blocksAtParamEpoch, data.BlocksProduced)
+	require.True(t, data.MemberRewardPresent)
+	require.Equal(t, "123456", data.MemberRewardTotal)
+}
+
 // TestGetEpochDataStakeEpochOffset confirms epoch_summary is read at the
 // caller-supplied epoch verbatim (GetEpochData itself is offset-agnostic —
 // check.go is responsible for passing koiosStakeEpoch(K), not K) and that a

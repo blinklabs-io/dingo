@@ -2382,11 +2382,18 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   merges up to three separate queries (`reward_pool_input` at each epoch plus
   `reward_pool_output` at `stakeEpoch`) into one per-pool map. A pool present
   in only one of the two `reward_pool_input` reads (e.g. captured at the
-  param epoch but not yet at the stake epoch) still gets an entry;
-  `DingoPoolEpochData.ParamsPresent`/`MemberRewardPresent` record which field
-  groups actually resolved so `ComparePoolEpoch` never mistakes "not yet
-  captured at that specific epoch" for "compared and equal" — see the mismatch
-  categories subsection below for how presence gaps are classified. This
+  param epoch but not yet at the stake epoch, or the reverse — a freshly
+  registered pool whose param-epoch or output row lands before its
+  stake-epoch row does) still gets an entry;
+  `DingoPoolEpochData.StakePresent`/`ParamsPresent`/`MemberRewardPresent`
+  record which field groups actually resolved so `ComparePoolEpoch` never
+  mistakes "not yet captured at that specific epoch" for "compared and
+  equal" — see the mismatch categories subsection below for how presence
+  gaps are classified. Without `StakePresent`, a pool seeded only via the
+  param-epoch or output query gets a bare zero-value stub for
+  `DelegatedStake`/`DelegatorCount`, and `ComparePoolEpoch` would otherwise
+  compare that zero directly against Koios's real figures as a false
+  `value_mismatch` instead of reporting the row as genuinely absent. This
   derivation could not be verified empirically against live Koios data from
   this environment the way `CompareEpochTotals`'s field pairing was (see
   below); it is derived directly from `stakeRewardEpochsForNewEpoch` and
@@ -2465,6 +2472,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `reward_pool_input_params` when absent) via `DingoPoolEpochData.
   ParamsPresent`, for the same reason: a not-yet-captured param-epoch row must
   not silently compare as zero blocks/cost/margin against Koios's real values.
+  The same split applies a third time to `reward_pool_input`'s stake-epoch
+  fields (`delegated_stake`/`delegator_count`, reported together as
+  `reward_pool_input_stake` when absent) via `DingoPoolEpochData.
+  StakePresent` — a pool whose stake-epoch row hasn't landed yet (e.g. a
+  freshly registered pool captured first at the param epoch) must not
+  silently compare as zero stake/delegators against Koios's real values
+  either.
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
