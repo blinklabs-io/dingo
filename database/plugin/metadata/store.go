@@ -1367,6 +1367,13 @@ type MetadataStore interface {
 	// rows for a stake credential tag/hash pair across every epoch that has
 	// not yet been pruned, paginated and ordered by epoch. Used by the
 	// Blockfrost account reward-history endpoint.
+	//
+	// Only spendable rows (spendable = true) are returned. A row with
+	// spendable = false was never credited to the account -- crediting skips
+	// it and adds the amount to the epoch's unspendable total instead -- so
+	// returning it would report a reward the account never received. See
+	// rewardstate.GetAccountOutputsByCredential for the full rationale,
+	// including a known gap for CIP-0163-guarded rows (dingo #3021).
 	GetRewardAccountOutputsByCredential(
 		uint8, // credentialTag
 		[]byte, // stakingKey
@@ -1378,6 +1385,10 @@ type MetadataStore interface {
 
 	// CountRewardAccountOutputsByCredential retrieves the total count of
 	// reward account output rows for a stake credential tag/hash pair.
+	//
+	// Counts only spendable rows, matching
+	// GetRewardAccountOutputsByCredential's filter. The two must agree, or
+	// pagination advertises pages of rewards that were never paid.
 	CountRewardAccountOutputsByCredential(
 		uint8, // credentialTag
 		[]byte, // stakingKey
