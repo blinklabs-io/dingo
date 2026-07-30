@@ -82,6 +82,15 @@ const devnetSystemStartLeadTime = 3 * time.Second
 // test's in-memory config copy, not the checked-in devnet/*.json files).
 const devnetTestEpochLength = 100
 
+// liveNodeSyncTimeout allows the production-mode forging and real networking
+// checks below to make progress while `go test -race ./...` runs many
+// CPU- and I/O-heavy packages concurrently. The root package has taken more
+// than twice as long on loaded Linux CI runners as it does in isolation, so a
+// 90-second wall-clock deadline can expire even though the node is still
+// making progress. Polling remains condition-based and returns immediately
+// once the requested tip is reached.
+const liveNodeSyncTimeout = 5 * time.Minute
+
 // devnetCardanoConfig loads the embedded devnet network config: sub-second
 // slots and activeSlotsCoeff=1.0, tuned for fast in-process iteration. The
 // checked-in genesis's SystemStart is whatever fixed instant it was
@@ -328,7 +337,7 @@ func waitForTipSlotAtLeast(t *testing.T, n *Node, minSlot uint64) {
 			return false
 		}
 		return tip.Point.Slot >= minSlot
-	}, 90*time.Second, 20*time.Millisecond)
+	}, liveNodeSyncTimeout, 20*time.Millisecond)
 }
 
 // requireInboundListenerAcceptsConnections dials ln's own resolved address

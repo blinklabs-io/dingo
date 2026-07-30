@@ -130,7 +130,7 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-4", "manifest.json"))
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
