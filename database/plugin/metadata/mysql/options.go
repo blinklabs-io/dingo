@@ -19,6 +19,7 @@ package mysql
 import (
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -103,5 +104,29 @@ func WithDSN(dsn string) MysqlOptionFunc {
 func WithStorageMode(mode string) MysqlOptionFunc {
 	return func(m *MetadataStoreMysql) {
 		m.storageMode = strings.ToLower(mode)
+	}
+}
+
+// WithPoolMaxOpenConns specifies the maximum number of open connections to
+// the database. A value of 0 selects the provider default.
+func WithPoolMaxOpenConns(maxOpenConns int) MysqlOptionFunc {
+	return func(m *MetadataStoreMysql) {
+		m.poolMaxOpen = maxOpenConns
+	}
+}
+
+// WithPoolMaxIdleConns specifies the maximum number of idle connections
+// retained in the pool. A value of 0 selects the provider default.
+func WithPoolMaxIdleConns(maxIdleConns int) MysqlOptionFunc {
+	return func(m *MetadataStoreMysql) {
+		m.poolMaxIdle = maxIdleConns
+	}
+}
+
+// WithPoolConnMaxLifetime specifies the maximum amount of time a connection
+// may be reused. A value of 0 selects the provider default.
+func WithPoolConnMaxLifetime(connMaxLifetime time.Duration) MysqlOptionFunc {
+	return func(m *MetadataStoreMysql) {
+		m.poolConnMaxLifetime = connMaxLifetime
 	}
 }

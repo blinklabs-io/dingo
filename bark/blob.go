@@ -15,6 +15,7 @@
 package bark
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -31,6 +32,7 @@ import (
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -300,9 +302,10 @@ func (b *BlobStoreBark) GetBlock(
 		return nil, types.BlockMetadata{}, archErr
 	}
 	// Prefer the local metadata for ID (the archive does not know our
-	// local block IDs), but trust the archive for Type/Height/PrevHash
-	// in case upstream returned a zero metadata struct alongside the
-	// expired-history error.
+	// local block IDs), and fill Type/Height/PrevHash from the archive
+	// result when upstream returned a zero metadata struct alongside the
+	// expired-history error. Those fields are derived from the decoded,
+	// hash-verified block rather than from the archive's own claims.
 	merged := upstreamMeta
 	if merged.Type == 0 {
 		merged.Type = archiveMeta.Type
@@ -393,7 +396,7 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 			fmt.Errorf("bark: archive response exceeds %d-byte limit", maxArchiveBlockSize)
 	}
 
-	prevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())
+	archivePrevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed decoding previous hash: %w", err)
@@ -405,10 +408,210 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 			fmt.Errorf("invalid block type: %d", blockType)
 	}
 
-	return blockBody, types.BlockMetadata{
-		Type:     (uint)(blockType),
-		Height:   block.GetBlock().GetHeight(),
-		PrevHash: prevHash,
+	decoded, err := verifyArchiveBlock(
+		(uint)(blockType), blockBody, slot, hash,
+	)
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	era, err := blockEraFromHeader(decoded, (uint)(blockType))
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	if err := assertBodyFullyAuthenticated(era); err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+	meta, err := archiveBlockMetadata(
+		decoded, era, block.GetBlock().GetHeight(), archivePrevHash,
+	)
+	if err != nil {
+		return nil, types.BlockMetadata{}, err
+	}
+
+	return blockBody, meta, nil
+}
+
+// Errors reported when an archive response fails local verification. They are
+// distinct from transport failures on purpose: a transport error is worth
+// retrying, whereas these mean the archive served something that is not the
+// block that was asked for, and its answers cannot be trusted as chain data.
+var (
+	// ErrArchiveBlockUndecodable reports an archive response body that does
+	// not decode as a block of the type the archive claimed.
+	ErrArchiveBlockUndecodable = errors.New(
+		"bark: archive block could not be decoded",
+	)
+	// ErrArchiveBlockHashMismatch reports a decoded block whose computed
+	// hash is not the hash that was requested.
+	ErrArchiveBlockHashMismatch = errors.New(
+		"bark: archive block hash does not match the requested hash",
+	)
+	// ErrArchiveBlockSlotMismatch reports a decoded block that does not sit
+	// at the slot that was requested.
+	ErrArchiveBlockSlotMismatch = errors.New(
+		"bark: archive block slot does not match the requested slot",
+	)
+	// ErrArchiveMetadataMismatch reports archive-supplied metadata that
+	// contradicts the contents of the verified block it accompanied.
+	ErrArchiveMetadataMismatch = errors.New(
+		"bark: archive metadata contradicts the block",
+	)
+	// ErrArchiveBlockTypeMismatch reports a block whose era, derived from its
+	// own header, is not the era the archive claimed.
+	ErrArchiveBlockTypeMismatch = errors.New(
+		"bark: archive block era does not match the block header",
+	)
+	// ErrArchiveBlockNotFullyAuthenticated reports a block whose body cannot
+	// be bound to its header in full, so the archive could alter the
+	// unauthenticated part without changing anything checked here.
+	ErrArchiveBlockNotFullyAuthenticated = errors.New(
+		"bark: archive block body cannot be fully authenticated",
+	)
+)
+
+// assertBodyFullyAuthenticated refuses blocks whose body is only partly bound
+// to their header.
+//
+// Byron main blocks are the sole case. gouroboros checks their transaction,
+// delegation, and update proofs but not ssc_proof, because the SSC proof
+// hashes cardano-ledger's own encoding of the sub-payloads rather than the
+// bytes carried in the block. An alteration confined to the SSC payload
+// therefore changes nothing this package verifies — hash, slot, height, and
+// previous hash all come from the untouched header — so the archive could
+// still substitute part of a historical block.
+//
+// Epoch boundary blocks are unaffected: they carry no transactions and no SSC
+// payload, and a single body hash covers the whole body.
+//
+// This restriction can be lifted once Byron SSC proof validation exists
+// upstream.
+func assertBodyFullyAuthenticated(blockType uint) error {
+	if blockType == gledger.BlockTypeByronMain {
+		return fmt.Errorf(
+			"%w: byron main block ssc payload is unverified",
+			ErrArchiveBlockNotFullyAuthenticated,
+		)
+	}
+	return nil
+}
+
+// blockEraFromHeader derives a block's era from its own header rather than
+// from the era the archive nominated.
+//
+// This is needed because the hash does not pin the era for Shelley and later:
+// those hashes cover the header alone, and adjacent eras share its layout, so
+// one set of bytes decodes under several eras with an identical hash and slot.
+// Byron is the exception — its hash is taken over the block type byte followed
+// by the header, so the era is already bound by the hash check and there is
+// nothing further to derive.
+func blockEraFromHeader(
+	decoded gledger.Block,
+	claimed uint,
+) (uint, error) {
+	if claimed == gledger.BlockTypeByronEbb ||
+		claimed == gledger.BlockTypeByronMain {
+		return claimed, nil
+	}
+	header := decoded.Header()
+	if header == nil {
+		return 0, fmt.Errorf(
+			"%w: block has no header to derive the era from",
+			ErrArchiveBlockTypeMismatch,
+		)
+	}
+	derived, err := gledger.DetermineBlockType(header.Cbor())
+	if err != nil {
+		// Fail closed. An era that cannot be derived cannot be checked, and
+		// falling back to the archive's claim would hand era selection back to
+		// it. A block this node cannot classify is one it could not process
+		// anyway, so refusing costs nothing it could otherwise have used.
+		return 0, fmt.Errorf(
+			"%w: deriving era from header: %w",
+			ErrArchiveBlockTypeMismatch, err,
+		)
+	}
+	if derived != claimed {
+		return 0, fmt.Errorf(
+			"%w: header is era %d, archive claimed %d",
+			ErrArchiveBlockTypeMismatch, derived, claimed,
+		)
+	}
+	return derived, nil
+}
+
+// verifyArchiveBlock establishes locally that the bytes the archive returned
+// really are the block that was requested. Bark chooses both the download URL
+// and the response body, so it can only be trusted to store blocks, not to
+// identify them: consensus-relevant identity is re-derived here before any
+// caller sees the data.
+//
+// The block type carried in the archive response is a decode hint only. A
+// wrong type either fails to decode or yields a different block hash, and
+// both outcomes are rejected below, so it cannot be used to smuggle in
+// substitute bytes. Decoding runs with validation enabled, so a block whose
+// header is genuine but whose body was swapped fails the body-hash check.
+func verifyArchiveBlock(
+	blockType uint,
+	body []byte,
+	slot uint64,
+	hash []byte,
+) (gledger.Block, error) {
+	decoded, err := gledger.NewBlockFromCbor(blockType, body)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: slot %d, type %d: %w",
+			ErrArchiveBlockUndecodable, slot, blockType, err,
+		)
+	}
+	decodedHash := decoded.Hash()
+	if !bytes.Equal(decodedHash[:], hash) {
+		return nil, fmt.Errorf(
+			"%w: got %x, requested %x",
+			ErrArchiveBlockHashMismatch, decodedHash[:], hash,
+		)
+	}
+	if decoded.SlotNumber() != slot {
+		return nil, fmt.Errorf(
+			"%w: block %x is at slot %d, requested slot %d",
+			ErrArchiveBlockSlotMismatch,
+			decodedHash[:], decoded.SlotNumber(), slot,
+		)
+	}
+	return decoded, nil
+}
+
+// archiveBlockMetadata derives block metadata from the verified block rather
+// than from what the archive claimed alongside it, and rejects archive-supplied
+// values that contradict the block. The bytes are already hash-verified by this
+// point, so a disagreement means the archive is misreporting; failing is more
+// useful than silently preferring the decoded value and carrying on.
+//
+// Zero-valued archive fields are treated as absent rather than as a conflict:
+// the archive is not required to populate them.
+func archiveBlockMetadata(
+	decoded gledger.Block,
+	era uint,
+	archiveHeight uint64,
+	archivePrevHash []byte,
+) (types.BlockMetadata, error) {
+	height := decoded.BlockNumber()
+	if archiveHeight != 0 && archiveHeight != height {
+		return types.BlockMetadata{}, fmt.Errorf(
+			"%w: reported height %d, block height %d",
+			ErrArchiveMetadataMismatch, archiveHeight, height,
+		)
+	}
+	prevHash := decoded.PrevHash()
+	if len(archivePrevHash) > 0 && !bytes.Equal(archivePrevHash, prevHash[:]) {
+		return types.BlockMetadata{}, fmt.Errorf(
+			"%w: reported previous hash %x, block previous hash %x",
+			ErrArchiveMetadataMismatch, archivePrevHash, prevHash[:],
+		)
+	}
+	return types.BlockMetadata{
+		Type:     era,
+		Height:   height,
+		PrevHash: prevHash[:],
 	}, nil
 }
 

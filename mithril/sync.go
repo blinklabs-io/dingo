@@ -33,6 +33,7 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/plugin"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"golang.org/x/sync/errgroup"
 )
@@ -44,6 +45,37 @@ const (
 	syncStatusInProgress = "in_progress"
 	syncStatusBackfill   = "backfill"
 )
+
+func setStableMithrilLedgerTip(
+	db *database.Database,
+	slot uint64,
+	hash []byte,
+) error {
+	point := ocommon.NewPoint(slot, hash)
+	block, err := database.BlockByPoint(db, point)
+	if err != nil {
+		return fmt.Errorf(
+			"stable ledger state point %d.%x is not present in certified ImmutableDB: %w",
+			slot,
+			hash,
+			err,
+		)
+	}
+	// Ledger snapshots do not carry the absolute block number. Populate it
+	// from the same certified immutable block while keeping the metadata
+	// cursor at the stable point; otherwise envelope validation would compare
+	// the first replayed block against a synthetic block number zero.
+	if err := db.SetTip(ochainsync.Tip{
+		Point:       point,
+		BlockNumber: block.Number,
+	}, nil); err != nil {
+		return fmt.Errorf(
+			"recording stable Mithril anchor block number: %w",
+			err,
+		)
+	}
+	return nil
+}
 
 // syncMode is the state-detected disposition of a Sync run, decided from the
 // database alone (no artifact comparison). It selects between the existing
@@ -653,6 +685,31 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// the next startup.
 	deferredIndexes := node.WithDeferredIndexes(db, logger)
 
+	// The Mithril certificate commits to ImmutableDB content. Ancillary ledger
+	// states can be newer than that certified point because they come from the
+	// source node's volatile database. Select only a ledger state at or below
+	// the certified immutable tip; later blocks must go through normal ledger
+	// validation when the node starts.
+	immutableDB, err := immutable.New(result.ImmutableDir)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"opening certified ImmutableDB for trust-boundary selection: %w",
+			err,
+		)
+	}
+	certifiedTip, err := immutableDB.GetTip()
+	if err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"reading certified ImmutableDB tip: %w",
+			err,
+		)
+	}
+	if certifiedTip == nil {
+		return SyncResult{}, errors.New(
+			"certified ImmutableDB has no tip",
+		)
+	}
+
 	// Import ledger state and copy blocks in parallel.
 	// Ledger state goes to metadata (SQLite), blocks go to the blob
 	// store (Badger) — completely independent data stores.
@@ -666,6 +723,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
 		slot, hash, importErr := importLedgerState(
 			gctx, db, logger, nodeCfg, result, catchUp,
+			certifiedTip.Slot,
 			func(p ledgerstate.ImportProgress) {
 				cfg.emit(SyncProgress{
 					Phase:       PhaseLedgerImport,
@@ -730,6 +788,20 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if err := g.Wait(); err != nil {
 		return SyncResult{}, err
 	}
+	if ledgerStateSlot > certifiedTip.Slot {
+		return SyncResult{}, fmt.Errorf(
+			"selected ledger state slot %d is past certified ImmutableDB tip slot %d",
+			ledgerStateSlot,
+			certifiedTip.Slot,
+		)
+	}
+	if err := setStableMithrilLedgerTip(
+		db,
+		ledgerStateSlot,
+		ledgerStateHash,
+	); err != nil {
+		return SyncResult{}, err
+	}
 
 	// The pipelined copy stores produced-UTxO offsets per block but does not
 	// advance the offsets-complete marker, and the post-bootstrap copy only
@@ -747,11 +819,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		}
 	}
 
-	// Fetch volatile blocks between the ImmutableDB tip and the
-	// ledger state tip. The Mithril snapshot's UTxO set is at the
-	// ledger state tip, but the ImmutableDB only has blocks up to
-	// an earlier point. We must close this gap so the node has a
-	// continuous chain matching the UTxO state.
+	// The imported ledger state is deliberately at or behind the certified
+	// ImmutableDB tip. Raw blocks after it remain in the primary chain, but
+	// the metadata ledger cursor stays at the imported state so normal node
+	// startup replays and validates that entire suffix.
 	recentBlocks, err := database.BlocksRecent(db, 1)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("reading chain tip: %w", err)
@@ -958,25 +1029,6 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		)
 		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: false})
 	}
-	// Skip post-ledger-state processing when no ledger state was imported.
-	// importLedgerState returns (0, nil, nil) for a snapshot with no ledger
-	// state file. In that case there is no ledger-state tip to chain from,
-	// and validateStoredGapContinuity would compare the first stored block's
-	// PrevHash against a nil hash and always fail.
-	if len(ledgerStateHash) > 0 {
-		cfg.emit(SyncProgress{Phase: PhasePostLedger, Active: true})
-		if err := processPostLedgerStateBlocks(
-			ctx,
-			db,
-			logger,
-			ledgerStateSlot,
-			ledgerStateHash,
-		); err != nil {
-			return SyncResult{}, err
-		}
-		cfg.emit(SyncProgress{Phase: PhasePostLedger, Active: false})
-	}
-
 	if isAPIMode(cfg.StorageMode) {
 		if err := updateMithrilReadyState(
 			db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
@@ -986,9 +1038,9 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		}
 	}
 
-	// Backfill historical metadata if storage mode is API.
-	// This replays all stored blocks to populate transaction
-	// records needed for API queries (Blockfrost, UTxO RPC).
+	// Backfill historical metadata through the stable ledger anchor if storage
+	// mode is API. Blocks after the anchor are left for ordinary ledger replay,
+	// which also populates the API indexes.
 	if isAPIMode(cfg.StorageMode) {
 		cfg.emit(SyncProgress{Phase: PhaseBackfill, Active: true})
 		logger.Info(
@@ -999,6 +1051,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			return SyncResult{}, fmt.Errorf("running planner statistics before backfill: %w", err)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(
 				"invalid backfill batch size %d in SetBatchSize: %w",

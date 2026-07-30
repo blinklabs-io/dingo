@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -577,7 +578,40 @@ func (a *epochInfoAdapter) EpochSlotRange(
 ) (leader.EpochSlotRange, error) {
 	info, err := a.ledgerState.EpochInfo(epoch)
 	if err != nil {
-		return leader.EpochSlotRange{}, err
+		if !errors.Is(err, hardfork.ErrPastHorizon) {
+			return leader.EpochSlotRange{}, err
+		}
+		// The nonce-stability cutoff can precede the HFC header horizon. Once
+		// the next epoch's nonce is stable, leader election still needs that
+		// immediate Praos epoch's slot range to precompute its schedule. All
+		// Praos eras use the Shelley genesis epoch/slot dimensions.
+		readyEpoch, ready := a.ledgerState.NextEpochNonceReadyEpoch()
+		currentEpoch := a.ledgerState.CurrentEpoch()
+		if !ready ||
+			readyEpoch != epoch ||
+			currentEpoch == ^uint64(0) ||
+			epoch != currentEpoch+1 {
+			return leader.EpochSlotRange{}, err
+		}
+		currentInfo, currentErr := a.ledgerState.EpochInfo(
+			currentEpoch,
+		)
+		if currentErr != nil {
+			return leader.EpochSlotRange{}, currentErr
+		}
+		slotCount := uint64(currentInfo.LengthInSlots)
+		if slotCount == 0 ||
+			currentInfo.StartSlot > ^uint64(0)-slotCount {
+			return leader.EpochSlotRange{}, fmt.Errorf(
+				"current epoch slot range is invalid: start=%d count=%d",
+				currentInfo.StartSlot,
+				slotCount,
+			)
+		}
+		return leader.EpochSlotRange{
+			StartSlot: currentInfo.StartSlot + slotCount,
+			SlotCount: slotCount,
+		}, nil
 	}
 	return leader.EpochSlotRange{
 		StartSlot: info.StartSlot,

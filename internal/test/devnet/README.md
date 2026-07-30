@@ -200,6 +200,7 @@ node's NtC endpoint.
 ./run-tests.sh --conformance                 # conformance mode: dingo + cardano-node
 ./run-tests.sh -run TestBasicBlockForging   # forward -run (and other flags) to `go test`
 ./run-tests.sh --keep-up                    # leave the network running on success (for poking around)
+DEVNET_MEMPOOL_PROVIDER=dag ./run-tests.sh  # exercise the DAG mempool on every Dingo node
 ```
 
 What it does:

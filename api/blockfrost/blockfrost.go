@@ -125,6 +125,10 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handlePoolMetadata,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}",
+		b.handlePoolDetail,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/governance/dreps",
 		b.handleDReps,
 	)

@@ -39,6 +39,14 @@ import (
 	"gorm.io/plugin/opentelemetry/tracing"
 )
 
+// Default SQL connection pool settings, applied when not overridden via
+// config.
+const (
+	defaultPoolMaxOpenConns    = 100
+	defaultPoolMaxIdleConns    = 10
+	defaultPoolConnMaxLifetime = time.Hour
+)
+
 // validDatabaseNameRe matches the conservative identifier set allowed for MySQL
 // database names: letters, digits, underscores, and hyphens only.
 var validDatabaseNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -155,8 +163,9 @@ type MetadataStoreMysql struct {
 	dsn         string // Data source name (MySQL connection string)
 	storageMode string
 
-	poolMaxIdle int // saved pool max idle connections
-	poolMaxOpen int // saved pool max open connections
+	poolMaxIdle         int           // saved pool max idle connections
+	poolMaxOpen         int           // saved pool max open connections
+	poolConnMaxLifetime time.Duration // saved pool connection max lifetime
 }
 
 // New creates a new database
@@ -240,6 +249,38 @@ func NewWithOptions(opts ...MysqlOptionFunc) (*MetadataStoreMysql, error) {
 			types.StorageModeCore,
 			types.StorageModeAPI,
 		)
+	}
+
+	// Default and validate the SQL connection pool settings. Negative
+	// values are always invalid; 0 selects the provider default rather
+	// than the stdlib meaning (unlimited/no idle conns retained), matching
+	// how a 0 port or empty host also select this package's defaults.
+	if db.poolMaxOpen < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max open connections %d: must not be negative",
+			db.poolMaxOpen,
+		)
+	}
+	if db.poolMaxOpen == 0 {
+		db.poolMaxOpen = defaultPoolMaxOpenConns
+	}
+	if db.poolMaxIdle < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max idle connections %d: must not be negative",
+			db.poolMaxIdle,
+		)
+	}
+	if db.poolMaxIdle == 0 {
+		db.poolMaxIdle = defaultPoolMaxIdleConns
+	}
+	if db.poolConnMaxLifetime < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool connection max lifetime %s: must not be negative",
+			db.poolConnMaxLifetime,
+		)
+	}
+	if db.poolConnMaxLifetime == 0 {
+		db.poolConnMaxLifetime = defaultPoolConnMaxLifetime
 	}
 
 	// Note: Database initialization moved to Start()
@@ -361,11 +402,9 @@ func (d *MetadataStoreMysql) Start() error {
 	if err != nil {
 		return err
 	}
-	d.poolMaxIdle = 10
-	d.poolMaxOpen = 100
 	sqlDB.SetMaxOpenConns(d.poolMaxOpen)
 	sqlDB.SetMaxIdleConns(d.poolMaxIdle)
-	sqlDB.SetConnMaxLifetime(time.Hour)
+	sqlDB.SetConnMaxLifetime(d.poolConnMaxLifetime)
 
 	if err := d.init(); err != nil {
 		// MetadataStoreMysql is available for recovery, so return error but keep instance
@@ -485,6 +524,15 @@ func (d *MetadataStoreMysql) Start() error {
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
 		}
+	}
+	// Drop the superseded reward_account_output credential index now that
+	// AutoMigrate above has created its spendable-aware replacement.
+	if err := models.MigrateRewardAccountOutputCredentialIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward account output credential index migration failed: %w", err,
+		)
 	}
 	// Drop the now-redundant address_transaction credential/staking index
 	// only now that AutoMigrate (above) has created its

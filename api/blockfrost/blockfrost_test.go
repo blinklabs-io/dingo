@@ -70,6 +70,8 @@ type mockNode struct {
 	poolsRetiring                 []PoolRetiringInfo
 	poolsRetiringTotal            int
 	poolMetadata                  PoolMetadataInfo
+	poolDetail                    PoolDetailInfo
+	poolDetailErr                 error
 	asset                         AssetInfo
 	assetHolders                  []AssetHolderInfo
 	assetHoldersTotal             int
@@ -235,6 +237,12 @@ func (m *mockNode) PoolMetadata(
 	_ string,
 ) (PoolMetadataInfo, error) {
 	return m.poolMetadata, m.poolMetadataErr
+}
+
+func (m *mockNode) PoolDetail(
+	_ string,
+) (PoolDetailInfo, error) {
+	return m.poolDetail, m.poolDetailErr
 }
 
 func (m *mockNode) Asset(

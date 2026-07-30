@@ -73,6 +73,12 @@ type BlockfrostNode interface {
 	// PoolMetadata returns the registered metadata for a pool.
 	PoolMetadata(poolID string) (PoolMetadataInfo, error)
 
+	// PoolDetail returns the OpenAPI pool detail object for the requested
+	// pool (bech32 or hex ID), computing epoch-sensitive aggregates
+	// (blocks_epoch, live/active stake, saturation) as of the current
+	// epoch.
+	PoolDetail(poolID string) (PoolDetailInfo, error)
+
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
@@ -441,6 +447,51 @@ type PoolRelayInfo struct {
 	Port *int
 }
 
+// PoolDetailInfo holds pool data needed by the /pools/{pool_id} endpoint,
+// following the Blockfrost OpenAPI 0.1.90 pool schema.
+type PoolDetailInfo struct {
+	PoolID         string
+	Hex            string
+	VrfKey         string
+	LiveStake      string
+	ActiveStake    string
+	DeclaredPledge string
+	LivePledge     string
+	FixedCost      string
+	RewardAccount  string
+	Owners         []string
+	// Registration and Retirement are the transaction hashes of the pool's
+	// registration and retirement certificates, oldest first. Certificates
+	// with no linked transaction (rows synthesized by a Mithril
+	// ledger-state import) are excluded since they have no originating
+	// transaction to report.
+	Registration   []string
+	Retirement     []string
+	CalidusKey     *PoolCalidusKeyInfo
+	BlocksMinted   uint64
+	BlocksEpoch    uint64
+	LiveDelegators uint64
+	LiveSize       float64
+	LiveSaturation float64
+	ActiveSize     float64
+	MarginCost     float64
+}
+
+// PoolCalidusKeyInfo holds a pool's latest valid CIP-0088 Calidus key
+// registration (Blockfrost's calidus_key object). dingo does not currently
+// ingest Calidus key registrations from any source, so every
+// BlockfrostNode implementation returns a nil *PoolCalidusKeyInfo here; the
+// type exists so PoolDetailInfo mirrors the OpenAPI schema exactly.
+type PoolCalidusKeyInfo struct {
+	ID          string
+	PubKey      string
+	Nonce       uint64
+	TxHash      string
+	BlockHeight uint64
+	BlockTime   int64
+	Epoch       uint64
+}
+
 // AddressAmountInfo holds amount data needed by address
 // UTxO responses.
 type AddressAmountInfo struct {
@@ -780,6 +831,9 @@ type AccountRewardHistoryInfo struct {
 	Epoch  int32
 	Amount string
 	PoolID string
+	// Type is the Blockfrost reward-type enum spelling (leader, member,
+	// pool_deposit_refund) mapped from models.RewardAccountOutput.RewardType.
+	Type string
 }
 
 // AccountUTXOInfo holds a stake-account UTxO row.

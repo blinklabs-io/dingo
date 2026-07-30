@@ -541,7 +541,9 @@ dingo/
 │   ├── utxo.go          # UTXO state handling
 │   └── certstate.go     # Certificate state handling
 ├── mempool/             # Transaction pool
-│   ├── mempool.go       # Mempool, validation, capacity
+│   ├── backend.go       # FIFO/DAG backend contract and constructors
+│   ├── dag.go           # Dependency graph and topological ordering
+│   ├── mempool.go       # Shared validation, lifecycle, capacity, providers
 │   └── consumer.go      # Per-consumer transaction tracking
 ├── ouroboros/            # Ouroboros protocol handlers
 │   ├── ouroboros.go      # N2N and N2C protocol management
@@ -634,7 +636,7 @@ type Node struct {
     chainsyncState *chainsync.State               // Multi-peer sync state
     chainSelector  *chainselection.ChainSelector  // Chain comparison
     eventBus       *event.EventBus                // Event routing
-    mempool        mempool.Pool                   // Selected transaction pool
+    mempool        mempool.Service                // Selected transaction pool
     chainManager   *chain.ChainManager            // Blockchain state
     db             *database.Database             // Storage layer
     ledgerState    *ledger.LedgerState            // UTXO/state tracking
@@ -1010,6 +1012,28 @@ The worker is intentionally composed at the node boundary. Ledger and database
 indexing code persist the URL/hash pointers; APIs read the local cache through
 the metadata store when they need off-chain documents.
 
+Pool-sourced (`source_type = "pool"`) documents get source-specific
+enforcement inside the fetcher, ahead of every other source type: `fetchOne`
+caps the read at 512 bytes rather than the generic `maxBytes`, and, once the
+Blake2b-256 hash matches, decodes and validates the body with
+`internal/offchainmetadata.ValidatePoolMetadata` before marking the row
+fetched. That validator mirrors cardano-api's
+`validateAndHashStakePoolMetadata` (`name` <=50 characters, `description`
+<=255 characters, `ticker` 3-5 characters, `homepage` required) and the
+Blockfrost `pool_metadata` schema. A hash-valid pool document that is
+oversized or fails validation is recorded as a failed fetch, with `LastError`
+prefixed the same way an oversized generic response or a hash mismatch is, so
+the classification lives in one place (`api/blockfrost/adapter.go`'s
+`offchainFetchError`) rather than being recomputed by every reader. This is a
+deliberate fetch-vs-serve split: validation happens once, in the worker, at
+fetch time, and `NodeAdapter.PoolMetadata` mostly reads the persisted
+`Status`/`LastError` rather than re-validating on every request. The one
+exception is a defensive read-time fallback for `status = "fetched"` rows
+that predate this validation (there is no in-place migration of already-cached
+rows): `PoolMetadata` re-runs `ValidatePoolMetadata` against `Content` before
+returning it, so a stale cached document that would fail today's validation
+does not keep serving as if it were valid, without writing back to the row.
+
 ### Archive And History Expiry Topology
 
 Dingo's blob-store abstraction supports independent history expiry and archive
@@ -1290,6 +1314,36 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 - VRF proof verification against the epoch nonce
 - KES signature verification with period checks
 - Slot leader eligibility checking
+
+Before resolving or eagerly forecasting an epoch for a live header,
+`headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
+The in-memory summary uses the same configured era safe zone and
+`TransitionInfo` as the NtC era-history query: an unknown transition is bounded
+from the applied tip by the era's stability window (`3k/f` for Shelley and
+later), a known transition is bounded at the announced era boundary, and an
+impossible transition keeps the same rolling safe-zone bound so live slot
+processing can cross a confirmed same-era epoch boundary. (The point-in-time
+NtC query may conservatively stop its reported range at that confirmed
+boundary.) A header at or past the live bound fails with
+`hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
+epoch/nonce cache. Candidate fork blockfetch begins after fork resolution has
+rolled the applied chain back to its common ancestor, so permitted epoch-nonce
+forecasts and the epoch-specific Mark stake snapshot used for leader
+eligibility are read from that intersection state.
+
+Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
+chains so callers can defer until the ledger advances. `EpochInfo` serves an
+already materialized epoch directly from the immutable epoch cache before
+forecasting. The operational slot clock is the deliberate exception to
+wall-clock forecast refusal: a near-now `TimeToSlot` call extrapolates the
+current era while a stale node catches up, but arbitrary time queries and all
+header validation remain bounded. Blockfrost epoch/era end timestamps are
+calculated as interval endpoints from cached epoch durations rather than
+treating the exclusive end as a forecastable header slot.
+When the next-epoch nonce becomes stable before that header horizon opens,
+the node-level leader adapter derives only the immediate next Praos epoch's
+slot range from the current epoch dimensions so schedule precomputation can
+proceed without broadening general ledger forecasts.
 
 ### Operational Certificate Validation
 
@@ -1882,6 +1936,22 @@ paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
 the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
+The unresolved-producer fallback also tracks the applied ledger high-water
+mark across attempts. Different candidate continuations can move the failing
+block forward slightly while rebuilding to the same applied tip, so failure
+slot or transaction identity is not a reliable convergence signal. After
+`maxReplayRecoveryNoProgress` consecutive attempts fail to cross that applied
+tip, recovery holds there instead of pruning another security-parameter
+window, emits `dingo_ledger_replay_recovery_nonconverging_total`, and publishes
+a `chainsync.resync` event with reason
+`replay tx validation recovery not converging`. Node composition routes that
+neutral event to Ouroboros, which closes the active ChainSync connection and
+forces a fresh intersection. The resync is published before local rollback
+work so a rollback error cannot suppress peer rotation. If an earlier recovery
+step has already pruned the primary chain below the applied ledger tip, the
+primary-chain rewind is an already-held no-op while ChainSync refills it.
+Successful block application beyond the recorded high-water mark clears the
+hold and restores the normal fallback budget.
 
 When a block fails per-tx validation at tip,
 the node rewinds the primary chain and rolls the ledger back so ChainSelection
@@ -1945,13 +2015,34 @@ ChainSync streams ineligible.
 
 ## Transaction Mempool
 
-`mempool.Pool` is the backend-neutral contract used by node composition.
-`mempool.FIFO` embeds the existing ordered queue and is the default backend.
-Successful admissions append to that queue; independent transactions are
+`mempool.Service` is the backend-neutral contract used by node composition.
+The plugin host resolves either the `fifo` provider (the default) or the `dag`
+provider. The legacy provider name `default` remains an alias for `fifo`.
+Successful FIFO admissions append to one queue; independent transactions are
 therefore exposed to forging and relay consumers in admission order. Duplicate
 submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
+
+The DAG provider maintains nodes keyed by transaction hash, a pending-output
+producer index, explicit parent/child edges, and a cached transaction order. An
+edge points from a pending transaction to a transaction that consumes one of
+its outputs. Only validated transactions enter the graph, and a pending parent
+must exist before its child can be admitted, so successful-admission order is
+already a stable topological order. Independent transactions therefore retain
+FIFO behavior without sorting the graph during each forging or relay snapshot.
+Manual removal and expiry use the adjacency index to find the transitive
+descendant closure; confirmed removal detaches only the confirmed nodes because
+their outputs have moved into ledger state. The DAG backend never
+watermark-evicts transactions. Its TxSubmission intake waits for sufficient
+admission headroom, while direct submissions receive `MempoolFullError` above
+the rejection watermark. A transaction that repeatedly loses the available
+headroom race to another peer is dropped after a bounded retry streak so that
+one offer cannot stall the connection indefinitely. DAG intake currently
+requests one transaction ID per TxSubmission round trip, which can reduce
+inbound throughput on high-latency peer links. This is required because
+gouroboros acknowledges every ID returned by a peer; support for acknowledging
+only the fetched prefix would permit batched requests.
 
 The selected pool manages pending transactions:
 
@@ -1961,7 +2052,7 @@ The selected pool manages pending transactions:
     | Transaction Management                         |
     |   Validation on add (Phase 1 + Phase 2)        |
     |   Capacity limits (configurable)               |
-    |   Watermark-based eviction and rejection       |
+    |   FIFO eviction / DAG intake backpressure      |
     |   Automatic purging on chain updates           |
     |                                                |
     | Consumer Tracking                              |
@@ -1973,14 +2064,14 @@ The selected pool manages pending transactions:
     -------------------------------------------------
 ```
 
-The `mempoolImplementation` setting accepts only `fifo`, which is also the
-default; configuration validation rejects every other value. Selection and
+Selection uses `plugins.mempool.provider: fifo|dag`; provider-specific capacity
+and watermark settings remain under `plugins.mempool.config`. Selection and
 construction happen in `node.go`; networking depends on its own narrow mempool
 interface, forging and APIs retain their existing narrow adapters, and none of
-them import FIFO state. Cardano-compatible metrics and `mempool.add_tx` /
+them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 `mempool.remove_tx` events remain backend-neutral;
-`dingo_metrics_mempool_info{implementation="fifo"}` identifies the selected
-backend.
+`dingo_metrics_mempool_info{implementation="fifo|dag"}` identifies the
+selected backend.
 
 Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
 clearing transaction and consumer state; later transaction admission returns
@@ -1988,29 +2079,32 @@ clearing transaction and consumer state; later transaction admission returns
 prevents in-flight protocol callbacks from repopulating a pool whose background
 expiry and chain-update workers have already been stopped.
 
-Ordinary FIFO mutations are serialized by a dedicated mutation gate, but
-chain-update revalidation does not hold that gate while it validates the whole
-pool. A rebuild briefly snapshots the live FIFO and starts a mutation journal,
-then constructs a private candidate state while admissions, confirmed/manual
-removals, descendant pruning, expiry, and watermark eviction continue against
-the live state. The bounded journal aborts a candidate instead of growing
-without limit. Otherwise, the candidate catches up by mutation sequence,
-leaving at most the configured `revalidationDeltaCap` residual per pass, and
-commits only after it reaches the current sequence. The final critical section
-translates consumer cursors and swaps the candidate overlay, ordered
-transaction slice, hash index, and byte totals; its work is independent of
-total pool occupancy. Shutdown is a terminal journal state, and repeated
-ledger-generation changes abandon the candidate after a bounded retry so chain
-activity cannot create a busy loop.
+Ordinary mutations are serialized by a dedicated mutation gate, but chain-update
+revalidation does not hold that gate while it validates the whole pool. Both
+backends briefly snapshot their live state, build a private candidate while
+admissions and removals continue, and replay concurrent changes from a monotonic
+mutation journal. Bounded catch-up loops apply large deltas off the gate and
+leave only a limited residual for the final critical section.
 
-`LedgerState.WithTxValidationSession` is the narrow boundary for a rebuild. It
-pins one published ledger generation (tip, era, and protocol parameters), one
-validation reference slot, and one repeatable-read metadata/blob transaction
-for every transaction in the batch. The mempool verifies that generation again
-immediately before the swap; if a block or rollback published a newer one, the
-candidate is discarded and retried from the live FIFO. This prevents a single
-candidate from mixing transaction results from different ledger or database
-views.
+The shared bounded journal aborts a candidate instead of growing without limit,
+and `plugins.mempool.config.revalidationDeltaCap` controls the residual mutation
+count for both providers. The final critical section translates consumer
+cursors and swaps the candidate overlay, ordered transaction slice, hash index,
+and byte totals; DAG additionally rebuilds and swaps its dependency graph. Its
+work is independent of total pool occupancy. Shutdown terminates an in-flight
+rebuild, and bounded ledger-generation retries prevent chain activity from
+creating a busy loop. If an overlay entry is unexpectedly missing from the
+transaction hash index, both FIFO and DAG reject its dependent transaction cone
+rather than retaining descendants whose parent body cannot be revalidated.
+
+`LedgerState.WithTxValidationSession` is the narrow boundary for every backend
+rebuild. It pins one published ledger generation (tip, era, and protocol
+parameters), one validation reference slot, and one repeatable-read
+metadata/blob transaction for every transaction in the batch. The mempool
+verifies that generation again immediately before the swap; if a block or
+rollback published a newer one, the candidate is discarded and retried from
+the live pool. This prevents one FIFO or DAG candidate from mixing transaction
+results from different ledger or database views.
 
 CBOR decoding and ledger validation run without the primary pool RW lock or
 consumer lock. `Transactions` likewise snapshots transaction values under the
@@ -2198,11 +2292,18 @@ header validation recognizes that shape as unsuitable for hard stake-threshold
 rejection and skips that portion of validation until live boundary-captured Mark
 rows are available.
 
-The Mithril snapshot also acts as the local trust anchor during live
-chainsync. The ledger refuses any rollback below the imported ledger slot
-(`mithrilLedgerSlot`), since blocks at or below that boundary were certified
-as a single ledger state and intermediate UTxO states for a replacement fork
-cannot be reconstructed. Mithril sync persists the full boundary point in
+Mithril sync only uses a ledger state as the local trust anchor when its point
+is at or below the certificate-backed ImmutableDB tip. Ancillary archives can
+contain a newer ledger state and volatile blocks signed by the ancillary
+publisher, but that signature authenticates the archive; it does not establish
+Ouroboros consensus validity for the volatile suffix. State-file selection is
+therefore capped at the certified immutable tip, the selected point is checked
+against the copied immutable chain, and sync fails closed when no such state is
+available.
+
+The ledger refuses any rollback below the selected stable ledger slot
+(`mithrilLedgerSlot`), since intermediate UTxO states before that imported
+state cannot be reconstructed. Mithril sync persists the full boundary point in
 `sync_state` (`mithril_ledger_slot` and `mithril_ledger_hash`) so outbound
 chainsync can always offer that point during `FindIntersect`, even if recent
 ledger-tip point generation is temporarily empty or stale. Slot-only older
@@ -2227,47 +2328,29 @@ ingestion (`ensureGapConsumedUtxos`, used while closing the range between the
 snapshot and the chain tip) is unconditionally strict already, since that range
 is always expected to be fully recoverable from the snapshot import.
 
-Historical block validation is controlled independently. With
+Certified immutable blocks after the selected anchor remain in the primary
+chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
+node startup therefore replays that stable suffix through the ordinary ledger
+path. Blocks beyond the ImmutableDB tip are not imported from ancillary
+volatile state or pre-processed as gap blocks; chainsync/blockfetch obtains and
+validates them normally. API-mode historical metadata backfill is capped at the
+anchor so it cannot pre-apply and thereby bypass the ledger path for either
+suffix.
+
+Historical block validation before the stable anchor is controlled
+independently. With
 `ValidateHistorical: false` (the default), ledger replay skips validation
 outside the near-tip stability window; certificate verification of a Mithril
 artifact establishes a signed trust boundary but is not equivalent to
 independent from-genesis replay. With complete historical state,
 `ValidateHistorical: true` validates the older replay window as well.
 
-The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
-`processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
-(the "gap blocks") for their transaction effects, including consumed-input
-reconciliation via `ensureGapConsumedUtxos`, but without VRF folding. Because a
-phase-2-invalid transaction's collateral fee is computed from the metadata UTxO
-rows and those consumed inputs are only recovered by `ensureGapConsumedUtxos`
-after the transaction row is created, `SetGapBlockTransaction` then calls
-`RecomputeGapCollateralFee` to recompute and persist `transaction.collateral_fee`
-once the inputs exist, so the epoch fee pot is not undercounted. The trust
-boundary is then recorded at the post-gap chain tip (`mithril/sync_import.go`),
-ahead of the evolving nonce persisted at the ledger-state slot. Because live
-chainsync folds nonces only past the trust boundary, the candidate nonce carried
-into the first post-bootstrap epoch
-boundary would otherwise omit every gap block's VRF output, diverging the
-computed epoch nonce from the network and failing every leader-VRF check in that
-epoch (a node runs clean through the bootstrap epoch — whose nonce was imported,
-not computed — then wedges rejecting the first block of the next epoch).
-`LedgerState.healMithrilGapBlockNonces` closes this at startup: it re-folds the
-evolving nonce (the shared `foldBlockEtaV`, Byron-skipped) from the anchor
-block's stored `block_nonce` through every canonical-chain block up to the tip,
-persisting a corrected `block_nonce` for each and checkpointing the
-trust-boundary block. Blocks come from the primary chain index — a raw
-block-blob slot scan would also fold retained fork blobs and synthetic Leios
-endorser blobs, silently corrupting every subsequent nonce. Writes commit in
-batches, with the trust-boundary row committed last as the completion marker,
-so the heal is idempotent — once the recorded trust-boundary point carries a
-folded nonce it detects completion and no-ops — and a crash mid-heal resumes on
-the next start from the highest valid canonical row below the boundary. It
-repairs an already-bootstrapped node in place with no re-bootstrap and never
-reconstructs from an unknown seed: when no usable anchor nonce exists below the
-boundary, or no valid anchor candidate is on the primary chain, it declines
-rather than guess. If a higher valid nonce row below the boundary belongs to a
-retained fork, the heal falls back to the next lower canonical candidate instead
-of treating the fork row as the seed.
+`processGapBlocks`, `SetGapBlockTransaction`, and
+`LedgerState.healMithrilGapBlockNonces` remain compatibility/recovery machinery
+for databases produced by older releases that advanced
+`mithril_ledger_slot` across an unvalidated gap. New imports do not create that
+shape: nonce folding and transaction effects after the stable anchor are
+produced by ordinary ledger replay.
 
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce`, where the carried
@@ -2309,8 +2392,8 @@ fields protect every API listener.
 A Blockfrost-compatible REST API that provides read access to chain data and
 transaction submission. The current router includes health/root, blocks,
 epochs/parameters, network/eras, genesis, assets, pools/extended, retiring
-pools, pool metadata, governance DRep list and lookup, address summary,
-address UTxOs and transactions, metadata label JSON/CBOR,
+pools, pool detail, pool metadata, governance DRep list and lookup, address
+summary, address UTxOs and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
@@ -2413,6 +2496,36 @@ The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 remote Bark archive and downloading the signed URL. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
+
+Because the archive controls both the download URL and the response body, the
+client re-establishes block identity locally rather than trusting the response.
+Downloaded bytes are decoded with body validation enabled, and the block's
+computed hash and slot must match the point that was requested.
+
+That binding is complete for every era except Byron main. gouroboros checks a
+Byron main block's transaction, delegation, and update proofs but not
+`ssc_proof`, whose hashes cover cardano-ledger's own encoding of the SSC
+sub-payloads rather than the bytes carried in the block. An alteration confined
+to the SSC payload would therefore leave the hash, slot, height, and previous
+hash — all taken from the untouched header — unchanged. Rather than serve a
+body that is only partly authenticated, Bark refuses Byron main archive reads
+outright; the restriction lifts once Byron SSC proof validation exists
+upstream. Byron epoch boundary blocks are unaffected, carrying neither
+transactions nor an SSC payload, so one body hash covers their whole body.
+
+The block era needs its own check. For Shelley and later the hash covers the
+header alone, and adjacent eras share that header layout, so one set of bytes
+decodes under several eras with an identical hash and slot — the hash cannot
+police the era. The era is therefore derived from the header itself via
+`ledger.DetermineBlockType` and must equal what the archive claimed. Byron is
+exempt because its hash is taken over the block type byte followed by the
+header, so the hash already binds it. An era that cannot be derived at all is
+refused rather than taken on the archive's word.
+
+Block metadata is derived from the decoded block, and archive-reported height
+or previous hash that disagrees with it fails the fetch. Both entry points — `GetBlock` and the iterator's expired-history
+resolution — share this path, so neither is an unchecked route into archive
+data.
 
 ### Midnight Indexer (`midnight/indexer/`)
 
@@ -2828,16 +2941,29 @@ off).
 Snapshot types: `"mark"` for epoch-boundary lovelace totals, `"set"` and `"go"` for historical rotation metadata, and `"actv"` for Mithril-imported active `pool-distr` fractions.
 
 The Cleanup step of each epoch transition (`cleanupOldSnapshots`) prunes only
-what scales with delegator count — `RewardStakeInput` and `RewardAccountOutput`,
-plus `PoolStakeSnapshot` — to the four epochs the rotation and delayed reward
-model need (current through current-3). `EpochSummary`, `RewardAdaPots`,
-`RewardSnapshot`, `RewardPoolInput`, and `RewardPoolOutput` are exempt and
-retained for the life of the database, so full per-epoch and per-pool reward
-history stays queryable and a missing summary row keeps its diagnostic meaning of
-a boundary that was never captured. Because a retained snapshot can outlive its
-per-credential rows, `applyStakeRewards` skips an epoch whose snapshot claims
-delegators over an empty `RewardStakeInput` set rather than failing the rollover.
-See the retention section in `DATABASE.md` for the per-table detail.
+what scales with delegator count — `RewardStakeInput` and (in `core` storage
+mode) `RewardAccountOutput`, plus `PoolStakeSnapshot` — to the four epochs the
+rotation and delayed reward model need (current through current-3).
+`EpochSummary`, `RewardAdaPots`, `RewardSnapshot`, `RewardPoolInput`, and
+`RewardPoolOutput` are exempt and retained for the life of the database, so
+full per-epoch and per-pool reward history stays queryable and a missing
+summary row keeps its diagnostic meaning of a boundary that was never
+captured. Because a retained snapshot can outlive its per-credential rows,
+`applyStakeRewards` skips an epoch whose snapshot claims delegators over an
+empty `RewardStakeInput` set rather than failing the rollover. See the
+retention section in `DATABASE.md` for the per-table detail.
+
+Since dingo #1875, `cleanupOldSnapshots` reads `Database.StorageMode()` and
+diverges for `RewardAccountOutput` only: in `api` storage mode it is exempted
+from the epoch-window prune and retained for the life of the database instead,
+so the Blockfrost account reward-history endpoint
+(`NodeAdapter.AccountRewardHistory`, `GET /accounts/{stake_address}/rewards`)
+can answer for any epoch rather than only the trailing four; `core` mode is
+unchanged. `RewardStakeInput` is pruned to the same four-epoch window in both
+modes regardless — it is not a Blockfrost-visible table and remains too large
+to retain unconditionally. The rollback path, `DeleteRewardStateAfterSlot`, is
+unaffected: it does not consult storage mode and always removes reward-state
+rows (including `RewardAccountOutput`) above the rollback slot in every mode.
 
 ### Reward Metadata State
 

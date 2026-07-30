@@ -305,7 +305,7 @@ func (f *Fetcher) fetchOne(
 		)
 		return nil
 	}
-	body, err := readLimited(resp.Body, f.maxBytes)
+	body, err := readLimited(resp.Body, f.maxBytesForSource(doc.SourceType))
 	if err != nil {
 		if ctx.Err() != nil {
 			doc.FetchAttempts = originalAttempts
@@ -323,6 +323,12 @@ func (f *Fetcher) fetchOne(
 			errors.New(models.OffchainFetchErrHashMismatch),
 		)
 		return nil
+	}
+	if doc.SourceType == models.OffchainMetadataSourcePool {
+		if _, err := ValidatePoolMetadata(body); err != nil {
+			f.markFailure(doc, uint(resp.StatusCode), err)
+			return nil
+		}
 	}
 	now := f.now()
 	doc.Content = body
@@ -346,6 +352,21 @@ func (f *Fetcher) markFailure(
 	doc.LastHTTPStatus = status
 	doc.LastError = truncate(err.Error(), 1024)
 	doc.NextFetchAfter = &next
+}
+
+// maxBytesForSource returns the fetch byte limit for a document's source
+// type. Pool sources get the stake-pool-specific 512-byte limit (never
+// larger than the configured generic limit); every other source keeps the
+// fetcher's configured generic limit unchanged. Reducing the read cap for
+// pool sources at the network-read boundary, rather than only validating
+// after the fact, avoids reading and buffering up to the generic limit for
+// documents that can never validate.
+func (f *Fetcher) maxBytesForSource(sourceType string) int64 {
+	if sourceType == models.OffchainMetadataSourcePool &&
+		f.maxBytes > poolMetadataMaxBytes {
+		return poolMetadataMaxBytes
+	}
+	return f.maxBytes
 }
 
 func readLimited(r io.Reader, maxBytes int64) ([]byte, error) {

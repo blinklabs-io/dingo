@@ -36,6 +36,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ledgersnapshot "github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -45,6 +46,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
@@ -717,6 +719,45 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 		"block outside known epochs must be rejected, not skipped",
 	)
 	assert.Contains(t, err.Error(), "no epoch data for slot")
+}
+
+func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
+	t *testing.T,
+) {
+	const horizonSlot = uint64(532_000)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(200_000, []byte("tip")),
+		},
+		epochCache: []models.Epoch{
+			{
+				EpochId:       500,
+				StartSlot:     100_000,
+				SlotLength:    1_000,
+				LengthInSlots: 432_000,
+				EraId:         eras.ConwayEraDesc.Id,
+				Nonce:         []byte{0x01},
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	epoch, err := ls.headerVerificationEpoch(horizonSlot-1, true)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(500), epoch.EpochId)
+
+	_, err = ls.headerVerificationEpoch(horizonSlot, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+		"past-horizon rejection must happen before forecast cache mutation")
 }
 
 // TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce verifies that a block

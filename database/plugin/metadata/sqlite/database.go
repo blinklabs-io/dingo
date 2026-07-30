@@ -590,6 +590,15 @@ func (d *MetadataStoreSqlite) Start() error {
 	if err := d.db.AutoMigrate(models.MigrateModels...); err != nil {
 		return err
 	}
+	// Drop the superseded reward_account_output credential index now that
+	// AutoMigrate above has created its spendable-aware replacement.
+	if err := models.MigrateRewardAccountOutputCredentialIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward account output credential index migration failed: %w", err,
+		)
+	}
 	// Drop the now-redundant address_transaction credential/staking index
 	// only now that AutoMigrate (above) has created its
 	// idx_addr_tx_stake_position replacement: this must run after

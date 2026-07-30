@@ -109,6 +109,23 @@ func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
 	assert.Equal(t, capacity, selection.Config["capacity"])
 }
 
+func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
+	for _, provider := range []string{"default", "fifo", "dag"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := NewConfig(WithPluginSelection(
+				plugin.CapabilityMempool,
+				plugin.Selection{Provider: provider},
+			))
+			selection := cfg.pluginSelections[plugin.CapabilityMempool]
+			assert.Equal(
+				t,
+				int64(internalconfig.DefaultMempoolCapacityPraos),
+				selection.Config["capacity"],
+			)
+		})
+	}
+}
+
 func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 	cfg := NewConfig(
 		WithRunMode(runModeLeios),

@@ -23,6 +23,7 @@
         <div class="tabs" role="tablist">
           <button class="tab active" id="tab-proposals" data-view="proposals" type="button" role="tab" aria-selected="true" aria-controls="panel-proposals">Actions</button>
           <button class="tab" id="tab-dreps" data-view="dreps" type="button" role="tab" aria-selected="false" aria-controls="panel-dreps">DReps</button>
+          <button class="tab" id="tab-epochs" data-view="epochs" type="button" role="tab" aria-selected="false" aria-controls="panel-epochs">Epochs</button>
           <button class="tab" id="tab-stake" data-view="stake" type="button" role="tab" aria-selected="false" aria-controls="panel-stake">Stake Lookup</button>
         </div>
         <button class="icon-button" id="refresh" type="button" title="Refresh">Refresh</button>
@@ -74,11 +75,19 @@
       <section class="view" id="panel-dreps" role="tabpanel" aria-labelledby="tab-dreps" aria-hidden="true">
         <div class="filters">
           <label>
-            Activity
+            Registration
             <select id="drep-active">
               <option value="true">Active</option>
               <option value="">All</option>
               <option value="false">Inactive</option>
+            </select>
+          </label>
+          <label>
+            Inactivity expiry
+            <select id="drep-expiry">
+              <option value="">Any</option>
+              <option value="active">Not expired</option>
+              <option value="expired">Expired</option>
             </select>
           </label>
         </div>
@@ -88,12 +97,38 @@
               <tr>
                 <th>DRep</th>
                 <th>Status</th>
+                <th>Expiry</th>
                 <th>Epochs</th>
                 <th>Delegators</th>
                 <th>Votes</th>
               </tr>
             </thead>
             <tbody id="drep-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view" id="panel-epochs" role="tabpanel" aria-labelledby="tab-epochs" aria-hidden="true">
+        <p class="muted">
+          Retained epoch and reward state. Per-epoch ADA pots, stake aggregates,
+          and per-pool reward results are kept for the life of the database; the
+          per-delegator rows behind them are pruned to the last four epochs.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Epoch</th>
+                <th>Treasury</th>
+                <th>Reserves</th>
+                <th>Fees</th>
+                <th>Rewards</th>
+                <th>Active stake</th>
+                <th>Pools / Delegators</th>
+                <th>Capture</th>
+              </tr>
+            </thead>
+            <tbody id="epoch-rows"></tbody>
           </table>
         </div>
       </section>

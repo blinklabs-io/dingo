@@ -31,9 +31,19 @@ import (
 const (
 	txsubmissionRequestTxIdsCount        = 10              // Number of TxIds to request from peer at one time
 	txsubmissionMaxConsecutiveRateLimits = 3               // Drop TxIds after this many consecutive hits
+	txsubmissionMaxAdmissionRetryStreak  = 3               // Drop one offered TX after this many lost headroom races
 	txsubmissionMaxBackoff               = 5 * time.Second // Cap on exponential backoff wait
 	txsubmissionBaseBackoff              = 150 * time.Millisecond
 	txsubmissionLogEvery                 = 10 // Log every Nth rate limit hit after the 1st
+)
+
+var (
+	errTxsubmissionAdmissionRetriesExhausted = errors.New(
+		"txsubmission admission retries exhausted",
+	)
+	errTxsubmissionAdmissionStopped = errors.New(
+		"txsubmission admission wait stopped",
+	)
 )
 
 // txsubmissionBackoffDuration returns the exponential backoff duration
@@ -50,6 +60,36 @@ func txsubmissionBackoffDuration(consecutiveHits int) time.Duration {
 		}
 	}
 	return d
+}
+
+func retryTxsubmissionAdmission(
+	add func() error,
+	waitForHeadroom func() bool,
+	recordRetry func(int),
+) error {
+	for retryStreak := 0; ; {
+		err := add()
+		if err == nil {
+			return nil
+		}
+		var fullErr *mempool.MempoolFullError
+		if !errors.As(err, &fullErr) {
+			return err
+		}
+		retryStreak++
+		recordRetry(retryStreak)
+		if retryStreak >= txsubmissionMaxAdmissionRetryStreak {
+			return fmt.Errorf(
+				"%w after %d capacity failures: %w",
+				errTxsubmissionAdmissionRetriesExhausted,
+				retryStreak,
+				err,
+			)
+		}
+		if !waitForHeadroom() {
+			return errTxsubmissionAdmissionStopped
+		}
+	}
 }
 
 func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
@@ -163,6 +203,23 @@ func (o *Ouroboros) txsubmissionServerInit(
 		defer backoffTimer.Stop()
 
 		for {
+			headroom, limitAdmission := o.Mempool.(mempool.AdmissionHeadroom)
+			requestCount := txsubmissionRequestTxIdsCount
+			if limitAdmission {
+				if !headroom.WaitForAdmissionHeadroom(
+					1,
+					conn.ErrorChan(),
+				) {
+					return
+				}
+				// Request one ID at a time because gouroboros acknowledges every
+				// ID in a reply on the next request. Requesting a larger batch
+				// and fetching only the prefix that fits would silently discard
+				// the unrequested remainder.
+				// TODO: Restore batched requests when gouroboros can
+				// acknowledge only the fetched prefix.
+				requestCount = 1
+			}
 			done := make(chan struct{})
 			var txIds []txsubmission.TxIdAndSize
 			var err error
@@ -170,7 +227,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 				defer close(done)
 				txIds, err = ctx.Server.RequestTxIds(
 					true,
-					txsubmissionRequestTxIdsCount,
+					requestCount,
 				)
 			}()
 			select {
@@ -261,10 +318,37 @@ func (o *Ouroboros) txsubmissionServerInit(
 				} else {
 					consecutiveRateLimits = 0
 				}
-				// Unwrap inner TxId from TxIdAndSize
-				var requestTxIds []txsubmission.TxId
-				for _, txId := range txIds {
-					requestTxIds = append(requestTxIds, txId.TxId)
+				requestTxIds := make([]txsubmission.TxId, 0, len(txIds))
+				if limitAdmission {
+					if int64(txIds[0].Size) >
+						headroom.MaxAdmissionHeadroomBytes() {
+						o.config.Logger.Warn(
+							"peer offered transaction larger than mempool admission capacity",
+							"component", "network",
+							"protocol", "tx-submission",
+							"role", "server",
+							"connection_id", ctx.ConnectionId.String(),
+							"tx_size", txIds[0].Size,
+							"max_admission_bytes",
+							headroom.MaxAdmissionHeadroomBytes(),
+						)
+						continue
+					}
+					if !headroom.WaitForAdmissionHeadroom(
+						int64(txIds[0].Size),
+						conn.ErrorChan(),
+					) {
+						return
+					}
+					requestTxIds = append(requestTxIds, txIds[0].TxId)
+				} else {
+					// Unwrap inner TxId from TxIdAndSize.
+					for _, txId := range txIds {
+						requestTxIds = append(requestTxIds, txId.TxId)
+					}
+				}
+				if len(requestTxIds) == 0 {
+					continue
 				}
 				// Request TX content for TxIds from above
 				txs, err := ctx.Server.RequestTxs(requestTxIds)
@@ -307,11 +391,55 @@ func (o *Ouroboros) txsubmissionServerInit(
 						"role", "server",
 						"connection_id", ctx.ConnectionId.String(),
 					)
-					// Add transaction to mempool
-					err = o.Mempool.AddTransaction(
-						uint(txBody.EraId),
-						txBody.TxBody,
-					)
+					// Admission headroom can be consumed by another peer
+					// between the wait above and this commit. Retry only
+					// capacity failures, and bound the retry streak so one
+					// contested offer cannot stall this peer indefinitely.
+					if limitAdmission {
+						err = retryTxsubmissionAdmission(
+							func() error {
+								return o.Mempool.AddTransaction(
+									uint(txBody.EraId),
+									txBody.TxBody,
+								)
+							},
+							func() bool {
+								return headroom.WaitForAdmissionHeadroom(
+									int64(len(txBody.TxBody)),
+									conn.ErrorChan(),
+								)
+							},
+							o.recordTxsubmissionAdmissionRetry,
+						)
+					} else {
+						err = o.Mempool.AddTransaction(
+							uint(txBody.EraId),
+							txBody.TxBody,
+						)
+					}
+					if errors.Is(
+						err,
+						errTxsubmissionAdmissionStopped,
+					) {
+						return
+					}
+					if errors.Is(
+						err,
+						errTxsubmissionAdmissionRetriesExhausted,
+					) {
+						o.config.Logger.Warn(
+							"dropping peer transaction after repeated mempool admission contention",
+							"component", "network",
+							"protocol", "tx-submission",
+							"role", "server",
+							"connection_id", ctx.ConnectionId.String(),
+							"tx_hash", tx.Hash(),
+							"retry_streak",
+							txsubmissionMaxAdmissionRetryStreak,
+							"error", err,
+						)
+						continue
+					}
 					if err != nil {
 						o.config.Logger.Error(
 							fmt.Sprintf(

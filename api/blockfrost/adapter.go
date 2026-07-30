@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"net/http"
@@ -28,11 +29,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -537,15 +540,7 @@ func (a *NodeAdapter) CurrentEpoch() (
 			err,
 		)
 	}
-	endSlot := tipEpoch.StartSlot + uint64(tipEpoch.LengthInSlots)
-	endTime, err := a.ledgerState.SlotToTime(endSlot)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"get epoch end time for slot %d: %w",
-			endSlot,
-			err,
-		)
-	}
+	endTime := epochEndTime(startTime, tipEpoch)
 	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
 		tipEpoch.StartSlot,
 		tip.Point.Slot,
@@ -771,7 +766,7 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 		)
 	}
 
-	liveStake, err := a.liveStake()
+	liveStake, err := a.liveStake(nil)
 	if err != nil {
 		return NetworkInfo{}, err
 	}
@@ -836,13 +831,9 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 			)
 		}
 		endSlot := last.StartSlot + uint64(last.LengthInSlots)
-		endTime, err := a.ledgerState.SlotToTime(endSlot)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"get era %s end time: %w",
-				era.Name,
-				err,
-			)
+		endTime := startTime
+		for _, epoch := range epochs {
+			endTime = epochEndTime(endTime, epoch)
 		}
 		slotLengthMs := uint64(last.SlotLength)
 		slotLengthSeconds := (slotLengthMs + 500) / 1000
@@ -869,6 +860,14 @@ func (a *NodeAdapter) NetworkEras() ([]NetworkEraInfo, error) {
 		})
 	}
 	return ret, nil
+}
+
+func epochEndTime(startTime time.Time, epoch models.Epoch) time.Time {
+	// Epoch length and slot length are protocol-bounded.
+	// #nosec G115
+	duration := time.Duration(epoch.LengthInSlots) *
+		time.Duration(epoch.SlotLength) * time.Millisecond
+	return startTime.Add(duration)
 }
 
 // Genesis returns Shelley genesis configuration values.
@@ -1654,9 +1653,15 @@ func (a *NodeAdapter) latestBlockData(
 	return block, decodedBlock, nil
 }
 
-func (a *NodeAdapter) liveStake() (uint64, error) {
+// liveStake sums delegated stake across every active pool for the
+// network-wide live-stake total. txn scopes the reads to the caller's
+// transaction (nil for no transaction, matching every other call in this
+// file that takes a *types.Txn-shaped parameter): passing the caller's txn
+// keeps this read in the same snapshot as the caller's other reads, rather
+// than potentially straddling a block boundary against them.
+func (a *NodeAdapter) liveStake(txn dbtypes.Txn) (uint64, error) {
 	poolKeyHashes, err := a.ledgerState.Database().Metadata().
-		GetActivePoolKeyHashes(nil)
+		GetActivePoolKeyHashes(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"get active pool key hashes: %w",
@@ -1667,7 +1672,7 @@ func (a *NodeAdapter) liveStake() (uint64, error) {
 		return 0, nil
 	}
 	stakeByPool, _, err := a.ledgerState.Database().Metadata().
-		GetStakeByPools(poolKeyHashes, nil)
+		GetStakeByPools(poolKeyHashes, txn)
 	if err != nil {
 		return 0, fmt.Errorf("get live stake by pools: %w", err)
 	}
@@ -1711,6 +1716,18 @@ func offchainFetchError(
 			Message: fmt.Sprintf(
 				"Error Offchain %s: Size error when fetching "+
 					"metadata from %s.",
+				sourceLabel,
+				url,
+			),
+		}
+	case strings.HasPrefix(
+		doc.LastError, models.OffchainFetchErrDecodeErrorPrefix,
+	):
+		return &OffchainFetchErrorInfo{
+			Code: "DECODE_ERROR",
+			Message: fmt.Sprintf(
+				"Error Offchain %s: JSON decode error when "+
+					"fetching metadata from %s.",
 				sourceLabel,
 				url,
 			),
@@ -1877,30 +1894,34 @@ func (a *NodeAdapter) PoolMetadata(
 		)
 		return ret, nil
 	}
-	if len(doc.Content) == 0 {
+	// Validation now happens in the fetcher at fetch time
+	// (internal/offchainmetadata.ValidatePoolMetadata, invoked from
+	// fetchOne): a hash-valid pool document that is oversized or fails
+	// stake-pool schema validation is persisted with Status ==
+	// OffchainMetadataStatusFailed and a classified LastError, handled by
+	// the branch above. Content reaching this point from a fetch
+	// performed under the current code is already known-valid.
+	//
+	// Rows persisted as "fetched" before this validation existed were
+	// never checked, so this defensive re-validation is a read-time
+	// fallback that keeps already-cached legacy documents (empty
+	// content, "{}", a missing field, an over-length field, or an
+	// over-limit body that happened to still match its on-chain hash)
+	// from serving as if they were valid. It is a no-op for any row
+	// fetched under the current code, since such content already passed
+	// this exact validator once.
+	fields, err := offchainmetadata.ValidatePoolMetadata(doc.Content)
+	if err != nil {
+		legacyFailure := &models.OffchainMetadata{LastError: err.Error()}
+		ret.Error = offchainFetchError(
+			"Pool", metadataURL, metadataHash, legacyFailure,
+		)
 		return ret, nil
 	}
-	var offchain struct {
-		Name        *string `json:"name"`
-		Description *string `json:"description"`
-		Ticker      *string `json:"ticker"`
-		Homepage    *string `json:"homepage"`
-	}
-	if err := json.Unmarshal(doc.Content, &offchain); err != nil {
-		ret.Error = &OffchainFetchErrorInfo{
-			Code: "DECODE_ERROR",
-			Message: fmt.Sprintf(
-				"Error Offchain Pool: JSON decode error when "+
-					"fetching metadata from %s.",
-				metadataURL,
-			),
-		}
-		return ret, nil
-	}
-	ret.Name = offchain.Name
-	ret.Description = offchain.Description
-	ret.Ticker = offchain.Ticker
-	ret.Homepage = offchain.Homepage
+	ret.Name = &fields.Name
+	ret.Description = &fields.Description
+	ret.Ticker = &fields.Ticker
+	ret.Homepage = &fields.Homepage
 	return ret, nil
 }
 
@@ -2394,6 +2415,26 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	return ret, total, nil
 }
 
+// blockfrostRewardTypes is the allow-list of reward_account_output.reward_type
+// values (ledger/rewards.RewardType: RewardTypeLeader "leader", RewardTypeMember
+// "member") that dingo produces today, plus "pool_deposit_refund", which
+// dingo does not yet produce but the Blockfrost account_reward_content "type"
+// enum already defines. It is a package-level var, built once rather than
+// per-request.
+//
+// Membership, not translation, is the point: every recognized value already
+// matches its lowercased form verbatim, so this is not a mapping table. Its
+// job is to catch the day dingo starts producing a reward_type outside this
+// closed set — which would silently make the Blockfrost response
+// schema-invalid otherwise. AccountRewardHistory logs a warning when a row's
+// type is not in this set and still passes the lowercased value through
+// rather than dropping the row.
+var blockfrostRewardTypes = map[string]struct{}{
+	"leader":              {},
+	"member":              {},
+	"pool_deposit_refund": {},
+}
+
 // AccountRewardHistory returns reward history rows for
 // the requested stake address.
 func (a *NodeAdapter) AccountRewardHistory(
@@ -2404,20 +2445,87 @@ func (a *NodeAdapter) AccountRewardHistory(
 	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := a.ledgerState.Database().
-		GetAccountByCredential(
-			credentialTag,
-			stakeKey,
-			true,
-			nil,
-		); err != nil {
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	if _, err := db.GetAccountByCredential(
+		credentialTag,
+		stakeKey,
+		true,
+		txn,
+	); err != nil {
 		return nil, 0, err
 	}
-	// TODO(#1875): Implement reward history once Dingo persists
-	// per-account, per-epoch reward records. This endpoint remains
-	// stubbed in this PR because the backing reward-history storage
-	// and rollback-safe ledger/database plumbing do not exist yet.
-	return []AccountRewardHistoryInfo{}, 0, nil
+	offset := (params.Page - 1) * params.Count
+	// count and rows share the read txn opened above so an epoch boundary
+	// landing between the two queries cannot change total relative to the
+	// page: with two independent nil-txn reads, a client paging through
+	// history at a boundary could see a row twice or miss one.
+	total, err := db.CountRewardAccountOutputsByCredential(
+		credentialTag,
+		stakeKey,
+		txn,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count account reward history: %w",
+			err,
+		)
+	}
+	if offset >= total {
+		return []AccountRewardHistoryInfo{}, total, nil
+	}
+	rows, err := db.GetRewardAccountOutputsByCredential(
+		credentialTag,
+		stakeKey,
+		params.Count,
+		offset,
+		params.Order,
+		txn,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get account reward history: %w",
+			err,
+		)
+	}
+	ret := make([]AccountRewardHistoryInfo, 0, len(rows))
+	for _, row := range rows {
+		// row.Epoch is the snapshot epoch (stakeRewardEpochsForNewEpoch's
+		// "snapshot" = newEpoch-3 in ledger/reward_calculation.go, which is
+		// what rewardAccountOutputs persists into this column), not the
+		// earned epoch Blockfrost reports. Rewards computed from that
+		// snapshot are credited at the boundary into newEpoch, i.e. they
+		// become spendable in newEpoch = snapshot+3. cardano-db-sync, which
+		// backs this endpoint on Blockfrost, models
+		// spendable_epoch = earned_epoch + 2, so earned_epoch = newEpoch-2 =
+		// snapshot+1 (the "performance" epoch in the same struct). Adding 1
+		// cannot underflow: row.Epoch is a uint64 and this is addition, so a
+		// stored epoch of 0 (or any value) yields a valid earned epoch.
+		earnedEpoch := row.Epoch + 1
+		epoch, err := uint64ToInt32(earnedEpoch, "reward epoch")
+		if err != nil {
+			return nil, 0, err
+		}
+		rewardType := strings.ToLower(row.RewardType)
+		if _, ok := blockfrostRewardTypes[rewardType]; !ok {
+			slog.Warn(
+				"account reward history: reward_type outside the Blockfrost account_reward_content enum",
+				"reward_type", row.RewardType,
+				"credential_tag", credentialTag,
+			)
+		}
+		ret = append(ret, AccountRewardHistoryInfo{
+			Epoch:  epoch,
+			Amount: strconv.FormatUint(uint64(row.Amount), 10),
+			PoolID: lcommon.PoolId(
+				lcommon.NewBlake2b224(row.PoolKeyHash),
+			).String(),
+			Type: rewardType,
+		})
+	}
+	return ret, total, nil
 }
 
 func blockIssuer(issuer lcommon.IssuerVkey) string {

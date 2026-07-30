@@ -50,6 +50,10 @@ type stateMetrics struct {
 	// false-positive validation rejection), not a peer/fork problem. See
 	// issue #2939.
 	atTipRecoveryNonConverging prometheus.Counter
+	// Incremented when unresolved-producer replay recovery repeatedly fails
+	// to move the applied ledger tip forward and holds at that tip instead of
+	// pruning another security-parameter window. See issue #3005.
+	replayRecoveryNonConverging prometheus.Counter
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -153,6 +157,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_nonconverging_total",
 			Help: "times at-tip validation recovery held at the ledger tip instead of rewinding the primary chain deeper, because a descending series of distinct failures indicated local validation divergence (operator intervention required)",
+		},
+	)
+	m.replayRecoveryNonConverging = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_replay_recovery_nonconverging_total",
+			Help: "times unresolved-producer replay recovery held at the applied ledger tip because repeated recovery attempts made no forward progress",
 		},
 	)
 }

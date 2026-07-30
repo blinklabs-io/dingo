@@ -664,10 +664,20 @@ type LedgerState struct {
 	atTipRecoveryLastFailSlot uint64 // failing slot of the previous distinct at-tip failure
 	atTipRecoveryDescentCount int    // consecutive distinct failures that did not advance
 	atTipRecoveryHolding      bool   // sticky: deep rewinds suppressed until forward progress
-	mithrilLedgerSlot         uint64 // blocks at or below this slot are Mithril-verified; skip validation
-	mithrilLedgerHash         []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
-	lastLocalRollbackSeq      uint64
-	lastLocalRollbackPoint    ocommon.Point
+	// Replay recovery non-convergence tracking (issue #3005). The
+	// unresolved-producer fallback can encounter different, slowly advancing
+	// failing blocks while repeatedly rebuilding to the same applied tip.
+	// Track that applied high-water mark so changing failure identities do not
+	// hide the lack of ledger progress. These fields are only accessed by the
+	// ledger pipeline goroutine.
+	replayRecoveryTipTracked      bool
+	replayRecoveryHighWaterSlot   uint64
+	replayRecoveryNoProgressCount int
+	replayRecoveryHolding         bool
+	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash             []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
+	lastLocalRollbackSeq          uint64
+	lastLocalRollbackPoint        ocommon.Point
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -3925,10 +3935,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				if len(pendingNonce) > 0 {
 					ls.currentTipBlockNonce = pendingNonce
 				}
-				// Forward progress past a prior at-tip failure clears the
-				// non-convergence hold so a later, unrelated failure gets a
-				// fresh recovery budget (issue #2939).
+				// Forward progress past a prior validation-recovery high-water
+				// mark clears its non-convergence hold so a later, unrelated
+				// failure gets a fresh recovery budget (issues #2939, #3005).
 				ls.resetAtTipRecoveryDescent(pendingTip.Point.Slot)
+				ls.resetReplayRecoveryNonProgress(pendingTip.Point.Slot)
 				ls.checkpointWrittenForEpoch = localCheckpointWritten
 				if wantEnableValidation {
 					ls.validationEnabled = true
