@@ -235,10 +235,18 @@ func (e *Election) Start(ctx context.Context) error {
 			e.epochNonceReadyLoop(ctx, nonceReadyCh)
 		}()
 	}
+	// Captured into a local before spawning: e.computeCh is read here while
+	// Start still holds e.mu, but the goroutine below reads it again at
+	// whatever time it actually gets scheduled to run, with no lock -- an
+	// immediate Stop right after Start (as TestElectionStartStop does) can
+	// nil the field out first, racing this goroutine's read of the live
+	// field. The local copy is never touched by anything else, so passing
+	// it in is race-free regardless of scheduling order.
+	computeCh := e.computeCh
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
-		e.scheduleComputeLoop(ctx, e.computeCh)
+		e.scheduleComputeLoop(ctx, computeCh)
 	}()
 
 	// Kick off initial schedule computation for the current epoch.
