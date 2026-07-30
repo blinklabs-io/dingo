@@ -164,6 +164,9 @@ func New(config *Config, stores Stores) (*Database, error) {
 	if configCopy.StorageMode == "" {
 		configCopy.StorageMode = types.StorageModeCore
 	}
+	if configCopy.Logger == nil {
+		configCopy.Logger = slog.New(slog.DiscardHandler)
+	}
 	// Stores is an exported injection boundary, so reject a typed nil (an
 	// interface wrapping a nil pointer) as well as an untyped nil; otherwise
 	// the plain == nil check passes and the nil underlying store panics later

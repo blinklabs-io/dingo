@@ -274,16 +274,20 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 
 	stats := cache.CASStats()
 	assert.Positive(t, stats.Attempts, "writers should attempt cache commits")
-	assert.Positive(
+	// SuccessfulCommitsAfterBackoff/SuccessfulCommitBackoffTime only count
+	// commits that needed a *sleeping* backoff (attempt >= casYieldThreshold);
+	// a writer that wins after just one or two zero-duration yields
+	// contributes to neither, so asserting either is positive is flaky on a
+	// lightly-loaded or single-core runner. Attempts exceeding the total
+	// number of Put calls is a threshold-independent proof that contention
+	// forced at least one writer to retry rather than succeed on its first
+	// CAS attempt every time.
+	assert.Greater(
 		t,
-		stats.SuccessfulCommitsAfterBackoff,
-		"at least one contended writer should make progress after backing off, "+
-			"not just terminate",
-	)
-	assert.Positive(
-		t,
-		stats.SuccessfulCommitBackoffTime,
-		"successful contended commits should report their cumulative backoff",
+		stats.Attempts,
+		uint64(numGoroutines*numOperations),
+		"heavy contention should force at least one writer to retry, "+
+			"not succeed on the first CAS attempt every time",
 	)
 
 	_, ok := cache.Get([]byte("key-0"))
