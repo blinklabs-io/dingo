@@ -1956,21 +1956,25 @@ submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
 
-The DAG provider maintains nodes keyed by transaction hash, pending-output
-producer and spender indexes, and explicit parent/child edges. An edge points
-from a pending transaction to a transaction that consumes one of its outputs.
-Only validated transactions enter the graph, parents always precede descendants,
-and the ready frontier uses admission sequence then hash as deterministic
-tie-breakers. Independent transactions therefore retain FIFO behavior. Manual
-removal and expiry use the adjacency index to find the transitive descendant
-closure; confirmed removal detaches only the confirmed nodes because their
-outputs have moved into ledger state. The DAG backend never watermark-evicts
-transactions. Its TxSubmission intake waits for sufficient admission headroom,
-while direct submissions receive `MempoolFullError` above the rejection
-watermark. DAG intake currently requests one transaction ID per TxSubmission
-round trip, which can reduce inbound throughput on high-latency peer links.
-This is required because gouroboros acknowledges every ID returned by a peer;
-support for acknowledging only the fetched prefix would permit batched requests.
+The DAG provider maintains nodes keyed by transaction hash, a pending-output
+producer index, explicit parent/child edges, and a cached transaction order. An
+edge points from a pending transaction to a transaction that consumes one of
+its outputs. Only validated transactions enter the graph, and a pending parent
+must exist before its child can be admitted, so successful-admission order is
+already a stable topological order. Independent transactions therefore retain
+FIFO behavior without sorting the graph during each forging or relay snapshot.
+Manual removal and expiry use the adjacency index to find the transitive
+descendant closure; confirmed removal detaches only the confirmed nodes because
+their outputs have moved into ledger state. The DAG backend never
+watermark-evicts transactions. Its TxSubmission intake waits for sufficient
+admission headroom, while direct submissions receive `MempoolFullError` above
+the rejection watermark. A transaction that repeatedly loses the available
+headroom race to another peer is dropped after a bounded retry streak so that
+one offer cannot stall the connection indefinitely. DAG intake currently
+requests one transaction ID per TxSubmission round trip, which can reduce
+inbound throughput on high-latency peer links. This is required because
+gouroboros acknowledges every ID returned by a peer; support for acknowledging
+only the fetched prefix would permit batched requests.
 
 The selected pool manages pending transactions:
 
@@ -2021,7 +2025,9 @@ cursors and swaps the candidate overlay, ordered transaction slice, hash index,
 and byte totals; DAG additionally rebuilds and swaps its dependency graph. Its
 work is independent of total pool occupancy. Shutdown terminates an in-flight
 rebuild, and bounded ledger-generation retries prevent chain activity from
-creating a busy loop.
+creating a busy loop. If an overlay entry is unexpectedly missing from the
+transaction hash index, both FIFO and DAG reject its dependent transaction cone
+rather than retaining descendants whose parent body cannot be revalidated.
 
 `LedgerState.WithTxValidationSession` is the narrow boundary for every backend
 rebuild. It pins one published ledger generation (tip, era, and protocol

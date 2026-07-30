@@ -31,9 +31,19 @@ import (
 const (
 	txsubmissionRequestTxIdsCount        = 10              // Number of TxIds to request from peer at one time
 	txsubmissionMaxConsecutiveRateLimits = 3               // Drop TxIds after this many consecutive hits
+	txsubmissionMaxAdmissionRetryStreak  = 3               // Drop one offered TX after this many lost headroom races
 	txsubmissionMaxBackoff               = 5 * time.Second // Cap on exponential backoff wait
 	txsubmissionBaseBackoff              = 150 * time.Millisecond
 	txsubmissionLogEvery                 = 10 // Log every Nth rate limit hit after the 1st
+)
+
+var (
+	errTxsubmissionAdmissionRetriesExhausted = errors.New(
+		"txsubmission admission retries exhausted",
+	)
+	errTxsubmissionAdmissionStopped = errors.New(
+		"txsubmission admission wait stopped",
+	)
 )
 
 // txsubmissionBackoffDuration returns the exponential backoff duration
@@ -50,6 +60,36 @@ func txsubmissionBackoffDuration(consecutiveHits int) time.Duration {
 		}
 	}
 	return d
+}
+
+func retryTxsubmissionAdmission(
+	add func() error,
+	waitForHeadroom func() bool,
+	recordRetry func(int),
+) error {
+	for retryStreak := 0; ; {
+		err := add()
+		if err == nil {
+			return nil
+		}
+		var fullErr *mempool.MempoolFullError
+		if !errors.As(err, &fullErr) {
+			return err
+		}
+		retryStreak++
+		recordRetry(retryStreak)
+		if retryStreak >= txsubmissionMaxAdmissionRetryStreak {
+			return fmt.Errorf(
+				"%w after %d capacity failures: %w",
+				errTxsubmissionAdmissionRetriesExhausted,
+				retryStreak,
+				err,
+			)
+		}
+		if !waitForHeadroom() {
+			return errTxsubmissionAdmissionStopped
+		}
+	}
 }
 
 func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
@@ -351,34 +391,56 @@ func (o *Ouroboros) txsubmissionServerInit(
 						"role", "server",
 						"connection_id", ctx.ConnectionId.String(),
 					)
-					admissionRetryStreak := 0
-					for {
-						// Admission headroom can be consumed by another peer
-						// between the wait above and this commit. Retry only a
-						// capacity failure after headroom becomes available;
-						// validation and decoding failures remain terminal for
-						// this protocol loop.
+					// Admission headroom can be consumed by another peer
+					// between the wait above and this commit. Retry only
+					// capacity failures, and bound the retry streak so one
+					// contested offer cannot stall this peer indefinitely.
+					if limitAdmission {
+						err = retryTxsubmissionAdmission(
+							func() error {
+								return o.Mempool.AddTransaction(
+									uint(txBody.EraId),
+									txBody.TxBody,
+								)
+							},
+							func() bool {
+								return headroom.WaitForAdmissionHeadroom(
+									int64(len(txBody.TxBody)),
+									conn.ErrorChan(),
+								)
+							},
+							o.recordTxsubmissionAdmissionRetry,
+						)
+					} else {
 						err = o.Mempool.AddTransaction(
 							uint(txBody.EraId),
 							txBody.TxBody,
 						)
-						if err == nil {
-							break
-						}
-						var fullErr *mempool.MempoolFullError
-						if limitAdmission && errors.As(err, &fullErr) {
-							admissionRetryStreak++
-							o.recordTxsubmissionAdmissionRetry(
-								admissionRetryStreak,
-							)
-							if !headroom.WaitForAdmissionHeadroom(
-								int64(len(txBody.TxBody)),
-								conn.ErrorChan(),
-							) {
-								return
-							}
-							continue
-						}
+					}
+					if errors.Is(
+						err,
+						errTxsubmissionAdmissionStopped,
+					) {
+						return
+					}
+					if errors.Is(
+						err,
+						errTxsubmissionAdmissionRetriesExhausted,
+					) {
+						o.config.Logger.Warn(
+							"dropping peer transaction after repeated mempool admission contention",
+							"component", "network",
+							"protocol", "tx-submission",
+							"role", "server",
+							"connection_id", ctx.ConnectionId.String(),
+							"tx_hash", tx.Hash(),
+							"retry_streak",
+							txsubmissionMaxAdmissionRetryStreak,
+							"error", err,
+						)
+						continue
+					}
+					if err != nil {
 						o.config.Logger.Error(
 							fmt.Sprintf(
 								"failed to add tx %x to mempool: %s",

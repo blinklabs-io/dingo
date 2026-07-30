@@ -86,6 +86,61 @@ func (txsubmissionRejectingValidator) ValidateTxWithOverlay(
 	return errors.New("txsubmissionRejectingValidator: rejected")
 }
 
+func TestRetryTxsubmissionAdmissionBoundsContention(t *testing.T) {
+	var addCalls int
+	var waitCalls int
+	var retryStreaks []int
+	fullErr := &mempool.MempoolFullError{
+		CurrentSize: 10,
+		TxSize:      1,
+		Capacity:    10,
+	}
+
+	err := retryTxsubmissionAdmission(
+		func() error {
+			addCalls++
+			return fullErr
+		},
+		func() bool {
+			waitCalls++
+			return true
+		},
+		func(streak int) {
+			retryStreaks = append(retryStreaks, streak)
+		},
+	)
+
+	require.ErrorIs(t, err, errTxsubmissionAdmissionRetriesExhausted)
+	require.ErrorAs(t, err, &fullErr)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak, addCalls)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak-1, waitCalls)
+	require.Equal(t, []int{1, 2, 3}, retryStreaks)
+}
+
+func TestRetryTxsubmissionAdmissionSucceedsAfterContention(t *testing.T) {
+	var addCalls int
+	var waitCalls int
+
+	err := retryTxsubmissionAdmission(
+		func() error {
+			addCalls++
+			if addCalls < txsubmissionMaxAdmissionRetryStreak {
+				return &mempool.MempoolFullError{}
+			}
+			return nil
+		},
+		func() bool {
+			waitCalls++
+			return true
+		},
+		func(int) {},
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak, addCalls)
+	require.Equal(t, txsubmissionMaxAdmissionRetryStreak-1, waitCalls)
+}
+
 // TestTxSubmissionClientRequestTxIds verifies empty, partial, and capped
 // TxId responses when a peer asks what transactions this node can relay.
 func TestTxSubmissionClientRequestTxIds(t *testing.T) {

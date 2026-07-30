@@ -133,10 +133,12 @@ func TestTransactionDAGTopologicalOrderAndDescendants(t *testing.T) {
 	graph.add(graphTx("right", []string{"parent:1"}, "right:0"))
 	graph.add(graphTx("grandchild", []string{"left:0"}, "grandchild:0"))
 
+	order, err := graph.topologicalOrder()
+	require.NoError(t, err)
 	assert.Equal(
 		t,
 		[]string{"parent", "independent", "left", "right", "grandchild"},
-		graph.topologicalOrder(),
+		order,
 	)
 	assert.Equal(t, map[string]struct{}{
 		"parent":     {},
@@ -145,7 +147,6 @@ func TestTransactionDAGTopologicalOrderAndDescendants(t *testing.T) {
 		"grandchild": {},
 	}, graph.descendants(map[string]struct{}{"parent": {}}))
 	assert.Equal(t, "parent", graph.producerByUtxo["parent:0"])
-	assert.Equal(t, "left", graph.spenderByUtxo["parent:0"])
 }
 
 func TestTransactionDAGConfirmedRemovalPreservesDescendants(t *testing.T) {
@@ -155,7 +156,9 @@ func TestTransactionDAGConfirmedRemovalPreservesDescendants(t *testing.T) {
 
 	graph.remove(map[string]struct{}{"parent": {}})
 
-	assert.Equal(t, []string{"child"}, graph.topologicalOrder())
+	order, err := graph.topologicalOrder()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"child"}, order)
 	child := graph.nodes["child"]
 	require.NotNil(t, child)
 	assert.Empty(t, child.parents)
@@ -164,6 +167,40 @@ func TestTransactionDAGConfirmedRemovalPreservesDescendants(t *testing.T) {
 		map[string]struct{}{"child": {}},
 		graph.descendants(map[string]struct{}{"child": {}}),
 	)
+}
+
+func TestTransactionDAGTopologicalOrderRejectsInconsistentCache(t *testing.T) {
+	graph := newTransactionDAG()
+	graph.add(graphTx("parent", []string{"base:0"}, "parent:0"))
+	graph.add(graphTx("child", []string{"parent:0"}, "child:0"))
+	graph.order = graph.order[:1]
+
+	order, err := graph.topologicalOrder()
+
+	assert.Equal(t, []string{"parent"}, order)
+	require.ErrorContains(t, err, "1 of 2 transactions ordered")
+}
+
+func TestDAGTransactionsFallsBackOnInconsistentOrder(t *testing.T) {
+	pool, err := NewDAG(MempoolConfig{
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1 << 20,
+		PromRegistry:    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+	require.NoError(
+		t,
+		pool.AddTransaction(
+			uint(conway.EraIdConway),
+			getTestTxBytes(t),
+		),
+	)
+	pool.Lock()
+	pool.dag.order = nil
+	pool.Unlock()
+
+	assert.Len(t, pool.Transactions(), 1)
 }
 
 func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
@@ -579,6 +616,42 @@ func TestDAGRevalidationSkipsInvalidDescendantValidation(t *testing.T) {
 	assert.Equal(t, 1, validator.calls)
 	assert.Empty(t, pool.Transactions())
 	assert.Empty(t, pool.dag.nodes)
+}
+
+func TestFIFORevalidationPrunesDescendantsOfMissingIndexedTransaction(
+	t *testing.T,
+) {
+	parentBytes, childBytes, parentHash, _ := getDependentTestTxBytes(t)
+	validator := &countingFailValidator{}
+	pool, err := NewFIFO(MempoolConfig{
+		Validator:       validator,
+		MempoolCapacity: 1 << 20,
+		PromRegistry:    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+	require.NoError(
+		t,
+		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+	)
+	require.NoError(
+		t,
+		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+	)
+
+	// Simulate an inconsistent live index. The missing parent has no
+	// transaction body to add to the invalid set, but its outputs must still
+	// poison the child during the shared FIFO/DAG revalidation pass.
+	pool.Lock()
+	delete(pool.txByHash, parentHash)
+	pool.Unlock()
+	validator.calls = 0
+
+	require.NoError(t, pool.rebuildOverlay())
+
+	assert.Zero(t, validator.calls)
+	assert.Empty(t, pool.Transactions())
+	assert.Empty(t, pool.overlay.applied)
 }
 
 func TestMempoolProvidersIncludeFIFOAndDAG(t *testing.T) {

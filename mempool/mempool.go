@@ -1138,6 +1138,8 @@ func (m *Mempool) revalidateAppliedTx(
 	) error,
 ) {
 	if tx == nil {
+		// There is no transaction body to record in candidate.invalid, but its
+		// created outputs must still invalidate every dependent transaction.
 		candidate.reject(at, nil)
 		m.logger.Warn(
 			"overlay applied transaction is missing from transaction index during re-validation",
@@ -1358,9 +1360,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		}
 		txSize := int64(len(txBytes))
 		newSize := m.currentSizeBytes + txSize
-		rejectionThreshold := int64(
-			float64(m.config.MempoolCapacity) * m.rejectionWatermark,
-		)
+		rejectionThreshold := m.admissionLimitBytes()
 		if newSize > rejectionThreshold {
 			retErr := &MempoolFullError{
 				CurrentSize: int(m.currentSizeBytes),
@@ -1480,22 +1480,41 @@ func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
 
 func (m *Mempool) Transactions() []MempoolTransaction {
 	m.RLock()
-	var ret []MempoolTransaction
+	ret := make([]MempoolTransaction, 0)
+	var dagErr error
 	if m.dag != nil {
-		order := m.dag.topologicalOrder()
-		ret = make([]MempoolTransaction, 0, len(order))
-		for _, hash := range order {
-			if tx := m.txByHash[hash]; tx != nil {
-				ret = append(ret, *tx)
+		var order []string
+		order, dagErr = m.dag.topologicalOrder()
+		if dagErr == nil {
+			ret = make([]MempoolTransaction, 0, len(order))
+			for _, hash := range order {
+				if tx := m.txByHash[hash]; tx != nil {
+					ret = append(ret, *tx)
+				}
+			}
+			if len(ret) != len(m.transactions) {
+				dagErr = fmt.Errorf(
+					"DAG transaction index inconsistent: %d of %d transactions resolved",
+					len(ret),
+					len(m.transactions),
+				)
 			}
 		}
-	} else {
+	}
+	if m.dag == nil || dagErr != nil {
 		ret = make([]MempoolTransaction, len(m.transactions))
 		for i := range m.transactions {
 			ret[i] = *m.transactions[i]
 		}
 	}
 	m.RUnlock()
+	if dagErr != nil {
+		m.logger.Error(
+			"falling back to admission order for mempool snapshot",
+			"component", "mempool",
+			"error", dagErr,
+		)
+	}
 
 	// Transaction CBOR is immutable after admission. Copy the slice headers
 	// under the state lock, then clone the bytes after releasing it so forging

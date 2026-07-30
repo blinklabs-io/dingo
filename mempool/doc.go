@@ -20,11 +20,12 @@
 // Service is the backend-neutral node contract. FIFO is the default backend
 // and orders transactions by successful admission: independent submissions
 // retain arrival order, and a duplicate refresh does not move a transaction.
-// DAG is the alternative backend. It indexes pending producers and spenders
-// plus parent/child edges, and exposes parents before descendants with FIFO
-// tie-breaking between ready transactions. DAG never watermark-evicts; network
-// intake waits for admission headroom instead. Mempool remains the shared
-// engine embedded by both backends for source compatibility.
+// DAG is the alternative backend. It indexes pending producers plus
+// parent/child edges, and caches successful-admission order, which is
+// topological because a pending parent must exist before a child can be
+// admitted. DAG never watermark-evicts; network intake waits for admission
+// headroom instead. Mempool remains the shared engine embedded by both backends
+// for source compatibility.
 //
 // Both backends validate every submitted
 // transaction through the ledger package — UTxO resolution, fees,

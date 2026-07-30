@@ -15,7 +15,7 @@
 package mempool
 
 import (
-	"container/heap"
+	"fmt"
 	"slices"
 )
 
@@ -23,11 +23,8 @@ import (
 // Mempool so both implementations preserve the same immutable snapshot and
 // relay behavior.
 type dagNode struct {
-	hash     string
-	sequence uint64
 	parents  map[string]struct{}
 	children map[string]struct{}
-	consumed []string
 	produced []string
 }
 
@@ -37,44 +34,13 @@ type dagNode struct {
 type transactionDAG struct {
 	nodes          map[string]*dagNode
 	producerByUtxo map[string]string
-	spenderByUtxo  map[string]string
-	nextSequence   uint64
-}
-
-type dagReadyQueue []*dagNode
-
-func (q *dagReadyQueue) Len() int {
-	return len(*q)
-}
-
-func (q *dagReadyQueue) Less(i, j int) bool {
-	if (*q)[i].sequence != (*q)[j].sequence {
-		return (*q)[i].sequence < (*q)[j].sequence
-	}
-	return (*q)[i].hash < (*q)[j].hash
-}
-
-func (q *dagReadyQueue) Swap(i, j int) {
-	(*q)[i], (*q)[j] = (*q)[j], (*q)[i]
-}
-
-func (q *dagReadyQueue) Push(value any) {
-	*q = append(*q, value.(*dagNode))
-}
-
-func (q *dagReadyQueue) Pop() any {
-	old := *q
-	last := len(old) - 1
-	node := old[last]
-	*q = old[:last]
-	return node
+	order          []string
 }
 
 func newTransactionDAG() *transactionDAG {
 	return &transactionDAG{
 		nodes:          make(map[string]*dagNode),
 		producerByUtxo: make(map[string]string),
-		spenderByUtxo:  make(map[string]string),
 	}
 }
 
@@ -83,16 +49,11 @@ func (d *transactionDAG) add(tx appliedTx) {
 		return
 	}
 	node := &dagNode{
-		hash:     tx.hash,
-		sequence: d.nextSequence,
 		parents:  make(map[string]struct{}),
 		children: make(map[string]struct{}),
-		consumed: slices.Clone(tx.consumed),
 		produced: make([]string, 0, len(tx.created)),
 	}
-	d.nextSequence++
 	for _, input := range tx.consumed {
-		d.spenderByUtxo[input] = tx.hash
 		if parentHash, ok := d.producerByUtxo[input]; ok {
 			node.parents[parentHash] = struct{}{}
 		}
@@ -101,8 +62,10 @@ func (d *transactionDAG) add(tx appliedTx) {
 		node.produced = append(node.produced, output)
 		d.producerByUtxo[output] = tx.hash
 	}
-	slices.Sort(node.produced)
 	d.nodes[tx.hash] = node
+	// A pending parent must already be admitted before a child can resolve its
+	// output. Admission order is therefore itself a stable topological order.
+	d.order = append(d.order, tx.hash)
 	for parentHash := range node.parents {
 		if parent := d.nodes[parentHash]; parent != nil {
 			parent.children[tx.hash] = struct{}{}
@@ -160,11 +123,6 @@ func (d *transactionDAG) remove(hashes map[string]struct{}) {
 				delete(child.parents, hash)
 			}
 		}
-		for _, input := range node.consumed {
-			if d.spenderByUtxo[input] == hash {
-				delete(d.spenderByUtxo, input)
-			}
-		}
 		for _, output := range node.produced {
 			if d.producerByUtxo[output] == hash {
 				delete(d.producerByUtxo, output)
@@ -172,6 +130,10 @@ func (d *transactionDAG) remove(hashes map[string]struct{}) {
 		}
 		delete(d.nodes, hash)
 	}
+	d.order = slices.DeleteFunc(d.order, func(hash string) bool {
+		_, remove := hashes[hash]
+		return remove
+	})
 }
 
 func (d *transactionDAG) rebuild(applied []appliedTx) {
@@ -182,29 +144,17 @@ func (d *transactionDAG) rebuild(applied []appliedTx) {
 	*d = *replacement
 }
 
-// topologicalOrder returns a stable Kahn traversal. Admission sequence is the
-// primary ready-frontier key and transaction hash is a defensive tie-breaker.
-func (d *transactionDAG) topologicalOrder() []string {
-	indegree := make(map[string]int, len(d.nodes))
-	ready := make(dagReadyQueue, 0, len(d.nodes))
-	for hash, node := range d.nodes {
-		indegree[hash] = len(node.parents)
-		if len(node.parents) == 0 {
-			heap.Push(&ready, node)
-		}
+// topologicalOrder returns the cached stable ordering maintained at mutation
+// time. A count mismatch is an internal index failure, not a representable
+// partial answer: callers must diagnose it and use a complete fallback.
+func (d *transactionDAG) topologicalOrder() ([]string, error) {
+	ret := slices.Clone(d.order)
+	if len(ret) != len(d.nodes) {
+		return ret, fmt.Errorf(
+			"DAG index inconsistent: %d of %d transactions ordered",
+			len(ret),
+			len(d.nodes),
+		)
 	}
-	ret := make([]string, 0, len(d.nodes))
-	for len(ready) > 0 {
-		node := heap.Pop(&ready).(*dagNode)
-		ret = append(ret, node.hash)
-		for childHash := range node.children {
-			indegree[childHash]--
-			if indegree[childHash] == 0 {
-				if child := d.nodes[childHash]; child != nil {
-					heap.Push(&ready, child)
-				}
-			}
-		}
-	}
-	return ret
+	return ret, nil
 }
