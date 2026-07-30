@@ -371,8 +371,16 @@ func (a *NodeAdapter) totalCirculation(txn dbtypes.Txn) (uint64, error) {
 	if state != nil {
 		reserves = uint64(state.Reserves)
 	}
+	// An impossible ledger state, but returning 0 here would feed a zero
+	// denominator into live_saturation and surface as a plausible-looking
+	// 0.0 — the fabricated value every other unavailable input in this
+	// function errors on rather than guessing.
 	if reserves > maxSupply {
-		return 0, nil
+		return 0, fmt.Errorf(
+			"reserves %d exceed max lovelace supply %d",
+			reserves,
+			maxSupply,
+		)
 	}
 	return maxSupply - reserves, nil
 }

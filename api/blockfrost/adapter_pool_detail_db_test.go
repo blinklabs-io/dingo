@@ -385,7 +385,11 @@ func TestNodeAdapterPoolDetailEpochRowMissing(t *testing.T) {
 	)
 
 	_, err := adapter.PoolDetail(hex.EncodeToString(poolKeyHash))
-	require.ErrorContains(t, err, "epoch")
+	// Match the epoch-row branch specifically: earlier failure paths in
+	// PoolDetail also mention "epoch" ("get pool stake snapshot for epoch
+	// %d", "get total active stake for epoch %d"), so a bare "epoch"
+	// substring would pass without ever reaching the branch under test.
+	require.ErrorContains(t, err, "no epoch row found")
 }
 
 // TestNodeAdapterPoolDetailInvalidID covers a malformed pool ID (neither

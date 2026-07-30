@@ -207,6 +207,11 @@ func TestGetPoolCertificateHistoryNoCertificates(t *testing.T) {
 		lcommon.PoolKeyHash(poolB), nil,
 	)
 	require.NoError(t, err)
+	// Non-nil is the contract, not just empty: assert.Empty also passes for
+	// nil, and the pool detail response requires these arrays to serialize
+	// as [] rather than null.
+	require.NotNil(t, registrationHashes)
+	require.NotNil(t, retirementHashes)
 	assert.Empty(t, registrationHashes)
 	assert.Empty(t, retirementHashes)
 }
