@@ -231,10 +231,23 @@ func TestNodeAdapterPoolDetailFullResponse(t *testing.T) {
 	// captured snapshot row, so it holds the entire active-stake total.
 	assert.Equal(t, "4200000000", info.ActiveStake)
 	assert.InDelta(t, 1.0, info.ActiveSize, 1e-9)
-	// live_saturation is computed from the real devnet nOpt (100), not a
-	// placeholder: saturation_threshold = totalActiveStake / nOpt, and
-	// live_saturation = liveStake / saturation_threshold.
-	wantSaturation := float64(wantLiveStake) / (float64(activeStake) / float64(wantNOpt))
+	// live_saturation is computed from the real devnet nOpt (100) and real
+	// total circulating supply, not a placeholder: saturation_threshold =
+	// totalCirculation / nOpt, and live_saturation = liveStake /
+	// saturation_threshold. totalCirculation (MaxLovelaceSupply minus
+	// Reserves) is deliberately NOT totalActiveStake -- see
+	// totalCirculation's doc comment in adapter_pool_detail.go for why the
+	// reward calculation requires that distinction. Both figures are
+	// derivable from the same devnet-genesis fixture this test already
+	// starts a real LedgerState against: MaxLovelaceSupply is fixed by
+	// config/cardano/devnet/shelley-genesis.json, and Reserves is whatever
+	// ls.Start() computed and persisted as the genesis network state
+	// (MaxLovelaceSupply minus the sum of all genesis UTxOs).
+	const wantMaxLovelaceSupply = uint64(2_000_000_000_000) // config/cardano/devnet/shelley-genesis.json
+	var networkState models.NetworkState
+	require.NoError(t, store.DB().Order("slot DESC").First(&networkState).Error)
+	wantCirculation := wantMaxLovelaceSupply - uint64(networkState.Reserves)
+	wantSaturation := float64(wantLiveStake) / (float64(wantCirculation) / float64(wantNOpt))
 	assert.InDelta(t, wantSaturation, info.LiveSaturation, 1e-6)
 }
 
@@ -256,6 +269,15 @@ func TestNodeAdapterPoolDetailProtocolParamsUnavailable(t *testing.T) {
 		},
 	}
 	require.NoError(t, store.DB().Create(pool).Error)
+	// A captured active-stake snapshot so this test exercises the
+	// protocol-params failure specifically, not the (also required)
+	// missing-active-stake-snapshot failure checked just before it.
+	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		PoolKeyHash:  poolKeyHash,
+		TotalStake:   types.Uint64(1_000_000),
+	}).Error)
 
 	_, err := adapter.PoolDetail(hex.EncodeToString(poolKeyHash))
 	require.ErrorContains(t, err, "protocol parameters")
@@ -276,6 +298,17 @@ func TestNodeAdapterPoolDetailBech32AndHexSameResult(t *testing.T) {
 		},
 	}
 	require.NoError(t, store.DB().Create(pool).Error)
+	// A captured active-stake snapshot: PoolDetail now errors rather than
+	// silently reporting active_size == 0.0 when none exists for the
+	// current epoch (see the active_size doc comment in
+	// adapter_pool_detail.go), and this test wants both ID-format calls to
+	// succeed.
+	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		PoolKeyHash:  poolKeyHash,
+		TotalStake:   types.Uint64(1_000_000),
+	}).Error)
 
 	hexID := hex.EncodeToString(poolKeyHash)
 	bech32ID := lcommon.PoolId(lcommon.NewBlake2b224(poolKeyHash)).String()
@@ -289,6 +322,70 @@ func TestNodeAdapterPoolDetailBech32AndHexSameResult(t *testing.T) {
 	assert.Equal(t, byHex, byBech32)
 	assert.Equal(t, bech32ID, byHex.PoolID)
 	assert.Equal(t, hexID, byHex.Hex)
+}
+
+// TestNodeAdapterPoolDetailActiveStakeSnapshotUnavailable covers the case
+// where activeStakeEpoch has no captured Mark snapshot for any pool
+// (GetTotalActiveStake returns 0): active_size is a required, non-nullable
+// float in the OpenAPI schema, and 0.0 is itself a legitimate active_size
+// value (a pool with no active stake), so there is no schema-compatible
+// placeholder for "unknown". PoolDetail must fail the whole request rather
+// than silently report every pool as 0% active-saturated. This is
+// reachable through the normal path, not a pathological one:
+// activeStakeEpoch floors to 0 for currentEpoch < 2, and any node missing
+// that epoch's snapshot hits it too.
+func TestNodeAdapterPoolDetailActiveStakeSnapshotUnavailable(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapterWithProtocolParams(t)
+
+	poolKeyHash := fill32(0xf1)[:28]
+	pool := &models.Pool{
+		PoolKeyHash: poolKeyHash,
+		VrfKeyHash:  fill32(0xf2),
+		Registration: []models.PoolRegistration{
+			{PoolKeyHash: poolKeyHash, AddedSlot: 1},
+		},
+	}
+	require.NoError(t, store.DB().Create(pool).Error)
+	// Deliberately no PoolStakeSnapshot row for epoch 0.
+
+	_, err := adapter.PoolDetail(hex.EncodeToString(poolKeyHash))
+	require.ErrorContains(t, err, "active stake")
+}
+
+// TestNodeAdapterPoolDetailEpochRowMissing covers the case where GetEpoch
+// returns nil for the current epoch: falling back to epochStartSlot = 0
+// would make the blocks_epoch query byte-identical to the blocks_minted
+// query above it (both 0..noSlotUpperBound) and silently report the
+// pool's entire lifetime block count as its current-epoch count. PoolDetail
+// must fail instead, since the state needed to answer blocks_epoch isn't
+// there.
+func TestNodeAdapterPoolDetailEpochRowMissing(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapterWithProtocolParams(t)
+
+	poolKeyHash := fill32(0xf3)[:28]
+	pool := &models.Pool{
+		PoolKeyHash: poolKeyHash,
+		VrfKeyHash:  fill32(0xf4),
+		Registration: []models.PoolRegistration{
+			{PoolKeyHash: poolKeyHash, AddedSlot: 1},
+		},
+	}
+	require.NoError(t, store.DB().Create(pool).Error)
+	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+		Epoch:        0,
+		SnapshotType: "mark",
+		PoolKeyHash:  poolKeyHash,
+		TotalStake:   types.Uint64(1_000_000),
+	}).Error)
+	// Start() against the devnet genesis writes the epoch_id = 0 row;
+	// delete it to simulate a node missing the current epoch's row.
+	require.NoError(
+		t,
+		store.DB().Where("epoch_id = ?", 0).Delete(&models.Epoch{}).Error,
+	)
+
+	_, err := adapter.PoolDetail(hex.EncodeToString(poolKeyHash))
+	require.ErrorContains(t, err, "epoch")
 }
 
 // TestNodeAdapterPoolDetailInvalidID covers a malformed pool ID (neither

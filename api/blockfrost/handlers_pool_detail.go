@@ -69,19 +69,15 @@ func (b *Blockfrost) handlePoolDetail(
 // the OpenAPI schema, so a nil slice is normalized to an empty one rather
 // than encoding as JSON null.
 func poolDetailResponse(info PoolDetailInfo) PoolDetailResponse {
+	// info.CalidusKey is always nil: dingo does not currently ingest
+	// CIP-0088 Calidus key registrations from any source (see
+	// PoolCalidusKeyInfo's doc comment in node_interface.go), so there is
+	// no producer that could set it, and no PoolCalidusKeyInfo ->
+	// PoolCalidusKeyResponse conversion to reach. PoolCalidusKeyResponse
+	// itself stays, since nullable: true in the OpenAPI schema makes null
+	// the correct wire representation and the type still documents that
+	// shape.
 	var calidusKey *PoolCalidusKeyResponse
-	if info.CalidusKey != nil {
-		resp := PoolCalidusKeyResponse{
-			ID:          info.CalidusKey.ID,
-			PubKey:      info.CalidusKey.PubKey,
-			Nonce:       info.CalidusKey.Nonce,
-			TxHash:      info.CalidusKey.TxHash,
-			BlockHeight: info.CalidusKey.BlockHeight,
-			BlockTime:   info.CalidusKey.BlockTime,
-			Epoch:       info.CalidusKey.Epoch,
-		}
-		calidusKey = &resp
-	}
 	owners := info.Owners
 	if owners == nil {
 		owners = []string{}

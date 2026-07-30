@@ -232,19 +232,26 @@ func TestPoolSizeSaturation(t *testing.T) {
 	tests := []struct {
 		name                                             string
 		liveStake, activeStake, totalLive, totalActive   uint64
+		totalCirculation                                 uint64
 		nOpt                                             int
 		wantLiveSize, wantActiveSize, wantLiveSaturation float64
 	}{
 		{
+			// totalCirculation is deliberately different from totalActive
+			// here (as it always is in practice: circulating supply is
+			// always larger than total staked), so this case would catch
+			// live_saturation being computed against the wrong
+			// denominator.
 			name:               "normal pool",
 			liveStake:          6_900_000_000,
 			activeStake:        4_200_000_000,
 			totalLive:          16_428_571_428,
 			totalActive:        420_000_000_000,
+			totalCirculation:   700_000_000_000,
 			nOpt:               500,
 			wantLiveSize:       6_900_000_000.0 / 16_428_571_428.0,
 			wantActiveSize:     4_200_000_000.0 / 420_000_000_000.0,
-			wantLiveSaturation: 6_900_000_000.0 / (420_000_000_000.0 / 500.0),
+			wantLiveSaturation: 6_900_000_000.0 / (700_000_000_000.0 / 500.0),
 		},
 		{
 			name:               "zero total live stake",
@@ -252,21 +259,31 @@ func TestPoolSizeSaturation(t *testing.T) {
 			totalLive:          0,
 			totalActive:        1_000_000,
 			activeStake:        500,
+			totalCirculation:   2_000_000,
 			nOpt:               100,
 			wantLiveSize:       0,
 			wantActiveSize:     500.0 / 1_000_000.0,
-			wantLiveSaturation: 1000.0 / (1_000_000.0 / 100.0),
+			wantLiveSaturation: 1000.0 / (2_000_000.0 / 100.0),
 		},
 		{
+			// totalActive == 0 (no snapshot captured) no longer affects
+			// live_saturation at all: it now depends solely on
+			// totalCirculation and nOpt, so it comes out nonzero here even
+			// though active_size is forced to zero by the totalActive
+			// guard. PoolDetail itself errors before calling this function
+			// when totalActive == 0 (see the active_size doc comment on
+			// poolSizeSaturation in adapter_pool_detail.go); this case
+			// only pins poolSizeSaturation's own defensive guard.
 			name:               "zero total active stake",
 			liveStake:          1000,
 			totalLive:          10_000,
 			activeStake:        0,
 			totalActive:        0,
+			totalCirculation:   5_000_000,
 			nOpt:               100,
 			wantLiveSize:       1000.0 / 10_000.0,
 			wantActiveSize:     0,
-			wantLiveSaturation: 0,
+			wantLiveSaturation: 1000.0 / (5_000_000.0 / 100.0),
 		},
 		{
 			// Defensive zero-denominator guard only: PoolDetail never calls
@@ -278,7 +295,24 @@ func TestPoolSizeSaturation(t *testing.T) {
 			totalLive:          10_000,
 			activeStake:        500,
 			totalActive:        1_000_000,
+			totalCirculation:   2_000_000,
 			nOpt:               0,
+			wantLiveSize:       1000.0 / 10_000.0,
+			wantActiveSize:     500.0 / 1_000_000.0,
+			wantLiveSaturation: 0,
+		},
+		{
+			// Defensive zero-denominator guard only: PoolDetail never calls
+			// this with totalCirculation == 0 in practice, since it now
+			// requires totalCirculation to be computed successfully before
+			// calling this function at all.
+			name:               "zero total circulation",
+			liveStake:          1000,
+			totalLive:          10_000,
+			activeStake:        500,
+			totalActive:        1_000_000,
+			totalCirculation:   0,
+			nOpt:               100,
 			wantLiveSize:       1000.0 / 10_000.0,
 			wantActiveSize:     500.0 / 1_000_000.0,
 			wantLiveSaturation: 0,
@@ -286,15 +320,36 @@ func TestPoolSizeSaturation(t *testing.T) {
 		{
 			name: "all zero",
 		},
+		{
+			// Mainnet-shaped: circulating supply and total staked diverge
+			// enough (~1.68x) that the two denominators disagree sharply.
+			// A pool at 72M ADA live stake should land at ~1.0 saturation
+			// against the correct denominator (circulating supply / nOpt =
+			// 72.2M ADA), the shape the pre-fix formula (totalActive /
+			// nOpt = 43M ADA) could not express: it would have reported
+			// this same pool at ~1.674. Values are lovelace
+			// (1 ADA = 1_000_000 lovelace).
+			name:               "mainnet-shaped: circulating vs staked diverge",
+			liveStake:          72_000_000_000_000,     // 72M ADA
+			activeStake:        72_000_000_000_000,     // 72M ADA
+			totalLive:          21_500_000_000_000_000, // 21.5B ADA
+			totalActive:        21_500_000_000_000_000, // 21.5B ADA
+			totalCirculation:   36_100_000_000_000_000, // 36.1B ADA
+			nOpt:               500,
+			wantLiveSize:       72_000_000_000_000.0 / 21_500_000_000_000_000.0,
+			wantActiveSize:     72_000_000_000_000.0 / 21_500_000_000_000_000.0,
+			wantLiveSaturation: 72_000_000_000_000.0 / (36_100_000_000_000_000.0 / 500.0),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			liveSize, activeSize, liveSaturation := poolSizeSaturation(
-				tt.liveStake, tt.activeStake, tt.totalLive, tt.totalActive, tt.nOpt,
+				tt.liveStake, tt.activeStake, tt.totalLive, tt.totalActive,
+				tt.totalCirculation, tt.nOpt,
 			)
 			assert.InDelta(t, tt.wantLiveSize, liveSize, 1e-9)
 			assert.InDelta(t, tt.wantActiveSize, activeSize, 1e-9)
-			assert.InDelta(t, tt.wantLiveSaturation, liveSaturation, 1e-9)
+			assert.InDelta(t, tt.wantLiveSaturation, liveSaturation, 1e-6)
 		})
 	}
 }

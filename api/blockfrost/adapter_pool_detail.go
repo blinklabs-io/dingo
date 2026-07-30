@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -131,30 +132,33 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	liveDelegators := delegatorsByPool[string(pool.PoolKeyHash)]
 
 	// Active stake: the Mark snapshot at currentEpoch-2, matching
-	// PoolsExtended and Network.
+	// PoolsExtended and Network. A single targeted row lookup rather than
+	// GetPoolStakeSnapshotsByEpoch's full-network fetch-then-linear-scan:
+	// on mainnet that call returns ~3,000 pools' rows to find the one that
+	// matches.
 	currentEpoch := a.ledgerState.CurrentEpoch()
 	activeStakeEpoch := uint64(0)
 	if currentEpoch >= 2 {
 		activeStakeEpoch = currentEpoch - 2
 	}
-	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
-		activeStakeEpoch, "mark", txn.Metadata(),
+	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		activeStakeEpoch, "mark", pool.PoolKeyHash, txn.Metadata(),
 	)
 	if err != nil {
 		return PoolDetailInfo{}, fmt.Errorf(
-			"get pool stake snapshots for epoch %d: %w",
+			"get pool stake snapshot for epoch %d: %w",
 			activeStakeEpoch, err,
 		)
 	}
 	var activeStake uint64
-	for _, snapshot := range snapshots {
-		if string(snapshot.PoolKeyHash) == string(pool.PoolKeyHash) {
-			activeStake = uint64(snapshot.TotalStake)
-			break
-		}
+	if snapshot != nil {
+		activeStake = uint64(snapshot.TotalStake)
 	}
 
-	// Network-wide totals for the live/active size ratios and saturation.
+	// Network-wide total active stake, for active_size. GetTotalActiveStake
+	// is already a targeted aggregate (an EpochSummary fast path, falling
+	// back to a single SUM query), not a per-pool scan, so nothing further
+	// to avoid here.
 	totalActiveStake, err := db.Metadata().GetTotalActiveStake(
 		activeStakeEpoch, "mark", txn.Metadata(),
 	)
@@ -163,7 +167,31 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 			"get total active stake: %w", err,
 		)
 	}
-	totalLiveStake, err := a.liveStake()
+	// active_size is a required, non-nullable float with no schema-
+	// compatible "unknown" placeholder — the same constraint documented
+	// on live_saturation below. 0.0 is a value a real pool can
+	// legitimately have (no active stake), so it cannot double as a
+	// placeholder for "no snapshot captured for this epoch yet".
+	// activeStakeEpoch floors to 0 for currentEpoch < 2, and any node
+	// missing that epoch's snapshot hits this through the normal path,
+	// not a pathological one. Error instead of silently reporting every
+	// pool as 0% active-saturated, consistent with the protocol-parameters
+	// case below.
+	if totalActiveStake == 0 {
+		return PoolDetailInfo{}, fmt.Errorf(
+			"get total active stake for epoch %d: no snapshot captured",
+			activeStakeEpoch,
+		)
+	}
+
+	// Network-wide total live stake, for live_size. Unlike active stake's
+	// total, there is no pre-aggregated column to query directly here, so
+	// this genuinely requires summing every pool's delegated stake — the
+	// same cost PoolsExtended and Network already pay for the same
+	// number. liveStake reads within txn so this stays in the same
+	// snapshot as the reads above (see liveStake's doc comment for the
+	// one read that still can't).
+	totalLiveStake, err := a.liveStake(txn.Metadata())
 	if err != nil {
 		return PoolDetailInfo{}, err
 	}
@@ -174,15 +202,33 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	// with no live stake), so it cannot double as a placeholder for
 	// "protocol parameters aren't loaded yet". Propagate the error instead
 	// of guessing.
+	//
+	// CurrentProtocolParams reads the ledger state's own cached current
+	// parameters rather than a value scoped to txn — the same convention
+	// PoolsExtended and Network already rely on for their own out-of-txn
+	// reads (see liveStake). It matters less here in practice than it
+	// would for a live-stake read: protocol parameters only change at
+	// epoch boundaries via governance action, not every block, so the
+	// window in which this could disagree with the rest of this
+	// snapshot is far narrower.
 	protocolParams, err := a.CurrentProtocolParams()
 	if err != nil {
 		return PoolDetailInfo{}, fmt.Errorf(
 			"get protocol parameters: %w", err,
 		)
 	}
+
+	// live_saturation's denominator is total circulating supply, not
+	// total active stake: see totalCirculation's doc comment.
+	totalCirculation, err := a.totalCirculation(txn.Metadata())
+	if err != nil {
+		return PoolDetailInfo{}, fmt.Errorf(
+			"get total circulation: %w", err,
+		)
+	}
 	liveSize, activeSize, liveSaturation := poolSizeSaturation(
 		liveStake, activeStake, totalLiveStake, totalActiveStake,
-		protocolParams.NOpt,
+		totalCirculation, protocolParams.NOpt,
 	)
 
 	// Live pledge: the live stake currently delegated to this pool by its
@@ -223,18 +269,30 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 		)
 	}
 
-	epochStartSlot := uint64(0)
+	// blocks_epoch narrows the lifetime query above to the current epoch's
+	// slot range. If GetEpoch returns nil for the current epoch, the state
+	// needed to do that narrowing isn't there: defaulting epochStartSlot
+	// to 0 would silently reproduce the blocks_minted query above
+	// (0..noSlotUpperBound) and report the pool's entire history as
+	// current-epoch blocks, so this errors instead.
+	//
+	// The upper bound is noSlotUpperBound, not the epoch's end slot — only
+	// correct because this is always the CURRENT epoch, where no blocks
+	// exist past the synced tip. Reusing this for a historical epoch would
+	// need the epoch's actual end slot as the upper bound instead.
 	epochRow, err := db.GetEpoch(currentEpoch, txn)
 	if err != nil {
 		return PoolDetailInfo{}, fmt.Errorf(
 			"get epoch %d: %w", currentEpoch, err,
 		)
 	}
-	if epochRow != nil {
-		epochStartSlot = epochRow.StartSlot
+	if epochRow == nil {
+		return PoolDetailInfo{}, fmt.Errorf(
+			"get epoch %d: no epoch row found", currentEpoch,
+		)
 	}
 	blocksEpochByPool, _, err := db.Metadata().CountPoolBlocksInSlotRange(
-		[]lcommon.PoolKeyHash{pkh}, epochStartSlot, noSlotUpperBound, txn.Metadata(),
+		[]lcommon.PoolKeyHash{pkh}, epochRow.StartSlot, noSlotUpperBound, txn.Metadata(),
 	)
 	if err != nil {
 		return PoolDetailInfo{}, fmt.Errorf(
@@ -284,21 +342,65 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	}, nil
 }
 
+// totalCirculation returns MaxLovelaceSupply minus Reserves: the sigma
+// denominator the reward calculation uses for the per-pool saturation
+// threshold. ledger/rewards/rewards.go:287 computes exactly this quantity
+// (`totalCirculation := params.MaxLovelaceSupply - pots.Reserves`), and
+// rewards.go:~1028-1034 passes it as totalStake into
+// optimalPoolRewardChecked, where sigma = poolStake/totalStake is capped at
+// z0 = 1/optimalPoolCount — a deliberately different denominator from
+// totalActiveStake, which the same call passes to apparentPerformance one
+// line above.
+//
+// This is NOT the same figure as Network()'s local "circulating" value
+// (adapter.go), which further subtracts treasury and script-locked supply
+// for display purposes. Callers computing a saturation threshold must use
+// this function's result, never that one.
+func (a *NodeAdapter) totalCirculation(txn dbtypes.Txn) (uint64, error) {
+	nodeCfg := a.ledgerState.CardanoNodeConfig()
+	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
+		return 0, errors.New("shelley genesis not available")
+	}
+	maxSupply := nodeCfg.ShelleyGenesis().MaxLovelaceSupply
+
+	state, err := a.ledgerState.Database().Metadata().GetNetworkState(txn)
+	if err != nil {
+		return 0, fmt.Errorf("get network state: %w", err)
+	}
+	reserves := uint64(0)
+	if state != nil {
+		reserves = uint64(state.Reserves)
+	}
+	if reserves > maxSupply {
+		return 0, nil
+	}
+	return maxSupply - reserves, nil
+}
+
 // poolSizeSaturation computes a pool's live/active stake-size ratios and
-// live-saturation fraction relative to network-wide totals and the nOpt (k)
-// protocol parameter, matching Blockfrost's live_size, active_size, and
-// live_saturation semantics: live_size and active_size are the pool's share
-// of total live/active stake, and live_saturation is live stake relative to
-// the per-pool saturation threshold (total active stake / nOpt). The caller
-// is responsible for nOpt being a real, loaded protocol parameter value —
-// this function only guards the pathological case of a zero denominator
-// (e.g. a network with no active stake yet captured) to avoid dividing by
-// zero; it does not stand in for "nOpt unavailable".
+// live-saturation fraction, matching Blockfrost's live_size, active_size,
+// and live_saturation semantics. The three outputs each divide by a
+// different network-wide total:
+//   - live_size divides by totalLiveStake, the network's total delegated
+//     (live) stake.
+//   - active_size divides by totalActiveStake, the network's total Mark-
+//     snapshot (active) stake for the relevant epoch.
+//   - live_saturation divides live stake by the per-pool saturation
+//     threshold, totalCirculation / nOpt. totalCirculation is deliberately
+//     NOT totalActiveStake: see the totalCirculation doc comment above for
+//     why the reward calculation requires this distinction.
+//
+// The caller is responsible for nOpt being a real, loaded protocol
+// parameter value — this function only guards the pathological case of a
+// zero denominator (e.g. a network with no active stake or circulation
+// figure yet captured) to avoid dividing by zero; it does not stand in for
+// "nOpt unavailable" or "totalCirculation unavailable".
 func poolSizeSaturation(
 	liveStake uint64,
 	activeStake uint64,
 	totalLiveStake uint64,
 	totalActiveStake uint64,
+	totalCirculation uint64,
 	nOpt int,
 ) (liveSize float64, activeSize float64, liveSaturation float64) {
 	if totalLiveStake > 0 {
@@ -306,11 +408,11 @@ func poolSizeSaturation(
 	}
 	if totalActiveStake > 0 {
 		activeSize = float64(activeStake) / float64(totalActiveStake)
-		if nOpt > 0 {
-			saturationThreshold := float64(totalActiveStake) / float64(nOpt)
-			if saturationThreshold > 0 {
-				liveSaturation = float64(liveStake) / saturationThreshold
-			}
+	}
+	if totalCirculation > 0 && nOpt > 0 {
+		saturationThreshold := float64(totalCirculation) / float64(nOpt)
+		if saturationThreshold > 0 {
+			liveSaturation = float64(liveStake) / saturationThreshold
 		}
 	}
 	return liveSize, activeSize, liveSaturation
