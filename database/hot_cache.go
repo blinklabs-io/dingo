@@ -15,10 +15,16 @@
 package database
 
 import (
+	"errors"
+	"log/slog"
 	"maps"
+	"runtime"
 	"slices"
 	"sort"
 	"sync/atomic"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // hotCacheData holds both entries and access counts together for atomic updates.
@@ -33,16 +39,163 @@ type hotCacheData struct {
 // This trades LFU accuracy for performance by avoiding map copies on every read.
 const accessSampleRate = 4
 
+const (
+	// defaultMaxCASAttempts bounds the work spent on one best-effort
+	// copy-on-write update (Put, access-count tracking, or eviction).
+	defaultMaxCASAttempts = 16
+	// casYieldThreshold is the retry count after which a CAS loop starts
+	// sleeping a small, randomized amount instead of just yielding the
+	// processor, so contending writers desynchronize instead of retrying
+	// in lockstep.
+	casYieldThreshold = 2
+	// maxCASBackoff caps the randomized sleep between CAS retries.
+	maxCASBackoff = 64 * time.Microsecond
+)
+
+// HotCacheCASStats describes contention in HotCache's copy-on-write update
+// path. Values are cumulative for the lifetime of the cache.
+type HotCacheCASStats struct {
+	// Attempts is the total number of CompareAndSwap attempts across Put,
+	// access-count tracking, and eviction.
+	Attempts uint64
+	// WritersAbortedAfterBudget is the number of copy-on-write updates that
+	// exhausted their retry budget and were dropped as best-effort.
+	WritersAbortedAfterBudget uint64
+	// SuccessfulCommitsAfterBackoff is the number of updates that succeeded
+	// only after backing off at least once, i.e. actual forward progress
+	// under contention rather than just bounded termination.
+	SuccessfulCommitsAfterBackoff uint64
+	// SuccessfulCommitBackoffTime is the cumulative backoff duration spent
+	// by updates counted in SuccessfulCommitsAfterBackoff.
+	SuccessfulCommitBackoffTime time.Duration
+}
+
 // HotCache provides a lock-free cache for frequently accessed CBOR data.
 // It uses copy-on-write semantics for thread-safe concurrent access without locks.
 // Eviction follows a Least-Frequently-Used (LFU) policy with probabilistic counting.
 type HotCache struct {
-	data      atomic.Pointer[hotCacheData] // combined entries + access counts
-	maxSize   int                          // max number of entries (0 = unlimited)
-	maxBytes  int64                        // max memory in bytes (0 = unlimited)
-	curBytes  atomic.Int64                 // current memory usage
-	evicting  atomic.Bool                  // eviction lock
-	sampleCnt atomic.Uint64                // counter for probabilistic access tracking
+	data                atomic.Pointer[hotCacheData] // combined entries + access counts
+	maxSize             int                          // max number of entries (0 = unlimited)
+	maxBytes            int64                        // max memory in bytes (0 = unlimited)
+	curBytes            atomic.Int64                 // current memory usage
+	evicting            atomic.Bool                  // eviction lock
+	sampleCnt           atomic.Uint64                // counter for probabilistic access tracking
+	casSequence         atomic.Uint64                // gives contending writers asymmetric jitter
+	casAttempts         atomic.Uint64
+	writersAborted      atomic.Uint64 // updates dropped after exhausting the budget
+	commitsAfterBackoff atomic.Uint64
+	commitBackoffNanos  atomic.Uint64
+	maxCASAttempts      int
+
+	// logger and cacheName are optional; set via SetLogger. A nil logger
+	// (the default) disables the writer-aborted warning log entirely.
+	logger    *slog.Logger
+	cacheName string
+}
+
+// SetLogger wires an optional logger into the cache for diagnostics: it logs
+// a warning whenever a copy-on-write update is dropped after exhausting the
+// CAS retry budget (see HotCacheCASStats.WritersAbortedAfterBudget). name
+// identifies this cache instance in the log fields (e.g. "utxo", "tx"). A
+// nil logger disables this logging, which is the default.
+func (c *HotCache) SetLogger(logger *slog.Logger, name string) {
+	c.logger = logger
+	c.cacheName = name
+}
+
+// logWriterAborted logs the writer-aborted-after-budget event, if a logger
+// has been configured. op identifies which CAS loop gave up (put,
+// increment_access, or evict).
+func (c *HotCache) logWriterAborted(op string) {
+	if c.logger == nil {
+		return
+	}
+	c.logger.Warn(
+		"hot cache dropped a best-effort update after exhausting its CAS retry budget",
+		"cache", c.cacheName,
+		"op", op,
+		"max_attempts", c.maxCASAttempts,
+		"writers_aborted_total", c.writersAborted.Load(),
+	)
+}
+
+// RegisterCASMetrics exposes this cache's copy-on-write contention counters
+// (see HotCacheCASStats) on the given Prometheus registry, labeled by
+// cacheName (e.g. "utxo", "tx"). If registry is nil, this is a no-op. This
+// method is safe to call more than once with the same registry; a duplicate
+// registration is ignored since the collectors read from this cache's own
+// counters regardless of which registration call installed them.
+func (c *HotCache) RegisterCASMetrics(
+	registry prometheus.Registerer,
+	cacheName string,
+) error {
+	if registry == nil {
+		return nil
+	}
+	labels := prometheus.Labels{"cache": cacheName}
+	collectors := []prometheus.Collector{
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name:        "dingo_hot_cache_cas_attempts_total",
+			Help:        "Total CompareAndSwap attempts across Put, access tracking, and eviction",
+			ConstLabels: labels,
+		}, func() float64 { return float64(c.casAttempts.Load()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name:        "dingo_hot_cache_writers_aborted_after_budget_total",
+			Help:        "Total copy-on-write updates dropped after exhausting the CAS retry budget",
+			ConstLabels: labels,
+		}, func() float64 { return float64(c.writersAborted.Load()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name:        "dingo_hot_cache_successful_commits_after_backoff_total",
+			Help:        "Total copy-on-write updates that succeeded only after backing off at least once",
+			ConstLabels: labels,
+		}, func() float64 { return float64(c.commitsAfterBackoff.Load()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name:        "dingo_hot_cache_successful_commit_backoff_seconds_total",
+			Help:        "Cumulative backoff time spent by updates that succeeded after backing off",
+			ConstLabels: labels,
+		}, func() float64 { return c.CASStats().SuccessfulCommitBackoffTime.Seconds() }),
+	}
+	for _, collector := range collectors {
+		if err := registry.Register(collector); err != nil {
+			if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// CASStats returns a snapshot of copy-on-write contention counters, suitable
+// for diagnostics or metrics export.
+func (c *HotCache) CASStats() HotCacheCASStats {
+	return HotCacheCASStats{
+		Attempts:                      c.casAttempts.Load(),
+		WritersAbortedAfterBudget:     c.writersAborted.Load(),
+		SuccessfulCommitsAfterBackoff: c.commitsAfterBackoff.Load(),
+		// #nosec G115 -- backoff nanoseconds are bounded by maxCASBackoff per
+		// attempt and maxCASAttempts attempts; won't approach int64 overflow.
+		SuccessfulCommitBackoffTime: time.Duration(c.commitBackoffNanos.Load()),
+	}
+}
+
+// backoff waits between CAS retries: an immediate scheduler yield for the
+// first couple of attempts, then a small randomized sleep whose window
+// grows with the attempt count. casSequence lets concurrent callers land on
+// different delays without a shared RNG or lock. Returns the duration
+// slept, or 0 if only a yield occurred.
+func (c *HotCache) backoff(attempt int) time.Duration {
+	if attempt < casYieldThreshold {
+		runtime.Gosched()
+		return 0
+	}
+	shift := min(attempt-casYieldThreshold, 6)
+	window := uint64(1) << shift
+	sequence := c.casSequence.Add(0x9e3779b97f4a7c15)
+	// #nosec G115 -- value is 1..window (window <= 64), far below int64 range.
+	jitter := time.Duration(1+(sequence^(sequence>>30))%window) * time.Microsecond
+	jitter = min(jitter, maxCASBackoff)
+	time.Sleep(jitter)
+	return jitter
 }
 
 // NewHotCache creates a new HotCache with the given size and memory limits.
@@ -50,8 +203,9 @@ type HotCache struct {
 // Set maxBytes to 0 for unlimited memory (limited only by maxSize).
 func NewHotCache(maxSize int, maxBytes int64) *HotCache {
 	cache := &HotCache{
-		maxSize:  maxSize,
-		maxBytes: maxBytes,
+		maxSize:        maxSize,
+		maxBytes:       maxBytes,
+		maxCASAttempts: defaultMaxCASAttempts,
 	}
 
 	// Initialize combined data structure
@@ -101,7 +255,8 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 	}
 
 	// Copy-on-write: create new combined data with the update
-	for {
+	var backoffTime time.Duration
+	for attempt := 0; attempt < c.maxCASAttempts; attempt++ {
 		oldData := c.data.Load()
 
 		newEntries := make(map[string][]byte, len(oldData.entries)+1)
@@ -131,16 +286,27 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 		}
 
 		// Try to atomically update both maps together
+		c.casAttempts.Add(1)
 		if c.data.CompareAndSwap(oldData, newData) {
 			if c.maxBytes > 0 {
 				c.curBytes.Add(memDelta)
 			}
-			break
+			if backoffTime > 0 {
+				c.commitsAfterBackoff.Add(1)
+				c.commitBackoffNanos.Add(uint64(backoffTime))
+			}
+			c.maybeEvict()
+			return
 		}
-		// CAS failed, retry with fresh data
+		// CAS failed. The bounded loop plus backoff below prevents this from
+		// spinning forever or staying synchronized with other contenders.
+		backoffTime += c.backoff(attempt)
 	}
 
-	c.maybeEvict()
+	// Cache population is strictly best-effort. Dropping the write keeps
+	// contention out of the caller's critical path; a later miss recomputes it.
+	c.writersAborted.Add(1)
+	c.logWriterAborted("put")
 }
 
 // incrementAccess increments the access counter for a key.
@@ -149,7 +315,7 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 func (c *HotCache) incrementAccess(key []byte) {
 	keyStr := string(key)
 
-	for {
+	for attempt := 0; attempt < c.maxCASAttempts; attempt++ {
 		oldData := c.data.Load()
 		if oldData == nil {
 			return
@@ -170,11 +336,17 @@ func (c *HotCache) incrementAccess(key []byte) {
 			accessCnt: newAccessCnt,
 		}
 
+		c.casAttempts.Add(1)
 		if c.data.CompareAndSwap(oldData, newData) {
 			return
 		}
-		// CAS failed, retry
+		// CAS failed. This is a probabilistic, best-effort access-count
+		// update (see accessSampleRate), so dropping it under sustained
+		// contention only costs a little LFU accuracy.
+		c.backoff(attempt)
 	}
+	c.writersAborted.Add(1)
+	c.logWriterAborted("increment_access")
 }
 
 // maybeEvict checks if eviction is needed and performs LFU eviction.
@@ -203,7 +375,7 @@ func (c *HotCache) maybeEvict() {
 	defer c.evicting.Store(false)
 
 	// Use CAS loop to atomically update while handling concurrent modifications
-	for {
+	for attempt := 0; attempt < c.maxCASAttempts; attempt++ {
 		oldData := c.data.Load()
 		if oldData == nil {
 			return
@@ -286,12 +458,18 @@ func (c *HotCache) maybeEvict() {
 		}
 
 		// Try to atomically update
+		c.casAttempts.Add(1)
 		if c.data.CompareAndSwap(oldData, newData) {
 			if c.maxBytes > 0 {
 				c.curBytes.Add(-bytesRemoved)
 			}
 			return
 		}
-		// CAS failed, retry with fresh data
+		// CAS failed. Eviction is opportunistic and re-checked on every
+		// Put, so under sustained contention it's safe to abandon this
+		// attempt rather than spin: the next Put will retry it.
+		c.backoff(attempt)
 	}
+	c.writersAborted.Add(1)
+	c.logWriterAborted("evict")
 }

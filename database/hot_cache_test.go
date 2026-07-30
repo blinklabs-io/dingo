@@ -15,10 +15,14 @@
 package database
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -231,6 +235,174 @@ func TestHotCacheLFUEviction(t *testing.T) {
 	// key1 (moderately frequent) should likely still be present
 	_, ok = cache.Get([]byte("key1"))
 	assert.True(t, ok, "moderately accessed key should survive eviction")
+}
+
+// TestHotCacheConcurrentPutsCompleteUnderHighContention drives many more
+// concurrent writers against a small, heavily-contended cache than
+// TestHotCacheConcurrent and asserts every Put returns within a bounded
+// time. This validates the acceptance criteria that cache insertion cannot
+// spin indefinitely under high contention, using the default retry budget.
+func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
+	cache := NewHotCache(50, 0)
+
+	const numGoroutines = 200
+	const numOperations = 200
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		for i := range numGoroutines {
+			go func(id int) {
+				defer wg.Done()
+				for j := range numOperations {
+					key := fmt.Appendf(nil, "key-%d", j%20)
+					value := fmt.Appendf(nil, "value-%d-%d", id, j)
+					cache.Put(key, value)
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Put calls did not complete under high contention within timeout")
+	}
+
+	stats := cache.CASStats()
+	assert.Positive(t, stats.Attempts, "writers should attempt cache commits")
+	assert.Positive(
+		t,
+		stats.SuccessfulCommitsAfterBackoff,
+		"at least one contended writer should make progress after backing off, "+
+			"not just terminate",
+	)
+	assert.Positive(
+		t,
+		stats.SuccessfulCommitBackoffTime,
+		"successful contended commits should report their cumulative backoff",
+	)
+
+	_, ok := cache.Get([]byte("key-0"))
+	assert.True(t, ok, "contention should still leave successfully committed entries")
+}
+
+// TestHotCacheRetryBudgetFallback deterministically exercises the CAS
+// retry-budget fallback by allowing one CAS attempt and hammering a shared
+// cache with concurrent writers, then asserts the cache degrades gracefully
+// (no panic, no hang) and reports writers that drop their best-effort update.
+func TestHotCacheRetryBudgetFallback(t *testing.T) {
+	cache := NewHotCache(50, 0)
+	cache.maxCASAttempts = 1
+
+	const numGoroutines = 100
+	const numOperations = 100
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(numGoroutines)
+		for i := range numGoroutines {
+			go func(id int) {
+				defer wg.Done()
+				for j := range numOperations {
+					key := fmt.Appendf(nil, "key-%d", j%10)
+					value := fmt.Appendf(nil, "value-%d-%d", id, j)
+					cache.Put(key, value)
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Put calls did not complete within timeout under a tiny retry budget")
+	}
+
+	assert.Positive(
+		t,
+		cache.CASStats().WritersAbortedAfterBudget,
+		"expected at least one writer to exhaust a one-attempt budget under contention",
+	)
+
+	// Cache must remain usable after the fallback triggers.
+	cache.Put([]byte("after-fallback"), []byte("still-works"))
+	got, ok := cache.Get([]byte("after-fallback"))
+	assert.True(t, ok, "cache should still accept writes after a retry-budget fallback")
+	assert.Equal(t, []byte("still-works"), got)
+}
+
+// TestHotCacheLogsWriterAbortedOnBudgetExhaustion deterministically forces
+// the writer-aborted-after-budget path (by setting maxCASAttempts to 0, so
+// the CAS loop body never runs) and asserts a configured logger reports it,
+// with no reliance on real contention or goroutine timing.
+func TestHotCacheLogsWriterAbortedOnBudgetExhaustion(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	cache.maxCASAttempts = 0
+
+	var buf bytes.Buffer
+	cache.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)), "test-cache")
+
+	cache.Put([]byte("key"), []byte("value"))
+
+	logOutput := buf.String()
+	assert.Contains(
+		t,
+		logOutput,
+		"hot cache dropped a best-effort update after exhausting its CAS retry budget",
+	)
+	assert.Contains(t, logOutput, "cache=test-cache")
+	assert.Contains(t, logOutput, "op=put")
+	assert.Equal(t, uint64(1), cache.CASStats().WritersAbortedAfterBudget)
+}
+
+// TestHotCacheNilLoggerDoesNotPanic confirms that a cache with no logger
+// configured (the default) silently drops the writer-aborted event instead
+// of panicking on a nil logger dereference.
+func TestHotCacheNilLoggerDoesNotPanic(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	cache.maxCASAttempts = 0
+
+	require.NotPanics(t, func() {
+		cache.Put([]byte("key"), []byte("value"))
+	})
+	assert.Equal(t, uint64(1), cache.CASStats().WritersAbortedAfterBudget)
+}
+
+// TestHotCacheRegisterCASMetrics verifies that RegisterCASMetrics exposes
+// live CAS contention counters on a Prometheus registry, that the counters
+// reflect this cache's actual state, and that registering twice on the same
+// registry is a safe no-op rather than an error or duplicate series.
+func TestHotCacheRegisterCASMetrics(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	registry := prometheus.NewRegistry()
+
+	require.NoError(t, cache.RegisterCASMetrics(registry, "test"))
+	require.NoError(t, cache.RegisterCASMetrics(registry, "test")) // reuse is a no-op
+
+	cache.Put([]byte("key1"), []byte("value1"))
+	cache.maxCASAttempts = 0
+	cache.Put([]byte("key2"), []byte("value2")) // deterministically aborts
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	found := map[string]float64{}
+	for _, mf := range families {
+		for _, m := range mf.GetMetric() {
+			found[mf.GetName()] = m.GetCounter().GetValue()
+		}
+	}
+
+	assert.Positive(t, found["dingo_hot_cache_cas_attempts_total"])
+	assert.Equal(t, float64(1), found["dingo_hot_cache_writers_aborted_after_budget_total"])
+	assert.Contains(t, found, "dingo_hot_cache_successful_commits_after_backoff_total")
+	assert.Contains(t, found, "dingo_hot_cache_successful_commit_backoff_seconds_total")
 }
 
 func TestHotCacheEmptyCache(t *testing.T) {

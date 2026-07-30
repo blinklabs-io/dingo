@@ -182,12 +182,19 @@ func New(config *Config, stores Stores) (*Database, error) {
 	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)
+	db.cborCache.SetLogger(configCopy.Logger)
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)
 		if err := RegisterBlockByHashMetrics(configCopy.PromRegistry); err != nil {
 			configCopy.Logger.Warn(
 				"failed to register block-hash index metrics",
+				"error", err,
+			)
+		}
+		if err := db.cborCache.RegisterCASMetrics(configCopy.PromRegistry); err != nil {
+			configCopy.Logger.Warn(
+				"failed to register hot cache CAS metrics",
 				"error", err,
 			)
 		}
