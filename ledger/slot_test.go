@@ -15,12 +15,14 @@
 package ledger
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
 func TestSlotCalc(t *testing.T) {
@@ -302,7 +304,10 @@ func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for slot before first known epoch")
 	}
-	if err.Error() != "slot is outside the known epoch range" {
+	if !errors.Is(err, hardfork.ErrPastHorizon) {
+		t.Errorf("expected ErrPastHorizon, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "slot is outside the known epoch range") {
 		t.Errorf("unexpected error message: %s", err.Error())
 	}
 
