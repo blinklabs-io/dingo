@@ -1035,6 +1035,8 @@ Tier 3: Cold Extraction
   - Extract CBOR at stored offset
 ```
 
+Tier 1 (`HotCache`, `database/hot_cache.go`) is a lock-free, copy-on-write cache: writers build a new snapshot and `CompareAndSwap` it in without ever taking a mutex. Every CAS loop (`Put`, probabilistic access-count tracking, LFU eviction) is bounded (`maxCASAttempts`, default 16) with yield-then-jittered-backoff between retries; a writer that exhausts its budget under sustained contention drops the update rather than spinning or falling back to a lock — the cache is strictly best-effort, so a dropped write only costs a future miss recomputed from Tier 2/3. Contention is observable via `HotCache.CASStats()` and, when a `Config.PromRegistry` is set, the `dingo_hot_cache_cas_attempts_total`, `dingo_hot_cache_writers_aborted_after_budget_total`, `dingo_hot_cache_successful_commits_after_backoff_total`, and `dingo_hot_cache_successful_commit_backoff_seconds_total` metrics (labeled `cache="utxo"|"tx"`); a configured logger also gets a warning each time a write is dropped.
+
 ### CborOffset Structure
 
 Each CBOR reference is a fixed 52-byte `CborOffset` struct with magic prefix:
