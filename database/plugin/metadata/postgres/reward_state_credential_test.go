@@ -43,8 +43,8 @@ func TestGetRewardAccountOutputsByCredentialPostgres(t *testing.T) {
 	})
 
 	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
-		{Epoch: 1, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolA, RewardType: "member", Amount: 100},
-		{Epoch: 2, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolB, RewardType: "member", Amount: 200},
+		{Epoch: 1, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolA, RewardType: "member", Amount: 100, Spendable: true},
+		{Epoch: 2, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolB, RewardType: "member", Amount: 200, Spendable: true},
 	}, nil))
 
 	count, err := store.CountRewardAccountOutputsByCredential(0, stakingKey, nil)
@@ -57,6 +57,41 @@ func TestGetRewardAccountOutputsByCredentialPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.Equal(t, uint64(2), rows[0].Epoch)
+}
+
+// TestGetRewardAccountOutputsByCredentialExcludesNonSpendablePostgres pins
+// Finding 1 against postgres: a row whose reward was never actually
+// credited (Spendable = false, e.g. a credential that deregistered before
+// its reward's payout boundary) must be absent from both the returned rows
+// and the count.
+func TestGetRewardAccountOutputsByCredentialExcludesNonSpendablePostgres(t *testing.T) {
+	store := newTestPostgresStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	db := store.DB()
+
+	stakingKey := testHash28("reward-history-nonspendable-cred")
+	pool := testHash28("reward-history-nonspendable-pool")
+
+	t.Cleanup(func() {
+		_ = db.Where("staking_key = ?", stakingKey).
+			Delete(&models.RewardAccountOutput{}).Error
+	})
+
+	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		{Epoch: 10, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: pool, RewardType: "member", Amount: 1_000_000, Spendable: true},
+		{Epoch: 11, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: pool, RewardType: "member", Amount: 9_999_999, Spendable: false},
+	}, nil))
+
+	count, err := store.CountRewardAccountOutputsByCredential(0, stakingKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, count, "the non-spendable row must not be counted")
+
+	rows, err := store.GetRewardAccountOutputsByCredential(
+		0, stakingKey, 100, 0, "asc", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the non-spendable row must be absent from the results")
+	require.Equal(t, uint64(10), rows[0].Epoch)
 }
 
 // TestDeleteRewardStakeInputBeforeEpochPostgres verifies the API storage-mode

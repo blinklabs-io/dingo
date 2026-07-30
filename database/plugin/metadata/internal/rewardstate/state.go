@@ -602,6 +602,28 @@ func GetAccountOutputs(db *gorm.DB, epoch uint64) ([]*models.RewardAccountOutput
 // by pool_key_hash then reward_type so results are stable across pages. Used
 // by the Blockfrost account reward-history endpoint
 // (GET /accounts/{stake_address}/rewards, dingo #1875).
+//
+// Filters to spendable = true. applyStakeRewardApplication
+// (ledger/reward_calculation.go) never credits a reward whose row has
+// Spendable = false — the amount is added to the epoch's unspendable total
+// instead — so a non-spendable row here was never actually paid to the
+// account. Reporting it as reward history would overstate what the account
+// received (and, added into the endpoint's total, overstate the count of
+// rewards too). finalizePrecomputedRewardOutputs persists Spendable = false
+// permanently for a credential that deregistered before its reward's payout
+// boundary, so this is not a transient state.
+//
+// idx_reward_account_output_credential_spendable puts spendable in the
+// index's equality prefix alongside credential_tag/staking_key specifically
+// so this filter stays a pure index range scan.
+//
+// NOTE(dingo #1875 follow-up, not fixed here): a CIP-0163-guarded reward
+// (rewardOutputGuarded, ledger/reward_calculation.go) is also skipped at
+// crediting time without ever being credited, but that guard is not written
+// back to Spendable, so a guarded row keeps spendable = true and this filter
+// does not catch it. That only bites once CIP-0163 (delegator inactivity)
+// activates; see DATABASE.md and the RewardAccountOutput doc comment for the
+// same note. Tracked as a follow-up, not addressed in this change.
 func GetAccountOutputsByCredential(
 	db *gorm.DB,
 	credentialTag uint8,
@@ -615,9 +637,10 @@ func GetAccountOutputsByCredential(
 		return ret, nil
 	}
 	query := db.Where(
-		"credential_tag = ? AND staking_key = ?",
+		"credential_tag = ? AND staking_key = ? AND spendable = ?",
 		credentialTag,
 		stakingKey,
+		true,
 	)
 	if strings.EqualFold(order, "desc") {
 		query = query.Order("epoch DESC, pool_key_hash ASC, reward_type ASC")
@@ -641,7 +664,10 @@ func GetAccountOutputsByCredential(
 
 // CountAccountOutputsByCredential returns the total count of reward account
 // output rows for a stake credential across every epoch that has not yet
-// been pruned.
+// been pruned. Filters to spendable = true for the same reason
+// GetAccountOutputsByCredential does: a non-spendable row was never credited,
+// so it must not be counted as reward history either, or pagination
+// advertises pages of rewards that were never paid.
 func CountAccountOutputsByCredential(
 	db *gorm.DB,
 	credentialTag uint8,
@@ -652,9 +678,10 @@ func CountAccountOutputsByCredential(
 	}
 	var count int64
 	if err := db.Model(&models.RewardAccountOutput{}).Where(
-		"credential_tag = ? AND staking_key = ?",
+		"credential_tag = ? AND staking_key = ? AND spendable = ?",
 		credentialTag,
 		stakingKey,
+		true,
 	).Count(&count).Error; err != nil {
 		return 0, fmt.Errorf(
 			"count reward account outputs by credential: %w",

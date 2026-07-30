@@ -428,7 +428,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot` | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
-| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; index `(credential_tag, staking_key, epoch, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. Backs the Blockfrost `GET /accounts/{stake_address}/rewards` endpoint via `GetRewardAccountOutputsByCredential` / `CountRewardAccountOutputsByCredential` (see below), which the `(credential_tag, staking_key, ...)` index exists specifically to serve: the unique index leads with `epoch`, so without a second, credential-leading index that query would be a full scan of every retained row rather than a range scan over one account's rows. Pruning is storage-mode dependent (see the retention note below): pruned to the four-epoch window in `core` mode, retained for the life of the database in `api` mode. |
+| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; index `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. Backs the Blockfrost `GET /accounts/{stake_address}/rewards` endpoint via `GetRewardAccountOutputsByCredential` / `CountRewardAccountOutputsByCredential` (see below), which the `(credential_tag, staking_key, spendable, ...)` index exists specifically to serve: the unique index leads with `epoch`, so without a second, credential-leading index that query would be a full scan of every retained row rather than a range scan over one account's spendable rows; `spendable` is in that index's equality prefix (not just the base query filter) so the `spendable = true` filter those two methods apply stays a pure index seek rather than a seek followed by a per-row filter. Pruning is storage-mode dependent (see the retention note below): pruned to the four-epoch window in `core` mode, retained for the life of the database in `api` mode. |
 
 #### Snapshot and Reward-State Retention
 
@@ -469,9 +469,31 @@ per epoch on mainnet, ~5k on preview — so retaining it without bound in `api`
 mode grows the table by that amount every epoch for the life of the database,
 an ongoing, unbounded storage cost, not a one-time one. `core` mode never
 serves that endpoint and has no reason to pay it. The
-`(credential_tag, staking_key, epoch, pool_key_hash, reward_type)` index
-(above) is what keeps `GetRewardAccountOutputsByCredential` a bounded lookup
-against that growing table rather than a full scan of it.
+`(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)`
+index (above) is what keeps `GetRewardAccountOutputsByCredential` a bounded
+lookup against that growing table rather than a full scan of it.
+
+The row counts above are not the same as disk bytes, and in `api` mode the
+gap matters for sizing: `reward_account_output` carries the pre-existing
+unique index (`epoch, credential_tag, staking_key, pool_key_hash,
+reward_type`) *and*, since dingo #1875, the credential-leading
+`idx_reward_account_output_credential_spendable` (`credential_tag,
+staking_key, spendable, epoch, pool_key_hash, reward_type`) needed to serve
+`GetRewardAccountOutputsByCredential` without a full scan. Both indexes key
+on nearly the same columns as the base row — each carries its own copy of the
+28-byte `staking_key` and `pool_key_hash` — so each index entry is comparable
+in size to the row itself: roughly 100-110 bytes for the row (`id`, `epoch`,
+`credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`,
+`spendable`, `captured_slot`, `boundary_slot`) plus roughly 80-90 bytes per
+index entry for each of the two indexes. An operator sizing a disk from the
+row count alone (1.3M rows/epoch on mainnet) would be sizing for roughly half
+the real number: the base row plus two comparably-sized indexes is on the
+order of 250-300 bytes/row, not ~100-110, so budget roughly double the naive
+row-count estimate for `reward_account_output` specifically in `api` mode —
+on the order of 300-400MB of *added, unbounded* storage per mainnet epoch,
+before compression, compounding for the life of the database. `core` mode
+prunes this table on the same four-epoch window as `reward_stake_input`, so
+it never accumulates this cost.
 
 Retained for the life of the database regardless of storage mode: `epoch`,
 `epoch_summary`, `reward_ada_pots`, `reward_snapshot`, `reward_pool_input`, and
@@ -1471,44 +1493,116 @@ deterministically:
 ```sql
 SELECT *
 FROM reward_account_output
-WHERE credential_tag = $1 AND staking_key = decode($2, 'hex')
+WHERE credential_tag = $1 AND staking_key = decode($2, 'hex') AND spendable = true
 ORDER BY epoch ASC, pool_key_hash ASC, reward_type ASC   -- DESC ASC ASC when order=desc
 LIMIT $3 OFFSET $4;
 ```
 
+`spendable = true` is required, not optional filtering: `Spendable = false`
+means the reward was never actually credited to the account.
+`applyStakeRewardApplication` (`ledger/reward_calculation.go`) skips crediting
+a non-spendable output and instead folds its amount into the epoch's
+unspendable total, and `finalizePrecomputedRewardOutputs` persists
+`Spendable = false` permanently for a credential that deregistered before its
+reward's payout boundary. Without this filter both the row and the count
+would misreport an uncredited reward as one the account received (dingo #1875
+review finding 1); `CountRewardAccountOutputsByCredential` applies the same
+filter to its `COUNT(*)` so the reported total always matches the rows that
+can actually be paginated.
+
+NOTE (not fixed by the `spendable` filter, tracked as a follow-up): a
+CIP-0163-guarded reward (`rewardOutputGuarded`,
+`ledger/reward_calculation.go`) is also skipped at crediting time and folded
+into undistributed/reserves, but that guard is never written back to
+`Spendable` — a guarded row keeps `spendable = true`. This filter does not
+catch it, so once CIP-0163 (delegator inactivity) activates, a
+CIP-0163-expired credential's guarded reward can still be overstated by this
+endpoint the same way non-spendable rows were before this fix. Out of scope
+for dingo #1875; needs its own follow-up (e.g. persisting the guard decision
+onto the row, the same way `Spendable` already is).
+
 The adapter maps `reward_type` (dingo's `ledger/rewards.RewardType`: `leader`,
 `member`) to the Blockfrost `account_reward_content` `type` enum (`leader`,
-`member`, `pool_deposit_refund`); the two currently-produced values already
-match verbatim, and any value dingo does not yet model is passed through
-lowercased rather than dropped. `pool_key_hash` is rendered as a bech32 pool ID
-the same way `GetAccountDelegationHistory` does. See the retention note above
-for how far back this query can answer: unbounded in `api` storage mode,
-windowed to the last four epochs in `core` mode.
+`member`, `pool_deposit_refund`) by lowercasing it; the two currently-produced
+values already match verbatim. `blockfrostRewardTypes` (a package-level
+allow-list in `api/blockfrost/adapter.go`, not a translation table) checks
+membership rather than translating: a lowercased value outside the allow-list
+still passes through rather than being dropped, but the adapter also logs a
+warning, since a value outside `leader`/`member`/`pool_deposit_refund` would
+otherwise silently make the closed Blockfrost OpenAPI enum for this field
+invalid. `pool_key_hash` is rendered as a bech32 pool ID the same way
+`GetAccountDelegationHistory` does. See the retention note above for how far
+back this query can answer: unbounded in `api` storage mode, windowed to the
+last four epochs in `core` mode.
+
+The stored `epoch` column is the reward-calculation *snapshot* epoch
+(`stakeRewardEpochsForNewEpoch`'s `snapshot = newEpoch - 3` in
+`ledger/reward_calculation.go`, which is what `rewardAccountOutputs` persists
+into this column), not the earned epoch Blockfrost reports. A reward computed
+from snapshot epoch `S` is credited at the boundary into epoch `S+3`, i.e. it
+becomes spendable in `S+3`. cardano-db-sync, which is what Blockfrost serves
+this endpoint from, models `spendable_epoch = earned_epoch + 2`, so
+`earned_epoch = (S+3) - 2 = S+1` — one higher than the stored value, and equal
+to `stakeRewardEpochs.performance` for the same boundary. The adapter reports
+`row.Epoch + 1`, which cannot underflow since it is unsigned addition, and
+pagination/ordering are unaffected since they are driven by the stored
+(snapshot) epoch, only the reported value is shifted.
 
 `reward_account_output`'s pre-existing unique index leads with `epoch`
 (`idx_reward_account_output_epoch_cred_pool_type`), so it cannot serve this
-query's `credential_tag`/`staking_key` equality predicate without scanning
-every row — a real cost once `api` mode retains the table without bound
-(previous paragraph). `idx_reward_account_output_credential`
-`(credential_tag, staking_key, epoch, pool_key_hash, reward_type)` exists so
-the planner instead does a range scan restricted to one credential's rows,
-confirmed with `EXPLAIN QUERY PLAN` (SQLite), `EXPLAIN` (MySQL: `type: ref`),
-and `EXPLAIN` (PostgreSQL: `Index Scan`) all reporting index use rather than a
-table/sequential scan for the query above. The ascending case is served
+query's `credential_tag`/`staking_key`/`spendable` equality predicate without
+scanning every row — a real cost once `api` mode retains the table without
+bound (previous paragraph). `idx_reward_account_output_credential_spendable`
+`(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)`
+exists so the planner instead does a range scan restricted to one
+credential's spendable rows, confirmed with `EXPLAIN QUERY PLAN` (SQLite),
+`EXPLAIN` (MySQL: `type: ref`), and `EXPLAIN` (PostgreSQL: `Index Scan`) all
+reporting index use rather than a table/sequential scan for the query above.
+Putting `spendable` in the index's equality prefix (rather than leaving it a
+post-filter after a `credential_tag`/`staking_key`-only seek) is what keeps
+the query a pure index range scan: `EXPLAIN QUERY PLAN` against the older
+two-column prefix reports
+`SEARCH reward_account_output USING INDEX idx_reward_account_output_credential (credential_tag=? AND staking_key=?)`
+— `spendable` is not part of the search key, so every one of the credential's
+rows must still be visited and filtered — while the six-column index reports
+`SEARCH reward_account_output USING INDEX idx_reward_account_output_credential_spendable (credential_tag=? AND staking_key=? AND spendable=?)`,
+with `spendable` folded into the seek itself. The ascending case is served
 entirely from the index; a descending `epoch` request still uses the index for
-the credential lookup but sorts the (typically small, single-credential)
-matched rows for the `pool_key_hash`/`reward_type` tie-break, since no
-practical index can be ordered `epoch DESC, pool_key_hash ASC, reward_type ASC`
-and `epoch ASC, ...` at once.
-`TestGetRewardAccountOutputsByCredentialUsesIndex` pins the plan so a future
-index rename or drop fails loudly instead of silently degrading to a scan.
-AutoMigrate creates this index on both a fresh database and an existing
-populated one (`TestMigrateRewardAccountOutputCredentialIndex` in
-`database/models`); no legacy-index migration helper (as
-`MigrateRewardLiveStakePoolIndex` is for `reward_live_stake`) is needed because
-this is a new, non-unique secondary index over unchanged column types, which
-SQLite/MySQL/PostgreSQL all add with a plain `CREATE INDEX` rather than a table
-rebuild.
+the credential/spendable lookup but sorts the (typically small,
+single-credential) matched rows for the `pool_key_hash`/`reward_type`
+tie-break, since no practical index can be ordered
+`epoch DESC, pool_key_hash ASC, reward_type ASC` and `epoch ASC, ...` at once.
+`TestGetRewardAccountOutputsByCredentialUsesIndex` pins the plan (including
+that `spendable` is part of the search key) so a future index rename, drop,
+or narrowing fails loudly instead of silently degrading to a scan or a
+seek-plus-filter.
+
+`idx_reward_account_output_credential_spendable` supersedes an earlier
+`idx_reward_account_output_credential` (`credential_tag, staking_key, epoch,
+pool_key_hash, reward_type` — no `spendable`) that dingo #1875 originally
+shipped. AutoMigrate creates the new index directly on both a fresh database
+and one that predates dingo #1875 entirely
+(`TestMigrateRewardAccountOutputCredentialIndex` in `database/models`): it is
+a new, non-unique secondary index over unchanged column types, so
+SQLite/MySQL/PostgreSQL all add it with a plain `CREATE INDEX` rather than a
+table rebuild, and no pre-migration repair step is needed to create it.
+Dropping the now-superseded five-column index on a database that already
+upgraded to it, however, does need a helper —
+`MigrateRewardAccountOutputCredentialIndex` in `database/models`, called after
+`AutoMigrate` in each of the sqlite/mysql/postgres `database.go` plugins —
+because AutoMigrate does not alter or drop an index it no longer sees
+declared; left alone, an upgraded database would carry both indexes forever.
+The helper deliberately runs *after* `AutoMigrate` rather than before (unlike
+the legacy-index migrations elsewhere in this file, which drop a unique index
+first because it could otherwise reject valid rows or block a column-type
+change): `idx_reward_account_output_credential` is a plain non-unique
+secondary index, so keeping it a little longer is only wasted space, never a
+correctness problem, and running the drop after guarantees the replacement
+index already exists first.
+`TestMigrateRewardAccountOutputCredentialSpendableIndex` in
+`database/models` pins that upgrade path against a populated database: rows
+of both spendable states survive, the superseded index is gone afterward, and
+the replacement is in place throughout.
 
 ### `GetAccountSumsByCredential`
 

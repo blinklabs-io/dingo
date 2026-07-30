@@ -38,10 +38,10 @@ func explainRewardAccountOutputsByCredentialPlan(
 	}
 	require.NoError(t, db.Raw(
 		`EXPLAIN QUERY PLAN SELECT * FROM reward_account_output
-		 WHERE credential_tag = ? AND staking_key = ?
+		 WHERE credential_tag = ? AND staking_key = ? AND spendable = ?
 		 ORDER BY epoch ASC, pool_key_hash ASC, reward_type ASC
 		 LIMIT ? OFFSET ?`,
-		0, rewardStateTestHash(0x01), 100, 0,
+		0, rewardStateTestHash(0x01), true, 100, 0,
 	).Scan(&plan).Error)
 	details := make([]string, 0, len(plan))
 	for _, row := range plan {
@@ -54,7 +54,9 @@ func explainRewardAccountOutputsByCredentialPlan(
 // spanning more than one epoch and pool, verifying the credential filter,
 // default ascending order, the pool_key_hash/reward_type tie-break within an
 // epoch, and pagination. This is the query backing the Blockfrost account
-// reward-history endpoint (dingo #1875).
+// reward-history endpoint (dingo #1875). All rows here are spendable; see
+// TestGetRewardAccountOutputsByCredentialExcludesNonSpendable for the
+// Finding 1 regression coverage.
 func TestGetRewardAccountOutputsByCredential(t *testing.T) {
 	t.Parallel()
 	store := setupTestDB(t)
@@ -65,12 +67,12 @@ func TestGetRewardAccountOutputsByCredential(t *testing.T) {
 	poolB := rewardStateTestHash(0xbb)
 
 	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
-		{Epoch: 1, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolA, RewardType: "member", Amount: 100},
-		{Epoch: 2, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolB, RewardType: "member", Amount: 200},
-		{Epoch: 3, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolA, RewardType: "leader", Amount: 300},
-		{Epoch: 3, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolB, RewardType: "member", Amount: 50},
+		{Epoch: 1, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolA, RewardType: "member", Amount: 100, Spendable: true},
+		{Epoch: 2, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolB, RewardType: "member", Amount: 200, Spendable: true},
+		{Epoch: 3, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolA, RewardType: "leader", Amount: 300, Spendable: true},
+		{Epoch: 3, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolB, RewardType: "member", Amount: 50, Spendable: true},
 		// Different credential: must never leak into the results below.
-		{Epoch: 1, CredentialTag: 0, StakingKey: otherStakingKey, PoolKeyHash: poolA, RewardType: "member", Amount: 999},
+		{Epoch: 1, CredentialTag: 0, StakingKey: otherStakingKey, PoolKeyHash: poolA, RewardType: "member", Amount: 999, Spendable: true},
 	}, nil))
 
 	count, err := store.CountRewardAccountOutputsByCredential(0, stakingKey, nil)
@@ -171,17 +173,20 @@ func TestDeleteRewardStakeInputBeforeEpoch(t *testing.T) {
 }
 
 // TestGetRewardAccountOutputsByCredentialUsesIndex pins that
-// idx_reward_account_output_credential (credential_tag, staking_key, epoch,
-// pool_key_hash, reward_type) is what makes GetRewardAccountOutputsByCredential
-// affordable once dingo #1875 lets reward_account_output grow without bound in
-// API storage mode: without a credential-leading index, the existing
+// idx_reward_account_output_credential_spendable (credential_tag,
+// staking_key, spendable, epoch, pool_key_hash, reward_type) is what makes
+// GetRewardAccountOutputsByCredential affordable once dingo #1875 lets
+// reward_account_output grow without bound in API storage mode: without a
+// credential-leading index, the existing
 // idx_reward_account_output_epoch_cred_pool_type index (which leads with
-// epoch) cannot serve the credential_tag/staking_key predicate, and SQLite
-// falls back to a full index/table scan — the query returns the same rows
-// either way, so a plain correctness test would not catch an index being
-// dropped or renamed out from under this query. This asserts on the query
-// plan itself so that regression fails loudly instead of silently degrading
-// to O(table size) per request.
+// epoch) cannot serve the credential_tag/staking_key/spendable predicate, and
+// SQLite falls back to a full index/table scan — the query returns the same
+// rows either way, so a plain correctness test would not catch an index
+// being dropped or renamed out from under this query. This asserts on the
+// query plan itself so that regression fails loudly instead of silently
+// degrading to O(table size) per request. It also pins that spendable is
+// part of the index's search key (not just a post-filter), which is what
+// keeps the Finding 1 spendable=true filter a pure index seek.
 func TestGetRewardAccountOutputsByCredentialUsesIndex(t *testing.T) {
 	t.Parallel()
 	store := setupTestDB(t)
@@ -189,7 +194,8 @@ func TestGetRewardAccountOutputsByCredentialUsesIndex(t *testing.T) {
 	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
 		{
 			Epoch: 1, CredentialTag: 0, StakingKey: rewardStateTestHash(0x01),
-			PoolKeyHash: rewardStateTestHash(0xaa), RewardType: "member", Amount: 1,
+			PoolKeyHash: rewardStateTestHash(0xaa), RewardType: "member",
+			Amount: 1, Spendable: true,
 		},
 	}, nil))
 
@@ -203,13 +209,55 @@ func TestGetRewardAccountOutputsByCredentialUsesIndex(t *testing.T) {
 			t, upper, "SCAN REWARD_ACCOUNT_OUTPUT",
 			"query must not fall back to a full scan: %v", plan,
 		)
-		if strings.Contains(detail, "idx_reward_account_output_credential") {
+		if strings.Contains(detail, "idx_reward_account_output_credential_spendable") {
 			sawCredentialIndex = true
+			// The search key itself must include spendable, not just
+			// credential_tag/staking_key, or the filter is a
+			// seek-plus-filter rather than a pure index range scan.
+			require.Contains(
+				t, detail, "spendable=?",
+				"expected spendable in the index search key, got: %v", detail,
+			)
 		}
 	}
 	require.True(
 		t, sawCredentialIndex,
-		"expected the query plan to use idx_reward_account_output_credential, got: %v",
+		"expected the query plan to use idx_reward_account_output_credential_spendable, got: %v",
 		plan,
 	)
+}
+
+// TestGetRewardAccountOutputsByCredentialExcludesNonSpendable pins Finding 1:
+// a row whose reward was never actually credited (Spendable = false, e.g. a
+// credential that deregistered before its reward's payout boundary — see
+// finalizePrecomputedRewardOutputs in ledger/reward_calculation.go) must be
+// absent from both the returned rows and the count. Before this fix the
+// query filtered only on credential, so this row would have been returned
+// and counted as a reward the account received, even though it was never
+// paid.
+func TestGetRewardAccountOutputsByCredentialExcludesNonSpendable(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	stakingKey := rewardStateTestHash(0x06)
+	pool := rewardStateTestHash(0xdd)
+
+	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		{Epoch: 10, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: pool, RewardType: "member", Amount: 1_000_000, Spendable: true},
+		// Deregistered before the payout boundary: never credited.
+		{Epoch: 11, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: pool, RewardType: "member", Amount: 9_999_999, Spendable: false},
+	}, nil))
+
+	count, err := store.CountRewardAccountOutputsByCredential(0, stakingKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, count, "the non-spendable row must not be counted")
+
+	rows, err := store.GetRewardAccountOutputsByCredential(
+		0, stakingKey, 100, 0, "asc", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the non-spendable row must be absent from the results")
+	require.Equal(t, uint64(10), rows[0].Epoch)
+	require.Equal(t, uint64(1_000_000), uint64(rows[0].Amount))
+	require.True(t, rows[0].Spendable)
 }

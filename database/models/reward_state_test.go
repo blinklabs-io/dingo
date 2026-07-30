@@ -53,11 +53,13 @@ func (legacyRewardPoolInput) TableName() string {
 }
 
 // legacyRewardAccountOutput is the reward_account_output schema from before
-// dingo #1875 added idx_reward_account_output_credential (credential_tag,
-// staking_key, epoch, pool_key_hash, reward_type). Every other tag is
-// identical to the current RewardAccountOutput, so migrating from this shape
-// to the current one exercises exactly what an operator upgrading an
-// existing database sees.
+// dingo #1875 added any credential-leading index at all (it predates both
+// idx_reward_account_output_credential and its later replacement,
+// idx_reward_account_output_credential_spendable; see
+// legacyRewardAccountOutputCredentialNoSpendable below for the intermediate
+// shape). Every other tag is identical to the current RewardAccountOutput, so
+// migrating from this shape to the current one exercises exactly what an
+// operator upgrading a database that predates dingo #1875 entirely sees.
 type legacyRewardAccountOutput struct {
 	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null"`
 	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null"`
@@ -215,13 +217,17 @@ func TestDedupeRewardLiveStake(t *testing.T) {
 }
 
 // TestMigrateRewardAccountOutputCredentialIndex pins that AutoMigrate adds
-// idx_reward_account_output_credential to a database that predates dingo
-// #1875 (an in-place upgrade), not only to a freshly created one, and that
-// pre-existing rows survive untouched. Unlike idx_reward_live_stake_pool_order
-// (MigrateRewardLiveStakePoolIndex) this index needs no pre-migration repair
-// step: it is a new, non-unique secondary index over columns whose types are
-// unchanged, so AutoMigrate creates it directly with CREATE INDEX rather than
-// rebuilding the table.
+// idx_reward_account_output_credential_spendable to a database that predates
+// dingo #1875 entirely (an in-place upgrade), not only to a freshly created
+// one, and that pre-existing rows survive untouched. Unlike
+// idx_reward_live_stake_pool_order (MigrateRewardLiveStakePoolIndex) this
+// index needs no pre-migration repair step to be created: it is a new,
+// non-unique secondary index over columns whose types are unchanged, so
+// AutoMigrate creates it directly with CREATE INDEX rather than rebuilding
+// the table. See TestMigrateRewardAccountOutputCredentialSpendableIndex for
+// the narrower upgrade from the index shape dingo #1875 originally shipped
+// (credential-leading but without spendable), which does need the
+// post-AutoMigrate drop step.
 func TestMigrateRewardAccountOutputCredentialIndex(t *testing.T) {
 	db := openMemoryDB(t)
 	require.NoError(t, db.AutoMigrate(&legacyRewardAccountOutput{}))
@@ -229,7 +235,7 @@ func TestMigrateRewardAccountOutputCredentialIndex(t *testing.T) {
 		t,
 		db.Migrator().HasIndex(
 			&legacyRewardAccountOutput{},
-			"idx_reward_account_output_credential",
+			"idx_reward_account_output_credential_spendable",
 		),
 	)
 
@@ -255,7 +261,7 @@ func TestMigrateRewardAccountOutputCredentialIndex(t *testing.T) {
 		t,
 		db.Migrator().HasIndex(
 			&RewardAccountOutput{},
-			"idx_reward_account_output_credential",
+			"idx_reward_account_output_credential_spendable",
 		),
 	)
 	// The pre-existing unique index survives alongside the new one.
@@ -277,4 +283,134 @@ func TestMigrateRewardAccountOutputCredentialIndex(t *testing.T) {
 
 	// Idempotent: migrating an already-migrated database is a no-op.
 	require.NoError(t, db.AutoMigrate(&RewardAccountOutput{}))
+}
+
+// legacyRewardAccountOutputCredentialNoSpendable is the reward_account_output
+// schema as dingo #1875 originally shipped it: idx_reward_account_output_credential
+// leads with (credential_tag, staking_key) but has no spendable column, so a
+// query filtering on spendable degrades that index's seek into a seek over
+// every one of the credential's rows plus a per-row filter (the "Finding 1"
+// fix). This is the shape TestMigrateRewardAccountOutputCredentialSpendableIndex
+// upgrades from, exercising the exact database an operator who already
+// deployed dingo #1875 has on disk.
+type legacyRewardAccountOutputCredentialNoSpendable struct {
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null;index:idx_reward_account_output_credential,priority:2"`
+	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null;index:idx_reward_account_output_credential,priority:4"`
+	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null;index:idx_reward_account_output_credential,priority:5"`
+	ID            uint         `gorm:"primarykey"`
+	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null;index:idx_reward_account_output_credential,priority:3"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0;index:idx_reward_account_output_credential,priority:1"`
+	Amount        types.Uint64 `gorm:"not null"`
+	Spendable     bool         `gorm:"not null"`
+	CapturedSlot  uint64       `gorm:"index;not null"`
+	BoundarySlot  uint64       `gorm:"index;not null"`
+}
+
+func (legacyRewardAccountOutputCredentialNoSpendable) TableName() string {
+	return "reward_account_output"
+}
+
+// TestMigrateRewardAccountOutputCredentialSpendableIndex pins the upgrade
+// path for the Finding 1 fix: a database already running the
+// credential-leading index dingo #1875 originally shipped (no spendable
+// column) ends up with exactly the new idx_reward_account_output_credential_spendable
+// index and none of the superseded idx_reward_account_output_credential,
+// with every pre-existing row (both spendable and non-spendable) intact.
+//
+// This is the "prove the upgrade path works on a populated database" case:
+// AutoMigrate alone only adds the new index (GORM does not alter or drop an
+// existing index it no longer sees declared), so without
+// MigrateRewardAccountOutputCredentialIndex a migrated database would carry
+// both indexes forever. The migration runs after AutoMigrate specifically so
+// the replacement always exists before the old one is removed.
+func TestMigrateRewardAccountOutputCredentialSpendableIndex(t *testing.T) {
+	db := openMemoryDB(t)
+	require.NoError(
+		t,
+		db.AutoMigrate(&legacyRewardAccountOutputCredentialNoSpendable{}),
+	)
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&legacyRewardAccountOutputCredentialNoSpendable{},
+			"idx_reward_account_output_credential",
+		),
+	)
+	require.False(
+		t,
+		db.Migrator().HasIndex(
+			&legacyRewardAccountOutputCredentialNoSpendable{},
+			"idx_reward_account_output_credential_spendable",
+		),
+	)
+
+	spendableKey := make([]byte, 28)
+	spendableKey[0] = 0x51
+	unspendableKey := make([]byte, 28)
+	unspendableKey[0] = 0x52
+	poolKeyHash := make([]byte, 28)
+	poolKeyHash[0] = 0x53
+	require.NoError(t, db.Create(&legacyRewardAccountOutputCredentialNoSpendable{
+		Epoch: 9, CredentialTag: 0, StakingKey: spendableKey,
+		PoolKeyHash: poolKeyHash, RewardType: "member", Amount: 111,
+		Spendable: true, CapturedSlot: 20, BoundarySlot: 21,
+	}).Error)
+	require.NoError(t, db.Create(&legacyRewardAccountOutputCredentialNoSpendable{
+		Epoch: 9, CredentialTag: 0, StakingKey: unspendableKey,
+		PoolKeyHash: poolKeyHash, RewardType: "member", Amount: 222,
+		Spendable: false, CapturedSlot: 20, BoundarySlot: 21,
+	}).Error)
+
+	// AutoMigrate on its own only adds the replacement index; it does not
+	// drop the superseded one, since GORM never alters/removes an existing
+	// index that the current struct simply no longer declares.
+	require.NoError(t, db.AutoMigrate(&RewardAccountOutput{}))
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&RewardAccountOutput{},
+			"idx_reward_account_output_credential_spendable",
+		),
+	)
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&RewardAccountOutput{},
+			"idx_reward_account_output_credential",
+		),
+		"superseded index must still be present before the migration helper runs",
+	)
+
+	require.NoError(t, MigrateRewardAccountOutputCredentialIndex(db, nil))
+
+	require.False(
+		t,
+		db.Migrator().HasIndex(
+			&RewardAccountOutput{},
+			"idx_reward_account_output_credential",
+		),
+		"superseded index must be dropped once the replacement exists",
+	)
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&RewardAccountOutput{},
+			"idx_reward_account_output_credential_spendable",
+		),
+	)
+
+	// Pre-existing rows of both spendable states survive the migration.
+	var rows []RewardAccountOutput
+	require.NoError(t, db.Order("staking_key ASC").Find(&rows).Error)
+	require.Len(t, rows, 2)
+	require.Equal(t, spendableKey, rows[0].StakingKey)
+	require.True(t, rows[0].Spendable)
+	require.Equal(t, uint64(111), uint64(rows[0].Amount))
+	require.Equal(t, unspendableKey, rows[1].StakingKey)
+	require.False(t, rows[1].Spendable)
+	require.Equal(t, uint64(222), uint64(rows[1].Amount))
+
+	// Idempotent: running the migration again against an already-migrated
+	// database (superseded index already gone) is a no-op.
+	require.NoError(t, MigrateRewardAccountOutputCredentialIndex(db, nil))
 }

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"net/http"
@@ -2394,6 +2395,26 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	return ret, total, nil
 }
 
+// blockfrostRewardTypes is the allow-list of reward_account_output.reward_type
+// values (ledger/rewards.RewardType: RewardTypeLeader "leader", RewardTypeMember
+// "member") that dingo produces today, plus "pool_deposit_refund", which
+// dingo does not yet produce but the Blockfrost account_reward_content "type"
+// enum already defines. It is a package-level var, built once rather than
+// per-request.
+//
+// Membership, not translation, is the point: every recognized value already
+// matches its lowercased form verbatim, so this is not a mapping table. Its
+// job is to catch the day dingo starts producing a reward_type outside this
+// closed set — which would silently make the Blockfrost response
+// schema-invalid otherwise. AccountRewardHistory logs a warning when a row's
+// type is not in this set and still passes the lowercased value through
+// rather than dropping the row.
+var blockfrostRewardTypes = map[string]struct{}{
+	"leader":              {},
+	"member":              {},
+	"pool_deposit_refund": {},
+}
+
 // AccountRewardHistory returns reward history rows for
 // the requested stake address.
 func (a *NodeAdapter) AccountRewardHistory(
@@ -2404,22 +2425,28 @@ func (a *NodeAdapter) AccountRewardHistory(
 	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := a.ledgerState.Database().
-		GetAccountByCredential(
-			credentialTag,
-			stakeKey,
-			true,
-			nil,
-		); err != nil {
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+
+	if _, err := db.GetAccountByCredential(
+		credentialTag,
+		stakeKey,
+		true,
+		txn,
+	); err != nil {
 		return nil, 0, err
 	}
 	offset := (params.Page - 1) * params.Count
-	total, err := a.ledgerState.Database().
-		CountRewardAccountOutputsByCredential(
-			credentialTag,
-			stakeKey,
-			nil,
-		)
+	// count and rows share the read txn opened above so an epoch boundary
+	// landing between the two queries cannot change total relative to the
+	// page: with two independent nil-txn reads, a client paging through
+	// history at a boundary could see a row twice or miss one.
+	total, err := db.CountRewardAccountOutputsByCredential(
+		credentialTag,
+		stakeKey,
+		txn,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account reward history: %w",
@@ -2429,43 +2456,45 @@ func (a *NodeAdapter) AccountRewardHistory(
 	if offset >= total {
 		return []AccountRewardHistoryInfo{}, total, nil
 	}
-	rows, err := a.ledgerState.Database().
-		GetRewardAccountOutputsByCredential(
-			credentialTag,
-			stakeKey,
-			params.Count,
-			offset,
-			params.Order,
-			nil,
-		)
+	rows, err := db.GetRewardAccountOutputsByCredential(
+		credentialTag,
+		stakeKey,
+		params.Count,
+		offset,
+		params.Order,
+		txn,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get account reward history: %w",
 			err,
 		)
 	}
-	// blockfrostRewardTypes maps dingo's stored reward_account_output.reward_type
-	// values (ledger/rewards.RewardType: "leader", "member") to the Blockfrost
-	// account_reward_content enum spelling (leader, member,
-	// pool_deposit_refund). The two overlapping spellings already match
-	// verbatim; this only defends against case variance and normalizes a
-	// not-yet-modeled reward type to lowercase rather than silently dropping
-	// it, so a future addition (e.g. a CIP-0163 pool deposit refund) still
-	// surfaces in the response.
-	blockfrostRewardTypes := map[string]string{
-		"leader":              "leader",
-		"member":              "member",
-		"pool_deposit_refund": "pool_deposit_refund",
-	}
 	ret := make([]AccountRewardHistoryInfo, 0, len(rows))
 	for _, row := range rows {
-		epoch, err := uint64ToInt32(row.Epoch, "reward epoch")
+		// row.Epoch is the snapshot epoch (stakeRewardEpochsForNewEpoch's
+		// "snapshot" = newEpoch-3 in ledger/reward_calculation.go, which is
+		// what rewardAccountOutputs persists into this column), not the
+		// earned epoch Blockfrost reports. Rewards computed from that
+		// snapshot are credited at the boundary into newEpoch, i.e. they
+		// become spendable in newEpoch = snapshot+3. cardano-db-sync, which
+		// backs this endpoint on Blockfrost, models
+		// spendable_epoch = earned_epoch + 2, so earned_epoch = newEpoch-2 =
+		// snapshot+1 (the "performance" epoch in the same struct). Adding 1
+		// cannot underflow: row.Epoch is a uint64 and this is addition, so a
+		// stored epoch of 0 (or any value) yields a valid earned epoch.
+		earnedEpoch := row.Epoch + 1
+		epoch, err := uint64ToInt32(earnedEpoch, "reward epoch")
 		if err != nil {
 			return nil, 0, err
 		}
-		rewardType, ok := blockfrostRewardTypes[strings.ToLower(row.RewardType)]
-		if !ok {
-			rewardType = strings.ToLower(row.RewardType)
+		rewardType := strings.ToLower(row.RewardType)
+		if _, ok := blockfrostRewardTypes[rewardType]; !ok {
+			slog.Warn(
+				"account reward history: reward_type outside the Blockfrost account_reward_content enum",
+				"reward_type", row.RewardType,
+				"credential_tag", credentialTag,
+			)
 		}
 		ret = append(ret, AccountRewardHistoryInfo{
 			Epoch:  epoch,
