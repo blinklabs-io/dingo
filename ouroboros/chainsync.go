@@ -1445,7 +1445,21 @@ func (o *Ouroboros) decodeChainsyncHeader(
 		blockType == gledger.BlockTypeConway {
 		return gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
 	}
-	return gledger.NewBlockHeaderFromCbor(blockType, raw)
+	header, err := gledger.NewBlockHeaderFromCbor(blockType, raw)
+	if err == nil || blockType != gledger.BlockTypeByronEbb {
+		return header, err
+	}
+	// Some dingo peers have sent a complete Byron EBB in the NtN header
+	// payload. A complete EBB is an array of its header, body, and extra data,
+	// so the header decoder rejects it at ConsensusData. Decode that one legacy
+	// representation as a block and return its header; the regular path above
+	// remains the only path for all other block types and correctly encoded EBB
+	// headers.
+	block, blockErr := gledger.NewBlockFromCbor(blockType, raw)
+	if blockErr != nil {
+		return nil, err
+	}
+	return block.Header(), nil
 }
 
 // chainsyncClientRollForwardRaw decodes the raw header itself (via
