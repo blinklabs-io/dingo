@@ -71,7 +71,7 @@ func TestLoad_CompareFullStruct(t *testing.T) {
 	yamlContent := `
 plugins:
   mempool:
-    provider: default
+    provider: fifo
     config:
       capacity: 2097152
       evictionWatermark: 0.90
@@ -213,6 +213,32 @@ mithril:
 		)
 	}
 }
+
+func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
+	if got := defaultPluginsConfig().Mempool.Provider; got != "fifo" {
+		t.Fatalf("default mempool provider = %q, want fifo", got)
+	}
+}
+
+func TestLoad_DAGMempoolProvider(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dag-mempool.yaml")
+	if err := os.WriteFile(
+		tmpFile,
+		[]byte("plugins:\n  mempool:\n    provider: dag\n"),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Plugins.Mempool.Provider; got != "dag" {
+		t.Fatalf("mempool provider = %q, want dag", got)
+	}
+}
+
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 

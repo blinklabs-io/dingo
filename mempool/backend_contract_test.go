@@ -45,6 +45,15 @@ func fifoContractFactory(t *testing.T, config MempoolConfig) Pool {
 	return pool
 }
 
+func dagContractFactory(t *testing.T, config MempoolConfig) Pool {
+	t.Helper()
+	config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	config.PromRegistry = prometheus.NewRegistry()
+	pool, err := New(ImplementationDAG, config)
+	require.NoError(t, err)
+	return pool
+}
+
 func newBackendContractPool(
 	t *testing.T,
 	factory backendContractFactory,
@@ -274,6 +283,34 @@ func TestFIFOBackendContract(t *testing.T) {
 	})
 }
 
+func TestDAGBackendContract(t *testing.T) {
+	runBackendContract(t, dagContractFactory)
+
+	t.Run("revalidation", func(t *testing.T) {
+		const inputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
+		inputKey := inputHash + ":1"
+		input := buildMockInput(t, inputHash, 1)
+		validator := newOverlayValidator(map[string]lcommon.Utxo{
+			inputKey: {Id: input, Output: buildMockOutput(t, 50_000_000)},
+		})
+		pool, err := NewDAG(MempoolConfig{
+			Validator:       validator,
+			MempoolCapacity: 1 << 20,
+			PromRegistry:    prometheus.NewRegistry(),
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+		require.NoError(
+			t,
+			pool.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+		)
+		validator.removeBaseUtxo(inputKey)
+		require.NoError(t, pool.rebuildOverlay())
+		assert.Empty(t, pool.Transactions())
+		assert.Empty(t, pool.dag.nodes)
+	})
+}
+
 func TestBackendFactorySelection(t *testing.T) {
 	config := MempoolConfig{
 		Validator:       newMockValidator(),
@@ -284,6 +321,16 @@ func TestBackendFactorySelection(t *testing.T) {
 	pool, err := New("", config)
 	require.NoError(t, err)
 	assert.Equal(t, ImplementationFIFO, pool.Implementation())
+	_, hasHeadroom := pool.(AdmissionHeadroom)
+	assert.False(t, hasHeadroom)
+	require.NoError(t, pool.Stop(context.Background()))
+
+	config.PromRegistry = prometheus.NewRegistry()
+	pool, err = New(ImplementationDAG, config)
+	require.NoError(t, err)
+	assert.Equal(t, ImplementationDAG, pool.Implementation())
+	_, hasHeadroom = pool.(AdmissionHeadroom)
+	assert.True(t, hasHeadroom)
 	require.NoError(t, pool.Stop(context.Background()))
 
 	pool, err = New(Implementation("priority"), config)
@@ -291,9 +338,21 @@ func TestBackendFactorySelection(t *testing.T) {
 	assert.ErrorContains(t, err, "unknown mempool implementation")
 }
 
-func TestFIFOBackendIdentityMetric(t *testing.T) {
+func TestBackendIdentityMetric(t *testing.T) {
+	for _, implementation := range []Implementation{
+		ImplementationFIFO,
+		ImplementationDAG,
+	} {
+		t.Run(string(implementation), func(t *testing.T) {
+			testBackendIdentityMetric(t, implementation)
+		})
+	}
+}
+
+func testBackendIdentityMetric(t *testing.T, implementation Implementation) {
+	t.Helper()
 	registry := prometheus.NewRegistry()
-	pool, err := NewFIFO(MempoolConfig{
+	pool, err := New(implementation, MempoolConfig{
 		Validator:       newMockValidator(),
 		MempoolCapacity: 1 << 20,
 		PromRegistry:    registry,
@@ -311,7 +370,7 @@ func TestFIFOBackendIdentityMetric(t *testing.T) {
 		labels := family.Metric[0].Label
 		require.Len(t, labels, 1)
 		assert.Equal(t, "implementation", labels[0].GetName())
-		assert.Equal(t, "fifo", labels[0].GetValue())
+		assert.Equal(t, string(implementation), labels[0].GetValue())
 		assert.Equal(t, float64(1), family.Metric[0].Gauge.GetValue())
 		return
 	}

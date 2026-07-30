@@ -31,7 +31,10 @@ plugins:
         # Optional SQLite data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
   mempool:
-    provider: "default"
+    # "fifo" preserves successful-admission order. "dag" additionally indexes
+    # transaction dependencies and uses deterministic topological ordering.
+    # "default" remains a compatibility alias for "fifo".
+    provider: "fifo"
     config:
       # Mempool capacity in bytes. Left commented out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
@@ -39,6 +42,8 @@ plugins:
       # leios node would silently run with the smaller capacity — uncomment
       # only to pin a specific size for every run mode.
       # capacity: 1048576
+      # FIFO begins oldest-first eviction here. DAG never evicts and applies
+      # TxSubmission backpressure as it approaches rejectionWatermark.
       evictionWatermark: 0.90
       rejectionWatermark: 0.95
   api:

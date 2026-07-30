@@ -92,6 +92,7 @@ services:
       DINGO_PLEDGE_LEVERAGE_ENABLED: "${DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED:-false}"
       DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
       DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
+      DINGO_PLUGINS_MEMPOOL_PROVIDER: "${DEVNET_MEMPOOL_PROVIDER:-fifo}"
       # Expose node-to-client over TCP (private port 3002) so the host test
       # harness can run LocalStateQuery. Avoids a cross-uid host socket mount:
       # the dingo image runs as uid 100 and cannot bind a socket in a

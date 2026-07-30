@@ -38,7 +38,13 @@ func NewHost() (*plugin.Host, error) {
 		return nil, fmt.Errorf("register sqlite provider: %w", err)
 	}
 	if err := mempool.RegisterProvider(host); err != nil {
-		return nil, fmt.Errorf("register mempool provider: %w", err)
+		return nil, fmt.Errorf("register default mempool provider: %w", err)
+	}
+	if err := mempool.RegisterFIFOProvider(host); err != nil {
+		return nil, fmt.Errorf("register FIFO mempool provider: %w", err)
+	}
+	if err := mempool.RegisterDAGProvider(host); err != nil {
+		return nil, fmt.Errorf("register DAG mempool provider: %w", err)
 	}
 	if err := blockfrost.RegisterProvider(host); err != nil {
 		return nil, fmt.Errorf("register blockfrost provider: %w", err)
