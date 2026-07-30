@@ -1687,6 +1687,16 @@ func (a *NodeAdapter) liveStake(txn dbtypes.Txn) (uint64, error) {
 // Blockfrost's error object, matching the hosted API's codes and
 // message formats. sourceLabel is the capitalized source name used in
 // the message ("Pool", "Drep").
+//
+// Every current caller passes "Pool" because pool metadata is the only
+// off-chain source whose fetch errors are surfaced through a Blockfrost
+// response so far. The parameter is kept rather than hardcoded because
+// models.OffchainMetadataSource* defines seven other sources (drep,
+// drep_registration, drep_update, gov_proposal, gov_vote, constitution,
+// committee_resign) that share this cache and this error classification,
+// and whose messages differ only by this label.
+//
+//nolint:unparam // sourceLabel is "Pool" for every caller today; see above.
 func offchainFetchError(
 	sourceLabel string,
 	url string,
@@ -1996,6 +2006,14 @@ func (a *NodeAdapter) PoolsExtended() (
 	if err != nil {
 		return nil, fmt.Errorf("get total active stake: %w", err)
 	}
+	// live_saturation's denominator is the per-pool saturation threshold
+	// totalCirculation/nOpt, not total active stake. See
+	// poolSizeSaturation's doc comment and ledger/rewards.
+	// Resolved once for the whole page rather than per pool.
+	totalCirculation, err := a.totalCirculation(txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get total circulation: %w", err)
+	}
 
 	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
@@ -2067,15 +2085,15 @@ func (a *NodeAdapter) PoolsExtended() (
 		liveStake := liveStakeByPool[string(pool.PoolKeyHash)]
 		activeStake := activeStakeByPool[poolHex]
 		// pool_list_extended only needs live_saturation, which
-		// poolSizeSaturation derives from liveStake/totalActiveStake/nOpt
-		// alone; the live-size/active-size outputs (and the
-		// totalLiveStake input they need) are pool-detail-only fields, so
-		// totalLiveStake is passed as 0 rather than paying for another
-		// network-wide live-stake query just to compute values this
-		// endpoint discards.
+		// poolSizeSaturation derives from liveStake, totalCirculation
+		// and nOpt; the live-size/active-size outputs (and the
+		// totalLiveStake/totalActiveStake inputs they need) are
+		// pool-detail-only fields, so totalLiveStake is passed as 0
+		// rather than paying for another network-wide live-stake query
+		// just to compute values this endpoint discards.
 		_, _, liveSaturation := poolSizeSaturation(
 			liveStake, activeStake, 0, totalActiveStake,
-			protocolParams.NOpt,
+			totalCirculation, protocolParams.NOpt,
 		)
 
 		var metadataURL string

@@ -214,13 +214,26 @@ func TestNodeAdapterPoolsExtendedFullResponse(t *testing.T) {
 	}
 
 	const wantNOpt = 100 // config/cardano/devnet/shelley-genesis.json
-	// The real network-wide total, not a hardcoded sum of the three
-	// seeded pools: it also includes the genesis pool's own stake
-	// snapshot, and GetTotalActiveStake is the exact input PoolsExtended
-	// uses for live_saturation.
-	totalActiveStake, err := store.GetTotalActiveStake(0, "mark", nil)
-	require.NoError(t, err)
-	saturationThreshold := float64(totalActiveStake) / float64(wantNOpt)
+	// live_saturation's denominator is the per-pool saturation threshold
+	// totalCirculation / nOpt, where totalCirculation is
+	// MaxLovelaceSupply minus Reserves. It is deliberately NOT
+	// totalActiveStake -- see totalCirculation's doc comment in
+	// adapter_pool_detail.go, and ledger/rewards, for why the two differ
+	// (using active stake here overstated saturation by ~1.68x on
+	// mainnet-shaped inputs).
+	//
+	// Both inputs come from the same devnet genesis this test starts a
+	// real LedgerState against, rather than being restated from the
+	// implementation: MaxLovelaceSupply is fixed by the genesis file and
+	// Reserves is whatever the ledger actually persisted.
+	const wantMaxLovelaceSupply = uint64(2_000_000_000_000) // config/cardano/devnet/shelley-genesis.json
+	var networkState models.NetworkState
+	require.NoError(
+		t, store.DB().Order("slot DESC").First(&networkState).Error,
+	)
+	wantCirculation := wantMaxLovelaceSupply -
+		uint64(networkState.Reserves)
+	saturationThreshold := float64(wantCirculation) / float64(wantNOpt)
 
 	// Pool A: no anchor.
 	a, ok := byHex[hex.EncodeToString(poolA)]
