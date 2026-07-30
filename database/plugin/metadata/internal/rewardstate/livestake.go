@@ -357,15 +357,17 @@ func CreditLiveStakeDelta(
 	// values above math.MaxInt64.
 	sql := fmt.Sprintf(
 		`UPDATE reward_live_stake
-		 SET reward_stake = CAST(CAST(reward_stake AS %[1]s) + %[3]s AS %[2]s),
-		     total_stake = CAST(CAST(total_stake AS %[1]s) + %[3]s AS %[2]s),
-		     updated_slot = ?
+	 SET reward_stake = CAST(CAST(reward_stake AS %[1]s) + %[3]s AS %[2]s),
+	     total_stake = CAST(CAST(total_stake AS %[1]s) + %[3]s AS %[2]s),
+	     updated_slot = ?,
+	     calculation_version = ?
 		 WHERE credential_tag = ? AND staking_key = ?`,
 		integerCastType(db), textCastType(db), arithmeticParam(db),
 	)
 	result = db.Exec(
 		sql,
-		types.Uint64(amount), types.Uint64(amount), slot, ref.Tag, ref.Key,
+		types.Uint64(amount), types.Uint64(amount), slot,
+		models.RewardStakeCalculationVersion, ref.Tag, ref.Key,
 	)
 	if result.Error != nil {
 		return false, fmt.Errorf(
@@ -485,6 +487,7 @@ func RefreshLiveStakeAggregate(
 		"pool_delegation_block_index": poolDelegation.BlockIndex,
 		"pool_delegation_cert_index":  poolDelegation.CertIndex,
 		"updated_slot":                slot,
+		"calculation_version":         models.RewardStakeCalculationVersion,
 	}
 	if result.Error == nil {
 		if err := db.Model(&existing).Updates(values).Error; err != nil {
@@ -507,6 +510,7 @@ func RefreshLiveStakeAggregate(
 		PoolDelegationBlockIndex: poolDelegation.BlockIndex,
 		PoolDelegationCertIndex:  poolDelegation.CertIndex,
 		UpdatedSlot:              slot,
+		CalculationVersion:       models.RewardStakeCalculationVersion,
 	}
 	if err := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
@@ -632,7 +636,8 @@ func RebuildLiveStake(db *gorm.DB, slot uint64, utxoJoinHint string) error {
 			pool_delegation_slot,
 			pool_delegation_block_index,
 			pool_delegation_cert_index,
-			updated_slot
+			updated_slot,
+			calculation_version
 		)
 		WITH latest_delegation AS (
 			SELECT credential_tag, staking_key, pool_key_hash, added_slot, block_index, cert_index
@@ -700,7 +705,8 @@ func RebuildLiveStake(db *gorm.DB, slot uint64, utxoJoinHint string) error {
 				THEN COALESCE(latest_delegation.cert_index, 0)
 				ELSE 0
 			END AS pool_delegation_cert_index,
-			? AS updated_slot
+			? AS updated_slot,
+			? AS calculation_version
 		FROM (
 			SELECT credential_tag, staking_key FROM account
 			UNION
@@ -732,45 +738,108 @@ func RebuildLiveStake(db *gorm.DB, slot uint64, utxoJoinHint string) error {
 			latest_delegation.block_index,
 			latest_delegation.cert_index
 	`, castType, txTable, trueLit, falseLit, utxoJoin)
-	if err := db.Exec(sql, slot).Error; err != nil {
+	if err := db.Exec(
+		sql,
+		slot,
+		models.RewardStakeCalculationVersion,
+	).Error; err != nil {
 		return fmt.Errorf("populate reward live stake: %w", err)
 	}
 	return nil
 }
 
-// LiveStakeNeedsBackfill reports whether any canonical account or live-UTxO
-// credential is missing from reward_live_stake. Testing for missing keys, not
-// merely an empty aggregate, also repairs upgraded databases where post-upgrade
-// writes populated only part of the table before the first restart.
+// LiveStakeNeedsBackfill reports whether reward_live_stake differs from the
+// canonical account and live-UTxO state. It checks values as well as missing
+// keys: a present but stale aggregate is consensus-critical at SNAP just as a
+// missing row is.
 func LiveStakeNeedsBackfill(db *gorm.DB) (bool, error) {
-	var missing bool
-	if err := db.Raw(`
+	var stale bool
+	castType := integerCastType(db)
+	sql := fmt.Sprintf(`
 		SELECT EXISTS (
 			SELECT 1
-		FROM (
+			FROM (
 			SELECT credential_tag, staking_key
 			FROM account
 			WHERE LENGTH(staking_key) > 0
-			UNION ALL
+			UNION
 			SELECT credential_tag, staking_key
 			FROM utxo
 			WHERE deleted_slot = 0 AND LENGTH(staking_key) > 0
-		) AS canonical_credentials
-		WHERE NOT EXISTS (
-			SELECT 1
-			FROM reward_live_stake
-			WHERE reward_live_stake.credential_tag =
+			) AS canonical_credentials
+			LEFT JOIN account ON account.credential_tag = canonical_credentials.credential_tag
+				AND account.staking_key = canonical_credentials.staking_key
+			LEFT JOIN utxo ON utxo.credential_tag = canonical_credentials.credential_tag
+				AND utxo.staking_key = canonical_credentials.staking_key
+				AND utxo.deleted_slot = 0
+			LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag =
 				canonical_credentials.credential_tag
-			AND reward_live_stake.staking_key =
-				canonical_credentials.staking_key
+				AND reward_live_stake.staking_key = canonical_credentials.staking_key
+			GROUP BY canonical_credentials.credential_tag, canonical_credentials.staking_key
+			HAVING reward_live_stake.id IS NULL
+				OR reward_live_stake.calculation_version <> ?
+				OR CAST(reward_live_stake.utxo_stake AS %[1]s) <>
+					COALESCE(SUM(CAST(utxo.amount AS %[1]s)), 0)
+				OR CAST(reward_live_stake.reward_stake AS %[1]s) <>
+					COALESCE(CAST(account.reward AS %[1]s), 0)
+				OR CAST(reward_live_stake.total_stake AS %[1]s) <>
+					COALESCE(SUM(CAST(utxo.amount AS %[1]s)), 0) +
+					COALESCE(CAST(account.reward AS %[1]s), 0)
+				OR reward_live_stake.registered <> COALESCE(account.active, %[2]s)
+				OR (
+					COALESCE(account.active, %[2]s) = %[3]s
+					AND LENGTH(COALESCE(account.pool, '')) > 0
+					AND account.pool <> reward_live_stake.pool_key_hash
+				)
+				OR (
+					(COALESCE(account.active, %[2]s) <> %[3]s
+						OR LENGTH(COALESCE(account.pool, '')) = 0)
+					AND LENGTH(COALESCE(reward_live_stake.pool_key_hash, '')) > 0
+				)
 		)
-			LIMIT 1
+		OR EXISTS (
+			SELECT 1 FROM reward_live_stake
+			WHERE NOT EXISTS (
+				SELECT 1 FROM account
+				WHERE account.credential_tag = reward_live_stake.credential_tag
+					AND account.staking_key = reward_live_stake.staking_key
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM utxo
+				WHERE utxo.credential_tag = reward_live_stake.credential_tag
+					AND utxo.staking_key = reward_live_stake.staking_key
+					AND utxo.deleted_slot = 0
+			)
 		)
-	`).Scan(&missing).Error; err != nil {
+	`, castType, boolLiteral(db, false), boolLiteral(db, true))
+	if err := db.Raw(sql, models.RewardStakeCalculationVersion).Scan(&stale).Error; err != nil {
 		return false, fmt.Errorf(
-			"checking missing reward live stake credentials: %w",
+			"checking reward live stake consistency: %w",
 			err,
 		)
 	}
-	return missing, nil
+	return stale, nil
+}
+
+// StaleConsensusStakeSnapshotsExist reports whether persisted consensus
+// snapshots predate the current calculation. Rebuilding them from a current
+// aggregate would give a false historical result once consumed UTxOs have been
+// pruned, so callers must rebootstrap rather than reuse them.
+func StaleConsensusStakeSnapshotsExist(db *gorm.DB) (bool, error) {
+	var stale bool
+	if err := db.Raw(`
+		SELECT EXISTS (
+			SELECT 1 FROM pool_stake_snapshot
+			WHERE snapshot_type IN ('mark', 'set', 'go')
+				AND calculation_version <> ?
+		) OR EXISTS (
+			SELECT 1 FROM reward_snapshot
+			WHERE snapshot_type = 'mark' AND authoritative = ?
+				AND calculation_version <> ?
+		)
+	`, models.RewardStakeCalculationVersion, true,
+		models.RewardStakeCalculationVersion).Scan(&stale).Error; err != nil {
+		return false, fmt.Errorf("checking stake snapshot provenance: %w", err)
+	}
+	return stale, nil
 }

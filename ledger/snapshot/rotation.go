@@ -211,12 +211,13 @@ func (m *Manager) saveSnapshotInTxn(
 	for poolKeyHash, stake := range distribution.PoolStakes {
 		delegators := distribution.DelegatorCount[poolKeyHash]
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:          epoch,
-			SnapshotType:   snapshotType,
-			PoolKeyHash:    poolKeyHash[:], // Convert [28]byte to []byte
-			TotalStake:     types.Uint64(stake),
-			DelegatorCount: delegators,
-			CapturedSlot:   distribution.Slot,
+			Epoch:              epoch,
+			SnapshotType:       snapshotType,
+			PoolKeyHash:        poolKeyHash[:], // Convert [28]byte to []byte
+			TotalStake:         types.Uint64(stake),
+			DelegatorCount:     delegators,
+			CapturedSlot:       distribution.Slot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
 
@@ -341,15 +342,16 @@ func (m *Manager) buildRewardStateInputs(
 
 	return &rewardStateBundle{
 		snapshot: &models.RewardSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     snapshotType,
-			TotalActiveStake: types.Uint64(sumPoolStakes(effective.PoolStakes)),
-			TotalPoolCount:   uint64(len(effective.PoolStakes)),
-			TotalDelegators:  sumDelegators(effective.DelegatorCount),
-			CapturedSlot:     distribution.Slot,
-			BoundarySlot:     evt.BoundarySlot,
-			EpochNonce:       evt.EpochNonce,
-			ProtocolVersion:  evt.ProtocolVersion,
+			Epoch:              epoch,
+			SnapshotType:       snapshotType,
+			TotalActiveStake:   types.Uint64(sumPoolStakes(effective.PoolStakes)),
+			TotalPoolCount:     uint64(len(effective.PoolStakes)),
+			TotalDelegators:    sumDelegators(effective.DelegatorCount),
+			CapturedSlot:       distribution.Slot,
+			BoundarySlot:       evt.BoundarySlot,
+			EpochNonce:         evt.EpochNonce,
+			ProtocolVersion:    evt.ProtocolVersion,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		},
 		poolInputs:  poolInputs,
 		stakeInputs: stakeInputs,
