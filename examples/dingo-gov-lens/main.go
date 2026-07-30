@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -41,17 +42,29 @@ type app struct {
 }
 
 type statusResponse struct {
-	Network             string          `json:"network"`
-	StorageMode         string          `json:"storageMode"`
-	Tip                 *tip            `json:"tip,omitempty"`
-	LatestEpoch         *epoch          `json:"latestEpoch,omitempty"`
-	ProposalCount       int64           `json:"proposalCount"`
-	GovernanceVoteCount int64           `json:"governanceVoteCount"`
-	ActiveDrepCount     int64           `json:"activeDrepCount"`
-	MinLiveProposalSlot uint64          `json:"minLiveProposalSlot,omitempty"`
-	Backfill            *backfillStatus `json:"backfill,omitempty"`
-	VoteBackfillPending bool            `json:"voteBackfillPending"`
-	LastMetadataWrite   *time.Time      `json:"lastMetadataWrite,omitempty"`
+	Network             string             `json:"network"`
+	StorageMode         string             `json:"storageMode"`
+	Tip                 *tip               `json:"tip,omitempty"`
+	LatestEpoch         *epoch             `json:"latestEpoch,omitempty"`
+	ProposalCount       int64              `json:"proposalCount"`
+	GovernanceVoteCount int64              `json:"governanceVoteCount"`
+	ActiveDrepCount     int64              `json:"activeDrepCount"`
+	ExpiredDrepCount    int64              `json:"expiredDrepCount"`
+	MinLiveProposalSlot uint64             `json:"minLiveProposalSlot,omitempty"`
+	LatestRewardEpoch   *uint64            `json:"latestRewardEpoch,omitempty"`
+	AccountInactivity   *accountInactivity `json:"accountInactivity,omitempty"`
+	Backfill            *backfillStatus    `json:"backfill,omitempty"`
+	VoteBackfillPending bool               `json:"voteBackfillPending"`
+	LastMetadataWrite   *time.Time         `json:"lastMetadataWrite,omitempty"`
+}
+
+// accountInactivity reports whether the node has run the one-time CIP-0163
+// reward-account inactivity activation. Without it, every
+// account.expiration_epoch is 0 (unset) and reward-account expiry is not being
+// enforced, so the stake lookup must not present the column as meaningful.
+type accountInactivity struct {
+	Activated       bool   `json:"activated"`
+	ActivationEpoch uint64 `json:"activationEpoch"`
 }
 
 type tip struct {
@@ -137,9 +150,23 @@ type drep struct {
 	AddedSlot         uint64 `json:"addedSlot"`
 	LastActivityEpoch uint64 `json:"lastActivityEpoch"`
 	ExpiryEpoch       uint64 `json:"expiryEpoch"`
+	// ExpiryStatus is the inactivity state the Conway tally applies:
+	// "expired" when expiry_epoch has been reached, "active" when it has
+	// not, "unknown" when no activity has ever been recorded (expiry_epoch
+	// 0) or the latest epoch is not known yet. Independent of Active, which
+	// only tracks registration.
+	ExpiryStatus string `json:"expiryStatus"`
+	// EpochsUntilExpiry is expiry_epoch minus the latest epoch, so a
+	// non-positive value means the DRep is already expired. Nil when
+	// ExpiryStatus is "unknown".
+	EpochsUntilExpiry *int64 `json:"epochsUntilExpiry,omitempty"`
 	Active            bool   `json:"active"`
 	DelegatorCount    int64  `json:"delegatorCount"`
 	VoteCount         int64  `json:"voteCount"`
+	// FirstSeenSlot and LastRegistrationSlot come from certificate history
+	// and are only populated by the DRep detail endpoint.
+	FirstSeenSlot        uint64 `json:"firstSeenSlot,omitempty"`
+	LastRegistrationSlot uint64 `json:"lastRegistrationSlot,omitempty"`
 }
 
 type drepDetail struct {
@@ -186,6 +213,61 @@ type stakeLookup struct {
 	DRepType      int64  `json:"drepType"`
 	Reward        string `json:"reward"`
 	Active        bool   `json:"active"`
+	// ExpirationEpoch is the CIP-0163 reward-account inactivity expiry. 0
+	// means unset, which is every account on a node running without
+	// delegator inactivity enabled.
+	ExpirationEpoch uint64 `json:"expirationEpoch"`
+	// InactivityActivated reports membership in the one-time CIP-0163
+	// activation stamp (account_inactivity_activation).
+	InactivityActivated bool                `json:"inactivityActivated"`
+	Rewards             []accountReward     `json:"rewards"`
+	Withdrawals         []withdrawalWitness `json:"withdrawals"`
+}
+
+// accountReward is one persisted per-epoch reward-calculation output row for a
+// stake credential. Only the retained snapshot window (the current epoch and
+// the three before it) is queryable; older per-credential rows are pruned.
+type accountReward struct {
+	Epoch        uint64 `json:"epoch"`
+	PoolKeyHash  string `json:"poolKeyHash,omitempty"`
+	RewardType   string `json:"rewardType"`
+	Amount       string `json:"amount"`
+	Spendable    bool   `json:"spendable"`
+	BoundarySlot uint64 `json:"boundarySlot"`
+}
+
+// withdrawalWitness is one CIP-0163 reward-withdrawal witness. Every valid
+// withdrawal-map entry is recorded, so a witness with no matching reward delta
+// is a zero-amount withdrawal that still counts as account activity.
+type withdrawalWitness struct {
+	TxHash     string `json:"txHash"`
+	AddedSlot  uint64 `json:"addedSlot"`
+	Amount     string `json:"amount,omitempty"`
+	ZeroAmount bool   `json:"zeroAmount"`
+}
+
+// epochRow is one epoch of retained epoch and reward state. Every table joined
+// here is retained for the life of the database, so the history reaches back to
+// the first boundary the node captured.
+type epochRow struct {
+	EpochID          uint64 `json:"epochId"`
+	StartSlot        uint64 `json:"startSlot"`
+	EraID            uint64 `json:"eraId"`
+	Treasury         string `json:"treasury,omitempty"`
+	Reserves         string `json:"reserves,omitempty"`
+	Fees             string `json:"fees,omitempty"`
+	Rewards          string `json:"rewards,omitempty"`
+	PotsCapturedSlot uint64 `json:"potsCapturedSlot,omitempty"`
+	ActiveStake      string `json:"activeStake,omitempty"`
+	PoolCount        uint64 `json:"poolCount"`
+	DelegatorCount   uint64 `json:"delegatorCount"`
+	SnapshotReady    bool   `json:"snapshotReady"`
+	// RewardBasisStake is the reward-side stake total, which differs from
+	// ActiveStake because the reward basis excludes pools with degraded
+	// registration data.
+	RewardBasisStake string `json:"rewardBasisStake,omitempty"`
+	Authoritative    bool   `json:"authoritative"`
+	PoolOutputCount  int64  `json:"poolOutputCount"`
 }
 
 func main() {
@@ -220,6 +302,7 @@ func main() {
 	mux.HandleFunc("GET /api/dreps", a.handleDreps)
 	mux.HandleFunc("GET /api/dreps/{credential}", a.handleDrepDetail)
 	mux.HandleFunc("GET /api/stake/{credential}", a.handleStakeLookup)
+	mux.HandleFunc("GET /api/epochs", a.handleEpochs)
 
 	static, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -326,6 +409,35 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "count dreps", err)
 		return
 	}
+	// Registered DReps whose inactivity expiry has passed. They still read
+	// active (that flag only clears on deregistration) but the Conway tally
+	// drops them from the voting-power denominator.
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM drep d
+		WHERE d.active = true
+			AND `+drepExpiredPredicate).Scan(&ret.ExpiredDrepCount); err != nil {
+		serverError(w, r, "count expired dreps", err)
+		return
+	}
+	var latestRewardEpoch sql.NullInt64
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT MAX(epoch)
+		FROM reward_ada_pots
+	`).Scan(&latestRewardEpoch); err != nil {
+		serverError(w, r, "query latest reward epoch", err)
+		return
+	}
+	if latestRewardEpoch.Valid && latestRewardEpoch.Int64 >= 0 {
+		v := uint64(latestRewardEpoch.Int64)
+		ret.LatestRewardEpoch = &v
+	}
+	inactivity, err := a.accountInactivityStatus(ctx)
+	if err != nil {
+		serverError(w, r, "query account inactivity", err)
+		return
+	}
+	ret.AccountInactivity = inactivity
 	var bf backfillStatus
 	var bfUpdatedAt sql.NullTime
 	switch err := a.db.QueryRowContext(ctx, `
@@ -382,6 +494,46 @@ func voteBackfillPending(
 		backfill != nil &&
 		!backfill.Completed &&
 		backfill.LastSlot < minLiveProposalSlot
+}
+
+// accountInactivityStatus reads the CIP-0163 activation state. The marker row
+// carries the activation epoch, but it lives in sync_state, which a completed
+// sync/load run clears wholesale, so the recorded activation membership is used
+// as the fallback signal that activation has already happened.
+func (a *app) accountInactivityStatus(
+	ctx context.Context,
+) (*accountInactivity, error) {
+	ret := &accountInactivity{}
+	var marker string
+	switch err := a.db.QueryRowContext(ctx, `
+		SELECT value
+		FROM sync_state
+		WHERE sync_key = 'delegator_inactivity_activated'
+	`).Scan(&marker); {
+	case err == nil:
+		marker = strings.TrimSpace(marker)
+		if marker != "" {
+			ret.Activated = true
+			if epoch, parseErr := strconv.ParseUint(marker, 10, 64); parseErr == nil {
+				ret.ActivationEpoch = epoch
+			}
+		}
+	case errors.Is(err, sql.ErrNoRows):
+	default:
+		return nil, err
+	}
+	if ret.Activated {
+		return ret, nil
+	}
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM account_inactivity_activation
+		)
+	`).Scan(&ret.Activated); err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 func (a *app) handleProposals(w http.ResponseWriter, r *http.Request) {
@@ -601,6 +753,19 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid active filter", http.StatusBadRequest)
 		return
 	}
+	expiryClause, ok := drepExpiryPredicate(r.URL.Query().Get("expiry"))
+	if !ok {
+		http.Error(w, "invalid expiry filter", http.StatusBadRequest)
+		return
+	}
+	if expiryClause != "" {
+		where = append(where, expiryClause)
+	}
+	latestEpoch, err := a.latestEpochID(ctx)
+	if err != nil {
+		serverError(w, r, "query latest epoch", err)
+		return
+	}
 	args = append(args, limit)
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
@@ -609,8 +774,8 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 			COALESCE(d.anchor_url, ''),
 			COALESCE(encode(d.anchor_hash, 'hex'), ''),
 			d.added_slot,
-			d.last_activity_epoch,
-			d.expiry_epoch,
+			COALESCE(d.last_activity_epoch, 0),
+			COALESCE(d.expiry_epoch, 0),
 			d.active,
 			COUNT(DISTINCT a.id) FILTER (WHERE a.active = true) AS delegator_count,
 			COUNT(DISTINCT gv.id) FILTER (WHERE gv.deleted_slot IS NULL) AS vote_count
@@ -649,6 +814,10 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 			serverError(w, r, "scan drep", err)
 			return
 		}
+		item.ExpiryStatus, item.EpochsUntilExpiry = drepExpiryState(
+			item.ExpiryEpoch,
+			latestEpoch,
+		)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -678,8 +847,8 @@ func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 			COALESCE(d.anchor_url, ''),
 			COALESCE(encode(d.anchor_hash, 'hex'), ''),
 			d.added_slot,
-			d.last_activity_epoch,
-			d.expiry_epoch,
+			COALESCE(d.last_activity_epoch, 0),
+			COALESCE(d.expiry_epoch, 0),
 			d.active,
 			COUNT(DISTINCT a.id) FILTER (WHERE a.active = true) AS delegator_count,
 			COUNT(DISTINCT gv.id) FILTER (WHERE gv.deleted_slot IS NULL) AS vote_count
@@ -727,6 +896,26 @@ func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "query drep history", err)
 		return
 	}
+	firstSeen, lastRegistration, err := a.drepCertSlots(
+		ctx,
+		credential,
+		credentialTag,
+	)
+	if err != nil {
+		serverError(w, r, "query drep certificate slots", err)
+		return
+	}
+	ret.DRep.FirstSeenSlot = firstSeenSlot(firstSeen, ret.DRep.AddedSlot)
+	ret.DRep.LastRegistrationSlot = lastRegistration
+	latestEpoch, err := a.latestEpochID(ctx)
+	if err != nil {
+		serverError(w, r, "query latest epoch", err)
+		return
+	}
+	ret.DRep.ExpiryStatus, ret.DRep.EpochsUntilExpiry = drepExpiryState(
+		ret.DRep.ExpiryEpoch,
+		latestEpoch,
+	)
 	writeJSON(w, http.StatusOK, ret)
 }
 
@@ -752,7 +941,8 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 			COALESCE(encode(drep, 'hex'), ''),
 			drep_type,
 			reward::text,
-			active
+			active,
+			COALESCE(expiration_epoch, 0)
 		FROM account
 		WHERE staking_key = decode($1, 'hex')
 			AND credential_tag = $2
@@ -765,6 +955,7 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 		&ret.DRepType,
 		&ret.Reward,
 		&ret.Active,
+		&ret.ExpirationEpoch,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		http.NotFound(w, r)
@@ -774,7 +965,100 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "query account", err)
 		return
 	}
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM account_inactivity_activation
+			WHERE staking_key = decode($1, 'hex')
+				AND credential_tag = $2
+		)
+	`, credential, credentialTag).Scan(&ret.InactivityActivated); err != nil {
+		serverError(w, r, "query account activation", err)
+		return
+	}
+	ret.Rewards, err = a.accountRewards(ctx, credential, credentialTag)
+	if err != nil {
+		serverError(w, r, "query account rewards", err)
+		return
+	}
+	ret.Withdrawals, err = a.accountWithdrawals(ctx, credential, credentialTag)
+	if err != nil {
+		serverError(w, r, "query account withdrawals", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, ret)
+}
+
+func (a *app) handleEpochs(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	limit := boundedLimit(r.URL.Query().Get("limit"), 50, 250)
+	// Every joined table is retained for the life of the database, so this
+	// reaches every boundary the node captured. The per-credential reward
+	// tables are the only ones pruned to the four-epoch snapshot window.
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT
+			COALESCE(e.epoch_id, 0),
+			COALESCE(e.start_slot, 0),
+			COALESCE(e.era_id, 0),
+			COALESCE(p.treasury::text, ''),
+			COALESCE(p.reserves::text, ''),
+			COALESCE(p.fees::text, ''),
+			COALESCE(p.rewards::text, ''),
+			COALESCE(p.captured_slot, 0),
+			COALESCE(es.total_active_stake::text, ''),
+			COALESCE(es.total_pool_count, 0),
+			COALESCE(es.total_delegators, 0),
+			COALESCE(es.snapshot_ready, false),
+			COALESCE(rs.total_active_stake::text, ''),
+			COALESCE(rs.authoritative, false),
+			(
+				SELECT COUNT(*)
+				FROM reward_pool_output rpo
+				WHERE rpo.epoch = e.epoch_id
+			) AS pool_output_count
+		FROM epoch e
+		LEFT JOIN reward_ada_pots p ON p.epoch = e.epoch_id
+		LEFT JOIN epoch_summary es ON es.epoch = e.epoch_id
+		LEFT JOIN reward_snapshot rs ON rs.epoch = e.epoch_id
+			AND rs.snapshot_type = 'mark'
+		ORDER BY e.epoch_id DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		serverError(w, r, "query epochs", err)
+		return
+	}
+	defer rows.Close()
+	items := []epochRow{}
+	for rows.Next() {
+		var item epochRow
+		if err := rows.Scan(
+			&item.EpochID,
+			&item.StartSlot,
+			&item.EraID,
+			&item.Treasury,
+			&item.Reserves,
+			&item.Fees,
+			&item.Rewards,
+			&item.PotsCapturedSlot,
+			&item.ActiveStake,
+			&item.PoolCount,
+			&item.DelegatorCount,
+			&item.SnapshotReady,
+			&item.RewardBasisStake,
+			&item.Authoritative,
+			&item.PoolOutputCount,
+		); err != nil {
+			serverError(w, r, "scan epoch", err)
+			return
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		serverError(w, r, "read epochs", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (a *app) proposalVotes(ctx context.Context, proposalID int64) ([]voteRow, voteStats, error) {
@@ -977,6 +1261,171 @@ func (a *app) drepHistory(
 	return ret, rows.Err()
 }
 
+// drepCertSlots returns the credential's first on-chain appearance slot and the
+// added_slot of its most recent real registration certificate. The first
+// appearance survives deregister/re-register cycles because it also considers
+// update and vote-delegation references. Both are 0 when no certificate history
+// exists, which is the normal state for a core-mode or pre-backfill database.
+func (a *app) drepCertSlots(
+	ctx context.Context,
+	credential string,
+	credentialTag uint8,
+) (uint64, uint64, error) {
+	var firstSeen, lastRegistration sql.NullInt64
+	// certificate_id filters out the synthetic registration rows a Mithril
+	// ledger-state import writes at the bootstrap slot; only real on-chain
+	// certificates count as a registration.
+	err := a.db.QueryRowContext(ctx, `
+		SELECT MIN(first_slot), MAX(registration_slot)
+		FROM (
+			SELECT
+				MIN(added_slot) AS first_slot,
+				MAX(
+					CASE
+						WHEN certificate_id IS NOT NULL AND certificate_id != 0
+						THEN added_slot
+					END
+				) AS registration_slot
+			FROM registration_drep
+			WHERE drep_credential = decode($1, 'hex')
+				AND credential_tag = $2::bigint
+
+			UNION ALL
+			SELECT MIN(added_slot), NULL
+			FROM update_drep
+			WHERE credential = decode($1, 'hex')
+				AND credential_tag = $2::bigint
+
+			UNION ALL
+			SELECT MIN(added_slot), NULL
+			FROM vote_delegation
+			WHERE drep = decode($1, 'hex')
+				AND drep_type = $2::bigint
+
+			UNION ALL
+			SELECT MIN(added_slot), NULL
+			FROM stake_vote_delegation
+			WHERE drep = decode($1, 'hex')
+				AND drep_type = $2::bigint
+
+			UNION ALL
+			SELECT MIN(added_slot), NULL
+			FROM vote_registration_delegation
+			WHERE drep = decode($1, 'hex')
+				AND drep_type = $2::bigint
+
+			UNION ALL
+			SELECT MIN(added_slot), NULL
+			FROM stake_vote_registration_delegation
+			WHERE drep = decode($1, 'hex')
+				AND drep_type = $2::bigint
+		) slots
+	`, credential, credentialTag).Scan(&firstSeen, &lastRegistration)
+	if err != nil {
+		return 0, 0, err
+	}
+	return nullSlot(firstSeen), nullSlot(lastRegistration), nil
+}
+
+// latestEpochID returns the highest known epoch, invalid when the node has not
+// recorded an epoch yet.
+func (a *app) latestEpochID(ctx context.Context) (sql.NullInt64, error) {
+	var ret sql.NullInt64
+	if err := a.db.QueryRowContext(ctx, `
+		SELECT MAX(epoch_id)
+		FROM epoch
+	`).Scan(&ret); err != nil {
+		return sql.NullInt64{}, err
+	}
+	return ret, nil
+}
+
+func (a *app) accountRewards(
+	ctx context.Context,
+	credential string,
+	credentialTag uint8,
+) ([]accountReward, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT
+			epoch,
+			COALESCE(encode(pool_key_hash, 'hex'), ''),
+			reward_type,
+			amount::text,
+			spendable,
+			boundary_slot
+		FROM reward_account_output
+		WHERE staking_key = decode($1, 'hex')
+			AND credential_tag = $2
+		ORDER BY epoch DESC, reward_type ASC, pool_key_hash ASC
+		LIMIT 25
+	`, credential, credentialTag)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []accountReward{}
+	for rows.Next() {
+		var item accountReward
+		if err := rows.Scan(
+			&item.Epoch,
+			&item.PoolKeyHash,
+			&item.RewardType,
+			&item.Amount,
+			&item.Spendable,
+			&item.BoundarySlot,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, item)
+	}
+	return ret, rows.Err()
+}
+
+// accountWithdrawals returns the account's CIP-0163 withdrawal witnesses joined
+// to the reward journal. A witness with no journal row is a zero-amount
+// withdrawal: the withdrawal path records a witness for every valid
+// withdrawal-map entry but only journals a delta when the amount is non-zero.
+func (a *app) accountWithdrawals(
+	ctx context.Context,
+	credential string,
+	credentialTag uint8,
+) ([]withdrawalWitness, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT
+			encode(w.tx_hash, 'hex'),
+			w.added_slot,
+			COALESCE(d.amount::text, '')
+		FROM account_withdrawal_witness w
+		LEFT JOIN account_reward_delta d ON d.withdrawal = true
+			AND d.tx_hash = w.tx_hash
+			AND d.credential_tag = w.credential_tag
+			AND d.staking_key = w.staking_key
+			AND d.added_slot = w.added_slot
+		WHERE w.staking_key = decode($1, 'hex')
+			AND w.credential_tag = $2
+		ORDER BY w.added_slot DESC, w.tx_hash ASC
+		LIMIT 25
+	`, credential, credentialTag)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []withdrawalWitness{}
+	for rows.Next() {
+		var item withdrawalWitness
+		if err := rows.Scan(
+			&item.TxHash,
+			&item.AddedSlot,
+			&item.Amount,
+		); err != nil {
+			return nil, err
+		}
+		item.ZeroAmount = withdrawalZeroAmount(item.Amount)
+		ret = append(ret, item)
+	}
+	return ret, rows.Err()
+}
+
 func enrichProposal(p *proposal, govtoolURL string) {
 	p.ActionTypeName = actionTypeName(p.ActionType)
 	p.GovToolURL = govtoolActionURL(govtoolURL, p.TxHash, p.ActionIndex)
@@ -1033,6 +1482,77 @@ func actionTypeName(v int64) string {
 	default:
 		return fmt.Sprintf("Type %d", v)
 	}
+}
+
+// drepExpiredPredicate and drepUnexpiredPredicate mirror the Conway tally's
+// inactivity test: a DRep is expired once expiry_epoch is set and has been
+// reached, and a zero expiry_epoch means no activity has been recorded yet and
+// is treated as unexpired. Both are independent of drep.active, which only
+// clears on deregistration.
+// expiry_epoch is a nullable column, so every comparison folds NULL into the
+// unset value first.
+const (
+	drepExpiredPredicate = `COALESCE(d.expiry_epoch, 0) > 0
+			AND COALESCE(d.expiry_epoch, 0) <=
+				COALESCE((SELECT MAX(epoch_id) FROM epoch), 0)`
+	drepUnexpiredPredicate = `(COALESCE(d.expiry_epoch, 0) = 0
+			OR COALESCE(d.expiry_epoch, 0) >
+				COALESCE((SELECT MAX(epoch_id) FROM epoch), 0))`
+)
+
+// drepExpiryPredicate maps the expiry filter to its SQL predicate. An empty
+// filter matches every DRep and returns an empty predicate.
+func drepExpiryPredicate(filter string) (string, bool) {
+	switch filter {
+	case "":
+		return "", true
+	case "expired":
+		return drepExpiredPredicate, true
+	case "active":
+		return drepUnexpiredPredicate, true
+	default:
+		return "", false
+	}
+}
+
+// drepExpiryState reports the inactivity state for a DRep's expiry epoch and
+// how many epochs remain before it expires. A non-positive remainder means the
+// DRep is already expired and its voting power is excluded from the tally.
+func drepExpiryState(
+	expiryEpoch uint64,
+	latestEpoch sql.NullInt64,
+) (string, *int64) {
+	if expiryEpoch == 0 || expiryEpoch > math.MaxInt64 ||
+		!latestEpoch.Valid || latestEpoch.Int64 < 0 {
+		return "unknown", nil
+	}
+	remaining := int64(expiryEpoch) - latestEpoch.Int64
+	if remaining <= 0 {
+		return "expired", &remaining
+	}
+	return "active", &remaining
+}
+
+// firstSeenSlot falls back to the DRep's current registration slot when no
+// certificate history is present to derive a first appearance from.
+func firstSeenSlot(certSlot, addedSlot uint64) uint64 {
+	if certSlot == 0 {
+		return addedSlot
+	}
+	return certSlot
+}
+
+// withdrawalZeroAmount reports whether a withdrawal witness moved no reward.
+func withdrawalZeroAmount(amount string) bool {
+	trimmed := strings.TrimSpace(amount)
+	return trimmed == "" || strings.Trim(trimmed, "0") == ""
+}
+
+func nullSlot(value sql.NullInt64) uint64 {
+	if !value.Valid || value.Int64 <= 0 {
+		return 0
+	}
+	return uint64(value.Int64)
 }
 
 func voterTypeName(v int64) string {
