@@ -431,6 +431,17 @@ type MetadataStore interface {
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
 
+	// GetPoolCertificateHistory returns the transaction hashes of a pool's
+	// registration and retirement certificates, in chronological order
+	// (added_slot, block_index, cert_index ascending). Certificates with no
+	// linked transaction — rows synthesized by the Mithril ledger-state
+	// import, which carry certificate_id = 0 — are excluded since they have
+	// no originating transaction to report.
+	GetPoolCertificateHistory(
+		lcommon.PoolKeyHash,
+		types.Txn,
+	) (registrationTxHashes [][]byte, retirementTxHashes [][]byte, err error)
+
 	// GetActivePoolKeyHashesAtSlot retrieves the key hashes of pools that were
 	// active at the given slot. A pool was active at a slot if:
 	// 1. It had a registration with added_slot <= slot

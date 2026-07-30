@@ -202,3 +202,16 @@ func (d *Database) GetActivePoolKeyHashes(
 	}
 	return d.metadata.GetActivePoolKeyHashes(txn.Metadata())
 }
+
+// GetPoolCertificateHistory returns the transaction hashes of a pool's
+// registration and retirement certificates, in chronological order.
+func (d *Database) GetPoolCertificateHistory(
+	pkh lcommon.PoolKeyHash,
+	txn *Txn,
+) ([][]byte, [][]byte, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetPoolCertificateHistory(pkh, txn.Metadata())
+}

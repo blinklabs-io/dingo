@@ -766,7 +766,7 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 		)
 	}
 
-	liveStake, err := a.liveStake()
+	liveStake, err := a.liveStake(nil)
 	if err != nil {
 		return NetworkInfo{}, err
 	}
@@ -1653,9 +1653,15 @@ func (a *NodeAdapter) latestBlockData(
 	return block, decodedBlock, nil
 }
 
-func (a *NodeAdapter) liveStake() (uint64, error) {
+// liveStake sums delegated stake across every active pool for the
+// network-wide live-stake total. txn scopes the reads to the caller's
+// transaction (nil for no transaction, matching every other call in this
+// file that takes a *types.Txn-shaped parameter): passing the caller's txn
+// keeps this read in the same snapshot as the caller's other reads, rather
+// than potentially straddling a block boundary against them.
+func (a *NodeAdapter) liveStake(txn dbtypes.Txn) (uint64, error) {
 	poolKeyHashes, err := a.ledgerState.Database().Metadata().
-		GetActivePoolKeyHashes(nil)
+		GetActivePoolKeyHashes(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"get active pool key hashes: %w",
@@ -1666,7 +1672,7 @@ func (a *NodeAdapter) liveStake() (uint64, error) {
 		return 0, nil
 	}
 	stakeByPool, _, err := a.ledgerState.Database().Metadata().
-		GetStakeByPools(poolKeyHashes, nil)
+		GetStakeByPools(poolKeyHashes, txn)
 	if err != nil {
 		return 0, fmt.Errorf("get live stake by pools: %w", err)
 	}

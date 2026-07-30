@@ -22,6 +22,7 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/poolcerthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/stakequery"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1267,4 +1268,20 @@ func (d *MetadataStoreMysql) GetRetiringPools(
 		return nil, fmt.Errorf("get retiring pools: %w", err)
 	}
 	return rows, nil
+}
+
+// GetPoolCertificateHistory returns the transaction hashes of a pool's
+// registration and retirement certificates. See
+// poolcerthistory.GetPoolCertificateHistory for the query and its semantics
+// — this is a one-line delegation shared with the sqlite and postgres
+// backends, which differ only in how they quote the "transaction" table.
+func (d *MetadataStoreMysql) GetPoolCertificateHistory(
+	pkh lcommon.PoolKeyHash,
+	txn types.Txn,
+) ([][]byte, [][]byte, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, nil, err
+	}
+	return poolcerthistory.GetPoolCertificateHistory(db, pkh)
 }
