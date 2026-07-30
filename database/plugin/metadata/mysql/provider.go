@@ -18,20 +18,24 @@ package mysql
 
 import (
 	"context"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
 type Config struct {
-	Host     string `yaml:"host"`
-	Port     uint   `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`
-	SSLMode  string `yaml:"sslMode"`
-	TimeZone string `yaml:"timeZone"`
-	DSN      string `yaml:"dsn"`
+	Host                string        `yaml:"host"`
+	Port                uint          `yaml:"port"`
+	User                string        `yaml:"user"`
+	Password            string        `yaml:"password"`
+	Database            string        `yaml:"database"`
+	SSLMode             string        `yaml:"sslMode"`
+	TimeZone            string        `yaml:"timeZone"`
+	DSN                 string        `yaml:"dsn"`
+	PoolMaxOpenConns    int           `yaml:"poolMaxOpenConns"`
+	PoolMaxIdleConns    int           `yaml:"poolMaxIdleConns"`
+	PoolConnMaxLifetime time.Duration `yaml:"poolConnMaxLifetime"`
 }
 
 func RegisterProvider(host *plugin.Host) error {
@@ -40,7 +44,7 @@ func RegisterProvider(host *plugin.Host) error {
 			return Config{Host: "localhost", Port: 3306, User: "root", Database: "dingo", TimeZone: "UTC"}
 		},
 		func(_ context.Context, cfg Config, deps metadata.ProviderDependencies) (*MetadataStoreMysql, plugin.Instance, error) {
-			store, err := NewWithOptions(WithHost(cfg.Host), WithPort(cfg.Port), WithUser(cfg.User), WithPassword(cfg.Password), WithDatabase(cfg.Database), WithSSLMode(cfg.SSLMode), WithTimeZone(cfg.TimeZone), WithDSN(cfg.DSN), WithStorageMode(deps.StorageMode), WithLogger(deps.Logger), WithPromRegistry(deps.PromRegistry))
+			store, err := NewWithOptions(WithHost(cfg.Host), WithPort(cfg.Port), WithUser(cfg.User), WithPassword(cfg.Password), WithDatabase(cfg.Database), WithSSLMode(cfg.SSLMode), WithTimeZone(cfg.TimeZone), WithDSN(cfg.DSN), WithPoolMaxOpenConns(cfg.PoolMaxOpenConns), WithPoolMaxIdleConns(cfg.PoolMaxIdleConns), WithPoolConnMaxLifetime(cfg.PoolConnMaxLifetime), WithStorageMode(deps.StorageMode), WithLogger(deps.Logger), WithPromRegistry(deps.PromRegistry))
 			if err != nil {
 				return nil, nil, err
 			}

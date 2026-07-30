@@ -122,9 +122,18 @@ type MetadataStorePostgres struct {
 	dsn         string // Data source name (postgres connection string)
 	storageMode string
 
-	poolMaxIdle int // saved pool max idle connections
-	poolMaxOpen int // saved pool max open connections
+	poolMaxIdle         int           // saved pool max idle connections
+	poolMaxOpen         int           // saved pool max open connections
+	poolConnMaxLifetime time.Duration // saved pool connection max lifetime
 }
+
+// Default SQL connection pool settings, applied when not overridden via
+// config.
+const (
+	defaultPoolMaxOpenConns    = 100
+	defaultPoolMaxIdleConns    = 10
+	defaultPoolConnMaxLifetime = time.Hour
+)
 
 // New creates a new database
 func New(
@@ -201,6 +210,38 @@ func NewWithOptions(
 		)
 	}
 
+	// Default and validate the SQL connection pool settings. Negative
+	// values are always invalid; 0 selects the provider default rather
+	// than the stdlib meaning (unlimited/no idle conns retained), matching
+	// how a 0 port or empty host also select this package's defaults.
+	if db.poolMaxOpen < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max open connections %d: must not be negative",
+			db.poolMaxOpen,
+		)
+	}
+	if db.poolMaxOpen == 0 {
+		db.poolMaxOpen = defaultPoolMaxOpenConns
+	}
+	if db.poolMaxIdle < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max idle connections %d: must not be negative",
+			db.poolMaxIdle,
+		)
+	}
+	if db.poolMaxIdle == 0 {
+		db.poolMaxIdle = defaultPoolMaxIdleConns
+	}
+	if db.poolConnMaxLifetime < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool connection max lifetime %s: must not be negative",
+			db.poolConnMaxLifetime,
+		)
+	}
+	if db.poolConnMaxLifetime == 0 {
+		db.poolConnMaxLifetime = defaultPoolConnMaxLifetime
+	}
+
 	// Note: Database initialization moved to Start()
 	return db, nil
 }
@@ -271,11 +312,9 @@ func (d *MetadataStorePostgres) Start() error {
 	if err != nil {
 		return err
 	}
-	d.poolMaxIdle = 10
-	d.poolMaxOpen = 100
 	sqlDB.SetMaxOpenConns(d.poolMaxOpen)
 	sqlDB.SetMaxIdleConns(d.poolMaxIdle)
-	sqlDB.SetConnMaxLifetime(time.Hour)
+	sqlDB.SetConnMaxLifetime(d.poolConnMaxLifetime)
 
 	if err := d.init(); err != nil {
 		// MetadataStorePostgres is available for recovery, so return error but keep instance

@@ -516,6 +516,9 @@ PostgreSQL Options:
 - `sslMode` - PostgreSQL SSL mode
 - `timeZone` - PostgreSQL time zone (default: UTC)
 - `dsn` - Full PostgreSQL DSN (overrides the individual connection fields)
+- `poolMaxOpenConns` - Maximum open connections (default: 100)
+- `poolMaxIdleConns` - Maximum idle connections (default: 10)
+- `poolConnMaxLifetime` - Maximum connection lifetime (default: 1h)
 
 MySQL Options:
 - `host` - MySQL server hostname
@@ -526,6 +529,9 @@ MySQL Options:
 - `sslMode` - MySQL TLS mode (mapped to `tls` in the DSN)
 - `timeZone` - MySQL time zone location (default: UTC)
 - `dsn` - Full MySQL DSN (overrides other options when set)
+- `poolMaxOpenConns` - Maximum open connections (default: 100)
+- `poolMaxIdleConns` - Maximum idle connections (default: 10)
+- `poolConnMaxLifetime` - Maximum connection lifetime (default: 1h)
 
 ### Migrating From Pre-Plugin Configuration
 

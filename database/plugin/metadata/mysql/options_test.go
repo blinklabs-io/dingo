@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -133,5 +134,41 @@ func TestWithPromRegistry(t *testing.T) {
 
 	if m.promRegistry != reg {
 		t.Errorf("Expected promRegistry to be set")
+	}
+}
+
+func TestWithPoolMaxOpenConns(t *testing.T) {
+	m := &MetadataStoreMysql{}
+	option := WithPoolMaxOpenConns(42)
+
+	option(m)
+
+	if m.poolMaxOpen != 42 {
+		t.Errorf("Expected poolMaxOpen to be 42, got %d", m.poolMaxOpen)
+	}
+}
+
+func TestWithPoolMaxIdleConns(t *testing.T) {
+	m := &MetadataStoreMysql{}
+	option := WithPoolMaxIdleConns(7)
+
+	option(m)
+
+	if m.poolMaxIdle != 7 {
+		t.Errorf("Expected poolMaxIdle to be 7, got %d", m.poolMaxIdle)
+	}
+}
+
+func TestWithPoolConnMaxLifetime(t *testing.T) {
+	m := &MetadataStoreMysql{}
+	option := WithPoolConnMaxLifetime(30 * time.Minute)
+
+	option(m)
+
+	if m.poolConnMaxLifetime != 30*time.Minute {
+		t.Errorf(
+			"Expected poolConnMaxLifetime to be 30m, got %s",
+			m.poolConnMaxLifetime,
+		)
 	}
 }
