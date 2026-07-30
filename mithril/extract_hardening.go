@@ -129,8 +129,12 @@ func dirIsEmpty(dir string) (bool, error) {
 }
 
 // rootEntryIsEmptyDir reports whether name under root is absent or an empty
-// directory. Read through the handle so the answer describes the same
-// directory the caller is about to act on.
+// directory, read through the handle so the answer describes the same entry
+// the caller acted on.
+//
+// This classifies a failed rename; it is never used to decide whether
+// removing something is safe, because that decision cannot be separated from
+// the removal without a race.
 func rootEntryIsEmptyDir(root *os.Root, name string) (bool, error) {
 	dir, err := root.Open(name)
 	if err != nil {
@@ -257,35 +261,38 @@ func prepareExtractDestination(
 		_ = parentRoot.Close()
 	}
 	publish = func() error {
-		// Re-check emptiness now, not just before extraction. Another writer
-		// may have populated the destination while extraction ran, and the
-		// removal below would otherwise delete their content despite the
-		// caller never asking for a replacement.
-		if !cfg.replace {
-			empty, err := rootEntryIsEmptyDir(parentRoot, destName)
-			if err != nil {
-				return fmt.Errorf(
-					"inspecting extraction destination: %w", err,
-				)
-			}
-			if !empty {
-				return fmt.Errorf(
-					"%w: %s", ErrExtractDestinationNotEmpty, cleanDest,
-				)
-			}
-		}
 		// Release the handle before moving the directory it refers to.
 		if err := stagingRoot.Close(); err != nil {
 			return fmt.Errorf("closing staging root: %w", err)
 		}
-		// Both operations resolve through the parent handle, so a parent
-		// swapped at any point — including between these two calls — cannot
-		// redirect them. RemoveAll unlinks a symlink at the destination
-		// rather than following it.
-		if err := parentRoot.RemoveAll(destName); err != nil {
-			return fmt.Errorf("clearing extraction destination: %w", err)
+		// Replacing is destructive by request, so the existing destination
+		// goes first. RemoveAll unlinks a symlink at the destination rather
+		// than following it, and resolving through the parent handle means a
+		// swapped parent cannot redirect it.
+		if cfg.replace {
+			if err := parentRoot.RemoveAll(destName); err != nil {
+				return fmt.Errorf(
+					"clearing extraction destination: %w", err,
+				)
+			}
 		}
+		// Without an explicit replacement request nothing is deleted at all.
+		// Checking that the destination is empty and then removing it can
+		// never be made safe, however narrow the gap: a writer populating it
+		// in between loses their content. Renaming onto the destination
+		// instead lets the kernel decide atomically — it refuses when
+		// anything occupies the name, and succeeds when the destination is
+		// absent or an empty directory, so no content can be destroyed by
+		// this path.
 		if err := parentRoot.Rename(stagingName, destName); err != nil {
+			if !cfg.replace {
+				occupied, checkErr := rootEntryIsEmptyDir(parentRoot, destName)
+				if checkErr == nil && !occupied {
+					return fmt.Errorf(
+						"%w: %s", ErrExtractDestinationNotEmpty, cleanDest,
+					)
+				}
+			}
 			return fmt.Errorf("publishing extraction: %w", err)
 		}
 		return nil

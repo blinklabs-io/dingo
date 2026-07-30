@@ -2497,13 +2497,18 @@ Destinations come in two shapes, selected by the caller:
   once complete, so a failed run publishes nothing and a pre-existing entry is
   discarded rather than merged with. A non-empty destination is refused unless
   the caller passes `WithReplaceDestination` to recover from an interrupted
-  run. The parent directory is held open for the whole extraction, and both the
-  removal and the rename that publish the tree resolve through that handle, so
-  a parent replaced at any point — including between those two operations —
-  redirects neither. Emptiness is re-checked through the same handle
-  immediately before publishing: another writer may have populated the
-  destination while extraction ran, and removing it then would delete their
-  content despite the caller never asking for a replacement.
+  run. The parent directory is held open for the whole extraction and publication
+  resolves through that handle, so a parent replaced at any point cannot
+  redirect it.
+
+  Without `WithReplaceDestination` nothing is deleted at all. Checking that a
+  destination is empty and then removing it cannot be made safe however narrow
+  the gap, because a writer populating it in between loses their content.
+  Publication instead renames onto the destination and lets the kernel decide
+  atomically: it refuses when anything occupies the name, and succeeds when the
+  destination is absent or an empty directory. `WithReplaceDestination` is the
+  only path that removes an existing destination, which is what that option
+  exists to authorise.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
   into it directly and accumulates. Staging is unavailable here, and the

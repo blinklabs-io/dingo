@@ -451,6 +451,31 @@ func TestExtractPublishRefusesConcurrentDestinationContent(t *testing.T) {
 	assert.Equal(t, "keep", string(data))
 }
 
+// TestExtractPublishAcceptsEmptyDestination pins that refusing to delete does
+// not cost the legitimate case: an empty directory already sitting at the
+// destination is still published into, because renaming onto it destroys
+// nothing.
+func TestExtractPublishAcceptsEmptyDestination(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+	require.NoError(t, os.MkdirAll(destDir, 0o750))
+
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
+
+	require.NoError(t, publish())
+
+	data, err := os.ReadFile(filepath.Join(destDir, "chunk"))
+	require.NoError(t, err)
+	assert.Equal(t, "data", string(data))
+}
+
 // TestExtractPublishReplacesConcurrentDestinationContent is the counterpart:
 // a caller that explicitly asked to replace the destination still does so,
 // since that is the documented recovery path.
