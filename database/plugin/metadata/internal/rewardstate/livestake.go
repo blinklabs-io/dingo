@@ -775,7 +775,19 @@ func LiveStakeNeedsBackfill(db *gorm.DB) (bool, error) {
 			LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag =
 				canonical_credentials.credential_tag
 				AND reward_live_stake.staking_key = canonical_credentials.staking_key
-			GROUP BY canonical_credentials.credential_tag, canonical_credentials.staking_key
+			GROUP BY
+				canonical_credentials.credential_tag,
+				canonical_credentials.staking_key,
+				account.pool,
+				account.reward,
+				account.active,
+				reward_live_stake.id,
+				reward_live_stake.calculation_version,
+				reward_live_stake.utxo_stake,
+				reward_live_stake.reward_stake,
+				reward_live_stake.total_stake,
+				reward_live_stake.registered,
+				reward_live_stake.pool_key_hash
 			HAVING reward_live_stake.id IS NULL
 				OR reward_live_stake.calculation_version <> ?
 				OR CAST(reward_live_stake.utxo_stake AS %[1]s) <>

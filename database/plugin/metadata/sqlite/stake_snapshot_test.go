@@ -359,6 +359,7 @@ func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
 			TotalStake:                    1,
 			DelegatorCount:                1,
 			CapturedSlot:                  100,
+			CalculationVersion:            0,
 			RewardAccountAutoVote:         models.PoolRewardAccountAutoVoteNone,
 			RewardAccountAutoVoteResolved: false,
 		},
@@ -380,6 +381,7 @@ func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
 			TotalStake:                    999,
 			DelegatorCount:                9,
 			CapturedSlot:                  200,
+			CalculationVersion:            models.RewardStakeCalculationVersion,
 			RewardAccountAutoVote:         models.PoolRewardAccountAutoVoteAbstain,
 			RewardAccountAutoVoteResolved: true,
 		},
@@ -392,6 +394,12 @@ func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
 	assert.Equal(t, uint64(999), uint64(retrieved.TotalStake))
 	assert.Equal(t, uint64(9), retrieved.DelegatorCount)
 	assert.Equal(t, uint64(200), retrieved.CapturedSlot)
+	assert.Equal(
+		t,
+		models.RewardStakeCalculationVersion,
+		retrieved.CalculationVersion,
+		"calculation version must survive an upsert",
+	)
 	assert.Equal(
 		t,
 		models.PoolRewardAccountAutoVoteAbstain,

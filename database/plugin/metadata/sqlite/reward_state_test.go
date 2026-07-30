@@ -93,6 +93,7 @@ func TestRewardSnapshotCRUD(t *testing.T) {
 
 	snapshot.TotalActiveStake = 200
 	snapshot.TotalPoolCount = 3
+	snapshot.CalculationVersion = models.RewardStakeCalculationVersion
 	require.NoError(t, store.SaveRewardSnapshot(snapshot, nil))
 
 	got, err = store.GetRewardSnapshot(42, "mark", nil)
@@ -100,6 +101,7 @@ func TestRewardSnapshotCRUD(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, uint64(200), uint64(got.TotalActiveStake))
 	require.Equal(t, uint64(3), got.TotalPoolCount)
+	require.Equal(t, models.RewardStakeCalculationVersion, got.CalculationVersion)
 
 	got, err = store.GetRewardSnapshot(42, "go", nil)
 	require.NoError(t, err)
