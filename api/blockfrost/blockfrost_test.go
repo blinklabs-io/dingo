@@ -469,42 +469,45 @@ func (m *mockNode) AccountRewardHistory(
 	return items[start:end], total, m.rewardsErr
 }
 
-func (m *mockNode) AccountUTXOs(
-	_ string,
-	params PaginationParams,
-) ([]AccountUTXOInfo, int, error) {
-	items := append([]AccountUTXOInfo(nil), m.accountUTXOs...)
+// mockPage applies the same in-memory ordering/pagination every
+// mockNode paginated-list method needs: reverse for desc, then slice out
+// the requested page. It only handles the shared count/page/order
+// mechanics; each caller still owns picking its own backing slice and
+// error field, since those differ per endpoint.
+func mockPage[T any](items []T, order string, page, count int) ([]T, int) {
+	items = append([]T(nil), items...)
 	total := len(items)
-	if params.Order == PaginationOrderDesc {
+	if order == PaginationOrderDesc {
 		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
 			items[i], items[j] = items[j], items[i]
 		}
 	}
-	start := (params.Page - 1) * params.Count
+	start := (page - 1) * count
 	if start >= total {
-		return []AccountUTXOInfo{}, total, m.accountUTXOsErr
+		return []T{}, total
 	}
-	end := min(start+params.Count, total)
-	return items[start:end], total, m.accountUTXOsErr
+	end := min(start+count, total)
+	return items[start:end], total
+}
+
+func (m *mockNode) AccountUTXOs(
+	_ string,
+	params PaginationParams,
+) ([]AccountUTXOInfo, int, error) {
+	rows, total := mockPage(
+		m.accountUTXOs, params.Order, params.Page, params.Count,
+	)
+	return rows, total, m.accountUTXOsErr
 }
 
 func (m *mockNode) AccountWithdrawals(
 	_ string,
 	params PaginationParams,
 ) ([]AccountWithdrawalInfo, int, error) {
-	items := append([]AccountWithdrawalInfo(nil), m.accountWithdrawals...)
-	total := len(items)
-	if params.Order == PaginationOrderDesc {
-		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
-			items[i], items[j] = items[j], items[i]
-		}
-	}
-	start := (params.Page - 1) * params.Count
-	if start >= total {
-		return []AccountWithdrawalInfo{}, total, m.accountWithdrawalsErr
-	}
-	end := min(start+params.Count, total)
-	return items[start:end], total, m.accountWithdrawalsErr
+	rows, total := mockPage(
+		m.accountWithdrawals, params.Order, params.Page, params.Count,
+	)
+	return rows, total, m.accountWithdrawalsErr
 }
 
 func (m *mockNode) AccountTransactions(
@@ -512,19 +515,13 @@ func (m *mockNode) AccountTransactions(
 	params AccountTransactionsParams,
 ) ([]AccountTransactionInfo, int, error) {
 	m.lastAccountTransactionsParams = params
-	items := append([]AccountTransactionInfo(nil), m.accountTransactions...)
-	total := len(items)
-	if params.Pagination.Order == PaginationOrderDesc {
-		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
-			items[i], items[j] = items[j], items[i]
-		}
-	}
-	start := (params.Pagination.Page - 1) * params.Pagination.Count
-	if start >= total {
-		return []AccountTransactionInfo{}, total, m.accountTransactionsErr
-	}
-	end := min(start+params.Pagination.Count, total)
-	return items[start:end], total, m.accountTransactionsErr
+	rows, total := mockPage(
+		m.accountTransactions,
+		params.Pagination.Order,
+		params.Pagination.Page,
+		params.Pagination.Count,
+	)
+	return rows, total, m.accountTransactionsErr
 }
 
 func newTestBlockfrost(

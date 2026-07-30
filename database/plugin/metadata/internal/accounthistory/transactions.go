@@ -114,18 +114,21 @@ func CountAddressTransactionsByCredential(
 // predicate); the join to the transaction table only resolves tx_hash and
 // block_hash, which are not duplicated onto address_transaction.
 //
-// The from/to bound is written as a row-value comparison, "(slot,
-// tx_index) >= (?, ?)", rather than the logically equivalent "slot > ? OR
-// (slot = ? AND tx_index >= ?)". Both are correct, but only the row-value
-// form is recognized as an index range scan against
-// idx_addr_tx_stake_position: verified via EXPLAIN QUERY PLAN, the OR form
-// still matches the index for the leading credential_tag/staking_key
-// equality but degrades the slot/tx_index bound to a row-by-row filter
-// (the index's USING clause shows only "credential_tag=? AND
-// staking_key=?"), while the row-value form shows the full "(slot,
-// tx_index)>(?,?) AND (slot,tx_index)<(?,?)" range folded into the same
-// index seek. Row-value comparisons are standard SQL, supported the same
-// way by SQLite, Postgres, and MySQL.
+// The from/to bound is a two-column range comparison against (at.slot,
+// at.tx_index) that must fold into an index range scan against
+// idx_addr_tx_stake_position rather than degrade into a row-by-row filter
+// after the credential lookup - otherwise a page-size request would cost
+// work proportional to the row's position within the credential's history
+// instead of to the page. There are two logically equivalent ways to write
+// that comparison, and which one achieves that depends on the backend:
+// sqlite and postgres fold the row-value form, "(slot, tx_index) >= (?,
+// ?)", directly into the index seek, while mysql's optimizer does not
+// (MySQL Bug #104128, #111952) and instead needs the expanded "slot > ? OR
+// (slot = ? AND tx_index >= ?)" form. sqldialect.TwoColumnRangeCondition
+// picks the form proven correct for db's dialect - see its doc comment for
+// the EXPLAIN evidence from all three backends, and
+// transactions_test.go/DATABASE.md for the pinned per-dialect regression
+// coverage.
 func addressTransactionRangeQuery(
 	db *gorm.DB,
 	credentialTag uint8,
@@ -147,12 +150,18 @@ func addressTransactionRangeQuery(
 	)
 	args := []any{credentialTag, stakingKey}
 	if from != nil {
-		query += " AND (at.slot, at.tx_index) >= (?, ?)"
-		args = append(args, from.Slot, from.TxIndex)
+		cond, condArgs := sqldialect.TwoColumnRangeCondition(
+			db, "at.slot", "at.tx_index", ">=", from.Slot, from.TxIndex,
+		)
+		query += " AND " + cond
+		args = append(args, condArgs...)
 	}
 	if to != nil {
-		query += " AND (at.slot, at.tx_index) <= (?, ?)"
-		args = append(args, to.Slot, to.TxIndex)
+		cond, condArgs := sqldialect.TwoColumnRangeCondition(
+			db, "at.slot", "at.tx_index", "<=", to.Slot, to.TxIndex,
+		)
+		query += " AND " + cond
+		args = append(args, condArgs...)
 	}
 	return query, args
 }

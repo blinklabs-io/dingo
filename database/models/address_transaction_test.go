@@ -39,10 +39,12 @@ func (legacyAddressTransaction) TableName() string {
 }
 
 // TestMigrateAddressTransactionStakePositionIndex verifies the upgrade
-// path on a populated, pre-existing table: AutoMigrate creates the new
-// idx_addr_tx_stake_position index on its own (it is a new name), and the
-// migration helper drops the now-redundant idx_addr_tx_staking, without
-// losing any rows.
+// path on a populated, pre-existing table, called in the same order
+// production call sites (postgres/sqlite/mysql database.go) now use:
+// AutoMigrate creates the new idx_addr_tx_stake_position index on its own
+// (it is a new name) BEFORE the migration helper runs, and the helper
+// then drops the now-redundant idx_addr_tx_staking, without losing any
+// rows.
 func TestMigrateAddressTransactionStakePositionIndex(t *testing.T) {
 	db := openMemoryDB(t)
 	require.NoError(t, db.AutoMigrate(&legacyAddressTransaction{}))
@@ -70,8 +72,13 @@ func TestMigrateAddressTransactionStakePositionIndex(t *testing.T) {
 		TxIndex:       0,
 	}).Error)
 
-	require.NoError(t, MigrateAddressTransactionStakePositionIndex(db, nil))
+	// AutoMigrate (creating idx_addr_tx_stake_position) MUST run before
+	// the cleanup helper: see MigrateAddressTransactionStakePositionIndex's
+	// doc comment and TestMigrateAddressTransactionStakePositionIndex_
+	// ReplacementMissing below for what happens if a caller gets this
+	// order wrong.
 	require.NoError(t, db.AutoMigrate(&AddressTransaction{}))
+	require.NoError(t, MigrateAddressTransactionStakePositionIndex(db, nil))
 
 	require.True(
 		t,
@@ -98,4 +105,40 @@ func TestMigrateAddressTransactionStakePositionIndex(t *testing.T) {
 func TestMigrateAddressTransactionStakePositionIndex_NoTable(t *testing.T) {
 	db := openMemoryDB(t)
 	require.NoError(t, MigrateAddressTransactionStakePositionIndex(db, nil))
+}
+
+// TestMigrateAddressTransactionStakePositionIndex_ReplacementMissing is the
+// regression test for the drop-before-create ordering bug (CodeRabbit
+// review, dingo PR #3016): if idx_addr_tx_stake_position does not exist
+// yet — i.e. a caller invokes this helper before AutoMigrate has created
+// it, or a prior AutoMigrate run failed partway through — the helper must
+// leave idx_addr_tx_staking in place rather than dropping the only index
+// that still covers credential lookups.
+func TestMigrateAddressTransactionStakePositionIndex_ReplacementMissing(t *testing.T) {
+	db := openMemoryDB(t)
+	require.NoError(t, db.AutoMigrate(&legacyAddressTransaction{}))
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&legacyAddressTransaction{}, "idx_addr_tx_staking",
+		),
+	)
+	require.False(
+		t,
+		db.Migrator().HasIndex(
+			&AddressTransaction{}, "idx_addr_tx_stake_position",
+		),
+	)
+
+	// Deliberately do NOT call AutoMigrate(&AddressTransaction{}) first, so
+	// idx_addr_tx_stake_position never gets created.
+	require.NoError(t, MigrateAddressTransactionStakePositionIndex(db, nil))
+
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&legacyAddressTransaction{}, "idx_addr_tx_staking",
+		),
+		"legacy index must survive when its replacement was never created",
+	)
 }

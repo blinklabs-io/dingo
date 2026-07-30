@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 )
 
 // newAddressTransactionsTestDB builds an in-memory sqlite DB with the real
@@ -175,4 +177,87 @@ func TestQueryAddressTransactionsByCredentialRangeIsIndexSeek(t *testing.T) {
 		"expected the to bound to be folded into the index seek as a "+
 			"range constraint, not applied as a post-search filter; plan was:\n%s",
 		plan)
+}
+
+// namedDialector is a minimal fake gorm.Dialector used only to make db.Name()
+// (and therefore sqldialect.Name(db)) report a given backend, without
+// opening a real connection. It exists so
+// TestAddressTransactionRangeQueryPerDialectForm below can pin the SQL
+// addressTransactionRangeQuery generates for mysql and postgres the same
+// way the sqlite form is pinned above with a real EXPLAIN QUERY PLAN
+// against a live in-memory database: mysql and postgres containers were
+// used for the actual EXPLAIN verification during review (see
+// sqldialect.TwoColumnRangeCondition's doc comment and DATABASE.md), but a
+// real MySQL/Postgres server is not available to this test binary, so this
+// only pins the query text those EXPLAIN runs were performed against.
+type namedDialector string
+
+func (d namedDialector) Name() string                                 { return string(d) }
+func (namedDialector) Initialize(*gorm.DB) error                      { return nil }
+func (namedDialector) Migrator(*gorm.DB) gorm.Migrator                { return nil }
+func (namedDialector) DataTypeOf(*schema.Field) string                { return "" }
+func (namedDialector) DefaultValueOf(*schema.Field) clause.Expression { return nil }
+func (namedDialector) BindVarTo(clause.Writer, *gorm.Statement, any)  {}
+func (namedDialector) QuoteTo(clause.Writer, string)                  {}
+func (namedDialector) Explain(string, ...any) string                  { return "" }
+
+// TestAddressTransactionRangeQueryPerDialectForm is the dialect-specific
+// companion to the sqlite-only EXPLAIN regression tests above: it pins
+// that addressTransactionRangeQuery emits the row-value from/to form for
+// postgres (folds into the index range scan there, confirmed via EXPLAIN
+// ANALYZE) and the expanded OR form for mysql (required there because
+// MySQL does not fold row-value inequalities into a composite-index range
+// scan; confirmed via EXPLAIN showing "ref"/2-key-part access for the
+// row-value form versus "range"/4-key-part access for the OR form). See
+// sqldialect.TwoColumnRangeCondition for the full evidence.
+func TestAddressTransactionRangeQueryPerDialectForm(t *testing.T) {
+	credentialTag := uint8(0)
+	stakingKey := make([]byte, 28)
+	from := &models.AddressTransactionPosition{Slot: 500, TxIndex: 1}
+	to := &models.AddressTransactionPosition{Slot: 1500, TxIndex: 2}
+
+	t.Run("postgres_uses_row_value_form", func(t *testing.T) {
+		db := &gorm.DB{
+			Config: &gorm.Config{Dialector: namedDialector("postgres")},
+		}
+		query, args := addressTransactionRangeQuery(
+			db, credentialTag, stakingKey, from, to,
+		)
+		assert.Contains(t, query, "(at.slot, at.tx_index) >= (?, ?)")
+		assert.Contains(t, query, "(at.slot, at.tx_index) <= (?, ?)")
+		assert.Equal(
+			t,
+			[]any{credentialTag, stakingKey, uint64(500), uint32(1), uint64(1500), uint32(2)},
+			args,
+		)
+	})
+
+	t.Run("mysql_uses_expanded_or_form", func(t *testing.T) {
+		db := &gorm.DB{
+			Config: &gorm.Config{Dialector: namedDialector("mysql")},
+		}
+		query, args := addressTransactionRangeQuery(
+			db, credentialTag, stakingKey, from, to,
+		)
+		assert.Contains(
+			t, query,
+			"(at.slot > ? OR (at.slot = ? AND at.tx_index >= ?))",
+		)
+		assert.Contains(
+			t, query,
+			"(at.slot < ? OR (at.slot = ? AND at.tx_index <= ?))",
+		)
+		assert.NotContains(t, query, "(at.slot, at.tx_index)",
+			"mysql must not use the row-value form: it is not folded into "+
+				"a composite-index range scan there")
+		assert.Equal(
+			t,
+			[]any{
+				credentialTag, stakingKey,
+				uint64(500), uint64(500), uint32(1),
+				uint64(1500), uint64(1500), uint32(2),
+			},
+			args,
+		)
+	})
 }

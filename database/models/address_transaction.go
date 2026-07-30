@@ -49,17 +49,25 @@ func (AddressTransaction) TableName() string {
 
 // MigrateAddressTransactionStakePositionIndex drops the legacy
 // credential_tag/staking_key-only index (idx_addr_tx_staking) once
-// idx_addr_tx_stake_position exists to take over its role. AutoMigrate
-// creates idx_addr_tx_stake_position on its own (it is a new index name
-// that does not previously exist), so this helper's only job is removing
-// the now-redundant one: idx_addr_tx_stake_position's leading two columns
-// (credential_tag, staking_key) are an exact prefix match for every query
-// idx_addr_tx_staking served (GetAddressesByCredential,
+// idx_addr_tx_stake_position exists to take over its role: its leading two
+// columns (credential_tag, staking_key) are an exact prefix match for every
+// query idx_addr_tx_staking served (GetAddressesByCredential,
 // GetTransactionsByAddress's credential-tag branch,
 // GetAddressTransactionsByCredential), so nothing loses index coverage.
 // address_transaction gets one row per (payment address, transaction) on
 // every applied block, so leaving both indexes in place would cost write
 // throughput for a lookup the wider index already covers.
+//
+// Callers MUST invoke this only after AutoMigrate has created
+// idx_addr_tx_stake_position (AutoMigrate creates it on its own, since it
+// is a new index name that did not previously exist). This function also
+// verifies that precondition itself and is a no-op if the replacement
+// index is not present yet, so that a caller mistake — or a future
+// refactor that reorders migration steps — cannot leave the table with
+// neither index: if a process were to crash between dropping the legacy
+// index and AutoMigrate creating the replacement, address_transaction
+// would have no index at all supporting credential lookups until the next
+// startup retried both steps in the correct order.
 func MigrateAddressTransactionStakePositionIndex(
 	db *gorm.DB,
 	logger *slog.Logger,
@@ -71,6 +79,13 @@ func MigrateAddressTransactionStakePositionIndex(
 		return nil
 	}
 	if !db.Migrator().HasIndex(&AddressTransaction{}, "idx_addr_tx_staking") {
+		return nil
+	}
+	if !db.Migrator().HasIndex(&AddressTransaction{}, "idx_addr_tx_stake_position") {
+		logger.Warn(
+			"deferring address_transaction staking index cleanup: " +
+				"idx_addr_tx_stake_position does not exist yet",
+		)
 		return nil
 	}
 	logger.Info(

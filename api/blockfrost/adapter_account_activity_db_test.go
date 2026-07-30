@@ -790,10 +790,13 @@ func TestNodeAdapterAccountTransactionsBounded(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, hex.EncodeToString(fill32(0)), rows[0].TxHash)
 
-	// A later page whose transaction's block is also missing must fail:
-	// this confirms the test's missing-block setup would actually have
-	// caught the original bug (it only "passes" the count=1/page=1 case
-	// above because that happens to be the one block that exists).
+	// A later page whose transaction's block is also missing must fail
+	// with models.ErrBlockNotFound specifically (BlockByHash's sentinel,
+	// propagated by adapter_account_activity.go's "%w" wrap): this
+	// confirms the test's missing-block setup would actually have caught
+	// the original bug (it only "passes" the count=1/page=1 case above
+	// because that happens to be the one block that exists), rather than
+	// merely asserting that some unrelated error occurred.
 	_, _, err = adapter.AccountTransactions(
 		stakeAddress,
 		AccountTransactionsParams{
@@ -802,7 +805,7 @@ func TestNodeAdapterAccountTransactionsBounded(t *testing.T) {
 			},
 		},
 	)
-	require.Error(t, err)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
 func TestNodeAdapterAccountTransactionsEmpty(t *testing.T) {
