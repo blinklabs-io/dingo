@@ -60,8 +60,14 @@ import (
 )
 
 type Node struct {
-	connManager                      *connmanager.ConnectionManager
-	peerGov                          *peergov.PeerGovernor
+	connManager *connmanager.ConnectionManager
+	peerGov     *peergov.PeerGovernor
+	// poolRelayProvider backs peerGov's LedgerPeerProvider. Tracked here (not
+	// a throwaway local) so quiesceForLiveLifecycleOp can Close it -- it has
+	// no Stop of its own otherwise, so a live database restore/truncate,
+	// which constructs a fresh one on every cycle, would leak its EventBus
+	// subscription every time (node_lifecycle.go).
+	poolRelayProvider                *ledger.PoolRelayProvider
 	chainsyncState                   *chainsync.State
 	chainSelector                    *chainselection.ChainSelector
 	eventBus                         *event.EventBus
@@ -1178,7 +1184,7 @@ func (n *Node) Run(ctx context.Context) error {
 	// Configure peer governor before opening listeners so topology-driven
 	// outbound connections start first and do not lose the race to inbounds.
 	// Create ledger relay provider for discovering peers from stake pool relays.
-	ledgerRelayProvider, err := ledger.NewPoolRelayProvider(
+	n.poolRelayProvider, err = ledger.NewPoolRelayProvider(
 		n.ledgerState,
 		n.db,
 		n.eventBus,
@@ -1186,7 +1192,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create ledger relay provider: %w", err)
 	}
-	ledgerPeerProvider := ledgerpeers.NewProvider(ledgerRelayProvider)
+	ledgerPeerProvider := ledgerpeers.NewProvider(n.poolRelayProvider)
 
 	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled).
 	var useLedgerAfterSlot int64 = -1

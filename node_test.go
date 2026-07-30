@@ -330,6 +330,79 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	assert.Equal(t, uint64(1), clientB.HeadersRecv)
 }
 
+// TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
+// during a live database restore/truncate where n.chainsyncState is nil
+// between closeStorageForLiveLifecycleOp and reinitializeNetworkingCore.
+// chainSelector's evaluation loop is never paused during quiesce, so it can
+// still emit a ChainSwitchEvent in that window.
+func TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic(t *testing.T) {
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	require.NotPanics(t, func() {
+		n.handleChainSwitchEvent(
+			event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					NewConnectionId: newNodeTestConnId(3003),
+					NewTip: ochainsync.Tip{
+						Point: ocommon.NewPoint(100, []byte("hash-a")),
+					},
+				},
+			),
+		)
+	})
+}
+
+// TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp covers the same
+// window from the other side: n.chainsyncState has already been rebuilt to a
+// non-nil value, but a live restore/truncate still holds n.liveLifecycleMu
+// (held for its entire quiesce-through-reinitialize duration), so the
+// handler must not block waiting for it -- it should skip the update rather
+// than stall the EventBus dispatch goroutine behind a possibly long-running
+// operation.
+func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connA := newNodeTestConnId(3001)
+	connB := newNodeTestConnId(3002)
+	state.AddClientConnId(connA)
+	state.AddClientConnId(connB)
+	state.SetClientConnId(connA)
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+	}
+
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+
+	n.handleChainSwitchEvent(
+		event.NewEvent(
+			chainselection.ChainSwitchEventType,
+			chainselection.ChainSwitchEvent{
+				PreviousConnectionId: connA,
+				NewConnectionId:      connB,
+				NewTip:               ochainsync.Tip{Point: ocommon.NewPoint(200, []byte("hash-b"))},
+			},
+		),
+	)
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	assert.Equal(t, connA, *active)
+}
+
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	connId := newNodeTestConnId(3003)
 	n := &Node{}

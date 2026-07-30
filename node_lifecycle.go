@@ -134,6 +134,16 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	if n.peerGov != nil {
 		n.peerGov.Stop()
 	}
+	// reinitializeNetworkingCore constructs a fresh PoolRelayProvider on
+	// every cycle (it has no long-lived identity of its own, unlike
+	// peerGov above) -- without unsubscribing the stale one here first, the
+	// EventBus (never recreated across this cycle) accumulates one more
+	// permanently-active subscription per live restore/truncate cycle,
+	// each pointing at an otherwise-unreachable, abandoned provider.
+	if n.poolRelayProvider != nil {
+		n.poolRelayProvider.Close()
+		n.poolRelayProvider = nil
+	}
 	if n.snapshotMgr != nil {
 		if stopErr := n.snapshotMgr.Stop(); stopErr != nil {
 			err = errors.Join(
@@ -805,7 +815,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	)
 	n.ouroboros.ConnManager = n.connManager
 
-	ledgerRelayProvider, err := ledger.NewPoolRelayProvider(
+	n.poolRelayProvider, err = ledger.NewPoolRelayProvider(
 		n.ledgerState,
 		n.db,
 		n.eventBus,
@@ -813,7 +823,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to recreate ledger relay provider: %w", err)
 	}
-	ledgerPeerProvider := ledgerpeers.NewProvider(ledgerRelayProvider)
+	ledgerPeerProvider := ledgerpeers.NewProvider(n.poolRelayProvider)
 
 	var useLedgerAfterSlot int64 = -1
 	if n.config.topologyConfig != nil {

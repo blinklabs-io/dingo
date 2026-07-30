@@ -1413,10 +1413,28 @@ func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
 }
 
+// closeRollbackDrainTimeout and closeDBWorkerPoolShutdownTimeout bound the
+// two waits in Close() below. Package-level (not local consts) so tests can
+// shrink them instead of running real multi-second timeouts.
+var (
+	closeRollbackDrainTimeout        = 10 * time.Second
+	closeDBWorkerPoolShutdownTimeout = 15 * time.Second
+)
+
 func (ls *LedgerState) Close() error {
 	if !ls.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+
+	// Accumulates errors from the two bounded waits below (rollback
+	// goroutines, database worker pool). Both used to only log a Warn on
+	// timeout and fall through as if they'd succeeded -- indistinguishable
+	// from the other, unconditional waits in this function to a caller, but
+	// unlike those, a timeout here means Close() is returning while a
+	// goroutine may still be reading/writing state a live restore/truncate
+	// is about to close the underlying storage out from under
+	// (closeStorageForLiveLifecycleOp runs immediately after this returns).
+	var err error
 
 	// Stop the dev-mode block-forging scheduler first, before anything
 	// else below: initForge registers ls.forgeBlock on ls.Scheduler as a
@@ -1497,10 +1515,17 @@ func (ls *LedgerState) Close() error {
 			"rollback goroutines finished",
 			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
 		)
-	case <-time.After(10 * time.Second):
+	case <-time.After(closeRollbackDrainTimeout):
 		ls.config.Logger.Warn(
 			"timed out waiting for rollback goroutines",
 			"elapsed", time.Since(rollbackStart).Round(time.Millisecond),
+		)
+		err = errors.Join(
+			err,
+			fmt.Errorf(
+				"timed out after %s waiting for in-flight rollback goroutines",
+				time.Since(rollbackStart).Round(time.Millisecond),
+			),
 		)
 	}
 	ls.rollbackMu.Unlock()
@@ -1561,10 +1586,17 @@ func (ls *LedgerState) Close() error {
 				"database worker pool shut down",
 				"elapsed", time.Since(poolStart).Round(time.Millisecond),
 			)
-		case <-time.After(15 * time.Second):
+		case <-time.After(closeDBWorkerPoolShutdownTimeout):
 			ls.config.Logger.Warn(
 				"timed out waiting for database worker pool shutdown",
 				"elapsed", time.Since(poolStart).Round(time.Millisecond),
+			)
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"timed out after %s waiting for database worker pool shutdown",
+					time.Since(poolStart).Round(time.Millisecond),
+				),
 			)
 		}
 	}
@@ -1572,7 +1604,7 @@ func (ls *LedgerState) Close() error {
 	// Note: We don't close the database here because LedgerState doesn't own it.
 	// The database is passed in via LedgerStateConfig and should be closed by
 	// the owner (typically Node.shutdown()).
-	return nil
+	return err
 }
 
 func (ls *LedgerState) initScheduler() error {

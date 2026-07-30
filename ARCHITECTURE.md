@@ -1145,6 +1145,52 @@ Truncate reuses `database.TruncateAfterSlot`, the same metadata+blob-referenced-
 
 Stopping a component during quiesce is not by itself enough — the caller (`quiesceForLiveLifecycleOp`) proceeds straight to `closeStorageForLiveLifecycleOp` right after, so a `Stop()` that only signals its background goroutines to exit and returns immediately (rather than waiting for them to actually finish) leaves a real window for one of them to still be reading `n.db`/`n.ledgerState`-backed state after it's closed and replaced. `peergov.PeerGovernor.Stop`, `leader.Election.Stop`, and `midnightindexer.Indexer.Stop` all wait for their own in-flight work before returning, for this reason: `PeerGovernor` and `Election` each track their background goroutines with a `sync.WaitGroup` (releasing their own mutex first, since those goroutines take it internally — waiting while still holding it would deadlock), and all three use `EventBus.UnsubscribeAndWait` rather than plain `Unsubscribe` for the same reason `node_lifecycle.go`'s own subscriptions do above. `Election`'s ctx-monitor goroutine is the one deliberate exception: it only forwards `ctx` cancellation into a `Stop()` call and never reads `ledgerState`-backed state itself, and tracking it in the same `WaitGroup` `Stop()` waits on would deadlock `Stop()` against itself when cancellation (not an external `Stop()` call) is what triggered it.
 
+A handful of narrower gaps in this same quiesce/reinit path were found by a
+follow-up audit and fixed the same way. `LedgerState.Close`'s two bounded
+waits (in-flight rollback-event goroutines, 10s; `dbWorkerPool` shutdown,
+15s) previously only logged a `Warn` and let `Close` return `nil` on
+timeout — unlike this same function's other, unconditional waits (header
+replay, reward precompute), which exist specifically because returning
+early there would reintroduce the races they're meant to prevent. Both now
+join a real error into `Close`'s return value on timeout, propagated by
+`closeStorageForLiveLifecycleOp` like any other close failure, so a
+live-lifecycle caller can no longer mistake a timed-out drain for a clean
+shutdown. `mempool.Stop` had the same shape: if the caller's `ctx` fired
+before `workerWG` drained, it returned `nil` regardless — now it records
+the triggering `ctx.Err()` in a field (a local variable set inside
+`stopOnce.Do`'s closure would be invisible to any later or concurrent
+`Stop` call, since the closure only runs once) and returns it wrapped, so a
+worker still touching mempool state when storage closes is no longer
+reported as a successful stop. `handleChainSwitchEvent` is one of the
+"closure over `n` itself, self-healing" handlers `Run()`'s subscriber-ID
+doc comment describes as needing no tracked subscription — correct, since
+it reads `n.chainsyncState` fresh each call rather than a bound method
+value captured at subscribe time — but it was still missing the same
+`n.liveLifecycleMu.TryLock`-and-nil-check guard `runStallCheckerTick` uses
+for the identical field, so `chainSelector`'s evaluation loop (never paused
+during quiesce) firing this event mid-operation could call a method on a
+nil `n.chainsyncState`; it now takes that guard, matching the recycler, and
+drops the event exactly the same way (chain selection re-evaluates and
+emits again once connections reattach after reinit, so this is safe to
+lose). `ledger.PoolRelayProvider` — reconstructed fresh on every cycle by
+`reinitializeNetworkingCore`/`node.go`'s `Run()`, and now tracked on `Node`
+(`poolRelayProvider`) instead of being a throwaway local — gained a `Close`
+that unsubscribes its `PoolStateRestoredEventType` cache-invalidation
+handler, called in `quiesceForLiveLifecycleOp` right after `peerGov.Stop`;
+without it, the EventBus accumulated one more permanently-active
+subscription per cycle, each pointing at an otherwise-unreachable abandoned
+provider. Separately, `api/utxorpc`'s `Utxorpc.Stop` was exactly
+`http.Server.Shutdown(ctx)` with no fallback, unlike `midnight/server`'s
+escalation to a forced `grpc.Server.Stop`; since `WatchTx`/`WatchMempool`
+are unbounded streaming RPCs, a connected client could keep `Shutdown`
+blocked indefinitely, and the `ctx` `node_lifecycle.go` passes through
+carries no deadline of its own. `Stop` now mirrors `midnight/server`'s
+`gracefulStop`: a `ShutdownTimeout` config default (or the caller `ctx`'s
+own deadline, if sooner) bounds a plain timer racing `Shutdown` (run
+against `context.Background()`, deliberately not `ctx` — racing the same
+ctx twice would make it nondeterministic which timeout error won),
+escalating to a hard `Close` on expiry.
+
 A caller-supplied `connmanager.ListenerConfig.Listener` (a test harness binding an OS-assigned port up front and handing the listener object itself to the node, rather than an address string, so a peer can be told the exact port with no discovery race — see `node_lifecycle_multinode_test.go`'s `newLoopbackListener`) needs its own handling across this quiesce/reinit cycle: `ConnectionManager.Stop`'s `stopListeners` closes every listener it is tracking unconditionally, with no way to distinguish one it created itself from one a caller handed it, and a closed `net.Listener` can never be reused. `reinitializeNetworkingCore` rebuilds `connManager` from `n.config.listeners` via `ouroboros.ConfigureListeners`, which only appends connection options and never touches `.Listener` — so without further handling, the same now-closed listener object would be fed straight back in, `connmanager.startListener` would skip rebinding (it only binds fresh when `.Listener == nil`), and the accept loop launched on it would exit immediately on `net.ErrClosed` while `connManager.Start` still returned successfully, silently leaving that listener permanently deaf to new inbound connections after the very first live Restore/Truncate. `ConnectionManager.ResolvedListeners` (called right after every successful `connManager.Start`, both at initial startup in `node.go` and after every reinit in `node_lifecycle.go`) closes this gap: for any listener config entry that came in with a caller-supplied `Listener`, it replaces that field with the concrete `ListenNetwork`/`ListenAddress` the listener actually resolved to (nil-ing `Listener` out), so the next reinit rebinds a fresh listener at that same address instead of trying to reuse the dead object — exactly the self-healing behavior an address-configured entry already had. Entries that started address-configured (including a Windows named-pipe NtC listener, whose `ListenNetwork` must stay `"unix"` for `startListener`'s pipe-creation branch to keep matching) are left untouched.
 
 `(*Node).Restore` specifically validates the incoming snapshot in a sibling staging directory (`<dataDir>.restore-staging`) — both via `lifecycle.Restore`'s own manifest/tip checks and an additional open against this node's actual configured network/storage-mode/plugins (`validateRestoredAgainstNodeConfig`, using a `nil` `PromRegistry` since the live `n.db` is still registered under the real one at this point) — entirely *before* quiescing or touching `n.config.dataDir`, with the node still serving normally throughout. Only once that validation passes does it quiesce, close storage, and atomically swap the directories in (`swapInRestoredDataDir`: rename the current data dir aside to `<dataDir>.pre-restore`, rename staging into place — rolling back the rename and resuming on the original data if activating the restored directory fails). This means a bad snapshot (corrupted, wrong network, wrong plugin) is rejected with the node's existing data and tip completely untouched and the node still usable, rather than the node being torn down; `n.cancel()` is now reserved for the rare case where the swap itself fails on both the primary attempt and its rollback (`errRestoreSwapUnrecoverable`), or where `reinitializeAndResume` itself fails after a successful swap.

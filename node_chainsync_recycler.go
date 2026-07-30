@@ -760,6 +760,23 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	// chainSelector's evaluation loop is never paused during a live
+	// database restore/truncate, which briefly nils n.chainsyncState while
+	// swapping in a rebuilt one and holds n.liveLifecycleMu for its entire
+	// quiesce-through-reinitialize duration -- so this event can still fire
+	// mid-operation. TryLock, not Lock, matching runStallCheckerTick's
+	// identical guard below: this handler runs on the EventBus's own
+	// per-subscriber dispatch goroutine, so blocking it for a possibly
+	// long-running truncate is worse than dropping one update, since
+	// chainSelector re-evaluates and emits again once connections reattach
+	// after reinit.
+	if !n.liveLifecycleMu.TryLock() {
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.chainsyncState == nil {
+		return
+	}
 	prevConn := "(none)"
 	if e.PreviousConnectionId.LocalAddr != nil &&
 		e.PreviousConnectionId.RemoteAddr != nil {

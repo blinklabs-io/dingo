@@ -47,6 +47,10 @@ const (
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
 	DefaultServerTimeout   = time.Hour
+	// DefaultShutdownTimeout bounds Stop's graceful http.Server.Shutdown
+	// before it escalates to a hard Close, matching midnight/server's
+	// identical ShutdownTimeout/defaultShutdownTimeout pattern.
+	DefaultShutdownTimeout = 30 * time.Second
 )
 
 type Utxorpc struct {
@@ -75,6 +79,11 @@ type UtxorpcConfig struct {
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
 	// (0 = use default).
 	ServerTimeout time.Duration
+	// ShutdownTimeout bounds Stop's graceful http.Server.Shutdown before it
+	// escalates to a hard Close (0 = use default). Watch* RPCs are
+	// unbounded streams, so a connected client can otherwise keep
+	// Shutdown blocked indefinitely.
+	ShutdownTimeout time.Duration
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
@@ -105,6 +114,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	if cfg.ServerTimeout <= 0 {
 		cfg.ServerTimeout = DefaultServerTimeout
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = DefaultShutdownTimeout
 	}
 	return &Utxorpc{
 		config: cfg,
@@ -297,18 +309,70 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 	return protocols
 }
 
+// Stop shuts down the server, escalating to a hard Close if it does not
+// complete within u.config.ShutdownTimeout (or the caller ctx's own
+// deadline, if sooner). WatchTx/WatchMempool are unbounded streaming RPCs,
+// so a connected client can otherwise keep http.Server.Shutdown blocked
+// indefinitely, hanging any live database restore/truncate quiesce that
+// waits on Stop -- matching midnight/server's identical Stop/gracefulStop
+// pattern for a grpc.Server.
+// Stop shuts down the server, escalating to a hard Close if it does not
+// complete within u.config.ShutdownTimeout (or the caller ctx's own
+// deadline, if sooner). WatchTx/WatchMempool are unbounded streaming RPCs,
+// so a connected client can otherwise keep http.Server.Shutdown blocked
+// indefinitely, hanging any live database restore/truncate quiesce that
+// waits on Stop -- matching midnight/server's identical Stop/gracefulStop
+// pattern for a grpc.Server.
 func (u *Utxorpc) Stop(ctx context.Context) error {
 	u.mu.Lock()
-	defer u.mu.Unlock()
+	server := u.server
+	u.server = nil
+	u.mu.Unlock()
 
-	if u.server != nil {
-		u.config.Logger.Debug("shutting down utxorpc gRPC server")
-		if err := u.server.Shutdown(ctx); err != nil {
+	if server == nil {
+		return nil
+	}
+
+	timeout := u.config.ShutdownTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 {
+			timeout = min(timeout, remaining)
+		} else {
+			timeout = 0
+		}
+	}
+
+	u.config.Logger.Debug("shutting down utxorpc gRPC server")
+	// Shutdown itself is given a ctx that never expires (not shutdownCtx
+	// below): it races that ctx internally, and racing it a second time
+	// here too would be nondeterministic about which timeout error wins --
+	// sometimes returning Shutdown's own ctx-expired error instead of
+	// actually escalating to the hard Close this exists for. A plain timer
+	// avoids that, matching midnight/server's gracefulStop, which for the
+	// same reason never passes a ctx into grpc.Server.GracefulStop either.
+	shutdownErr := make(chan error, 1)
+	//nolint:gosec,contextcheck // G118: intentionally outlives ctx, see comment above
+	go func() {
+		shutdownErr <- server.Shutdown(context.Background())
+	}()
+
+	select {
+	case err := <-shutdownErr:
+		if err != nil {
 			return fmt.Errorf("failed to shutdown utxorpc gRPC server: %w", err)
 		}
-		u.server = nil
+		return nil
+	case <-time.After(timeout):
+		u.config.Logger.Warn(
+			"utxorpc gRPC graceful shutdown timed out; forcing close",
+			"timeout", timeout,
+		)
+		if err := server.Close(); err != nil {
+			return fmt.Errorf("failed to force-close utxorpc gRPC server: %w", err)
+		}
+		<-shutdownErr
+		return nil
 	}
-	return nil
 }
 
 // startServer starts the HTTP server with deterministic error

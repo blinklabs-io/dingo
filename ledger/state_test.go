@@ -4183,3 +4183,61 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 		})
 	}
 }
+
+// TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime covers Close()'s
+// rollback-goroutine wait: previously this only logged a Warn on timeout and
+// let Close() return nil regardless, which live restore/truncate's caller
+// (closeStorageForLiveLifecycleOp) took as a green light to proceed to
+// physically close/reopen the data directory even though a rollback
+// goroutine might still be running against it.
+func TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime(t *testing.T) {
+	origTimeout := closeRollbackDrainTimeout
+	closeRollbackDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { closeRollbackDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	// Simulate an in-flight rollback goroutine that outlives the timeout.
+	ls.rollbackWG.Add(1)
+	t.Cleanup(func() { ls.rollbackWG.Done() })
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rollback")
+}
+
+// TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime covers Close()'s
+// database-worker-pool wait, which had the same silent-timeout gap as the
+// rollback wait above.
+func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
+	origTimeout := closeDBWorkerPoolShutdownTimeout
+	closeDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { closeDBWorkerPoolShutdownTimeout = origTimeout })
+
+	pool := NewDatabaseWorkerPool(nil, DatabaseWorkerPoolConfig{
+		WorkerPoolSize: 1,
+		TaskQueueSize:  1,
+	})
+	release := make(chan struct{})
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			<-release
+			return nil
+		},
+	})
+	t.Cleanup(func() { close(release) })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		dbWorkerPool: pool,
+	}
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "database worker pool")
+}
