@@ -41,7 +41,8 @@ const accessSampleRate = 4
 
 const (
 	// defaultMaxCASAttempts bounds the work spent on one best-effort
-	// copy-on-write update (Put, access-count tracking, or eviction).
+	// copy-on-write update (Put, which folds in eviction, or access-count
+	// tracking).
 	defaultMaxCASAttempts = 16
 	// casYieldThreshold is the retry count after which a CAS loop starts
 	// sleeping a small, randomized amount instead of just yielding the
@@ -50,13 +51,19 @@ const (
 	casYieldThreshold = 2
 	// maxCASBackoff caps the randomized sleep between CAS retries.
 	maxCASBackoff = 64 * time.Microsecond
+	// abortLogInterval rate-limits the writer-aborted warning log so that
+	// sustained contention produces bounded log/IO traffic instead of one
+	// warning per dropped update. The writersAborted counter is unaffected
+	// and remains authoritative regardless of how many log lines this
+	// suppresses.
+	abortLogInterval = time.Second
 )
 
 // HotCacheCASStats describes contention in HotCache's copy-on-write update
 // path. Values are cumulative for the lifetime of the cache.
 type HotCacheCASStats struct {
-	// Attempts is the total number of CompareAndSwap attempts across Put,
-	// access-count tracking, and eviction.
+	// Attempts is the total number of CompareAndSwap attempts across Put
+	// (which folds in eviction, see evictToFit) and access-count tracking.
 	Attempts uint64
 	// WritersAbortedAfterBudget is the number of copy-on-write updates that
 	// exhausted their retry budget and were dropped as best-effort.
@@ -78,7 +85,6 @@ type HotCache struct {
 	maxSize             int                          // max number of entries (0 = unlimited)
 	maxBytes            int64                        // max memory in bytes (0 = unlimited)
 	curBytes            atomic.Int64                 // current memory usage
-	evicting            atomic.Bool                  // eviction lock
 	sampleCnt           atomic.Uint64                // counter for probabilistic access tracking
 	casSequence         atomic.Uint64                // gives contending writers asymmetric jitter
 	casAttempts         atomic.Uint64
@@ -91,6 +97,8 @@ type HotCache struct {
 	// (the default) disables the writer-aborted warning log entirely.
 	logger    *slog.Logger
 	cacheName string
+	// lastAbortLogNanos rate-limits logWriterAborted to abortLogInterval.
+	lastAbortLogNanos atomic.Int64
 }
 
 // SetLogger wires an optional logger into the cache for diagnostics: it logs
@@ -104,10 +112,25 @@ func (c *HotCache) SetLogger(logger *slog.Logger, name string) {
 }
 
 // logWriterAborted logs the writer-aborted-after-budget event, if a logger
-// has been configured. op identifies which CAS loop gave up (put,
-// increment_access, or evict).
+// has been configured, rate-limited to at most one line per
+// abortLogInterval regardless of how many aborts occur in that window —
+// under sustained contention this can otherwise emit thousands of warnings
+// per second, trading CPU churn for log/IO churn. writersAborted itself is
+// unaffected and always incremented by the caller, so it remains an
+// authoritative count even while logging is suppressed. op identifies which
+// CAS loop gave up (put or increment_access).
 func (c *HotCache) logWriterAborted(op string) {
 	if c.logger == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := c.lastAbortLogNanos.Load()
+	if now-last < int64(abortLogInterval) {
+		return
+	}
+	if !c.lastAbortLogNanos.CompareAndSwap(last, now) {
+		// Another goroutine just logged for this window; skip to avoid a
+		// burst of near-simultaneous duplicate lines.
 		return
 	}
 	c.logger.Warn(
@@ -136,7 +159,7 @@ func (c *HotCache) RegisterCASMetrics(
 	collectors := []prometheus.Collector{
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name:        "dingo_hot_cache_cas_attempts_total",
-			Help:        "Total CompareAndSwap attempts across Put, access tracking, and eviction",
+			Help:        "Total CompareAndSwap attempts across Put (including eviction) and access tracking",
 			ConstLabels: labels,
 		}, func() float64 { return float64(c.casAttempts.Load()) }),
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
@@ -176,6 +199,17 @@ func (c *HotCache) CASStats() HotCacheCASStats {
 		// attempt and maxCASAttempts attempts; won't approach int64 overflow.
 		SuccessfulCommitBackoffTime: time.Duration(c.commitBackoffNanos.Load()),
 	}
+}
+
+// recordSuccessfulCommit records a copy-on-write update that committed after
+// a timed backoff. Keeping this accounting in one place ensures every CAS path
+// uses the same metric semantics.
+func (c *HotCache) recordSuccessfulCommit(backoffTime time.Duration) {
+	if backoffTime <= 0 {
+		return
+	}
+	c.commitsAfterBackoff.Add(1)
+	c.commitBackoffNanos.Add(uint64(backoffTime))
 }
 
 // backoff waits between CAS retries: an immediate scheduler yield for the
@@ -244,7 +278,13 @@ func (c *HotCache) Get(key []byte) ([]byte, bool) {
 
 // Put adds or updates a value in the cache.
 // If maxBytes > 0 and the entry size exceeds maxBytes/10, the entry is skipped.
-// This operation uses copy-on-write semantics for thread safety.
+// This operation uses copy-on-write semantics for thread safety. If the
+// insert pushes the cache over its configured maxSize/maxBytes, eviction is
+// folded into this same CAS attempt (see evictToFit) rather than run as a
+// separate follow-up operation: a standalone eviction pass would have to win
+// its own CAS race against concurrent access-count updates from Get, and
+// could lose that race indefinitely under sustained read contention with no
+// later Put to retry it, leaving the cache permanently over its limit.
 func (c *HotCache) Put(key []byte, cbor []byte) {
 	keyStr := string(key)
 	entrySize := int64(len(key) + len(cbor))
@@ -280,22 +320,27 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 		maps.Copy(newAccessCnt, oldData.accessCnt)
 		newAccessCnt[keyStr]++ // increment on put
 
+		// Trim to the configured limits as part of this same snapshot, using
+		// an estimate of post-insert bytes derived from the running counter;
+		// this mirrors how memDelta itself is computed relative to oldData
+		// and needs no per-Put O(n) resummation.
+		estimatedBytes := c.curBytes.Load() + memDelta
+		trimmedEntries, trimmedAccessCnt, bytesEvicted := c.evictToFit(
+			newEntries, newAccessCnt, estimatedBytes,
+		)
+
 		newData := &hotCacheData{
-			entries:   newEntries,
-			accessCnt: newAccessCnt,
+			entries:   trimmedEntries,
+			accessCnt: trimmedAccessCnt,
 		}
 
 		// Try to atomically update both maps together
 		c.casAttempts.Add(1)
 		if c.data.CompareAndSwap(oldData, newData) {
 			if c.maxBytes > 0 {
-				c.curBytes.Add(memDelta)
+				c.curBytes.Add(memDelta - bytesEvicted)
 			}
-			if backoffTime > 0 {
-				c.commitsAfterBackoff.Add(1)
-				c.commitBackoffNanos.Add(uint64(backoffTime))
-			}
-			c.maybeEvict()
+			c.recordSuccessfulCommit(backoffTime)
 			return
 		}
 		// CAS failed. The bounded loop plus backoff below prevents this from
@@ -315,6 +360,7 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 func (c *HotCache) incrementAccess(key []byte) {
 	keyStr := string(key)
 
+	var backoffTime time.Duration
 	for attempt := 0; attempt < c.maxCASAttempts; attempt++ {
 		oldData := c.data.Load()
 		if oldData == nil {
@@ -338,138 +384,109 @@ func (c *HotCache) incrementAccess(key []byte) {
 
 		c.casAttempts.Add(1)
 		if c.data.CompareAndSwap(oldData, newData) {
+			c.recordSuccessfulCommit(backoffTime)
 			return
 		}
 		// CAS failed. This is a probabilistic, best-effort access-count
 		// update (see accessSampleRate), so dropping it under sustained
 		// contention only costs a little LFU accuracy.
-		c.backoff(attempt)
+		backoffTime += c.backoff(attempt)
 	}
 	c.writersAborted.Add(1)
 	c.logWriterAborted("increment_access")
 }
 
-// maybeEvict checks if eviction is needed and performs LFU eviction.
-// Uses atomic bool to ensure only one goroutine performs eviction at a time.
-func (c *HotCache) maybeEvict() {
-	// Check if eviction is needed
-	data := c.data.Load()
-	if data == nil {
-		return
-	}
-
-	currentSize := len(data.entries)
-	currentBytes := c.curBytes.Load()
-
-	needEvictBySize := c.maxSize > 0 && currentSize > c.maxSize
-	needEvictByBytes := c.maxBytes > 0 && currentBytes > c.maxBytes
-
+// evictToFit trims entries (least-frequently-used first) so the result
+// satisfies maxSize/maxBytes, given a pending insert already folded into
+// entries/accessCnt and an estimate of the resulting byte usage. It returns
+// the input maps unchanged (same references) if no trimming is needed, or
+// new maps with the LFU entries removed, plus the bytes removed.
+//
+// This is called from within Put's own CAS-attempt loop rather than as a
+// separate operation: eviction has no correctness value if it can be
+// starved indefinitely by concurrent access-count updates from Get, since
+// only Put ever grows the cache and there may be no later Put to retry a
+// dropped eviction. Folding it into the same atomic snapshot as the insert
+// makes limit enforcement a property of that single CAS instead of a
+// separate, losable race.
+func (c *HotCache) evictToFit(
+	entries map[string][]byte,
+	accessCnt map[string]uint64,
+	estimatedBytes int64,
+) (map[string][]byte, map[string]uint64, int64) {
+	needEvictBySize := c.maxSize > 0 && len(entries) > c.maxSize
+	needEvictByBytes := c.maxBytes > 0 && estimatedBytes > c.maxBytes
 	if !needEvictBySize && !needEvictByBytes {
-		return
+		return entries, accessCnt, 0
 	}
 
-	// Try to acquire eviction lock
-	if !c.evicting.CompareAndSwap(false, true) {
-		return // Another goroutine is already evicting
+	// Calculate target size (evict ~25%, but keep at least 1 entry)
+	// Only computed when maxSize > 0; otherwise size-based eviction is disabled
+	var targetSize int
+	if c.maxSize > 0 {
+		targetSize = max(1, c.maxSize*3/4)
 	}
-	defer c.evicting.Store(false)
 
-	// Use CAS loop to atomically update while handling concurrent modifications
-	for attempt := 0; attempt < c.maxCASAttempts; attempt++ {
-		oldData := c.data.Load()
-		if oldData == nil {
-			return
-		}
+	var targetBytes int64
+	if c.maxBytes > 0 {
+		targetBytes = c.maxBytes * 3 / 4
+	}
 
-		currentSize = len(oldData.entries)
+	// Build list of entries sorted by access count (ascending = least frequent first)
+	type entry struct {
+		key   string
+		count uint64
+		size  int64
+	}
 
-		// Calculate target size (evict ~25%, but keep at least 1 entry)
-		// Only computed when maxSize > 0; otherwise size-based eviction is disabled
-		var targetSize int
-		if c.maxSize > 0 {
-			targetSize = max(1, c.maxSize*3/4)
-		}
-
-		var targetBytes int64
-		if c.maxBytes > 0 {
-			targetBytes = c.maxBytes * 3 / 4
-		}
-
-		// Build list of entries sorted by access count (ascending = least frequent first)
-		type entry struct {
-			key   string
-			count uint64
-			size  int64
-		}
-
-		entriesList := make([]entry, 0, currentSize)
-		for k, v := range oldData.entries {
-			count := oldData.accessCnt[k]
-			entriesList = append(entriesList, entry{
-				key:   k,
-				count: count,
-				size:  int64(len(k) + len(v)),
-			})
-		}
-
-		// Sort by access count ascending (least frequently used first)
-		sort.Slice(entriesList, func(i, j int) bool {
-			return entriesList[i].count < entriesList[j].count
+	entriesList := make([]entry, 0, len(entries))
+	for k, v := range entries {
+		entriesList = append(entriesList, entry{
+			key:   k,
+			count: accessCnt[k],
+			size:  int64(len(k) + len(v)),
 		})
-
-		// Determine which entries to keep
-		keysToRemove := make(map[string]bool)
-		keptSize := 0
-		var keptBytes int64
-
-		for _, e := range slices.Backward(entriesList) {
-			wouldExceedSize := c.maxSize > 0 && keptSize >= targetSize
-			wouldExceedBytes := c.maxBytes > 0 && keptBytes+e.size > targetBytes
-
-			if wouldExceedSize || wouldExceedBytes {
-				keysToRemove[e.key] = true
-			} else {
-				keptSize++
-				keptBytes += e.size
-			}
-		}
-
-		if len(keysToRemove) == 0 {
-			return
-		}
-
-		// Create new maps without evicted entries
-		newEntries := make(map[string][]byte, keptSize)
-		newAccessCnt := make(map[string]uint64, keptSize)
-		var bytesRemoved int64
-
-		for k, v := range oldData.entries {
-			if keysToRemove[k] {
-				bytesRemoved += int64(len(k) + len(v))
-				continue
-			}
-			newEntries[k] = v
-			newAccessCnt[k] = oldData.accessCnt[k]
-		}
-
-		newData := &hotCacheData{
-			entries:   newEntries,
-			accessCnt: newAccessCnt,
-		}
-
-		// Try to atomically update
-		c.casAttempts.Add(1)
-		if c.data.CompareAndSwap(oldData, newData) {
-			if c.maxBytes > 0 {
-				c.curBytes.Add(-bytesRemoved)
-			}
-			return
-		}
-		// CAS failed. Eviction is opportunistic and re-checked on every
-		// Put, so under sustained contention it's safe to abandon this
-		// attempt rather than spin: the next Put will retry it.
-		c.backoff(attempt)
 	}
-	c.writersAborted.Add(1)
-	c.logWriterAborted("evict")
+
+	// Sort by access count ascending (least frequently used first)
+	sort.Slice(entriesList, func(i, j int) bool {
+		return entriesList[i].count < entriesList[j].count
+	})
+
+	// Determine which entries to keep
+	keysToRemove := make(map[string]bool)
+	keptSize := 0
+	var keptBytes int64
+
+	for _, e := range slices.Backward(entriesList) {
+		wouldExceedSize := c.maxSize > 0 && keptSize >= targetSize
+		wouldExceedBytes := c.maxBytes > 0 && keptBytes+e.size > targetBytes
+
+		if wouldExceedSize || wouldExceedBytes {
+			keysToRemove[e.key] = true
+		} else {
+			keptSize++
+			keptBytes += e.size
+		}
+	}
+
+	if len(keysToRemove) == 0 {
+		return entries, accessCnt, 0
+	}
+
+	// Create new maps without evicted entries
+	newEntries := make(map[string][]byte, len(entries)-len(keysToRemove))
+	newAccessCnt := make(map[string]uint64, len(entries)-len(keysToRemove))
+	var bytesRemoved int64
+
+	for k, v := range entries {
+		if keysToRemove[k] {
+			bytesRemoved += int64(len(k) + len(v))
+			continue
+		}
+		newEntries[k] = v
+		newAccessCnt[k] = accessCnt[k]
+	}
+
+	return newEntries, newAccessCnt, bytesRemoved
 }

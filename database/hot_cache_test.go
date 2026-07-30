@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -238,10 +239,11 @@ func TestHotCacheLFUEviction(t *testing.T) {
 }
 
 // TestHotCacheConcurrentPutsCompleteUnderHighContention drives many more
-// concurrent writers against a small, heavily-contended cache than
-// TestHotCacheConcurrent and asserts every Put returns within a bounded
-// time. This validates the acceptance criteria that cache insertion cannot
-// spin indefinitely under high contention, using the default retry budget.
+// concurrent writers (and readers, to exercise incrementAccess's CAS path
+// too) against a small, heavily-contended cache than TestHotCacheConcurrent
+// and asserts every call returns within a bounded time. This validates the
+// acceptance criteria that cache insertion cannot spin indefinitely under
+// high contention, using the default retry budget.
 func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 	cache := NewHotCache(50, 0)
 
@@ -251,7 +253,7 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		var wg sync.WaitGroup
-		wg.Add(numGoroutines)
+		wg.Add(numGoroutines * 2)
 		for i := range numGoroutines {
 			go func(id int) {
 				defer wg.Done()
@@ -259,6 +261,18 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 					key := fmt.Appendf(nil, "key-%d", j%20)
 					value := fmt.Appendf(nil, "value-%d-%d", id, j)
 					cache.Put(key, value)
+				}
+			}(i)
+		}
+		// Readers exercise incrementAccess's CAS path (see accessSampleRate)
+		// concurrently with the writers above, so stats.Attempts genuinely
+		// reflects contention across both CAS paths it claims to cover.
+		for i := range numGoroutines {
+			go func(id int) {
+				defer wg.Done()
+				for j := range numOperations {
+					key := fmt.Appendf(nil, "key-%d", j%20)
+					cache.Get(key)
 				}
 			}(i)
 		}
@@ -364,6 +378,44 @@ func TestHotCacheLogsWriterAbortedOnBudgetExhaustion(t *testing.T) {
 	assert.Contains(t, logOutput, "cache=test-cache")
 	assert.Contains(t, logOutput, "op=put")
 	assert.Equal(t, uint64(1), cache.CASStats().WritersAbortedAfterBudget)
+}
+
+// TestHotCacheLogWriterAbortedIsRateLimited forces many deterministic
+// aborts in a tight loop (via maxCASAttempts = 0, so every Put aborts) and
+// asserts logging is rate-limited to at most one line, while the
+// WritersAbortedAfterBudget counter still reflects every single abort. This
+// guards against sustained contention turning CPU churn into log/IO churn.
+func TestHotCacheLogWriterAbortedIsRateLimited(t *testing.T) {
+	cache := NewHotCache(10, 0)
+	cache.maxCASAttempts = 0
+
+	var buf bytes.Buffer
+	cache.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)), "test-cache")
+
+	const attempts = 1000
+	for i := range attempts {
+		cache.Put(fmt.Appendf(nil, "key-%d", i), []byte("value"))
+	}
+
+	assert.Equal(
+		t,
+		uint64(attempts),
+		cache.CASStats().WritersAbortedAfterBudget,
+		"the counter must remain authoritative regardless of log rate limiting",
+	)
+
+	logLines := strings.Count(
+		buf.String(),
+		"hot cache dropped a best-effort update",
+	)
+	assert.Equal(
+		t,
+		1,
+		logLines,
+		"logging must be rate-limited to at most one line per abortLogInterval "+
+			"even though every one of %d Put calls aborted",
+		attempts,
+	)
 }
 
 // TestHotCacheNilLoggerDoesNotPanic confirms that a cache with no logger
@@ -477,4 +529,61 @@ func TestHotCacheSmallMaxSize(t *testing.T) {
 		2,
 		"cache with maxSize=1 should have at most 2 entries",
 	)
+}
+
+// TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention reproduces
+// the reported regression: eviction run as a separate operation after Put
+// could lose its own CAS race against concurrent access-count updates from
+// Get, and since only Put retries eviction, a cache that never received
+// another Put stayed oversized forever. Each round fills a small cache,
+// races heavy Get-driven incrementAccess contention against a single
+// overflow Put, and asserts the final state never exceeds maxSize. Because
+// eviction is now folded into the overflowing Put's own CAS attempt (see
+// HotCache.evictToFit), this must hold on every round, not just on average.
+func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(t *testing.T) {
+	const maxSize = 10
+	const rounds = 50
+	const numReaders = 50
+	const readsPerReader = 200
+
+	for round := range rounds {
+		cache := NewHotCache(maxSize, 0)
+		keys := make([][]byte, maxSize)
+		for i := range keys {
+			keys[i] = fmt.Appendf(nil, "key-%d-%d", round, i)
+			cache.Put(keys[i], []byte("value"))
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(numReaders + 1)
+
+		// Concurrent readers hammer Get() on existing keys, forcing
+		// incrementAccess CAS contention against the overflow Put below.
+		for r := range numReaders {
+			go func(id int) {
+				defer wg.Done()
+				for j := range readsPerReader {
+					cache.Get(keys[(id+j)%maxSize])
+				}
+			}(r)
+		}
+		// One overflow Put racing the readers; this must evict.
+		go func() {
+			defer wg.Done()
+			cache.Put(fmt.Appendf(nil, "key-%d-overflow", round), []byte("value"))
+		}()
+
+		wg.Wait()
+
+		data := cache.data.Load()
+		require.NotNil(t, data)
+		assert.LessOrEqual(
+			t,
+			len(data.entries),
+			maxSize,
+			"round %d: cache must not permanently exceed maxSize after an "+
+				"insert that pushed it over the limit",
+			round,
+		)
+	}
 }
