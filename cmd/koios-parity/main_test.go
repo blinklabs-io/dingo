@@ -49,3 +49,74 @@ func TestCheckResultErrOnPersistedOutcomeAlone(t *testing.T) {
 func TestCheckResultErrNilResult(t *testing.T) {
 	require.NoError(t, checkResultErr(nil))
 }
+
+// TestDsnFromMetadataConfigPostgresProviderOnly guards against the bug where
+// selecting the postgres provider with no config section at all (or one
+// missing every discrete field) produced an empty DSN, which then tripped
+// dingo_db.go's "--metadata-dsn is required" error even though the
+// equivalent Dingo node configuration works — postgres.RegisterProvider's own
+// descriptor default fills host/port/user/database/sslMode/timeZone before
+// Start() ever runs. A nil cfg (provider selected, no config map produced at
+// all) and an empty-but-non-nil map must both resolve to that same working
+// default DSN.
+func TestDsnFromMetadataConfigPostgresProviderOnly(t *testing.T) {
+	want := "host=localhost user=postgres password= dbname=postgres port=5432 sslmode=disable TimeZone=UTC"
+
+	require.Equal(t, want, dsnFromMetadataConfig("postgres", nil))
+	require.Equal(t, want, dsnFromMetadataConfig("postgres", map[string]any{}))
+}
+
+// TestDsnFromMetadataConfigPostgresPartialOverride confirms a partially
+// specified config layers explicit fields on top of the provider defaults
+// rather than falling back to "" once any field is set.
+func TestDsnFromMetadataConfigPostgresPartialOverride(t *testing.T) {
+	dsn := dsnFromMetadataConfig("postgres", map[string]any{"host": "db.example.com"})
+	require.Equal(t,
+		"host=db.example.com user=postgres password= dbname=postgres port=5432 sslmode=disable TimeZone=UTC",
+		dsn,
+	)
+}
+
+// TestDsnFromMetadataConfigMysqlProviderOnly is the mysql counterpart of
+// TestDsnFromMetadataConfigPostgresProviderOnly: selecting the mysql provider
+// alone must resolve to mysql.RegisterProvider's own descriptor default
+// (host=localhost, port=3306, user=root, database=dingo, timeZone=UTC) built
+// via go-sql-driver/mysql's own Config/FormatDSN, matching
+// database/plugin/metadata/mysql's Start() byte-for-byte, rather than an
+// empty DSN.
+func TestDsnFromMetadataConfigMysqlProviderOnly(t *testing.T) {
+	want := "root@tcp(localhost:3306)/dingo?checkConnLiveness=false&parseTime=true&maxAllowedPacket=0&loc=UTC"
+
+	require.Equal(t, want, dsnFromMetadataConfig("mysql", nil))
+	require.Equal(t, want, dsnFromMetadataConfig("mysql", map[string]any{}))
+}
+
+// TestDsnFromMetadataConfigMysqlPartialOverride mirrors
+// TestDsnFromMetadataConfigPostgresPartialOverride for mysql.
+func TestDsnFromMetadataConfigMysqlPartialOverride(t *testing.T) {
+	dsn := dsnFromMetadataConfig("mysql", map[string]any{"database": "myapp"})
+	require.Equal(t,
+		"root@tcp(localhost:3306)/myapp?checkConnLiveness=false&parseTime=true&maxAllowedPacket=0&loc=UTC",
+		dsn,
+	)
+}
+
+// TestDsnFromMetadataConfigDsnKeyTakesPrecedence confirms a flat "dsn" field
+// is still used verbatim ahead of any discrete-field default, for both
+// providers.
+func TestDsnFromMetadataConfigDsnKeyTakesPrecedence(t *testing.T) {
+	require.Equal(t, "custom-postgres-dsn", dsnFromMetadataConfig("postgres", map[string]any{
+		"dsn": "custom-postgres-dsn", "host": "ignored",
+	}))
+	require.Equal(t, "custom-mysql-dsn", dsnFromMetadataConfig("mysql", map[string]any{
+		"dsn": "custom-mysql-dsn", "host": "ignored",
+	}))
+}
+
+// TestDsnFromMetadataConfigUnsupportedPlugin confirms sqlite (and any other
+// non-postgres/mysql plugin) still resolves to "" — dsnFromMetadataConfig is
+// only ever consulted for postgres/mysql; sqlite never uses a DSN.
+func TestDsnFromMetadataConfigUnsupportedPlugin(t *testing.T) {
+	require.Empty(t, dsnFromMetadataConfig("sqlite", nil))
+	require.Empty(t, dsnFromMetadataConfig("sqlite", map[string]any{"host": "db.example.com"}))
+}

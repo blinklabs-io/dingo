@@ -16,13 +16,16 @@ package koiosparity
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -170,6 +173,160 @@ func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.Equal(t, 0, result.EpochsChecked, "epoch 999 was never fetched")
+}
+
+// newTestDingoDB creates an empty, WAL-mode, schema-migrated Dingo
+// metadata.sqlite (matching newTestDingoDataDir) but returns a writable GORM
+// handle to it too, so a test can seed reward_pool_input/reward_pool_output/
+// epoch_summary rows directly before Check opens its own read-only
+// connection against the same file.
+func newTestDingoDB(t *testing.T) (dataDir string, gdb *gorm.DB) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.sqlite")
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", path)), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&models.EpochSummary{},
+		&models.RewardAdaPots{},
+		&models.RewardPoolInput{},
+		&models.RewardPoolOutput{},
+	))
+	return dir, db
+}
+
+// TestCheckAlignsRewardScheduleEpochsEndToEnd is an end-to-end boundary test
+// for the check.go/dingo_db.go epoch-alignment fix, built from Dingo's real
+// snapshot/reward lifecycle layout rather than two same-epoch structs with
+// equal fields (see koiosStakeEpoch/koiosParamEpoch's doc comments and
+// TestGetPoolEpochDataMapAlignsRewardScheduleEpochs in dingo_db_test.go for
+// the field-by-field derivation). For Koios reporting epoch K=10 it seeds:
+//
+//   - epoch_summary at epoch 9 (K-1): the mark stake distribution Praos used
+//     as epoch 10's active-stake basis.
+//   - reward_pool_input at epoch 9 (K-1): DelegatedStake/DelegatorCount.
+//   - reward_pool_output at epoch 9 (K-1): MemberRewardTotal.
+//   - reward_pool_input at epoch 11 (K+1): BlocksProduced/Margin/FixedCost,
+//     describing epoch 10 per rotation.go's buildRewardStateInputs.
+//   - reward_ada_pots at epoch 10 (unshifted — a point-in-time pot balance,
+//     not a delayed reward-calculation input; see ARCHITECTURE.md).
+//   - a decoy reward_pool_input row at epoch 10 itself with wrong values in
+//     every field, so a regression to the naive same-epoch read fails loudly.
+//
+// The cached Koios reference row for epoch 10 is built to match this real
+// data exactly, so a fully correct field-level epoch mapping is the only way
+// Check reports PASS.
+func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	poolHash := testPoolKeyHash(t, 0x03)
+	poolBech32, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolHash))
+	require.NoError(t, err)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	// Decoy at the naive "same epoch as Koios" (10): wrong in every field.
+	badBlocks := uint64(999)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          koiosEpoch,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(1),
+		DelegatorCount: 1,
+		Cost:           types.Uint64(1),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 2)},
+		BlocksProduced: &badBlocks,
+	}).Error)
+
+	// Stake epoch (9 = K-1).
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          9,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(5_000_000),
+		DelegatorCount: 7,
+	}).Error)
+	require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+		Epoch:             9,
+		PoolKeyHash:       poolHash,
+		MemberRewardTotal: types.Uint64(123_456),
+	}).Error)
+
+	// Param epoch (11 = K+1).
+	realBlocks := uint64(4)
+	require.NoError(t, gdb.Create(&models.RewardPoolInput{
+		Epoch:          11,
+		PoolKeyHash:    poolHash,
+		DelegatedStake: types.Uint64(2), // irrelevant at this epoch
+		Cost:           types.Uint64(340_000_000),
+		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+		BlocksProduced: &realBlocks,
+	}).Error)
+
+	// reward_ada_pots stays at koiosEpoch itself (unshifted).
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		[]KoiosPoolEpoch{{
+			Network:       network,
+			Epoch:         koiosEpoch,
+			PoolBech32:    poolBech32,
+			ActiveStake:   "5000000",
+			BlockCnt:      4,
+			Delegators:    7,
+			Margin:        "0.1",
+			FixedCost:     "340000000",
+			MemberRewards: "123456",
+			FetchedAt:     fetchedAt,
+		}},
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			Treasury:  "1000",
+			Reserves:  "2000",
+			Fees:      "300",
+			FetchedAt: fetchedAt,
+		},
+	))
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 1, result.EpochsChecked)
+	require.Empty(t, result.FailEpochs)
+	require.Empty(t, result.ErrorEpochs)
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Empty(t, mismatches, "correct field-level epoch mapping must produce zero mismatches")
 }
 
 func TestEffectiveCheckOutcome(t *testing.T) {

@@ -80,19 +80,45 @@ type DingoEpochData struct {
 	RewardAdaPotsPresent bool
 }
 
-// DingoPoolEpochData holds per-pool reward-input data for one epoch,
-// sourced from the reward_pool_input table written by Dingo's reward calculator.
+// DingoPoolEpochData holds per-pool reward-input data assembled for one Koios
+// reporting epoch. It is built from up to three separate Dingo rows spread
+// across two different reward_pool_input epochs plus one reward_pool_output
+// epoch — see GetPoolEpochDataMap's doc comment and ARCHITECTURE.md's Koios
+// Parity Tracker "Epoch alignment" section for the full derivation of why a
+// single same-numbered row cannot supply every field.
 type DingoPoolEpochData struct {
+	// DelegatedStake/DelegatorCount come from reward_pool_input at the "stake
+	// epoch" (Koios epoch K's K-1): the mark stake distribution Praos actually
+	// used as K's active-stake/reward-calculation basis.
 	DelegatedStake string // lovelace decimal string
-	BlocksProduced uint64
 	DelegatorCount uint64
+
+	// ParamsPresent distinguishes "no reward_pool_input row yet at the
+	// 'param epoch' (K+1)" from "row exists with legitimately zero/empty
+	// BlocksProduced/FixedCost/Margin" — see ComparePoolEpoch, which must
+	// never silently treat the former as a comparison pass.
+	ParamsPresent bool
+	// BlocksProduced/FixedCost/Margin come from reward_pool_input at the
+	// "param epoch" (K+1): that row's BlocksProduced/pool-params fields
+	// describe the epoch immediately before it (K), because
+	// buildRewardStateInputs (ledger/snapshot/rotation.go) stamps them from
+	// evt.PreviousEpoch at capture time, not from the row's own Epoch.
+	BlocksProduced uint64
 	FixedCost      string // lovelace decimal string (reward_pool_input.cost)
 	Margin         string // rational string (e.g. "1/10"); empty when null
 
+	// MemberRewardPresent distinguishes "no reward_pool_output row yet at the
+	// stake epoch (K-1)" — reward calculation not finished for this
+	// pool/epoch — from "row exists with a genuinely empty/zero
+	// MemberRewardTotal". See ComparePoolEpoch: neither absence may be
+	// silently treated as a comparison pass.
+	MemberRewardPresent bool
 	// MemberRewardTotal is reward_pool_output.member_reward_total (lovelace
-	// decimal string); "" when Dingo hasn't yet computed rewards for this
-	// pool/epoch (no reward_pool_output row), which is distinct from a
-	// genuine zero reward.
+	// decimal string) at the stake epoch (K-1) — reward_pool_output and the
+	// reward_pool_input row it was computed alongside always share the same
+	// Epoch value in Dingo's schema (see reward_calculation.go's
+	// stakeRewardEpochsForNewEpoch: both are read/written at
+	// epochs.snapshot).
 	MemberRewardTotal string
 }
 
@@ -226,52 +252,92 @@ func (d *DingoDB) GetEpochData(ctx context.Context, epoch uint64) (*DingoEpochDa
 	return data, nil
 }
 
-// GetPoolEpochDataMap returns all pools with a reward_pool_input row for the
-// given epoch, keyed by pool-key-hash hex, merged with reward_pool_output rows
-// (reward outputs are computed later than inputs, so an output row may not
-// exist yet for a pool that already has an input row — that pool's
-// MemberRewardTotal is simply left ""). One bulk query per table per epoch.
-// ctx is forwarded to the DB driver so that a cancelled context aborts the query.
-func (d *DingoDB) GetPoolEpochDataMap(ctx context.Context, epoch uint64) (map[string]*DingoPoolEpochData, error) {
-	var inputs []models.RewardPoolInput
-	if err := d.db.WithContext(ctx).Where("epoch = ?", epoch).Find(&inputs).Error; err != nil {
-		return nil, fmt.Errorf("reward_pool_input epoch %d: %w", epoch, err)
+// GetPoolEpochDataMap returns per-pool reward data assembled for Koios
+// reporting epoch K, keyed by pool-key-hash hex. Dingo's reward_pool_input/
+// reward_pool_output rows do not use Koios's epoch numbering uniformly across
+// fields, so the caller must resolve and pass two distinct Dingo epoch
+// numbers rather than K itself:
+//
+//   - stakeEpoch (K-1): the mark stake distribution actually used as Praos's
+//     active-stake/reward-calculation basis for K. reward_pool_input's
+//     DelegatedStake/DelegatorCount and reward_pool_output's
+//     MemberRewardTotal are both read at this epoch — reward_calculation.go's
+//     stakeRewardEpochsForNewEpoch computes both from the same
+//     epochs.snapshot value, so input and output always share one Epoch.
+//   - paramEpoch (K+1): reward_pool_input's BlocksProduced and pool
+//     Margin/FixedCost are captured onto the row for the epoch *after* the
+//     one they describe — see ledger/snapshot/rotation.go's
+//     buildRewardStateInputs, which stamps these from evt.PreviousEpoch, not
+//     from the row's own Epoch.
+//
+// See koiosStakeEpoch/koiosParamEpoch in check.go and ARCHITECTURE.md's Koios
+// Parity Tracker "Epoch alignment" section for the full derivation.
+//
+// A pool present in only one of the two reward_pool_input reads (e.g. a pool
+// with a stake-epoch row but whose param-epoch row hasn't been captured yet)
+// still gets an entry — ParamsPresent/MemberRewardPresent record which pieces
+// are actually available so ComparePoolEpoch never mistakes "not yet
+// computed" for "compared and equal". One bulk query per table per epoch
+// (three total), independent of pool count. ctx is forwarded to the DB driver
+// so that a cancelled context aborts the query.
+func (d *DingoDB) GetPoolEpochDataMap(
+	ctx context.Context,
+	stakeEpoch, paramEpoch uint64,
+) (map[string]*DingoPoolEpochData, error) {
+	var stakeInputs []models.RewardPoolInput
+	if err := d.db.WithContext(ctx).Where("epoch = ?", stakeEpoch).Find(&stakeInputs).Error; err != nil {
+		return nil, fmt.Errorf("reward_pool_input stake epoch %d: %w", stakeEpoch, err)
 	}
 
-	m := make(map[string]*DingoPoolEpochData, len(inputs))
-	for i := range inputs {
-		inp := &inputs[i]
-		var blocks uint64
-		if inp.BlocksProduced != nil {
-			blocks = *inp.BlocksProduced
-		}
-		var margin string
-		if inp.Margin != nil && inp.Margin.Rat != nil {
-			margin = inp.Margin.String()
-		}
+	m := make(map[string]*DingoPoolEpochData, len(stakeInputs))
+	for i := range stakeInputs {
+		inp := &stakeInputs[i]
 		m[hex.EncodeToString(inp.PoolKeyHash)] = &DingoPoolEpochData{
 			DelegatedStake: strconv.FormatUint(uint64(inp.DelegatedStake), 10),
-			BlocksProduced: blocks,
 			DelegatorCount: inp.DelegatorCount,
-			FixedCost:      strconv.FormatUint(uint64(inp.Cost), 10),
-			Margin:         margin,
+		}
+	}
+
+	var paramInputs []models.RewardPoolInput
+	if err := d.db.WithContext(ctx).Where("epoch = ?", paramEpoch).Find(&paramInputs).Error; err != nil {
+		return nil, fmt.Errorf("reward_pool_input param epoch %d: %w", paramEpoch, err)
+	}
+	for i := range paramInputs {
+		inp := &paramInputs[i]
+		key := hex.EncodeToString(inp.PoolKeyHash)
+		data, ok := m[key]
+		if !ok {
+			// Present at the param epoch but not the stake epoch (e.g. a
+			// freshly registered pool) — still record what's available
+			// rather than dropping it; DelegatedStake/DelegatorCount stay at
+			// their zero value.
+			data = &DingoPoolEpochData{}
+			m[key] = data
+		}
+		data.ParamsPresent = true
+		if inp.BlocksProduced != nil {
+			data.BlocksProduced = *inp.BlocksProduced
+		}
+		data.FixedCost = strconv.FormatUint(uint64(inp.Cost), 10)
+		if inp.Margin != nil && inp.Margin.Rat != nil {
+			data.Margin = inp.Margin.String()
 		}
 	}
 
 	var outputs []models.RewardPoolOutput
-	if err := d.db.WithContext(ctx).Where("epoch = ?", epoch).Find(&outputs).Error; err != nil {
-		return nil, fmt.Errorf("reward_pool_output epoch %d: %w", epoch, err)
+	if err := d.db.WithContext(ctx).Where("epoch = ?", stakeEpoch).Find(&outputs).Error; err != nil {
+		return nil, fmt.Errorf("reward_pool_output epoch %d: %w", stakeEpoch, err)
 	}
 	for i := range outputs {
 		out := &outputs[i]
-		// reward_pool_input is captured before reward_pool_output is computed,
-		// so every output row should have a matching input row already in m.
-		// Skip silently on the (unexpected) alternative rather than
-		// synthesizing a partial entry with zeroed input fields, which would
-		// misreport as a set of spurious value_mismatch results below.
-		if data, ok := m[hex.EncodeToString(out.PoolKeyHash)]; ok {
-			data.MemberRewardTotal = strconv.FormatUint(uint64(out.MemberRewardTotal), 10)
+		key := hex.EncodeToString(out.PoolKeyHash)
+		data, ok := m[key]
+		if !ok {
+			data = &DingoPoolEpochData{}
+			m[key] = data
 		}
+		data.MemberRewardPresent = true
+		data.MemberRewardTotal = strconv.FormatUint(uint64(out.MemberRewardTotal), 10)
 	}
 	return m, nil
 }

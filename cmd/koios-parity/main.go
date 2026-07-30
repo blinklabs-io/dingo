@@ -36,9 +36,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
 
@@ -206,23 +208,27 @@ func intConfigValue(cfg map[string]any, key string) int {
 // plugins.storage.metadata.config map. A flat "dsn" key (the pattern used by
 // this repo's own k8s examples, e.g. examples/dingo-gov-lens/k8s/
 // dingo-values.yaml) is used verbatim; otherwise it's assembled from discrete
-// fields the same way database/plugin/metadata/{postgres,mysql}'s Start()
-// methods do internally, so this tool connects with the exact credentials the
-// running Dingo node was configured with. Returns "" if cfg has neither.
+// fields the same way database/plugin/metadata/{postgres,mysql}'s own
+// RegisterProvider descriptor defaults + Start() methods do internally, so
+// this tool connects with the exact credentials the running Dingo node was
+// configured with.
+//
+// Selecting the postgres/mysql provider with no config section at all (or one
+// missing every discrete field) is valid Dingo configuration: the provider's
+// own descriptor default (see postgres/mysql's RegisterProvider) fills every
+// field before Start() ever runs, so it always has a complete, connectable
+// DSN. cfg may be nil — map indexing on a nil map is safe in Go and yields
+// the same "absent" result as an empty map — so this always returns a
+// non-empty DSN for a supported plugin rather than requiring the caller to
+// have supplied at least one field.
 func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
-	if cfg == nil {
-		return ""
-	}
 	if dsn, ok := stringConfigValue(cfg, "dsn"); ok && dsn != "" {
 		return dsn
 	}
 
-	host, hasHost := stringConfigValue(cfg, "host")
-	user, hasUser := stringConfigValue(cfg, "user")
-	database, hasDatabase := stringConfigValue(cfg, "database")
-	if !hasHost && !hasUser && !hasDatabase {
-		return "" // no discrete fields set either; nothing to build a DSN from.
-	}
+	host, _ := stringConfigValue(cfg, "host")
+	user, _ := stringConfigValue(cfg, "user")
+	database, _ := stringConfigValue(cfg, "database")
 	password, _ := stringConfigValue(cfg, "password")
 	sslMode, _ := stringConfigValue(cfg, "sslMode")
 	timeZone, _ := stringConfigValue(cfg, "timeZone")
@@ -230,6 +236,11 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 
 	switch plugin {
 	case "postgres":
+		// Defaults match postgres.RegisterProvider's descriptor default
+		// (Config{Host: "localhost", Port: 5432, User: "postgres", Database:
+		// "postgres", SSLMode: "disable", TimeZone: "UTC"}), which is what a
+		// bare `provider: postgres` config section resolves to before
+		// Start() builds its connection string the same way below.
 		if host == "" {
 			host = "localhost"
 		}
@@ -242,6 +253,9 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 		if sslMode == "" {
 			sslMode = "disable"
 		}
+		if timeZone == "" {
+			timeZone = "UTC"
+		}
 		if port == 0 {
 			port = 5432
 		}
@@ -252,12 +266,18 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 			"dbname=" + database,
 			"port=" + strconv.Itoa(port),
 			"sslmode=" + sslMode,
-		}
-		if timeZone != "" {
-			parts = append(parts, "TimeZone="+timeZone)
+			"TimeZone=" + timeZone,
 		}
 		return strings.Join(parts, " ")
 	case "mysql":
+		// Defaults match mysql.RegisterProvider's descriptor default
+		// (Config{Host: "localhost", Port: 3306, User: "root", Database:
+		// "dingo", TimeZone: "UTC"}). The DSN itself is built with
+		// go-sql-driver/mysql's own Config/FormatDSN — the same type
+		// database/plugin/metadata/mysql's Start() feeds to gorm — rather
+		// than hand-formatting the connection string, so query-parameter
+		// encoding (parseTime, allowNativePasswords, loc, tls) stays
+		// byte-for-byte consistent with the real provider.
 		if host == "" {
 			host = "localhost"
 		}
@@ -267,14 +287,31 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 		if database == "" {
 			database = "dingo"
 		}
+		if timeZone == "" {
+			timeZone = "UTC"
+		}
 		if port == 0 {
 			port = 3306
 		}
-		params := "parseTime=true"
-		if sslMode != "" {
-			params += "&tls=" + sslMode
+		mcfg := mysqldriver.Config{
+			User:                 user,
+			Passwd:               password,
+			Net:                  "tcp",
+			Addr:                 fmt.Sprintf("%s:%d", host, port),
+			DBName:               database,
+			ParseTime:            true,
+			AllowNativePasswords: true,
 		}
-		return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?%s", user, password, host, port, database, params)
+		loc, err := time.LoadLocation(timeZone)
+		if err != nil {
+			loc = time.UTC
+		}
+		mcfg.Loc = loc
+		mcfg.Params = map[string]string{"loc": timeZone}
+		if sslMode != "" {
+			mcfg.Params["tls"] = sslMode
+		}
+		return mcfg.FormatDSN()
 	default:
 		return ""
 	}

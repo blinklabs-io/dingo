@@ -317,48 +317,71 @@ func ComparePoolEpoch(
 		})
 	}
 
-	// blocks_produced
-	dingoBlockStr := strconv.FormatUint(dingoPool.BlocksProduced, 10)
-	koiosBlockStr := strconv.Itoa(koiosPool.BlockCnt)
-	if dingoBlockStr != koiosBlockStr {
+	// blocks_produced/fixed_cost/margin all come from the same reward_pool_input
+	// "param epoch" (K+1) row — see DingoPoolEpochData's doc comment. That row
+	// not existing yet is never a silent pass: within the grace window it may
+	// simply not be captured yet (reference_lag); past it, it's a genuine gap
+	// in Dingo's own computation (dingo_db_missing).
+	if !dingoPool.ParamsPresent {
+		cat := CategoryDBMissing
+		if graceHours > 0 && !epochEndTime.IsZero() &&
+			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			cat = CategoryReferenceLag
+		}
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
 			PoolBech32: koiosPool.PoolBech32,
-			Field:      "blocks_produced",
-			DingoValue: dingoBlockStr,
-			KoiosValue: koiosBlockStr,
-			Category:   CategoryValueMismatch,
+			Field:      "reward_pool_input_params",
+			DingoValue: "",
+			KoiosValue: "present",
+			Category:   cat,
 			CheckedAt:  now,
 		})
-	}
+	} else {
+		// blocks_produced
+		dingoBlockStr := strconv.FormatUint(dingoPool.BlocksProduced, 10)
+		koiosBlockStr := strconv.Itoa(koiosPool.BlockCnt)
+		if dingoBlockStr != koiosBlockStr {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "blocks_produced",
+				DingoValue: dingoBlockStr,
+				KoiosValue: koiosBlockStr,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
 
-	// fixed_cost — reward_pool_input.cost vs Koios pool_history.fixed_cost.
-	if koiosPool.FixedCost != "" && dingoPool.FixedCost != koiosPool.FixedCost {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			PoolBech32: koiosPool.PoolBech32,
-			Field:      "fixed_cost",
-			DingoValue: dingoPool.FixedCost,
-			KoiosValue: koiosPool.FixedCost,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
-	}
+		// fixed_cost — reward_pool_input.cost vs Koios pool_history.fixed_cost.
+		if koiosPool.FixedCost != "" && dingoPool.FixedCost != koiosPool.FixedCost {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "fixed_cost",
+				DingoValue: dingoPool.FixedCost,
+				KoiosValue: koiosPool.FixedCost,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
 
-	// margin — compare as rationals so Koios "0.1" matches Dingo "1/10".
-	if koiosPool.Margin != "" && dingoPool.Margin != "" && !rationalsEqual(dingoPool.Margin, koiosPool.Margin) {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			PoolBech32: koiosPool.PoolBech32,
-			Field:      "margin",
-			DingoValue: dingoPool.Margin,
-			KoiosValue: koiosPool.Margin,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
+		// margin — compare as rationals so Koios "0.1" matches Dingo "1/10".
+		if koiosPool.Margin != "" && dingoPool.Margin != "" && !rationalsEqual(dingoPool.Margin, koiosPool.Margin) {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "margin",
+				DingoValue: dingoPool.Margin,
+				KoiosValue: koiosPool.Margin,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
 	}
 
 	// member_rewards — reward_pool_output.member_reward_total vs Koios
@@ -378,18 +401,42 @@ func ComparePoolEpoch(
 	// on each side, so their difference isn't even guaranteed to cancel out
 	// to the exact lovelace. Comparing either would produce mismatches that
 	// reflect Koios's own reporting approximation, not a real Dingo bug.
-	if koiosPool.MemberRewards != "" && dingoPool.MemberRewardTotal != "" &&
-		dingoPool.MemberRewardTotal != koiosPool.MemberRewards {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			PoolBech32: koiosPool.PoolBech32,
-			Field:      "member_rewards",
-			DingoValue: dingoPool.MemberRewardTotal,
-			KoiosValue: koiosPool.MemberRewards,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
+	//
+	// A missing reward_pool_output row (MemberRewardPresent == false) is
+	// never treated as "nothing to compare" when Koios has a value: within
+	// the grace window it may simply not be computed yet (reference_lag,
+	// ERROR); past it, it's a genuine gap in Dingo's own computation
+	// (dingo_db_missing, ERROR). Neither case can produce a PASS.
+	if koiosPool.MemberRewards != "" {
+		switch {
+		case !dingoPool.MemberRewardPresent:
+			cat := CategoryDBMissing
+			if graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+				cat = CategoryReferenceLag
+			}
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "member_rewards",
+				DingoValue: "",
+				KoiosValue: koiosPool.MemberRewards,
+				Category:   cat,
+				CheckedAt:  now,
+			})
+		case dingoPool.MemberRewardTotal != koiosPool.MemberRewards:
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "member_rewards",
+				DingoValue: dingoPool.MemberRewardTotal,
+				KoiosValue: koiosPool.MemberRewards,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
 	}
 
 	return out

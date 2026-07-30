@@ -161,6 +161,7 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 	}
 	dingo := &DingoPoolEpochData{
 		DelegatedStake: "1000",
+		ParamsPresent:  true,
 		BlocksProduced: 2,
 		DelegatorCount: 3,
 		FixedCost:      "340000000",
@@ -180,6 +181,44 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 	require.Equal(t, "margin", ms[0].Field)
 }
 
+// TestComparePoolEpochParamsNotPresent guards against a false PASS when
+// reward_pool_input hasn't been captured yet at the "param epoch" (K+1):
+// blocks_produced/fixed_cost/margin must never be silently skipped in a way
+// that lets the epoch read as PASS. Within the grace window this is
+// reference_lag (ERROR); past it, dingo_db_missing (ERROR) — never PASS and
+// never a spurious value_mismatch against zeroed fields.
+func TestComparePoolEpochParamsNotPresent(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "1000",
+		BlockCnt:    2,
+		Delegators:  3,
+		FixedCost:   "340000000",
+		Margin:      "0.1",
+	}
+	dingo := &DingoPoolEpochData{
+		DelegatedStake: "1000",
+		DelegatorCount: 3,
+		ParamsPresent:  false,
+	}
+
+	// Historical (outside grace, or no grace configured): dingo_db_missing.
+	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, "reward_pool_input_params", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+
+	// Recent (epoch closed within the grace window): reference_lag, not PASS.
+	recentClose := now.Add(-time.Hour)
+	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose)
+	require.Len(t, ms, 1)
+	require.Equal(t, "reward_pool_input_params", ms[0].Field)
+	require.Equal(t, CategoryReferenceLag, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
 func TestComparePoolEpochMemberRewards(t *testing.T) {
 	now := time.Now()
 	koios := &KoiosPoolEpoch{
@@ -192,23 +231,74 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 		MemberRewards: "123456789",
 	}
 	dingo := &DingoPoolEpochData{
-		DelegatedStake:    "1000",
-		BlocksProduced:    2,
-		DelegatorCount:    3,
-		FixedCost:         "340000000",
-		Margin:            "1/10",
-		MemberRewardTotal: "123456789",
+		DelegatedStake:      "1000",
+		ParamsPresent:       true,
+		BlocksProduced:      2,
+		DelegatorCount:      3,
+		FixedCost:           "340000000",
+		Margin:              "1/10",
+		MemberRewardPresent: true,
+		MemberRewardTotal:   "123456789",
 	}
 	require.Empty(t, ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}))
 
 	// Reward calculation not yet finished for this pool/epoch: Dingo has no
-	// reward_pool_output row, so the field is skipped rather than flagged.
+	// reward_pool_output row. This must NEVER read as a comparison pass —
+	// see TestComparePoolEpochMemberRewardsNotPresent for the recent
+	// (reference_lag) vs historical (dingo_db_missing) split this guards.
+	dingo.MemberRewardPresent = false
 	dingo.MemberRewardTotal = ""
-	require.Empty(t, ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}))
+	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1, "a missing reward_pool_output row must never be silently skipped")
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+	dingo.MemberRewardPresent = true
 
 	dingo.MemberRewardTotal = "1"
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+}
+
+// TestComparePoolEpochMemberRewardsNotPresent proves a missing
+// reward_pool_output row can never yield PASS regardless of how recently the
+// epoch closed — only the mismatch category differs (reference_lag for a
+// recent epoch that may simply not be computed yet vs dingo_db_missing for a
+// long-settled one), per the reviewer finding that this condition must not be
+// conflated with "nothing to compare".
+func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:    "pool1test",
+		ActiveStake:   "1000",
+		BlockCnt:      2,
+		Delegators:    3,
+		MemberRewards: "123456789",
+	}
+	dingo := &DingoPoolEpochData{
+		DelegatedStake:      "1000",
+		DelegatorCount:      3,
+		ParamsPresent:       true,
+		BlocksProduced:      2,
+		MemberRewardPresent: false,
+	}
+
+	// Historical: outside the grace window (or no grace configured) — a
+	// genuine gap in Dingo's own computation.
+	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.NotEqual(t, StatusPass, DetermineStatus(ms))
+
+	// Recent: epoch closed within the grace window — may simply not be
+	// computed yet, but still not a pass.
+	recentClose := now.Add(-time.Hour)
+	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose)
+	require.Len(t, ms, 1)
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryReferenceLag, ms[0].Category)
+	require.NotEqual(t, StatusPass, DetermineStatus(ms))
 }

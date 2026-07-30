@@ -208,6 +208,50 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	return result, nil
 }
 
+// koiosStakeEpoch returns the Dingo epoch whose reward_pool_input/
+// reward_pool_output rows and epoch_summary/mark stake distribution actually
+// correspond to Koios reporting epoch koiosEpoch's active stake and reward
+// calculation ("K-1").
+//
+// This is not the same epoch number Koios reports things under, because
+// Dingo's reward_pool_input.Epoch is stamped by *capture time*
+// (ledger/snapshot/rotation.go's saveSnapshotInTxn, called with
+// epoch=evt.NewEpoch), while the same row's DelegatedStake/DelegatorCount are
+// the "go" stake distribution reward_calculation.go's
+// stakeRewardEpochsForNewEpoch actually consumes one epoch later, at
+// epochs.snapshot = epochs.performance - 1 (performance being the true,
+// unambiguous calendar epoch whose blocks are being measured — the same
+// epoch Koios reports the corresponding pool_history/epoch_info row under).
+// reward_pool_output.Epoch is written from that same epochs.snapshot value in
+// the same reward-application call, so it shares this offset with
+// reward_pool_input's stake fields exactly. See ARCHITECTURE.md's Koios
+// Parity Tracker "Epoch alignment" section for the full derivation and
+// koiosParamEpoch below for the distinct offset reward_pool_input's
+// BlocksProduced/Margin/FixedCost fields need instead.
+//
+// ok is false only for koiosEpoch == 0, which has no valid stake epoch at
+// all (checkEpoch never reaches this for epoch 0 in practice — it's already
+// filtered out by the PreStaking marker fetch commits for epochs 0-1 — but
+// the guard avoids a uint64 underflow if that invariant is ever violated).
+func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
+	if koiosEpoch == 0 {
+		return 0, false
+	}
+	return koiosEpoch - 1, true
+}
+
+// koiosParamEpoch returns the Dingo reward_pool_input epoch whose
+// BlocksProduced and pool Margin/FixedCost fields describe Koios reporting
+// epoch koiosEpoch ("K+1"). ledger/snapshot/rotation.go's
+// buildRewardStateInputs stamps these fields from evt.PreviousEpoch (the just
+// -ended epoch) onto the row captured for the *new* epoch — one epoch after
+// the epoch they describe — independent of the stake-epoch offset above,
+// which governs the same row's DelegatedStake/DelegatorCount instead. See
+// koiosStakeEpoch's doc comment and ARCHITECTURE.md.
+func koiosParamEpoch(koiosEpoch uint64) uint64 {
+	return koiosEpoch + 1
+}
+
 // checkEpoch performs the full comparison for one epoch and persists results.
 //
 // Epoch aggregates (epoch_summary, reward_ada_pots) are compared against the
@@ -215,6 +259,15 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 // against Koios pool_history rows using a single bulk DB query per epoch.
 // Koios defines epoch pool membership; pools in Dingo but not in Koios are
 // flagged as pool_only_dingo.
+//
+// Dingo's reward_pool_input/reward_pool_output/epoch_summary rows do not
+// share Koios's epoch numbering uniformly across fields — see
+// koiosStakeEpoch/koiosParamEpoch above — so this function resolves the
+// distinct Dingo epoch numbers each field group actually needs rather than
+// querying epoch itself for everything. reward_ada_pots (treasury/reserves/
+// fees, compared in CompareEpochTotals) is unaffected and still read at
+// epoch itself: it is a point-in-time ledger pot balance captured at the
+// boundary into that same epoch, not a delayed reward-calculation input.
 func checkEpoch(
 	ctx context.Context,
 	cache *Cache,
@@ -267,27 +320,71 @@ func checkEpoch(
 
 	var allMismatches []CheckMismatch
 
-	// 1. Compare epoch-level aggregates.
-	dingoEpoch, epochErr := dingo.GetEpochData(ctx, epoch)
+	// Resolve the distinct Dingo epoch numbers this Koios epoch's fields
+	// actually live under — see koiosStakeEpoch/koiosParamEpoch. stakeEpoch is
+	// always valid here: PreStaking (checked above) already excludes Koios
+	// epochs 0-1, so epoch >= 2 and stakeEpoch = epoch-1 >= 1.
+	stakeEpoch, hasStakeEpoch := koiosStakeEpoch(epoch)
+	paramEpoch := koiosParamEpoch(epoch)
+
+	// 1. Compare epoch-level aggregates. total_active_stake needs the mark
+	// stake distribution actually used as this epoch's reward/leader-election
+	// basis (epoch_summary at stakeEpoch), not epoch_summary at epoch itself.
+	var dingoEpochStake *DingoEpochData
+	var epochErr error
+	if hasStakeEpoch {
+		dingoEpochStake, epochErr = dingo.GetEpochData(ctx, stakeEpoch)
+	} else {
+		epochErr = fmt.Errorf("epoch %d: no valid stake epoch (predates staking)", epoch)
+	}
 	allMismatches = append(allMismatches,
-		CompareEpochAggregates(network, epoch, koiosEpoch, dingoEpoch, epochErr, now, graceHours)...,
+		CompareEpochAggregates(network, epoch, koiosEpoch, dingoEpochStake, epochErr, now, graceHours)...,
 	)
 
 	// 1b. Compare /totals fields (treasury, reserves, and totals' own
 	// fees/reward) — independent of the /epoch_info comparison above despite
-	// overlapping field names; see CompareEpochTotals. A missing totals row
-	// (cached before this check existed) is not an error — skip silently.
+	// overlapping field names; see CompareEpochTotals. Unlike total_active_stake
+	// above, reward_ada_pots is a point-in-time ledger pot balance captured at
+	// the boundary into epoch itself (not a delayed reward-calculation input),
+	// so it is read at epoch, not stakeEpoch — see ARCHITECTURE.md. A missing
+	// totals row (cached before this check existed) is not an error — skip
+	// silently. CompareEpochTotals has no fetchErr parameter (unlike
+	// CompareEpochAggregates) since it deliberately skips on a nil dingoEpoch
+	// rather than duplicate-report a DB error under a second field name; a
+	// real query failure here is reported explicitly below instead.
+	dingoEpochPots, potsErr := dingo.GetEpochData(ctx, epoch)
+	if potsErr != nil {
+		allMismatches = append(allMismatches, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "reward_ada_pots_fetch",
+			DingoValue: fmt.Sprintf("error: %v", potsErr),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		})
+		dingoEpochPots = nil
+	}
 	koiosTotals, totalsErr := cache.GetTotals(network, epoch)
 	if totalsErr != nil && !errors.Is(totalsErr, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("get koios totals: %w", totalsErr)
 	}
 	allMismatches = append(allMismatches,
-		CompareEpochTotals(network, epoch, koiosTotals, dingoEpoch, now)...,
+		CompareEpochTotals(network, epoch, koiosTotals, dingoEpochPots, now)...,
 	)
 
-	// 2. Bulk-load all pool reward inputs for this epoch from Dingo's DB.
-	// This is a single query regardless of how many pools Koios knows about.
-	dingoPoolMap, dingoPoolErr := dingo.GetPoolEpochDataMap(ctx, epoch)
+	// 2. Bulk-load all pool reward data for this epoch from Dingo's DB,
+	// spread across stakeEpoch (active stake/delegator count/member rewards)
+	// and paramEpoch (blocks produced/margin/fixed cost) — see
+	// GetPoolEpochDataMap's doc comment. Two-to-three queries regardless of
+	// how many pools Koios knows about.
+	var dingoPoolMap map[string]*DingoPoolEpochData
+	var dingoPoolErr error
+	if hasStakeEpoch {
+		dingoPoolMap, dingoPoolErr = dingo.GetPoolEpochDataMap(ctx, stakeEpoch, paramEpoch)
+	} else {
+		dingoPoolErr = epochErr
+	}
 	if dingoPoolErr != nil {
 		// Record the DB failure and skip all per-pool comparisons.
 		// Continuing with dingoPoolMap == nil would make every Koios pool appear

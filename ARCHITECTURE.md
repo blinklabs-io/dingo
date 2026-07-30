@@ -2329,8 +2329,20 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode
   - `postgres` / `mysql`: a `dsn` config field is used verbatim; otherwise a
     DSN is assembled from discrete host/port/user/password/database/sslMode/
-    timeZone fields the same way
-    `database/plugin/metadata/{postgres,mysql}`'s own `Start()` does
+    timeZone fields, defaulting any field left unset to that provider's own
+    `RegisterProvider` descriptor default (e.g. postgres:
+    `host=localhost user=postgres dbname=postgres sslmode=disable`; mysql:
+    `host=localhost user=root database=dingo`) and building the connection
+    string the same way `database/plugin/metadata/{postgres,mysql}`'s own
+    `Start()` does (mysql via `go-sql-driver/mysql`'s own `Config`/
+    `FormatDSN`, so query-parameter encoding matches exactly). Selecting
+    `postgres`/`mysql` with no config section at all (or one missing every
+    discrete field) is valid Dingo configuration — the provider applies its
+    own complete defaults — so `dsnFromMetadataConfig` always resolves to a
+    working DSN for those two plugins rather than returning `""` and tripping
+    `dingo_db.go`'s `--metadata-dsn is required` error; that error remains as
+    a defensive check for direct `OpenDingoDB` callers that bypass this
+    resolution entirely.
 
   Tables queried: `reward_pool_input` (per-pool stake/blocks/delegators),
   `reward_pool_output` (per-pool `member_reward_total`, merged into the same
@@ -2338,6 +2350,48 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   its output row is computed), `epoch_summary` (total active stake, pool
   count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
   rewards — Dingo's full AdaPots).
+
+  **Epoch alignment.** Koios reports everything for a reporting epoch K, but
+  Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
+  all use K for the same ledger period, so `checkEpoch` (`check.go`) never
+  reads them at K directly — it resolves two distinct Dingo epoch numbers via
+  `koiosStakeEpoch`/`koiosParamEpoch` and reads each field group from the one
+  that actually matches:
+  - **stake epoch (K-1):** `epoch_summary.TotalActiveStake` and
+    `reward_pool_input`'s `DelegatedStake`/`DelegatorCount` are the mark stake
+    distribution Praos actually used as K's active-stake/reward-calculation
+    basis — derived from `ledger/reward_calculation.go`'s
+    `stakeRewardEpochsForNewEpoch` (`epochs.snapshot = epochs.performance - 1`,
+    where `epochs.performance` is the unambiguous calendar epoch whose blocks
+    are being measured, i.e. K itself). `reward_pool_output` (`member_reward_
+    total`) is written from that same `epochs.snapshot` value in the same
+    reward-application call, so it is read at the identical epoch as
+    `reward_pool_input`'s stake fields, never at K.
+  - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced`, `Margin`,
+    and `Cost` (fixed cost) describe the epoch *before* the row's own Epoch —
+    `ledger/snapshot/rotation.go`'s `buildRewardStateInputs` stamps them from
+    `evt.PreviousEpoch` onto the row captured for the new epoch at snapshot
+    time, independent of the stake-epoch offset above (which governs that
+    same row's `DelegatedStake`/`DelegatorCount` instead).
+  - `reward_ada_pots` (treasury/reserves/fees, compared in
+    `CompareEpochTotals`) is unaffected by either offset: it is a
+    point-in-time ledger pot balance captured at the boundary into K itself,
+    not a delayed reward-calculation input, so it is still read at K.
+
+  `GetPoolEpochDataMap` takes both `stakeEpoch` and `paramEpoch` explicitly and
+  merges up to three separate queries (`reward_pool_input` at each epoch plus
+  `reward_pool_output` at `stakeEpoch`) into one per-pool map. A pool present
+  in only one of the two `reward_pool_input` reads (e.g. captured at the
+  param epoch but not yet at the stake epoch) still gets an entry;
+  `DingoPoolEpochData.ParamsPresent`/`MemberRewardPresent` record which field
+  groups actually resolved so `ComparePoolEpoch` never mistakes "not yet
+  captured at that specific epoch" for "compared and equal" — see the mismatch
+  categories subsection below for how presence gaps are classified. This
+  derivation could not be verified empirically against live Koios data from
+  this environment the way `CompareEpochTotals`'s field pairing was (see
+  below); it is derived directly from `stakeRewardEpochsForNewEpoch` and
+  `buildRewardStateInputs`, and should be spot-checked against a real synced
+  preview/preprod node's reward tables before being treated as final.
 
   `/totals` and `/epoch_info` both have a `fees` field (and near-identically
   named `reward` / `total_rewards` fields), but they are *not* the same
@@ -2399,7 +2453,18 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   systematically diverges from Dingo's exact value for any pool with owner
   stake. `member_rewards` has no such approximation (it's a direct sum of
   per-delegator reward amounts) and is compared 1:1 against
-  `reward_pool_output.member_reward_total`.
+  `reward_pool_output.member_reward_total` — but only once
+  `DingoPoolEpochData.MemberRewardPresent` is true. An absent
+  `reward_pool_output` row is never treated as "nothing to compare": within
+  `--grace-hours` of the epoch closing it is `reference_lag` (reward
+  calculation may simply not have finished yet); past that window it is
+  `dingo_db_missing` (a genuine gap in Dingo's own computation). Both are
+  `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
+  presence/grace split to `reward_pool_input`'s param-epoch fields
+  (`blocks_produced`/`fixed_cost`/`margin`, reported together as
+  `reward_pool_input_params` when absent) via `DingoPoolEpochData.
+  ParamsPresent`, for the same reason: a not-yet-captured param-epoch row must
+  not silently compare as zero blocks/cost/margin against Koios's real values.
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
