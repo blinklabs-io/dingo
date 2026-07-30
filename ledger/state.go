@@ -54,7 +54,6 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"gorm.io/gorm"
 )
 
 const (
@@ -66,14 +65,6 @@ const (
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
 )
-
-type metadataDbReader interface {
-	DB() *gorm.DB
-}
-
-type metadataReadDbReader interface {
-	ReadDB() *gorm.DB
-}
 
 // DatabaseOperation represents an asynchronous database operation
 type DatabaseOperation struct {
@@ -168,7 +159,10 @@ func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
 // sendResult delivers result on op.ResultChan. It blocks until send succeeds so
 // errors are not dropped when the channel is temporarily full (callers should
 // use a buffered ResultChan, e.g. cap 1, as in SubmitAsyncDBOperation).
-func (p *DatabaseWorkerPool) sendResult(op DatabaseOperation, result DatabaseResult) {
+func (p *DatabaseWorkerPool) sendResult(
+	op DatabaseOperation,
+	result DatabaseResult,
+) {
 	if op.ResultChan == nil {
 		return
 	}
@@ -182,7 +176,9 @@ func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
 		p.mu.Unlock()
 		p.sendResult(
 			op,
-			DatabaseResult{Error: errors.New("database worker pool is shut down")},
+			DatabaseResult{
+				Error: errors.New("database worker pool is shut down"),
+			},
 		)
 		return
 	}
@@ -1728,12 +1724,15 @@ func (ls *LedgerState) handleSlotTicks() {
 			// block processing runs. Subscribers that need the nonce should wait
 			// for the block-based event or query it later.
 			epochTransitionEvent := event.EpochTransitionEvent{
-				PreviousEpoch:   tick.Epoch - 1,
-				NewEpoch:        tick.Epoch,
-				BoundarySlot:    tick.Slot,
-				EpochNonce:      nil,
-				ProtocolVersion: ls.protocolMajorForEvent(currentPParams, currentEra),
-				SnapshotSlot:    snapshotSlot,
+				PreviousEpoch: tick.Epoch - 1,
+				NewEpoch:      tick.Epoch,
+				BoundarySlot:  tick.Slot,
+				EpochNonce:    nil,
+				ProtocolVersion: ls.protocolMajorForEvent(
+					currentPParams,
+					currentEra,
+				),
+				SnapshotSlot: snapshotSlot,
 			}
 			ls.config.EventBus.Publish(
 				event.EpochTransitionEventType,
@@ -2503,11 +2502,16 @@ func (ls *LedgerState) processChainIteratorRollback(
 		!bytes.Equal(chainTip.Point.Hash, point.Hash) {
 		ls.config.Logger.Debug(
 			"stale chain iterator rollback detected, restarting ledger pipeline",
-			"component", "ledger",
-			"rollback_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"chain_tip_slot", chainTip.Point.Slot,
-			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			"component",
+			"ledger",
+			"rollback_slot",
+			point.Slot,
+			"rollback_hash",
+			hex.EncodeToString(point.Hash),
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"chain_tip_hash",
+			hex.EncodeToString(chainTip.Point.Hash),
 		)
 		return errRestartLedgerPipeline
 	}
@@ -2797,7 +2801,9 @@ func (ls *LedgerState) SecurityParam() int {
 
 func (ls *LedgerState) securityParamForEraOrDefault(eraId uint) int {
 	if k, ok := ls.securityParamForEra(eraId); ok {
-		return int(k) // #nosec G115 -- k came from a non-negative int genesis field
+		return int(
+			k,
+		) // #nosec G115 -- k came from a non-negative int genesis field
 	}
 	return blockfetchBatchSlotThresholdDefault
 }
@@ -2906,19 +2912,27 @@ func (ls *LedgerState) ledgerReadChain(
 			if reconcileRetries >= maxReconcileRetries {
 				ls.config.Logger.Error(
 					"exhausted ledger rollback retries for missing chain iterator start point",
-					"error", err,
-					"start_slot", startPoint.Slot,
-					"start_hash", hex.EncodeToString(startPoint.Hash),
-					"retries", reconcileRetries,
-					"max_retries", maxReconcileRetries,
+					"error",
+					err,
+					"start_slot",
+					startPoint.Slot,
+					"start_hash",
+					hex.EncodeToString(startPoint.Hash),
+					"retries",
+					reconcileRetries,
+					"max_retries",
+					maxReconcileRetries,
 				)
 				return
 			}
 			ls.config.Logger.Warn(
 				"chain iterator start point not on chain, attempting ledger rollback",
-				"error", err,
-				"start_slot", startPoint.Slot,
-				"start_hash", hex.EncodeToString(startPoint.Hash),
+				"error",
+				err,
+				"start_slot",
+				startPoint.Slot,
+				"start_hash",
+				hex.EncodeToString(startPoint.Hash),
 			)
 			if reconcileErr := ls.reconcilePrimaryChainTipWithLedgerTip(); reconcileErr != nil {
 				ls.config.Logger.Error(
@@ -2937,8 +2951,10 @@ func (ls *LedgerState) ledgerReadChain(
 				bytes.Equal(recoveredPoint.Hash, startPoint.Hash) {
 				ls.config.Logger.Error(
 					"ledger rollback did not change missing chain iterator start point",
-					"start_slot", startPoint.Slot,
-					"start_hash", hex.EncodeToString(startPoint.Hash),
+					"start_slot",
+					startPoint.Slot,
+					"start_hash",
+					hex.EncodeToString(startPoint.Hash),
 				)
 				return
 			}
@@ -3085,7 +3101,8 @@ func (ls *LedgerState) handleLedgerProcessBlocksError(err error) {
 	if errors.Is(err, errHaltLedgerPipeline) {
 		ls.config.Logger.Warn(
 			"block processing hit persistent validation failure, restarting pipeline",
-			"error", err,
+			"error",
+			err,
 		)
 		return
 	}
@@ -3640,7 +3657,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// would make cutoffSlot 0 and validate ALL historical blocks.
 			stabilityWindow := ls.calculateStabilityWindowForEra(snapshotEra.Id)
 			referenceSlot := chainTipSlot
-			if wallSlot, err := ls.CurrentSlot(); err == nil && wallSlot > referenceSlot {
+			if wallSlot, err := ls.CurrentSlot(); err == nil &&
+				wallSlot > referenceSlot {
 				referenceSlot = wallSlot
 			}
 			var cutoffSlot uint64
@@ -3834,7 +3852,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					var blockNonce []byte
 					if snapshotEra.CalculateEtaVFunc != nil {
 						tmpEra, ok := ls.eraById(uint(next.Era().Id))
-						if ok && tmpEra != nil && tmpEra.CalculateEtaVFunc != nil {
+						if ok && tmpEra != nil &&
+							tmpEra.CalculateEtaVFunc != nil {
 							tmpNonce, err := tmpEra.CalculateEtaVFunc(
 								ls.config.CardanoNodeConfig,
 								runningNonce,
@@ -3913,8 +3932,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				if errors.Is(err, errStaleChainIterator) {
 					ls.config.Logger.Debug(
 						"stale chain iterator detected, restarting pipeline to resync",
-						"component", "ledger",
-						"error", err,
+						"component",
+						"ledger",
+						"error",
+						err,
 					)
 					completeReadResult()
 					return errRestartLedgerPipeline
@@ -3963,7 +3984,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.Unlock()
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
 				// Restore normal DB options outside the lock after validation is enabled
-				if wantEnableValidation && bulkLoadActive && bulkOptimizer != nil {
+				if wantEnableValidation && bulkLoadActive &&
+					bulkOptimizer != nil {
 					if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {
 						ls.config.Logger.Error(
 							"failed to restore normal pragmas",
@@ -4323,13 +4345,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 				if err != nil && errors.As(err, &plutusErr) {
 					ls.config.Logger.Warn(
 						"Plutus evaluation disagrees with block producer (trusting isValid=true)",
-						"component", "ledger",
-						"tx_hash", tx.Hash().String(),
-						"block_slot", point.Slot,
-						"script_hash", hex.EncodeToString(plutusErr.ScriptHash[:]),
-						"redeemer_tag", plutusErr.Tag,
-						"redeemer_index", plutusErr.Index,
-						"eval_error", plutusErr.Err.Error(),
+						"component",
+						"ledger",
+						"tx_hash",
+						tx.Hash().String(),
+						"block_slot",
+						point.Slot,
+						"script_hash",
+						hex.EncodeToString(plutusErr.ScriptHash[:]),
+						"redeemer_tag",
+						plutusErr.Tag,
+						"redeemer_index",
+						plutusErr.Index,
+						"eval_error",
+						plutusErr.Err.Error(),
 					)
 					err = nil
 				}
@@ -4346,10 +4375,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 					validationEra.Id == dijkstra.EraIdDijkstra {
 					ls.config.Logger.Warn(
 						"Dijkstra tx validation disagreement (trusting Leios-certified block)",
-						"component", "ledger",
-						"tx_hash", tx.Hash().String(),
-						"block_slot", point.Slot,
-						"error", err.Error(),
+						"component",
+						"ledger",
+						"tx_hash",
+						tx.Hash().String(),
+						"block_slot",
+						point.Slot,
+						"error",
+						err.Error(),
 					)
 					err = nil
 				}
@@ -5081,7 +5114,9 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 // SlotToEpoch before the ledger processing loop is running.
 func (ls *LedgerState) PrepareEpochCacheForStartup() error {
 	if ls.ctx != nil {
-		return errors.New("PrepareEpochCacheForStartup must be called before LedgerState.Start")
+		return errors.New(
+			"PrepareEpochCacheForStartup must be called before LedgerState.Start",
+		)
 	}
 	txn := ls.db.Transaction(true)
 	defer txn.Release()
@@ -5090,7 +5125,10 @@ func (ls *LedgerState) PrepareEpochCacheForStartup() error {
 	})
 }
 
-func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) error {
+func (ls *LedgerState) setEpochCache(
+	txn *database.Txn,
+	epochs []models.Epoch,
+) error {
 	ls.epochCache = epochs
 	// Publish every mutation made by this startup writer, including partial
 	// state on error returns, so snapshot readers can never retain a stale view
@@ -5370,29 +5408,42 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 	if skippedMithrilTrusted > 0 {
 		ls.config.Logger.Info(
 			"skipped epoch lab recovery for epochs covered by Mithril trust boundary",
-			"count", skippedMithrilTrusted,
-			"first_epoch", firstMithrilTrustedEpoch,
-			"last_epoch", lastMithrilTrustedEpoch,
-			"mithril_ledger_slot", ls.mithrilLedgerSlot,
-			"component", "ledger",
+			"count",
+			skippedMithrilTrusted,
+			"first_epoch",
+			firstMithrilTrustedEpoch,
+			"last_epoch",
+			lastMithrilTrustedEpoch,
+			"mithril_ledger_slot",
+			ls.mithrilLedgerSlot,
+			"component",
+			"ledger",
 		)
 	}
 	if skippedMissingCandidate > 0 {
 		ls.config.Logger.Info(
 			"skipped epoch lab recovery for epochs without stored candidate nonce",
-			"count", skippedMissingCandidate,
-			"first_epoch", firstMissingCandidateEpoch,
-			"last_epoch", lastMissingCandidateEpoch,
-			"component", "ledger",
+			"count",
+			skippedMissingCandidate,
+			"first_epoch",
+			firstMissingCandidateEpoch,
+			"last_epoch",
+			lastMissingCandidateEpoch,
+			"component",
+			"ledger",
 		)
 	}
 	if skippedInvalidCandidate > 0 {
 		ls.config.Logger.Warn(
 			"skipped epoch lab recovery for epochs with invalid candidate nonce",
-			"count", skippedInvalidCandidate,
-			"first_epoch", firstInvalidCandidateEpoch,
-			"last_epoch", lastInvalidCandidateEpoch,
-			"component", "ledger",
+			"count",
+			skippedInvalidCandidate,
+			"first_epoch",
+			firstInvalidCandidateEpoch,
+			"last_epoch",
+			lastInvalidCandidateEpoch,
+			"component",
+			"ledger",
 		)
 	}
 	return repaired
@@ -5508,11 +5559,16 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	if chainTip.Point.Slot < ledgerTip.Point.Slot {
 		ls.config.Logger.Warn(
 			"ledger tip ahead of primary chain tip at startup, rolling back metadata to chain tip",
-			"component", "ledger",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"ledger_tip_slot", ledgerTip.Point.Slot,
-			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+			"component",
+			"ledger",
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"ledger_tip_slot",
+			ledgerTip.Point.Slot,
+			"chain_tip_hash",
+			hex.EncodeToString(chainTip.Point.Hash),
+			"ledger_tip_hash",
+			hex.EncodeToString(ledgerTip.Point.Hash),
 		)
 		if err := ls.rollback(chainTip.Point); err != nil {
 			return fmt.Errorf(
@@ -5540,12 +5596,18 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		}
 		ls.config.Logger.Warn(
 			"primary chain tip ahead of ledger tip at startup; ledgerProcessBlocks will catch up via chainsync",
-			"component", "ledger",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"ledger_tip_slot", ledgerTip.Point.Slot,
-			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
-			"block_gap", gap,
+			"component",
+			"ledger",
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"ledger_tip_slot",
+			ledgerTip.Point.Slot,
+			"chain_tip_hash",
+			hex.EncodeToString(chainTip.Point.Hash),
+			"ledger_tip_hash",
+			hex.EncodeToString(ledgerTip.Point.Hash),
+			"block_gap",
+			gap,
 		)
 		return nil
 	}
@@ -5554,7 +5616,10 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		containsLedgerTip,
 	)
 	if err != nil {
-		return fmt.Errorf("find common primary-chain ancestor for ledger tip: %w", err)
+		return fmt.Errorf(
+			"find common primary-chain ancestor for ledger tip: %w",
+			err,
+		)
 	}
 	if !found {
 		return fmt.Errorf(
@@ -5565,13 +5630,20 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	}
 	ls.config.Logger.Warn(
 		"ledger tip not on primary chain at startup, rolling back metadata to common ancestor",
-		"component", "ledger",
-		"chain_tip_slot", chainTip.Point.Slot,
-		"ledger_tip_slot", ledgerTip.Point.Slot,
-		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
-		"ancestor_slot", ancestor.Slot,
-		"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+		"component",
+		"ledger",
+		"chain_tip_slot",
+		chainTip.Point.Slot,
+		"ledger_tip_slot",
+		ledgerTip.Point.Slot,
+		"chain_tip_hash",
+		hex.EncodeToString(chainTip.Point.Hash),
+		"ledger_tip_hash",
+		hex.EncodeToString(ledgerTip.Point.Hash),
+		"ancestor_slot",
+		ancestor.Slot,
+		"ancestor_hash",
+		hex.EncodeToString(ancestor.Hash),
 	)
 	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
 		ancestor,
@@ -5641,13 +5713,20 @@ func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 
 	ls.config.Logger.Warn(
 		"primary chain and ledger diverged during live chainsync recovery, reconciling to common ancestor",
-		"component", "ledger",
-		"reason", reason,
-		"connection_id", connId.String(),
-		"chain_tip_slot", chainTip.Point.Slot,
-		"ledger_tip_slot", ledgerTip.Point.Slot,
-		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+		"component",
+		"ledger",
+		"reason",
+		reason,
+		"connection_id",
+		connId.String(),
+		"chain_tip_slot",
+		chainTip.Point.Slot,
+		"ledger_tip_slot",
+		ledgerTip.Point.Slot,
+		"chain_tip_hash",
+		hex.EncodeToString(chainTip.Point.Hash),
+		"ledger_tip_hash",
+		hex.EncodeToString(ledgerTip.Point.Hash),
 	)
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
 		return false, err
@@ -5655,7 +5734,9 @@ func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 	return true, nil
 }
 
-func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, error) {
+func (ls *LedgerState) primaryChainContainsPoint(
+	point ocommon.Point,
+) (bool, error) {
 	if point.Slot == 0 && len(point.Hash) == 0 {
 		return true, nil
 	}
@@ -6276,7 +6357,9 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 //     overrides surface here too), advancing once per scheduled
 //     boundary at-or-before the target epoch.
 //  4. Fall back to the current era if nothing applies.
-func (ls *LedgerState) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+func (ls *LedgerState) ConsensusModeForEpoch(
+	epoch uint64,
+) consensus.ConsensusMode {
 	snapshot := ls.loadConsensusSnapshot()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
@@ -6805,15 +6888,18 @@ func (ls *LedgerState) CountTransactionsInSlotRange(
 	if endSlot < startSlot {
 		return 0, nil
 	}
-	db, err := resolveMetadataQueryDB(ls)
-	if err != nil {
-		return 0, err
+	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
+	if !ok {
+		return 0, errors.New(
+			"metadata store does not support slot-range statistics",
+		)
 	}
-	var count int64
-	if err := db.
-		Model(&models.Transaction{}).
-		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
-		Count(&count).Error; err != nil {
+	count, err := store.CountTransactionsInSlotRange(
+		startSlot,
+		endSlot,
+		nil,
+	)
+	if err != nil {
 		return 0, fmt.Errorf(
 			"count transactions in slot range %d-%d: %w",
 			startSlot,
@@ -6821,27 +6907,7 @@ func (ls *LedgerState) CountTransactionsInSlotRange(
 			err,
 		)
 	}
-	return int(count), nil
-}
-
-func resolveMetadataQueryDB(ls *LedgerState) (*gorm.DB, error) {
-	metaStore := ls.db.Metadata()
-	if metaStore == nil {
-		return nil, errors.New("metadata store unavailable")
-	}
-	if reader, ok := metaStore.(metadataReadDbReader); ok {
-		if db := reader.ReadDB(); db != nil {
-			return db, nil
-		}
-	}
-	if reader, ok := metaStore.(metadataDbReader); ok {
-		if db := reader.DB(); db != nil {
-			return db, nil
-		}
-	}
-	return nil, errors.New(
-		"metadata store does not expose database handle",
-	)
+	return count, nil
 }
 
 // CountBlocksInSlotRange returns the number of canonical blocks in the
@@ -6854,23 +6920,14 @@ func (ls *LedgerState) CountBlocksInSlotRange(
 	if endSlot < startSlot {
 		return 0, 0, 0, nil
 	}
-	db, err := resolveMetadataQueryDB(ls)
+	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
+	if !ok {
+		return 0, 0, 0, errors.New(
+			"metadata store does not support slot-range statistics",
+		)
+	}
+	stats, err := store.GetBlockSlotRangeStats(startSlot, endSlot, nil)
 	if err != nil {
-		return 0, 0, 0, err
-	}
-	type blockRangeStats struct {
-		Count     int64
-		FirstSlot *uint64
-		LastSlot  *uint64
-	}
-	var stats blockRangeStats
-	if err := db.
-		Model(&models.BlockNonce{}).
-		Select(
-			"COUNT(*) AS count, MIN(slot) AS first_slot, MAX(slot) AS last_slot",
-		).
-		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
-		Scan(&stats).Error; err != nil {
 		return 0, 0, 0, fmt.Errorf(
 			"count blocks in slot range %d-%d: %w",
 			startSlot,
@@ -6878,10 +6935,7 @@ func (ls *LedgerState) CountBlocksInSlotRange(
 			err,
 		)
 	}
-	if stats.Count == 0 || stats.FirstSlot == nil || stats.LastSlot == nil {
-		return 0, 0, 0, nil
-	}
-	return int(stats.Count), *stats.FirstSlot, *stats.LastSlot, nil
+	return stats.Count, stats.FirstSlot, stats.LastSlot, nil
 }
 
 // resolveValidationEra determines the appropriate era descriptor for

@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -143,7 +142,10 @@ func createTestBlock(
 
 	var result *realBabbageBlock
 	for slot := uint64(1); slot <= 200; slot++ {
-		vrfInput, vrfInputErr := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		vrfInput, vrfInputErr := vrf.MkInputVrf(
+			int64(slot),
+			epochNonce,
+		) //nolint:gosec
 		if vrfInputErr != nil {
 			continue
 		}
@@ -1054,7 +1056,9 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
+	err := cfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(shelleyGenesisJSON),
+	)
 	require.NoError(t, err)
 	return cfg
 }
@@ -1096,7 +1100,9 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		}
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
+	err := cfg.LoadShelleyGenesisFromReader(
+		strings.NewReader(shelleyGenesisJSON),
+	)
 	require.NoError(t, err)
 	return cfg
 }
@@ -1107,9 +1113,22 @@ func seedGenesisDelegation(
 	row models.GenesisDelegation,
 ) {
 	t.Helper()
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-	require.NoError(t, store.DB().Create(&row).Error)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO genesis_delegation (
+    genesis_hash, genesis_delegate_hash, vrf_key_hash,
+    added_slot, block_index, cert_index, certificate_id
+) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		row.GenesisHash,
+		row.GenesisDelegateHash,
+		row.VrfKeyHash,
+		row.AddedSlot,
+		row.BlockIndex,
+		row.CertIndex,
+		row.CertificateID,
+	)
+	require.NoError(t, err)
 }
 
 // newEligibilityTestLedger builds a LedgerState backed by in-memory SQLite,
@@ -1122,7 +1141,7 @@ func newEligibilityTestLedger(
 ) (*LedgerState, *database.Database) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -1552,7 +1571,9 @@ func TestVerifyBlockLeaderEligibility_ByronSkipped(t *testing.T) {
 // TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot verifies that
 // epochs 0 and 1 query the genesis snapshot (epoch 0, "mark") rather than
 // skipping eligibility checks. A pool absent from that snapshot is rejected.
-func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(t *testing.T) {
+func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(
+	t *testing.T,
+) {
 	tb := createTestBlock(t, [32]byte{35}, 0, tamperNone)
 	// Use epoch 5 nonce for the genesis epoch cache entry; the actual nonce
 	// is not used by verifyBlockLeaderEligibility itself.
@@ -1560,7 +1581,12 @@ func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(t *testing.T
 
 	// Override epoch cache to place the block in epoch 1 (snapshotEpoch = 0).
 	ls.epochCache = []models.Epoch{
-		{EpochId: 1, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+		{
+			EpochId:       1,
+			StartSlot:     0,
+			LengthInSlots: 1_000_000,
+			Nonce:         tb.epochNonce,
+		},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -1768,7 +1794,11 @@ func TestVerifyBlockLeaderEligibility_ActiveDistributionVRFAboveThresholdFails(
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
 }
 
 // TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails verifies that a block
@@ -1817,7 +1847,11 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
 }
 
 func TestVerifyBlockLeaderEligibility_DecentralizationActiveSkipsThreshold(
@@ -1936,7 +1970,11 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err)
-	assert.Contains(t, logBuf.String(), "Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary")
+	assert.Contains(
+		t,
+		logBuf.String(),
+		"Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary",
+	)
 	assert.NotContains(t, logBuf.String(), "total active stake is zero")
 }
 
@@ -1987,7 +2025,11 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
 }
 
 // TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips verifies that
@@ -2009,7 +2051,12 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 	ls := &LedgerState{
 		db: db,
 		epochCache: []models.Epoch{
-			{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+			{
+				EpochId:       5,
+				StartSlot:     0,
+				LengthInSlots: 1_000_000,
+				Nonce:         tb.epochNonce,
+			},
 		},
 		config: LedgerStateConfig{
 			// No CardanoNodeConfig → ActiveSlotCoeff() returns 0 → skip.
@@ -2055,7 +2102,12 @@ func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 	ls := &LedgerState{
 		db: db,
 		epochCache: []models.Epoch{
-			{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+			{
+				EpochId:       5,
+				StartSlot:     0,
+				LengthInSlots: 1_000_000,
+				Nonce:         tb.epochNonce,
+			},
 		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: zeroCfg,
@@ -2065,5 +2117,9 @@ func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "zero active slot coeff should skip, not reject all blocks")
+	assert.NoError(
+		t,
+		err,
+		"zero active slot coeff should skip, not reject all blocks",
+	)
 }

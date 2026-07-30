@@ -17,7 +17,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Block production with VRF leader election and stake snapshots
 - Multi-peer chain selection with density comparison and VRF tie-breaking
 - Client connectivity for wallets and applications
-- Pluggable storage backends (Badger, SQLite, PostgreSQL, MySQL, GCS, S3)
+- Pluggable storage backends (Badger, SQLite, GCS, S3)
 - Tiered storage modes ("core" for consensus, "api" for full indexing)
 - Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
@@ -100,7 +100,12 @@ The following environment variables modify Dingo's behavior:
   - `api` additionally stores witnesses, scripts, datums, redeemers, and tx metadata
   - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
 - `DINGO_RUN_MODE`
-  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios/Dijkstra protocol support)
+  - Application-wide operational mode for a bare `dingo` invocation:
+    `serve` (default), `load`, `dev`, or `leios`
+  - Explicit subcommands select their own effective operation; for example,
+    `dingo sync` runs in sync mode regardless of the configured value
+  - Relay, producer, storage, API, and validation settings do not select a run
+    mode
 - `DINGO_START_ERA`
   - Experimental startup era override. Set to `dijkstra` only for Dijkstra/Leios test networks; leave empty to follow genesis protocol version.
 - `DINGO_LOGGING_FORMAT`
@@ -170,9 +175,9 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 
 ## Storage Modes
 
-Dingo has two storage modes and three primary deployment profiles:
+Dingo has two storage modes commonly used in three node configurations:
 
-| Profile | Configuration | Current behavior |
+| Node configuration | Settings | Current behavior |
 |---|---|---|
 | Relay | `storageMode: core`, `blockProducer: false` | Validates and follows the chain, participates in NtN/NtC, relays blocks and transactions, and stores consensus state without API history |
 | Block producer | `storageMode: core`, `blockProducer: true` plus VRF/KES/opcert paths | Includes the relay behavior, leader election, block forging, forged-block self-validation, and block diffusion |
@@ -437,8 +442,11 @@ Dingo supports pluggable storage backends for both blob storage (blocks, transac
 ### Available Plugins
 
 For local source builds, `badger`, `sqlite`, the default mempool, and all three
-built-in API providers are always available. GCS, S3, PostgreSQL, and MySQL
-require `-tags dingo_extra_plugins` or an official release binary.
+built-in API providers are always available. GCS and S3 require
+`-tags dingo_extra_plugins` or an official release binary. The same tag retains
+the PostgreSQL and MySQL metadata selectors for source compatibility, but the
+SQLite-first `database/sql` cutover rejects them at startup until their
+operational query ports are complete.
 
 Blob Storage Plugins:
 - `badger` - BadgerDB local key-value store (default)
@@ -447,8 +455,8 @@ Blob Storage Plugins:
 
 Metadata Storage Plugins:
 - `sqlite` - SQLite relational database (default)
-- `postgres` - PostgreSQL relational database
-- `mysql` - MySQL relational database
+- `postgres` - Reserved PostgreSQL adapter; not currently operational
+- `mysql` - Reserved MySQL adapter; not currently operational
 
 ### Plugin Selection
 
@@ -512,7 +520,7 @@ SQLite Options:
 - `dataDir` - SQLite data directory (defaults to the shared database path)
 - `maxConnections` - Maximum connection count
 
-PostgreSQL Options:
+Reserved PostgreSQL Options:
 - `host` - PostgreSQL server hostname
 - `port` - PostgreSQL server port
 - `user` - Database user
@@ -525,7 +533,7 @@ PostgreSQL Options:
 - `poolMaxIdleConns` - Maximum idle connections (default: 10)
 - `poolConnMaxLifetime` - Maximum connection lifetime (default: 1h)
 
-MySQL Options:
+Reserved MySQL Options:
 - `host` - MySQL server hostname
 - `port` - MySQL server port
 - `user` - Database user
@@ -647,7 +655,7 @@ validation record.
   - [x] Transaction purging on chain update
   - [x] Watermark-based eviction and rejection
 - [x] Database Recovery
-  - [x] Chain rollback support (SQLite, PostgreSQL, and MySQL plugins)
+  - [x] Chain rollback support (SQLite metadata store)
   - [x] State restoration on rollback
   - [x] WAL mode for crash recovery
   - [x] Automatic rollback on transaction error

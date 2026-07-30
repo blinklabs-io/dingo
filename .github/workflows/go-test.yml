@@ -97,6 +97,10 @@ jobs:
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-build-minimal
         run: go build ./cmd/dingo
+      - name: sqlc-generation-drift
+        run: make sql-check
+      - name: gorm-dependency-absence
+        run: make gorm-check
       - name: go-test
         # Explicit -timeout because this job is race-instrumented. Go's
         # default is 10m per package binary, and under -race the ledger

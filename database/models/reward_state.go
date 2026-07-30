@@ -14,13 +14,7 @@
 
 package models
 
-import (
-	"fmt"
-	"log/slog"
-
-	"github.com/blinklabs-io/dingo/database/types"
-	"gorm.io/gorm"
-)
+import "github.com/blinklabs-io/dingo/database/types"
 
 // RewardStakeCalculationVersion identifies the stake-accounting algorithm
 // used to produce persisted live stake and consensus snapshots. Bump it when
@@ -29,13 +23,13 @@ const RewardStakeCalculationVersion uint = 1
 
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
-	ID           uint         `gorm:"primarykey"`
-	Epoch        uint64       `gorm:"uniqueIndex;not null"`
-	Treasury     types.Uint64 `gorm:"not null"`
-	Reserves     types.Uint64 `gorm:"not null"`
-	Fees         types.Uint64 `gorm:"not null"`
-	Rewards      types.Uint64 `gorm:"not null"`
-	CapturedSlot uint64       `gorm:"index;not null"`
+	ID           uint
+	Epoch        uint64
+	Treasury     types.Uint64
+	Reserves     types.Uint64
+	Fees         types.Uint64
+	Rewards      types.Uint64
+	CapturedSlot uint64
 }
 
 func (RewardAdaPots) TableName() string {
@@ -44,25 +38,25 @@ func (RewardAdaPots) TableName() string {
 
 // RewardSnapshot captures reward-calculation snapshot metadata for an epoch.
 type RewardSnapshot struct {
-	ID               uint         `gorm:"primarykey"`
-	Epoch            uint64       `gorm:"uniqueIndex:idx_reward_snapshot_epoch_type,priority:1;not null"`
-	SnapshotType     string       `gorm:"type:varchar(4);uniqueIndex:idx_reward_snapshot_epoch_type,priority:2;not null"`
-	TotalActiveStake types.Uint64 `gorm:"not null"`
-	TotalPoolCount   uint64       `gorm:"not null"`
-	TotalDelegators  uint64       `gorm:"not null"`
-	CapturedSlot     uint64       `gorm:"index;not null"`
-	BoundarySlot     uint64       `gorm:"index;not null"`
-	EpochNonce       []byte       `gorm:"size:32"`
-	ProtocolVersion  uint         `gorm:"not null"`
+	ID               uint
+	Epoch            uint64
+	SnapshotType     string
+	TotalActiveStake types.Uint64
+	TotalPoolCount   uint64
+	TotalDelegators  uint64
+	CapturedSlot     uint64
+	BoundarySlot     uint64
+	EpochNonce       []byte
+	ProtocolVersion  uint
 	// Authoritative marks a snapshot captured inside the ledger epoch-rollover
 	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot). The
 	// event-driven fallback capture (captureMarkSnapshot) never overwrites an
 	// authoritative row: it either claims a fresh row or is superseded. Defaults
 	// to false, so pre-existing rows and fallback captures read as provisional.
-	Authoritative bool `gorm:"not null;default:false"`
+	Authoritative bool
 	// CalculationVersion ties authoritative Mark metadata to the stake
 	// calculation that produced its accompanying pool snapshots.
-	CalculationVersion uint `gorm:"not null;default:0"`
+	CalculationVersion uint
 }
 
 func (RewardSnapshot) TableName() string {
@@ -72,20 +66,20 @@ func (RewardSnapshot) TableName() string {
 // RewardPoolInput captures per-pool inputs needed by reward calculation.
 type RewardPoolInput struct {
 	Margin                     *types.Rat
-	PoolKeyHash                []byte `gorm:"uniqueIndex:idx_reward_pool_input_epoch_pool,priority:2;size:28;not null"`
-	RewardAccount              []byte `gorm:"size:28"`
+	PoolKeyHash                []byte
+	RewardAccount              []byte
 	BlocksProduced             *uint64
 	TotalBlocksInEpoch         *uint64
-	ID                         uint         `gorm:"primarykey"`
-	Epoch                      uint64       `gorm:"uniqueIndex:idx_reward_pool_input_epoch_pool,priority:1;not null"`
-	Pledge                     types.Uint64 `gorm:"not null"`
-	DelegatedStake             types.Uint64 `gorm:"not null"`
-	OwnerStake                 types.Uint64 `gorm:"not null;default:0"`
-	Cost                       types.Uint64 `gorm:"not null"`
-	DelegatorCount             uint64       `gorm:"not null"`
-	RewardAccountCredentialTag uint8        `gorm:"not null;default:0"`
-	CapturedSlot               uint64       `gorm:"index;not null"`
-	BoundarySlot               uint64       `gorm:"index;not null"`
+	ID                         uint
+	Epoch                      uint64
+	Pledge                     types.Uint64
+	DelegatedStake             types.Uint64
+	OwnerStake                 types.Uint64
+	Cost                       types.Uint64
+	DelegatorCount             uint64
+	RewardAccountCredentialTag uint8
+	CapturedSlot               uint64
+	BoundarySlot               uint64
 }
 
 func (RewardPoolInput) TableName() string {
@@ -94,16 +88,16 @@ func (RewardPoolInput) TableName() string {
 
 // RewardStakeInput captures per-credential stake at the reward snapshot.
 type RewardStakeInput struct {
-	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:2;size:28;not null"`
-	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:4;size:28;not null"`
-	ID            uint         `gorm:"primarykey"`
-	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:1;not null"`
-	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:3;not null;default:0"`
-	Stake         types.Uint64 `gorm:"not null"`
-	Owner         bool         `gorm:"not null;default:false"`
-	Registered    bool         `gorm:"not null"`
-	CapturedSlot  uint64       `gorm:"index;not null"`
-	BoundarySlot  uint64       `gorm:"index;not null"`
+	PoolKeyHash   []byte
+	StakingKey    []byte
+	ID            uint
+	Epoch         uint64
+	CredentialTag uint8
+	Stake         types.Uint64
+	Owner         bool
+	Registered    bool
+	CapturedSlot  uint64
+	BoundarySlot  uint64
 }
 
 func (RewardStakeInput) TableName() string {
@@ -115,24 +109,24 @@ func (RewardStakeInput) TableName() string {
 // separately so rollback/account-reward repair can refresh only the affected
 // credential while TotalStake remains directly queryable.
 type RewardLiveStake struct {
-	PoolKeyHash   []byte       `gorm:"index:idx_reward_live_stake_pool_order,priority:1;size:28"`
-	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:2;index:idx_reward_live_stake_pool_order,priority:3;size:28;not null"`
-	ID            uint         `gorm:"primarykey"`
-	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:1;index:idx_reward_live_stake_pool_order,priority:2;not null;default:0"`
-	UtxoStake     types.Uint64 `gorm:"not null"`
-	RewardStake   types.Uint64 `gorm:"not null"`
-	TotalStake    types.Uint64 `gorm:"not null"`
-	Registered    bool         `gorm:"not null"`
+	PoolKeyHash   []byte
+	StakingKey    []byte
+	ID            uint
+	CredentialTag uint8
+	UtxoStake     types.Uint64
+	RewardStake   types.Uint64
+	TotalStake    types.Uint64
+	Registered    bool
 	// PoolDelegation* records the certificate order used to derive PoolKeyHash.
 	// It is rollback/rebuild bookkeeping; snapshot consumers select eligible
 	// pools independently at the requested slot.
-	PoolDelegationSlot       uint64 `gorm:"not null;default:0"`
-	PoolDelegationBlockIndex uint64 `gorm:"not null;default:0"`
-	PoolDelegationCertIndex  uint32 `gorm:"not null;default:0"`
-	UpdatedSlot              uint64 `gorm:"index;not null"`
+	PoolDelegationSlot       uint64
+	PoolDelegationBlockIndex uint64
+	PoolDelegationCertIndex  uint32
+	UpdatedSlot              uint64
 	// CalculationVersion is set by every rebuild and incremental update. Zero
 	// denotes rows created before calculation provenance was introduced.
-	CalculationVersion uint `gorm:"not null;default:0"`
+	CalculationVersion uint
 }
 
 func (RewardLiveStake) TableName() string {
@@ -142,18 +136,18 @@ func (RewardLiveStake) TableName() string {
 // RewardPoolOutput captures per-pool reward calculation output for an epoch.
 type RewardPoolOutput struct {
 	ApparentPerformance *types.Rat
-	PoolKeyHash         []byte       `gorm:"uniqueIndex:idx_reward_pool_output_epoch_pool,priority:2;size:28;not null"`
-	ID                  uint         `gorm:"primarykey"`
-	Epoch               uint64       `gorm:"uniqueIndex:idx_reward_pool_output_epoch_pool,priority:1;not null"`
-	OptimalReward       types.Uint64 `gorm:"not null"`
-	TotalReward         types.Uint64 `gorm:"not null"`
-	LeaderReward        types.Uint64 `gorm:"not null"`
-	MemberRewardTotal   types.Uint64 `gorm:"not null"`
-	OwnerStake          types.Uint64 `gorm:"not null"`
-	Undistributed       types.Uint64 `gorm:"not null"`
-	Unspendable         types.Uint64 `gorm:"not null"`
-	CapturedSlot        uint64       `gorm:"index;not null"`
-	BoundarySlot        uint64       `gorm:"index;not null"`
+	PoolKeyHash         []byte
+	ID                  uint
+	Epoch               uint64
+	OptimalReward       types.Uint64
+	TotalReward         types.Uint64
+	LeaderReward        types.Uint64
+	MemberRewardTotal   types.Uint64
+	OwnerStake          types.Uint64
+	Undistributed       types.Uint64
+	Unspendable         types.Uint64
+	CapturedSlot        uint64
+	BoundarySlot        uint64
 }
 
 func (RewardPoolOutput) TableName() string {
@@ -161,248 +155,22 @@ func (RewardPoolOutput) TableName() string {
 }
 
 // RewardAccountOutput captures per-account reward calculation output.
-//
-// idx_reward_account_output_credential_spendable_guarded leads with
-// (credential_tag, staking_key, spendable, guarded) so
-// GetRewardAccountOutputsByCredential (the Blockfrost account reward-history
-// endpoint, dingo #1875) is a pure index range scan over one credential's
-// actually-credited rows rather than an index seek followed by a per-row
-// filter: the epoch/pool_key_hash/reward_type tail matches that query's
-// ORDER BY, so an ascending request is served directly from the index and a
-// descending one only sorts the (typically tiny, single-credential) matched
-// rows rather than the whole table. This matters specifically because dingo
-// #1875 also makes API storage mode retain this table without bound (see the
-// retention note in DATABASE.md), so the existing
-// idx_reward_account_output_epoch_cred_pool_type index — which leads with
-// epoch, not credential — cannot serve this query without scanning every
-// retained row.
-//
-// spendable and guarded both mean "this reward was never credited to the
-// account", for two distinct reasons a diagnostic query may still want to
-// tell apart:
-//
-//   - spendable=false: the credential deregistered before its reward's payout
-//     boundary (finalizePrecomputedRewardOutputs in
-//     ledger/reward_calculation.go persists this permanently). The withheld
-//     amount is folded into the epoch's unspendable total and ends up in the
-//     treasury.
-//   - guarded=true: the reward account was CIP-0163-expired as of the
-//     reward's snapshot epoch (rewardOutputGuarded in
-//     ledger/reward_calculation.go, applyStakeRewardApplication). The
-//     withheld amount is excluded from both the credited and unspendable
-//     totals and instead falls through to undistributed, refunding reserves
-//     — a different economic effect than the unspendable/treasury path
-//     above, which is why this is a second column rather than folded into
-//     Spendable.
-//
-// GetRewardAccountOutputsByCredential and CountRewardAccountOutputsByCredential
-// filter to spendable=true AND guarded=false; either flag alone means the
-// reward never reached the account.
-//
-// idx_reward_account_output_credential_spendable_guarded is additive, not a
-// replacement for idx_reward_account_output_credential_spendable (which
-// leads with credential_tag, staking_key, spendable only, and stays
-// declared, unchanged, alongside this one): dropping or renaming that index
-// would have to run through the same after-AutoMigrate
-// "drop the superseded index" helper the two migrations before it used (see
-// MigrateRewardAccountOutputCredentialIndex below), but that index's
-// continued existence after a plain AutoMigrate is itself pinned by
-// TestMigrateRewardAccountOutputCredentialIndex and
-// TestMigrateRewardAccountOutputCredentialSpendableIndex predating this
-// change, so this change leaves it alone rather than repeating the rename.
-// Both indexes coexist as a result; the guarded-aware query above uses the
-// new one, and nothing needs the old one's exact column set once the new
-// one exists, but it stays declared so those two tests keep passing.
 type RewardAccountOutput struct {
-	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:2;index:idx_reward_account_output_credential_spendable_guarded,priority:2"`
-	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:5;index:idx_reward_account_output_credential_spendable_guarded,priority:6"`
-	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null;index:idx_reward_account_output_credential_spendable,priority:6;index:idx_reward_account_output_credential_spendable_guarded,priority:7"`
-	ID            uint         `gorm:"primarykey"`
-	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null;index:idx_reward_account_output_credential_spendable,priority:4;index:idx_reward_account_output_credential_spendable_guarded,priority:5"`
-	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0;index:idx_reward_account_output_credential_spendable,priority:1;index:idx_reward_account_output_credential_spendable_guarded,priority:1"`
-	Amount        types.Uint64 `gorm:"not null"`
-	Spendable     bool         `gorm:"not null;index:idx_reward_account_output_credential_spendable,priority:3;index:idx_reward_account_output_credential_spendable_guarded,priority:3"`
-	// Guarded records the CIP-0163 reward-crediting guard decision
-	// (rewardOutputGuarded, ledger/reward_calculation.go): true when this
-	// output's reward-account credential was expired as of the reward's
-	// snapshot epoch, so applyStakeRewardApplication skipped crediting it.
-	// Always false when the delegator-inactivity gate is off, keeping that
-	// path byte-identical. See the type doc comment above for why this is
-	// separate from Spendable rather than folded into it.
-	Guarded      bool   `gorm:"not null;default:false;index:idx_reward_account_output_credential_spendable_guarded,priority:4"`
-	CapturedSlot uint64 `gorm:"index;not null"`
-	BoundarySlot uint64 `gorm:"index;not null"`
+	StakingKey    []byte
+	PoolKeyHash   []byte
+	RewardType    string
+	ID            uint
+	Epoch         uint64
+	CredentialTag uint8
+	Amount        types.Uint64
+	Spendable     bool
+	// Guarded records that CIP-0163 account expiry prevented this otherwise
+	// spendable reward from being credited.
+	Guarded      bool
+	CapturedSlot uint64
+	BoundarySlot uint64
 }
 
 func (RewardAccountOutput) TableName() string {
 	return "reward_account_output"
-}
-
-// MigrateRewardAccountOutputCredentialIndex drops the superseded
-// idx_reward_account_output_credential index (credential_tag, staking_key,
-// epoch, pool_key_hash, reward_type) once its replacement,
-// idx_reward_account_output_credential_spendable, exists. The replacement
-// adds spendable to the equality prefix so GetAccountOutputsByCredential's
-// new spendable=true filter (dingo #1875 follow-up) stays a pure index range
-// scan instead of degrading to a seek over every one of the credential's
-// rows plus a per-row filter.
-//
-// Unlike MigrateRewardLiveStakePoolIndex and the other legacy-index
-// migrations in this file, this one runs AFTER AutoMigrate rather than
-// before. Those migrations drop a unique index that could otherwise reject
-// valid rows or block a column-type change, so they must run first.
-// idx_reward_account_output_credential is a plain non-unique secondary
-// index: keeping it around a little longer is only wasted space, never a
-// correctness problem, so there is no reason to risk a window with no
-// credential-leading index at all. Calling this after AutoMigrate
-// guarantees the replacement already exists before the old index is
-// dropped.
-func MigrateRewardAccountOutputCredentialIndex(
-	db *gorm.DB,
-	logger *slog.Logger,
-) error {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	if !db.Migrator().HasTable(&RewardAccountOutput{}) {
-		return nil
-	}
-	if !db.Migrator().HasIndex(
-		&RewardAccountOutput{},
-		"idx_reward_account_output_credential",
-	) {
-		return nil
-	}
-	if !db.Migrator().HasIndex(
-		&RewardAccountOutput{},
-		"idx_reward_account_output_credential_spendable",
-	) {
-		// The replacement has not been created yet (should not happen when
-		// called after AutoMigrate); leave the old index in place rather
-		// than dropping the only credential-leading index available.
-		return nil
-	}
-	logger.Info(
-		"dropping superseded reward_account_output credential index",
-	)
-	if err := db.Migrator().DropIndex(
-		&RewardAccountOutput{},
-		"idx_reward_account_output_credential",
-	); err != nil {
-		return fmt.Errorf(
-			"drop reward_account_output credential index: %w",
-			err,
-		)
-	}
-	return nil
-}
-
-// MigrateRewardLiveStakePoolIndex drops the legacy pool/total_stake index.
-// Snapshot capture uses the replacement pool/credential ordering index declared
-// on RewardLiveStake. Dropping the legacy index first lets MySQL change
-// total_stake's numeric column type during AutoMigrate when an older schema
-// represented it as TEXT.
-func MigrateRewardLiveStakePoolIndex(db *gorm.DB, logger *slog.Logger) error {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	if !db.Migrator().HasTable(&RewardLiveStake{}) ||
-		!db.Migrator().HasIndex(&RewardLiveStake{}, "idx_reward_live_stake_pool") {
-		return nil
-	}
-	logger.Info(
-		"dropping legacy reward_live_stake pool/total_stake index",
-	)
-	if err := db.Migrator().DropIndex(
-		&RewardLiveStake{},
-		"idx_reward_live_stake_pool",
-	); err != nil {
-		return fmt.Errorf("drop reward_live_stake pool index: %w", err)
-	}
-	return nil
-}
-
-// DedupeRewardLiveStake removes duplicate rows from the reward_live_stake
-// table so that the unique index idx_reward_live_stake_cred
-// (credential_tag, staking_key) can be created safely by AutoMigrate. This
-// must be called before AutoMigrate for RewardLiveStake.
-//
-// The unique credential identity ensures one aggregate can contribute to only
-// one reward pool input. Snapshot capture defensively applies the same identity,
-// while this migration repairs pre-existing duplicates so AutoMigrate can
-// install the constraint. Keeping only the lowest-id row per credential
-// preserves the row selected by RefreshLiveStakeAggregate's First query before
-// the unique index exists. This is important for upgraded databases: a refresh
-// may have already repaired that row, while the missing-key backfill check will
-// not rebuild a credential merely because another duplicate retained stale
-// values.
-//
-// The function is a no-op when the table does not exist or contains no
-// duplicates.
-func DedupeRewardLiveStake(db *gorm.DB, logger *slog.Logger) error {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	if !db.Migrator().HasTable(&RewardLiveStake{}) {
-		return nil
-	}
-
-	type dupGroup struct {
-		CredentialTag uint8
-		StakingKey    []byte
-		Cnt           int64
-	}
-	var dups []dupGroup
-	if err := db.Raw(`
-		SELECT credential_tag, staking_key, COUNT(*) AS cnt
-		FROM reward_live_stake
-		GROUP BY credential_tag, staking_key
-		HAVING COUNT(*) > 1
-	`).Scan(&dups).Error; err != nil {
-		return fmt.Errorf(
-			"query duplicate reward_live_stake groups: %w", err,
-		)
-	}
-	if len(dups) == 0 {
-		return nil
-	}
-
-	logger.Info(
-		"deduplicating reward_live_stake rows before creating unique index",
-		"duplicate_groups", len(dups),
-	)
-
-	// For each duplicate group, SELECT the MIN(id) to keep, then DELETE by id.
-	// RefreshLiveStakeAggregate uses GORM First, which orders by primary key and
-	// updates this same row when duplicates predate the unique index.
-	// This avoids the MySQL error 1093 ("can't specify target table for update
-	// in FROM clause") that occurs when a DELETE subquery references the same
-	// table.
-	for _, d := range dups {
-		var keepID uint
-		if err := db.Raw(`
-			SELECT MIN(id) FROM reward_live_stake
-			WHERE credential_tag = ?
-			  AND staking_key = ?
-		`, d.CredentialTag, d.StakingKey,
-		).Scan(&keepID).Error; err != nil {
-			return fmt.Errorf(
-				"select min id for reward_live_stake (tag=%d): %w",
-				d.CredentialTag, err,
-			)
-		}
-		if err := db.Exec(`
-			DELETE FROM reward_live_stake
-			WHERE credential_tag = ?
-			  AND staking_key = ?
-			  AND id != ?
-		`, d.CredentialTag, d.StakingKey, keepID,
-		).Error; err != nil {
-			return fmt.Errorf(
-				"delete duplicate reward_live_stake (tag=%d): %w",
-				d.CredentialTag, err,
-			)
-		}
-	}
-	return nil
 }

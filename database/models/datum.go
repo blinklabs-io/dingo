@@ -15,10 +15,10 @@
 package models
 
 type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique;size:32"`
-	RawDatum  []byte `gorm:"not null"`
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"index;not null"`
+	Hash      []byte
+	RawDatum  []byte
+	ID        uint
+	AddedSlot uint64
 }
 
 func (Datum) TableName() string {
@@ -27,10 +27,10 @@ func (Datum) TableName() string {
 
 // PlutusData represents a Plutus data value in the witness set
 type PlutusData struct {
-	Transaction   *Transaction `gorm:"foreignKey:TransactionID"`
+	Transaction   *Transaction
 	Data          []byte
-	ID            uint `gorm:"primaryKey"`
-	TransactionID uint `gorm:"index"`
+	ID            uint
+	TransactionID uint
 }
 
 func (PlutusData) TableName() string {

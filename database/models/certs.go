@@ -20,13 +20,13 @@ package models
 // All certificate types now have dedicated specialized models. The CertificateID field
 // references the ID of the specific certificate record based on CertType.
 type Certificate struct {
-	BlockHash     []byte `gorm:"index;size:32"`
-	ID            uint   `gorm:"primaryKey"`
-	TransactionID uint   `gorm:"index;uniqueIndex:uniq_tx_cert"`
-	CertificateID uint   `gorm:"index"` // Polymorphic FK to certificate table based on CertType. Not DB-enforced.
-	Slot          uint64 `gorm:"index"`
-	CertIndex     uint   `gorm:"column:cert_index;uniqueIndex:uniq_tx_cert"`
-	CertType      uint   `gorm:"index"`
+	BlockHash     []byte
+	ID            uint
+	TransactionID uint
+	CertificateID uint // Polymorphic FK to certificate table based on CertType. Not DB-enforced.
+	Slot          uint64
+	CertIndex     uint
+	CertType      uint
 }
 
 func (Certificate) TableName() string {

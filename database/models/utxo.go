@@ -186,8 +186,8 @@ const (
 )
 
 // AppendUtxoAddressOrBranch appends an OR branch for the given address
-// to the ors/args slices. It uses standard "?" placeholders that work
-// across SQLite, MySQL, and Postgres via GORM. Payment-only addresses
+// to the ors/args slices. It uses standard anonymous placeholders; the shared
+// SQL dialect may rebind them. Payment-only addresses
 // use payment-credential matching; see AppendUtxoAddressOrBranchMode
 // for exact full-address semantics.
 func AppendUtxoAddressOrBranch(
@@ -235,14 +235,20 @@ func AppendUtxoAddressOrBranchMode(
 			sk.Bytes(),
 		)
 	case hasPayment:
-		*ors = append(*ors, "(utxo.payment_script = ? AND utxo.payment_key = ?)")
+		*ors = append(
+			*ors,
+			"(utxo.payment_script = ? AND utxo.payment_key = ?)",
+		)
 		*args = append(*args, paymentScript, pk.Bytes())
 	case hasStake:
 		credentialTag, ok := StakeCredentialTagFromAddress(addr)
 		if !ok {
 			return errors.New("derive stake credential tag from address")
 		}
-		*ors = append(*ors, "(utxo.credential_tag = ? AND utxo.staking_key = ?)")
+		*ors = append(
+			*ors,
+			"(utxo.credential_tag = ? AND utxo.staking_key = ?)",
+		)
 		*args = append(*args, credentialTag, sk.Bytes())
 	}
 	return nil
@@ -250,44 +256,44 @@ func AppendUtxoAddressOrBranchMode(
 
 // Utxo represents an unspent transaction output
 type Utxo struct {
-	TransactionID           *uint   `gorm:"index"`
-	CollateralReturnForTxID *uint   `gorm:"uniqueIndex"` // Unique: a transaction has at most one collateral return output
-	TxId                    []byte  `gorm:"uniqueIndex:tx_id_output_idx;size:32"`
-	PaymentKey              []byte  `gorm:"index;size:28"`
-	StakingKey              []byte  `gorm:"index;size:28;index:idx_utxo_deleted_staking_amount,priority:3;index:idx_utxo_staking_deleted_amount,priority:2"`
-	CredentialTag           uint8   `gorm:"not null;default:0;index:idx_utxo_deleted_staking_amount,priority:2;index:idx_utxo_staking_deleted_amount,priority:1"`
-	Assets                  []Asset `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
-	Cbor                    []byte  `gorm:"-"`       // This is here for convenience but not represented in the metadata DB
-	DatumHash               []byte  `gorm:"size:32"` // Optional datum hash (32 bytes)
-	Datum                   []byte  `gorm:"-"`       // Inline datum CBOR, not stored in metadata DB
-	ScriptRef               []byte  `gorm:"-"`       // Reference script bytes, not stored in metadata DB
+	TransactionID           *uint
+	CollateralReturnForTxID *uint // Unique: a transaction has at most one collateral return output
+	TxId                    []byte
+	PaymentKey              []byte
+	StakingKey              []byte
+	CredentialTag           uint8
+	Assets                  []Asset
+	Cbor                    []byte // This is here for convenience but not represented in the metadata DB
+	DatumHash               []byte // Optional datum hash (32 bytes)
+	Datum                   []byte // Inline datum CBOR, not stored in metadata DB
+	ScriptRef               []byte // Reference script bytes, not stored in metadata DB
 	// SpentAtTxId, ReferencedByTxId, and CollateralByTxId are nullable FKs to
 	// transaction(hash); they are unset until a UTxO is spent/referenced.
 	// They use types.NullableHash so an empty value serializes to SQL NULL
 	// (not an empty blob), which is required for the FK to be skipped — see
 	// the type docs for the FOREIGN KEY constraint failed (787) issue.
-	SpentAtTxId      types.NullableHash `gorm:"index;size:32"`
-	ReferencedByTxId types.NullableHash `gorm:"index;size:32"`
-	CollateralByTxId types.NullableHash `gorm:"index;size:32"`
-	ID               uint               `gorm:"primarykey"`
-	AddedSlot        uint64             `gorm:"index"`
-	DeletedSlot      uint64             `gorm:"index:idx_utxo_deleted_staking_amount,priority:1;index:idx_utxo_staking_deleted_amount,priority:3;index:idx_utxo_deleted_payment_script,priority:1"`
-	Amount           types.Uint64       `gorm:"index:idx_utxo_deleted_staking_amount,priority:4;index:idx_utxo_staking_deleted_amount,priority:4;index:idx_utxo_deleted_payment_script,priority:3"`
-	OutputIdx        uint32             `gorm:"uniqueIndex:tx_id_output_idx"`
+	SpentAtTxId      types.NullableHash
+	ReferencedByTxId types.NullableHash
+	CollateralByTxId types.NullableHash
+	ID               uint
+	AddedSlot        uint64
+	DeletedSlot      uint64
+	Amount           types.Uint64
+	OutputIdx        uint32
 	// PaymentScript is true when the output's payment credential is a
 	// script hash (as opposed to a key hash). It is derived from the
 	// address type at index time and used to compute the network's
 	// script-locked supply (see GetScriptLockedSupply). The composite
 	// index (deleted_slot, payment_script, amount) lets the supply sum
 	// scan only live script UTxOs.
-	PaymentScript bool `gorm:"index:idx_utxo_deleted_payment_script,priority:2"`
+	PaymentScript bool
 }
 
 // UtxoWithOrdering includes UTxO with transaction ordering metadata
 type UtxoWithOrdering struct {
 	Utxo
-	TxSlot       uint64 `gorm:"column:tx_slot"`
-	TxBlockIndex uint32 `gorm:"column:tx_block_index"`
+	TxSlot       uint64
+	TxBlockIndex uint32
 }
 
 // UtxoOrderingCursor is the keyset position for SearchUtxos.

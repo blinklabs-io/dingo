@@ -18,10 +18,17 @@ package mysql
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/plugin"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 type Config struct {
@@ -39,15 +46,120 @@ type Config struct {
 }
 
 func RegisterProvider(host *plugin.Host) error {
-	return plugin.Register(host, plugin.Descriptor{Capability: plugin.CapabilityStorageMetadata, Name: "mysql", Description: "MySQL relational database"},
-		func() Config {
-			return Config{Host: "localhost", Port: 3306, User: "root", Database: "dingo", TimeZone: "UTC"}
+	return plugin.Register(
+		host,
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityStorageMetadata,
+			Name:        "mysql",
+			Description: "MySQL relational database",
 		},
-		func(_ context.Context, cfg Config, deps metadata.ProviderDependencies) (*MetadataStoreMysql, plugin.Instance, error) {
-			store, err := NewWithOptions(WithHost(cfg.Host), WithPort(cfg.Port), WithUser(cfg.User), WithPassword(cfg.Password), WithDatabase(cfg.Database), WithSSLMode(cfg.SSLMode), WithTimeZone(cfg.TimeZone), WithDSN(cfg.DSN), WithPoolMaxOpenConns(cfg.PoolMaxOpenConns), WithPoolMaxIdleConns(cfg.PoolMaxIdleConns), WithPoolConnMaxLifetime(cfg.PoolConnMaxLifetime), WithStorageMode(deps.StorageMode), WithLogger(deps.Logger), WithPromRegistry(deps.PromRegistry))
+		func() Config {
+			return Config{
+				Host:     "localhost",
+				Port:     3306,
+				User:     "root",
+				Database: "dingo",
+				TimeZone: "UTC",
+			}
+		},
+		func(
+			_ context.Context,
+			cfg Config,
+			deps metadata.ProviderDependencies,
+		) (*sqlstore.Store, plugin.Instance, error) {
+			store, err := openStore(cfg, deps)
 			if err != nil {
 				return nil, nil, err
 			}
-			return store, plugin.Lifecycle{StartFunc: func(context.Context) error { return store.Start() }, StopFunc: func(context.Context) error { return store.Stop() }}, nil
-		})
+			return store, plugin.Lifecycle{
+				StartFunc: store.Start,
+				StopFunc: func(context.Context) error {
+					return store.Close()
+				},
+			}, nil
+		},
+	)
+}
+
+func openStore(
+	cfg Config,
+	deps metadata.ProviderDependencies,
+) (*sqlstore.Store, error) {
+	if cfg.PoolMaxOpenConns < 0 ||
+		cfg.PoolMaxIdleConns < 0 ||
+		cfg.PoolConnMaxLifetime < 0 {
+		return nil, errors.New("MySQL pool limits must not be negative")
+	}
+	dsn := cfg.DSN
+	if dsn == "" {
+		location := time.UTC
+		if cfg.TimeZone != "" {
+			var err error
+			location, err = time.LoadLocation(cfg.TimeZone)
+			if err != nil {
+				return nil, fmt.Errorf("load MySQL time zone: %w", err)
+			}
+		}
+		driverConfig := mysqldriver.Config{
+			User:   cfg.User,
+			Passwd: cfg.Password,
+			Net:    "tcp",
+			Addr: net.JoinHostPort(
+				cfg.Host,
+				strconv.FormatUint(uint64(cfg.Port), 10),
+			),
+			DBName:    cfg.Database,
+			ParseTime: true,
+			Loc:       location,
+		}
+		if cfg.SSLMode != "" {
+			driverConfig.TLSConfig = cfg.SSLMode
+		}
+		dsn = driverConfig.FormatDSN()
+	}
+	db, err := sqlstore.OpenDB("mysql", dsn, "mysql")
+	if err != nil {
+		return nil, err
+	}
+	maxOpen := cfg.PoolMaxOpenConns
+	if maxOpen == 0 {
+		maxOpen = deps.MaxConnections
+	}
+	if maxOpen <= 0 {
+		maxOpen = 100
+	}
+	maxIdle := cfg.PoolMaxIdleConns
+	if maxIdle == 0 {
+		maxIdle = 10
+	}
+	connMaxLifetime := cfg.PoolConnMaxLifetime
+	if connMaxLifetime == 0 {
+		connMaxLifetime = time.Hour
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(connMaxLifetime)
+	registry, err := migrations.MySQLRegistry()
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	store, err := sqlstore.New(sqlstore.Config{
+		WriteDB:     db,
+		ReadDB:      db,
+		Dialect:     sqlstore.MySQLDialect(),
+		Logger:      deps.Logger,
+		StorageMode: deps.StorageMode,
+		Migrations:  registry,
+		MigrationLocker: migrations.NewAdvisoryLocker(
+			"mysql",
+			0x64696e676f6d6574,
+			30*time.Second,
+		),
+	})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
 }

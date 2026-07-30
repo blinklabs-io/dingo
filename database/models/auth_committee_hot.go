@@ -21,14 +21,14 @@ import (
 var ErrCommitteeMemberNotFound = errors.New("committee member not found")
 
 type AuthCommitteeHot struct {
-	ColdCredential []byte `gorm:"index;size:28"`
+	ColdCredential []byte
 	// Column is "host_credential" for backward compatibility with
 	// existing databases; the Go field uses the canonical Cardano
 	// terminology ("hot credential" for committee voting keys).
-	HotCredential []byte `gorm:"column:host_credential;index;size:28"`
-	ID            uint   `gorm:"primarykey"`
-	CertificateID uint   `gorm:"index"`
-	AddedSlot     uint64 `gorm:"index"`
+	HotCredential []byte
+	ID            uint
+	CertificateID uint
+	AddedSlot     uint64
 }
 
 func (AuthCommitteeHot) TableName() string {

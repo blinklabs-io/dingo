@@ -1,0 +1,1294 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//nolint:gosec // SQL INTEGER mappings preserve the existing unsigned domain API.
+package sqlstore
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"math/big"
+	"strconv"
+	"strings"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
+)
+
+func (s *Store) SaveRewardAdaPots(
+	pots *models.RewardAdaPots,
+	txn types.Txn,
+) error {
+	if pots == nil {
+		return errors.New("save reward ADA pots: pots are nil")
+	}
+	db, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return err
+	}
+	epoch, err := checkedInt64(pots.Epoch)
+	if err != nil {
+		return err
+	}
+	capturedSlot, err := checkedInt64(pots.CapturedSlot)
+	if err != nil {
+		return err
+	}
+	id, err := queries.SaveRewardAdaPots(
+		context.Background(),
+		sqlitequery.SaveRewardAdaPotsParams{
+			Epoch:        epoch,
+			Treasury:     decimalUint64(pots.Treasury),
+			Reserves:     decimalUint64(pots.Reserves),
+			Fees:         decimalUint64(pots.Fees),
+			Rewards:      decimalUint64(pots.Rewards),
+			CapturedSlot: capturedSlot,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("save reward ADA pots: %w", err)
+	}
+	pots.ID = uint(id)
+	return nil
+}
+
+func (s *Store) GetRewardAdaPots(
+	epoch uint64,
+	txn types.Txn,
+) (*models.RewardAdaPots, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	row, err := queries.GetRewardAdaPots(context.Background(), sqlEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reward ADA pots: %w", err)
+	}
+	treasury, err := parseUint64("treasury", row.Treasury)
+	if err != nil {
+		return nil, err
+	}
+	reserves, err := parseUint64("reserves", row.Reserves)
+	if err != nil {
+		return nil, err
+	}
+	fees, err := parseUint64("fees", row.Fees)
+	if err != nil {
+		return nil, err
+	}
+	rewards, err := parseUint64("rewards", row.Rewards)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardAdaPots{
+		ID:           uint(row.ID),
+		Epoch:        uint64(row.Epoch),
+		Treasury:     types.Uint64(treasury),
+		Reserves:     types.Uint64(reserves),
+		Fees:         types.Uint64(fees),
+		Rewards:      types.Uint64(rewards),
+		CapturedSlot: uint64(row.CapturedSlot),
+	}, nil
+}
+
+func (s *Store) SaveRewardSnapshot(
+	snapshot *models.RewardSnapshot,
+	txn types.Txn,
+) error {
+	if snapshot == nil {
+		return errors.New("save reward snapshot: snapshot is nil")
+	}
+	db, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return err
+	}
+	params, err := rewardSnapshotParams(snapshot)
+	if err != nil {
+		return err
+	}
+	id, err := queries.SaveRewardSnapshot(
+		context.Background(),
+		sqlitequery.SaveRewardSnapshotParams(params),
+	)
+	if err != nil {
+		return fmt.Errorf("save reward snapshot: %w", err)
+	}
+	snapshot.ID = uint(id)
+	return nil
+}
+
+func (s *Store) ClaimFallbackRewardSnapshot(
+	snapshot *models.RewardSnapshot,
+	txn types.Txn,
+) (bool, error) {
+	if snapshot == nil {
+		return false, errors.New(
+			"claim fallback reward snapshot: snapshot is nil",
+		)
+	}
+	snapshot.Authoritative = false
+	params, err := rewardSnapshotParams(snapshot)
+	if err != nil {
+		return false, err
+	}
+	proceed := false
+	err = s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			queries, err := s.sqliteQueries(db)
+			if err != nil {
+				return err
+			}
+			id, err := queries.InsertRewardSnapshot(
+				context.Background(),
+				sqlitequery.InsertRewardSnapshotParams(params),
+			)
+			if err == nil {
+				snapshot.ID = uint(id)
+				proceed = true
+				return nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			existing, err := queries.GetRewardSnapshot(
+				context.Background(),
+				sqlitequery.GetRewardSnapshotParams{
+					Epoch:        params.Epoch,
+					SnapshotType: params.SnapshotType,
+				},
+			)
+			if err != nil {
+				return err
+			}
+			if existing.Authoritative {
+				return nil
+			}
+			err = queries.UpdateFallbackRewardSnapshot(
+				context.Background(),
+				sqlitequery.UpdateFallbackRewardSnapshotParams{
+					TotalActiveStake:   params.TotalActiveStake,
+					TotalPoolCount:     params.TotalPoolCount,
+					TotalDelegators:    params.TotalDelegators,
+					CapturedSlot:       params.CapturedSlot,
+					BoundarySlot:       params.BoundarySlot,
+					EpochNonce:         params.EpochNonce,
+					ProtocolVersion:    params.ProtocolVersion,
+					CalculationVersion: params.CalculationVersion,
+					Epoch:              params.Epoch,
+					SnapshotType:       params.SnapshotType,
+				},
+			)
+			if err == nil {
+				snapshot.ID = uint(existing.ID)
+				proceed = true
+			}
+			return err
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("claim fallback reward snapshot: %w", err)
+	}
+	return proceed, nil
+}
+
+func (s *Store) ClaimFallbackRewardSnapshotGuard(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (bool, uint, error) {
+	if txn == nil {
+		return false, 0, errors.New(
+			"ClaimFallbackRewardSnapshotGuard: transaction is required",
+		)
+	}
+	db, err := s.dbFromTxn(txn)
+	if err != nil {
+		return false, 0, err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return false, 0, err
+	}
+	guard := &models.RewardSnapshot{
+		Epoch:        epoch,
+		SnapshotType: snapshotType,
+	}
+	params, err := rewardSnapshotParams(guard)
+	if err != nil {
+		return false, 0, err
+	}
+	id, err := queries.InsertRewardSnapshot(
+		context.Background(),
+		sqlitequery.InsertRewardSnapshotParams(params),
+	)
+	if err == nil {
+		return true, uint(id), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, 0, fmt.Errorf(
+			"claim fallback reward snapshot guard: %w",
+			err,
+		)
+	}
+	existing, err := queries.GetRewardSnapshot(
+		context.Background(),
+		sqlitequery.GetRewardSnapshotParams{
+			Epoch:        params.Epoch,
+			SnapshotType: params.SnapshotType,
+		},
+	)
+	if err != nil {
+		return false, 0, fmt.Errorf(
+			"claim fallback reward snapshot guard: %w",
+			err,
+		)
+	}
+	if existing.Authoritative {
+		return false, 0, nil
+	}
+	return true, 0, nil
+}
+
+func (s *Store) ReleaseFallbackRewardSnapshotGuard(
+	guardID uint,
+	txn types.Txn,
+) error {
+	if txn == nil {
+		return errors.New(
+			"ReleaseFallbackRewardSnapshotGuard: transaction is required",
+		)
+	}
+	if guardID == 0 {
+		return nil
+	}
+	db, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return err
+	}
+	rows, err := queries.ReleaseFallbackRewardSnapshotGuard(
+		context.Background(),
+		int64(guardID),
+	)
+	if err != nil {
+		return fmt.Errorf("release fallback reward snapshot guard: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf(
+			"release fallback reward snapshot guard: expected 1 row, deleted %d",
+			rows,
+		)
+	}
+	return nil
+}
+
+func (s *Store) GetRewardSnapshot(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (*models.RewardSnapshot, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	row, err := queries.GetRewardSnapshot(
+		context.Background(),
+		sqlitequery.GetRewardSnapshotParams{
+			Epoch:        sqlEpoch,
+			SnapshotType: snapshotType,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reward snapshot: %w", err)
+	}
+	return rewardSnapshotFromSQLite(row)
+}
+
+func (s *Store) SaveRewardPoolInputs(
+	inputs []*models.RewardPoolInput,
+	txn types.Txn,
+) error {
+	return s.saveRewardRows(
+		"pool inputs",
+		len(inputs),
+		txn,
+		func(queries *sqlitequery.Queries, index int) error {
+			input := inputs[index]
+			if input == nil {
+				return errors.New("input is nil")
+			}
+			params, err := rewardPoolInputParams(input)
+			if err != nil {
+				return err
+			}
+			id, err := queries.SaveRewardPoolInput(
+				context.Background(),
+				params,
+			)
+			input.ID = uint(id)
+			return err
+		},
+	)
+}
+
+func (s *Store) GetRewardPoolInputs(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardPoolInput, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := queries.GetRewardPoolInputs(context.Background(), sqlEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get reward pool inputs: %w", err)
+	}
+	ret := make([]*models.RewardPoolInput, 0, len(rows))
+	for _, row := range rows {
+		input, err := rewardPoolInputFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, input)
+	}
+	return ret, nil
+}
+
+func (s *Store) SaveRewardStakeInputs(
+	inputs []*models.RewardStakeInput,
+	txn types.Txn,
+) error {
+	return s.saveRewardRows(
+		"stake inputs",
+		len(inputs),
+		txn,
+		func(queries *sqlitequery.Queries, index int) error {
+			input := inputs[index]
+			if input == nil {
+				return errors.New("input is nil")
+			}
+			params, err := rewardStakeInputParams(input)
+			if err != nil {
+				return err
+			}
+			id, err := queries.SaveRewardStakeInput(
+				context.Background(),
+				params,
+			)
+			input.ID = uint(id)
+			return err
+		},
+	)
+}
+
+func (s *Store) GetRewardStakeInputs(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := queries.GetRewardStakeInputs(context.Background(), sqlEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get reward stake inputs: %w", err)
+	}
+	ret := make([]*models.RewardStakeInput, 0, len(rows))
+	for _, row := range rows {
+		input, err := rewardStakeInputFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, input)
+	}
+	return ret, nil
+}
+
+func (s *Store) DeleteRewardInputsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	return s.deleteRewardPair(
+		"inputs for epoch",
+		epoch,
+		txn,
+		func(q *sqlitequery.Queries, value int64) error {
+			if err := q.DeleteRewardPoolInputsForEpoch(
+				context.Background(),
+				value,
+			); err != nil {
+				return err
+			}
+			return q.DeleteRewardStakeInputsForEpoch(
+				context.Background(),
+				value,
+			)
+		},
+	)
+}
+
+func (s *Store) DeleteRewardOutputsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	return s.deleteRewardPair(
+		"outputs for epoch",
+		epoch,
+		txn,
+		func(q *sqlitequery.Queries, value int64) error {
+			if err := q.DeleteRewardPoolOutputsForEpoch(
+				context.Background(),
+				value,
+			); err != nil {
+				return err
+			}
+			return q.DeleteRewardAccountOutputsForEpoch(
+				context.Background(),
+				value,
+			)
+		},
+	)
+}
+
+func (s *Store) SaveRewardPoolOutputs(
+	outputs []*models.RewardPoolOutput,
+	txn types.Txn,
+) error {
+	return s.saveRewardRows(
+		"pool outputs",
+		len(outputs),
+		txn,
+		func(queries *sqlitequery.Queries, index int) error {
+			output := outputs[index]
+			if output == nil {
+				return errors.New("output is nil")
+			}
+			params, err := rewardPoolOutputParams(output)
+			if err != nil {
+				return err
+			}
+			id, err := queries.SaveRewardPoolOutput(
+				context.Background(),
+				params,
+			)
+			output.ID = uint(id)
+			return err
+		},
+	)
+}
+
+func (s *Store) GetRewardPoolOutputs(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardPoolOutput, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := queries.GetRewardPoolOutputs(context.Background(), sqlEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get reward pool outputs: %w", err)
+	}
+	ret := make([]*models.RewardPoolOutput, 0, len(rows))
+	for _, row := range rows {
+		output, err := rewardPoolOutputFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, output)
+	}
+	return ret, nil
+}
+
+func (s *Store) SaveRewardAccountOutputs(
+	outputs []*models.RewardAccountOutput,
+	txn types.Txn,
+) error {
+	return s.saveRewardRows(
+		"account outputs",
+		len(outputs),
+		txn,
+		func(queries *sqlitequery.Queries, index int) error {
+			output := outputs[index]
+			if output == nil {
+				return errors.New("output is nil")
+			}
+			params, err := rewardAccountOutputParams(output)
+			if err != nil {
+				return err
+			}
+			id, err := queries.SaveRewardAccountOutput(
+				context.Background(),
+				params,
+			)
+			output.ID = uint(id)
+			return err
+		},
+	)
+}
+
+func (s *Store) GetRewardAccountOutputs(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	queries, err := s.sqliteQueries(db)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := queries.GetRewardAccountOutputs(
+		context.Background(),
+		sqlEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get reward account outputs: %w", err)
+	}
+	ret := make([]*models.RewardAccountOutput, 0, len(rows))
+	for _, row := range rows {
+		output, err := rewardAccountOutputFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, output)
+	}
+	return ret, nil
+}
+
+func (s *Store) GetRewardAccountOutputsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	ret := make([]*models.RewardAccountOutput, 0)
+	if len(stakingKey) == 0 {
+		return ret, nil
+	}
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := `
+SELECT staking_key, pool_key_hash, reward_type, id, epoch, credential_tag,
+       amount, spendable, guarded, captured_slot, boundary_slot
+FROM reward_account_output
+WHERE credential_tag = ? AND staking_key = ?
+  AND spendable = TRUE AND guarded = FALSE`
+	if strings.EqualFold(order, "desc") {
+		query += " ORDER BY epoch DESC, pool_key_hash ASC, reward_type ASC"
+	} else {
+		query += " ORDER BY epoch ASC, pool_key_hash ASC, reward_type ASC"
+	}
+	args := []any{credentialTag, stakingKey}
+	query, args = addLimitOffset(query, args, limit, offset)
+	rows, err := db.QueryContext(
+		context.Background(),
+		s.dialect.Rebind(query),
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get reward account outputs by credential: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			output       models.RewardAccountOutput
+			amount       string
+			id           int64
+			epoch        int64
+			sqlTag       int64
+			capturedSlot int64
+			boundarySlot int64
+		)
+		if err := rows.Scan(
+			&output.StakingKey,
+			&output.PoolKeyHash,
+			&output.RewardType,
+			&id,
+			&epoch,
+			&sqlTag,
+			&amount,
+			&output.Spendable,
+			&output.Guarded,
+			&capturedSlot,
+			&boundarySlot,
+		); err != nil {
+			return nil, err
+		}
+		value, err := parseUint64("reward account amount", amount)
+		if err != nil {
+			return nil, err
+		}
+		output.ID = uint(id)
+		output.Epoch = uint64(epoch)
+		output.CredentialTag = uint8(sqlTag)
+		output.Amount = types.Uint64(value)
+		output.CapturedSlot = uint64(capturedSlot)
+		output.BoundarySlot = uint64(boundarySlot)
+		ret = append(ret, &output)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func (s *Store) CountRewardAccountOutputsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = db.QueryRowContext(
+		context.Background(),
+		s.dialect.Rebind(`
+SELECT COUNT(*)
+FROM reward_account_output
+WHERE credential_tag = ? AND staking_key = ?
+  AND spendable = TRUE AND guarded = FALSE`),
+		credentialTag,
+		stakingKey,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count reward account outputs by credential: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
+func (s *Store) DeleteRewardStateAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	sqlSlot, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	err = s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			q, err := s.sqliteQueries(db)
+			if err != nil {
+				return err
+			}
+			if err := q.DeleteRewardAdaPotsAfterSlot(
+				context.Background(),
+				sqlSlot,
+			); err != nil {
+				return err
+			}
+			pair := sqlitequery.DeleteRewardSnapshotsAfterSlotParams{
+				CapturedSlot: sqlSlot,
+				BoundarySlot: sqlSlot,
+			}
+			if err := q.DeleteRewardSnapshotsAfterSlot(
+				context.Background(),
+				pair,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteRewardPoolInputsAfterSlot(
+				context.Background(),
+				sqlitequery.DeleteRewardPoolInputsAfterSlotParams(pair),
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteRewardStakeInputsAfterSlot(
+				context.Background(),
+				sqlitequery.DeleteRewardStakeInputsAfterSlotParams(pair),
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteRewardPoolOutputsAfterSlot(
+				context.Background(),
+				sqlitequery.DeleteRewardPoolOutputsAfterSlotParams(pair),
+			); err != nil {
+				return err
+			}
+			return q.DeleteRewardAccountOutputsAfterSlot(
+				context.Background(),
+				sqlitequery.DeleteRewardAccountOutputsAfterSlotParams(pair),
+			)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("delete reward state after slot: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteRewardStateBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	return s.deleteRewardPair(
+		"state before epoch",
+		epoch,
+		txn,
+		func(q *sqlitequery.Queries, value int64) error {
+			if err := q.DeleteRewardStakeInputsBeforeEpoch(
+				context.Background(),
+				value,
+			); err != nil {
+				return err
+			}
+			return q.DeleteRewardAccountOutputsBeforeEpoch(
+				context.Background(),
+				value,
+			)
+		},
+	)
+}
+
+func (s *Store) DeleteRewardStakeInputBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	return s.deleteRewardPair(
+		"stake input before epoch",
+		epoch,
+		txn,
+		func(q *sqlitequery.Queries, value int64) error {
+			return q.DeleteRewardStakeInputsBeforeEpoch(
+				context.Background(),
+				value,
+			)
+		},
+	)
+}
+
+func (s *Store) saveRewardRows(
+	description string,
+	count int,
+	txn types.Txn,
+	save func(*sqlitequery.Queries, int) error,
+) error {
+	if count == 0 {
+		return nil
+	}
+	err := s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			queries, err := s.sqliteQueries(db)
+			if err != nil {
+				return err
+			}
+			for index := range count {
+				if err := save(queries, index); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("save reward %s: %w", description, err)
+	}
+	return nil
+}
+
+func (s *Store) deleteRewardPair(
+	description string,
+	value uint64,
+	txn types.Txn,
+	deleteFn func(*sqlitequery.Queries, int64) error,
+) error {
+	sqlValue, err := checkedInt64(value)
+	if err != nil {
+		return err
+	}
+	err = s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			queries, err := s.sqliteQueries(db)
+			if err != nil {
+				return err
+			}
+			return deleteFn(queries, sqlValue)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("delete reward %s: %w", description, err)
+	}
+	return nil
+}
+
+type rewardSnapshotQueryParams struct {
+	Epoch              int64
+	SnapshotType       string
+	TotalActiveStake   string
+	TotalPoolCount     int64
+	TotalDelegators    int64
+	CapturedSlot       int64
+	BoundarySlot       int64
+	EpochNonce         []byte
+	ProtocolVersion    int64
+	Authoritative      bool
+	CalculationVersion int64
+}
+
+func rewardSnapshotParams(
+	snapshot *models.RewardSnapshot,
+) (rewardSnapshotQueryParams, error) {
+	epoch, err := checkedInt64(snapshot.Epoch)
+	if err != nil {
+		return rewardSnapshotQueryParams{}, err
+	}
+	totalPoolCount, err := checkedInt64(snapshot.TotalPoolCount)
+	if err != nil {
+		return rewardSnapshotQueryParams{}, err
+	}
+	totalDelegators, err := checkedInt64(snapshot.TotalDelegators)
+	if err != nil {
+		return rewardSnapshotQueryParams{}, err
+	}
+	capturedSlot, err := checkedInt64(snapshot.CapturedSlot)
+	if err != nil {
+		return rewardSnapshotQueryParams{}, err
+	}
+	boundarySlot, err := checkedInt64(snapshot.BoundarySlot)
+	if err != nil {
+		return rewardSnapshotQueryParams{}, err
+	}
+	protocolVersion, err := checkedInt64(uint64(snapshot.ProtocolVersion))
+	if err != nil {
+		return rewardSnapshotQueryParams{}, err
+	}
+	return rewardSnapshotQueryParams{
+		Epoch:              epoch,
+		SnapshotType:       snapshot.SnapshotType,
+		TotalActiveStake:   decimalUint64(snapshot.TotalActiveStake),
+		TotalPoolCount:     totalPoolCount,
+		TotalDelegators:    totalDelegators,
+		CapturedSlot:       capturedSlot,
+		BoundarySlot:       boundarySlot,
+		EpochNonce:         snapshot.EpochNonce,
+		ProtocolVersion:    protocolVersion,
+		Authoritative:      snapshot.Authoritative,
+		CalculationVersion: int64(snapshot.CalculationVersion),
+	}, nil
+}
+
+func rewardSnapshotFromSQLite(
+	row sqlitequery.RewardSnapshot,
+) (*models.RewardSnapshot, error) {
+	totalActiveStake, err := parseUint64(
+		"reward total active stake",
+		row.TotalActiveStake,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardSnapshot{
+		ID:                 uint(row.ID),
+		Epoch:              uint64(row.Epoch),
+		SnapshotType:       row.SnapshotType,
+		TotalActiveStake:   types.Uint64(totalActiveStake),
+		TotalPoolCount:     uint64(row.TotalPoolCount),
+		TotalDelegators:    uint64(row.TotalDelegators),
+		CapturedSlot:       uint64(row.CapturedSlot),
+		BoundarySlot:       uint64(row.BoundarySlot),
+		EpochNonce:         row.EpochNonce,
+		ProtocolVersion:    uint(row.ProtocolVersion),
+		Authoritative:      row.Authoritative,
+		CalculationVersion: uint(row.CalculationVersion),
+	}, nil
+}
+
+func rewardPoolInputParams(
+	input *models.RewardPoolInput,
+) (sqlitequery.SaveRewardPoolInputParams, error) {
+	epoch, err := checkedInt64(input.Epoch)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolInputParams{}, err
+	}
+	delegatorCount, err := checkedInt64(input.DelegatorCount)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolInputParams{}, err
+	}
+	capturedSlot, err := checkedInt64(input.CapturedSlot)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolInputParams{}, err
+	}
+	boundarySlot, err := checkedInt64(input.BoundarySlot)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolInputParams{}, err
+	}
+	blocksProduced, err := nullableUint64(input.BlocksProduced)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolInputParams{}, err
+	}
+	totalBlocks, err := nullableUint64(input.TotalBlocksInEpoch)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolInputParams{}, err
+	}
+	return sqlitequery.SaveRewardPoolInputParams{
+		Margin:                     nullableRat(input.Margin),
+		PoolKeyHash:                input.PoolKeyHash,
+		RewardAccount:              input.RewardAccount,
+		BlocksProduced:             blocksProduced,
+		TotalBlocksInEpoch:         totalBlocks,
+		Epoch:                      epoch,
+		Pledge:                     decimalUint64(input.Pledge),
+		DelegatedStake:             decimalUint64(input.DelegatedStake),
+		OwnerStake:                 decimalUint64(input.OwnerStake),
+		Cost:                       decimalUint64(input.Cost),
+		DelegatorCount:             delegatorCount,
+		RewardAccountCredentialTag: int64(input.RewardAccountCredentialTag),
+		CapturedSlot:               capturedSlot,
+		BoundarySlot:               boundarySlot,
+	}, nil
+}
+
+func rewardPoolInputFromSQLite(
+	row sqlitequery.RewardPoolInput,
+) (*models.RewardPoolInput, error) {
+	pledge, err := parseUint64("reward pledge", row.Pledge)
+	if err != nil {
+		return nil, err
+	}
+	delegatedStake, err := parseUint64(
+		"reward delegated stake",
+		row.DelegatedStake,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ownerStake, err := parseUint64("reward owner stake", row.OwnerStake)
+	if err != nil {
+		return nil, err
+	}
+	cost, err := parseUint64("reward cost", row.Cost)
+	if err != nil {
+		return nil, err
+	}
+	margin, err := parseNullableRat(row.Margin)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardPoolInput{
+		Margin:                     margin,
+		PoolKeyHash:                row.PoolKeyHash,
+		RewardAccount:              row.RewardAccount,
+		BlocksProduced:             uint64Pointer(row.BlocksProduced),
+		TotalBlocksInEpoch:         uint64Pointer(row.TotalBlocksInEpoch),
+		ID:                         uint(row.ID),
+		Epoch:                      uint64(row.Epoch),
+		Pledge:                     types.Uint64(pledge),
+		DelegatedStake:             types.Uint64(delegatedStake),
+		OwnerStake:                 types.Uint64(ownerStake),
+		Cost:                       types.Uint64(cost),
+		DelegatorCount:             uint64(row.DelegatorCount),
+		RewardAccountCredentialTag: uint8(row.RewardAccountCredentialTag),
+		CapturedSlot:               uint64(row.CapturedSlot),
+		BoundarySlot:               uint64(row.BoundarySlot),
+	}, nil
+}
+
+func rewardStakeInputParams(
+	input *models.RewardStakeInput,
+) (sqlitequery.SaveRewardStakeInputParams, error) {
+	epoch, err := checkedInt64(input.Epoch)
+	if err != nil {
+		return sqlitequery.SaveRewardStakeInputParams{}, err
+	}
+	capturedSlot, err := checkedInt64(input.CapturedSlot)
+	if err != nil {
+		return sqlitequery.SaveRewardStakeInputParams{}, err
+	}
+	boundarySlot, err := checkedInt64(input.BoundarySlot)
+	if err != nil {
+		return sqlitequery.SaveRewardStakeInputParams{}, err
+	}
+	return sqlitequery.SaveRewardStakeInputParams{
+		PoolKeyHash:   input.PoolKeyHash,
+		StakingKey:    input.StakingKey,
+		Epoch:         epoch,
+		CredentialTag: int64(input.CredentialTag),
+		Stake:         decimalUint64(input.Stake),
+		Owner:         input.Owner,
+		Registered:    input.Registered,
+		CapturedSlot:  capturedSlot,
+		BoundarySlot:  boundarySlot,
+	}, nil
+}
+
+func rewardStakeInputFromSQLite(
+	row sqlitequery.RewardStakeInput,
+) (*models.RewardStakeInput, error) {
+	stake, err := parseUint64("reward stake", row.Stake)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardStakeInput{
+		PoolKeyHash:   row.PoolKeyHash,
+		StakingKey:    row.StakingKey,
+		ID:            uint(row.ID),
+		Epoch:         uint64(row.Epoch),
+		CredentialTag: uint8(row.CredentialTag),
+		Stake:         types.Uint64(stake),
+		Owner:         row.Owner,
+		Registered:    row.Registered,
+		CapturedSlot:  uint64(row.CapturedSlot),
+		BoundarySlot:  uint64(row.BoundarySlot),
+	}, nil
+}
+
+func rewardPoolOutputParams(
+	output *models.RewardPoolOutput,
+) (sqlitequery.SaveRewardPoolOutputParams, error) {
+	epoch, err := checkedInt64(output.Epoch)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolOutputParams{}, err
+	}
+	capturedSlot, err := checkedInt64(output.CapturedSlot)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolOutputParams{}, err
+	}
+	boundarySlot, err := checkedInt64(output.BoundarySlot)
+	if err != nil {
+		return sqlitequery.SaveRewardPoolOutputParams{}, err
+	}
+	return sqlitequery.SaveRewardPoolOutputParams{
+		ApparentPerformance: nullableRat(output.ApparentPerformance),
+		PoolKeyHash:         output.PoolKeyHash,
+		Epoch:               epoch,
+		OptimalReward:       decimalUint64(output.OptimalReward),
+		TotalReward:         decimalUint64(output.TotalReward),
+		LeaderReward:        decimalUint64(output.LeaderReward),
+		MemberRewardTotal:   decimalUint64(output.MemberRewardTotal),
+		OwnerStake:          decimalUint64(output.OwnerStake),
+		Undistributed:       decimalUint64(output.Undistributed),
+		Unspendable:         decimalUint64(output.Unspendable),
+		CapturedSlot:        capturedSlot,
+		BoundarySlot:        boundarySlot,
+	}, nil
+}
+
+func rewardPoolOutputFromSQLite(
+	row sqlitequery.RewardPoolOutput,
+) (*models.RewardPoolOutput, error) {
+	values, err := parseUint64Fields(
+		[]string{
+			row.OptimalReward,
+			row.TotalReward,
+			row.LeaderReward,
+			row.MemberRewardTotal,
+			row.OwnerStake,
+			row.Undistributed,
+			row.Unspendable,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	performance, err := parseNullableRat(row.ApparentPerformance)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardPoolOutput{
+		ApparentPerformance: performance,
+		PoolKeyHash:         row.PoolKeyHash,
+		ID:                  uint(row.ID),
+		Epoch:               uint64(row.Epoch),
+		OptimalReward:       types.Uint64(values[0]),
+		TotalReward:         types.Uint64(values[1]),
+		LeaderReward:        types.Uint64(values[2]),
+		MemberRewardTotal:   types.Uint64(values[3]),
+		OwnerStake:          types.Uint64(values[4]),
+		Undistributed:       types.Uint64(values[5]),
+		Unspendable:         types.Uint64(values[6]),
+		CapturedSlot:        uint64(row.CapturedSlot),
+		BoundarySlot:        uint64(row.BoundarySlot),
+	}, nil
+}
+
+func rewardAccountOutputParams(
+	output *models.RewardAccountOutput,
+) (sqlitequery.SaveRewardAccountOutputParams, error) {
+	epoch, err := checkedInt64(output.Epoch)
+	if err != nil {
+		return sqlitequery.SaveRewardAccountOutputParams{}, err
+	}
+	capturedSlot, err := checkedInt64(output.CapturedSlot)
+	if err != nil {
+		return sqlitequery.SaveRewardAccountOutputParams{}, err
+	}
+	boundarySlot, err := checkedInt64(output.BoundarySlot)
+	if err != nil {
+		return sqlitequery.SaveRewardAccountOutputParams{}, err
+	}
+	return sqlitequery.SaveRewardAccountOutputParams{
+		StakingKey:    output.StakingKey,
+		PoolKeyHash:   output.PoolKeyHash,
+		RewardType:    output.RewardType,
+		Epoch:         epoch,
+		CredentialTag: int64(output.CredentialTag),
+		Amount:        decimalUint64(output.Amount),
+		Spendable:     output.Spendable,
+		Guarded:       output.Guarded,
+		CapturedSlot:  capturedSlot,
+		BoundarySlot:  boundarySlot,
+	}, nil
+}
+
+func rewardAccountOutputFromSQLite(
+	row sqlitequery.RewardAccountOutput,
+) (*models.RewardAccountOutput, error) {
+	amount, err := parseUint64("reward account amount", row.Amount)
+	if err != nil {
+		return nil, err
+	}
+	return &models.RewardAccountOutput{
+		StakingKey:    row.StakingKey,
+		PoolKeyHash:   row.PoolKeyHash,
+		RewardType:    row.RewardType,
+		ID:            uint(row.ID),
+		Epoch:         uint64(row.Epoch),
+		CredentialTag: uint8(row.CredentialTag),
+		Amount:        types.Uint64(amount),
+		Spendable:     row.Spendable,
+		Guarded:       row.Guarded,
+		CapturedSlot:  uint64(row.CapturedSlot),
+		BoundarySlot:  uint64(row.BoundarySlot),
+	}, nil
+}
+
+func decimalUint64(value types.Uint64) string {
+	return strconv.FormatUint(uint64(value), 10)
+}
+
+func parseUint64(description, value string) (uint64, error) {
+	ret, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("decode %s: %w", description, err)
+	}
+	return ret, nil
+}
+
+func parseUint64Fields(values []string) ([]uint64, error) {
+	ret := make([]uint64, len(values))
+	for index, value := range values {
+		parsed, err := parseUint64("reward value", value)
+		if err != nil {
+			return nil, err
+		}
+		ret[index] = parsed
+	}
+	return ret, nil
+}
+
+func nullableRat(value *types.Rat) sql.NullString {
+	if value == nil || value.Rat == nil {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: value.String(), Valid: true}
+}
+
+func parseNullableRat(value sql.NullString) (*types.Rat, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	rat, ok := new(big.Rat).SetString(value.String)
+	if !ok {
+		return nil, fmt.Errorf("decode rational %q", value.String)
+	}
+	return &types.Rat{Rat: rat}, nil
+}

@@ -19,12 +19,12 @@ import "github.com/blinklabs-io/dingo/database/types"
 // TransactionMetadataLabel stores per-label transaction metadata values
 // for efficient label-based querying.
 type TransactionMetadataLabel struct {
-	ID            uint         `gorm:"primaryKey"`
-	TransactionID uint         `gorm:"uniqueIndex:idx_tx_metadata_label_tx_label"`
-	Label         types.Uint64 `gorm:"index;uniqueIndex:idx_tx_metadata_label_tx_label"`
-	Slot          uint64       `gorm:"index"`
+	ID            uint
+	TransactionID uint
+	Label         types.Uint64
+	Slot          uint64
 	CborValue     []byte
-	JsonValue     string `gorm:"type:text"`
+	JsonValue     string
 }
 
 func (TransactionMetadataLabel) TableName() string {

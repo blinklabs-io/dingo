@@ -1428,7 +1428,14 @@ func TestNodeAdapterDRepsEpochForSlot(t *testing.T) {
 		{EpochId: 1, StartSlot: 100, LengthInSlots: 100},
 		{EpochId: 2, StartSlot: 200, LengthInSlots: 100},
 	} {
-		require.NoError(t, store.DB().Create(&epoch).Error)
+		_, err := store.Exec(`
+INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+VALUES (?, ?, ?)`,
+			epoch.EpochId,
+			epoch.StartSlot,
+			epoch.LengthInSlots,
+		)
+		require.NoError(t, err)
 	}
 
 	// LastActivityEpoch 0 makes the reported last-active epoch fall back
@@ -1438,7 +1445,17 @@ func TestNodeAdapterDRepsEpochForSlot(t *testing.T) {
 		{Credential: bytes.Repeat([]byte{0x02}, 28), AddedSlot: 200, Active: true},
 		{Credential: bytes.Repeat([]byte{0x03}, 28), AddedSlot: 250, Active: true},
 	} {
-		require.NoError(t, store.DB().Create(&drep).Error)
+		_, err := store.Exec(`
+INSERT INTO drep (
+    credential, credential_tag, added_slot, last_activity_epoch, active
+) VALUES (?, ?, ?, ?, ?)`,
+			drep.Credential,
+			drep.CredentialTag,
+			drep.AddedSlot,
+			drep.LastActivityEpoch,
+			drep.Active,
+		)
+		require.NoError(t, err)
 	}
 
 	items, total, err := adapter.DReps(DRepListParams{
@@ -3207,12 +3224,16 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	// Spent history recorded against the payment credential (via a base
 	// address, so the synthetic enterprise form never matches) resolves
 	// with a zero lovelace balance.
-	require.NoError(t, store.DB().Create(&models.AddressTransaction{
-		PaymentKey:    paymentKey,
-		StakingKey:    bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
-		TransactionID: 1,
-		Slot:          10,
-	}).Error)
+	_, err = store.Exec(`
+INSERT INTO address_transaction (
+    payment_key, staking_key, transaction_id, slot
+) VALUES (?, ?, ?, ?)`,
+		paymentKey,
+		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		1,
+		10,
+	)
+	require.NoError(t, err)
 
 	info, err := adapter.Address(credID)
 	require.NoError(t, err)

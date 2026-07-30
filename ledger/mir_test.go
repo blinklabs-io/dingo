@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"database/sql"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -22,7 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 // mirCred28 builds a 28-byte stake credential filled with seed.
@@ -35,7 +36,9 @@ func mirCred28(seed byte) []byte {
 }
 
 // newMIRTestLedger reuses the poolreap helper (same DB setup).
-func newMIRTestLedger(t *testing.T) (*LedgerState, *database.Database, *gorm.DB) {
+func newMIRTestLedger(
+	t *testing.T,
+) (*LedgerState, *database.Database, *sql.DB) {
 	t.Helper()
 	return newPoolreapTestLedger(t)
 }
@@ -44,20 +47,31 @@ func newMIRTestLedger(t *testing.T) (*LedgerState, *database.Database, *gorm.DB)
 // credential→amount reward rows, simulating a distribution MIR cert.
 func seedMIRDistribution(
 	t *testing.T,
-	gdb *gorm.DB,
+	raw *sql.DB,
 	pot uint,
 	addedSlot uint64,
 	rewards []models.MoveInstantaneousRewardsReward,
 ) {
 	t.Helper()
-	mir := &models.MoveInstantaneousRewards{
-		Pot:       pot,
-		AddedSlot: addedSlot,
-	}
-	require.NoError(t, gdb.Create(mir).Error)
+	result, err := raw.Exec(`
+INSERT INTO move_instantaneous_rewards (pot, added_slot, other_pot)
+VALUES (?, ?, '0')`,
+		pot, addedSlot,
+	)
+	require.NoError(t, err)
+	mirID, err := result.LastInsertId()
+	require.NoError(t, err)
 	for i := range rewards {
-		rewards[i].MIRID = mir.ID
-		require.NoError(t, gdb.Create(&rewards[i]).Error)
+		_, err = raw.Exec(`
+INSERT INTO move_instantaneous_rewards_reward (
+    mir_id, credential, credential_tag, amount
+) VALUES (?, ?, ?, ?)`,
+			mirID,
+			rewards[i].Credential,
+			rewards[i].CredentialTag,
+			strconv.FormatUint(uint64(rewards[i].Amount), 10),
+		)
+		require.NoError(t, err)
 	}
 }
 
@@ -65,18 +79,20 @@ func seedMIRDistribution(
 // pot-to-pot transfer (OtherPot > 0, no credential rows).
 func seedMIRPotTransfer(
 	t *testing.T,
-	gdb *gorm.DB,
+	raw *sql.DB,
 	sourcePot uint,
 	amount uint64,
 	addedSlot uint64,
 ) {
 	t.Helper()
-	mir := &models.MoveInstantaneousRewards{
-		Pot:       sourcePot,
-		OtherPot:  types.Uint64(amount),
-		AddedSlot: addedSlot,
-	}
-	require.NoError(t, gdb.Create(mir).Error)
+	_, err := raw.Exec(`
+INSERT INTO move_instantaneous_rewards (pot, added_slot, other_pot)
+VALUES (?, ?, ?)`,
+		sourcePot,
+		addedSlot,
+		strconv.FormatUint(amount, 10),
+	)
+	require.NoError(t, err)
 }
 
 func runApplyMIRCerts(
@@ -106,7 +122,9 @@ func applyMIRCertsErr(
 // TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount verifies that a
 // MIR cert distributing from reserves credits the registered reward account and
 // debits reserves.
-func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(t *testing.T) {
+func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
+	t *testing.T,
+) {
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -115,9 +133,15 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(t *testing.T) 
 		mirAmount      = uint64(750)
 	)
 	cred := mirCred28(0x11)
-	seedMIRDistribution(t, gdb, mirPotReserves, 500, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(mirAmount)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		500,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(mirAmount)},
+		},
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: cred,
 		Reward:     0,
@@ -155,12 +179,24 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 		secondAmount   = uint64(450)
 	)
 	cred := mirCred28(0x12)
-	seedMIRDistribution(t, gdb, mirPotReserves, 200, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(firstAmount)},
-	})
-	seedMIRDistribution(t, gdb, mirPotReserves, 400, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(secondAmount)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		200,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(firstAmount)},
+		},
+	)
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		400,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(secondAmount)},
+		},
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: cred,
 		Reward:     0,
@@ -180,15 +216,23 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(9_250), uint64(state.Reserves))
 
-	var deltas []models.AccountRewardDelta
-	require.NoError(t, gdb.Where(
-		"credential_tag = ? AND staking_key = ? AND added_slot = ?",
-		0,
-		cred,
-		boundarySlot,
-	).Order("id ASC").Find(&deltas).Error)
-	require.Len(t, deltas, 2)
-	assert.NotEqual(t, string(deltas[0].TxHash), string(deltas[1].TxHash))
+	rows, err := gdb.Query(`
+SELECT tx_hash FROM account_reward_delta
+WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?
+ORDER BY id ASC`,
+		0, cred, boundarySlot,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+	var hashes [][]byte
+	for rows.Next() {
+		var hash []byte
+		require.NoError(t, rows.Scan(&hash))
+		hashes = append(hashes, hash)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, hashes, 2)
+	assert.NotEqual(t, string(hashes[0]), string(hashes[1]))
 }
 
 func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
@@ -197,10 +241,16 @@ func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
 	maxUint := ^uint64(0)
 	credA := mirCred28(0x13)
 	credB := mirCred28(0x14)
-	seedMIRDistribution(t, gdb, mirPotReserves, 200, []models.MoveInstantaneousRewardsReward{
-		{Credential: credA, Amount: types.Uint64(maxUint)},
-		{Credential: credB, Amount: types.Uint64(1)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		200,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: credA, Amount: types.Uint64(maxUint)},
+			{Credential: credB, Amount: types.Uint64(1)},
+		},
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: credA,
 		Active:     true,
@@ -228,7 +278,9 @@ func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
 
 // TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount verifies a MIR
 // cert from the treasury credits the account and debits the treasury.
-func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(t *testing.T) {
+func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
+	t *testing.T,
+) {
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -237,9 +289,15 @@ func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(t *testing.T) 
 		mirAmount      = uint64(200)
 	)
 	cred := mirCred28(0x22)
-	seedMIRDistribution(t, gdb, mirPotTreasury, 500, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(mirAmount)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotTreasury,
+		500,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(mirAmount)},
+		},
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: cred,
 		Reward:     0,
@@ -270,9 +328,15 @@ func TestApplyMIRCerts_DistributionUnregisteredAccount(t *testing.T) {
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x33) // no Account row seeded
-	seedMIRDistribution(t, gdb, mirPotReserves, 500, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(400)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		500,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(400)},
+		},
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
@@ -367,13 +431,25 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 
 	cred := mirCred28(0x44)
 	// addedSlot=50 is before epochStartSlot=100
-	seedMIRDistribution(t, gdb, mirPotReserves, 50, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(500)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		50,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(500)},
+		},
+	)
 	// addedSlot=1000 equals boundarySlot — excluded (half-open interval)
-	seedMIRDistribution(t, gdb, mirPotReserves, 1_000, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(300)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		1_000,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(300)},
+		},
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: cred,
 		Reward:     0,
@@ -408,9 +484,15 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 		mirAmount      = uint64(600)
 	)
 	cred := mirCred28(0x55)
-	seedMIRDistribution(t, gdb, mirPotReserves, 200, []models.MoveInstantaneousRewardsReward{
-		{Credential: cred, Amount: types.Uint64(mirAmount)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		200,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: types.Uint64(mirAmount)},
+		},
+	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
 		StakingKey: cred,
 		Reward:     0,

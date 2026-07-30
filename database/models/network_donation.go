@@ -25,10 +25,10 @@ package models
 // column lets SUM aggregate directly across SQLite/Postgres/MySQL without the
 // per-backend CAST that the text-encoded types.Uint64 would require.
 type NetworkDonation struct {
-	ID     uint   `gorm:"primarykey"`
-	Slot   uint64 `gorm:"uniqueIndex;not null"`
-	Epoch  uint64 `gorm:"index;not null"`
-	Amount uint64 `gorm:"not null"`
+	ID     uint
+	Slot   uint64
+	Epoch  uint64
+	Amount uint64
 }
 
 // TableName returns the table name for NetworkDonation.

@@ -16,10 +16,10 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -82,7 +82,17 @@ func TestCborArrayHeaderLen(t *testing.T) {
 		},
 		{
 			name: "uint64 length",
-			data: []byte{gcbor.CborTypeArray + 27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00},
+			data: []byte{
+				gcbor.CborTypeArray + 27,
+				0x00,
+				0x00,
+				0x00,
+				0x00,
+				0x00,
+				0x01,
+				0x00,
+				0x00,
+			},
 			want: 9,
 		},
 		{
@@ -136,7 +146,11 @@ func TestCborArrayHeaderLen(t *testing.T) {
 				t.Fatalf("cborArrayHeaderLen returned error: %v", err)
 			}
 			if got != test.want {
-				t.Fatalf("unexpected header len: got %d want %d", got, test.want)
+				t.Fatalf(
+					"unexpected header len: got %d want %d",
+					got,
+					test.want,
+				)
 			}
 		})
 	}
@@ -594,9 +608,17 @@ func TestLoadWithDBPropagatesDelegatorInactivity(t *testing.T) {
 			return nil, stop
 		}
 		t.Cleanup(func() { newLedgerStateForLoad = old })
-		err := LoadWithDB(context.Background(),
-			&config.Config{Network: "preview", DelegatorInactivityEnabled: enabled, DelegatorInactivity: epochs},
-			logger, "unused", db)
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                    "preview",
+				DelegatorInactivityEnabled: enabled,
+				DelegatorInactivity:        epochs,
+			},
+			logger,
+			"unused",
+			db,
+		)
 		require.ErrorIs(t, err, stop)
 		return captured
 	}
@@ -812,7 +834,7 @@ func decodeImmutableBlockHeader(
 // TestRunPlannerStats_WithSQLiteStore verifies that RunPlannerStats succeeds
 // against an in-memory SQLite database and populates sqlite_stat1.
 func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
-	db := newTestDB(t)
+	db := newFileTestDB(t)
 	require.NoError(t, db.Metadata().ImportUtxos([]models.Utxo{
 		{
 			TxId:      []byte("run_planner_stats_tx_id_00000001"),
@@ -824,13 +846,12 @@ func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
 
 	require.NoError(t, RunPlannerStats(db, slog.Default()))
 
-	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "test database should use SQLite metadata")
-
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	var count int64
-	err := sqliteStore.DB().Raw(
+	err = raw.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_stat1",
-	).Scan(&count).Error
+	).Scan(&count)
 	require.NoError(t, err)
 	assert.Positive(t, count, "sqlite_stat1 should be populated")
 }
@@ -838,18 +859,17 @@ func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
 // TestRunPlannerStats_Idempotent verifies that repeated planner-stat
 // maintenance stays safe for resume/restart paths.
 func TestRunPlannerStats_Idempotent(t *testing.T) {
-	db := newTestDB(t)
+	db := newFileTestDB(t)
 
 	require.NoError(t, RunPlannerStats(db, slog.Default()))
 	require.NoError(t, RunPlannerStats(db, slog.Default()))
 
-	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "test database should use SQLite metadata")
-
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	var count int64
-	err := sqliteStore.DB().Raw(
+	err = raw.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_stat1",
-	).Scan(&count).Error
+	).Scan(&count)
 	require.NoError(t, err)
 	assert.Positive(t, count, "sqlite_stat1 should remain populated")
 }

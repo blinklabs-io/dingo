@@ -21,15 +21,15 @@ const (
 
 // MidnightAssetCreate stores cNIGHT UTxO creations for the Midnight indexer.
 type MidnightAssetCreate struct {
-	ID               uint   `gorm:"primarykey"`
-	Address          []byte `gorm:"not null"`
-	Quantity         uint64 `gorm:"not null"`
-	TxHash           []byte `gorm:"uniqueIndex:idx_midnight_asset_creates_utxo_lookup,priority:1;size:32;not null"`
-	OutputIndex      uint32 `gorm:"uniqueIndex:idx_midnight_asset_creates_utxo_lookup,priority:2;not null"`
-	BlockNumber      uint64 `gorm:"index:idx_midnight_asset_creates_block_tx,priority:1;not null"`
-	BlockHash        []byte `gorm:"size:32;not null"`
-	TxIndex          uint32 `gorm:"index:idx_midnight_asset_creates_block_tx,priority:2;not null"`
-	BlockTimestampMs uint64 `gorm:"not null"`
+	ID               uint
+	Address          []byte
+	Quantity         uint64
+	TxHash           []byte
+	OutputIndex      uint32
+	BlockNumber      uint64
+	BlockHash        []byte
+	TxIndex          uint32
+	BlockTimestampMs uint64
 }
 
 func (MidnightAssetCreate) TableName() string {
@@ -43,16 +43,16 @@ func (r MidnightAssetCreate) BlockTxPosition() (blockNumber uint64, txIndex uint
 
 // MidnightAssetSpend stores cNIGHT UTxO spends for the Midnight indexer.
 type MidnightAssetSpend struct {
-	ID               uint   `gorm:"primarykey"`
-	Address          []byte `gorm:"not null"`
-	Quantity         uint64 `gorm:"not null"`
-	SpendingTxHash   []byte `gorm:"size:32;not null"`
-	UtxoTxHash       []byte `gorm:"uniqueIndex:idx_midnight_asset_spends_utxo_ref,priority:1;size:32;not null"`
-	UtxoIndex        uint32 `gorm:"uniqueIndex:idx_midnight_asset_spends_utxo_ref,priority:2;not null"`
-	BlockNumber      uint64 `gorm:"index:idx_midnight_asset_spends_block_tx,priority:1;not null"`
-	BlockHash        []byte `gorm:"size:32;not null"`
-	TxIndex          uint32 `gorm:"index:idx_midnight_asset_spends_block_tx,priority:2;not null"`
-	BlockTimestampMs uint64 `gorm:"not null"`
+	ID               uint
+	Address          []byte
+	Quantity         uint64
+	SpendingTxHash   []byte
+	UtxoTxHash       []byte
+	UtxoIndex        uint32
+	BlockNumber      uint64
+	BlockHash        []byte
+	TxIndex          uint32
+	BlockTimestampMs uint64
 }
 
 func (MidnightAssetSpend) TableName() string {
@@ -66,14 +66,14 @@ func (r MidnightAssetSpend) BlockTxPosition() (blockNumber uint64, txIndex uint3
 
 // MidnightRegistration stores mapping validator registration events.
 type MidnightRegistration struct {
-	ID               uint   `gorm:"primarykey"`
-	FullDatum        []byte `gorm:"not null"`
-	TxHash           []byte `gorm:"uniqueIndex:idx_midnight_registrations_utxo_lookup,priority:1;size:32;not null"`
-	OutputIndex      uint32 `gorm:"uniqueIndex:idx_midnight_registrations_utxo_lookup,priority:2;not null"`
-	BlockNumber      uint64 `gorm:"index:idx_midnight_registrations_block_tx,priority:1;not null"`
-	BlockHash        []byte `gorm:"size:32;not null"`
-	TxIndex          uint32 `gorm:"index:idx_midnight_registrations_block_tx,priority:2;not null"`
-	BlockTimestampMs uint64 `gorm:"not null"`
+	ID               uint
+	FullDatum        []byte
+	TxHash           []byte
+	OutputIndex      uint32
+	BlockNumber      uint64
+	BlockHash        []byte
+	TxIndex          uint32
+	BlockTimestampMs uint64
 }
 
 func (MidnightRegistration) TableName() string {
@@ -87,15 +87,15 @@ func (r MidnightRegistration) BlockTxPosition() (blockNumber uint64, txIndex uin
 
 // MidnightDeregistration stores mapping validator deregistration events.
 type MidnightDeregistration struct {
-	ID               uint   `gorm:"primarykey"`
-	FullDatum        []byte `gorm:"not null"`
-	TxHash           []byte `gorm:"size:32;not null"`
-	UtxoTxHash       []byte `gorm:"uniqueIndex:idx_midnight_deregistrations_utxo_ref,priority:1;size:32;not null"`
-	UtxoIndex        uint32 `gorm:"uniqueIndex:idx_midnight_deregistrations_utxo_ref,priority:2;not null"`
-	BlockNumber      uint64 `gorm:"index:idx_midnight_deregistrations_block_tx,priority:1;not null"`
-	BlockHash        []byte `gorm:"size:32;not null"`
-	TxIndex          uint32 `gorm:"index:idx_midnight_deregistrations_block_tx,priority:2;not null"`
-	BlockTimestampMs uint64 `gorm:"not null"`
+	ID               uint
+	FullDatum        []byte
+	TxHash           []byte
+	UtxoTxHash       []byte
+	UtxoIndex        uint32
+	BlockNumber      uint64
+	BlockHash        []byte
+	TxIndex          uint32
+	BlockTimestampMs uint64
 }
 
 func (MidnightDeregistration) TableName() string {
@@ -109,12 +109,12 @@ func (r MidnightDeregistration) BlockTxPosition() (blockNumber uint64, txIndex u
 
 // MidnightGovernanceDatum stores latest Technical Committee and Council datums.
 type MidnightGovernanceDatum struct {
-	ID          uint   `gorm:"primarykey"`
-	DatumType   string `gorm:"size:32;index:idx_midnight_governance_datums_latest,priority:1;uniqueIndex:idx_midnight_governance_datums_output,priority:1;not null"`
-	TxHash      []byte `gorm:"uniqueIndex:idx_midnight_governance_datums_output,priority:2;size:32;not null"`
-	OutputIndex uint32 `gorm:"uniqueIndex:idx_midnight_governance_datums_output,priority:3;not null"`
-	Datum       []byte `gorm:"not null"`
-	BlockNumber uint64 `gorm:"index:idx_midnight_governance_datums_latest,priority:2,sort:desc;not null"`
+	ID          uint
+	DatumType   string
+	TxHash      []byte
+	OutputIndex uint32
+	Datum       []byte
+	BlockNumber uint64
 }
 
 func (MidnightGovernanceDatum) TableName() string {
@@ -123,9 +123,9 @@ func (MidnightGovernanceDatum) TableName() string {
 
 // MidnightAriadneParams stores Ariadne parameters per epoch when changed.
 type MidnightAriadneParams struct {
-	ID    uint   `gorm:"primarykey"`
-	Epoch uint64 `gorm:"uniqueIndex;not null"`
-	Datum []byte `gorm:"not null"`
+	ID    uint
+	Epoch uint64
+	Datum []byte
 }
 
 func (MidnightAriadneParams) TableName() string {
@@ -135,10 +135,10 @@ func (MidnightAriadneParams) TableName() string {
 // MidnightAriadneRollback stores the previous Ariadne row for a block upsert,
 // so a later rollback can restore state even after process restart.
 type MidnightAriadneRollback struct {
-	ID             uint   `gorm:"primarykey"`
-	BlockNumber    uint64 `gorm:"uniqueIndex:idx_midnight_ariadne_rollbacks_block_epoch,priority:1;not null"`
-	Epoch          uint64 `gorm:"uniqueIndex:idx_midnight_ariadne_rollbacks_block_epoch,priority:2;not null"`
-	PreviousExists bool   `gorm:"not null"`
+	ID             uint
+	BlockNumber    uint64
+	Epoch          uint64
+	PreviousExists bool
 	PreviousDatum  []byte
 }
 
@@ -148,10 +148,10 @@ func (MidnightAriadneRollback) TableName() string {
 
 // MidnightEpochCandidates stores candidate snapshots at epoch boundaries.
 type MidnightEpochCandidates struct {
-	ID             uint   `gorm:"primarykey"`
-	Epoch          uint64 `gorm:"uniqueIndex;not null"`
-	BlockNumber    uint64 `gorm:"index;not null;default:0"`
-	CandidatesCbor []byte `gorm:"not null"`
+	ID             uint
+	Epoch          uint64
+	BlockNumber    uint64
+	CandidatesCbor []byte
 }
 
 func (MidnightEpochCandidates) TableName() string {
@@ -168,13 +168,13 @@ func (MidnightEpochCandidates) TableName() string {
 // in-memory candidate set is rebuilt on restart from the generic UTXO index
 // (GetMidnightCandidates), which carries only tx_hash/output_index/datum.
 type MidnightCommitteeCandidateRegistration struct {
-	ID           uint   `gorm:"primarykey"`
-	TxHash       []byte `gorm:"uniqueIndex:idx_midnight_committee_candidate_reg_utxo,priority:1;size:32;not null"`
-	OutputIndex  uint32 `gorm:"uniqueIndex:idx_midnight_committee_candidate_reg_utxo,priority:2;not null"`
-	BlockNumber  uint64 `gorm:"index;not null"`
-	SlotNumber   uint64 `gorm:"not null"`
-	TxIndex      uint32 `gorm:"not null"`
-	TxInputsCbor []byte `gorm:"not null"`
+	ID           uint
+	TxHash       []byte
+	OutputIndex  uint32
+	BlockNumber  uint64
+	SlotNumber   uint64
+	TxIndex      uint32
+	TxInputsCbor []byte
 }
 
 func (MidnightCommitteeCandidateRegistration) TableName() string {

@@ -18,14 +18,14 @@ package models
 // Header verification uses the latest row for a genesis key before a block slot
 // to validate overlay-slot genesis delegate headers against active ledger state.
 type GenesisDelegation struct {
-	ID                  uint   `gorm:"primarykey"`
-	GenesisHash         []byte `gorm:"index:idx_genesis_delegation_lookup,priority:1;size:28;not null"`
-	GenesisDelegateHash []byte `gorm:"index;size:28;not null"`
-	VrfKeyHash          []byte `gorm:"size:32;not null"`
-	AddedSlot           uint64 `gorm:"index:idx_genesis_delegation_lookup,priority:2;index;not null"`
-	BlockIndex          uint32 `gorm:"index:idx_genesis_delegation_lookup,priority:3;not null"`
-	CertIndex           uint   `gorm:"index:idx_genesis_delegation_lookup,priority:4;not null"`
-	CertificateID       uint   `gorm:"uniqueIndex"`
+	ID                  uint
+	GenesisHash         []byte
+	GenesisDelegateHash []byte
+	VrfKeyHash          []byte
+	AddedSlot           uint64
+	BlockIndex          uint32
+	CertIndex           uint
+	CertificateID       uint
 }
 
 func (GenesisDelegation) TableName() string {

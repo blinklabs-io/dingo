@@ -26,7 +26,7 @@ var ErrPoolNotFound = errors.New("pool not found")
 // Error 1170 (42000): BLOB/TEXT column 'staking_key' used in key specification without a key length
 type Pool struct {
 	Margin               *types.Rat
-	PoolKeyHash          []byte `gorm:"uniqueIndex;size:28"`
+	PoolKeyHash          []byte
 	VrfKeyHash           []byte
 	RewardAccount        []byte
 	LatestOpCertSequence uint64
@@ -36,15 +36,15 @@ type Pool struct {
 	// hash). The gouroboros library stores only the first 28 bytes in
 	// RewardAccount (AddrKeyHash), discarding the header. We decode the raw
 	// cert CBOR to preserve the credential type here.
-	RewardAccountCredentialTag uint8 `gorm:"not null;default:0"`
+	RewardAccountCredentialTag uint8
 	// Owners and Relays are query-only associations (no CASCADE).
 	// The actual parent-child relationship is PoolRegistration -> Owners/Relays.
 	// When Pool is deleted, PoolRegistrations cascade, which then cascade to Owners/Relays.
-	Owners       []PoolRegistrationOwner `gorm:"foreignKey:PoolID"`
-	Relays       []PoolRegistrationRelay `gorm:"foreignKey:PoolID"`
-	Registration []PoolRegistration      `gorm:"foreignKey:PoolID;constraint:OnDelete:CASCADE"`
-	Retirement   []PoolRetirement        `gorm:"foreignKey:PoolID;constraint:OnDelete:CASCADE"`
-	ID           uint                    `gorm:"primarykey"`
+	Owners       []PoolRegistrationOwner
+	Relays       []PoolRegistrationRelay
+	Registration []PoolRegistration
+	Retirement   []PoolRetirement
+	ID           uint
 	Pledge       types.Uint64
 	Cost         types.Uint64
 }
@@ -54,9 +54,9 @@ func (p *Pool) TableName() string {
 }
 
 type PoolOpCertSequence struct {
-	PoolKeyHash []byte `gorm:"uniqueIndex:idx_pool_opcert_sequence_pool_slot;size:28"`
-	ID          uint   `gorm:"primarykey"`
-	Slot        uint64 `gorm:"uniqueIndex:idx_pool_opcert_sequence_pool_slot;index"`
+	PoolKeyHash []byte
+	ID          uint
+	Slot        uint64
 	Sequence    uint64
 }
 
@@ -69,18 +69,18 @@ type PoolRegistration struct {
 	Pool                       *Pool // Belongs-to relationship; CASCADE is defined on Pool.Registration
 	MetadataUrl                string
 	VrfKeyHash                 []byte
-	PoolKeyHash                []byte `gorm:"index;size:28"`
+	PoolKeyHash                []byte
 	RewardAccount              []byte
-	RewardAccountCredentialTag uint8 `gorm:"not null;default:0"`
+	RewardAccountCredentialTag uint8
 	MetadataHash               []byte
-	Owners                     []PoolRegistrationOwner `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
-	Relays                     []PoolRegistrationRelay `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
+	Owners                     []PoolRegistrationOwner
+	Relays                     []PoolRegistrationRelay
 	Pledge                     types.Uint64
 	Cost                       types.Uint64
-	CertificateID              uint   `gorm:"index"`
-	ID                         uint   `gorm:"primarykey"`
-	PoolID                     uint   `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
-	AddedSlot                  uint64 `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
+	CertificateID              uint
+	ID                         uint
+	PoolID                     uint
+	AddedSlot                  uint64
 	DepositAmount              types.Uint64
 }
 
@@ -90,9 +90,9 @@ func (PoolRegistration) TableName() string {
 
 type PoolRegistrationOwner struct {
 	KeyHash            []byte
-	ID                 uint `gorm:"primarykey"`
-	PoolRegistrationID uint `gorm:"index"`
-	PoolID             uint `gorm:"index"`
+	ID                 uint
+	PoolRegistrationID uint
+	PoolID             uint
 }
 
 func (PoolRegistrationOwner) TableName() string {
@@ -103,9 +103,9 @@ type PoolRegistrationRelay struct {
 	Ipv4               *net.IP
 	Ipv6               *net.IP
 	Hostname           string
-	ID                 uint `gorm:"primarykey"`
-	PoolRegistrationID uint `gorm:"index"`
-	PoolID             uint `gorm:"index"`
+	ID                 uint
+	PoolRegistrationID uint
+	PoolID             uint
 	Port               uint
 }
 
@@ -123,12 +123,12 @@ type PoolRetiringRow struct {
 }
 
 type PoolRetirement struct {
-	PoolKeyHash   []byte `gorm:"index;size:28"`
-	CertificateID uint   `gorm:"index"`
-	ID            uint   `gorm:"primarykey"`
-	PoolID        uint   `gorm:"index"`
+	PoolKeyHash   []byte
+	CertificateID uint
+	ID            uint
+	PoolID        uint
 	Epoch         uint64
-	AddedSlot     uint64 `gorm:"index"`
+	AddedSlot     uint64
 }
 
 // PoolRetirementRefund identifies a pool retiring at an epoch boundary along

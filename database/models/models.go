@@ -14,93 +14,13 @@
 
 package models
 
-// MigrateModels contains a list of model objects that should have DB migrations applied
-var MigrateModels = []any{
-	&Account{},
-	&AccountInactivityActivation{},
-	&AccountRewardDelta{},
-	&AccountWithdrawalWitness{},
-	&AddressTransaction{},
-	&Asset{},
-	&AssetMintBurn{},
-	&AuthCommitteeHot{},
-	&BackfillCheckpoint{},
-	&BlockNonce{},
-	&Certificate{},
-	&CommitteeMember{},
-	&CommitteeQuorum{},
-	&Constitution{},
-	&Datum{},
-	&Deregistration{},
-	&DeregistrationDrep{},
-	&Drep{},
-	&Epoch{},
-	&EpochSummary{},
-	&GenesisDelegation{},
-	&GovernanceProposal{},
-	&GovernanceVote{},
-	&ImportCheckpoint{},
-	&KeyWitness{},
-	&MoveInstantaneousRewards{},
-	&MoveInstantaneousRewardsReward{},
-	&MidnightAriadneParams{},
-	&MidnightAriadneRollback{},
-	&MidnightAssetCreate{},
-	&MidnightAssetSpend{},
-	&MidnightCommitteeCandidateRegistration{},
-	&MidnightDeregistration{},
-	&MidnightEpochCandidates{},
-	&MidnightGovernanceDatum{},
-	&MidnightRegistration{},
-	&NetworkDonation{},
-	&NetworkState{},
-	&OffchainMetadata{},
-	&Pool{},
-	&PoolOpCertSequence{},
-	&PoolRegistration{},
-	&PoolRegistrationOwner{},
-	&PoolRegistrationRelay{},
-	&PoolRetirement{},
-	&PoolStakeSnapshot{},
-	&PParams{},
-	&PParamUpdate{},
-	&PlutusData{},
-	&Registration{},
-	&RegistrationDrep{},
-	&Redeemer{},
-	&RewardAdaPots{},
-	&RewardAccountOutput{},
-	&RewardLiveStake{},
-	&RewardPoolInput{},
-	&RewardPoolOutput{},
-	&RewardSnapshot{},
-	&RewardStakeInput{},
-	&ResignCommitteeCold{},
-	&Script{},
-	&StakeDelegation{},
-	&StakeDeregistration{},
-	&StakeRegistration{},
-	&StakeRegistrationDelegation{},
-	&StakeVoteDelegation{},
-	&StakeVoteRegistrationDelegation{},
-	&SyncState{},
-	&Tip{},
-	&Transaction{},
-	&TransactionMetadataLabel{},
-	&UpdateDrep{},
-	&Utxo{},
-	&VoteDelegation{},
-	&VoteRegistrationDelegation{},
-	&WitnessScripts{},
-}
-
 // ImportCheckpoint tracks the progress of a Mithril snapshot import
 // so that it can be resumed after a failure without re-importing
 // already completed phases.
 type ImportCheckpoint struct {
-	ID        uint   `gorm:"primarykey"`
-	ImportKey string `gorm:"size:255;uniqueIndex;not null"` // "{digest}:{slot}"
-	Phase     string `gorm:"not null"`                      // last completed phase
+	ID        uint
+	ImportKey string // "{digest}:{slot}"
+	Phase     string // last completed phase
 }
 
 func (ImportCheckpoint) TableName() string {

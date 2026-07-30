@@ -1,0 +1,32 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "database/plugin/metadata/sqlstore/queries/sqlite/schema.sql"
+    queries: "database/plugin/metadata/sqlstore/queries/sqlite"
+    gen:
+      go:
+        package: "sqlitequery"
+        out: "database/plugin/metadata/sqlstore/internal/query/sqlite"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_empty_slices: true
+  - engine: "postgresql"
+    schema: "database/plugin/metadata/sqlstore/queries/postgres/schema.sql"
+    queries: "database/plugin/metadata/sqlstore/queries/postgres"
+    gen:
+      go:
+        package: "postgresquery"
+        out: "database/plugin/metadata/sqlstore/internal/query/postgres"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_empty_slices: true
+  - engine: "mysql"
+    schema: "database/plugin/metadata/sqlstore/queries/mysql/schema.sql"
+    queries: "database/plugin/metadata/sqlstore/queries/mysql"
+    gen:
+      go:
+        package: "mysqlquery"
+        out: "database/plugin/metadata/sqlstore/internal/query/mysql"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_empty_slices: true
