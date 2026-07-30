@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -313,6 +314,93 @@ func TestElectionStartStop(t *testing.T) {
 	// Stop again should be idempotent
 	err = election.Stop()
 	require.NoError(t, err)
+}
+
+// blockingStakeProvider wraps mockStakeProvider's GetPoolStake so a test can
+// deterministically pin a schedule computation in flight: the first call
+// signals started (closing it) and then blocks until release is closed,
+// rather than racing a real computation's completion against a timed Stop
+// call.
+type blockingStakeProvider struct {
+	*mockStakeProvider
+	started   chan struct{}
+	startOnce sync.Once
+	release   chan struct{}
+}
+
+func (b *blockingStakeProvider) GetPoolStake(
+	epoch uint64,
+	poolKeyHash []byte,
+) (uint64, error) {
+	b.startOnce.Do(func() { close(b.started) })
+	<-b.release
+	return b.mockStakeProvider.GetPoolStake(epoch, poolKeyHash)
+}
+
+// TestElectionStopWaitsForInFlightScheduleComputation guards a real bug:
+// Stop used to signal its background goroutines to exit (closing stopCh/
+// computeCh, cancelling ctx, unsubscribing) and return immediately,
+// without waiting for a schedule computation already in flight to
+// actually finish. Schedule computation reads stakeProvider/epochProvider,
+// which node.go's initBlockForger binds to whatever ledgerState exists at
+// construction time -- so on the live database restore/truncate path
+// (node_lifecycle.go), a computation still running when Stop returns could
+// keep reading from that ledgerState after the caller closes it moments
+// later. Start's own initial-epoch compute request pins the computation in
+// flight via blockingStakeProvider, so this needs no timing assumptions
+// about a real computation's speed.
+func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	inner := newMockStakeProvider()
+	inner.totalStake = 10000
+	inner.poolStakes[string(poolId[:])] = 1000
+	blocking := &blockingStakeProvider{
+		mockStakeProvider: inner,
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+
+	epochProvider := newMockEpochProvider()
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		blocking,
+		epochProvider,
+		eventBus,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	require.NoError(t, election.Start(context.Background()))
+
+	// Start's own initial schedule-compute request reaches GetPoolStake
+	// almost immediately.
+	select {
+	case <-blocking.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("schedule computation never started")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- election.Stop() }()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop returned before the in-flight schedule computation finished")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight computation finished")
+	}
 }
 
 func TestElectionScheduleEarlyEpochs(t *testing.T) {

@@ -117,6 +117,22 @@ type Election struct {
 	subscriptionId event.EventSubscriberId
 	nonceReadySub  event.EventSubscriberId
 	metrics        *electionMetrics
+
+	// wg tracks epochTransitionLoop, epochNonceReadyLoop,
+	// scheduleComputeLoop, and the ctx-monitor goroutine, so Stop can
+	// actually wait for all of them to exit rather than merely signaling
+	// them (closing stopCh/computeCh, cancelling ctx, unsubscribing) and
+	// returning immediately. A plain signal-and-return was fine when the
+	// only caller was a full process shutdown, but the live database
+	// restore/truncate path (node_lifecycle.go) calls Stop and then
+	// closes/reopens the node's *database.Database/*ledger.LedgerState
+	// while the process keeps running: RefreshScheduleForEpoch (driven by
+	// any of these goroutines) reads stakeProvider/epochProvider, both
+	// bound to whatever ledgerState existed at construction time
+	// (initBlockForger), so a goroutine still in flight when Stop returns
+	// can keep running against it after that ledgerState has already been
+	// closed and replaced.
+	wg sync.WaitGroup
 }
 
 // NewElection creates a new leader election manager for a stake pool.
@@ -196,7 +212,11 @@ func (e *Election) Start(ctx context.Context) error {
 			"component", "leader",
 		)
 	} else {
-		go e.epochTransitionLoop(ctx, evtCh)
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			e.epochTransitionLoop(ctx, evtCh)
+		}()
 	}
 
 	var nonceReadyCh <-chan event.Event
@@ -209,9 +229,17 @@ func (e *Election) Start(ctx context.Context) error {
 			"component", "leader",
 		)
 	} else {
-		go e.epochNonceReadyLoop(ctx, nonceReadyCh)
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			e.epochNonceReadyLoop(ctx, nonceReadyCh)
+		}()
 	}
-	go e.scheduleComputeLoop(ctx, e.computeCh)
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		e.scheduleComputeLoop(ctx, e.computeCh)
+	}()
 
 	// Kick off initial schedule computation for the current epoch.
 	currentEpoch := e.epochProvider.CurrentEpoch()
@@ -392,12 +420,19 @@ func (e *Election) scheduleComputeLoop(
 	}
 }
 
-// Stop stops the leader election manager.
+// Stop stops the leader election manager, waiting for epochTransitionLoop,
+// epochNonceReadyLoop, and scheduleComputeLoop to actually exit before
+// returning -- not just signaling them to stop. A plain signal-and-return
+// was fine when the only caller was a full process shutdown, but the live
+// database restore/truncate path (node_lifecycle.go) calls Stop and then
+// closes/reopens the node's storage while the process keeps running: see
+// the wg field's doc comment for why a goroutine still in flight when Stop
+// returns is a real use-after-close risk here, not just a benign leak.
 func (e *Election) Stop() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	if !e.running {
+		e.mu.Unlock()
 		return nil
 	}
 
@@ -412,22 +447,31 @@ func (e *Election) Stop() error {
 	if e.cancel != nil {
 		e.cancel()
 	}
-	if e.subscriptionId != 0 {
-		e.eventBus.Unsubscribe(
-			event.EpochTransitionEventType,
-			e.subscriptionId,
-		)
-		e.subscriptionId = 0
-	}
-	if e.nonceReadySub != 0 {
-		e.eventBus.Unsubscribe(
-			event.EpochNonceReadyEventType,
-			e.nonceReadySub,
-		)
-		e.nonceReadySub = 0
-	}
+	subscriptionId := e.subscriptionId
+	nonceReadySub := e.nonceReadySub
+	e.subscriptionId = 0
+	e.nonceReadySub = 0
 	e.running = false
 	e.schedules = nil
+
+	e.mu.Unlock()
+
+	// Must run with e.mu released: RefreshScheduleForEpoch and
+	// scheduleComputeLoop both take e.mu (RLock), so waiting for them to
+	// exit while still holding the write lock here would deadlock.
+	if subscriptionId != 0 {
+		e.eventBus.UnsubscribeAndWait(
+			event.EpochTransitionEventType,
+			subscriptionId,
+		)
+	}
+	if nonceReadySub != 0 {
+		e.eventBus.UnsubscribeAndWait(
+			event.EpochNonceReadyEventType,
+			nonceReadySub,
+		)
+	}
+	e.wg.Wait()
 
 	e.logger.Info("leader election stopped", "component", "leader")
 	return nil
