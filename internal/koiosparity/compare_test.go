@@ -182,6 +182,48 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 	require.Equal(t, "margin", ms[0].Field)
 }
 
+// TestComparePoolEpochEmptyDingoSideIsFlagged guards against reintroducing an
+// asymmetry between the fixed_cost and margin guards: once ParamsPresent is
+// true (the reward_pool_input row at the param epoch genuinely exists — the
+// "not ready yet" case is already handled by the outer ParamsPresent check),
+// an unexpectedly empty dingoPool.FixedCost/Margin means a corrupted/partial
+// row, not a legitimate skip condition, and must be reported as a
+// value_mismatch like any other divergence rather than silently passed over.
+func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "1000",
+		BlockCnt:    2,
+		Delegators:  3,
+		FixedCost:   "340000000",
+		Margin:      "0.1",
+	}
+	baseline := &DingoPoolEpochData{
+		StakePresent:   true,
+		DelegatedStake: "1000",
+		ParamsPresent:  true,
+		BlocksProduced: 2,
+		DelegatorCount: 3,
+		FixedCost:      "340000000",
+		Margin:         "1/10",
+	}
+
+	dingo := *baseline
+	dingo.FixedCost = ""
+	ms := ComparePoolEpoch("preview", 5, koios, &dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, "fixed_cost", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+
+	dingo = *baseline
+	dingo.Margin = ""
+	ms = ComparePoolEpoch("preview", 5, koios, &dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, "margin", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+}
+
 // TestComparePoolEpochParamsNotPresent guards against a false PASS when
 // reward_pool_input hasn't been captured yet at the "param epoch" (K+1):
 // blocks_produced/fixed_cost/margin must never be silently skipped in a way

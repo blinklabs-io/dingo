@@ -397,7 +397,13 @@ func ComparePoolEpoch(
 		}
 
 		// margin — compare as rationals so Koios "0.1" matches Dingo "1/10".
-		if koiosPool.Margin != "" && dingoPool.Margin != "" && !rationalsEqual(dingoPool.Margin, koiosPool.Margin) {
+		// Only guard on the Koios side being non-empty, matching fixed_cost
+		// above: an empty dingoPool.Margin here means a corrupted/partial row
+		// despite ParamsPresent being true (the "not ready yet" case is
+		// already handled by the outer ParamsPresent check), so it must be
+		// flagged as a mismatch, not silently skipped. rationalsEqual returns
+		// false (not a panic) when given an empty string.
+		if koiosPool.Margin != "" && !rationalsEqual(dingoPool.Margin, koiosPool.Margin) {
 			out = append(out, CheckMismatch{
 				Network:    network,
 				Epoch:      epoch,
