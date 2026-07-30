@@ -587,3 +587,87 @@ func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(t *testing.
 		)
 	}
 }
+
+// TestEvictToFitNoEvictionWhenWithinLimits verifies evictToFit is a no-op
+// (returns the inputs and zero bytes removed) when neither maxSize nor
+// maxBytes is exceeded.
+func TestEvictToFitNoEvictionWhenWithinLimits(t *testing.T) {
+	cache := NewHotCache(10, 100)
+	entries := map[string][]byte{"a": []byte("1"), "b": []byte("2")}
+	accessCnt := map[string]uint64{"a": 5, "b": 3}
+
+	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(entries, accessCnt, 4)
+
+	assert.Equal(t, entries, gotEntries)
+	assert.Equal(t, accessCnt, gotAccessCnt)
+	assert.Zero(t, bytesRemoved)
+}
+
+// TestEvictToFitRemovesLeastFrequentlyUsedFirstBySize verifies size-based
+// eviction trims down to the target size and keeps the most frequently
+// accessed entries, removing the least frequently accessed ones first.
+func TestEvictToFitRemovesLeastFrequentlyUsedFirstBySize(t *testing.T) {
+	cache := NewHotCache(4, 0)
+	entries := map[string][]byte{
+		"most":     []byte("v"),
+		"more":     []byte("v"),
+		"less":     []byte("v"),
+		"least":    []byte("v"),
+		"overflow": []byte("v"),
+	}
+	accessCnt := map[string]uint64{
+		"most":     100,
+		"more":     50,
+		"less":     10,
+		"least":    1,
+		"overflow": 1,
+	}
+
+	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(entries, accessCnt, 0)
+
+	// target size = max(1, 4*3/4) = 3
+	assert.LessOrEqual(t, len(gotEntries), 3)
+	assert.Contains(t, gotEntries, "most", "highest access count must survive eviction")
+	assert.Contains(t, gotEntries, "more", "second highest access count must survive eviction")
+	assert.NotContains(t, gotEntries, "least", "lowest access count should be evicted first")
+	assert.Equal(t, len(gotEntries), len(gotAccessCnt))
+	assert.Positive(t, bytesRemoved)
+}
+
+// TestEvictToFitByBytes verifies byte-based eviction trims down to the
+// target byte budget, again preferring to keep the most frequently accessed
+// entries.
+func TestEvictToFitByBytes(t *testing.T) {
+	cache := NewHotCache(0, 100) // maxBytes=100, maxSize unlimited
+	entries := map[string][]byte{
+		"a": make([]byte, 40),
+		"b": make([]byte, 40),
+		"c": make([]byte, 40),
+	}
+	accessCnt := map[string]uint64{"a": 10, "b": 5, "c": 1}
+
+	var estimatedBytes int64
+	for k, v := range entries {
+		estimatedBytes += int64(len(k) + len(v))
+	}
+
+	gotEntries, _, bytesRemoved := cache.evictToFit(entries, accessCnt, estimatedBytes)
+
+	// Each entry is 1 (key) + 40 (value) = 41 bytes; target = 100*3/4 = 75,
+	// so only the highest-count entry ("a") fits.
+	assert.Equal(t, int64(82), bytesRemoved)
+	assert.Equal(t, map[string][]byte{"a": entries["a"]}, gotEntries)
+}
+
+// TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne is the size=1 edge
+// case: eviction must never trim a non-empty cache down to zero entries.
+func TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne(t *testing.T) {
+	cache := NewHotCache(1, 0)
+	entries := map[string][]byte{"a": []byte("1"), "b": []byte("2")}
+	accessCnt := map[string]uint64{"a": 5, "b": 1}
+
+	gotEntries, _, _ := cache.evictToFit(entries, accessCnt, 0)
+
+	assert.GreaterOrEqual(t, len(gotEntries), 1)
+	assert.LessOrEqual(t, len(gotEntries), 2)
+}
