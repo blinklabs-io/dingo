@@ -187,6 +187,10 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 
 	for epoch := uint64(1); epoch <= 3; epoch++ {
 		publishEpochTransition(eb, epoch)
+		// 30s, not 5s: a real badger+sqlite snapshot capture, matching
+		// TestManagerRespectsEveryNEpochsGating's identical allowance for
+		// slower Linux and Windows CI runners -- this test captures three
+		// in a row, so it needs the same per-capture headroom.
 		require.Eventually(t, func() bool {
 			_, err := os.Stat(filepath.Join(
 				snapshotDir,
@@ -194,13 +198,13 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 				"manifest.json",
 			))
 			return err == nil
-		}, 5*time.Second, 10*time.Millisecond)
+		}, 30*time.Second, 10*time.Millisecond)
 	}
 
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		return os.IsNotExist(err)
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-2"))
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
