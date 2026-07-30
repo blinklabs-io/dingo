@@ -2471,16 +2471,23 @@ coarse candidates before forming a limited page, preserving continuation-token
 correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
 
-`/pools/extended` computes `blocks_minted` and `live_saturation` for every
-active pool with one query each (`CountPoolBlocksInSlotRange`,
-`GetOffchainMetadataBatch`) rather than one query per pool; see the Off-chain
-Metadata Worker section above for the metadata half and DATABASE.md for both
-queries' index usage. `live_saturation` reuses pool detail's
-`poolSizeSaturation` and, like pool detail, requires the current protocol
-parameters' `nOpt` to be loaded (`LedgerState.Start()` having completed): a
-required, non-nullable schema field cannot fall back to a placeholder value,
-so the request fails outright rather than serving a fabricated 0.0 when
-protocol parameters are not yet available.
+`/pools/extended` resolves the whole page with two batched queries rather than
+one query per pool: `CountPoolBlocksInSlotRange` returns every active pool's
+`blocks_minted` keyed by pool, and `GetOffchainMetadataBatch` returns every
+pool's cached off-chain document keyed by URL, supplying the nullable
+`metadata` object. See the Off-chain Metadata Worker section above for the
+metadata half and DATABASE.md for both queries' index usage.
+
+`live_saturation` is not a query. It is computed in memory by pool detail's
+`poolSizeSaturation` helper from values already read for the page: the pool's
+live stake, the active-stake snapshot, `nOpt` from the current protocol
+parameters, and total circulation (`MaxLovelaceSupply - Reserves`, the
+denominator `ledger/rewards` uses for the saturation threshold, not total
+active stake). Like pool detail, it therefore requires protocol parameters to
+be loaded (`LedgerState.Start()` having completed): a required, non-nullable
+schema field cannot fall back to a placeholder value, so the request fails
+outright rather than serving a fabricated 0.0 when they are not yet
+available.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from

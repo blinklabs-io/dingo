@@ -17,12 +17,14 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -181,4 +183,51 @@ func TestGetOffchainMetadataBatch(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, empty)
+}
+
+// TestGetOffchainMetadataBatchDeduplicatesAcrossChunks pins the sqlite
+// backend's dedup-before-chunk behavior. sqlite splits the url IN (...) list
+// at sqliteBindVarLimit, and offchain.GetBatch only removes duplicates within
+// whatever slice it is handed, so deduplicating per chunk instead of over the
+// whole list would query a repeated URL once per chunk it appears in and
+// append its row that many times. Two pools can share a metadata anchor, so a
+// repeated URL is expected input rather than a pathological case.
+func TestGetOffchainMetadataBatchDeduplicatesAcrossChunks(t *testing.T) {
+	store := setupTestDBWithMode(t, types.StorageModeAPI)
+
+	url := "https://pool.example.test/shared.json"
+	hash := bytes.Repeat([]byte{0xc1}, 32)
+	require.NoError(t, store.DB().Create(&models.OffchainMetadata{
+		SourceType: models.OffchainMetadataSourcePool,
+		URL:        url,
+		Hash:       hash,
+		Status:     models.OffchainMetadataStatusFetched,
+		Content:    []byte(`{"ticker":"SHR"}`),
+	}).Error)
+
+	// Place the same URL at both ends of a list longer than one chunk, so
+	// the repeats land in different chunks.
+	urls := make([]string, 0, sqliteBindVarLimit+2)
+	urls = append(urls, url)
+	for i := range sqliteBindVarLimit {
+		urls = append(
+			urls,
+			fmt.Sprintf("https://pool.example.test/filler-%d.json", i),
+		)
+	}
+	urls = append(urls, url)
+	require.Greater(t, len(urls), sqliteBindVarLimit)
+
+	docs, err := store.GetOffchainMetadataBatch(
+		models.OffchainMetadataSourcePool, urls, nil,
+	)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		docs,
+		1,
+		"a URL repeated across chunk boundaries must yield one row, not one per chunk",
+	)
+	assert.Equal(t, url, docs[0].URL)
+	assert.Equal(t, hash, docs[0].Hash)
 }

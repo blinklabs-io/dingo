@@ -403,8 +403,20 @@ func TestNodeAdapterPoolsExtendedMetadataSingleBatchedQuery(t *testing.T) {
 	require.NotEmpty(t, details)
 	t.Logf("offchain_metadata query: %s | vars=%v", capturedSQL, capturedVars)
 	t.Logf("EXPLAIN QUERY PLAN: %v", details)
+	// Reject only an UNINDEXED scan of the table, not the bare word "SCAN":
+	// sqlite reports some index-only lookups as
+	// "SCAN offchain_metadata USING COVERING INDEX ...", which is an indexed
+	// access path and must not fail this test.
 	for _, detail := range details {
-		assert.NotContains(t, detail, "SCAN", "query plan: %v", details)
+		if strings.Contains(detail, "SCAN offchain_metadata") {
+			assert.Contains(
+				t,
+				detail,
+				"INDEX",
+				"query plan scans the table without an index: %v",
+				details,
+			)
+		}
 	}
 	assert.Contains(
 		t,

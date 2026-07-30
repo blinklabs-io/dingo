@@ -85,10 +85,17 @@ func (d *MetadataStoreSqlite) GetOffchainMetadataBatch(
 	if err != nil {
 		return nil, err
 	}
-	docs := make([]models.OffchainMetadata, 0, len(urls))
-	for start := 0; start < len(urls); start += sqliteBindVarLimit {
-		end := min(start+sqliteBindVarLimit, len(urls))
-		chunk, err := offchain.GetBatch(db, sourceType, urls[start:end])
+	// Deduplicate across the whole list before chunking, not per chunk:
+	// GetBatch removes duplicates within whatever slice it is handed, so a
+	// URL appearing in two different chunks would otherwise be queried twice
+	// and its row appended twice, breaking the batch's one-row-per-match
+	// contract. Two pools can share a metadata anchor, so repeats are
+	// expected input here rather than pathological.
+	uniq := offchain.DedupeURLs(urls)
+	docs := make([]models.OffchainMetadata, 0, len(uniq))
+	for start := 0; start < len(uniq); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(uniq))
+		chunk, err := offchain.GetBatch(db, sourceType, uniq[start:end])
 		if err != nil {
 			return nil, err
 		}

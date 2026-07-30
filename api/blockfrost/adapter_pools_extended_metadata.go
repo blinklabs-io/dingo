@@ -55,11 +55,21 @@ func buildPoolExtendedMetadata(
 	hash := hex.EncodeToString(metadataHash)
 	ret := &PoolExtendedMetadataInfo{URL: &url, Hash: &hash}
 
-	if doc == nil || doc.Status == models.OffchainMetadataStatusPending {
+	if doc == nil {
 		return ret
 	}
-	if doc.Status == models.OffchainMetadataStatusFailed {
+	// Branch on the status explicitly rather than treating "not pending and
+	// not failed" as fetched. An unrecognized future status falling into the
+	// validation path below would report DECODE_ERROR for content that was
+	// simply never fetched; anything but a known-fetched row is treated the
+	// same as pending, i.e. anchor only and no error object.
+	switch doc.Status {
+	case models.OffchainMetadataStatusFailed:
 		ret.Error = offchainFetchError("Pool", metadataURL, metadataHash, doc)
+		return ret
+	case models.OffchainMetadataStatusFetched:
+		// fall through to validation below
+	default:
 		return ret
 	}
 	// Validation happens in the fetcher at fetch time
