@@ -228,6 +228,19 @@ func prepareExtractDestination(
 			ErrExtractUnsafePath, staging, err,
 		)
 	}
+	// Identity of the directory extraction actually writes into, taken
+	// through the handle. Renaming can only name its source, so this is what
+	// lets publication tell the staging directory apart from anything that
+	// later occupies its name.
+	stagingInfo, err := stagingRoot.Stat(".")
+	if err != nil {
+		_ = stagingRoot.Close()
+		_ = os.RemoveAll(staging)
+		_ = parentRoot.Close()
+		return nil, nil, nil, fmt.Errorf(
+			"inspecting extraction staging directory: %w", err,
+		)
+	}
 
 	cleanup = func() {
 		_ = stagingRoot.Close()
@@ -279,6 +292,31 @@ func prepareExtractDestination(
 		// alone would make the refusal above platform-dependent.
 		if err := parentRoot.Rename(stagingName, destName); err != nil {
 			return fmt.Errorf("publishing extraction: %w", err)
+		}
+		// Rename names its source, so it moves whatever occupies stagingName
+		// at that instant, not necessarily the directory extraction wrote
+		// into. A writer with access to the parent can move the staging
+		// directory aside and leave a tree or symlink of their own under that
+		// name, which this rename would then publish. Go offers no rename
+		// keyed on a descriptor, so confirm afterwards that what landed at
+		// the destination is the directory extraction actually filled.
+		published, err := parentRoot.Lstat(destName)
+		if err != nil {
+			return fmt.Errorf(
+				"%w: inspecting published destination: %w",
+				ErrExtractUnsafePath, err,
+			)
+		}
+		if published.Mode()&os.ModeSymlink != 0 ||
+			!os.SameFile(stagingInfo, published) {
+			// Only this rename put anything here — the destination was
+			// confirmed absent above — so removing it restores the prior
+			// state rather than destroying anyone's content.
+			_ = parentRoot.RemoveAll(destName)
+			return fmt.Errorf(
+				"%w: staging directory was substituted before publication",
+				ErrExtractUnsafePath,
+			)
 		}
 		return nil
 	}

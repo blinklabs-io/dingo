@@ -451,6 +451,77 @@ func TestExtractPublishRefusesConcurrentDestinationContent(t *testing.T) {
 	assert.Equal(t, "keep", string(data))
 }
 
+// TestExtractPublishRefusesSubstitutedStaging covers a writer replacing the
+// staging entry between extraction and publication.
+//
+// Renaming names its source, so it moves whatever occupies that name at the
+// instant it runs rather than the directory extraction wrote into. Go has no
+// rename keyed on a descriptor, so the substitution cannot be prevented
+// outright — but publishing an attacker's tree under the destination can be,
+// by confirming afterwards that what landed is the directory that was filled.
+func TestExtractPublishRefusesSubstitutedStaging(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t, workDir.WriteFile("ours", []byte("genuine"), 0o640))
+
+	stagingName := filepath.Base(workDir.Name())
+	stagingPath := filepath.Join(parent, stagingName)
+
+	// Move the real staging directory aside and leave a tree of our own under
+	// its name, as a writer with access to the parent could.
+	requireDirectorySwap(t, stagingPath, filepath.Join(root, "moved-aside"))
+	require.NoError(t, os.MkdirAll(stagingPath, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stagingPath, "theirs"), []byte("substituted"), 0o640,
+	))
+
+	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
+
+	// The substituted tree must not remain published at the destination.
+	_, statErr := os.Stat(filepath.Join(destDir, "theirs"))
+	assert.True(t, os.IsNotExist(statErr),
+		"a substituted staging tree must not survive at the destination")
+}
+
+// TestExtractPublishRefusesSymlinkedStaging covers the same substitution done
+// with a symlink rather than a directory, which a rename would otherwise
+// relocate to the destination intact.
+func TestExtractPublishRefusesSymlinkedStaging(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+	elsewhere := filepath.Join(root, "elsewhere")
+	require.NoError(t, os.MkdirAll(elsewhere, 0o750))
+
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t, workDir.WriteFile("ours", []byte("genuine"), 0o640))
+
+	stagingName := filepath.Base(workDir.Name())
+	stagingPath := filepath.Join(parent, stagingName)
+	requireDirectorySwap(t, stagingPath, filepath.Join(root, "moved-aside"))
+	requireSymlinkSupport(t, elsewhere, stagingPath)
+
+	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
+
+	entries, err := os.ReadDir(elsewhere)
+	require.NoError(t, err)
+	assert.Empty(t, entries,
+		"publication must not reach through a substituted symlink")
+}
+
 // TestExtractPublishRefusesExistingDestination covers a destination that
 // already exists when publication runs, even an empty one.
 //
