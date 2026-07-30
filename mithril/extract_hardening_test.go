@@ -345,9 +345,9 @@ func TestExtractRootWritesSurviveParentSwap(t *testing.T) {
 	assert.Empty(t, leaked,
 		"no extracted write may reach the substituted directory")
 
-	// Publication is still refused, so the swapped parent cannot be used to
-	// place the tree either.
-	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
+	// Publication follows the same handle, so it lands in the real staging
+	// parent rather than anywhere the swapped pathname now points.
+	require.NoError(t, publish())
 }
 
 // TestExtractRootRefusesEscapingEntry covers an archive entry that resolves
@@ -379,13 +379,14 @@ func TestExtractRootRefusesEscapingEntry(t *testing.T) {
 	assert.Empty(t, entries)
 }
 
-// TestExtractPublishRejectsSwappedParent covers the window between staging and
-// publishing. Extraction of a mainnet snapshot takes minutes, and the parent
-// is the shared download directory, so a directory checked once at the start
-// is not still known-good at the end. Publishing resolves the destination
-// through that parent, and unlike the final component, an intermediate symlink
-// is followed by RemoveAll and Rename.
-func TestExtractPublishRejectsSwappedParent(t *testing.T) {
+// TestExtractPublishFollowsParentHandle covers a parent replaced between the
+// last write and publication.
+//
+// Removing and renaming are pathname operations, so a check before them can
+// always be overtaken. Holding the parent open instead means both resolve to
+// the directory extraction started in: the tree lands where it belongs and the
+// substituted directory receives nothing, with no window to lose.
+func TestExtractPublishFollowsParentHandle(t *testing.T) {
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -398,19 +399,86 @@ func TestExtractPublishRejectsSwappedParent(t *testing.T) {
 	t.Cleanup(cleanup)
 	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
 
-	// Swap the parent for a symlink pointing at somewhere else, as an
-	// attacker with write access to the download directory could.
 	elsewhere := filepath.Join(root, "elsewhere")
 	require.NoError(t, os.MkdirAll(elsewhere, 0o750))
-	requireDirectorySwap(t, parent, filepath.Join(root, "downloads.real"))
+	movedParent := filepath.Join(root, "downloads.real")
+	requireDirectorySwap(t, parent, movedParent)
 	requireSymlinkSupport(t, elsewhere, parent)
 
-	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
+	require.NoError(t, publish())
+
+	data, err := os.ReadFile(filepath.Join(movedParent, "extracted", "chunk"))
+	require.NoError(t, err,
+		"publication must land in the directory the handle was opened on")
+	assert.Equal(t, "data", string(data))
 
 	entries, err := os.ReadDir(elsewhere)
 	require.NoError(t, err)
 	assert.Empty(t, entries,
-		"publishing must not write through a parent swapped mid-extraction")
+		"the substituted parent must receive nothing")
+}
+
+// TestExtractPublishRefusesConcurrentDestinationContent covers a destination
+// populated by someone else while extraction was running.
+//
+// The emptiness check before extraction says nothing about the state minutes
+// later, and publication removes whatever occupies the destination. Without a
+// re-check that removal would silently delete another writer's files even
+// though this caller never asked to replace anything.
+func TestExtractPublishRefusesConcurrentDestinationContent(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
+
+	// Another process populates the destination mid-extraction.
+	require.NoError(t, os.MkdirAll(destDir, 0o750))
+	theirs := filepath.Join(destDir, "theirs.txt")
+	require.NoError(t, os.WriteFile(theirs, []byte("keep"), 0o640))
+
+	require.ErrorIs(t, publish(), ErrExtractDestinationNotEmpty)
+
+	data, err := os.ReadFile(theirs)
+	require.NoError(t, err,
+		"a refused publication must not delete another writer's content")
+	assert.Equal(t, "keep", string(data))
+}
+
+// TestExtractPublishReplacesConcurrentDestinationContent is the counterpart:
+// a caller that explicitly asked to replace the destination still does so,
+// since that is the documented recovery path.
+func TestExtractPublishReplacesConcurrentDestinationContent(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{replace: true},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
+
+	require.NoError(t, os.MkdirAll(destDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(destDir, "stale.txt"), []byte("stale"), 0o640,
+	))
+
+	require.NoError(t, publish())
+
+	data, err := os.ReadFile(filepath.Join(destDir, "chunk"))
+	require.NoError(t, err)
+	assert.Equal(t, "data", string(data))
+	_, statErr := os.Stat(filepath.Join(destDir, "stale.txt"))
+	assert.True(t, os.IsNotExist(statErr))
 }
 
 // TestExtractPublishAllowsStableSymlinkedParent is the counterpart that keeps

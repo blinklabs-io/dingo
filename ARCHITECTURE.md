@@ -2497,13 +2497,13 @@ Destinations come in two shapes, selected by the caller:
   once complete, so a failed run publishes nothing and a pre-existing entry is
   discarded rather than merged with. A non-empty destination is refused unless
   the caller passes `WithReplaceDestination` to recover from an interrupted
-  run. Publishing is a rename, which is pathname-based and so cannot be bound to
-  the handle; the parent's identity is therefore re-checked immediately before
-  the swap, and a directory that is no longer the one staging was created in
-  fails the publish. Identity is compared rather than rejecting symlinks
-  outright, so a data directory placed behind a stable symlink keeps working.
-  Extraction writes are unaffected by a parent swapped mid-run — they follow
-  the handle — so this check guards only the final placement.
+  run. The parent directory is held open for the whole extraction, and both the
+  removal and the rename that publish the tree resolve through that handle, so
+  a parent replaced at any point — including between those two operations —
+  redirects neither. Emptiness is re-checked through the same handle
+  immediately before publishing: another writer may have populated the
+  destination while extraction ran, and removing it then would delete their
+  content despite the caller never asking for a replacement.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
   into it directly and accumulates. Staging is unavailable here, and the

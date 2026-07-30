@@ -17,6 +17,7 @@ package mithril
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -127,6 +128,25 @@ func dirIsEmpty(dir string) (bool, error) {
 	return len(entries) == 0, nil
 }
 
+// rootEntryIsEmptyDir reports whether name under root is absent or an empty
+// directory. Read through the handle so the answer describes the same
+// directory the caller is about to act on.
+func rootEntryIsEmptyDir(root *os.Root, name string) (bool, error) {
+	dir, err := root.Open(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return len(entries) == 0, nil
+}
+
 // prepareExtractDestination applies the destination policy and returns a
 // directory handle extraction must write through, plus a publish function to
 // run on success and a cleanup function to run unconditionally.
@@ -196,69 +216,76 @@ func prepareExtractDestination(
 			"creating extraction parent directory: %w", err,
 		)
 	}
+	// The parent is held open for the whole extraction so publication can be
+	// performed relative to this handle. Renaming and removing are otherwise
+	// pathname-based, and a parent replaced after any check would redirect
+	// them however recently that check ran.
+	parentRoot, err := os.OpenRoot(parent)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf(
+			"%w: opening extraction parent %s: %w",
+			ErrExtractUnsafePath, parent, err,
+		)
+	}
 
 	// Staged alongside the destination so publishing is a rename within one
 	// filesystem. MkdirTemp creates with 0700 and never reuses a name.
 	staging, err := os.MkdirTemp(parent, ".extract-*")
 	if err != nil {
+		_ = parentRoot.Close()
 		return nil, nil, nil, fmt.Errorf(
 			"creating extraction staging directory: %w", err,
 		)
 	}
-	stagingRoot, err := os.OpenRoot(staging)
+	stagingName := filepath.Base(staging)
+	destName := filepath.Base(cleanDest)
+	stagingRoot, err := parentRoot.OpenRoot(stagingName)
 	if err != nil {
 		_ = os.RemoveAll(staging)
+		_ = parentRoot.Close()
 		return nil, nil, nil, fmt.Errorf(
 			"%w: opening staging root %s: %w",
 			ErrExtractUnsafePath, staging, err,
 		)
 	}
-	parentAtStaging, err := os.Stat(parent)
-	if err != nil {
-		_ = stagingRoot.Close()
-		_ = os.RemoveAll(staging)
-		return nil, nil, nil, fmt.Errorf(
-			"inspecting extraction parent directory: %w", err,
-		)
-	}
 
 	cleanup = func() {
 		_ = stagingRoot.Close()
-		_ = os.RemoveAll(staging)
+		// Removal goes through the parent handle for the same reason
+		// publication does.
+		_ = parentRoot.RemoveAll(stagingName)
+		_ = parentRoot.Close()
 	}
 	publish = func() error {
-		// Renaming is pathname-based, so unlike the extraction writes above
-		// it cannot be bound to the handle. Confirm the parent is still the
-		// directory staging was created in before touching the destination.
-		//
-		// Identity is compared rather than re-testing for a symlink: a data
-		// directory placed behind a stable symlink is an ordinary operator
-		// layout and still resolves to the same directory, while a genuine
-		// substitution does not.
-		parentNow, err := os.Stat(parent)
-		if err != nil {
-			return fmt.Errorf(
-				"%w: re-inspecting %s before publishing: %w",
-				ErrExtractUnsafePath, parent, err,
-			)
-		}
-		if !os.SameFile(parentAtStaging, parentNow) {
-			return fmt.Errorf(
-				"%w: %s changed during extraction",
-				ErrExtractUnsafePath, parent,
-			)
+		// Re-check emptiness now, not just before extraction. Another writer
+		// may have populated the destination while extraction ran, and the
+		// removal below would otherwise delete their content despite the
+		// caller never asking for a replacement.
+		if !cfg.replace {
+			empty, err := rootEntryIsEmptyDir(parentRoot, destName)
+			if err != nil {
+				return fmt.Errorf(
+					"inspecting extraction destination: %w", err,
+				)
+			}
+			if !empty {
+				return fmt.Errorf(
+					"%w: %s", ErrExtractDestinationNotEmpty, cleanDest,
+				)
+			}
 		}
 		// Release the handle before moving the directory it refers to.
 		if err := stagingRoot.Close(); err != nil {
 			return fmt.Errorf("closing staging root: %w", err)
 		}
-		// Remove whatever occupies the destination. This discards a
-		// pre-existing symlink rather than following it, because RemoveAll
-		// unlinks the symlink itself.
-		if err := os.RemoveAll(cleanDest); err != nil {
+		// Both operations resolve through the parent handle, so a parent
+		// swapped at any point — including between these two calls — cannot
+		// redirect them. RemoveAll unlinks a symlink at the destination
+		// rather than following it.
+		if err := parentRoot.RemoveAll(destName); err != nil {
 			return fmt.Errorf("clearing extraction destination: %w", err)
 		}
-		if err := os.Rename(staging, cleanDest); err != nil {
+		if err := parentRoot.Rename(stagingName, destName); err != nil {
 			return fmt.Errorf("publishing extraction: %w", err)
 		}
 		return nil
