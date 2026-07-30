@@ -654,10 +654,12 @@ func TestRouterUnimplementedRouteReturns404(t *testing.T) {
 	b := newTestBlockfrost(mock)
 	handler := b.handler()
 
+	// "/api/v0/pools" used to belong here as an unimplemented route. It is
+	// now registered (dingo #3011), so it no longer falls through to the
+	// catch-all. The remaining entries still cover that path.
 	paths := []string{
 		"/api/v0/",
 		"/api/v0/scripts",
-		"/api/v0/pools",
 		"/does-not-exist",
 	}
 	for _, path := range paths {
