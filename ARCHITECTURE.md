@@ -2511,6 +2511,17 @@ Destinations come in two shapes, selected by the caller:
   across platforms that differ on whether a rename may replace an existing
   directory. `WithReplaceDestination` is the only path that removes an
   existing destination, which is what that option exists to authorise.
+
+  Renaming names its source, so it moves whatever occupies the staging name at
+  the instant it runs rather than the directory extraction wrote into, and Go
+  offers no rename keyed on a descriptor. A writer with access to the parent
+  can therefore move the staging directory aside and leave a tree or symlink of
+  their own under that name. Publication cannot prevent that substitution, so
+  it detects it: the staging directory's identity is recorded when it is
+  created, and what landed at the destination is compared against it
+  afterwards. A mismatch, or a symlink, removes the destination — only that
+  rename put anything there, the destination having been confirmed absent —
+  and fails the publish, so a substituted tree is never left standing.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
   into it directly and accumulates. Staging is unavailable here, and the
