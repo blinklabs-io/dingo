@@ -191,6 +191,40 @@ func TestNewPeerGovernor(t *testing.T) {
 	}
 }
 
+func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:        eventBus,
+		DisableOutbound: true,
+	})
+	require.NoError(t, pg.Start(context.Background()))
+
+	require.True(
+		t,
+		eventBus.HasSubscribers(connmanager.InboundConnectionEventType),
+	)
+	require.True(
+		t,
+		eventBus.HasSubscribers(connmanager.ConnectionClosedEventType),
+	)
+
+	pg.Stop()
+
+	require.False(
+		t,
+		eventBus.HasSubscribers(connmanager.InboundConnectionEventType),
+		"stopped peer governor must not retain an inbound-connection handler",
+	)
+	require.False(
+		t,
+		eventBus.HasSubscribers(connmanager.ConnectionClosedEventType),
+		"stopped peer governor must not retain a connection-closed handler",
+	)
+}
+
 func TestPeerGovernor_AddPeer(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()

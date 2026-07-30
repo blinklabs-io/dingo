@@ -1797,6 +1797,8 @@ Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcom
 
 The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
 
+`Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop()` removes them with `UnsubscribeAndWait`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects.
+
 ```
                       PeerGovernor
     -------------------------------------------------

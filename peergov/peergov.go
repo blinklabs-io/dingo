@@ -162,6 +162,8 @@ type PeerGovernor struct {
 	dialFamilyHasV4     bool
 	dialFamilyHasV6     bool
 	dialFamilyCheckedAt time.Time
+	inboundConnSubId    event.EventSubscriberId
+	connClosedSubId     event.EventSubscriberId
 	mu                  sync.Mutex
 }
 
@@ -411,14 +413,18 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 func (p *PeerGovernor) Start(ctx context.Context) error {
 	// Setup connmanager event listeners
 	if p.config.EventBus != nil {
-		p.config.EventBus.SubscribeFunc(
+		inboundConnSubId := p.config.EventBus.SubscribeFunc(
 			connmanager.InboundConnectionEventType,
 			p.handleInboundConnectionEvent,
 		)
-		p.config.EventBus.SubscribeFunc(
+		connClosedSubId := p.config.EventBus.SubscribeFunc(
 			connmanager.ConnectionClosedEventType,
 			p.handleConnectionClosedEvent,
 		)
+		p.mu.Lock()
+		p.inboundConnSubId = inboundConnSubId
+		p.connClosedSubId = connClosedSubId
+		p.mu.Unlock()
 	}
 	// Start reconcile loop
 	ticker := time.NewTicker(p.config.ReconcileInterval)
@@ -528,7 +534,6 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 // Stop gracefully shuts down the peer governor
 func (p *PeerGovernor) Stop() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	// Stop all tickers
 	if p.reconcileTicker != nil {
@@ -547,5 +552,30 @@ func (p *PeerGovernor) Stop() {
 	if p.stopCh != nil {
 		close(p.stopCh)
 		p.stopCh = nil
+	}
+	inboundConnSubId := p.inboundConnSubId
+	connClosedSubId := p.connClosedSubId
+	p.inboundConnSubId = 0
+	p.connClosedSubId = 0
+	p.mu.Unlock()
+
+	// PeerGovernor instances are replaced during a live database
+	// restore/truncate while the EventBus remains running. Remove the
+	// old instance's handlers before its replacement starts so a delayed
+	// connection event cannot mutate stale peer state and publish a
+	// conflicting chain-selection update after reconnection.
+	if p.config.EventBus != nil {
+		if inboundConnSubId != 0 {
+			p.config.EventBus.UnsubscribeAndWait(
+				connmanager.InboundConnectionEventType,
+				inboundConnSubId,
+			)
+		}
+		if connClosedSubId != 0 {
+			p.config.EventBus.UnsubscribeAndWait(
+				connmanager.ConnectionClosedEventType,
+				connClosedSubId,
+			)
+		}
 	}
 }
