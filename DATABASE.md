@@ -1954,7 +1954,23 @@ order (no terminal `ORDER BY`, so its result order is not a documented
 contract). "Oldest first, newest last" (the OpenAPI schema's wording) is keyed
 on each pool's EARLIEST registration certificate, not its most recent one: a
 pool that later re-registers to update its margin or relays keeps its
-original list position rather than jumping to the end. The query, shared
+original list position rather than jumping to the end. This is a deliberate
+semantic choice, not one pinned by the schema itself -- the schema only says
+"oldest first" without defining "oldest" -- so a future change that keys the
+sort on the LATEST registration instead would be a silent behavior reversal,
+not a bug fix; if that is ever revisited, update this paragraph, the
+`poolorder.GetActivePoolKeyHashesOrdered` doc comment, and
+`PoolsList`'s doc comment (`api/blockfrost/adapter_pools_list.go`) together.
+Verified identical across backends: `TestNodeAdapterPoolsListOrderingAndActiveSet`
+(sqlite, via the Blockfrost adapter) and its direct-store counterparts
+`TestGetActivePoolKeyHashesOrderedPostgres`/`TestGetActivePoolKeyHashesOrderedMysql`
+(`database/plugin/metadata/{postgres,mysql}/pool_active_ordered_test.go`, run
+against real Postgres 16 / MySQL 8.4 containers) seed the same 8-pool fixture
+-- a re-registration, a retirement cancelled by a later re-registration, a
+same-slot three-way tie broken by `block_index`/`cert_index`, a pending
+future retirement, and an already-effective retirement that must be excluded
+-- and assert the exact same expected oldest-first sequence on all three
+backends, not independently-relaxed per-backend expectations. The query, shared
 verbatim across the sqlite/postgres/mysql backends
 (`database/plugin/metadata/internal/poolorder`, mirroring the
 `poolcerthistory` sharing pattern above), computes both the latest-registration
@@ -2002,19 +2018,33 @@ even when two rows collapse to the same `(added_slot, block_index,
 cert_index)` key, e.g. registrations with no linked certificate/transaction
 (both default to 0 via `COALESCE`).
 
-Query cost (verified with `EXPLAIN QUERY PLAN` on sqlite): the `reg_ranked`
-CTE does `SCAN pr USING INDEX idx_pool_reg_pool_slot` -- a full scan of that
-index, since its leading column is `pool_id` rather than `added_slot`, so the
-`added_slot <= ?` filter cannot narrow the index range and is evaluated
-row-by-row. This is bounded by the total historical `pool_registration` row
-count, not just the active-pool count, but it is the same cost `/pools/extended`
-already pays via `GetActivePoolKeyHashesAtSlot`, which has the identical
-`WHERE pr.added_slot <= ?` filter over the same table and index; this query
-adds one extra `ROW_NUMBER()` column computed over the same already-scanned
-rows, not a second scan. `latest_ret` fares better: `SEARCH rt USING INDEX
-idx_pool_retirement_added_slot (added_slot<?)`, a genuine range search. The
-final join/sort touches one row per active pool (`SEARCH p USING INTEGER
-PRIMARY KEY`, `SEARCH fr/lrt USING AUTOMATIC PARTIAL COVERING INDEX`).
+Query cost was verified per backend, not assumed to generalize from one:
+`EXPLAIN QUERY PLAN` on sqlite, `EXPLAIN` on a real Postgres 16 container, and
+`EXPLAIN FORMAT=TREE` on a real MySQL 8.4 container, the latter two populated
+with ~8,000 pools / ~10,000 historical registrations (including ~2,000
+re-registrations, to exercise the `rn_latest`/`rn_first` split at scale) /
+~500 retirements -- large enough that a backend-specific plan flip would show
+up, rather than the toy row counts a unit test would otherwise use. All three
+agree on the shape: the `reg_ranked` CTE does a full scan of `pool_registration`
+(sqlite: `SCAN pr USING INDEX idx_pool_reg_pool_slot`, a full index scan since
+its leading column is `pool_id` rather than `added_slot`, so `added_slot <= ?`
+can't narrow the index range; Postgres: `Seq Scan on pool_registration ...
+Filter: (added_slot <= ...)`; MySQL: `Table scan on pr ... Filter: (pr.added_slot
+<= ...)`) -- bounded by the total historical `pool_registration` row count, not
+just the active-pool count, on every backend. This is the same cost
+`/pools/extended` already pays via `GetActivePoolKeyHashesAtSlot`, which has
+the identical `WHERE pr.added_slot <= ?` filter over the same table; this
+query adds one extra `ROW_NUMBER()` column computed over the same
+already-scanned rows, not a second scan. `pool_retirement` fares better on
+sqlite at small scale (`SEARCH rt USING INDEX idx_pool_retirement_added_slot
+(added_slot<?)`, a genuine range search) but all three backends fell back to
+a full scan of `pool_retirement` at the populated scale above, since the
+`added_slot <= ?` filter matched nearly every row (Postgres and sqlite's
+planners both prefer a full scan over an index scan once the filter is not
+selective; this is normal cost-based planning, not a regression). No backend
+was materially worse than the others for this query, unlike a prior branch in
+this campaign where a SQLite-verified plan did not hold on MySQL. The final
+join/sort touches one row per active pool on all three backends.
 Because the sort key is a per-pool ranking computed across the whole
 registration/retirement history, the entire active set must be ranked before
 any page boundary can be determined; the Blockfrost adapter (`PoolsList`,

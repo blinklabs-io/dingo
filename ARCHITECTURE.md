@@ -2505,7 +2505,10 @@ the ORDER BY is itself a per-pool ranking computed over the whole
 registration/retirement history, so the entire active set must be ranked
 before any page boundary exists, and a SQL-side LIMIT would only trim rows
 after that ranking work, not reduce it. See DATABASE.md for the query's index
-usage.
+usage per backend (verified with real Postgres 16 and MySQL 8.4 containers at
+mainnet-comparable scale, not assumed from sqlite) and for the cross-backend
+behavioral tests confirming sqlite, postgres, and mysql return the identical
+oldest-first sequence against the same fixture.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from

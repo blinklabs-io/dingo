@@ -26,23 +26,34 @@ import (
 // matching results before pagination.
 //
 // Ordering: the store query (GetActivePoolKeyHashesOrdered) returns every
-// active pool key hash already sorted oldest-first by each pool's first
-// on-chain registration certificate, which is the chain-derived order the
-// pool_list schema's "oldest first, newest last" wording calls for (see
-// poolorder.GetActivePoolKeyHashesOrdered's doc comment for the full
-// rationale). asc uses that order as-is; desc reverses the same slice, so
-// the two are exact reverses of each other by construction rather than by
-// two independently-sorted queries agreeing.
+// active pool key hash already sorted oldest-first by each pool's FIRST
+// on-chain registration certificate -- not its most recent one -- which is
+// the chain-derived order the pool_list schema's "oldest first, newest
+// last" wording calls for (see poolorder.GetActivePoolKeyHashesOrdered's
+// doc comment for the full rationale, including why this is a deliberate,
+// reversible semantic choice rather than one the schema pins). asc uses
+// that order as-is; desc reverses the same slice, so the two are exact
+// reverses of each other by construction rather than by two
+// independently-sorted queries agreeing. This ordering and the
+// active/retired determination are verified identical across sqlite,
+// postgres, and mysql against the same 8-pool fixture: see
+// TestNodeAdapterPoolsListOrderingAndActiveSet (pools_list_test.go) and its
+// direct-store postgres/mysql counterparts
+// (database/plugin/metadata/{postgres,mysql}/pool_active_ordered_test.go).
 //
-// Query cost: this issues exactly one query returning one row per active
-// pool (~3,000 on mainnet), the same result-set shape PoolsExtended
-// already reads via GetActivePoolKeyHashes/GetActivePoolKeyHashesAtSlot;
-// no per-page query is added. Pagination is then applied in memory
-// (slice), matching PoolsRetiring (GetRetiringPools + PoolsRetiring)
-// rather than pushing LIMIT/OFFSET into SQL: the ORDER BY here is derived
-// from a per-pool window-function ranking computed across the full
-// registration/retirement history, so the whole active set must be
-// ranked before any page boundary can be determined -- a SQL-side
+// Query cost: the result is one row per active pool (~3,000 on mainnet),
+// the same result-set shape PoolsExtended already reads via
+// GetActivePoolKeyHashes/GetActivePoolKeyHashesAtSlot; no per-page query is
+// added. The underlying scan cost is bounded by the total historical
+// pool_registration row count instead (verified via EXPLAIN on all three
+// backends, see DATABASE.md), since the added_slot filter can't use the
+// (pool_id, added_slot) index on any backend -- the same bound
+// GetActivePoolKeyHashesAtSlot already pays for PoolsExtended. Pagination
+// is applied in memory (slice), matching PoolsRetiring (GetRetiringPools +
+// PoolsRetiring) rather than pushing LIMIT/OFFSET into SQL: the ORDER BY
+// here is derived from a per-pool window-function ranking computed across
+// the full registration/retirement history, so the whole active set must
+// be ranked before any page boundary can be determined -- a SQL-side
 // LIMIT/OFFSET would trim rows only after that ranking work is done, and
 // would not reduce it. The response is bare pool ID strings, so slicing
 // the resulting hash slice in memory before conversion is cheap relative

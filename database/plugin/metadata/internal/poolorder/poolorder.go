@@ -50,7 +50,13 @@ import (
 // naturally as pool age (when it joined the chain), not freshness of its
 // last registration certificate. A pool that re-registers years later to
 // change its margin or relays keeps its original list position rather
-// than jumping to the end of the list.
+// than jumping to the end of the list. This is a deliberate, reversible
+// semantic choice, not one the schema pins -- it only says "oldest first"
+// without defining "oldest" -- so a future change to key the sort on the
+// LATEST registration instead would be a silent behavior reversal to
+// evaluate on its own merits, not an obvious bug fix. Verified identical
+// across sqlite, postgres, and mysql against the same fixture; see
+// DATABASE.md's GetActivePoolKeyHashesOrdered section.
 //
 // A pool is considered active at slot under the same semantics as
 // GetActivePoolKeyHashesAtSlot: it has a registration with added_slot <=
