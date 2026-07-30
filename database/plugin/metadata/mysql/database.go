@@ -525,6 +525,15 @@ func (d *MetadataStoreMysql) Start() error {
 			return err
 		}
 	}
+	// Drop the superseded reward_account_output credential index now that
+	// AutoMigrate above has created its spendable-aware replacement.
+	if err := models.MigrateRewardAccountOutputCredentialIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward account output credential index migration failed: %w", err,
+		)
+	}
 	if backfillAccountCreatedSlot {
 		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
 			return fmt.Errorf(

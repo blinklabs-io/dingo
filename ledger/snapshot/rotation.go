@@ -955,6 +955,20 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 // be replayed after a rollback across the boundary where those rewards were
 // applied.
 //
+// reward_stake_input is pruned to that 4-epoch window in every storage mode:
+// it scales with delegator count (~1.3M rows/epoch on mainnet) and is not
+// needed once the epoch it snapshots has finished replaying. reward_account_output
+// is pruned to the same window in CORE storage mode (types.StorageModeCore),
+// matching dingo's original pruning behavior exactly, but retained WITHOUT BOUND
+// in API storage mode (types.StorageModeAPI) so the Blockfrost account
+// reward-history endpoint (GET /accounts/{stake_address}/rewards, dingo #1875)
+// can serve an account's full reward history instead of only the trailing few
+// epochs — the same "silently look empty past the window" failure mode #2987
+// already identified for epoch_summary. See
+// rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
+// rewardstate.DeleteStakeInputBeforeEpoch (API, prunes only
+// reward_stake_input) for the implementation and full rationale.
+//
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
 // slot), so retaining the full history costs one row per epoch — roughly a
@@ -989,7 +1003,16 @@ func (m *Manager) cleanupOldSnapshots(
 		return fmt.Errorf("cleanup pool snapshots: %w", err)
 	}
 
-	if err := meta.DeleteRewardStateBeforeEpoch(
+	if m.db.StorageMode() == types.StorageModeAPI {
+		// API storage mode: retain reward_account_output without bound (see
+		// doc comment above) and prune only reward_stake_input.
+		if err := meta.DeleteRewardStakeInputBeforeEpoch(
+			deleteBeforeEpoch,
+			metaTxn,
+		); err != nil {
+			return fmt.Errorf("cleanup reward state: %w", err)
+		}
+	} else if err := meta.DeleteRewardStateBeforeEpoch(
 		deleteBeforeEpoch,
 		metaTxn,
 	); err != nil {

@@ -1363,13 +1363,54 @@ type MetadataStore interface {
 	// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
 	GetRewardAccountOutputs(uint64, types.Txn) ([]*models.RewardAccountOutput, error)
 
+	// GetRewardAccountOutputsByCredential retrieves reward account output
+	// rows for a stake credential tag/hash pair across every epoch that has
+	// not yet been pruned, paginated and ordered by epoch. Used by the
+	// Blockfrost account reward-history endpoint.
+	//
+	// Only spendable rows (spendable = true) are returned. A row with
+	// spendable = false was never credited to the account -- crediting skips
+	// it and adds the amount to the epoch's unspendable total instead -- so
+	// returning it would report a reward the account never received. See
+	// rewardstate.GetAccountOutputsByCredential for the full rationale,
+	// including a known gap for CIP-0163-guarded rows (dingo #3021).
+	GetRewardAccountOutputsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// CountRewardAccountOutputsByCredential retrieves the total count of
+	// reward account output rows for a stake credential tag/hash pair.
+	//
+	// Counts only spendable rows, matching
+	// GetRewardAccountOutputsByCredential's filter. The two must agree, or
+	// pagination advertises pages of rewards that were never paid.
+	CountRewardAccountOutputsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
 	// DeleteRewardStateAfterSlot deletes reward-state rows captured from
 	// rolled-back blocks.
 	DeleteRewardStateAfterSlot(uint64, types.Txn) error
 
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
-	// retained snapshot window.
+	// retained snapshot window. This is the CORE storage-mode pruning path:
+	// it deletes both reward_stake_input and reward_account_output. See
+	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
 	DeleteRewardStateBeforeEpoch(uint64, types.Txn) error
+
+	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
+	// older than the retained snapshot window, leaving reward_account_output
+	// intact. This is the API storage-mode pruning path, used so the
+	// Blockfrost account reward-history endpoint can serve an account's full
+	// reward history. See rewardstate.DeleteStakeInputBeforeEpoch.
+	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
 
 	// Stake snapshot methods
 

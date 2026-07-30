@@ -757,4 +757,7 @@ type AccountRewardHistoryInfo struct {
 	Epoch  int32
 	Amount string
 	PoolID string
+	// Type is the Blockfrost reward-type enum spelling (leader, member,
+	// pool_deposit_refund) mapped from models.RewardAccountOutput.RewardType.
+	Type string
 }

@@ -150,21 +150,115 @@ func (RewardPoolOutput) TableName() string {
 }
 
 // RewardAccountOutput captures per-account reward calculation output.
+//
+// idx_reward_account_output_credential_spendable leads with (credential_tag,
+// staking_key, spendable) so GetRewardAccountOutputsByCredential (the
+// Blockfrost account reward-history endpoint, dingo #1875) is a pure index
+// range scan over one credential's spendable rows rather than an index seek
+// followed by a per-row filter: the epoch/pool_key_hash/reward_type tail
+// matches that query's ORDER BY, so an ascending request is served directly
+// from the index and a descending one only sorts the (typically tiny,
+// single-credential) matched rows rather than the whole table. This matters
+// specifically because dingo #1875 also makes API storage mode retain this
+// table without bound (see the retention note in DATABASE.md), so the
+// existing idx_reward_account_output_epoch_cred_pool_type index — which
+// leads with epoch, not credential — cannot serve this query without
+// scanning every retained row.
+//
+// spendable joined the index (superseding the original
+// idx_reward_account_output_credential, which had no spendable column) once
+// GetAccountOutputsByCredential started filtering on it: a credential
+// deregistered before its reward's payout boundary keeps a permanent
+// spendable=false row (see applyStakeRewardApplication /
+// finalizePrecomputedRewardOutputs in ledger/reward_calculation.go), and
+// that reward was never credited, so the reward-history endpoint must not
+// report it. Without spendable in the index's equality prefix, the filter
+// degrades the seek into a seek over every one of the credential's rows plus
+// a per-row check. MigrateRewardAccountOutputCredentialIndex drops the
+// superseded index once this one exists, so upgraded databases end up with
+// exactly one credential-leading index rather than both.
+//
+// NOTE(dingo #1875 follow-up): a CIP-0163-guarded reward
+// (rewardOutputGuarded in ledger/reward_calculation.go) is also skipped at
+// crediting time, but that guard is never written back to Spendable, so a
+// guarded row keeps spendable=true and this filter does not catch it. That
+// only matters once CIP-0163 (delegator inactivity) activates; see the
+// tracking note in DATABASE.md. Not fixed here — deliberately out of scope
+// for this change.
 type RewardAccountOutput struct {
-	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null"`
-	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null"`
-	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null"`
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:2"`
+	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:5"`
+	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null;index:idx_reward_account_output_credential_spendable,priority:6"`
 	ID            uint         `gorm:"primarykey"`
-	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null"`
-	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0"`
+	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null;index:idx_reward_account_output_credential_spendable,priority:4"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0;index:idx_reward_account_output_credential_spendable,priority:1"`
 	Amount        types.Uint64 `gorm:"not null"`
-	Spendable     bool         `gorm:"not null"`
+	Spendable     bool         `gorm:"not null;index:idx_reward_account_output_credential_spendable,priority:3"`
 	CapturedSlot  uint64       `gorm:"index;not null"`
 	BoundarySlot  uint64       `gorm:"index;not null"`
 }
 
 func (RewardAccountOutput) TableName() string {
 	return "reward_account_output"
+}
+
+// MigrateRewardAccountOutputCredentialIndex drops the superseded
+// idx_reward_account_output_credential index (credential_tag, staking_key,
+// epoch, pool_key_hash, reward_type) once its replacement,
+// idx_reward_account_output_credential_spendable, exists. The replacement
+// adds spendable to the equality prefix so GetAccountOutputsByCredential's
+// new spendable=true filter (dingo #1875 follow-up) stays a pure index range
+// scan instead of degrading to a seek over every one of the credential's
+// rows plus a per-row filter.
+//
+// Unlike MigrateRewardLiveStakePoolIndex and the other legacy-index
+// migrations in this file, this one runs AFTER AutoMigrate rather than
+// before. Those migrations drop a unique index that could otherwise reject
+// valid rows or block a column-type change, so they must run first.
+// idx_reward_account_output_credential is a plain non-unique secondary
+// index: keeping it around a little longer is only wasted space, never a
+// correctness problem, so there is no reason to risk a window with no
+// credential-leading index at all. Calling this after AutoMigrate
+// guarantees the replacement already exists before the old index is
+// dropped.
+func MigrateRewardAccountOutputCredentialIndex(
+	db *gorm.DB,
+	logger *slog.Logger,
+) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&RewardAccountOutput{}) {
+		return nil
+	}
+	if !db.Migrator().HasIndex(
+		&RewardAccountOutput{},
+		"idx_reward_account_output_credential",
+	) {
+		return nil
+	}
+	if !db.Migrator().HasIndex(
+		&RewardAccountOutput{},
+		"idx_reward_account_output_credential_spendable",
+	) {
+		// The replacement has not been created yet (should not happen when
+		// called after AutoMigrate); leave the old index in place rather
+		// than dropping the only credential-leading index available.
+		return nil
+	}
+	logger.Info(
+		"dropping superseded reward_account_output credential index",
+	)
+	if err := db.Migrator().DropIndex(
+		&RewardAccountOutput{},
+		"idx_reward_account_output_credential",
+	); err != nil {
+		return fmt.Errorf(
+			"drop reward_account_output credential index: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // MigrateRewardLiveStakePoolIndex drops the legacy pool/total_stake index.

@@ -270,6 +270,68 @@ func (d *MetadataStoreSqlite) GetRewardAccountOutputs(epoch uint64, txn types.Tx
 	return rewardstate.GetAccountOutputs(db, epoch)
 }
 
+// GetRewardAccountOutputsByCredential retrieves reward account output rows
+// for a stake credential tag/hash pair, paginated and ordered by epoch.
+func (d *MetadataStoreSqlite) GetRewardAccountOutputsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve read DB for reward account outputs by credential: %w",
+			err,
+		)
+	}
+	rows, err := rewardstate.GetAccountOutputsByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get reward account outputs by credential: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountRewardAccountOutputsByCredential retrieves the total count of reward
+// account output rows for a stake credential tag/hash pair.
+func (d *MetadataStoreSqlite) CountRewardAccountOutputsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve read DB for count reward account outputs by credential: %w",
+			err,
+		)
+	}
+	count, err := rewardstate.CountAccountOutputsByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count reward account outputs by credential: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from
 // rolled-back blocks.
 func (d *MetadataStoreSqlite) DeleteRewardStateAfterSlot(
@@ -294,4 +356,21 @@ func (d *MetadataStoreSqlite) DeleteRewardStateBeforeEpoch(
 		return fmt.Errorf("delete reward state before epoch: resolve db: %w", err)
 	}
 	return rewardstate.DeleteStateBeforeEpoch(db, epoch, txn)
+}
+
+// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
+// older than the retained snapshot window, leaving reward_account_output
+// intact. Used in API storage mode.
+func (d *MetadataStoreSqlite) DeleteRewardStakeInputBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"delete reward stake input before epoch: resolve db: %w",
+			err,
+		)
+	}
+	return rewardstate.DeleteStakeInputBeforeEpoch(db, epoch, txn)
 }
