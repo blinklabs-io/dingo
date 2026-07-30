@@ -2,7 +2,15 @@ import "./styles.css";
 import { Blaze, Core, WebWallet, type Wallet } from "@blaze-cardano/sdk";
 import { ADA_METADATA, type IPoolData, type IPoolDataAsset } from "@sundaeswap/core";
 import type { U5C } from "@utxorpc/blaze-provider";
-import { createDingoProvider, assertDingoReady } from "./dingo/provider";
+import {
+  assertDingoNetwork,
+  assertDingoReady,
+  createDingoProvider,
+  stakeCredentialHashFor,
+  summarizeDingoAddress,
+  summarizeDingoStakeCredential,
+  type DingoUtxoSummary,
+} from "./dingo/provider";
 import { formatAssetAmount, metadataFor, parseAssetAmount, unitFromAssetId } from "./sundae/assets";
 import { DingoSundaeQueryProvider } from "./sundae/dingoQueryProvider";
 import { DEFAULT_POOL, POOL_PRESETS, type PoolPreset } from "./sundae/protocol";
@@ -30,6 +38,7 @@ type AppState = {
   blaze?: Blaze<U5C, Wallet>;
   webWallet?: WebWallet;
   walletBalance?: Core.Value;
+  changeAddress?: Core.Address;
   walletApi?: Cip30WalletApi;
   poolOptions: PoolOption[];
   pool?: IPoolData;
@@ -69,11 +78,11 @@ app.innerHTML = `
       </div>
       <div class="header-actions">
         <div
-          class="status ready network-status"
+          class="status network-status"
           id="networkStatus"
-          title="Dingo provider network: cardano-preview"
+          title="Verifying the endpoint network through UTxO RPC ReadGenesis"
         >
-          Network: Preview
+          Network: checking
         </div>
         <div class="status" id="dingoStatus">Dingo: connecting</div>
         <details class="wallet-dropdown" id="walletDetails">
@@ -88,6 +97,8 @@ app.innerHTML = `
               <dt>Network</dt><dd id="walletNetwork">Not connected</dd>
               <dt>Change address</dt><dd id="changeAddress">-</dd>
               <dt>Balance</dt><dd id="walletBalance">-</dd>
+              <dt>Dingo UTxOs</dt><dd id="dingoAddressUtxos">-</dd>
+              <dt>Stake cred</dt><dd id="dingoStakeUtxos">-</dd>
             </dl>
           </div>
         </details>
@@ -187,6 +198,7 @@ app.innerHTML = `
 `;
 
 const els = {
+  networkStatus: byId("networkStatus"),
   dingoStatus: byId("dingoStatus"),
   walletDetails: byId<HTMLDetailsElement>("walletDetails"),
   walletSummary: byId<HTMLElement>("walletSummary"),
@@ -195,6 +207,8 @@ const els = {
   walletNetwork: byId("walletNetwork"),
   changeAddress: byId("changeAddress"),
   walletBalance: byId("walletBalance"),
+  dingoAddressUtxos: byId("dingoAddressUtxos"),
+  dingoStakeUtxos: byId("dingoStakeUtxos"),
   poolSelect: byId<HTMLSelectElement>("poolSelect"),
   loadPool: byId<HTMLButtonElement>("loadPool"),
   poolFee: byId("poolFee"),
@@ -349,14 +363,22 @@ function getWallets(): Array<[string, Cip30Wallet]> {
 
 async function initializeDingo(): Promise<void> {
   try {
+    const network = await assertDingoNetwork(state.provider);
+    els.networkStatus.textContent = "Network: Preview";
+    els.networkStatus.title = network;
+    els.networkStatus.classList.add("ready");
     const status = await assertDingoReady(state.provider);
     const references = await state.queryProvider.validateProtocolReferences();
     els.dingoStatus.textContent = `Dingo: ready`;
     els.dingoStatus.classList.add("ready");
-    log(`${status}; ${references}`);
+    log(`${network}; ${status}; ${references}`);
     await hydratePoolsFromDingo();
     await loadPool();
   } catch (error) {
+    if (!els.networkStatus.classList.contains("ready")) {
+      els.networkStatus.textContent = "Network: unverified";
+      els.networkStatus.classList.add("error");
+    }
     els.dingoStatus.textContent = "Dingo: unavailable";
     els.dingoStatus.classList.add("error");
     log(errorMessage(error));
@@ -384,6 +406,7 @@ async function connectWallet(): Promise<void> {
     const changeAddress = await webWallet.getChangeAddress();
     const balance = await webWallet.getBalance();
     state.walletBalance = balance;
+    state.changeAddress = changeAddress;
     els.walletNetwork.textContent = "Preview-compatible testnet";
     els.changeAddress.textContent = changeAddress.toBech32();
     els.walletBalance.textContent = `${formatAssetAmount(balance.coin(), 6)} ADA`;
@@ -391,6 +414,7 @@ async function connectWallet(): Promise<void> {
     els.walletDetails.open = false;
     renderSwapControls();
     log(`Wallet connected: ${wallet.name ?? els.walletSelect.value}`);
+    await refreshDingoWalletView();
   } catch (error) {
     log(errorMessage(error));
   }
@@ -486,6 +510,49 @@ async function refreshWalletBalance(): Promise<void> {
   state.walletBalance = balance;
   els.walletBalance.textContent = `${formatAssetAmount(balance.coin(), 6)} ADA`;
   renderSwapControls();
+  await refreshDingoWalletView();
+}
+
+// refreshDingoWalletView shows the wallet as Dingo sees it, independently of
+// what CIP-30 reports: one exact-address query and one stake-credential query
+// through UTxO RPC SearchUtxos.
+async function refreshDingoWalletView(): Promise<void> {
+  const changeAddress = state.changeAddress;
+  if (!changeAddress) {
+    return;
+  }
+
+  try {
+    const address = await summarizeDingoAddress(state.provider, changeAddress);
+    els.dingoAddressUtxos.textContent = summaryLabel(address);
+  } catch (error) {
+    els.dingoAddressUtxos.textContent = "-";
+    log(`Dingo address UTxO query failed: ${errorMessage(error)}`);
+  }
+
+  const stakeCredentialHash = stakeCredentialHashFor(changeAddress);
+  if (!stakeCredentialHash) {
+    els.dingoStakeUtxos.textContent = "No delegation part";
+    return;
+  }
+
+  try {
+    const stake = await summarizeDingoStakeCredential(state.provider, stakeCredentialHash);
+    els.dingoStakeUtxos.textContent = summaryLabel(stake);
+    els.dingoStakeUtxos.title = `Stake credential ${stakeCredentialHash}. UTxO RPC reports UTxOs only; delegation and rewards need node-to-client LocalStateQuery.`;
+  } catch (error) {
+    els.dingoStakeUtxos.textContent = "-";
+    log(`Dingo stake-credential UTxO query failed: ${errorMessage(error)}`);
+  }
+}
+
+function summaryLabel(summary: DingoUtxoSummary): string {
+  const ada = formatAssetAmount(summary.lovelace, 6);
+  const utxoLabel = summary.utxoCount === 1 ? "UTxO" : "UTxOs";
+  if (summary.truncated) {
+    return `${ada} ADA across the first ${summary.utxoCount} ${utxoLabel}`;
+  }
+  return `${ada} ADA across ${summary.utxoCount} ${utxoLabel}`;
 }
 
 function labelFor(asset: { assetId: string; ticker?: string; decimals?: number }): string {
