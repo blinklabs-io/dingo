@@ -61,6 +61,11 @@ type BlockfrostNode interface {
 	// extended details.
 	PoolsExtended() ([]PoolExtendedInfo, error)
 
+	// PoolsList returns the paginated list of registered (active,
+	// non-retired) stake pool IDs, along with the total number of
+	// matching results before pagination.
+	PoolsList(PaginationParams) ([]string, int, error)
+
 	// Address returns summary information for an address,
 	// including balances aggregated across its live UTxOs.
 	Address(address string) (AddressInfo, error)

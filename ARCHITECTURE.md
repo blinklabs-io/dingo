@@ -2403,8 +2403,8 @@ fields protect every API listener.
 
 A Blockfrost-compatible REST API that provides read access to chain data and
 transaction submission. The current router includes health/root, blocks,
-epochs/parameters, network/eras, genesis, assets, pools/extended, retiring
-pools, pool detail, pool metadata, governance DRep list and lookup, address
+epochs/parameters, network/eras, genesis, assets, pools list, pools/extended,
+retiring pools, pool detail, pool metadata, governance DRep list and lookup, address
 summary, address UTxOs and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
@@ -2488,6 +2488,24 @@ be loaded (`LedgerState.Start()` having completed): a required, non-nullable
 schema field cannot fall back to a placeholder value, so the request fails
 outright rather than serving a fabricated 0.0 when they are not yet
 available.
+
+`GET /pools` (pool_list) returns bare bech32 pool IDs for the same active-pool
+set `/pools/extended` reads, but ordered rather than left in incidental row
+order: `GetActivePoolKeyHashesOrdered` (shared across the sqlite/postgres/mysql
+backends via `poolorder`, mirroring the `poolcerthistory` pattern) sorts
+oldest-first by each pool's EARLIEST registration certificate
+(added_slot/block_index/cert_index ascending, pool_key_hash as a final
+deterministic tie-break), not its most recent parameter update -- a pool that
+re-registers to change its margin keeps its original list position rather than
+jumping to the end. `desc` is the in-memory reverse of the same ordered slice,
+so the two are exact reverses by construction. Pagination is applied in
+memory over the full active-pool result (matching `/pools/retiring`'s
+`GetRetiringPools`/`PoolsRetiring` split), not pushed into SQL LIMIT/OFFSET:
+the ORDER BY is itself a per-pool ranking computed over the whole
+registration/retirement history, so the entire active set must be ranked
+before any page boundary exists, and a SQL-side LIMIT would only trim rows
+after that ranking work, not reduce it. See DATABASE.md for the query's index
+usage.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from

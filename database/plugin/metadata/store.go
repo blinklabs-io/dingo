@@ -448,6 +448,18 @@ type MetadataStore interface {
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
 
+	// GetActivePoolKeyHashesOrdered retrieves the key hashes of all
+	// currently active pools (same active-pool semantics as
+	// GetActivePoolKeyHashes), ordered oldest-first by each pool's
+	// earliest on-chain registration certificate: added_slot ascending,
+	// then block_index and cert_index ascending to disambiguate
+	// certificates recorded in the same slot. This backs the Blockfrost
+	// pool_list endpoint's documented "oldest first, newest last"
+	// ordering. See poolorder.GetActivePoolKeyHashesOrdered for the full
+	// rationale, including why "oldest" is keyed on first registration
+	// rather than the most recent one.
+	GetActivePoolKeyHashesOrdered(types.Txn) ([][]byte, error)
+
 	// GetPoolCertificateHistory returns the transaction hashes of a pool's
 	// registration and retirement certificates, in chronological order
 	// (added_slot, block_index, cert_index ascending). Certificates with no

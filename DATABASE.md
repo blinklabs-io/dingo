@@ -1943,6 +1943,87 @@ slot. Such rows have no `certs`/`transaction` join, so without the
 tie-break to a registration, incorrectly keeping the pool active for stake
 snapshots and reward inputs.
 
+### `GetActivePoolKeyHashesOrdered`
+
+Backs the Blockfrost `GET /pools` (`pool_list`) endpoint: the same active-pool
+set as `GetActivePoolKeyHashes`/`GetActivePoolKeyHashesAtSlot` (registration
+with `added_slot <= tip`, no retirement or the retirement is cancelled by a
+later registration or targets a not-yet-started epoch), but with an explicit,
+deterministic order instead of `GetActivePoolKeyHashesAtSlot`'s incidental row
+order (no terminal `ORDER BY`, so its result order is not a documented
+contract). "Oldest first, newest last" (the OpenAPI schema's wording) is keyed
+on each pool's EARLIEST registration certificate, not its most recent one: a
+pool that later re-registers to update its margin or relays keeps its
+original list position rather than jumping to the end. The query, shared
+verbatim across the sqlite/postgres/mysql backends
+(`database/plugin/metadata/internal/poolorder`, mirroring the
+`poolcerthistory` sharing pattern above), computes both the latest-registration
+ranking (needed for the active/retired determination) and the
+earliest-registration ranking (needed for the sort key) as two `ROW_NUMBER()`
+columns over one CTE scan of `pool_registration` joined to `certs`/
+`transaction`, rather than scanning that join twice:
+
+```sql
+WITH reg_ranked AS (
+  SELECT pr.pool_id, pr.added_slot,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0) AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn_latest,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot ASC, COALESCE(t.block_index, 0) ASC, COALESCE(c.cert_index, 0) ASC
+    ) AS rn_first
+  FROM pool_registration pr
+  LEFT JOIN certs c ON c.id = pr.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE pr.added_slot <= $1
+),
+latest_ret AS ( -- same shape as GetActivePoolKeyHashesAtSlot's latest_ret
+  ...
+)
+SELECT p.pool_key_hash
+FROM pool p
+INNER JOIN reg_ranked lr ON lr.pool_id = p.id AND lr.rn_latest = 1
+INNER JOIN reg_ranked fr ON fr.pool_id = p.id AND fr.rn_first = 1
+LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+WHERE lrt.pool_id IS NULL
+  OR lrt.added_slot < lr.added_slot
+  OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+  OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+  OR lrt.epoch > $2
+ORDER BY fr.added_slot ASC, fr.blk_idx ASC, fr.cert_idx ASC, p.pool_key_hash ASC;
+```
+
+A final `p.pool_key_hash ASC` tie-break makes the order fully deterministic
+even when two rows collapse to the same `(added_slot, block_index,
+cert_index)` key, e.g. registrations with no linked certificate/transaction
+(both default to 0 via `COALESCE`).
+
+Query cost (verified with `EXPLAIN QUERY PLAN` on sqlite): the `reg_ranked`
+CTE does `SCAN pr USING INDEX idx_pool_reg_pool_slot` -- a full scan of that
+index, since its leading column is `pool_id` rather than `added_slot`, so the
+`added_slot <= ?` filter cannot narrow the index range and is evaluated
+row-by-row. This is bounded by the total historical `pool_registration` row
+count, not just the active-pool count, but it is the same cost `/pools/extended`
+already pays via `GetActivePoolKeyHashesAtSlot`, which has the identical
+`WHERE pr.added_slot <= ?` filter over the same table and index; this query
+adds one extra `ROW_NUMBER()` column computed over the same already-scanned
+rows, not a second scan. `latest_ret` fares better: `SEARCH rt USING INDEX
+idx_pool_retirement_added_slot (added_slot<?)`, a genuine range search. The
+final join/sort touches one row per active pool (`SEARCH p USING INTEGER
+PRIMARY KEY`, `SEARCH fr/lrt USING AUTOMATIC PARTIAL COVERING INDEX`).
+Because the sort key is a per-pool ranking computed across the whole
+registration/retirement history, the entire active set must be ranked before
+any page boundary can be determined; the Blockfrost adapter (`PoolsList`,
+`api/blockfrost/adapter_pools_list.go`) therefore fetches every active pool's
+key hash in this one query and applies `count`/`page`/`order` in memory
+(reversing the slice for `desc`), matching `GetRetiringPools`/`PoolsRetiring`'s
+existing split below rather than pushing `LIMIT`/`OFFSET` into SQL, which
+would only trim rows after the ranking work, not reduce it.
+
 ### `GetPoolsRetiringAtEpoch`
 
 Pools whose effective retirement takes effect at a given epoch, with the reward

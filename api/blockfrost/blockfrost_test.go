@@ -67,6 +67,9 @@ type mockNode struct {
 	networkEras                   []NetworkEraInfo
 	genesis                       GenesisInfo
 	pools                         []PoolExtendedInfo
+	poolsList                     []string
+	poolsListTotal                int
+	poolsListParams               PaginationParams
 	poolsRetiring                 []PoolRetiringInfo
 	poolsRetiringTotal            int
 	poolMetadata                  PoolMetadataInfo
@@ -126,6 +129,7 @@ type mockNode struct {
 	networkErasErr                error
 	genesisErr                    error
 	poolsErr                      error
+	poolsListErr                  error
 	poolsRetiringErr              error
 	poolMetadataErr               error
 	assetErr                      error
@@ -225,6 +229,13 @@ func (m *mockNode) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
 	return m.pools, m.poolsErr
+}
+
+func (m *mockNode) PoolsList(
+	params PaginationParams,
+) ([]string, int, error) {
+	m.poolsListParams = params
+	return m.poolsList, m.poolsListTotal, m.poolsListErr
 }
 
 func (m *mockNode) PoolsRetiring(
