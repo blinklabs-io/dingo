@@ -15,10 +15,45 @@
 package analysis
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestAnalyzerRunSignalsSetupCompleteWithoutForgedBlocks(t *testing.T) {
+	called := make(chan struct{}, 1)
+	analyzer := NewAnalyzer(&Config{
+		InitialWait:   0,
+		CheckInterval: time.Hour,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	analyzer.setupComplete = func() {
+		called <- struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- analyzer.Run(ctx)
+	}()
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("setup complete was not signaled")
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("analyzer did not stop after context cancellation")
+	}
+}
 
 func TestChainTipRange_Empty(t *testing.T) {
 	min, max, ok := chainTipRange(map[string]uint64{})
