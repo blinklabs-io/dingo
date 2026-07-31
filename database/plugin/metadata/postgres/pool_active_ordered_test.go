@@ -50,10 +50,10 @@ func TestGetActivePoolKeyHashesOrderedPostgres(t *testing.T) {
 	// connection closes: t.Cleanup callbacks run after every plain defer
 	// in this function body has already executed, so a plain
 	// "defer store.Close()" here would close the connection before any
-	// later-registered t.Cleanup data cleanup runs against it (that
-	// exact ordering bug is why TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres's
-	// own epoch cleanup below silently never executes -- see the epoch_id
-	// <= 5 delete below).
+	// later-registered t.Cleanup data cleanup runs against it (that exact
+	// ordering bug previously made TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres's
+	// own epoch cleanup silently never execute; fixed in dingo #3025 -- see
+	// the epoch_id <= 5 delete below, which stays as a defensive measure).
 	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
@@ -66,15 +66,14 @@ func TestGetActivePoolKeyHashesOrderedPostgres(t *testing.T) {
 		Attrs(models.Tip{Slot: 1_000_000}).
 		FirstOrCreate(&models.Tip{ID: 1}).Error)
 	// epoch_id 0-5 is TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres's
-	// fixture range (pool_atslot_test.go). That test's own cleanup never
-	// actually runs (same plain-defer-before-t.Cleanup ordering bug
-	// described above, pre-existing in that file and not touched here),
-	// so epoch_id 0 persists in this shared integration database with a
-	// narrow length_in_slots=100 that would make GetActivePoolKeyHashesOrdered's
+	// fixture range (pool_atslot_test.go). That test's own cleanup now runs
+	// (dingo #3025 fixed the plain-defer-before-t.Cleanup ordering bug
+	// described above, which is why it used to leave epoch_id 0 behind with
+	// a narrow length_in_slots=100 that would make GetActivePoolKeyHashesOrdered's
 	// epoch-at-tip-slot lookup pick that stale row instead of this test's
-	// and fail with ErrNoEpochData. Clearing that known range before
-	// creating our own epoch_id=0 makes this test self-sufficient
-	// regardless of that pre-existing bug or test run order.
+	// and fail with ErrNoEpochData). Clearing that known range before
+	// creating our own epoch_id=0 keeps this test self-sufficient
+	// regardless of test run order or a regression in that fix.
 	require.NoError(t, db.Where("epoch_id <= ?", 5).Delete(&models.Epoch{}).Error)
 	require.NoError(t, db.
 		Where("epoch_id = ?", 0).
