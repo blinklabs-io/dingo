@@ -73,6 +73,7 @@ func (d *MetadataStoreMysql) SavePoolStakeSnapshots(
 				"total_stake",
 				"delegator_count",
 				"captured_slot",
+				"calculation_version",
 				"reward_account_auto_vote",
 				"reward_account_auto_vote_resolved",
 			}),

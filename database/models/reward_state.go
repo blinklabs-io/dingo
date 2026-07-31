@@ -22,6 +22,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// RewardStakeCalculationVersion identifies the stake-accounting algorithm
+// used to produce persisted live stake and consensus snapshots. Bump it when
+// changing that calculation so upgrades cannot trust older values.
+const RewardStakeCalculationVersion uint = 1
+
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
 	ID           uint         `gorm:"primarykey"`
@@ -55,6 +60,9 @@ type RewardSnapshot struct {
 	// authoritative row: it either claims a fresh row or is superseded. Defaults
 	// to false, so pre-existing rows and fallback captures read as provisional.
 	Authoritative bool `gorm:"not null;default:false"`
+	// CalculationVersion ties authoritative Mark metadata to the stake
+	// calculation that produced its accompanying pool snapshots.
+	CalculationVersion uint `gorm:"not null;default:0"`
 }
 
 func (RewardSnapshot) TableName() string {
@@ -122,6 +130,9 @@ type RewardLiveStake struct {
 	PoolDelegationBlockIndex uint64 `gorm:"not null;default:0"`
 	PoolDelegationCertIndex  uint32 `gorm:"not null;default:0"`
 	UpdatedSlot              uint64 `gorm:"index;not null"`
+	// CalculationVersion is set by every rebuild and incremental update. Zero
+	// denotes rows created before calculation provenance was introduced.
+	CalculationVersion uint `gorm:"not null;default:0"`
 }
 
 func (RewardLiveStake) TableName() string {

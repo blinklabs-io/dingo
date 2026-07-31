@@ -341,3 +341,13 @@ func (d *MetadataStoreSqlite) RewardLiveStakeNeedsBackfill(
 	}
 	return rewardstate.LiveStakeNeedsBackfill(db)
 }
+
+func (d *MetadataStoreSqlite) StaleConsensusStakeSnapshotsExist(
+	txn types.Txn,
+) (bool, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return false, fmt.Errorf("check stale stake snapshots: resolve db: %w", err)
+	}
+	return rewardstate.StaleConsensusStakeSnapshotsExist(db)
+}

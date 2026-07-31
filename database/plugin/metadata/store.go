@@ -565,6 +565,11 @@ type MetadataStore interface {
 	// misfiring on a legitimately fresh, empty database.
 	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
 
+	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
+	// stake snapshots or authoritative Mark metadata use an older calculation
+	// version. Such snapshots cannot safely be recreated from a pruned database.
+	StaleConsensusStakeSnapshotsExist(types.Txn) (bool, error)
+
 	// GetStakeRegistrationsByCredential retrieves stake registration certificates
 	// using the full credential identity: credential tag plus 28-byte hash.
 	GetStakeRegistrationsByCredential(

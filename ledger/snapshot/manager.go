@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/prometheus/client_golang/prometheus"
@@ -397,6 +398,9 @@ func (m *Manager) authoritativeMarkRewardSnapshotExists(
 	// counts as "already captured". A provisional fallback row must not block a
 	// later block-based fallback that carries the real epoch nonce.
 	if !snapshot.Authoritative {
+		return false, nil
+	}
+	if snapshot.CalculationVersion != models.RewardStakeCalculationVersion {
 		return false, nil
 	}
 	if snapshot.BoundarySlot != evt.BoundarySlot {

@@ -90,6 +90,7 @@ func SaveSnapshot(db *gorm.DB, snapshot *models.RewardSnapshot) error {
 				"epoch_nonce",
 				"protocol_version",
 				"authoritative",
+				"calculation_version",
 			}),
 		},
 	).Create(snapshot).Error; err != nil {
@@ -160,14 +161,15 @@ func ClaimFallbackSnapshot(
 				snapshot.Epoch,
 				snapshot.SnapshotType,
 			).Updates(map[string]any{
-			"total_active_stake": snapshot.TotalActiveStake,
-			"total_pool_count":   snapshot.TotalPoolCount,
-			"total_delegators":   snapshot.TotalDelegators,
-			"captured_slot":      snapshot.CapturedSlot,
-			"boundary_slot":      snapshot.BoundarySlot,
-			"epoch_nonce":        snapshot.EpochNonce,
-			"protocol_version":   snapshot.ProtocolVersion,
-			"authoritative":      false,
+			"total_active_stake":  snapshot.TotalActiveStake,
+			"total_pool_count":    snapshot.TotalPoolCount,
+			"total_delegators":    snapshot.TotalDelegators,
+			"captured_slot":       snapshot.CapturedSlot,
+			"boundary_slot":       snapshot.BoundarySlot,
+			"epoch_nonce":         snapshot.EpochNonce,
+			"protocol_version":    snapshot.ProtocolVersion,
+			"authoritative":       false,
+			"calculation_version": snapshot.CalculationVersion,
 		}).Error; err != nil {
 			return false, fmt.Errorf("replace fallback reward snapshot: %w", err)
 		}
