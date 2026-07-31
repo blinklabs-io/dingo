@@ -462,6 +462,14 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		client := conn.LeiosFetch().Client
 		point := m.Point
+		// The relay offers each endorser block on every connection. The
+		// manifest is content-addressed, so once any peer's copy is cached a
+		// refetch returns identical bytes: skip it instead of spending a fetch
+		// slot and the manifest's bandwidth once per connected peer. Mirrors
+		// the same guard on the txs offer below.
+		if _, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
+			return nil
+		}
 		// Fetch the manifest off the handler so a slow fetch cannot head-of-line
 		// block later offers on this connection. The transactions arrive as a
 		// separate notify offer (MsgBlockTxsOffer): the prototype diffuses an
