@@ -112,6 +112,118 @@ func TestChunksSplitsOverMaxTerms(t *testing.T) {
 	}
 }
 
+// TestChunksNonPowerOfTwoMaxTerms pins the invariant documented on
+// Chunk.Condition when maxTerms is not a power of two: the effective bound is
+// maxTerms rounded down to a power of two, so every chunk's term count is a
+// power of two AND stays within the caller's maxTerms (which bounds the driver
+// bind-parameter count at two per term). Real, arg count and padding-by-repeat
+// semantics are unchanged.
+func TestChunksNonPowerOfTwoMaxTerms(t *testing.T) {
+	for _, maxTerms := range []int{3, 5, 100, 200, 255, 257, 999} {
+		for _, n := range []int{1, 2, 7, 63, 150, 300, 1001} {
+			refs := mkRefs(n)
+			chunks := Chunks(refs, maxTerms)
+			if len(chunks) == 0 {
+				t.Fatalf("maxTerms=%d n=%d: expected chunks", maxTerms, n)
+			}
+			total := 0
+			for i, c := range chunks {
+				terms := strings.Count(c.Condition, "output_idx")
+				if terms&(terms-1) != 0 {
+					t.Fatalf(
+						"maxTerms=%d n=%d chunk %d: term count %d is not a power of two",
+						maxTerms, n, i, terms,
+					)
+				}
+				if terms > maxTerms {
+					t.Fatalf(
+						"maxTerms=%d n=%d chunk %d: term count %d exceeds maxTerms",
+						maxTerms, n, i, terms,
+					)
+				}
+				if c.Real < 1 || c.Real > terms {
+					t.Fatalf(
+						"maxTerms=%d n=%d chunk %d: Real=%d out of range for %d terms",
+						maxTerms, n, i, c.Real, terms,
+					)
+				}
+				if len(c.Args) != terms*2 {
+					t.Fatalf(
+						"maxTerms=%d n=%d chunk %d: expected %d args, got %d",
+						maxTerms, n, i, terms*2, len(c.Args),
+					)
+				}
+				// Real args are the input refs in order; padding repeats the
+				// chunk's last real ref, which is what makes it idempotent.
+				lastReal := refs[total+c.Real-1]
+				for j := range terms {
+					want := lastReal
+					if j < c.Real {
+						want = refs[total+j]
+					}
+					idx, ok := c.Args[j*2+1].(uint32)
+					if !ok || idx != want.Idx {
+						t.Fatalf(
+							"maxTerms=%d n=%d chunk %d arg %d: expected idx %d, got %v",
+							maxTerms, n, i, j, want.Idx, c.Args[j*2+1],
+						)
+					}
+				}
+				total += c.Real
+			}
+			if total != n {
+				t.Fatalf(
+					"maxTerms=%d n=%d: expected sum(Real)=%d, got %d",
+					maxTerms, n, n, total,
+				)
+			}
+		}
+	}
+}
+
+// TestChunksNonPowerOfTwoMaxTermsBoundsShapes is the #2943 property for a
+// non-power-of-two maxTerms: the distinct-shape set must still be bounded by
+// the powers of two under the effective bound, not gain an extra ragged shape.
+func TestChunksNonPowerOfTwoMaxTermsBoundsShapes(t *testing.T) {
+	shapes := make(map[int]struct{})
+	for n := 1; n <= 500; n++ {
+		for _, c := range Chunks(mkRefs(n), 200) {
+			shapes[strings.Count(c.Condition, "output_idx")] = struct{}{}
+		}
+	}
+	// Effective bound is 128 (200 rounded down), so shapes are 1..128: 8 total.
+	if len(shapes) > 8 {
+		t.Fatalf("expected at most 8 distinct shapes, got %d: %v", len(shapes), shapes)
+	}
+	for terms := range shapes {
+		if terms&(terms-1) != 0 || terms > 200 {
+			t.Fatalf("invalid shape term count %d", terms)
+		}
+	}
+}
+
+// TestChunksMaxTermsBelowOne pins the documented fallback to DefaultMaxTerms.
+func TestChunksMaxTermsBelowOne(t *testing.T) {
+	for _, maxTerms := range []int{0, -1, -256} {
+		got := Chunks(mkRefs(300), maxTerms)
+		want := Chunks(mkRefs(300), DefaultMaxTerms)
+		if len(got) != len(want) {
+			t.Fatalf("maxTerms=%d: expected %d chunks, got %d",
+				maxTerms, len(want), len(got))
+		}
+		for i := range got {
+			if got[i].Condition != want[i].Condition ||
+				got[i].Real != want[i].Real {
+				t.Fatalf("maxTerms=%d chunk %d: expected Real=%d/%d terms, got Real=%d/%d terms",
+					maxTerms, i, want[i].Real,
+					strings.Count(want[i].Condition, "output_idx"),
+					got[i].Real,
+					strings.Count(got[i].Condition, "output_idx"))
+			}
+		}
+	}
+}
+
 func TestChunksEmpty(t *testing.T) {
 	if Chunks(nil, DefaultMaxTerms) != nil {
 		t.Fatal("expected nil for empty input")
