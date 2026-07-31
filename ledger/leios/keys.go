@@ -48,6 +48,20 @@ const voterPoolKeyHashSize = 28
 // DerivePrototypeVoteSigningKey reproduces the current Leios prototype's
 // temporary key derivation: the 28-byte pool cold-key hash is right-padded
 // with four zero bytes and interpreted as a BLS12-381 secret scalar.
+//
+// The padded value is reduced modulo the scalar field order, matching the
+// reference's rawDeserialiseSignKeyDSIGN, which decodes via blst's
+// blst_scalar_from_be_bytes: that reduces mod r and fails only on zero.
+// Reduction is not optional. r's leading byte is 0x73 while the padded
+// scalar's leading byte is the hash's, so roughly 55% of pools produce a
+// scalar of at least r; rejecting those would leave their votes
+// unverifiable. Reduction is a no-op for the rest, so derived keys for
+// pools below r are unchanged.
+//
+// This stands in for real voting-key registration (CIP-0164), which the
+// reference itself marks "FIXME: REMOVE THIS". It deliberately does not go
+// through ParseVoteSigningKey: that parses operator-supplied key files,
+// where silently reducing an out-of-range scalar would be wrong.
 func DerivePrototypeVoteSigningKey(
 	poolKeyHash []byte,
 ) (*VoteSigningKey, error) {
@@ -61,7 +75,18 @@ func DerivePrototypeVoteSigningKey(
 	}
 	raw := make([]byte, voteSigningKeySize)
 	copy(raw, poolKeyHash)
-	return ParseVoteSigningKey(hex.EncodeToString(raw))
+	sk := new(big.Int).SetBytes(raw)
+	sk.Mod(sk, fr.Modulus())
+	if sk.Sign() == 0 {
+		return nil, fmt.Errorf(
+			"%w: pool key hash %x reduces to a zero scalar",
+			ErrInvalidSigningKey,
+			poolKeyHash,
+		)
+	}
+	key := &VoteSigningKey{sk: sk}
+	key.pub.ScalarMultiplicationBase(sk)
+	return key, nil
 }
 
 // VoteSigningKey is a BLS12-381 MinSig signing key for Leios votes: a
