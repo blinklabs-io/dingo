@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"slices"
 
@@ -334,7 +333,10 @@ func ValidateTxBabbage(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				lcommon.ExUnits{Steps: math.MaxInt64 / 2, Memory: math.MaxInt64 / 2},
+				lcommon.ExUnits{
+					Steps:  restrictiveEnormousBudget,
+					Memory: restrictiveEnormousBudget,
+				},
 				evalContext,
 			)
 			if err != nil {
@@ -378,7 +380,10 @@ func ValidateTxBabbage(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				lcommon.ExUnits{Steps: math.MaxInt64 / 2, Memory: math.MaxInt64 / 2},
+				lcommon.ExUnits{
+					Steps:  restrictiveEnormousBudget,
+					Memory: restrictiveEnormousBudget,
+				},
 				evalContext,
 			)
 			if err != nil {
