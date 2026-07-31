@@ -542,9 +542,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 
 	// Catch-up disables the download<->copy pipeline: it downloads the bounded
 	// [catchUpStart..N] range fully, then runs the divergence check before any
-	// mutation. A fresh bootstrap keeps the pipeline (copy overlaps download).
+	// mutation. Verified Mithril bootstrap also waits for the ancillary
+	// signature and ledger-state checks before allowing database mutation.
 	chunkHook := onChunkContiguous
-	if catchUp {
+	if catchUp || cfg.VerifyCertChain {
 		chunkHook = nil
 	}
 

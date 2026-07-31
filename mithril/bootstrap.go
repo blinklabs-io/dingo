@@ -260,6 +260,14 @@ func Bootstrap(
 			err,
 		)
 	}
+	if cfg.Network != "" && snapshot.Network != "" &&
+		cfg.Network != snapshot.Network {
+		return nil, fmt.Errorf(
+			"mithril snapshot network mismatch: requested=%s snapshot=%s",
+			cfg.Network,
+			snapshot.Network,
+		)
+	}
 
 	cfg.Logger.Info(
 		"found latest snapshot",
@@ -374,6 +382,13 @@ func Bootstrap(
 		cfg.Logger.Info(
 			"certificate chain verified",
 			"component", "mithril",
+		)
+		// The legacy v1 artifact has no signed ancillary manifest. It can
+		// authenticate its immutable tarball, but not the ledger state that
+		// would be imported with it, so it cannot satisfy the verified fast
+		// bootstrap trust boundary.
+		return nil, errors.New(
+			"verified Mithril v1 bootstrap is unsupported because it has no signed ancillary state; use the v2 backend",
 		)
 	}
 

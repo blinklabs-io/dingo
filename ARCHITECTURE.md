@@ -2146,7 +2146,13 @@ The manager implements the `ouroboros.LeiosPipelineHandler` interface (`ObserveE
 ## Mithril Bootstrap
 
 The `mithril/` package enables fast initial sync by downloading and verifying
-Mithril artifacts rather than syncing from genesis. Two artifact backends are
+Mithril artifacts rather than syncing from genesis. The default verified path
+has two independent authentication boundaries: the genesis-rooted Mithril
+certificate authenticates the immutable database, while the ancillary
+verification key signs the ledger-state and in-progress immutable payload.
+The latter is ancillary-key-signed data, not stake-certified data. Normal
+Ouroboros validation resumes at the imported point and covers the gap and all
+future network blocks. Two artifact backends are
 supported, selected by `mithril.backend` (`--mithril-backend`,
 `DINGO_MITHRIL_BACKEND`):
 
@@ -2165,9 +2171,11 @@ supported, selected by `mithril.backend` (`--mithril-backend`,
 - `v1` (legacy): the full-database snapshot backend
   (`CardanoImmutableFilesFull`, `/artifact/snapshots`), a single tarball
   download bound to the certificate chain via the `snapshot_digest` protocol
-  message part. Upstream Mithril is phasing this artifact type out. At the
-  library level an empty `BootstrapConfig.Backend`/`SyncConfig.Backend`
-  selects v2; callers must specify `v1` explicitly to use the legacy backend.
+  message part. It has no signed ancillary-state boundary and is therefore
+  rejected when certificate verification is enabled. Upstream Mithril is
+  phasing this artifact type out. At the library level an empty
+  `BootstrapConfig.Backend`/`SyncConfig.Backend` selects v2; callers must
+  specify `v1` explicitly to use the legacy unverified workflow.
 
 Package layout:
 
@@ -2292,15 +2300,14 @@ a cooldown via peer governance.
 
 The same `mithril_ledger_slot` boundary gates how the database layer reacts to a
 consumed UTxO it cannot find or reconstruct from the blob store. By default
-(`StrictUtxoValidation: false`) `ensureTransactionConsumedUtxos` silently skips an
-unrecoverable input, which is expected when bootstrapping from a non-genesis
-chainsync intersect point without a Mithril snapshot import (pre-intersect UTxOs
-are never imported). With `StrictUtxoValidation: true`, a miss for a block past
-the recorded boundary — where the node should hold complete producer history —
-is treated as corruption or a bug and fails the ingest instead. Gap-block
-ingestion (`ensureGapConsumedUtxos`, used while closing the range between the
-snapshot and the chain tip) is unconditionally strict already, since that range
-is always expected to be fully recoverable from the snapshot import.
+(`StrictUtxoValidation: true`) `ensureTransactionConsumedUtxos` fails ingestion
+for an unrecoverable input, because a normal from-origin node is expected to
+hold complete producer history. A non-genesis chainsync intersection without a
+Mithril snapshot may explicitly set `StrictUtxoValidation: false` when
+pre-intersect UTxOs are intentionally absent. Gap-block ingestion
+(`ensureGapConsumedUtxos`, used while closing the range between the snapshot
+and the chain tip) is unconditionally strict already, since that range is
+always expected to be fully recoverable from the snapshot import.
 
 Certified immutable blocks after the selected anchor remain in the primary
 chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
@@ -2312,12 +2319,11 @@ anchor so it cannot pre-apply and thereby bypass the ledger path for either
 suffix.
 
 Historical block validation before the stable anchor is controlled
-independently. With
-`ValidateHistorical: false` (the default), ledger replay skips validation
-outside the near-tip stability window; certificate verification of a Mithril
-artifact establishes a signed trust boundary but is not equivalent to
-independent from-genesis replay. With complete historical state,
-`ValidateHistorical: true` validates the older replay window as well.
+independently. With `ValidateHistorical: true` (the default), ledger replay
+validates the complete from-origin replay. Setting it to `false` is an explicit
+operator choice to trust the selected peer/intersection for older blocks;
+certificate verification of a Mithril artifact is not a substitute for future
+network-block validation.
 
 `processGapBlocks`, `SetGapBlockTransaction`, and
 `LedgerState.healMithrilGapBlockNonces` remain compatibility/recovery machinery
