@@ -1034,6 +1034,18 @@ rows): `PoolMetadata` re-runs `ValidatePoolMetadata` against `Content` before
 returning it, so a stale cached document that would fail today's validation
 does not keep serving as if it were valid, without writing back to the row.
 
+`/pools/extended` needs the same classification for every active pool on a
+page, not one pool at a time, so it does not call `PoolMetadata` per pool
+(that would be one query per row). Instead `NodeAdapter.PoolsExtended`
+resolves every active pool's registered metadata URL in a single
+`MetadataStore.GetOffchainMetadataBatch` call, then applies the same
+pending/failed/fetched classification (including the `offchainFetchError`
+mapping and the read-time `ValidatePoolMetadata` fallback) as pure,
+in-memory logic over the already-fetched rows. The classification itself is
+intentionally duplicated rather than shared by refactoring `PoolMetadata`,
+since the single-pool and batched-page code paths have different callers
+and error-propagation needs.
+
 ### Archive And History Expiry Topology
 
 Dingo's blob-store abstraction supports independent history expiry and archive
@@ -2458,6 +2470,24 @@ as one ANDed address pattern; exact keyset queries scan through nonmatching
 coarse candidates before forming a limited page, preserving continuation-token
 correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
+
+`/pools/extended` resolves the whole page with two batched queries rather than
+one query per pool: `CountPoolBlocksInSlotRange` returns every active pool's
+`blocks_minted` keyed by pool, and `GetOffchainMetadataBatch` returns every
+pool's cached off-chain document keyed by URL, supplying the nullable
+`metadata` object. See the Off-chain Metadata Worker section above for the
+metadata half and DATABASE.md for both queries' index usage.
+
+`live_saturation` is not a query. It is computed in memory by pool detail's
+`poolSizeSaturation` helper from values already read for the page: the pool's
+live stake, the active-stake snapshot, `nOpt` from the current protocol
+parameters, and total circulation (`MaxLovelaceSupply - Reserves`, the
+denominator `ledger/rewards` uses for the saturation threshold, not total
+active stake). Like pool detail, it therefore requires protocol parameters to
+be loaded (`LedgerState.Start()` having completed): a required, non-nullable
+schema field cannot fall back to a placeholder value, so the request fails
+outright rather than serving a fabricated 0.0 when they are not yet
+available.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from

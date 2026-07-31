@@ -1571,38 +1571,34 @@ func TestHandlePoolsExtended(t *testing.T) {
 			{
 				PoolID:         "pool1zzz",
 				Hex:            "ff",
-				VrfKey:         "vrf2",
 				ActiveStake:    "200",
 				LiveStake:      "300",
+				BlocksMinted:   7,
+				LiveSaturation: 0.8,
 				DeclaredPledge: "400",
 				FixedCost:      "500",
 				MarginCost:     0.2,
-				Relays: []PoolRelayInfo{
-					{
-						IPv4: "192.168.0.1",
-						DNS:  "relay-two.example",
-						Port: new(3002),
-					},
-				},
+				// No registered metadata anchor: pool_list_extended
+				// requires the metadata key to be present as null.
+				Metadata: nil,
 			},
 			{
 				PoolID:         "pool1aaa",
 				Hex:            "01",
-				VrfKey:         "vrf1",
 				ActiveStake:    "20",
 				LiveStake:      "30",
+				BlocksMinted:   69,
+				LiveSaturation: 0.93,
 				DeclaredPledge: "40",
 				FixedCost:      "50",
 				MarginCost:     0.1,
-				Relays: []PoolRelayInfo{
-					{
-						IPv6: "2001:db8::1",
-						DNS:  "relay-one.example",
-						Port: new(3001),
-					},
-					{
-						DNS: "relay-no-port.example",
-					},
+				Metadata: &PoolExtendedMetadataInfo{
+					URL:         new("https://stakenuts.com/mainnet.json"),
+					Hash:        new("47c0c68c"),
+					Ticker:      new("NUTS"),
+					Name:        new("Stake Nuts"),
+					Description: new("The best pool ever"),
+					Homepage:    new("https://stakentus.com/"),
 				},
 			},
 		},
@@ -1629,29 +1625,53 @@ func TestHandlePoolsExtended(t *testing.T) {
 		w.Header().Get("X-Pagination-Page-Total"),
 	)
 
+	// Capture the body before decoding: the raw-JSON assertions at the end
+	// of this test need it, and a json.Decoder over w.Body would drain it.
+	body := w.Body.Bytes()
+
 	var resp []PoolExtendedResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
+	err := json.Unmarshal(body, &resp)
 	require.NoError(t, err)
 	require.Len(t, resp, 1)
 	assert.Equal(t, "pool1aaa", resp[0].PoolID)
 	assert.Equal(t, "01", resp[0].Hex)
-	assert.Equal(t, "vrf1", resp[0].VrfKey)
 	assert.Equal(t, "20", resp[0].ActiveStake)
 	assert.Equal(t, "30", resp[0].LiveStake)
+	assert.Equal(t, uint64(69), resp[0].BlocksMinted)
+	assert.InDelta(t, 0.93, resp[0].LiveSaturation, 0.0001)
 	assert.Equal(t, "40", resp[0].DeclaredPledge)
 	assert.Equal(t, "50", resp[0].FixedCost)
 	assert.InDelta(t, 0.1, resp[0].MarginCost, 0.0001)
-	require.Len(t, resp[0].Relays, 2)
-	assert.Nil(t, resp[0].Relays[0].IPv4)
-	require.NotNil(t, resp[0].Relays[0].IPv6)
-	assert.Equal(t, "2001:db8::1", *resp[0].Relays[0].IPv6)
-	require.NotNil(t, resp[0].Relays[0].DNS)
-	assert.Equal(t, "relay-one.example", *resp[0].Relays[0].DNS)
-	require.NotNil(t, resp[0].Relays[0].Port)
-	assert.Equal(t, 3001, *resp[0].Relays[0].Port)
-	require.NotNil(t, resp[0].Relays[1].DNS)
-	assert.Equal(t, "relay-no-port.example", *resp[0].Relays[1].DNS)
-	assert.Nil(t, resp[0].Relays[1].Port)
+	// pool_list_extended requires metadata; a registered anchor with a
+	// successfully fetched document populates all six nullable fields
+	// and carries no error object.
+	require.NotNil(t, resp[0].Metadata)
+	require.NotNil(t, resp[0].Metadata.URL)
+	assert.Equal(
+		t,
+		"https://stakenuts.com/mainnet.json",
+		*resp[0].Metadata.URL,
+	)
+	require.NotNil(t, resp[0].Metadata.Hash)
+	assert.Equal(t, "47c0c68c", *resp[0].Metadata.Hash)
+	require.NotNil(t, resp[0].Metadata.Ticker)
+	assert.Equal(t, "NUTS", *resp[0].Metadata.Ticker)
+	require.NotNil(t, resp[0].Metadata.Name)
+	assert.Equal(t, "Stake Nuts", *resp[0].Metadata.Name)
+	require.NotNil(t, resp[0].Metadata.Description)
+	assert.Equal(t, "The best pool ever", *resp[0].Metadata.Description)
+	require.NotNil(t, resp[0].Metadata.Homepage)
+	assert.Equal(t, "https://stakentus.com/", *resp[0].Metadata.Homepage)
+	assert.Nil(t, resp[0].Metadata.Error)
+
+	// vrf_key and relays are not part of pool_list_extended and must not
+	// be emitted. Assert on the raw JSON, since the typed struct can no
+	// longer express them.
+	var raw []map[string]any
+	require.NoError(t, json.Unmarshal(body, &raw))
+	require.Len(t, raw, 1)
+	assert.NotContains(t, raw[0], "vrf_key")
+	assert.NotContains(t, raw[0], "relays")
 }
 
 func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
