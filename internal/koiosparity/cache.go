@@ -377,8 +377,9 @@ func (c *Cache) GetEpochInfo(network string, epoch uint64) (*KoiosEpochInfo, err
 
 // GetTotals retrieves a cached Koios /totals record. Returns gorm.ErrRecordNotFound
 // when absent — e.g. an epoch cached before totals fetching was added, and not
-// yet re-fetched. Callers should skip totals comparison rather than treat this
-// as an error.
+// yet re-fetched. Callers must treat this as an incomplete reference row (see
+// CompareEpochTotals's CategoryDBMissing "koios_totals" mismatch), not skip
+// totals comparison silently.
 func (c *Cache) GetTotals(network string, epoch uint64) (*KoiosTotals, error) {
 	var totals KoiosTotals
 	err := c.db.

@@ -329,6 +329,94 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 	require.Empty(t, mismatches, "correct field-level epoch mapping must produce zero mismatches")
 }
 
+// TestCheckDetectsMissingKoiosTotalsOnUpgradedCache is a regression test for
+// the "upgraded cache" scenario the reviewer flagged: a cache.db that has a
+// koios_epoch_info row (from before /totals fetching was added to this tool,
+// or from a --skip-fetch run against such a cache) but no koios_totals row
+// for the same epoch. Before this fix, CompareEpochTotals silently skipped
+// comparison whenever koiosTotals was nil, so an epoch like this could report
+// a clean PASS despite treasury/reserves/fees never actually being validated.
+// This confirms Check now surfaces it as ERROR instead.
+func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+
+	dingoDir, gdb := newTestDingoDB(t)
+
+	// Stake epoch (9 = K-1): total_active_stake matches Koios exactly so this
+	// path alone contributes no mismatches.
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            9,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// epoch_summary at koiosEpoch itself (unshifted) — GetEpochData reads this
+	// row (not the stakeEpoch one above) to decide whether reward_ada_pots is
+	// ready to compare at all.
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            koiosEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	// reward_ada_pots at koiosEpoch itself (unshifted), matching what will be
+	// committed to the cache below — so the only mismatch produced is the
+	// missing /totals reference row, not a value divergence.
+	require.NoError(t, gdb.Create(&models.RewardAdaPots{
+		Epoch:    koiosEpoch,
+		Treasury: types.Uint64(1_000),
+		Reserves: types.Uint64(2_000),
+		Fees:     types.Uint64(300),
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	// totals is deliberately nil here — simulating a cache that has never
+	// fetched /totals for this epoch (pre-upgrade cache, or --skip-fetch).
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		},
+		nil,
+		nil,
+	))
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:   network,
+		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath: cachePath,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, 1, result.EpochsChecked)
+	require.Empty(t, result.FailEpochs)
+	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs,
+		"a missing Koios /totals reference row must surface as ERROR, not a silent PASS")
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "koios_totals", mismatches[0].Field)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+
+	statuses, err := cache.GetStatusSummary(network)
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusError, statuses[0].Status)
+}
+
 func TestEffectiveCheckOutcome(t *testing.T) {
 	statuses := []CheckEpochStatus{
 		{Epoch: 1, Status: StatusPass},

@@ -92,13 +92,41 @@ func TestCompareEpochTotals(t *testing.T) {
 	require.Equal(t, "totals_treasury", ms[0].Field)
 	dingo.Treasury = "6931231163186226"
 
-	// A missing /totals cache row (not yet fetched) skips comparison rather
-	// than flagging anything.
-	require.Empty(t, CompareEpochTotals("preview", 1367, nil, dingo, now))
+	// A missing /totals cache row (e.g. cached before totals fetching was
+	// added, or a --skip-fetch run) must be reported explicitly, not skipped —
+	// see TestCompareEpochTotalsMissingKoiosRow below for the full regression.
+	ms = CompareEpochTotals("preview", 1367, nil, dingo, now)
+	require.Len(t, ms, 1)
+	require.Equal(t, "koios_totals", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
 
 	// A missing Dingo row is left to CompareEpochAggregates' "epoch_summary"
 	// report; CompareEpochTotals must not duplicate it under a second field.
 	require.Empty(t, CompareEpochTotals("preview", 1367, koios, nil, now))
+}
+
+// TestCompareEpochTotalsMissingKoiosRow guards against the false-PASS bug
+// where a missing /totals cache row (koiosTotals == nil) was silently
+// skipped instead of flagged. This happens for caches created before totals
+// fetching was added, and for --skip-fetch runs against a cache that never
+// fetched /totals — in both cases treasury/reserves/fees would never
+// actually be validated, yet the epoch could still report PASS. A missing
+// reference row must always surface as an explicit, non-PASS result.
+func TestCompareEpochTotalsMissingKoiosRow(t *testing.T) {
+	now := time.Now()
+	dingo := &DingoEpochData{
+		Treasury:             "6931231163186226",
+		Reserves:             "7792082362166766",
+		Fees:                 "1245791321",
+		RewardAdaPotsPresent: true,
+	}
+
+	ms := CompareEpochTotals("preview", 1367, nil, dingo, now)
+	require.Len(t, ms, 1)
+	require.Equal(t, "koios_totals", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms),
+		"a missing Koios /totals reference row must never resolve to PASS")
 }
 
 // TestCompareEpochTotalsMissingRewardAdaPots guards against the false-PASS

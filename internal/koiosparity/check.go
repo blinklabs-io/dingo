@@ -347,11 +347,15 @@ func checkEpoch(
 	// above, reward_ada_pots is a point-in-time ledger pot balance captured at
 	// the boundary into epoch itself (not a delayed reward-calculation input),
 	// so it is read at epoch, not stakeEpoch — see ARCHITECTURE.md. A missing
-	// totals row (cached before this check existed) is not an error — skip
-	// silently. CompareEpochTotals has no fetchErr parameter (unlike
-	// CompareEpochAggregates) since it deliberately skips on a nil dingoEpoch
-	// rather than duplicate-report a DB error under a second field name; a
-	// real query failure here is reported explicitly below instead.
+	// totals row (e.g. cached before totals fetching existed, or a
+	// --skip-fetch run against a cache that never fetched it) is reported by
+	// CompareEpochTotals as an explicit "koios_totals" / CategoryDBMissing
+	// mismatch rather than skipped, so it can never silently produce a PASS
+	// that never actually validated treasury/reserves/fees. CompareEpochTotals
+	// has no fetchErr parameter (unlike CompareEpochAggregates) since it
+	// deliberately skips only on a nil dingoEpoch, rather than duplicate-report
+	// a DB error under a second field name; a real query failure here is
+	// reported explicitly below instead.
 	dingoEpochPots, potsErr := dingo.GetEpochData(ctx, epoch)
 	if potsErr != nil {
 		allMismatches = append(allMismatches, CheckMismatch{

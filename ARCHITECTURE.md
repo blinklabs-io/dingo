@@ -2443,6 +2443,20 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   / `dingo_db_missing` mismatch instead of silently skipping the
   treasury/reserves/fees comparison.
 
+  The Koios side has the same requirement: a missing `koios_totals` row for
+  an epoch that otherwise has cached `koios_epoch_info` — e.g. a `cache.db`
+  created before `/totals` fetching was added to this tool, or a
+  `--skip-fetch` run against such a cache — is reported as a `koios_totals`
+  / `dingo_db_missing` mismatch (`ERROR`) rather than skipped. Silently
+  skipping would let an epoch report a clean `PASS` despite
+  treasury/reserves/fees never actually being validated, which is exactly
+  the kind of false-positive parity result this tool exists to prevent. This
+  check runs only once `dingoEpoch` (`epoch_summary` at that epoch) is
+  confirmed present — a not-yet-ready `epoch_summary` is already reported
+  once by `CompareEpochAggregates` as `epoch_summary`, so `CompareEpochTotals`
+  still skips silently in that specific case to avoid double-reporting the
+  same root cause under a second field name.
+
   `koios_epoch_info.fees`/`total_rewards` are still fetched and cached for
   reference (the cache stores the full documented `/epoch_info` schema) but
   play no part in any comparison. `/totals.circulation`, `supply`,

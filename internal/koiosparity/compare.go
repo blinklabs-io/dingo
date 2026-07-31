@@ -152,12 +152,16 @@ func CompareEpochAggregates(
 // not compared at all; see the comment after the totals_fees check below.
 //
 // koiosTotals is nil when no /totals row has been cached for this epoch yet
-// (e.g. cached before totals fetching was added) — comparison is skipped
-// rather than flagged, since that is a reference-data gap, not a Dingo/Koios
-// disagreement. dingoEpoch is nil when epoch_summary isn't available yet;
-// CompareEpochAggregates already reports that condition once (as
-// "epoch_summary"), so this function skips silently rather than duplicating
-// the same root cause under a second field name.
+// — e.g. a cache created before totals fetching was added, or a --skip-fetch
+// run against a cache that never fetched it. This is reported explicitly (as
+// a "koios_totals" / CategoryDBMissing mismatch) rather than skipped: a
+// missing reference row must never silently produce a PASS that in fact never
+// validated treasury/reserves/fees at all. dingoEpoch is nil when
+// epoch_summary isn't available yet; CompareEpochAggregates already reports
+// that condition once (as "epoch_summary"), so this function still skips
+// silently in that specific case rather than duplicating the same root cause
+// under a second field name — the missing-dingoEpoch check runs first so a
+// concurrently-missing koiosTotals doesn't also get double-reported.
 //
 // dingoEpoch.RewardAdaPotsPresent == false is a distinct condition from
 // dingoEpoch == nil: epoch_summary is ready but reward_ada_pots (treasury/
@@ -173,8 +177,20 @@ func CompareEpochTotals(
 	dingoEpoch *DingoEpochData,
 	now time.Time,
 ) []CheckMismatch {
-	if koiosTotals == nil || dingoEpoch == nil {
+	if dingoEpoch == nil {
 		return nil
+	}
+
+	if koiosTotals == nil {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "koios_totals",
+			DingoValue: "present",
+			KoiosValue: "",
+			Category:   CategoryDBMissing,
+			CheckedAt:  now,
+		}}
 	}
 
 	if !dingoEpoch.RewardAdaPotsPresent {
