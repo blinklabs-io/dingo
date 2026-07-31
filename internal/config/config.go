@@ -409,11 +409,15 @@ type Config struct {
 	MetricsPort            uint          `yaml:"metricsPort"                                                      split_words:"true"`
 	DebugPort              uint          `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
 	IntersectTip           bool          `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical     bool          `yaml:"validateHistorical"                                               split_words:"true"`
+	// ValidateHistorical validates the complete replay from the selected
+	// intersection. The default from-origin sync path must not trust peers to
+	// have validated historical blocks for us.
+	ValidateHistorical bool `yaml:"validateHistorical"                                               split_words:"true"`
 	// StrictUtxoValidation errors out (instead of silently skipping) when a
 	// consumed UTxO cannot be found or recovered for a block past the
-	// recorded Mithril sync boundary. Leave disabled when bootstrapping from
-	// a non-genesis chainsync intersect point without a Mithril snapshot.
+	// recorded Mithril sync boundary. A non-genesis intersect without a
+	// Mithril snapshot should explicitly opt out when pre-intersect UTxOs are
+	// intentionally unavailable.
 	StrictUtxoValidation bool `yaml:"strictUtxoValidation" split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
@@ -745,8 +749,8 @@ var globalConfig = &Config{
 	DatabasePath:         ".dingo",
 	SocketPath:           "dingo.socket",
 	IntersectTip:         false,
-	ValidateHistorical:   false,
-	StrictUtxoValidation: false,
+	ValidateHistorical:   true,
+	StrictUtxoValidation: true,
 	Tracing:              false,
 	TracingStdout:        false,
 	Network:              "preview",

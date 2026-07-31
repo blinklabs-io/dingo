@@ -291,22 +291,19 @@ startEra: ""
 # CLI: --immutable-db-path
 immutableDbPath: ""
 
-# Validate historical blocks during ledger processing (default: false).
-# Enabling this is part of a strict replay configuration, but the source must
-# also contain the complete historical state required for validation.
-validateHistorical: false
+# Validate historical blocks during ledger processing (default: true).
+# Set false only when intentionally syncing from a non-genesis intersection
+# whose source does not provide the complete historical state.
+validateHistorical: true
 
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
-# Leave disabled when bootstrapping from a non-genesis chainsync intersect
-# point without a Mithril snapshot import, where pre-intersect UTxOs are
-# legitimately absent. A verified Mithril snapshot is a trusted bootstrap
-# boundary, not an independently validated replay from genesis. (default:
-# false)
+# A non-genesis chainsync intersection without a Mithril snapshot may set this
+# false when pre-intersect UTxOs are intentionally absent. (default: true)
 #
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
-strictUtxoValidation: false
+strictUtxoValidation: true
 
 # Peer targets - target number of peers in each state
 # These are goals the system works toward, not hard limits.

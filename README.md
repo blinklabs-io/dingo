@@ -369,10 +369,17 @@ Or use the subcommand form for more control:
 ./dingo -n preview mithril sync
 ```
 
-Two Mithril artifact backends are supported via `mithril.backend` (or
-`--mithril-backend`): `v2` (default) restores from incremental per-immutable-file
-archives verified against the certified merkle root, while `v1` uses the legacy
-full snapshot tarballs, which upstream Mithril is phasing out. The `mithril list`
+The default `v2` backend restores incremental per-immutable-file archives only
+after checking the genesis-rooted certificate chain, certified Merkle root, and
+each immutable-file digest. It also requires the ancillary archive: its
+ledger-state and in-progress immutable files are checked against the
+manifest separately signed by the ancillary key. That signature authenticates
+that payload; it is not a stake certificate and does not validate the volatile
+blocks after the certified immutable point.
+
+The legacy `v1` full-snapshot backend is available for inspection and
+unverified library workflows, but it cannot be used for a verified fast
+bootstrap because it has no signed ancillary-state boundary. The `mithril list`
 and `mithril show` subcommands follow the configured backend.
 
 This imports:
@@ -389,18 +396,16 @@ Individual transaction records, certificate history, witness/script/datum storag
 Dingo supports two working startup paths:
 
 - A normal chain sync builds ledger and database state from downloaded blocks.
-  Near-tip blocks are validated during normal operation. Operators with a
-  complete from-genesis source can set `validateHistorical: true` to validate
-  the older replay window as well.
+  The default configuration validates historical blocks from origin and fails
+  closed when required ledger/UTxO state is missing. Operators intentionally
+  using a non-genesis intersection without complete pre-intersect state must
+  explicitly set `validateHistorical: false` and `strictUtxoValidation: false`.
 - Mithril sync verifies the certificate chain and snapshot artifact, imports
-  the certified ledger state, stores immutable blocks, and strictly processes
-  the gap between the snapshot state and immutable tip. In API mode it then
+  the separately ancillary-key-signed ledger state, stores certified
+  immutable blocks, and strictly processes the gap between the imported state
+  and immutable tip. Normal strict validation resumes at the imported point
+  for the gap and all subsequently received network data. In API mode it then
   backfills historical query records before the APIs are used.
-
-`strictUtxoValidation` controls whether an unrecoverable consumed input after
-the recorded bootstrap boundary fails ingestion. Leave it disabled only for
-intersect-based bootstrap where pre-intersect UTxOs are intentionally absent;
-enable it when the node is expected to possess complete input history.
 
 Performance (preview network, ~4M blocks):
 

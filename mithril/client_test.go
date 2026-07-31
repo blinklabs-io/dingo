@@ -1477,7 +1477,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 
 	downloadDir := t.TempDir()
 
-	result, err := Bootstrap(
+	_, err = Bootstrap(
 		context.Background(),
 		BootstrapConfig{
 			Network:                "preprod",
@@ -1488,11 +1488,6 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 			VerifyCertificateChain: true,
 		},
 	)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(
-		t,
-		"abc123def456789012345678",
-		result.Snapshot.Digest,
-	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "signed ancillary state")
 }
