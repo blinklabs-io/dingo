@@ -68,6 +68,7 @@ flowchart LR
 
 ## SQL Conventions
 
+- Minimum backend versions: MySQL 8.0, PostgreSQL 12, SQLite 3.25. Several queries use window functions (`ROW_NUMBER() OVER (...)`) and common table expressions (`WITH`), which are unavailable below those versions and fail at query time rather than at startup or migration. Examples across the backends include `GetActivePoolKeyHashesOrdered` (`internal/poolorder`), the live-stake ranking in `internal/rewardstate`, and per-backend queries in `account.go`, `drep.go`, `governance.go`, `pool.go`, and `poolreap.go`. CI exercises PostgreSQL 16 and MySQL 8.4, so those are the versions actually covered by tests.
 - Table and column names are snake_case GORM names unless a model has an explicit `gorm:"column:..."` tag.
 - Byte columns store raw bytes, not hex strings. In Postgres use `encode(col, 'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
 - `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
@@ -1942,6 +1943,117 @@ slot. Such rows have no `certs`/`transaction` join, so without the
 `CASE WHEN` key their `COALESCE(..., 0)` values could lose the same-slot
 tie-break to a registration, incorrectly keeping the pool active for stake
 snapshots and reward inputs.
+
+### `GetActivePoolKeyHashesOrdered`
+
+Backs the Blockfrost `GET /pools` (`pool_list`) endpoint: the same active-pool
+set as `GetActivePoolKeyHashes`/`GetActivePoolKeyHashesAtSlot` (registration
+with `added_slot <= tip`, no retirement or the retirement is cancelled by a
+later registration or targets a not-yet-started epoch), but with an explicit,
+deterministic order instead of `GetActivePoolKeyHashesAtSlot`'s incidental row
+order (no terminal `ORDER BY`, so its result order is not a documented
+contract). "Oldest first, newest last" (the OpenAPI schema's wording) is keyed
+on each pool's EARLIEST registration certificate, not its most recent one: a
+pool that later re-registers to update its margin or relays keeps its
+original list position rather than jumping to the end. This is a deliberate
+semantic choice, not one pinned by the schema itself -- the schema only says
+"oldest first" without defining "oldest" -- so a future change that keys the
+sort on the LATEST registration instead would be a silent behavior reversal,
+not a bug fix; if that is ever revisited, update this paragraph, the
+`poolorder.GetActivePoolKeyHashesOrdered` doc comment, and
+`PoolsList`'s doc comment (`api/blockfrost/adapter_pools_list.go`) together.
+Verified identical across backends: `TestNodeAdapterPoolsListOrderingAndActiveSet`
+(sqlite, via the Blockfrost adapter) and its direct-store counterparts
+`TestGetActivePoolKeyHashesOrderedPostgres`/`TestGetActivePoolKeyHashesOrderedMysql`
+(`database/plugin/metadata/{postgres,mysql}/pool_active_ordered_test.go`, run
+against real Postgres 16 / MySQL 8.4 containers) seed the same 8-pool fixture
+-- a re-registration, a retirement cancelled by a later re-registration, a
+same-slot three-way tie broken by `block_index`/`cert_index`, a pending
+future retirement, and an already-effective retirement that must be excluded
+-- and assert the exact same expected oldest-first sequence on all three
+backends, not independently-relaxed per-backend expectations. The query, shared
+verbatim across the sqlite/postgres/mysql backends
+(`database/plugin/metadata/internal/poolorder`, mirroring the
+`poolcerthistory` sharing pattern above), computes both the latest-registration
+ranking (needed for the active/retired determination) and the
+earliest-registration ranking (needed for the sort key) as two `ROW_NUMBER()`
+columns over one CTE scan of `pool_registration` joined to `certs`/
+`transaction`, rather than scanning that join twice:
+
+```sql
+WITH reg_ranked AS (
+  SELECT pr.pool_id, pr.added_slot,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0) AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn_latest,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot ASC, COALESCE(t.block_index, 0) ASC, COALESCE(c.cert_index, 0) ASC
+    ) AS rn_first
+  FROM pool_registration pr
+  LEFT JOIN certs c ON c.id = pr.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE pr.added_slot <= $1
+),
+latest_ret AS ( -- same shape as GetActivePoolKeyHashesAtSlot's latest_ret
+  ...
+)
+SELECT p.pool_key_hash
+FROM pool p
+INNER JOIN reg_ranked lr ON lr.pool_id = p.id AND lr.rn_latest = 1
+INNER JOIN reg_ranked fr ON fr.pool_id = p.id AND fr.rn_first = 1
+LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+WHERE lrt.pool_id IS NULL
+  OR lrt.added_slot < lr.added_slot
+  OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+  OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+  OR lrt.epoch > $2
+ORDER BY fr.added_slot ASC, fr.blk_idx ASC, fr.cert_idx ASC, p.pool_key_hash ASC;
+```
+
+A final `p.pool_key_hash ASC` tie-break makes the order fully deterministic
+even when two rows collapse to the same `(added_slot, block_index,
+cert_index)` key, e.g. registrations with no linked certificate/transaction
+(both default to 0 via `COALESCE`).
+
+Query cost was verified per backend, not assumed to generalize from one:
+`EXPLAIN QUERY PLAN` on sqlite, `EXPLAIN` on a real Postgres 16 container, and
+`EXPLAIN FORMAT=TREE` on a real MySQL 8.4 container, the latter two populated
+with ~8,000 pools / ~10,000 historical registrations (including ~2,000
+re-registrations, to exercise the `rn_latest`/`rn_first` split at scale) /
+~500 retirements -- large enough that a backend-specific plan flip would show
+up, rather than the toy row counts a unit test would otherwise use. All three
+agree on the shape: the `reg_ranked` CTE does a full scan of `pool_registration`
+(sqlite: `SCAN pr USING INDEX idx_pool_reg_pool_slot`, a full index scan since
+its leading column is `pool_id` rather than `added_slot`, so `added_slot <= ?`
+can't narrow the index range; Postgres: `Seq Scan on pool_registration ...
+Filter: (added_slot <= ...)`; MySQL: `Table scan on pr ... Filter: (pr.added_slot
+<= ...)`) -- bounded by the total historical `pool_registration` row count, not
+just the active-pool count, on every backend. This is the same cost
+`/pools/extended` already pays via `GetActivePoolKeyHashesAtSlot`, which has
+the identical `WHERE pr.added_slot <= ?` filter over the same table; this
+query adds one extra `ROW_NUMBER()` column computed over the same
+already-scanned rows, not a second scan. `pool_retirement` fares better on
+sqlite at small scale (`SEARCH rt USING INDEX idx_pool_retirement_added_slot
+(added_slot<?)`, a genuine range search) but all three backends fell back to
+a full scan of `pool_retirement` at the populated scale above, since the
+`added_slot <= ?` filter matched nearly every row (Postgres and sqlite's
+planners both prefer a full scan over an index scan once the filter is not
+selective; this is normal cost-based planning, not a regression). No backend
+was materially worse than the others for this query, unlike a prior branch in
+this campaign where a SQLite-verified plan did not hold on MySQL. The final
+join/sort touches one row per active pool on all three backends.
+Because the sort key is a per-pool ranking computed across the whole
+registration/retirement history, the entire active set must be ranked before
+any page boundary can be determined; the Blockfrost adapter (`PoolsList`,
+`api/blockfrost/adapter_pools_list.go`) therefore fetches every active pool's
+key hash in this one query and applies `count`/`page`/`order` in memory
+(reversing the slice for `desc`), matching `GetRetiringPools`/`PoolsRetiring`'s
+existing split below rather than pushing `LIMIT`/`OFFSET` into SQL, which
+would only trim rows after the ranking work, not reduce it.
 
 ### `GetPoolsRetiringAtEpoch`
 
