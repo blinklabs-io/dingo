@@ -108,18 +108,25 @@ func TestGetActivePoolKeyHashesOrderedPostgres(t *testing.T) {
 			Delete(&models.Certificate{}).Error
 		_ = db.Where("id IN (?)", []uint{90001, 90002}).
 			Delete(&models.Transaction{}).Error
-		// Tear down the epoch fixture this test creates. Leaving
-		// epoch_id = 0 behind with length_in_slots = 2_000_000 would
-		// persist in this shared integration database, where
-		// pool_atslot_test.go's FirstOrCreate picks up the existing row
-		// rather than creating its own -- turning a currently
-		// order-independent test into an order-dependent one. Same class
-		// of leak as the pre-existing one described above; this test must
-		// not add another (see dingo #3025).
-		_ = db.Where("epoch_id <= ?", 5).Delete(&models.Epoch{}).Error
 	}
 	cleanup()
 	t.Cleanup(cleanup)
+	// Tear down the epoch fixture created above. Deliberately a separate
+	// t.Cleanup rather than part of cleanup(): cleanup() also runs up front
+	// (line above) to clear leftovers from an earlier run, and by that point
+	// the epoch fixture already exists, so deleting it there would remove
+	// the row this test depends on.
+	//
+	// It has to be torn down somewhere, though. Leaving epoch_id = 0 behind
+	// with length_in_slots = 2_000_000 persists in this shared integration
+	// database, where pool_atslot_test.go's FirstOrCreate adopts the
+	// existing row instead of creating its own -- turning a currently
+	// order-independent test into an order-dependent one. Same class of leak
+	// as the pre-existing one described above (see dingo #3025); this test
+	// must not add another.
+	t.Cleanup(func() {
+		_ = db.Where("epoch_id <= ?", 5).Delete(&models.Epoch{}).Error
+	})
 
 	seedPool := func(poolKeyHash []byte) uint {
 		pool := &models.Pool{PoolKeyHash: poolKeyHash}
