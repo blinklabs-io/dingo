@@ -67,6 +67,20 @@ func newChainIteratorWithContext(
 		if err != nil {
 			return nil, err
 		}
+		// A block this chain rolled back stays resolvable by point:
+		// removeBlockByIndex deletes the row but retains the block in the
+		// manager's LRU cache so non-primary chains can still reconcile
+		// against it. Positioning an iterator at that index hands the
+		// caller an iterator that can never yield the block it asked for,
+		// because the index is no longer part of this chain. Blockfetch
+		// turns that into a StartBatch/BatchDone pair carrying no blocks,
+		// which the requesting peer cannot tell apart from a served range,
+		// so it re-requests the same range instead of asking another peer.
+		// Reject the point here so callers get "not found" and can fail
+		// over (blockfetch answers NoBlocks).
+		if !chain.holdsBlockAtIndex(tmpBlock.ID, startPoint.Hash) {
+			return nil, models.ErrBlockNotFound
+		}
 		ci.nextBlockIndex = tmpBlock.ID
 		if !inclusive {
 			if reverse {

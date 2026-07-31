@@ -1301,6 +1301,22 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	return result, nil
 }
 
+// holdsBlockAtIndex reports whether this chain currently has the block with
+// the given hash at the given index. It distinguishes a point that is still
+// part of the chain from one that merely remains resolvable through the
+// manager's retained-block cache after a rollback, since blockByPoint answers
+// from that cache. Callers must hold c.mutex.
+func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
+	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
+		return false
+	}
+	tmpBlock, err := c.blockByIndex(blockIndex)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(tmpBlock.Hash, blockHash)
+}
+
 func (c *Chain) blockByIndex(
 	blockIndex uint64,
 ) (models.Block, error) {
