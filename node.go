@@ -189,6 +189,7 @@ func (n *Node) apiPluginSelection(
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
+	n.warnIfTracingMisconfigured()
 	if n.config.tracing {
 		if err := n.setupTracing(ctx); err != nil {
 			return err
