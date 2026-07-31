@@ -191,11 +191,9 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.NotNil(t, rewardMember)
 	require.Equal(t, uint64(37_049), uint64(rewardMember.Reward))
 
-	liveInputs, err := meta.GetRewardStakeInputsForPools(
+	liveInputs, err := meta.GetLiveStakeInputsForPools(
 		[][]byte{poolKey},
-		boundarySlot,
-		0, // gate off: live aggregate, slot/inactivity ignored
-		0,
+		0, // gate off
 		nil,
 	)
 	require.NoError(t, err)
@@ -245,11 +243,9 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	rewardMember, err = db.GetAccountByCredential(0, member, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(37_049), uint64(rewardMember.Reward))
-	liveInputs, err = meta.GetRewardStakeInputsForPools(
+	liveInputs, err = meta.GetLiveStakeInputsForPools(
 		[][]byte{poolKey},
-		boundarySlot,
-		0, // gate off: live aggregate, slot/inactivity ignored
-		0,
+		0, // gate off
 		nil,
 	)
 	require.NoError(t, err)

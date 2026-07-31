@@ -291,6 +291,41 @@ func (d *Database) AddAccountRewardByCredential(
 	sourceHash []byte,
 	txn *Txn,
 ) error {
+	return d.addAccountRewardByCredential(
+		credentialTag, stakeKey, amount, slot, sourceHash, false, txn,
+	)
+}
+
+// AddPostSnapshotAccountRewardByCredential credits a reward account with an
+// epoch-boundary credit that cardano-ledger applies AFTER the boundary stake
+// snapshot (SNAP): POOLREAP deposit refunds, enacted treasury withdrawals and
+// governance proposal-deposit refunds. The journal row is stamped
+// AccountRewardDelta.PostSnapshot so the epoch-boundary stake reconstruction can
+// exclude it while still retaining the pre-SNAP credits, which land at the same
+// boundary slot. Use AddAccountRewardByCredential for those — the delayed reward
+// update and MIR — and for transaction-driven credits.
+func (d *Database) AddPostSnapshotAccountRewardByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+	txn *Txn,
+) error {
+	return d.addAccountRewardByCredential(
+		credentialTag, stakeKey, amount, slot, sourceHash, true, txn,
+	)
+}
+
+func (d *Database) addAccountRewardByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+	postSnapshot bool,
+	txn *Txn,
+) error {
 	if amount == 0 {
 		return nil
 	}
@@ -304,7 +339,11 @@ func (d *Database) AddAccountRewardByCredential(
 			}
 		}()
 	}
-	if err := d.metadata.AddAccountRewardByCredential(
+	credit := d.metadata.AddAccountRewardByCredential
+	if postSnapshot {
+		credit = d.metadata.AddPostSnapshotAccountRewardByCredential
+	}
+	if err := credit(
 		credentialTag,
 		stakeKey,
 		amount,

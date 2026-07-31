@@ -22,6 +22,7 @@ import (
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -78,8 +79,23 @@ func (c *Calculator) CalculateStakeDistribution(
 
 	// Public historical query path: the CIP-0163 inactivity gate is a
 	// consensus concern applied only by the snapshot manager, which supplies a
-	// nonzero expiryEpoch. This query keeps expiryEpoch == 0 (gate off).
-	return c.calculateHistoricalStakeDistributionInTxn(ctx, txn, slot, 0, 0)
+	// nonzero expiryEpoch. This query keeps expiryEpoch == 0 (gate off), and
+	// boundarySlot == 0 so it stays a plain "stake at slot" reconstruction with
+	// no epoch-boundary reward semantics.
+	return c.calculateHistoricalStakeDistributionInTxn(ctx, txn, slot, 0, 0, 0)
+}
+
+// boundaryRewardSlot validates the epoch-boundary reward cut before it reaches
+// SQL. SNAP reward semantics are defined only for the mark snapshot's own
+// boundary, whose snapshot slot is exactly one before the boundary slot (see
+// captureEpochBoundarySnapshot in ledger/chainsync.go). Anything else — genesis
+// and post-Mithril seeding, which reconstruct at an epoch start slot rather than
+// one before it — gets 0, i.e. the plain "stake at slot" reconstruction.
+func boundaryRewardSlot(slot, boundarySlot uint64) uint64 {
+	if boundarySlot > 0 && boundarySlot == slot+1 {
+		return boundarySlot
+	}
+	return 0
 }
 
 // calculateStakeDistributionInTxn computes an epoch-boundary snapshot from the
@@ -110,10 +126,18 @@ func (c *Calculator) calculateStakeDistributionInTxn(
 // the transaction tip is at or before slot. A delayed fallback whose tip has
 // already passed the boundary retains the historical reconstruction needed for
 // slot accuracy.
+//
+// boundarySlot is the mark snapshot's boundary (slot+1); pass 0 for a capture
+// that is not reconstructing an epoch boundary. See boundaryRewardSlot.
+//
+// Both halves — the leader-election pool totals and the per-credential reward
+// basis — come from the same historical reconstruction, for the same
+// (slot, boundarySlot), and are cross-checked against each other.
 func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) (*StakeDistribution, error) {
@@ -131,19 +155,30 @@ func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 		)
 	}
 
+	rewardSlot := boundaryRewardSlot(slot, boundarySlot)
 	dist, err := c.calculateHistoricalStakeDistributionInTxn(
-		ctx, txn, slot, expiryEpoch, inactivityPeriod,
+		ctx, txn, slot, rewardSlot, expiryEpoch, inactivityPeriod,
 	)
 	if err != nil {
 		return nil, err
 	}
 	stakeInputs, err := c.rewardStakeInputsInTxn(
-		ctx, txn, slot, expiryEpoch, inactivityPeriod,
+		ctx, txn, slot, rewardSlot, expiryEpoch, inactivityPeriod,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate reward stake inputs: %w", err)
 	}
 	dist.StakeInputs = stakeInputs
+	// Cross-check the two halves against each other. Both were built from one
+	// reconstruction, so a mismatch means the pool totals and the reward basis
+	// genuinely disagree — the class of corruption that later surfaces as a
+	// "reward stake input total mismatch" crash during reward application.
+	if err := validateRewardStakeInputTotals(dist); err != nil {
+		return nil, fmt.Errorf(
+			"epoch-boundary fallback stake inputs disagree with pool totals: %w",
+			err,
+		)
+	}
 	if _, err := rewardStakeDistribution(dist); err != nil {
 		return nil, fmt.Errorf("validate reward stake inputs: %w", err)
 	}
@@ -175,11 +210,15 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	for i, poolHash := range pools {
 		poolKeyHashBytes[i] = append([]byte(nil), poolHash[:]...)
 	}
-	inputs, err := meta.GetLiveStakeInputsForPools(
+	rawInputs, err := meta.GetLiveStakeInputsForPools(
 		poolKeyHashBytes, expiryEpoch, metaTxn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get live stake inputs: %w", err)
+	}
+	inputs, err := dedupeRewardStakeInputRows(rawInputs)
+	if err != nil {
+		return nil, err
 	}
 	dist.StakeInputs = make([]StakeInput, 0, len(inputs))
 	for _, input := range inputs {
@@ -236,6 +275,7 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) (*StakeDistribution, error) {
@@ -246,7 +286,7 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 	}
 
 	err := c.calculateFromHistoricalStake(
-		ctx, txn, slot, expiryEpoch, inactivityPeriod, dist,
+		ctx, txn, slot, boundarySlot, expiryEpoch, inactivityPeriod, dist,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate from historical stake: %w", err)
@@ -258,16 +298,16 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 	return dist, nil
 }
 
-// rewardStakeInputsInTxn returns per-credential reward inputs. With the
-// CIP-0163 gate off (expiryEpoch == 0) these come from the live reward
-// aggregate; with the gate on they are reconstructed at slot from the same
-// historical CTE as the leader-election pool totals in
-// calculateHistoricalStakeDistributionInTxn, so both halves agree by
-// construction.
+// rewardStakeInputsInTxn returns per-credential reward inputs reconstructed at
+// slot from the same historical CTE as the leader-election pool totals in
+// calculateHistoricalStakeDistributionInTxn — with or without the CIP-0163 gate
+// — so both halves agree by construction instead of mixing a historical total
+// with the live reward aggregate.
 func (c *Calculator) rewardStakeInputsInTxn(
 	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) ([]StakeInput, error) {
@@ -293,6 +333,7 @@ func (c *Calculator) rewardStakeInputsInTxn(
 		metaTxn,
 		pools,
 		slot,
+		boundarySlot,
 		expiryEpoch,
 		inactivityPeriod,
 	)
@@ -308,6 +349,7 @@ func (c *Calculator) calculateFromHistoricalStake(
 	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	dist *StakeDistribution,
@@ -329,6 +371,7 @@ func (c *Calculator) calculateFromHistoricalStake(
 		metaTxn,
 		pools,
 		slot,
+		boundarySlot,
 		expiryEpoch,
 		inactivityPeriod,
 	)
@@ -392,6 +435,7 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 	metaTxn types.Txn,
 	pools []lcommon.PoolKeyHash,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) (*rewardStakeAggregation, error) {
@@ -412,15 +456,29 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 		poolKeyHashBytes[i] = hashCopy
 	}
 
-	inputs, err := meta.GetRewardStakeInputsForPools(
+	// The reward basis is reconstructed from the same CTE as the leader-election
+	// pool totals, for the same (slot, boundarySlot), with or without the
+	// CIP-0163 gate, so the two halves of the fallback snapshot agree by
+	// construction.
+	//
+	// The gate-off path used to read the live reward aggregate instead, which has
+	// no slot predicate at all, so a fallback capture paired slot-accurate pool
+	// totals with post-boundary live per-credential stake and nothing compared
+	// the two.
+	rawInputs, err := meta.GetEpochBoundaryRewardStakeInputsForPools(
 		poolKeyHashBytes,
 		slot,
+		boundarySlot,
 		expiryEpoch,
 		inactivityPeriod,
 		metaTxn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get reward stake inputs: %w", err)
+	}
+	inputs, err := dedupeRewardStakeInputRows(rawInputs)
+	if err != nil {
+		return nil, err
 	}
 	for _, input := range inputs {
 		if input == nil {
@@ -475,6 +533,7 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 	metaTxn types.Txn,
 	pools []lcommon.PoolKeyHash,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) (map[lcommon.PoolKeyHash]uint64, map[lcommon.PoolKeyHash]uint64, error) {
@@ -491,9 +550,10 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 		poolKeyHashBytes[i] = hashCopy
 	}
 
-	stakes, delegators, err := meta.GetStakeByPoolsAtSlot(
+	stakes, delegators, err := meta.GetEpochBoundaryStakeByPools(
 		poolKeyHashBytes,
 		slot,
+		boundarySlot,
 		expiryEpoch,
 		inactivityPeriod,
 		metaTxn,
@@ -513,4 +573,44 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 type rewardStakeAggregation struct {
 	inputs []StakeInput
 	values map[lcommon.PoolKeyHash]uint64
+}
+
+// dedupeRewardStakeInputRows collapses duplicate stake-credential rows before
+// they are aggregated, keeping the final occurrence.
+//
+// reward_live_stake is unique on (credential_tag, staking_key), so a credential
+// cannot legitimately contribute stake under two pools. Duplicate rows do occur
+// though — most concretely, a duplicate reward_live_stake credential row seeded
+// before idx_reward_live_stake_cred was unique made the per-credential stake
+// inputs disagree with the per-pool aggregate and crashed reward application at
+// an epoch rollover.
+//
+// rewardStakeDistribution already collapsed duplicates, but only into a
+// throwaway copy used for validation, so nothing downstream was protected: the
+// duplicate still reached PoolStakes, DelegatorCount, TotalStake, and from there
+// PoolStakeSnapshot and EpochSummary. Deduping here, ahead of aggregation, makes
+// the protection real and keeps the two dedupe rules identical (same key, same
+// last-wins tie-break) so rewardStakeDistribution stays a no-op validator.
+func dedupeRewardStakeInputRows(
+	rows []*models.RewardStakeInput,
+) ([]*models.RewardStakeInput, error) {
+	type credentialKey struct {
+		key string
+		tag uint8
+	}
+	seen := make(map[credentialKey]int, len(rows))
+	deduped := make([]*models.RewardStakeInput, 0, len(rows))
+	for _, row := range rows {
+		if row == nil {
+			return nil, errors.New("nil reward stake input")
+		}
+		k := credentialKey{key: string(row.StakingKey), tag: row.CredentialTag}
+		if idx, ok := seen[k]; ok {
+			deduped[idx] = row
+			continue
+		}
+		seen[k] = len(deduped)
+		deduped = append(deduped, row)
+	}
+	return deduped, nil
 }

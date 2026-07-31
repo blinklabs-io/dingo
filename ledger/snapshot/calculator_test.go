@@ -753,6 +753,7 @@ func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
 				context.Background(),
 				liveTxn,
 				100,
+				0,
 				test.expiryEpoch,
 				test.inactivityPeriod,
 			)
@@ -771,6 +772,7 @@ func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
 				context.Background(),
 				historicalTxn,
 				100,
+				0,
 				test.expiryEpoch,
 				test.inactivityPeriod,
 			)
@@ -823,7 +825,7 @@ func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 	txn := db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateBoundaryStakeDistributionInTxn(
-		context.Background(), txn, 100, 0, 0,
+		context.Background(), txn, 100, 0, 0, 0,
 	)
 	require.NoError(t, err)
 
@@ -890,7 +892,7 @@ func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
 			txn := db.Transaction(false)
 			defer func() { _ = txn.Commit() }()
 			dist, err := calc.calculateBoundaryStakeDistributionInTxn(
-				context.Background(), txn, 100, 0, 0,
+				context.Background(), txn, 100, 0, 0, 0,
 			)
 			require.NoError(t, err)
 

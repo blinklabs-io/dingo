@@ -3916,41 +3916,50 @@ func (ls *LedgerState) processEpochRollover(
 	// is selected from the new pparams' major version — a HARDFORK rule that ran
 	// before enactment would observe stale pparams and pick the wrong branch.
 	//
-	// The order, asserted by TestProcessEpochRollover_OrderingInvariant and
-	// TestProcessEpochRollover_RewardOrdering in chainsync_ordering_test.go, is:
+	// The order, asserted by TestProcessEpochRollover_OrderingInvariant,
+	// TestProcessEpochRollover_RewardOrdering and
+	// TestProcessEpochRollover_SnapStakeReadOrdering in
+	// chainsync_ordering_test.go and chainsync_snap_ordering_test.go, is:
 	//
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
 	//      rewards and move undistributed→reserves, unspendable→treasury
-	//      before governance reads the treasury.
-	//   2. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
-	//      voting path; produces newPParams from on-chain pparam-update
-	//      proposals.
-	//   3. applyPoolRetirements          — embedded Shelley POOLREAP: refund
-	//      deposits of pools whose retirement epoch is the new epoch. Runs
-	//      before enactment so any deposit landing in the treasury is visible
-	//      to the treasury withdrawals checked in governance.ProcessEpoch.
-	//   4. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//      before governance reads the treasury. Reference: applyRUpd, the
+	//      first step of NEWEPOCH.
+	//   2. applyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
-	//   5. activateDelegatorInactivityIfNeeded — one-time CIP-0163 activation
+	//      Reference: the MIR rule, which Shelley's NEWEPOCH embeds between
+	//      applyRUpd and EPOCH — so before SNAP, and before POOLREAP.
+	//   3. captureEpochBoundarySnapshotStake — SNAP: read the mark snapshot's
+	//      stake. Reference: the first sub-rule of EPOCH.
+	//   4. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//      voting path; produces newPParams from on-chain pparam-update
+	//      proposals.
+	//   5. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//      deposits of pools whose retirement epoch is the new epoch. Runs
+	//      after SNAP and before enactment, so its deposits are outside the
+	//      mark snapshot but any deposit landing in the treasury is visible
+	//      to the treasury withdrawals checked in governance.ProcessEpoch.
+	//   6. activateDelegatorInactivityIfNeeded — one-time CIP-0163 activation
 	//      before any inactivity-gated boundary calculation.
-	//   6. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   7. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   7. SetPParams                    — persist the enacted pparams.
-	//   8. IsHardForkTransition check    — detect inter-era boundary from
+	//   8. SetPParams                    — persist the enacted pparams.
+	//   9. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   9. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//  10. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
-	//  10. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//  11. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
 	//      (reserves/treasury/fees) after all boundary pot mutations so the
 	//      next delayed reward calculation has its pot inputs.
 	//
-	// The authoritative Mark snapshot is captured separately at the end of the
-	// rollover (captureEpochBoundarySnapshot), after the new epoch record and
-	// its nonce exist.
+	// The mark snapshot ROW is written separately at the end of the rollover
+	// (captureEpochBoundarySnapshot), after the new epoch record and its nonce
+	// exist; step 3 is only the stake read. Splitting them is what lets the read
+	// sit at the reference SNAP point while the write still sees the new epoch.
 	//
-	// Steps 6 and 7 must observe the post-enactment major version. Step 8 must
+	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if err := ls.applyStakeRewards(
@@ -3958,6 +3967,33 @@ func (ls *LedgerState) processEpochRollover(
 	); err != nil {
 		return nil, fmt.Errorf("apply stake rewards: %w", err)
 	}
+
+	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
+	// accumulated during the ended epoch to registered reward accounts, and
+	// apply pot-to-pot transfers between treasury and reserves. This is a
+	// no-op for Conway+ epochs because MIR certs are not valid there and no
+	// DB rows exist for those slots.
+	//
+	// Shelley's NEWEPOCH rule embeds MIR between applyRUpd and EPOCH, so MIR
+	// precedes both SNAP and POOLREAP: its credits are part of the mark snapshot
+	// and its pot movements are visible to POOLREAP, governance and the ADA-pot
+	// capture below.
+	if err := ls.applyMIRCerts(
+		txn, currentEpoch.StartSlot, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply MIR certs: %w", err)
+	}
+
+	// SNAP read point. Everything below this line is a rule cardano-ledger runs
+	// after SNAP, and several of them credit reward accounts at epochStartSlot
+	// (POOLREAP deposit refunds, enacted treasury withdrawals,
+	// proposal-deposit refunds). The mark snapshot's stake is therefore read
+	// here — after the delayed reward update and MIR, which precede SNAP, and
+	// before any of them — while the snapshot row is written at the end of the
+	// rollover where the new epoch record and the post-enactment protocol
+	// version exist.
+	ls.captureEpochBoundarySnapshotStake(txn, currentEpoch, epochStartSlot)
+
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -3977,25 +4013,16 @@ func (ls *LedgerState) processEpochRollover(
 	}
 
 	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
-	// pools whose retirement epoch is the new epoch. Per the Conway EPOCH rule
-	// this runs before governance enactment and treasury accounting, so any
-	// deposit that lands in the treasury (unregistered/inactive reward account)
-	// is visible to the withdrawals checked in governance.ProcessEpoch below.
+	// pools whose retirement epoch is the new epoch. The EPOCH rule runs it
+	// after SNAP, so these deposits are deliberately outside the mark snapshot
+	// read above, and before governance enactment and treasury accounting, so
+	// any deposit that lands in the treasury (unregistered/inactive reward
+	// account) is visible to the withdrawals checked in
+	// governance.ProcessEpoch below.
 	if err := ls.applyPoolRetirements(
 		txn, currentEpoch.EpochId+1, epochStartSlot,
 	); err != nil {
 		return nil, fmt.Errorf("apply pool retirements: %w", err)
-	}
-
-	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
-	// accumulated during the ended epoch to registered reward accounts, and
-	// apply pot-to-pot transfers between treasury and reserves. This is a
-	// no-op for Conway+ epochs because MIR certs are not valid there and no
-	// DB rows exist for those slots.
-	if err := ls.applyMIRCerts(
-		txn, currentEpoch.StartSlot, epochStartSlot,
-	); err != nil {
-		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
 	// CIP-0163: one-time activation stamp. It must precede governance's
@@ -4220,6 +4247,76 @@ func (ls *LedgerState) processEpochRollover(
 	return result, nil
 }
 
+// epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot
+// of the ended epoch, i.e. one before the boundary.
+func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
+	if boundarySlot == 0 {
+		return 0
+	}
+	return boundarySlot - 1
+}
+
+// captureEpochBoundarySnapshotStake invokes the optional SNAP-point stake hook
+// at the correct place in the boundary sequence: after the two boundary rules
+// cardano-ledger applies before SNAP (the delayed reward update and MIR) and
+// before POOLREAP and governance enactment, which credit reward accounts at the
+// boundary slot after it.
+//
+// It only reads, so it needs nothing from the not-yet-written new epoch record;
+// the boundary identity is fully determined here (the new epoch is
+// prevEpoch.EpochId+1 starting at boundarySlot) and matches the event the
+// persist half builds from that record.
+//
+// A failure is not fatal and is not surfaced: the stake read is wrapped in a
+// savepoint so a failed read cannot poison the rollover transaction on backends
+// that abort a transaction on SQL error, and leaving no SNAP-point distribution
+// behind makes the persist half read the stake itself — the pre-split behavior —
+// rather than wedging the epoch boundary.
+func (ls *LedgerState) captureEpochBoundarySnapshotStake(
+	txn *database.Txn,
+	prevEpoch models.Epoch,
+	boundarySlot uint64,
+) {
+	hook := ls.epochBoundarySnapshotStakeHook()
+	if hook == nil {
+		return
+	}
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch.EpochId,
+		NewEpoch:      prevEpoch.EpochId + 1,
+		BoundarySlot:  boundarySlot,
+		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
+	}
+	const savepoint = "epoch_boundary_snapshot_stake"
+	if err := txn.SavePoint(savepoint); err != nil {
+		ls.config.Logger.Warn(
+			"snap-point stake savepoint unavailable; deferring stake read to snapshot persist",
+			"error", err,
+			"epoch", evt.NewEpoch,
+			"component", "ledger",
+		)
+		return
+	}
+	if err := hook(txn, evt); err != nil {
+		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
+			ls.config.Logger.Error(
+				"failed to roll back snap-point stake savepoint",
+				"error", rbErr,
+				"read_error", err,
+				"epoch", evt.NewEpoch,
+				"component", "ledger",
+			)
+			return
+		}
+		ls.config.Logger.Warn(
+			"snap-point stake read failed; deferring stake read to snapshot persist",
+			"error", err,
+			"epoch", evt.NewEpoch,
+			"component", "ledger",
+		)
+	}
+}
+
 // captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook
 // inside the epoch-rollover write transaction so the mark snapshot commits
 // atomically with the epoch it describes (and the event-driven fallback then
@@ -4237,10 +4334,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 		return nil
 	}
 	newEpoch := result.NewCurrentEpoch
-	snapshotSlot := newEpoch.StartSlot
-	if snapshotSlot > 0 {
-		snapshotSlot--
-	}
+	snapshotSlot := epochBoundarySnapshotSlot(newEpoch.StartSlot)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch: prevEpoch.EpochId,
 		NewEpoch:      newEpoch.EpochId,

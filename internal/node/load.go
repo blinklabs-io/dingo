@@ -478,6 +478,15 @@ func LoadWithDB(
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	captureFailures := &loadCaptureFailureTracker{}
+	// SNAP-point stake read: runs before POOLREAP/MIR/enactment so the mark
+	// snapshot does not absorb the boundary credits those rules apply. A failed
+	// read is not recorded as a capture failure — the persist hook below still
+	// reads the stake itself, so the snapshot is not lost.
+	ls.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	)
 	if err := installEpochBoundarySnapshotHookForLoad(
 		ls,
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {

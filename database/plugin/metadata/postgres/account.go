@@ -279,6 +279,35 @@ func (d *MetadataStorePostgres) AddAccountRewardByCredential(
 	sourceHash []byte,
 	txn types.Txn,
 ) error {
+	return d.addAccountRewardByCredential(
+		credentialTag, stakeKey, amount, slot, sourceHash, false, txn,
+	)
+}
+
+// AddPostSnapshotAccountRewardByCredential credits a registered reward account
+// with a boundary credit applied after the epoch-boundary stake snapshot.
+func (d *MetadataStorePostgres) AddPostSnapshotAccountRewardByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+	txn types.Txn,
+) error {
+	return d.addAccountRewardByCredential(
+		credentialTag, stakeKey, amount, slot, sourceHash, true, txn,
+	)
+}
+
+func (d *MetadataStorePostgres) addAccountRewardByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+	postSnapshot bool,
+	txn types.Txn,
+) error {
 	if amount == 0 {
 		return nil
 	}
@@ -352,6 +381,7 @@ func (d *MetadataStorePostgres) AddAccountRewardByCredential(
 			TxHash:        sourceHash,
 			Amount:        types.Uint64(amount),
 			AddedSlot:     slot,
+			PostSnapshot:  postSnapshot,
 		}
 		// Insert the unique journal row before mutating account.reward.
 		// OnConflict backstops the read-check above against a writer racing

@@ -674,7 +674,7 @@ func refundProposalDeposit(
 	if err != nil {
 		return err
 	}
-	credited, err := CreditRegisteredRewardAccount(
+	credited, err := CreditRegisteredRewardAccountAfterSnapshot(
 		db,
 		txn,
 		credentialTag,

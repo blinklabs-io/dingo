@@ -194,13 +194,13 @@ func TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres(t *testing.T) {
 	require.Equal(t, uint64(1), delegators[string(poolB)])
 }
 
-// TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres exercises the
-// CIP-0163 gated reward-input path on postgres. With the gate on it must
+// TestGetEpochBoundaryRewardStakeInputsUseHistoricalExpirationPostgres exercises
+// the CIP-0163 gated reward-input path on postgres. With the gate on it must
 // reconstruct expiration at slot from the shared historical CTE (not the live
 // account.expiration_epoch column) so the reward-basis inputs agree with
 // GetStakeByPoolsAtSlot. Postgres type-checks the full query at parse time,
 // catching backend-specific regressions the sqlite test cannot.
-func TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres(t *testing.T) {
+func TestGetEpochBoundaryRewardStakeInputsUseHistoricalExpirationPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
 	// Registered via t.Cleanup (not a plain defer) and ahead of the data
 	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
@@ -261,30 +261,117 @@ func TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres(t *testing
 	require.NoError(t, db.Create(&models.AccountWithdrawalWitness{
 		StakingKey: expired, AddedSlot: 50, TxHash: bytes.Repeat([]byte{0x74}, 32),
 	}).Error)
-	live := []models.RewardLiveStake{
-		{
-			PoolKeyHash: pool, StakingKey: active, CredentialTag: 0,
-			TotalStake: types.Uint64(100), Registered: true,
-		},
-		{
-			PoolKeyHash: pool, StakingKey: expired, CredentialTag: 0,
-			TotalStake: types.Uint64(40), Registered: true,
-		},
-	}
-	for i := range live {
-		require.NoError(t, db.Create(&live[i]).Error)
-	}
-
-	// Gate off: live aggregate returns both inputs.
-	inputs, err := store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 0, 0, nil)
+	// Gate off: nothing is excluded, so both credentials contribute.
+	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
+		[][]byte{pool}, 250, 0, 0, 0, nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 2)
 
 	// Gate on: expiration reconstructed at slot 250 excludes the expired-at-slot
 	// credential; a live-column filter would have kept both (both live epoch 7).
-	inputs, err = store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 3, 2, nil)
+	inputs, err = store.GetEpochBoundaryRewardStakeInputsForPools(
+		[][]byte{pool}, 250, 0, 3, 2, nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1)
 	require.Equal(t, active, inputs[0].StakingKey)
 	require.Equal(t, uint64(100), uint64(inputs[0].Stake))
+}
+
+// TestEpochBoundaryStakeSemanticsPostgres exercises the epoch-boundary (SNAP)
+// reward cut and the zero-floored reward reconstruction on postgres. Both are
+// backend-sensitive: the boundary cut adds a bound placeholder and a
+// post_snapshot predicate to hand-written positional-arg SQL, and the floor has
+// to guard the subtraction rather than clamp its result because the reward cast
+// type is the backend's native integer type (BIGINT here).
+func TestEpochBoundaryStakeSemanticsPostgres(t *testing.T) {
+	store := newTestPostgresStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	db := store.DB()
+
+	pool := bytes.Repeat([]byte{0xE7}, 28)
+	retained := bytes.Repeat([]byte{0x3a}, 28)
+	underflow := bytes.Repeat([]byte{0x3b}, 28)
+	t.Cleanup(func() {
+		for _, k := range [][]byte{retained, underflow} {
+			_ = db.Where("staking_key = ?", k).Delete(&models.Account{}).Error
+			_ = db.Where("staking_key = ?", k).Delete(&models.Utxo{}).Error
+			_ = db.Where("staking_key = ?", k).
+				Delete(&models.AccountRewardDelta{}).Error
+			_ = db.Where("staking_key = ?", k).
+				Delete(&models.RewardLiveStake{}).Error
+		}
+	})
+
+	const (
+		snapshotSlot = uint64(199)
+		boundarySlot = uint64(200)
+	)
+
+	for _, cred := range [][]byte{retained, underflow} {
+		require.NoError(t, db.Create(&models.Account{
+			StakingKey:  cred,
+			Pool:        pool,
+			Active:      true,
+			AddedSlot:   10,
+			CreatedSlot: 10,
+			Reward:      types.Uint64(10),
+		}).Error)
+		require.NoError(t, db.Create(&models.Utxo{
+			TxId:       append(bytes.Repeat([]byte{0x6a}, 31), cred[0]),
+			OutputIdx:  0,
+			StakingKey: cred,
+			Amount:     types.Uint64(100),
+			AddedSlot:  10,
+		}).Error)
+	}
+
+	// retained: the pre-SNAP delayed reward update plus a post-SNAP boundary
+	// credit, both at the boundary slot.
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, retained, 50, boundarySlot,
+		bytes.Repeat([]byte{0xd1}, 32), nil,
+	))
+	require.NoError(t, store.AddPostSnapshotAccountRewardByCredential(
+		0, retained, 7, boundarySlot,
+		bytes.Repeat([]byte{0xd2}, 32), nil,
+	))
+	// underflow: journal retains more credit than the live balance, so the
+	// reconstruction would go below zero.
+	require.NoError(t, db.Create(&models.AccountRewardDelta{
+		StakingKey:    underflow,
+		CredentialTag: 0,
+		TxHash:        bytes.Repeat([]byte{0xd3}, 32),
+		Amount:        types.Uint64(1_000),
+		AddedSlot:     300,
+		Withdrawal:    false,
+	}).Error)
+
+	stakes, delegators, err := store.GetEpochBoundaryStakeByPools(
+		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	// retained: 100 utxo + 10 live reward + 50 retained boundary update - 7
+	// post-SNAP = 160. underflow: 100 utxo + floored 0 reward = 100.
+	require.Equal(t, uint64(260), stakes[string(pool)])
+	require.Equal(t, uint64(2), delegators[string(pool)])
+
+	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
+		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	byKey := make(map[string]uint64, len(inputs))
+	for _, in := range inputs {
+		byKey[string(in.StakingKey)] = uint64(in.Stake)
+	}
+	require.Equal(t, uint64(160), byKey[string(retained)])
+	require.Equal(t, uint64(100), byKey[string(underflow)])
+
+	// The plain stake-at-slot query keeps its own contract: no boundary credit.
+	stakes, _, err = store.GetStakeByPoolsAtSlot(
+		[][]byte{pool}, snapshotSlot, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(210), stakes[string(pool)])
 }
