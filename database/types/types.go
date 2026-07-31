@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -267,6 +268,53 @@ var ErrUtxoConflict = errors.New("UTxO already spent")
 
 // ErrUtxoNotFound is returned when a requested UTxO row does not exist.
 var ErrUtxoNotFound = errors.New("utxo not found")
+
+// UtxoValidationMode selects what a block application does when a consumed
+// UTxO past the Mithril trust boundary is neither present in the metadata
+// store nor reconstructable from the blob store.
+//
+// The right answer depends on how the node was brought up, which is why it is
+// configurable. A node synced from genesis, or bootstrapped from a Mithril
+// snapshot, should hold complete producer history past the trust boundary, so
+// a miss there is real corruption. A node that intersected the chain at an
+// arbitrary point legitimately has no history for the outputs those blocks
+// spend, and failing on them would make it unable to sync at all.
+type UtxoValidationMode string
+
+const (
+	// UtxoValidationFail rejects the block. Use it on a node whose history
+	// is supposed to be complete, where a missing input means the database
+	// is damaged and continuing would apply a value-inconsistent ledger.
+	UtxoValidationFail UtxoValidationMode = "fail"
+	// UtxoValidationWarn applies the block anyway but logs each miss at
+	// warning level. Use it to find out whether a node is hitting this at
+	// all, without taking it off the chain while you look.
+	UtxoValidationWarn UtxoValidationMode = "warn"
+	// UtxoValidationIgnore applies the block and logs each miss at debug
+	// level. This matches the behaviour that predates these modes.
+	UtxoValidationIgnore UtxoValidationMode = "ignore"
+)
+
+// ParseUtxoValidationMode maps a configured string to a UtxoValidationMode.
+// An empty value yields an empty mode, which callers resolve from their own
+// defaults.
+func ParseUtxoValidationMode(v string) (UtxoValidationMode, error) {
+	switch UtxoValidationMode(strings.ToLower(strings.TrimSpace(v))) {
+	case "":
+		return "", nil
+	case UtxoValidationFail:
+		return UtxoValidationFail, nil
+	case UtxoValidationWarn:
+		return UtxoValidationWarn, nil
+	case UtxoValidationIgnore:
+		return UtxoValidationIgnore, nil
+	default:
+		return "", fmt.Errorf(
+			"invalid utxo validation mode %q: expected fail, warn or ignore",
+			v,
+		)
+	}
+}
 
 // UtxoKey identifies a UTxO row by its transaction id and output
 // index. Used as a parameter type for batch UTxO operations across

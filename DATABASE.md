@@ -593,6 +593,83 @@ Plugins whose writes are already durable on commit implement `Sync` as a no-op:
 an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
 its writer closes successfully.
 
+### Crash Recovery Artifacts
+
+`database/recovery` records what the store contents alone cannot say: which
+combined commit was in flight when a process died, and what it was trying to do.
+It is not a redo log — both stores are already crash safe on their own — it is a
+journal of cross-store intent, plus periodic checkpoints that bound how far back
+recovery has to read.
+
+Artifacts live under `<dataDir>/recovery/` and are managed entirely by the node.
+Nothing external reads them, and deleting the directory only costs the next
+recovery its precision; it never loses ledger or block data.
+
+| Path | Contents |
+|------|----------|
+| `recovery/wal/wal-<first-seq>.log` | Journal segments. Framed records: magic `DWAL`, version, type, `uint32` payload length, payload, CRC-32C over version+type+length+payload. Segment files roll at 8MiB and are named for the first sequence they hold, so a lexical sort is a sequence sort. |
+| `recovery/checkpoints/checkpoint-<seq>.bin` | One checkpoint generation per file, in the same framing. Three generations are retained. |
+
+Journal record types are `begin` (sequence, commit timestamp, and the intent:
+block append or rollback, with the target slot, hash and block number), `commit`,
+`abort`, and an inline `checkpoint`. `Txn.Commit` writes `begin` before it
+touches either store, and `commit` once both are through, so a `begin` with no
+resolution is exactly the window a crash can interrupt. Only `begin` is fsynced,
+and only when `crashRecoverySyncJournal` is set; a lost `commit` marker is
+harmless because recovery then compares the stores, finds them consistent, and
+does nothing.
+
+A checkpoint holds the journal sequence it covers, when it was taken, the commit
+timestamp both stores held, the metadata tip (slot, hash, block number), the blob
+tip, and a SHA-256 merkle root over those fields as domain-separated leaves
+(RFC 6962 leaf and interior prefixes). The root is verified on load, so a
+generation damaged in a way the frame CRC survives is skipped in favour of an
+older one. Checkpoints are written to a temporary file, fsynced, renamed, and the
+directory fsynced. A checkpoint never covers a still-open commit, so truncating
+segments it covers cannot discard an intent record recovery still needs.
+
+At startup `recovery.Manager.Recover` runs the consistency checks, loads the
+newest verified checkpoint, and replays the journal above it. The commit
+timestamps decide whether anything is repaired:
+
+- Both stores on the same fence: nothing was half applied, so nothing is
+  repaired. Unresolved intents alone do not change that — only begin records are
+  fsynced, so a crash routinely loses the commit marker of a commit that did
+  land — but they are reported.
+- Blob fence ahead: the interrupted commit's blocks are trimmed above the chain
+  tip, not the metadata tip. Blocks between the applied tip and the chain tip
+  are legitimately on-chain and merely not applied yet, the normal shape after a
+  Mithril bootstrap. Recovery refuses to trim when no tip is known at all, since
+  the boundary would be slot zero.
+- Metadata fence ahead: the blob store lost a durable write, so the ledger is
+  rolled back onto what the blob store still holds.
+
+A repair ends by resetting both stores onto a common fence. A blob tip below the
+metadata tip while the fences agree is real damage that recovery does not act on
+— rolling the ledger back against the stores' own fences is too destructive to do
+unprompted — and `tip_consistency` reports it as a failure instead.
+
+The startup consistency checks are `commit_timestamps`, `tip_consistency`,
+`chain_ledger_tip`, `block_continuity` (prev-hash linkage beneath the tip; block
+numbers are advisory, because a Byron epoch boundary block repeats its
+predecessor's chain difficulty), `utxo_integrity` (a bounded sample of live
+UTxOs resolved against their stored CBOR, which is where a lost block shows up
+as an offset reference that no longer resolves), and `orphaned_data`. The
+`consistencyCheckMode` setting selects `off`, `fast` (bounded windows near the
+tip, the default) or `full` (roughly an order of magnitude wider).
+
+### Unrecoverable Consumed UTxOs
+
+`utxoValidationMode` selects what block application does when a consumed UTxO
+past the recorded Mithril trust boundary (`mithril_ledger_slot`) is neither in
+the metadata store nor reconstructable from the blob store: `fail` rejects the
+block, `warn` applies it and logs each miss at warning level, `ignore` applies it
+and logs at debug level. Below the boundary the mode does not apply, because a
+node that intersected the chain at an arbitrary point legitimately has no
+history for the outputs those blocks spend. The older `strictUtxoValidation`
+boolean remains the fallback when no mode is set: `true` maps to `fail` and
+`false` to `ignore`.
+
 S3 has two prefix input forms with deliberately different compatibility contracts. `New` normalizes a non-empty prefix parsed from `s3://<bucket>/<prefix>` to end in `/`, so `s3://bucket/foo` produces object names such as `foo/<hex-key>`. `WithPrefix`, used by the `plugins.storage` config `prefix` field, preserves the configured value verbatim: `foo` produces `foo<hex-key>`, while `foo/` produces `foo/<hex-key>`. An empty prefix in either form adds nothing. Keeping the option form literal preserves the object-key layout of existing deployments.
 
 ```mermaid

@@ -472,6 +472,18 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	}
 
 	inFlight, _ := acc.(inFlightProducerLookup)
+	// Resolve the UTxO validation mode and, only for the modes that consult
+	// it, the Mithril trust boundary. The boundary costs a sync-state read
+	// and a parse, and it cannot change within a block, so reading it per
+	// unrecoverable input — or at all on the ignore path, where the answer
+	// is never used — is wasted work.
+	utxoMode := d.config.utxoValidationMode()
+	boundaryApplies := utxoMode == types.UtxoValidationFail ||
+		utxoMode == types.UtxoValidationWarn
+	var trustBoundarySlot uint64
+	if boundaryApplies {
+		trustBoundarySlot = d.mithrilTrustBoundarySlot(txn)
+	}
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
@@ -545,23 +557,38 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// unrecoverable UTxO there indicates real corruption or a bug
 			// rather than an expected gap. Below the boundary (or when none
 			// is recorded and we did not sync from genesis) the UTxO may
-			// legitimately predate the data we imported.
-			if d.config.StrictUtxoValidation &&
-				point.Slot > d.mithrilTrustBoundarySlot(txn) {
+			// legitimately predate the data we imported, so the configured
+			// mode only applies above it.
+			mode := utxoMode
+			pastBoundary := boundaryApplies &&
+				point.Slot > trustBoundarySlot
+			switch {
+			case mode == types.UtxoValidationFail && pastBoundary:
 				return fmt.Errorf(
 					"consumed utxo %s not found at slot %d and could not be recovered: %w",
 					input.String(),
 					point.Slot,
 					err,
 				)
+			case mode == types.UtxoValidationWarn && pastBoundary:
+				d.logger.Warn(
+					"applying block with an unrecoverable consumed utxo past the Mithril trust boundary",
+					"input",
+					input.String(),
+					"slot",
+					point.Slot,
+					"error",
+					err,
+				)
+			default:
+				d.logger.Debug(
+					"skipping unrecoverable transaction input utxo repair",
+					"input",
+					input.String(),
+					"error",
+					err,
+				)
 			}
-			d.logger.Debug(
-				"skipping unrecoverable transaction input utxo repair",
-				"input",
-				input.String(),
-				"error",
-				err,
-			)
 			continue
 		}
 		recoveredUtxos = append(recoveredUtxos, *recoveredUtxo)

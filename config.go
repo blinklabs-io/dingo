@@ -143,6 +143,8 @@ type Config struct {
 	peerSharing              bool
 	validateHistorical       bool
 	strictUtxoValidation     bool
+	utxoValidationMode       string
+	crashRecovery            CrashRecoveryConfig
 	tracing                  bool
 	tracingStdout            bool
 	runMode                  string
@@ -774,9 +776,49 @@ func WithValidateHistorical(validate bool) ConfigOptionFunc {
 // WithStrictUtxoValidation specifies whether an unrecoverable consumed UTxO
 // past the recorded Mithril sync boundary is a hard error rather than a
 // silently skipped condition. See database.Config.StrictUtxoValidation.
+//
+// WithUtxoValidationMode supersedes this and additionally offers a mode that
+// applies the block but logs the miss. This option remains the fallback when no
+// mode is set.
 func WithStrictUtxoValidation(strict bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.strictUtxoValidation = strict
+	}
+}
+
+// WithUtxoValidationMode selects what happens when a consumed UTxO past the
+// recorded Mithril sync boundary cannot be found or recovered: "fail", "warn"
+// or "ignore". An empty value falls back to WithStrictUtxoValidation.
+func WithUtxoValidationMode(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.utxoValidationMode = mode
+	}
+}
+
+// CrashRecoveryConfig configures the crash-recovery subsystem: the cross-store
+// intent journal, the periodic checkpoints that bound how much of it recovery
+// has to read, and the startup consistency checks.
+type CrashRecoveryConfig struct {
+	// ConsistencyCheckMode is "off", "fast" or "full". Empty selects
+	// "fast".
+	ConsistencyCheckMode string
+	// CheckpointInterval is how often a running node records a checkpoint.
+	// Zero selects the package default.
+	CheckpointInterval time.Duration
+	// Enabled turns the whole subsystem on. When it is off the database
+	// behaves exactly as it did before crash recovery existed.
+	Enabled bool
+	// SyncJournal makes each intent record durable before the commit that
+	// wrote it touches the stores, which is what lets recovery name the
+	// operation a crash interrupted. It costs one additional fsync per
+	// combined commit on top of the blob sync that commit already does.
+	SyncJournal bool
+}
+
+// WithCrashRecovery configures the crash-recovery subsystem.
+func WithCrashRecovery(cfg CrashRecoveryConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.crashRecovery = cfg
 	}
 }
 

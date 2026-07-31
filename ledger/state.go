@@ -1167,6 +1167,19 @@ func (ls *LedgerState) loadMithrilTrustBoundary() {
 	ls.config.Logger.Info("loaded Mithril trust boundary", attrs...)
 }
 
+// RollbackToPoint rewinds applied ledger state to point.
+//
+// It is the exported entry point crash recovery repairs through, for the case
+// where the blob store turns out to be behind the state the metadata store
+// claims to have applied and the only consistent position left is the one the
+// blob store still holds.
+//
+// Do not call it to undo a fork; chain-driven rollbacks arrive through the
+// chainsync path, which also updates the chain's view of the tip.
+func (ls *LedgerState) RollbackToPoint(point ocommon.Point) error {
+	return ls.rollback(point)
+}
+
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	// Load current ledger tip
 	tmpTip, err := ls.db.GetTip(nil)

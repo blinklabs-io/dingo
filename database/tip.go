@@ -14,7 +14,10 @@
 
 package database
 
-import ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+import (
+	"github.com/blinklabs-io/dingo/database/recovery"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+)
 
 // GetTip returns the current tip as represented by the protocol
 func (d *Database) GetTip(txn *Txn) (ochainsync.Tip, error) {
@@ -25,9 +28,20 @@ func (d *Database) GetTip(txn *Txn) (ochainsync.Tip, error) {
 }
 
 // SetTip saves the current tip
+//
+// Moving the tip is what makes a combined transaction interesting to crash
+// recovery, so the target point is recorded as the transaction's intent here.
+// A transaction that already described itself — a rollback, say — keeps its own
+// description; see Txn.SetRecoveryIntent.
 func (d *Database) SetTip(tip ochainsync.Tip, txn *Txn) error {
 	if txn == nil {
 		return d.metadata.SetTip(tip, nil)
 	}
+	txn.SetRecoveryIntent(recovery.Intent{
+		Kind:        recovery.IntentBlockAdd,
+		Slot:        tip.Point.Slot,
+		Hash:        tip.Point.Hash,
+		BlockNumber: tip.BlockNumber,
+	})
 	return d.metadata.SetTip(tip, txn.Metadata())
 }

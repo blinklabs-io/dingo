@@ -418,7 +418,29 @@ type Config struct {
 	// recorded Mithril sync boundary. A non-genesis intersect without a
 	// Mithril snapshot should explicitly opt out when pre-intersect UTxOs are
 	// intentionally unavailable.
+	//
+	// UtxoValidationMode supersedes this when set; this remains the fallback
+	// for configurations that have not moved over.
 	StrictUtxoValidation bool `yaml:"strictUtxoValidation" split_words:"true"`
+	// UtxoValidationMode selects what happens when a consumed UTxO past the
+	// recorded Mithril sync boundary cannot be found or recovered: "fail",
+	// "warn" or "ignore". Empty falls back to StrictUtxoValidation.
+	UtxoValidationMode string `yaml:"utxoValidationMode" split_words:"true"`
+	// CrashRecovery enables the crash-recovery subsystem: a cross-store
+	// intent journal, periodic checkpoints, and startup consistency checks.
+	CrashRecovery bool `yaml:"crashRecovery" split_words:"true"`
+	// CrashRecoverySyncJournal makes each journal intent durable before the
+	// commit that wrote it touches the stores. Without it the journal is
+	// advisory: recovery can still compare the stores, it just cannot name
+	// the operation a crash interrupted. Costs one extra fsync per combined
+	// commit.
+	CrashRecoverySyncJournal bool `yaml:"crashRecoverySyncJournal" split_words:"true"`
+	// CrashRecoveryCheckpointInterval is how often a running node records a
+	// recovery checkpoint, as a duration string. Empty selects the default.
+	CrashRecoveryCheckpointInterval string `yaml:"crashRecoveryCheckpointInterval" envconfig:"DINGO_CRASH_RECOVERY_CHECKPOINT_INTERVAL"`
+	// ConsistencyCheckMode selects how much work the startup consistency
+	// checks do: "off", "fast" or "full". Empty selects "fast".
+	ConsistencyCheckMode string `yaml:"consistencyCheckMode" split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
 	// Spans are sent via OTLP HTTP; configure the destination with the
@@ -751,27 +773,39 @@ var globalConfig = &Config{
 	IntersectTip:         false,
 	ValidateHistorical:   true,
 	StrictUtxoValidation: true,
-	Tracing:              false,
-	TracingStdout:        false,
-	Network:              "preview",
-	NetworkMagic:         0,
-	MetricsPort:          12798,
-	DebugPort:            0,
-	PrivateBindAddr:      "127.0.0.1",
-	PrivatePort:          3002,
-	RelayPort:            3001,
-	BarkBaseUrl:          "",
-	BarkPort:             0,
-	CORSAllowedOrigins:   []string{"*"},
-	Topology:             "",
-	TlsCertFilePath:      "",
-	TlsKeyFilePath:       "",
-	StorageMode:          "core",
-	RunMode:              RunModeServe,
-	StartEra:             StartEraDefault,
-	ImmutableDbPath:      "",
-	ShutdownTimeout:      DefaultShutdownTimeout,
-	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+	UtxoValidationMode:   "",
+	// Crash recovery is on by default: an SPO's node should come back from
+	// an unclean shutdown knowing what was in flight, and the journal costs
+	// a small append per combined commit.
+	CrashRecovery: true,
+	// The journal fsync is off by default. It is what lets recovery name
+	// the interrupted operation rather than merely detect divergence, but
+	// it doubles the fsyncs a combined commit performs, and the cost lands
+	// on every block. Operators who want the stronger guarantee turn it on.
+	CrashRecoverySyncJournal:        false,
+	CrashRecoveryCheckpointInterval: "",
+	ConsistencyCheckMode:            "",
+	Tracing:                         false,
+	TracingStdout:                   false,
+	Network:                         "preview",
+	NetworkMagic:                    0,
+	MetricsPort:                     12798,
+	DebugPort:                       0,
+	PrivateBindAddr:                 "127.0.0.1",
+	PrivatePort:                     3002,
+	RelayPort:                       3001,
+	BarkBaseUrl:                     "",
+	BarkPort:                        0,
+	CORSAllowedOrigins:              []string{"*"},
+	Topology:                        "",
+	TlsCertFilePath:                 "",
+	TlsKeyFilePath:                  "",
+	StorageMode:                     "core",
+	RunMode:                         RunModeServe,
+	StartEra:                        StartEraDefault,
+	ImmutableDbPath:                 "",
+	ShutdownTimeout:                 DefaultShutdownTimeout,
+	LedgerCatchupTimeout:            DefaultLedgerCatchupTimeout,
 	// Defaults for database worker pool and API backfill tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,

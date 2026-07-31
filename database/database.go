@@ -18,12 +18,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/recovery"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -31,6 +33,10 @@ import (
 var DefaultConfig = &Config{
 	DataDir: ".dingo",
 }
+
+// defaultRecoverySubdir is where crash-recovery artifacts live under the data
+// directory when the caller does not name a directory of its own.
+const defaultRecoverySubdir = "recovery"
 
 // Config represents the configuration for a database instance
 type Config struct {
@@ -49,7 +55,33 @@ type Config struct {
 	// than an expected gap. Leave disabled (the default) when bootstrapping
 	// from a non-genesis chainsync intersect point without a Mithril
 	// snapshot import, where pre-intersect UTxOs are legitimately absent.
+	//
+	// UtxoValidationMode supersedes this when set; this remains the
+	// fallback for callers that have not moved over: true maps to
+	// UtxoValidationFail and false to UtxoValidationIgnore.
 	StrictUtxoValidation bool
+	// UtxoValidationMode selects what happens when a consumed UTxO past the
+	// Mithril trust boundary cannot be found or recovered:
+	// UtxoValidationFail, UtxoValidationWarn or UtxoValidationIgnore. An
+	// empty value falls back to StrictUtxoValidation.
+	UtxoValidationMode types.UtxoValidationMode
+	// Recovery configures the crash-recovery subsystem: the cross-store
+	// intent journal, periodic checkpoints, and the startup consistency
+	// checks. Leave it nil to run without any of that, which is how the
+	// database behaved before crash recovery existed.
+	Recovery *recovery.Config
+}
+
+// utxoValidationMode resolves the configured mode, falling back to the
+// deprecated StrictUtxoValidation boolean when no mode is set.
+func (c *Config) utxoValidationMode() types.UtxoValidationMode {
+	if c.UtxoValidationMode != "" {
+		return c.UtxoValidationMode
+	}
+	if c.StrictUtxoValidation {
+		return types.UtxoValidationFail
+	}
+	return types.UtxoValidationIgnore
 }
 
 // Stores contains the provider-owned storage services injected into a
@@ -77,10 +109,18 @@ type Database struct {
 	blob            blob.BlobStore
 	metadata        metadata.MetadataStore
 	cborCache       *TieredCborCache
+	recovery        *recovery.Manager
 	sizeMetricsStop chan struct{}
 	sizeMetricsDone chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
+}
+
+// Recovery returns the crash-recovery manager, or nil when the subsystem is
+// not configured. Callers must tolerate a nil manager; its methods are all
+// nil-safe no-ops.
+func (d *Database) Recovery() *recovery.Manager {
+	return d.recovery
 }
 
 // Blob returns the underling blob store instance
@@ -130,6 +170,15 @@ func (d *Database) Close() error {
 		if d.sizeMetricsStop != nil {
 			close(d.sizeMetricsStop)
 			<-d.sizeMetricsDone
+		}
+		// Closing the journal flushes and syncs it, so intents recorded
+		// for commits still in flight survive a shutdown that races
+		// them.
+		if err := d.recovery.Close(); err != nil {
+			d.logger.Warn(
+				"failed to close crash recovery journal",
+				"error", err,
+			)
 		}
 	})
 	return d.closeErr
@@ -183,9 +232,45 @@ func New(config *Config, stores Stores) (*Database, error) {
 		logger:   configCopy.Logger,
 		config:   configCopy,
 	}
+	if db.logger == nil {
+		// Throw logs away rather than guarding every log call. init would
+		// do this too, but subsystems below are brought up before it runs
+		// and log on their failure paths.
+		db.logger = slog.New(slog.DiscardHandler)
+	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)
 	db.cborCache.SetLogger(configCopy.Logger)
+	// Bring up crash recovery before init, so a database that fails its
+	// consistency gate is still returned to the caller with a working
+	// recovery manager attached.
+	if configCopy.Recovery != nil {
+		recoveryCfg := *configCopy.Recovery
+		if recoveryCfg.Dir == "" {
+			recoveryCfg.Dir = filepath.Join(
+				configCopy.DataDir,
+				defaultRecoverySubdir,
+			)
+		}
+		if recoveryCfg.Logger == nil {
+			recoveryCfg.Logger = db.logger
+		}
+		mgr, err := recovery.New(recoveryCfg)
+		if err != nil {
+			// Crash recovery makes an unclean shutdown diagnosable; it is
+			// not what makes the database correct. Refusing to open a
+			// database because its recovery directory is unwritable would
+			// take a node down over a feature that only matters after it
+			// has already crashed.
+			db.logger.Error(
+				"failed to open crash recovery; continuing without the intent journal, checkpoints, and startup consistency checks",
+				"dir", recoveryCfg.Dir,
+				"error", err,
+			)
+		} else {
+			db.recovery = mgr
+		}
+	}
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)

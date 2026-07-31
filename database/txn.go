@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/recovery"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -54,12 +55,33 @@ type Txn struct {
 	db          *Database
 	blobTxn     types.Txn
 	metadataTxn types.Txn
+	intent      recovery.Intent
 	lock        sync.Mutex
 	finished    bool
 	committed   bool
 	readWrite   bool
+	intentSet   bool
 	afterCommit []func()
 	dispatching bool
+}
+
+// SetRecoveryIntent records what this transaction is about to do, for the
+// crash-recovery journal.
+//
+// Most callers never need this: a combined transaction that moves the tip
+// describes itself automatically. Call it explicitly when the automatic
+// description would be wrong — a rollback, for instance, sets a tip like a
+// block append does, and only the caller knows which it is. The first intent
+// set on a transaction wins, so an explicit call before the tip is written is
+// not overwritten by the automatic one.
+func (t *Txn) SetRecoveryIntent(intent recovery.Intent) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.intentSet {
+		return
+	}
+	t.intent = intent
+	t.intentSet = true
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
@@ -289,12 +311,21 @@ func (t *Txn) Commit() error {
 	// Update the commit timestamp in both DBs if using both.
 	// Track timestamp for error reporting if partial commit occurs.
 	var commitTimestamp int64
+	// journalSeq identifies this commit in the crash-recovery journal, and is
+	// zero when the journal is not recording this transaction.
+	var journalSeq uint64
 	if t.blobTxn != nil && t.metadataTxn != nil {
 		commitTimestamp = time.Now().UnixMilli()
+		// Record the intent before either store is touched. Only a
+		// combined transaction needs this: it is the one that can leave
+		// the two stores disagreeing, and the record is what tells
+		// startup recovery which commit was in flight.
+		journalSeq = t.beginJournalEntryLocked(commitTimestamp)
 		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
 			// Rollback both transactions on timestamp update failure
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
+			t.abortJournalEntry(journalSeq)
 			t.finished = true
 			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
@@ -308,6 +339,7 @@ func (t *Txn) Commit() error {
 			if t.metadataTxn != nil {
 				_ = t.metadataTxn.Rollback()
 			}
+			t.abortJournalEntry(journalSeq)
 			t.finished = true
 			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
@@ -381,9 +413,75 @@ func (t *Txn) Commit() error {
 	t.finished = true
 	t.committed = true
 	t.dispatching = true
+	// Both stores are through, so the journal entry is resolved. The
+	// entries left unresolved past this point are exactly the commits a
+	// crash interrupted mid-window, which is what recovery looks for.
+	t.resolveJournalEntry(journalSeq)
 	t.lock.Unlock()
 	t.dispatchAfterCommit()
 	return nil
+}
+
+// beginJournalEntryLocked records this transaction's intent in the
+// crash-recovery journal and returns its sequence, or zero when nothing was
+// recorded. The transaction lock must be held.
+//
+// A journal that cannot be written does not fail the commit. The journal makes
+// recovery precise; it is not what makes the commit correct. Wedging a node
+// because its recovery directory filled up would trade a diagnostic aid for an
+// outage, and the commit-timestamp fence still detects the divergence — it just
+// cannot name the operation that caused it. The failure is logged at error
+// level so it does not pass unnoticed.
+func (t *Txn) beginJournalEntryLocked(commitTimestamp int64) uint64 {
+	if t.db == nil {
+		return 0
+	}
+	mgr := t.db.Recovery()
+	if mgr == nil {
+		return 0
+	}
+	seq, err := mgr.Begin(t.intent, commitTimestamp)
+	if err != nil {
+		t.db.logger.Error(
+			"failed to record commit intent in the crash recovery journal; recovery will fall back to comparing stored state",
+			"error", err,
+			"commit_timestamp", commitTimestamp,
+		)
+		return 0
+	}
+	return seq
+}
+
+// resolveJournalEntry marks a journal entry as applied to both stores.
+func (t *Txn) resolveJournalEntry(seq uint64) {
+	if seq == 0 || t.db == nil {
+		return
+	}
+	if err := t.db.Recovery().Commit(seq); err != nil {
+		t.db.logger.Warn(
+			"failed to record commit completion in the crash recovery journal",
+			"error", err,
+			"journal_seq", seq,
+		)
+	}
+}
+
+// abortJournalEntry marks a journal entry as rolled back.
+//
+// It is called only where neither store committed. When the blob store did
+// commit and the metadata store did not, the entry is deliberately left
+// unresolved: that is a genuine partial commit, and recovery needs to see it.
+func (t *Txn) abortJournalEntry(seq uint64) {
+	if seq == 0 || t.db == nil {
+		return
+	}
+	if err := t.db.Recovery().Abort(seq); err != nil {
+		t.db.logger.Warn(
+			"failed to record commit abort in the crash recovery journal",
+			"error", err,
+			"journal_seq", seq,
+		)
+	}
 }
 
 func (t *Txn) Rollback() error {

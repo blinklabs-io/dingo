@@ -303,7 +303,72 @@ validateHistorical: true
 #
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
+#
+# Superseded by utxoValidationMode below, which is used instead whenever it is
+# set. This setting remains the fallback: true means "fail", false means
+# "ignore".
 strictUtxoValidation: true
+
+# What to do when a consumed UTxO past the recorded Mithril sync boundary
+# cannot be found or recovered:
+#   fail   - reject the block. Use on a node whose history is supposed to be
+#            complete, where a missing input means the database is damaged.
+#   warn   - apply the block, log each miss at warning level. Use to find out
+#            whether a node hits this at all without taking it off the chain.
+#   ignore - apply the block, log at debug level.
+# Below the boundary the mode does not apply: a node that intersected the chain
+# at an arbitrary point legitimately has no history for the outputs those
+# blocks spend. An empty value falls back to strictUtxoValidation. (default: "")
+#
+# Can be overridden with the CARDANO_UTXO_VALIDATION_MODE environment variable
+# CLI: --utxo-validation-mode
+utxoValidationMode: ""
+
+# Crash recovery: a journal of cross-store commit intent, periodic checkpoints,
+# and consistency checks at startup. Recording what a commit was about to do,
+# before it touches either store, is what lets startup name and repair the
+# operation an unclean shutdown interrupted rather than merely detecting that
+# the two stores disagree. Artifacts live under <databasePath>/recovery/ and
+# are safe to delete; doing so only costs the next recovery its precision.
+# (default: true)
+#
+# Can be overridden with the CARDANO_CRASH_RECOVERY environment variable
+# CLI: --crash-recovery
+crashRecovery: true
+
+# Make each journal intent durable before the commit that wrote it touches the
+# stores. This is what lets recovery name the interrupted operation instead of
+# only detecting divergence, and it costs one additional fsync per combined
+# commit, on top of the blob sync that commit already performs. That cost lands
+# on every block, so it is off by default. (default: false)
+#
+# Can be overridden with the CARDANO_CRASH_RECOVERY_SYNC_JOURNAL environment
+# variable
+# CLI: --crash-recovery-sync-journal
+crashRecoverySyncJournal: false
+
+# How often a running node records a recovery checkpoint. Checkpoints bound how
+# much journal recovery has to read and let older segments be removed, so a
+# coarse cadence costs nothing but a slightly longer journal. Empty uses the
+# built-in default of 5m.
+#
+# Can be overridden with the DINGO_CRASH_RECOVERY_CHECKPOINT_INTERVAL
+# environment variable
+# CLI: --crash-recovery-checkpoint-interval
+crashRecoveryCheckpointInterval: ""
+
+# How much work the startup consistency checks do:
+#   off  - skip them.
+#   fast - bounded windows near the tip, which is the part of the database a
+#          crash can actually have damaged. (default)
+#   full - roughly an order of magnitude wider. Meaningfully slower on a large
+#          database; intended for investigating a suspected corruption, not for
+#          every start.
+# Empty selects "fast".
+#
+# Can be overridden with the CARDANO_CONSISTENCY_CHECK_MODE environment variable
+# CLI: --consistency-check-mode
+consistencyCheckMode: ""
 
 # Peer targets - target number of peers in each state
 # These are goals the system works toward, not hard limits.

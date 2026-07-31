@@ -259,6 +259,20 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("invalid shutdown timeout: %w", err)
 		}
 	}
+	// Zero leaves the crash-recovery package on its own default.
+	var crashRecoveryCheckpointInterval time.Duration
+	if cfg.CrashRecoveryCheckpointInterval != "" {
+		var err error
+		crashRecoveryCheckpointInterval, err = time.ParseDuration(
+			cfg.CrashRecoveryCheckpointInterval,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"invalid crash recovery checkpoint interval: %w",
+				err,
+			)
+		}
+	}
 	// Use the package-level default to avoid drift.
 	chainsyncStallTimeout := chainsync.DefaultStallTimeout
 	if cfg.Chainsync.StallTimeout != "" {
@@ -370,7 +384,16 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				PermissionedCandidatePolicy: cfg.Midnight.PermissionedCandidatePolicy,
 			}),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
+			// Passed through for configurations that still set the
+			// boolean; UtxoValidationMode takes precedence when set.
 			dingo.WithStrictUtxoValidation(cfg.StrictUtxoValidation),
+			dingo.WithUtxoValidationMode(cfg.UtxoValidationMode),
+			dingo.WithCrashRecovery(dingo.CrashRecoveryConfig{
+				Enabled:              cfg.CrashRecovery,
+				SyncJournal:          cfg.CrashRecoverySyncJournal,
+				CheckpointInterval:   crashRecoveryCheckpointInterval,
+				ConsistencyCheckMode: cfg.ConsistencyCheckMode,
+			}),
 			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithStartEra(string(cfg.StartEra)),
 			dingo.WithShutdownTimeout(shutdownTimeout),

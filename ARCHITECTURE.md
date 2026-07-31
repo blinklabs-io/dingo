@@ -178,6 +178,7 @@ graph LR
     db_meta_impl["database/plugin/metadata/{mysql,postgres,sqlite}"]
     db_meta_util["database/plugin/metadata/{importutil,labelcodec}"]
     db_immutable["database/immutable"]
+    db_recovery["database/recovery"]
     cardano_cfg["config/cardano"]
     ev["event"]
     ledger["ledger"]
@@ -236,7 +237,7 @@ graph LR
 
     mempool --> chain & ev & plugin
 
-    db --> db_blob & db_meta & db_types & db_models
+    db --> db_blob & db_meta & db_types & db_models & db_recovery
     db_blob --> db_types
     db_blob_impl --> plugin & db_blob & db_types
     db_meta --> db_models & db_types
@@ -470,6 +471,7 @@ dingo/
 │   ├── block_lru_cache.go # Block-level LRU cache
 │   ├── immutable/       # ImmutableDB chunk reader
 │   ├── models/          # Database models
+│   ├── recovery/        # Crash recovery: intent journal, checkpoints, checks
 │   ├── types/           # Database types
 │   ├── sops/            # Storage operations
 │   └── plugin/          # Storage domain contracts and implementations
@@ -884,6 +886,49 @@ the cost of the barrier. If either the metadata commit or the sync fails after
 the blob commit succeeded, the result is a `PartialCommitError`, which
 `SubmitAsyncDBTxn` answers by running `RecoverCommitTimestampConflict` once
 (guarded against recursion) before failing the operation so the caller retries.
+
+### Crash Recovery
+
+`database/recovery` closes the gap the commit ordering above leaves: the stores
+can tell you *that* they diverged, via their commit timestamps, but not which
+commit was in flight or what it intended. The package sits below `database`,
+which wires it in, and never imports `ledger`, `chain`, or node code — it
+declares `StateSource`, the optional `ChainTipSource`, and `Repairer`, and the
+layers above implement them.
+
+Responsibilities split three ways:
+
+- `WAL` is an append-only journal of commit intent. `Txn.Commit` records a
+  `begin` before either store is touched and a `commit` once both are through.
+  `Database.SetTip` describes the transaction automatically, since moving the
+  tip is what makes a combined commit interesting; `Txn.SetRecoveryIntent` lets
+  a caller that knows better — a rollback, say — say so first.
+- `CheckpointStore` holds merkle-rooted summaries of agreed state. They bound
+  replay, anchor recovery when the journal is unreadable, and authorise
+  truncating the segments they cover. A checkpoint never covers a still-open
+  commit.
+- `Checker` runs the startup consistency checks; `Manager` ties the three
+  together.
+
+Composition lives in `node.go` and `node_recovery.go`. `Node.runCrashRecovery`
+runs after the chain manager and ledger are up, because both the diagnosis and
+the repairs need them: `nodeRecoverySource` wraps `Database.RecoveryStateSource`
+to add the chain manager's tip, and `nodeRecoveryRepairer` routes trims to
+`Database.TrimBlobAbove`, rollbacks to `LedgerState.RollbackToPoint`, and
+restamping to `Database.StampCommitTimestamp`. It runs after the existing
+`RecoverCommitTimestampConflict` path so it reports on whatever that left
+behind, then starts the checkpoint ticker, which `Database.Close` stops.
+
+Recovery never refuses to start the node. An outcome it cannot repair is logged
+at error level and startup continues, because the existing tip reconciliation
+that runs next fixes several of those shapes, and a node that will not start is
+worse for an operator than one that starts and says loudly what it found.
+
+The subsystem is off unless `crashRecovery` is set. When it is off,
+`database.Config.Recovery` is nil, `Database.Recovery()` returns nil, and every
+call site relies on the manager's methods being nil-safe no-ops. See
+DATABASE.md, "Crash Recovery Artifacts", for the on-disk layout and the repair
+rules.
 
 ### Storage Modes
 

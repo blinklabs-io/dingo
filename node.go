@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
@@ -280,6 +281,16 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Load database
 	dbNeedsRecovery := false
+	utxoValidationMode, err := types.ParseUtxoValidationMode(
+		n.config.utxoValidationMode,
+	)
+	if err != nil {
+		return err
+	}
+	recoveryConfig, err := n.crashRecoveryConfig()
+	if err != nil {
+		return err
+	}
 	dbConfig := &database.Config{
 		DataDir:              n.config.dataDir,
 		Logger:               n.config.logger,
@@ -287,6 +298,8 @@ func (n *Node) Run(ctx context.Context) error {
 		StorageMode:          string(n.config.storageMode),
 		Network:              n.config.network,
 		StrictUtxoValidation: n.config.strictUtxoValidation,
+		UtxoValidationMode:   utxoValidationMode,
+		Recovery:             recoveryConfig,
 		CacheConfig: database.CborCacheConfig{
 			BlockLRUEntries: n.config.cacheBlockLRUEntries,
 			HotUtxoEntries:  n.config.cacheHotUtxoEntries,
@@ -626,6 +639,26 @@ func (n *Node) Run(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
+	// Run DB recovery if needed
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+	// Run the startup consistency checks and journal-driven recovery, and
+	// start periodic checkpointing. This runs after the timestamp-conflict
+	// path above so it sees, and reports on, whatever that left behind.
+	if err := n.runCrashRecovery(); err != nil {
+		return err
+	}
+
+	// The history-expiry pruner deletes blocks from both stores on its own
+	// goroutine, so it starts only once recovery is finished. Recovery
+	// enumerates blocks, computes a trim boundary from them, and can roll the
+	// ledger back; a pruner mutating the same stores underneath it would
+	// invalidate that boundary and can make the trim fail on a block that is
+	// already gone. Block application is not a concern here — the ledger has
+	// not started yet — but the pruner would be.
 	if n.config.historyExpiry.Enabled {
 		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
@@ -647,12 +680,6 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Run DB recovery if needed
-	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
-			return fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}

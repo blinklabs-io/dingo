@@ -63,6 +63,14 @@ var flagSpecs = []flagSpec{
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag("ValidateHistorical", "validate-historical", "validate historical blocks"),
 	boolFlag("StrictUtxoValidation", "strict-utxo-validation", "error instead of skipping when a consumed UTxO past the Mithril sync boundary cannot be found or recovered"),
+	// The mode strings are parsed, and rejected if invalid, where they are
+	// applied. Validating them here as well would duplicate the accepted
+	// values into a package that has no other reason to know them.
+	stringFlag("UtxoValidationMode", "utxo-validation-mode", "", `what to do when a consumed UTxO past the Mithril sync boundary cannot be recovered: "fail", "warn" or "ignore"`),
+	boolFlag("CrashRecovery", "crash-recovery", "record a cross-store intent journal and checkpoints, and run consistency checks and recovery at startup"),
+	boolFlag("CrashRecoverySyncJournal", "crash-recovery-sync-journal", "fsync each crash-recovery journal intent before the commit that wrote it touches the stores"),
+	stringFlag("CrashRecoveryCheckpointInterval", "crash-recovery-checkpoint-interval", "", "how often to record a crash-recovery checkpoint"),
+	stringFlag("ConsistencyCheckMode", "consistency-check-mode", "", `how much work the startup consistency checks do: "off", "fast" or "full"`),
 	boolFlag("Tracing", "tracing", "enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)"),
 	boolFlag("TracingStdout", "tracing-stdout", "export traces to stdout instead of OTLP (requires --tracing; for debugging)"),
 
