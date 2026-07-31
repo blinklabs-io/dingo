@@ -652,24 +652,20 @@ func TestChainSelectorSwitchesOnOneBlockObservedTipLead(t *testing.T) {
 
 	// Challenger has the same confirmed Tip but has received one block header
 	// ahead via ObservedTip — simulating "announced header before incumbent did".
-	// This is done by calling updatePeerTipObserved directly.
 	oneAheadTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 101, Hash: []byte("one-ahead")},
 		BlockNumber: 51,
 	}
-	cs.mutex.Lock()
-	if pt, ok := cs.peerTips[challengerConn]; ok {
-		pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
-	} else {
-		cs.mutex.Unlock()
-		// Add via normal path first, then update observed
-		cs.UpdatePeerTip(challengerConn, confirmedTip, nil)
+	// UpdatePeerTip takes cs.mutex itself, so the challenger must be registered
+	// before the lock is acquired to reach its PeerChainTip directly.
+	cs.UpdatePeerTip(challengerConn, confirmedTip, nil)
+	func() {
 		cs.mutex.Lock()
-		if pt, ok := cs.peerTips[challengerConn]; ok {
-			pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
-		}
-	}
-	cs.mutex.Unlock()
+		defer cs.mutex.Unlock()
+		pt, ok := cs.peerTips[challengerConn]
+		require.True(t, ok, "challenger must be registered before observing")
+		pt.UpdateTipWithObserved(confirmedTip, oneAheadTip, nil)
+	}()
 
 	switched := cs.EvaluateAndSwitch()
 	assert.True(
