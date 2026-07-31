@@ -164,10 +164,6 @@ expiry_rounds() {
   docker logs archivedemo-dingo-pruning 2>&1 | grep -c 'history expiry: completed round' || true
 }
 
-expiry_skipped() {
-  docker logs archivedemo-dingo-pruning 2>&1 | grep -c 'history expiry: skipped because current slot is not high enough' || true
-}
-
 # ---------------------------------------------------------------------------
 # Watch the system grow: print a stats line every 10s until tip clears the
 # security window and History Expiry has had time to act on slot ~50.
