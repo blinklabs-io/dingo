@@ -380,6 +380,48 @@ func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
 	}
 }
 
+// TestTruncateRejectsTipIDTargetWithMismatchedHash guards against the
+// target.ID == tipBlock.ID no-op path reporting success without ever
+// verifying target actually names the current tip: a stale or malformed
+// caller could pass the tip's own ID paired with a Hash that does not
+// match what is genuinely stored there, and without validating on-lineage
+// slot/hash before that early return, Truncate would report success (zero
+// blocks removed) for a target that was never proven canonical.
+func TestTruncateRejectsTipIDTargetWithMismatchedHash(t *testing.T) {
+	f := buildTestChain(t, 5)
+
+	target := f.blocks[len(f.blocks)-1] // the tip's own ID
+	target.Hash = bytes.Repeat([]byte{0xFF}, 32)
+
+	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+
+	for _, b := range f.blocks {
+		_, err := f.db.BlockByIndex(b.ID, nil)
+		require.NoError(t, err)
+	}
+}
+
+// TestTruncateRejectsTipIDTargetWithMismatchedSlot is
+// TestTruncateRejectsTipIDTargetWithMismatchedHash's counterpart for a
+// forged Slot rather than a mismatched Hash, at the tip's own ID.
+func TestTruncateRejectsTipIDTargetWithMismatchedSlot(t *testing.T) {
+	f := buildTestChain(t, 5)
+
+	target := f.blocks[len(f.blocks)-1] // the tip's own ID
+	target.Slot = target.Slot + 1
+
+	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+
+	for _, b := range f.blocks {
+		_, err := f.db.BlockByIndex(b.ID, nil)
+		require.NoError(t, err)
+	}
+}
+
 // TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock guards
 // against a real blob/metadata divergence bug: if the block
 // immediately after target shares its exact slot (the Byron epoch-

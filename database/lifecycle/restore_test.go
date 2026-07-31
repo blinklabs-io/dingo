@@ -143,6 +143,35 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T
 	)
 }
 
+// TestRestoreRejectsMismatchedTipBlockNumber verifies that
+// validateRestoredDatabase's post-restore tip check compares
+// TipBlockNumber, not just slot/hash, against the restored database's
+// actual tip. The manifest's checksum is recomputed over the tampered
+// content (via WriteManifest), so this is not caught as a corrupted file —
+// only comparing block number as well as slot/hash catches a restored
+// database whose recorded chain height disagrees with its own tip point.
+func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
+	src := newTestDB(t)
+	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
+	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	m, err := lifecycle.Snapshot(
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+	)
+	require.NoError(t, err)
+
+	m.TipBlockNumber++
+	require.NoError(t, lifecycle.WriteManifest(snapshotDir, m))
+
+	targetDir := filepath.Join(t.TempDir(), "restored")
+	_, err = lifecycle.Restore(
+		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match manifest tip")
+}
+
 // manifestOnlyCloudDestination implements CloudManifestFetcher but fails
 // UploadDir/DownloadDir outright -- used to prove a caller went through
 // the lightweight FetchManifest path and never attempted a full

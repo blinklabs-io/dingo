@@ -466,11 +466,14 @@ func validateRestoredDatabase(
 		return fmt.Errorf("get restored tip: %w", err)
 	}
 	if tip.Point.Slot != manifest.TipSlot ||
-		!bytes.Equal(tip.Point.Hash, manifest.TipHash) {
+		!bytes.Equal(tip.Point.Hash, manifest.TipHash) ||
+		tip.BlockNumber != manifest.TipBlockNumber {
 		return fmt.Errorf(
-			"restored tip (slot=%d) does not match manifest tip (slot=%d)",
+			"restored tip (slot=%d, block=%d) does not match manifest tip (slot=%d, block=%d)",
 			tip.Point.Slot,
+			tip.BlockNumber,
 			manifest.TipSlot,
+			manifest.TipBlockNumber,
 		)
 	}
 	return nil

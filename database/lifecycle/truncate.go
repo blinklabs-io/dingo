@@ -328,9 +328,6 @@ func Truncate(
 		)
 	}
 	tipBlock := recentBlocks[0]
-	if target.ID == tipBlock.ID {
-		return 0, nil
-	}
 
 	// Confirm target is genuinely the block occupying its ID on the
 	// current genesis-to-tip lineage, not just numerically within range.
@@ -338,17 +335,21 @@ func Truncate(
 	// binary-search the same contiguous ID space this reads), but
 	// ResolveTargetByHash resolves purely through the hash index and has
 	// no such structural guarantee -- a hash (and slot) lookup and an ID
-	// lookup agreeing here is what's actually being relied on.
-	// DeleteBlocksAfter below deletes blob-store blocks by ID range, while
-	// TruncateAfterSlot deletes metadata by target.Slot as the cutoff; the
-	// two only describe the same rollback when target's ID, Hash, AND Slot
-	// all genuinely match the same on-lineage block -- checking Hash alone
-	// leaves Slot unverified, and since TruncateAfterSlot trusts Slot
-	// directly (not ID), a target with a valid ID/Hash pair but a forged
-	// or otherwise-wrong Slot would still pass a hash-only check, then
-	// cut blob and metadata history at two different points, silently
-	// diverging them instead of failing closed the same way a hash
-	// mismatch does.
+	// lookup agreeing here is what's actually being relied on. This must
+	// run before the target.ID == tipBlock.ID no-op check below: a caller
+	// can pass a target whose ID happens to equal the current tip's but
+	// whose Slot/Hash are stale or malformed, and without this check that
+	// would report success without ever having verified target actually
+	// names the current tip. DeleteBlocksAfter below deletes blob-store
+	// blocks by ID range, while TruncateAfterSlot deletes metadata by
+	// target.Slot as the cutoff; the two only describe the same rollback
+	// when target's ID, Hash, AND Slot all genuinely match the same
+	// on-lineage block -- checking Hash alone leaves Slot unverified, and
+	// since TruncateAfterSlot trusts Slot directly (not ID), a target with
+	// a valid ID/Hash pair but a forged or otherwise-wrong Slot would
+	// still pass a hash-only check, then cut blob and metadata history at
+	// two different points, silently diverging them instead of failing
+	// closed the same way a hash mismatch does.
 	onLineage, err := db.BlockByIndex(target.ID, nil)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -369,6 +370,10 @@ func Truncate(
 			onLineage.Slot,
 			onLineage.Hash,
 		)
+	}
+
+	if target.ID == tipBlock.ID {
+		return 0, nil
 	}
 
 	// Reject, rather than silently diverge, a target immediately followed
