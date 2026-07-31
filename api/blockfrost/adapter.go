@@ -1358,21 +1358,30 @@ func (a *NodeAdapter) DReps(
 		return nil, 0, fmt.Errorf("get dreps: %w", err)
 	}
 
-	// Slot-to-epoch resolution walks the epoch table once instead of
-	// querying per DRep.
+	// Slot-to-epoch resolution reads the epoch table once instead of
+	// querying per DRep. The metadata stores order by epoch_id, which is
+	// monotonic with start_slot, but sorting locally makes the binary
+	// search below independent of store ordering. The sort is stable so
+	// epochs sharing a start slot keep their query order, matching the
+	// previous linear scan's choice of the last such row.
 	epochs, err := meta.GetEpochs(txn.Metadata())
 	if err != nil {
 		return nil, 0, fmt.Errorf("get epochs: %w", err)
 	}
+	sort.SliceStable(epochs, func(i, j int) bool {
+		return epochs[i].StartSlot < epochs[j].StartSlot
+	})
 	epochForSlot := func(slot uint64) uint64 {
-		id := uint64(0)
-		for i := range epochs {
-			if epochs[i].StartSlot > slot {
-				break
-			}
-			id = epochs[i].EpochId
+		// Index of the first epoch starting after slot; the epoch
+		// containing slot is the one before it. Slots before the first
+		// recorded epoch resolve to 0, as they did before.
+		next := sort.Search(len(epochs), func(i int) bool {
+			return epochs[i].StartSlot > slot
+		})
+		if next == 0 {
+			return 0
 		}
-		return id
+		return epochs[next-1].EpochId
 	}
 
 	currentEpoch := a.ledgerState.CurrentEpoch()
@@ -1480,27 +1489,32 @@ func (a *NodeAdapter) DReps(
 				Key: items[i].credential,
 			})
 		}
+		// Both lookups declare their own error so the closure never
+		// writes through the enclosing err, which the caller reads on
+		// unrelated paths.
 		powers := map[string]uint64{}
 		if len(refs) > 0 {
-			powers, err = meta.GetDRepVotingPowerBatch(
+			batch, batchErr := meta.GetDRepVotingPowerBatch(
 				refs, 0, txn.Metadata(),
 			)
-			if err != nil {
+			if batchErr != nil {
 				return fmt.Errorf(
-					"get drep voting power batch: %w", err,
+					"get drep voting power batch: %w", batchErr,
 				)
 			}
+			powers = batch
 		}
 		typePowers := map[uint64]uint64{}
 		if len(specialTypes) > 0 {
-			typePowers, err = meta.GetDRepVotingPowerByType(
+			byType, typeErr := meta.GetDRepVotingPowerByType(
 				specialTypes, 0, txn.Metadata(),
 			)
-			if err != nil {
+			if typeErr != nil {
 				return fmt.Errorf(
-					"get predefined drep voting power: %w", err,
+					"get predefined drep voting power: %w", typeErr,
 				)
 			}
+			typePowers = byType
 		}
 		for i := range items {
 			if items[i].predefined != nil {
@@ -1596,7 +1610,8 @@ func (a *NodeAdapter) DReps(
 // drepAnchorMetadata resolves a DRep's anchor document from the
 // off-chain metadata cache. It returns nil when the DRep has no anchor
 // or the document has not been fetched successfully; cache lookup
-// failures degrade to nil rather than failing the listing.
+// failures degrade to nil rather than failing the listing, but are
+// logged so a broken cache is not silently invisible.
 func (a *NodeAdapter) drepAnchorMetadata(
 	anchorURL string,
 	anchorHash []byte,
@@ -1611,7 +1626,17 @@ func (a *NodeAdapter) drepAnchorMetadata(
 		anchorHash,
 		txn,
 	)
-	if err != nil || doc == nil ||
+	if err != nil {
+		slog.Debug(
+			"drep anchor metadata lookup failed",
+			"component", "blockfrost",
+			"url", anchorURL,
+			"hash", hex.EncodeToString(anchorHash),
+			"error", err,
+		)
+		return nil
+	}
+	if doc == nil ||
 		doc.Status != models.OffchainMetadataStatusFetched ||
 		len(doc.Content) == 0 {
 		return nil
@@ -3013,10 +3038,14 @@ func (a *NodeAdapter) Address(
 ) (AddressInfo, error) {
 	addr, isPaymentCred, err := parseAddressOrPaymentCred(address)
 	if err != nil {
+		// ErrInvalidAddress drives the HTTP 400 mapping
+		// (errors.Is in the handler); the parse error is kept
+		// alongside it so logs retain the reason.
 		return AddressInfo{}, fmt.Errorf(
-			"parse address %q: %w",
+			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
+			err,
 		)
 	}
 	// Blockfrost rejects addresses encoded for a different network than
@@ -3170,9 +3199,10 @@ func (a *NodeAdapter) AddressUTXOs(
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
-			"parse address %q: %w",
+			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
+			err,
 		)
 	}
 
@@ -3300,9 +3330,10 @@ func (a *NodeAdapter) AddressTransactions(
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
-			"parse address %q: %w",
+			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
+			err,
 		)
 	}
 
