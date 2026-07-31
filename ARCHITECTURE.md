@@ -3119,6 +3119,36 @@ skipped amount, total supply conserved). The guard set is built only when the ga
 is on; with the gate off it is nil and the crediting loop and pot derivation are
 byte-identical to pre-CIP behavior.
 
+The guard decision is also persisted onto the row it withheld, not just acted
+on in memory: `applyGuardedFlagToAccountOutputs` sets each
+`RewardAccountOutput.Guarded` column to match `rewardOutputGuarded` before
+`saveStakeRewardOutputs` writes the row, the same way `Spendable` already
+records a deregistered credential's withheld reward. This runs ahead of the
+save for both application paths — a freshly calculated application (whose
+rows are always saved) and a reused precomputed application (whose rows were
+already written by the async precompute path,
+`precomputeStakeRewardsAfterEpochTransition`, before the guard was ever
+computed there; reconciling `Guarded` here and forcing a re-save when it
+changes is what keeps a reused application's rows correct rather than stuck
+at the precompute's zero-value `false`). The reconciliation is fresh on every
+application rather than trusted from a prior write, so a stale `Guarded`
+value — a credential renewed since the last pass, or the gate disabled since
+then — self-corrects instead of persisting indefinitely; this is also what
+keeps it consistent across a rollback that removes the row entirely
+(`DeleteRewardStateAfterSlot`) followed by recomputation. `Guarded` and
+`Spendable` are deliberately separate columns rather than one flag: they are
+credited identically (both mean "not paid") but reconcile to different ADA
+pots on withholding (`Spendable = false` to unspendable/treasury,
+`Guarded = true` to undistributed/reserves, previous paragraph), which matters
+for a diagnostic reading the row later, and only `Guarded` needs the
+per-application reconciliation above (`Spendable` is settled once, either at
+calculation time from snapshot-time eligibility or by
+`finalizePrecomputedRewardOutputs`'s current-eligibility recheck on reuse).
+The Blockfrost account reward-history endpoint
+(`GetRewardAccountOutputsByCredential`/`CountRewardAccountOutputsByCredential`,
+see DATABASE.md) filters on both columns so a guarded reward is not reported
+as received, the same way a non-spendable one already was not.
+
 CIP-0163 activation is a one-time stamp that starts the inactivity clock for
 accounts that existed before the gate was ever turned on: without it, those
 accounts would keep `expiration_epoch = 0` (permanently exempt) since ordinary

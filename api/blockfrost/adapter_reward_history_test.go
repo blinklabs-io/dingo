@@ -276,6 +276,157 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 	)
 }
 
+// TestAccountRewardHistoryExcludesGuardedReward is the dingo #3021 companion
+// to TestAccountRewardHistoryExcludesNonSpendableReward: a
+// reward_account_output row withheld by the CIP-0163 reward-crediting guard
+// (rewardOutputGuarded / applyGuardedFlagToAccountOutputs in
+// ledger/reward_calculation.go) is persisted with Guarded = true but keeps
+// Spendable = true -- it was never deregistered, just CIP-0163-expired as of
+// the reward's snapshot epoch -- so the Spendable-only filter #3015 added
+// does not catch it on its own. This fixture deliberately keeps every row's
+// Spendable = true (unlike the non-spendable case above) so the guarded
+// column is what is actually under test.
+func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	stakingKey := bytes.Repeat([]byte{0x08}, 28)
+	pool := bytes.Repeat([]byte{0xfe}, 28)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		CredentialTag: 0,
+		StakingKey:    stakingKey,
+		Active:        true,
+	}))
+
+	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		{
+			Epoch: 10, CredentialTag: 0, StakingKey: stakingKey,
+			PoolKeyHash: pool, RewardType: "member",
+			Amount: 1_000_000, Spendable: true, Guarded: false,
+		},
+		// CIP-0163-guarded: the reward account was expired as of the reward's
+		// snapshot epoch, so the guard skipped crediting it, but it was never
+		// deregistered, so Spendable stays true.
+		{
+			Epoch: 11, CredentialTag: 0, StakingKey: stakingKey,
+			PoolKeyHash: pool, RewardType: "leader",
+			Amount: 9_999_999, Spendable: true, Guarded: true,
+		},
+	}, nil))
+
+	stakeAddress := newRewardHistoryStakeAddress(t, stakingKey)
+	rows, total, err := adapter.AccountRewardHistory(
+		stakeAddress,
+		PaginationParams{Count: 100, Page: 1, Order: "asc"},
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t, 1, total,
+		"the guarded row must not be counted in the total",
+	)
+	require.Len(
+		t, rows, 1,
+		"the guarded row must be absent from the response",
+	)
+	assert.Equal(t, "1000000", rows[0].Amount)
+
+	var summed uint64
+	for _, row := range rows {
+		amount, err := strconv.ParseUint(row.Amount, 10, 64)
+		require.NoError(t, err)
+		summed += amount
+	}
+	assert.Equal(
+		t, uint64(1_000_000), summed,
+		"summed reward history must equal only what was actually credited",
+	)
+}
+
+// TestAccountRewardHistorySumMatchesAccountRewardsSum pins the user-visible
+// contract both TestAccountRewardHistoryExcludesNonSpendableReward (dingo
+// #1875 review finding 1) and TestAccountRewardHistoryExcludesGuardedReward
+// (dingo #3021) motivate: for an account with a withheld reward -- for
+// either reason -- the sum of amounts /accounts/{stake_address}/rewards
+// reports must equal rewards_sum on /accounts/{stake_address}, because both
+// numbers are supposed to describe the same thing (what the account actually
+// received). Account.Reward (rewards_sum's source, via db.Account) is set
+// only by AddAccountRewardByCredential, the same crediting primitive
+// applyStakeRewardApplication calls, so setting it directly here to the sum
+// of only the credited rows mirrors what a real reward application would
+// have produced without needing to run the full ledger pipeline.
+func TestAccountRewardHistorySumMatchesAccountRewardsSum(t *testing.T) {
+	adapter, store, db := newDBBackedAdapter(t)
+
+	stakingKey := bytes.Repeat([]byte{0x09}, 28)
+	pool := bytes.Repeat([]byte{0xfd}, 28)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		CredentialTag: 0,
+		StakingKey:    stakingKey,
+		Active:        true,
+	}))
+
+	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+		{
+			Epoch: 10, CredentialTag: 0, StakingKey: stakingKey,
+			PoolKeyHash: pool, RewardType: "member",
+			Amount: 1_000_000, Spendable: true, Guarded: false,
+		},
+		{
+			Epoch: 11, CredentialTag: 0, StakingKey: stakingKey,
+			PoolKeyHash: pool, RewardType: "member",
+			Amount: 500_000, Spendable: false, Guarded: false,
+		},
+		{
+			Epoch: 12, CredentialTag: 0, StakingKey: stakingKey,
+			PoolKeyHash: pool, RewardType: "leader",
+			Amount: 250_000, Spendable: true, Guarded: true,
+		},
+	}, nil))
+
+	// Only the first row was actually credited; the other two were withheld
+	// (for two different reasons) exactly as applyStakeRewardApplication
+	// would have left them. AddAccountRewardByCredential requires the
+	// account to be active to find it.
+	require.NoError(t, db.AddAccountRewardByCredential(
+		0, stakingKey, 1_000_000, 100, nil, nil,
+	))
+	// Deactivate afterward: newDBBackedAdapter supplies no CardanoNodeConfig
+	// (see its doc comment), so Account's active-epoch lookup (SlotToEpoch)
+	// has no epoch cache to resolve against and only runs when Active is
+	// true. Activation status is orthogonal to the sum invariant under test.
+	require.NoError(t, store.DB().
+		Model(&models.Account{}).
+		Where("credential_tag = ? AND staking_key = ?", 0, stakingKey).
+		Update("active", false).Error)
+
+	stakeAddress := newRewardHistoryStakeAddress(t, stakingKey)
+	rows, _, err := adapter.AccountRewardHistory(
+		stakeAddress,
+		PaginationParams{Count: 100, Page: 1, Order: "asc"},
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	var summed uint64
+	for _, row := range rows {
+		amount, err := strconv.ParseUint(row.Amount, 10, 64)
+		require.NoError(t, err)
+		summed += amount
+	}
+
+	account, err := adapter.Account(stakeAddress)
+	require.NoError(t, err)
+	rewardsSum, err := strconv.ParseUint(account.RewardsSum, 10, 64)
+	require.NoError(t, err)
+
+	assert.Equal(
+		t, rewardsSum, summed,
+		"the sum of /rewards must equal rewards_sum on /accounts/{stake_address}",
+	)
+	assert.Equal(t, uint64(1_000_000), summed)
+}
+
 // TestAccountRewardHistoryEmptyForRegisteredAccount covers a registered
 // account with no reward history: the endpoint must distinguish this from an
 // unknown account by returning an empty slice and zero total, not an error.
