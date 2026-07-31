@@ -181,7 +181,23 @@ from the target point.`,
 			// registry here is fine — see DestinationRegistry's doc
 			// comment.
 			svc := dblifecycle.NewService(cfg, nil, logger)
-			blocksRemoved, err := svc.Truncate(cmd.Context(), target)
+
+			// Truncate can run for a long time against a large database,
+			// and Cobra's default cmd.Context() is a plain
+			// context.Background() with no signal handling wired in
+			// anywhere above this command -- without this, an operator's
+			// Ctrl+C (SIGINT) or a SIGTERM would not cancel ctx at all,
+			// leaving Truncate no way to notice the interrupt and return
+			// cleanly (only the default Go runtime behavior of killing
+			// the process outright mid-DeleteBlocksAfter, skipping every
+			// deferred cleanup). See databaseRestoreCommand above for the
+			// same reasoning.
+			ctx, stop := signal.NotifyContext(
+				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
+			)
+			defer stop()
+
+			blocksRemoved, err := svc.Truncate(ctx, target)
 			if err != nil {
 				return fmt.Errorf("truncate: %w", err)
 			}

@@ -127,6 +127,13 @@ func (s *Service) openDatabase(
 		}
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
+		_ = runtime.Close(ctx)
+		return nil, fmt.Errorf(
+			"database is in a recoverable but inconsistent state: %w",
+			recoveryErr,
+		)
+	}
 	return runtime, nil
 }
 

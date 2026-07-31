@@ -44,6 +44,23 @@ func testConfig(dataDir string) *config.Config {
 
 func uint64Ptr(v uint64) *uint64 { return &v }
 
+// seedCommitTimestampMismatch opens dir's database, forces the metadata
+// store's commit timestamp out of sync with the blob store's, and closes it
+// again -- mirroring internal/plugins.
+// TestOpenDatabaseReturnsRecoveryErrorOnRuntime's setup for producing the
+// same recoverable database.CommitTimestampError that OpenDatabase
+// surfaces through DatabaseRuntime.RecoveryError instead of as an error
+// return.
+func seedCommitTimestampMismatch(t *testing.T, dir string) {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	require.NoError(t, err)
+	metaTxn := db.Metadata().Transaction()
+	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
+	require.NoError(t, metaTxn.Commit())
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
 // TestServiceSnapshotAndRestore verifies the offline path end to end:
 // Service.Snapshot writes a manifest, and Service.Restore reads it back.
 func TestServiceSnapshotAndRestore(t *testing.T) {
@@ -118,6 +135,36 @@ func TestServiceTruncateRequiresExactlyOneTarget(t *testing.T) {
 		BlockNumber: uint64Ptr(1),
 	})
 	require.Error(t, err)
+}
+
+// TestServiceSnapshotRefusesCommitTimestampMismatch verifies that the
+// offline Snapshot path checks DatabaseRuntime.RecoveryError before
+// operating on the database, instead of silently backing up a store that
+// OpenDatabase already flagged as inconsistent between its blob and
+// metadata halves.
+func TestServiceSnapshotRefusesCommitTimestampMismatch(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "db")
+	seedCommitTimestampMismatch(t, dir)
+
+	svc := dblifecycle.NewService(testConfig(dir), nil, nil)
+	_, err := svc.Snapshot(context.Background(), filepath.Join(t.TempDir(), "snap"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "inconsistent")
+}
+
+// TestServiceTruncateRefusesCommitTimestampMismatch is
+// TestServiceSnapshotRefusesCommitTimestampMismatch's counterpart for
+// Truncate, which shares the same openDatabase helper.
+func TestServiceTruncateRefusesCommitTimestampMismatch(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "db")
+	seedCommitTimestampMismatch(t, dir)
+
+	svc := dblifecycle.NewService(testConfig(dir), nil, nil)
+	_, err := svc.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: uint64Ptr(1),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "inconsistent")
 }
 
 // fakeLiveNode records whether Snapshot/Restore/Truncate were called on
