@@ -141,14 +141,30 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
-	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil &&
-		existing.point.Slot != point.Slot {
-		o.leiosMu.Unlock()
-		return fmt.Errorf(
-			"leios endorser block cache: point slot mismatch for hash: cached %d, got %d",
-			existing.point.Slot,
-			point.Slot,
-		)
+	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
+		if existing.point.Slot != point.Slot {
+			o.leiosMu.Unlock()
+			return fmt.Errorf(
+				"leios endorser block cache: point slot mismatch for hash: cached %d, got %d",
+				existing.point.Slot,
+				point.Slot,
+			)
+		}
+		// Never regress a cached transaction set. The relay offers each
+		// endorser block on every connection, so a manifest-only store
+		// (txsRaw nil) routinely arrives after another connection has already
+		// fetched the transactions. Overwriting made a complete endorser block
+		// report itself unavailable again, which stalled the ledger's
+		// certified closure ("certified Leios endorser block unavailable")
+		// and made leios-fetch serving fail for downstream peers until some
+		// peer happened to redeliver the transactions. The manifest is
+		// content-addressed by point.Hash and verified above, so blockRaw and
+		// txCount are identical across stores for the same hash and only the
+		// transaction set can differ. The retained slice is never mutated
+		// after being stored, so it can be aliased rather than re-cloned.
+		if len(existing.txsRaw) > len(data.txsRaw) {
+			data.txsRaw = existing.txsRaw
+		}
 	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
