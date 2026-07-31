@@ -225,6 +225,11 @@ What it does:
    submission; zero accepted submissions fails the run even if the Go tests
    passed.
 
+Set `DEVNET_ARTIFACT_DIR=<dir>` to collect per-node logs, the generated genesis
+and node configuration, container status, and the `txpump` log into that
+directory before teardown removes the volumes. Unset (the default) collects
+nothing. This is what CI uploads on failure.
+
 The harness reads endpoint addresses from mode-specific environment
 variables that `run-tests.sh` sets based on the host port mappings (dingo
 mode: `DEVNET_DINGO1_ADDR`, `DEVNET_DINGO2_ADDR`, `DEVNET_DINGO3_ADDR`,
@@ -330,6 +335,39 @@ this feature:
 |------|-------------------|
 | `TestCIP50PledgeLeverageRewardEffect` | With `poolPledge: 0`, compares a leverage-off baseline (member rewards greater than zero by epoch 4) against a leveraged pass (member rewards exactly zero for every delegated stake credential). Skipped unless `DEVNET_CIP50_TEST=1` is set; requires two separately launched networks to run both passes (see above). |
 
+## When CI runs these suites
+
+`.github/workflows/devnet.yml` runs both suites through the reusable workflow
+`.github/workflows/devnet-suite.yml`, one call per mode, using the same
+`run-tests.sh` entry point documented above:
+
+| Trigger | Suites |
+|---------|--------|
+| Pull request touching a consensus-sensitive path (`.github/devnet-paths.txt`) | dingo and `--conformance` |
+| Pull request touching nothing consensus-sensitive | none; the `devnet-gate` check completes through the path-classification job |
+| Push to `main`, tag `v*` | both, no path filtering |
+| Nightly schedule (04:30 UTC) | both, no path filtering |
+| `workflow_dispatch` | selectable: all, dingo, or conformance |
+
+`devnet-gate` is the stable check name. It fails when a selected suite did not
+succeed, and also when a selected suite reported zero tests or no test count at
+all, so a run that never reached `go test` cannot report green. It is not yet a
+required status check: the suites are intermittently red on `main` because of the
+fork-tip liveness wedge in
+[#3029](https://github.com/blinklabs-io/dingo/issues/3029). See
+[`docs/BRANCH_PROTECTION.md`](../../../docs/BRANCH_PROTECTION.md) for the
+required-check name, the runner capacity these suites need, and the one-step
+follow-up to make the check required.
+
+To reproduce what CI does for a change set:
+
+```bash
+git diff --name-only origin/main...HEAD > /tmp/changed.txt
+./.github/scripts/devnet-path-filter.sh /tmp/changed.txt   # would the suites run?
+DEVNET_ARTIFACT_DIR=/tmp/devnet-artifacts ./run-tests.sh              # dingo mode
+DEVNET_ARTIFACT_DIR=/tmp/devnet-artifacts ./run-tests.sh --conformance
+```
+
 ## Port and address overrides
 
 If the defaults clash with something already on the host, override the port
@@ -351,6 +389,8 @@ Dingo mode:
 | `DEVNET_DINGO{1,2,3}_ADDR`, `DEVNET_DINGO_RELAY_ADDR` | `localhost:<port above>` | `run-tests.sh`-derived NtN addresses for the Go harness |
 | `DEVNET_DINGO{1,2,3}_NTC_ADDR`, `DEVNET_DINGO_RELAY_NTC_ADDR` | `localhost:<port above>` | NtC addresses for `DingoNtcAddrs()` |
 | `TEST_TIMEOUT`                | `5m` (script default; `run-tests.sh` uses `20m`) | `go test -timeout` |
+| `DEVNET_ARTIFACT_DIR`         | unset (collect nothing) | directory for node logs, generated genesis/config, container status, and the `txpump` log, written before teardown |
+| `DEVNET_SYSTEM_START_DELAY`   | `30`    | seconds the configurator puts between finishing key generation and slot 0, in both profiles (see below) |
 
 Conformance mode:
 
@@ -366,20 +406,42 @@ Conformance mode:
 `run-tests.sh` derives the `DEVNET_*_ADDR` variables from these so the test
 harness and the compose port mappings always agree.
 
+### Genesis start budget
+
+`configurator.sh` sets `systemStart` (Shelley) and `startTime` (Byron) to the
+moment key generation finishes plus `DEVNET_SYSTEM_START_DELAY` seconds, default
+30. It is applied after generation because `genesis-cli.py`'s own
+`systemStartDelay` of 5s is far too short when key generation takes 30+ seconds.
+`docker-compose.yml` passes the variable to both configurator services, and the
+configurator rejects anything that is not an integer of at least 10 seconds.
+
+Raising it is not automatically safer. Measured on a 4-CPU GitHub-hosted runner:
+in dingo mode all four nodes reached the slot clock with 28 of the 30 seconds
+still to go, while in conformance mode `cardano-node`'s socket appeared about 4
+seconds after slot 0. But `run-tests.sh` starts `go test` as soon as the nodes
+report healthy, and the scenario deadlines are wall clock from that point (for
+example `TestChainGrowthRate` allows 62.5s to reach slot 50), so a larger delay
+spends scenario budget waiting for the chain to start. Raise it only for a host
+that is actually starting nodes behind genesis, and confirm the suite still
+passes.
+
 ## Files
 
 | File                         | Purpose |
 |------------------------------|---------|
 | `docker-compose.yml`         | Service, volume, and network definitions for both the `dingo` and `conformance` profiles |
 | `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.1.0) |
-| `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers |
+| `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`/`startTime` (`DEVNET_SYSTEM_START_DELAY`, default 30s), relaxes key permissions for non-root node containers |
 | `testnet-dingo.yaml`         | Network spec for dingo mode: 3 pools, `poolPledge: 0` |
 | `testnet.yaml`               | Network spec for conformance mode: 2 pools |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
-| `run-tests.sh`               | Full bring-up → test → tear-down cycle used by CI; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
+| `run-tests.sh`               | Full bring-up → test → tear-down cycle used by CI; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test`; honours `DEVNET_ARTIFACT_DIR` |
+| `../../../.github/workflows/devnet.yml` | CI gate: path classification, both suites, and the `devnet-gate` check |
+| `../../../.github/workflows/devnet-suite.yml` | Reusable workflow that runs one mode of `run-tests.sh` |
+| `../../../.github/devnet-paths.txt` | Path patterns that make a pull request consensus-sensitive |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
 | `harness.go`, `config.go`    | Go test harness package: Ouroboros NtN client, tip queries, consensus checks, `testnet*.yaml` loader (build tag `devnet`) |
 | `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |

@@ -75,22 +75,85 @@ die()  { echo "[run-tests] ERROR: $*" >&2; exit 1; }
 # Cleanup on exit
 # --------------------------------------------------------------------------- #
 
+# Collect logs, generated genesis/configuration, and container status into
+# DEVNET_ARTIFACT_DIR before teardown removes the volumes. No-op when the
+# variable is unset (interactive runs); CI sets it and uploads the directory.
+# Every step is a warning at worst: artifact collection must never change the
+# outcome of the run.
+collect_artifacts() {
+  local dir="${DEVNET_ARTIFACT_DIR:-}"
+  [[ -n "${dir}" ]] || return 0
+  if ! mkdir -p "${dir}"; then
+    warn "could not create artifact directory ${dir}; skipping collection"
+    return 0
+  fi
+  log "Collecting DevNet artifacts into ${dir}"
+  docker compose -f "${COMPOSE_FILE}" ps -a >"${dir}/container-status.txt" 2>&1 ||
+    warn "could not capture container status"
+  docker compose -f "${COMPOSE_FILE}" logs --no-color --timestamps \
+    >"${dir}/compose-logs.txt" 2>&1 || warn "could not capture compose logs"
+  local svc
+  for svc in "${HEALTH_SERVICES[@]}" "${TXPUMP_SERVICE}"; do
+    docker compose -f "${COMPOSE_FILE}" logs --no-color --timestamps "${svc}" \
+      >"${dir}/${svc}.log" 2>&1 || warn "could not capture logs for ${svc}"
+  done
+  # Generated genesis and node configuration live on the configurator's config
+  # volume, mounted into the first node of the active profile.
+  docker compose -f "${COMPOSE_FILE}" cp "${HEALTH_SERVICES[0]}:/configs" \
+    "${dir}/generated-configs" >/dev/null 2>&1 ||
+    warn "could not copy generated genesis/configuration"
+  docker compose -f "${COMPOSE_FILE}" cp "${TXPUMP_SERVICE}:/logs/txpump.log" \
+    "${dir}/txpump.log" >/dev/null 2>&1 || warn "could not copy the txpump log"
+  return 0
+}
+
+# Remove the host copy of the genesis stake keys.
+#
+# The copy step below runs as root inside a container, so ${dir}/stake and its
+# contents were owned by uid 0 even though ${dir} itself is host-owned. A plain
+# host "rm -rf" then fails with "Permission denied" on every file under stake/,
+# and because this script runs under "set -e", that unguarded failure inside the
+# EXIT trap aborted the trap and made the shell exit 1: a run where all scenarios
+# passed and txpump was healthy still reported failure, and the temp directories
+# leaked. The copy step now chowns the tree to the invoking user, this helper
+# falls back to removing it from inside a container (as the owning uid) for trees
+# copied before that change, and any residual failure is a warning only. See
+# TestDevNetRunTestsExitStatusContract in internal/test/ci/.
+remove_stake_keys_dir() {
+  local dir="${1:-}"
+  [[ -n "${dir}" && -d "${dir}" ]] || return 0
+  rm -rf "${dir}" 2>/dev/null || true
+  if [[ -d "${dir}" ]]; then
+    docker run --rm -v "${dir}:/out" alpine sh -c 'rm -rf /out/stake' \
+      >/dev/null 2>&1 || true
+    rm -rf "${dir}" 2>/dev/null || true
+  fi
+  if [[ -d "${dir}" ]]; then
+    warn "could not remove ${dir}; remove it manually"
+  fi
+  return 0
+}
+
 cleanup() {
   local exit_code=$?
   if [[ "${KEEP_UP}" == "true" ]] && [[ ${exit_code} -eq 0 ]]; then
     log "Tests passed. DevNet left running (--keep-up)."
     log "To stop:  docker compose -f ${COMPOSE_FILE} down -v"
-    return
+    exit "${exit_code}"
   fi
   if [[ ${exit_code} -ne 0 ]]; then
     log "Collecting logs before teardown..."
     docker compose -f "${COMPOSE_FILE}" logs --tail=100 2>/dev/null || true
   fi
+  collect_artifacts
   log "Tearing down DevNet..."
   docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
-  if [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
-    rm -rf "${STAKE_KEYS_HOST_DIR}"
-  fi
+  remove_stake_keys_dir "${STAKE_KEYS_HOST_DIR:-}"
+  # Exit with the status that triggered the trap, so teardown noise cannot decide
+  # whether the run passed. Every command above must stay guarded: under "set -e"
+  # an unguarded failure here aborts the trap before this line and the shell exits
+  # 1 regardless of the test result.
+  exit "${exit_code}"
 }
 trap cleanup EXIT
 
@@ -184,10 +247,19 @@ if [[ "${MODE}" == "dingo" ]]; then
   else
     # Never let a copy failure abort the run. Missing stake keys are handled
     # below by disabling the opt-in CIP-50 scenario for this invocation.
+    #
+    # The copy runs as root inside the container (the volume's files are owned by
+    # the node image's uid 100), so chown the result to the invoking user. Without
+    # it the copied tree is root-owned and the host cannot remove it — teardown
+    # then failed with "Permission denied" and, under "set -e", aborted the EXIT
+    # trap so a fully passing run exited 1.
     docker run --rm \
       -v "${UTXO_KEYS_VOLUME}:/k:ro" \
       -v "${STAKE_KEYS_HOST_DIR}:/out" \
-      alpine sh -c 'cp -r /k/stake /out/stake' 2>/dev/null || true
+      -e "HOST_UID=$(id -u)" \
+      -e "HOST_GID=$(id -g)" \
+      alpine sh -c 'cp -r /k/stake /out/stake && chown -R "${HOST_UID}:${HOST_GID}" /out/stake' \
+      2>/dev/null || true
   fi
   if [[ -d "${STAKE_KEYS_HOST_DIR}/stake" ]]; then
     export DEVNET_STAKE_KEYS_DIR="${STAKE_KEYS_HOST_DIR}/stake"

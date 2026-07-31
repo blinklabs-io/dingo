@@ -1,0 +1,281 @@
+name: devnet-suite
+
+# Reusable workflow that runs one DevNet suite end to end. Called by
+# .github/workflows/devnet.yml once per mode, so both modes share a single
+# implementation instead of parallel copies. Keep the calling workflow's
+# devnet-gate job as the only stable check name; the jobs here report as
+# "devnet / <mode> / suite" and their names are not contract.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'dingo (default all-Dingo network) or conformance (Dingo beside cardano-node)'
+        required: true
+        type: string
+      runner:
+        description: 'runs-on label for the suite job. See docs/BRANCH_PROTECTION.md for capacity requirements.'
+        required: false
+        default: 'ubuntu-latest'
+        type: string
+      timeout_minutes:
+        description: 'Hard job timeout. The suite itself needs roughly 15-20 minutes of network time plus image builds.'
+        required: false
+        default: 90
+        type: number
+      test_timeout:
+        description: 'TEST_TIMEOUT passed to run-tests.sh (go test -timeout).'
+        required: false
+        default: '35m'
+        type: string
+      system_start_delay:
+        description: >
+          Seconds the configurator puts between finishing key generation and
+          slot 0 (DEVNET_SYSTEM_START_DELAY). Measured on a 4-CPU
+          github-hosted runner: all four Dingo nodes reached the slot clock
+          with 28 of the default 30 seconds still to go, so the default has
+          ample headroom there; conformance mode is tighter because
+          cardano-node's socket appeared about 4 seconds after slot 0. Raising
+          it is not free: run-tests.sh starts the Go scenarios as soon as the
+          nodes are healthy, and scenario deadlines are wall clock from that
+          point (TestChainGrowthRate allows 62.5s to reach slot 50), so a
+          larger delay spends scenario budget waiting for the chain to start.
+          Raise it only for a host that is actually starting nodes behind
+          genesis, and check the suite still passes.
+        required: false
+        default: '30'
+        type: string
+      serialize:
+        description: >
+          Serialize this job against every other DevNet suite job in the
+          repository. Required on persistent runners: the DevNet uses fixed
+          container names, a fixed 172.20.0.0/24 subnet, fixed host ports, and a
+          single "devnet" compose project, so two concurrent runs on one machine
+          collide. Ephemeral GitHub-hosted runners do not need it.
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      tests_run:
+        description: 'Number of top-level Go tests that started. Zero means the suite never ran.'
+        value: ${{ jobs.suite.outputs.tests_run }}
+      tests_failed:
+        description: 'Number of top-level Go tests that reported FAIL.'
+        value: ${{ jobs.suite.outputs.tests_failed }}
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: suite
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: >-
+        ${{ inputs.serialize && 'devnet-suite-shared'
+        || format('devnet-suite-{0}-{1}-{2}', github.run_id, github.run_attempt, inputs.mode) }}
+      cancel-in-progress: false
+    outputs:
+      tests_run: ${{ steps.count.outputs.tests_run }}
+      tests_failed: ${{ steps.count.outputs.tests_failed }}
+    env:
+      DEVNET_MODE: ${{ inputs.mode }}
+      TEST_TIMEOUT: ${{ inputs.test_timeout }}
+      DEVNET_SYSTEM_START_DELAY: ${{ inputs.system_start_delay }}
+      ARTIFACT_DIR: ${{ github.workspace }}/devnet-artifacts
+      COMPOSE_FILE_PATH: internal/test/devnet/docker-compose.yml
+    steps:
+      - name: validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${DEVNET_MODE}" in
+            dingo|conformance) ;;
+            *)
+              echo "::error::unknown DevNet mode '${DEVNET_MODE}' (expected dingo or conformance)"
+              exit 1
+              ;;
+          esac
+          # Fail here rather than inside the configurator container, which only
+          # runs after several minutes of image builds.
+          case "${DEVNET_SYSTEM_START_DELAY}" in
+            ''|*[!0-9]*)
+              echo "::error::DEVNET_SYSTEM_START_DELAY must be an integer number of seconds, got '${DEVNET_SYSTEM_START_DELAY}'"
+              exit 1
+              ;;
+          esac
+          if [ "${DEVNET_SYSTEM_START_DELAY}" -lt 10 ]; then
+            echo "::error::DEVNET_SYSTEM_START_DELAY must be at least 10 seconds, got ${DEVNET_SYSTEM_START_DELAY}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: report runner capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${ARTIFACT_DIR}"
+          {
+            echo "### DevNet ${DEVNET_MODE} runner"
+            echo
+            echo "- runner environment: ${RUNNER_ENVIRONMENT:-unknown}"
+            echo "- cpus: $(nproc)"
+            echo "- memory: $(free -g 2>/dev/null | awk '/^Mem:/ {print $2 " GiB"}')"
+            echo "- disk: $(df -h --output=avail / 2>/dev/null | tail -n1 | tr -d ' ') available on /"
+            echo "- docker: $(docker --version)"
+            echo "- docker compose: $(docker compose version --short)"
+          } | tee -a "${ARTIFACT_DIR}/runner-capacity.txt" "${GITHUB_STEP_SUMMARY}"
+          # The DevNet drives real slot time: three producers plus a relay run
+          # against a 1s-slot, 500-slot-epoch network while txpump submits
+          # transactions, and the scenarios assert wall-clock chain growth.
+          # Under-provisioned runners fail on liveness rather than on timeout, so
+          # record capacity with every run.
+          if [ "$(nproc)" -lt 8 ]; then
+            echo "::warning::this runner has $(nproc) CPUs; the DevNet suites were sized on far larger hosts and may fail on liveness rather than correctness"
+          fi
+
+      - name: free disk space
+        if: runner.environment == 'github-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Node images, four Dingo ledger databases, and (in conformance mode)
+          # the cardano-node image do not comfortably fit alongside the
+          # preinstalled toolchains.
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: record pinned image identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${ARTIFACT_DIR}"
+          IDENTITY="${ARTIFACT_DIR}/image-identity.txt"
+          {
+            echo "dingo repository: ${GITHUB_REPOSITORY}"
+            echo "dingo ref: ${GITHUB_REF}"
+            echo "dingo commit: ${GITHUB_SHA}"
+            echo "dingo image: built from this working tree by docker compose (repo root Dockerfile)"
+            echo "devnet mode: ${DEVNET_MODE}"
+            echo "system start delay: ${DEVNET_SYSTEM_START_DELAY}s after key generation"
+          } >"${IDENTITY}"
+          # Read the cardano-node pin out of the compose file rather than
+          # repeating it here, so the report always names what actually runs.
+          CARDANO_REF="$(grep -oE 'ghcr\.io/blinklabs-io/cardano-node:[A-Za-z0-9._-]+' "${COMPOSE_FILE_PATH}" | sort -u | head -n1 || true)"
+          if [ "${DEVNET_MODE}" = conformance ]; then
+            if [ -z "${CARDANO_REF}" ]; then
+              echo "::error::conformance mode selected but no cardano-node image pin found in ${COMPOSE_FILE_PATH}"
+              exit 1
+            fi
+            docker pull "${CARDANO_REF}"
+            CARDANO_DIGEST="$(docker image inspect --format '{{index .RepoDigests 0}}' "${CARDANO_REF}")"
+            {
+              echo "cardano-node image: ${CARDANO_REF}"
+              echo "cardano-node digest: ${CARDANO_DIGEST}"
+            } >>"${IDENTITY}"
+          else
+            echo "cardano-node image: not used in dingo mode (pinned as ${CARDANO_REF:-none} for conformance mode)" >>"${IDENTITY}"
+          fi
+          {
+            echo "### DevNet ${DEVNET_MODE} image identity"
+            echo
+            sed 's/^/- /' "${IDENTITY}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: run DevNet suite
+        id: suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${ARTIFACT_DIR}"
+          args=()
+          if [ "${DEVNET_MODE}" = conformance ]; then
+            args+=(--conformance)
+          fi
+          # pipefail keeps run-tests.sh's exit status authoritative through tee.
+          DEVNET_ARTIFACT_DIR="${ARTIFACT_DIR}/devnet" \
+            ./internal/test/devnet/run-tests.sh ${args[@]+"${args[@]}"} \
+            2>&1 | tee "${ARTIFACT_DIR}/test-output.log"
+
+      - name: count tests
+        id: count
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          LOG="${ARTIFACT_DIR}/test-output.log"
+          if [ ! -f "${LOG}" ]; then
+            echo "tests_run=0" >>"${GITHUB_OUTPUT}"
+            echo "tests_failed=0" >>"${GITHUB_OUTPUT}"
+            echo "::error::no test output was produced; the ${DEVNET_MODE} suite did not start"
+            exit 1
+          fi
+          # Top-level tests only ("=== RUN   TestX", not subtests).
+          RUN_COUNT="$(grep -c -E '^=== RUN[[:space:]]+Test[^/]*$' "${LOG}" || true)"
+          PASS_COUNT="$(grep -c -E '^--- PASS: Test[^/]*' "${LOG}" || true)"
+          FAIL_COUNT="$(grep -c -E '^--- FAIL: Test[^/]*' "${LOG}" || true)"
+          SKIP_COUNT="$(grep -c -E '^--- SKIP: Test[^/]*' "${LOG}" || true)"
+          echo "tests_run=${RUN_COUNT}" >>"${GITHUB_OUTPUT}"
+          echo "tests_failed=${FAIL_COUNT}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### DevNet ${DEVNET_MODE} results"
+            echo
+            echo "- tests started: ${RUN_COUNT}"
+            echo "- passed: ${PASS_COUNT}"
+            echo "- failed: ${FAIL_COUNT}"
+            echo "- skipped: ${SKIP_COUNT}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+          if [ "${RUN_COUNT}" -eq 0 ]; then
+            echo "::error::the ${DEVNET_MODE} suite ran zero tests; treating this as a failure so an empty run cannot report green"
+            exit 1
+          fi
+
+      - name: record built image identities
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Compose tags the images it builds with the project prefix, so this
+          # records exactly what the run executed, including local builds.
+          docker images --filter 'reference=devnet-*' \
+            --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}' \
+            >>"${ARTIFACT_DIR}/image-identity.txt" || true
+          docker images --filter 'reference=ghcr.io/blinklabs-io/cardano-node' \
+            --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.Digest}}' \
+            >>"${ARTIFACT_DIR}/image-identity.txt" || true
+
+      - name: upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 https://github.com/actions/upload-artifact/releases/tag/v7.0.1
+        with:
+          name: devnet-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: tear down docker resources
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          # run-tests.sh tears down its own profile in an EXIT trap, but a
+          # cancelled or timed-out job never reaches it. Persistent runners must
+          # not keep containers, volumes, or the fixed 172.20.0.0/24 network
+          # around for the next run.
+          for profile in dingo conformance; do
+            COMPOSE_PROFILES="${profile}" docker compose -f "${COMPOSE_FILE_PATH}" \
+              down -v --remove-orphans --timeout 30 || true
+          done
+          docker ps -a

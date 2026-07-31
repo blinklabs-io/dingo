@@ -1,0 +1,208 @@
+name: devnet
+
+# DevNet gate for consensus-sensitive changes (dingo #3001).
+#
+# Runs both DevNet suites through the reusable workflow in devnet-suite.yml:
+#   - dingo:       the default all-Dingo network (three producers, one relay, txpump)
+#   - conformance: internal/test/devnet/run-tests.sh --conformance, Dingo beside
+#                  cardano-node
+#
+# devnet-gate is the stable check name. For pull requests that touch no
+# consensus-sensitive path (see .github/devnet-paths.txt) it completes through
+# the classify job instead of being omitted, so the name is always reported.
+#
+# devnet-gate is deliberately NOT a required status check yet: the suites are
+# intermittently red on main because of the fork-tip liveness wedge in #3029.
+# Adding it to branch protection is a one-step follow-up once that lands, see
+# docs/BRANCH_PROTECTION.md.
+
+on:
+  pull_request:
+  push:
+    branches: ['main']
+    # Release candidates and releases run both suites regardless of paths.
+    tags: ['v*']
+  schedule:
+    # Nightly full run: catches path-filter omissions and environmental drift
+    # (base image changes, cardano-node image republishes, runner changes).
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Which suites to run'
+        type: choice
+        default: all
+        options: [all, dingo, conformance]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devnet-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  classify:
+    name: classify paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run_devnet: ${{ steps.filter.outputs.run_devnet }}
+      reason: ${{ steps.filter.outputs.reason }}
+      run_dingo: ${{ steps.select.outputs.run_dingo }}
+      run_conformance: ${{ steps.select.outputs.run_conformance }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: classify changed paths
+        id: filter
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Numeric PR id only; never interpolate event text into the shell.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: ./.github/scripts/devnet-path-filter.sh
+
+      - name: select suites
+        id: select
+        env:
+          RUN_DEVNET: ${{ steps.filter.outputs.run_devnet }}
+          DISPATCH_MODE: ${{ inputs.mode || 'all' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_dingo=false
+          run_conformance=false
+          if [ "${RUN_DEVNET}" = true ]; then
+            case "${DISPATCH_MODE}" in
+              all)         run_dingo=true; run_conformance=true ;;
+              dingo)       run_dingo=true ;;
+              conformance) run_conformance=true ;;
+              *)
+                echo "::error::unknown dispatch mode '${DISPATCH_MODE}'"
+                exit 1
+                ;;
+            esac
+          fi
+          echo "run_dingo=${run_dingo}" >>"${GITHUB_OUTPUT}"
+          echo "run_conformance=${run_conformance}" >>"${GITHUB_OUTPUT}"
+          echo "run_dingo=${run_dingo} run_conformance=${run_conformance}"
+
+  dingo:
+    needs: [classify]
+    if: needs.classify.outputs.run_dingo == 'true'
+    uses: ./.github/workflows/devnet-suite.yml
+    with:
+      mode: dingo
+      # ubuntu-latest (4 CPUs) does run both suites inside the job timeout; see
+      # the measurements in docs/BRANCH_PROTECTION.md. Set the DEVNET_RUNNER
+      # repository variable to move them to a larger runner for headroom before
+      # the gate is made a required check.
+      runner: ${{ vars.DEVNET_RUNNER || 'ubuntu-latest' }}
+      # Persistent runners must serialize: fixed container names, a fixed
+      # 172.20.0.0/24 subnet, fixed host ports, and one "devnet" compose project
+      # mean two concurrent runs on the same machine collide.
+      serialize: ${{ vars.DEVNET_RUNNER != '' }}
+      timeout_minutes: 90
+      test_timeout: 35m
+      # Genesis start budget. 30 is the configurator default and measured
+      # sufficient on a 4-CPU github-hosted runner (all four nodes reached the
+      # slot clock with 28s to spare). DEVNET_SYSTEM_START_DELAY raises it for a
+      # host that starts nodes behind genesis, without editing this workflow;
+      # read the input's description in devnet-suite.yml before raising it,
+      # because a larger delay spends scenario deadline budget.
+      system_start_delay: ${{ vars.DEVNET_SYSTEM_START_DELAY || '30' }}
+
+  conformance:
+    needs: [classify]
+    if: needs.classify.outputs.run_conformance == 'true'
+    uses: ./.github/workflows/devnet-suite.yml
+    with:
+      mode: conformance
+      runner: ${{ vars.DEVNET_RUNNER || 'ubuntu-latest' }}
+      serialize: ${{ vars.DEVNET_RUNNER != '' }}
+      # Conformance additionally pulls the pinned cardano-node image.
+      timeout_minutes: 90
+      test_timeout: 35m
+      system_start_delay: ${{ vars.DEVNET_SYSTEM_START_DELAY || '30' }}
+
+  devnet-gate:
+    # Stable check name. Name this job in branch protection, not the suite jobs.
+    name: devnet-gate
+    needs: [classify, dingo, conformance]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: evaluate suites
+        shell: bash
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          RUN_DEVNET: ${{ needs.classify.outputs.run_devnet }}
+          CLASSIFY_REASON: ${{ needs.classify.outputs.reason }}
+          RUN_DINGO: ${{ needs.classify.outputs.run_dingo }}
+          RUN_CONFORMANCE: ${{ needs.classify.outputs.run_conformance }}
+          DINGO_RESULT: ${{ needs.dingo.result }}
+          DINGO_TESTS: ${{ needs.dingo.outputs.tests_run }}
+          CONFORMANCE_RESULT: ${{ needs.conformance.result }}
+          CONFORMANCE_TESTS: ${{ needs.conformance.outputs.tests_run }}
+        run: |
+          set -uo pipefail
+          summary() { echo "$1" >>"${GITHUB_STEP_SUMMARY}"; }
+          fail() {
+            echo "::error::$1"
+            summary "- FAILED: $1"
+            exit 1
+          }
+
+          summary "### devnet-gate"
+          summary ""
+          summary "- classification: run_devnet=${RUN_DEVNET} (${CLASSIFY_REASON:-no reason reported})"
+
+          if [ "${CLASSIFY_RESULT}" != success ]; then
+            fail "the path classification job did not succeed (result: ${CLASSIFY_RESULT}); the gate cannot tell whether the suites were needed"
+          fi
+
+          if [ "${RUN_DEVNET}" != true ]; then
+            if [ "${DINGO_RESULT}" != skipped ] || [ "${CONFORMANCE_RESULT}" != skipped ]; then
+              fail "no consensus-sensitive paths changed but a suite job reported dingo=${DINGO_RESULT} conformance=${CONFORMANCE_RESULT}"
+            fi
+            summary "- no consensus-sensitive paths changed; both DevNet suites were not selected"
+            echo "No consensus-sensitive paths changed; DevNet suites not required for this change."
+            exit 0
+          fi
+
+          check_suite() {
+            local name="$1" selected="$2" result="$3" tests="$4"
+            if [ "${selected}" != true ]; then
+              if [ "${result}" != skipped ]; then
+                fail "${name} suite was not selected but its job reported ${result}"
+              fi
+              summary "- ${name}: not selected"
+              return 0
+            fi
+            if [ "${result}" != success ]; then
+              fail "${name} suite did not succeed (result: ${result:-missing})"
+            fi
+            # A suite that never started reports no count. Zero tests must not
+            # be able to report green.
+            case "${tests}" in
+              ''|*[!0-9]*)
+                fail "${name} suite reported no test count ('${tests}'); it did not start"
+                ;;
+            esac
+            if [ "${tests}" -le 0 ]; then
+              fail "${name} suite ran zero tests"
+            fi
+            summary "- ${name}: success, ${tests} tests started"
+            return 0
+          }
+
+          check_suite dingo "${RUN_DINGO}" "${DINGO_RESULT}" "${DINGO_TESTS}"
+          check_suite conformance "${RUN_CONFORMANCE}" "${CONFORMANCE_RESULT}" "${CONFORMANCE_TESTS}"
+          echo "DevNet gate satisfied."

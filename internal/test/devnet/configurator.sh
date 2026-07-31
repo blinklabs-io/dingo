@@ -113,12 +113,30 @@ EOF
 }
 
 compute_start_time() {
-    # Set system start to now + 30s to give Docker time to start node
-    # containers after the configurator exits.
+    # Set system start to now + DEVNET_SYSTEM_START_DELAY seconds (default 30)
+    # to give Docker time to start node containers after the configurator exits.
     # genesis-cli.py's systemStartDelay (5s) is too short because key
-    # generation takes 30+ seconds, so we override after generation.
-    SYSTEM_START_UNIX=$(( $(date +%s) + 30 ))
+    # generation takes 30+ seconds, so we override after generation. Slower
+    # hosts can raise the budget; note that the node containers only need to be
+    # up before slot 0, and that the delay also determines how long the test
+    # harness waits for the chain to start.
+    local delay="${DEVNET_SYSTEM_START_DELAY:-30}"
+    # Validate before it reaches arithmetic and jq: digits only, and long
+    # enough that nodes can realistically come up before slot 0.
+    case "${delay}" in
+        ''|*[!0-9]*)
+            echo "ERROR: DEVNET_SYSTEM_START_DELAY must be a non-negative integer number of seconds, got '${delay}'" >&2
+            exit 1
+            ;;
+    esac
+    delay=$((10#${delay}))
+    if [ "${delay}" -lt 10 ]; then
+        echo "ERROR: DEVNET_SYSTEM_START_DELAY must be at least 10 seconds, got ${delay}" >&2
+        exit 1
+    fi
+    SYSTEM_START_UNIX=$(( $(date +%s) + delay ))
     SYSTEM_START_ISO="$(date -d @${SYSTEM_START_UNIX} -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "System start: ${SYSTEM_START_ISO} (now + ${delay}s)"
 }
 
 set_start_time() {

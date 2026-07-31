@@ -1,0 +1,74 @@
+# Consensus-sensitive paths for the DevNet gate (.github/workflows/devnet.yml).
+#
+# One POSIX extended regular expression per line, matched against
+# repository-relative paths of the files a pull request changes. Blank lines and
+# lines starting with "#" are ignored. When any changed path matches any pattern,
+# the pull request runs both DevNet suites (all-Dingo and --conformance).
+#
+# Patterns are consumed by two things, so keep them valid in both:
+#   - grep -E in .github/scripts/devnet-path-filter.sh
+#   - Go regexp in internal/test/ci/devnet_path_filter_test.go, which fails when
+#     a pattern matches nothing in the tree. A filter that matches nothing is
+#     worse than no filter, because it looks like coverage.
+
+# Chain storage, chain growth, and chain selection
+^chain/
+^chainselection/
+^chainsync/
+^consensus/
+
+# Ledger: block/header validation, VRF/KES/OpCert checks, epoch and nonce
+# logic, forging, leader election, rewards, governance
+^ledger/
+^ledgerstate/
+
+# Mempool and transaction admission
+^mempool/
+
+# Ouroboros mini-protocol handlers: NtN (chainsync, blockfetch, txsubmission,
+# keepalive, peersharing) and NtC (localstatequery, localtxsubmission,
+# localtxmonitor)
+^ouroboros/
+
+# Peer connectivity for the DevNet ring topology
+^connmanager/
+^peergov/
+^topology/
+
+# Block-producer credentials (VRF/KES key files, KES evolution)
+^keystore/
+
+# Cross-component event bus carrying block/chain/mempool/peer events
+^event/
+
+# Chain and ledger storage backing every node in the network
+^database/
+^plugin/
+
+# Node composition, forging wiring, and configuration surface
+^node[^/]*\.go$
+^config\.go$
+^internal/node/
+^internal/config/
+^internal/leiosheader/
+^cmd/dingo/
+
+# Network configuration and genesis shipped for devnet runs
+^config/cardano/
+
+# DevNet infrastructure and the container images it builds
+^internal/test/devnet/
+^internal/test/antithesis/
+^Dockerfile$
+^Makefile$
+
+# The gate itself, its path filter, and the test that guards the filter
+^\.github/workflows/devnet\.yml$
+^\.github/workflows/devnet-suite\.yml$
+^\.github/devnet-paths\.txt$
+^\.github/scripts/devnet-path-filter\.sh$
+^internal/test/ci/
+
+# Shared dependencies (gouroboros, plutigo, and everything else pinned here)
+^go\.mod$
+^go\.sum$

@@ -788,6 +788,46 @@ Containers remain running until you stop them. The DevNet parameters (in `testne
 
 See [`internal/test/devnet/README.md`](internal/test/devnet/README.md) for full details on the harness, configurator, available test scenarios, and port/address overrides.
 
+### When CI Runs the DevNet Suites
+
+`.github/workflows/devnet.yml` runs both suites through the reusable workflow
+`.github/workflows/devnet-suite.yml`, calling the same `run-tests.sh` shown
+above:
+
+| Trigger | Suites |
+|---------|--------|
+| Pull request touching a consensus-sensitive path (`.github/devnet-paths.txt`) | all-Dingo and `--conformance` |
+| Pull request touching nothing consensus-sensitive | none; the `devnet-gate` check completes through the path-classification job |
+| Push to `main`, tag `v*` | both, no path filtering |
+| Nightly schedule (04:30 UTC) | both, no path filtering |
+| Manual `workflow_dispatch` | selectable: all, dingo, or conformance |
+
+Consensus-sensitive means consensus, ledger epoch and nonce logic, forging and
+credentials, chain selection, mempool, transaction submission, NtN/NtC
+protocols, block and header validation, DevNet infrastructure, and their shared
+dependencies. The exact patterns live in `.github/devnet-paths.txt`, and
+`internal/test/ci/` fails the normal test run if a pattern stops matching real
+files.
+
+`devnet-gate` is the stable check name. It fails when a selected suite did not
+succeed and when a selected suite reported zero tests, so a run that never
+started cannot report green. It is not yet a required status check because the
+suites are intermittently red on `main` because of the fork-tip liveness wedge in
+[#3029](https://github.com/blinklabs-io/dingo/issues/3029). See
+[`docs/BRANCH_PROTECTION.md`](docs/BRANCH_PROTECTION.md) for the required-check
+name, the runner capacity these suites need, and the one-step follow-up to make
+the check required.
+
+Reproduce the classification decision and the runs locally:
+
+```bash
+git diff --name-only origin/main...HEAD > /tmp/changed.txt
+./.github/scripts/devnet-path-filter.sh /tmp/changed.txt
+
+DEVNET_ARTIFACT_DIR=/tmp/devnet-artifacts-dingo ./internal/test/devnet/run-tests.sh
+DEVNET_ARTIFACT_DIR=/tmp/devnet-artifacts-conformance ./internal/test/devnet/run-tests.sh --conformance
+```
+
 ### Local DevNet (Without Docker)
 
 For quick iteration without Docker, `devmode.sh` runs Dingo directly against a local devnet genesis. It resets state and updates genesis timestamps on each run:

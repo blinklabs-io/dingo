@@ -49,6 +49,10 @@ services:
       dockerfile: Dockerfile.configurator
     container_name: devnet-configurator
     profiles: ["conformance"]
+    environment:
+      # Seconds between key generation finishing and slot 0. Raise on hosts
+      # where the node containers need longer to come up.
+      DEVNET_SYSTEM_START_DELAY: "${DEVNET_SYSTEM_START_DELAY:-30}"
     volumes:
       - ./testnet.yaml:/testnet.yaml
       - p1-configs:/configs/1
@@ -63,6 +67,9 @@ services:
     profiles: ["dingo"]
     environment:
       DINGO_POOL_IDS: "1 2 3"
+      # Seconds between key generation finishing and slot 0. Raise on hosts
+      # where the node containers need longer to come up.
+      DEVNET_SYSTEM_START_DELAY: "${DEVNET_SYSTEM_START_DELAY:-30}"
     volumes:
       - ./testnet-dingo.yaml:/testnet.yaml
       - p1-configs:/configs/1
