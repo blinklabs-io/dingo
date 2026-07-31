@@ -98,6 +98,9 @@ type stakeRewardApplication struct {
 	// neither credited (applyStakeRewardApplication) nor counted toward
 	// effective/unspendable (deriveStakeRewardApplicationTotals), so its amount
 	// falls through to undistributed and is refunded to reserves.
+	// applyGuardedFlagToAccountOutputs (dingo #3021) persists this same
+	// membership test onto each output's Guarded column before it is saved, so
+	// a reader of reward_account_output does not need to reconstruct this set.
 	guardedRewardCredentials map[string]struct{}
 	// snapshotCapturedSlot and snapshotBoundarySlot record the reward_snapshot
 	// row's own captured/boundary slots as observed by
@@ -343,12 +346,6 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
 
-	if !app.precomputed || app.outputsUpdated {
-		if err := saveStakeRewardOutputs(meta, metaTxn, app); err != nil {
-			return err
-		}
-	}
-
 	// CIP-0163 reward-crediting guard (Mechanism B, Task 10). A pool's reward
 	// (leader) account is credited its leader reward independent of its own
 	// stake, so -- unlike an expired delegator, whose stake Task 8 already
@@ -359,12 +356,34 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	// agree: a guarded amount is not credited and lands in undistributed ->
 	// reserves rather than being counted effective. Gate off leaves the set nil
 	// (no load, byte-identical to pre-CIP behavior).
+	//
+	// This must run BEFORE saveStakeRewardOutputs below (dingo #3021): the
+	// guard decision is persisted onto each output's Guarded column, the same
+	// way Spendable already is, so a later reader (the Blockfrost account
+	// reward-history endpoint) can tell an uncredited row from a credited one
+	// without re-deriving activation state and inactivity windows at read
+	// time. applyGuardedFlagToAccountOutputs reconciles Guarded fresh against
+	// the current guard set on every application -- including a reused
+	// precomputed application, whose rows may have been persisted before this
+	// guard was known -- rather than trusting whatever a prior run wrote, so
+	// it also self-corrects a stale guarded=true from a credential that was
+	// later renewed, or from the gate being disabled since the row was last
+	// written.
 	if ls.config.DelegatorInactivityEnabled {
 		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
 		if err != nil {
 			return err
 		}
 		app.guardedRewardCredentials = guarded
+	}
+	if applyGuardedFlagToAccountOutputs(app) {
+		app.outputsUpdated = true
+	}
+
+	if !app.precomputed || app.outputsUpdated {
+		if err := saveStakeRewardOutputs(meta, metaTxn, app); err != nil {
+			return err
+		}
 	}
 
 	for _, output := range app.accountOutputs {
@@ -534,6 +553,34 @@ func rewardOutputGuarded(
 	).MapKey()
 	_, ok := app.guardedRewardCredentials[key]
 	return ok
+}
+
+// applyGuardedFlagToAccountOutputs reconciles each account output's
+// persisted Guarded column against rewardOutputGuarded for the current
+// application (dingo #3021). It mirrors finalizePrecomputedRewardOutputs'
+// Spendable reconciliation: the flag is always recomputed fresh rather than
+// trusted from a prior run, so a stale guarded=true left by an earlier
+// precompute or application -- e.g. the credential was since renewed, or the
+// gate has since been disabled -- is corrected rather than persisting
+// indefinitely. Returns whether any row's Guarded value changed, so the
+// caller can force a re-save of an otherwise-unchanged reused precomputed
+// application.
+func applyGuardedFlagToAccountOutputs(app *stakeRewardApplication) bool {
+	if app == nil {
+		return false
+	}
+	changed := false
+	for _, output := range app.accountOutputs {
+		if output == nil {
+			continue
+		}
+		guarded := rewardOutputGuarded(app, output)
+		if output.Guarded != guarded {
+			output.Guarded = guarded
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (ls *LedgerState) precomputedStakeRewardApplication(
