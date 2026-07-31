@@ -689,6 +689,35 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	return nil
 }
 
+// rollbackForkDepth returns the number of blocks a rollback to
+// rollbackBlockIndex removes from the chain. The rollback point is normally at
+// or behind the tip, but it can sit ahead of the tip: rolled-back blocks stay
+// resolvable through the manager's block cache with their original (higher)
+// block index, and ephemeral fork chains index above the primary chain tip, so
+// fork resolution can hand us a rollback point above the current tip. Nothing
+// sits between the tip and a point ahead of it, so the fork depth is zero.
+// Subtracting directly would wrap around uint64 and make any such rollback look
+// deeper than the security parameter K, which rejected and denied every peer
+// permanently (issue #3035).
+//
+// Callers must hold c.mutex.
+func (c *Chain) rollbackForkDepth(
+	point ocommon.Point,
+	rollbackBlockIndex uint64,
+) uint64 {
+	if rollbackBlockIndex <= c.tipBlockIndex {
+		return c.tipBlockIndex - rollbackBlockIndex
+	}
+	slog.Default().Warn(
+		"rollback point is ahead of chain tip, treating fork depth as zero",
+		"rollback_slot", point.Slot,
+		"rollback_block_index", rollbackBlockIndex,
+		"tip_slot", c.currentTip.Point.Slot,
+		"tip_block_index", c.tipBlockIndex,
+	)
+	return 0
+}
+
 // ValidateRollback verifies that Rollback(point) would be accepted without
 // mutating chain state. Callers can use this to avoid applying external
 // side effects before the chain's rollback pre-checks have run.
@@ -734,7 +763,7 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 		rollbackBlockIndex = tmpBlock.ID
 	}
 	// Calculate fork depth before deleting blocks
-	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. When the chain is shorter than K
@@ -807,7 +836,7 @@ func (c *Chain) rollbackLocked(
 		rollbackBlockIndex = tmpBlock.ID
 	}
 	// Calculate fork depth before deleting blocks
-	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. When the chain is shorter than K
