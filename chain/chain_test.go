@@ -1605,6 +1605,67 @@ func TestChainRollbackWithinSecurityParam(t *testing.T) {
 	}
 }
 
+// TestChainRollbackPointAheadOfTipIsNotDeepFork covers issue #3035: a rollback
+// point whose block index is ahead of the persistent tip must not be treated as
+// a deep fork. Rolled-back blocks stay resolvable through the manager's block
+// cache with their original (higher) block index, so a later fork resolution
+// can hand the chain a rollback point above the current tip. Subtracting that
+// index from the tip wrapped around uint64, making every such rollback look
+// deeper than K, which permanently denied every peer.
+func TestChainRollbackPointAheadOfTipIsNotDeepFork(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// K=2 allows the first rollback (depth 2) while remaining small enough
+	// that an underflowed fork depth would exceed it.
+	mustSetLedger(t, cm, 2)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// Roll back the last two blocks (block index 6 -> 4). The removed blocks
+	// remain in the manager's block cache with block index 5 and 6.
+	rollbackBlock := testBlocks[len(testBlocks)-3]
+	rollbackPoint := ocommon.Point{
+		Slot: rollbackBlock.SlotNumber(),
+		Hash: rollbackBlock.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("unexpected error rolling back chain: %s", err)
+	}
+	// Now roll back to a point that is still resolvable but whose block index
+	// (6) is ahead of the current tip index (4).
+	aheadBlock := testBlocks[len(testBlocks)-1]
+	aheadPoint := ocommon.Point{
+		Slot: aheadBlock.SlotNumber(),
+		Hash: aheadBlock.Hash().Bytes(),
+	}
+	if err := c.ValidateRollback(aheadPoint); err != nil {
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			t.Fatalf(
+				"rollback point ahead of tip must not be reported as "+
+					"exceeding security param K: %s",
+				err,
+			)
+		}
+		t.Fatalf("unexpected error validating rollback: %s", err)
+	}
+	if err := c.Rollback(aheadPoint); err != nil {
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			t.Fatalf(
+				"rollback point ahead of tip must not be rejected for "+
+					"exceeding security param K: %s",
+				err,
+			)
+		}
+		t.Fatalf("unexpected error rolling back chain: %s", err)
+	}
+}
+
 func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
