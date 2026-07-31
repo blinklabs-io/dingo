@@ -6539,6 +6539,21 @@ func (ls *LedgerState) ActiveSlotCoeff() float64 {
 	return float64(num) / float64(denom)
 }
 
+// ActiveSlotCoeffRat returns the active slot coefficient (f) as an exact
+// *big.Rat taken straight from the Shelley genesis, with no float64 roundtrip.
+// Returns nil when the genesis is unavailable.
+//
+// Prefer this over ActiveSlotCoeff for anything that feeds a leader check.
+// ActiveSlotCoeff divides the genesis numerator and denominator as float64, and
+// the nearest double to a value like 1/20 is strictly larger than 1/20, so a
+// threshold derived from it is strictly larger than the reference node's and
+// admits a strict superset of eligible slots. Both the header-verification path
+// and the leader-schedule precompute must use this exact value so they cannot
+// disagree with each other or with the reference.
+func (ls *LedgerState) ActiveSlotCoeffRat() *big.Rat {
+	return ls.activeSlotCoeffRat()
+}
+
 // activeSlotCoeffRat returns the active slot coefficient as a *big.Rat,
 // preserving the full precision from the Shelley genesis without a
 // float64 roundtrip. Returns nil when the genesis is unavailable.
@@ -6550,7 +6565,9 @@ func (ls *LedgerState) activeSlotCoeffRat() *big.Rat {
 	if shelleyGenesis == nil || shelleyGenesis.ActiveSlotsCoeff.Rat == nil {
 		return nil
 	}
-	return shelleyGenesis.ActiveSlotsCoeff.Rat
+	// big.Rat is mutable and this value is shared genesis state, so hand out a
+	// copy rather than the genesis pointer itself.
+	return new(big.Rat).Set(shelleyGenesis.ActiveSlotsCoeff.Rat)
 }
 
 // Database returns the underlying database for transaction operations.
