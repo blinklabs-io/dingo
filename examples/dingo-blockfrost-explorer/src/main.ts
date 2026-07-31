@@ -2241,7 +2241,10 @@ async function renderAssetLookup(assetID: string): Promise<void> {
   const encodedAssetID = encodeURIComponent(assetID);
   const [asset, holders] = await Promise.all([
     blockfrostFetch<AssetResponse>(`/api/v0/assets/${encodedAssetID}`),
-    optionalFetchPage<AssetAddressResponse>(
+    // A 404 means this Dingo build does not serve the holder endpoint, which
+    // falls back to the empty holder copy below. Any other failure is reported
+    // as an error instead of being shown as an asset with no holders.
+    fetchPageAllowingNotFound<AssetAddressResponse>(
       `/api/v0/assets/${encodedAssetID}/addresses?count=25&page=1&order=desc`,
     ),
   ]);
