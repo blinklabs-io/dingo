@@ -27,11 +27,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// hotCacheData holds both entries and access counts together for atomic updates.
-// This ensures entries and accessCnt are always consistent.
+// hotCacheData holds entries, access counts, and their total byte size
+// together for atomic updates. Keeping totalBytes here rather than in a
+// separately-updated atomic ensures a reader of one CAS-protected snapshot
+// always sees a byte total that is exactly consistent with that snapshot's
+// entries -- a byte total tracked outside this struct could be read after a
+// concurrent writer's entries CAS had already landed but before that
+// writer's own byte-total update ran, making the byte-limit check
+// undercount and silently skip eviction it should have performed.
 type hotCacheData struct {
-	entries   map[string][]byte
-	accessCnt map[string]uint64
+	entries    map[string][]byte
+	accessCnt  map[string]uint64
+	totalBytes int64 // sum of len(key)+len(value) across entries; only meaningful when maxBytes > 0
 }
 
 // accessSampleRate controls how often access counts are updated on Get().
@@ -81,10 +88,9 @@ type HotCacheCASStats struct {
 // It uses copy-on-write semantics for thread-safe concurrent access without locks.
 // Eviction follows a Least-Frequently-Used (LFU) policy with probabilistic counting.
 type HotCache struct {
-	data                atomic.Pointer[hotCacheData] // combined entries + access counts
+	data                atomic.Pointer[hotCacheData] // combined entries + access counts + total bytes
 	maxSize             int                          // max number of entries (0 = unlimited)
 	maxBytes            int64                        // max memory in bytes (0 = unlimited)
-	curBytes            atomic.Int64                 // current memory usage
 	sampleCnt           atomic.Uint64                // counter for probabilistic access tracking
 	casSequence         atomic.Uint64                // gives contending writers asymmetric jitter
 	casAttempts         atomic.Uint64
@@ -242,7 +248,8 @@ func NewHotCache(maxSize int, maxBytes int64) *HotCache {
 		maxCASAttempts: defaultMaxCASAttempts,
 	}
 
-	// Initialize combined data structure
+	// Initialize combined data structure (totalBytes defaults to 0, correct
+	// for an empty cache)
 	data := &hotCacheData{
 		entries:   make(map[string][]byte),
 		accessCnt: make(map[string]uint64),
@@ -321,25 +328,25 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 		newAccessCnt[keyStr]++ // increment on put
 
 		// Trim to the configured limits as part of this same snapshot, using
-		// an estimate of post-insert bytes derived from the running counter;
-		// this mirrors how memDelta itself is computed relative to oldData
-		// and needs no per-Put O(n) resummation.
-		estimatedBytes := c.curBytes.Load() + memDelta
+		// oldData's own totalBytes -- not a separately-updated atomic -- as
+		// the byte-usage baseline. Deriving the estimate from the exact
+		// snapshot memDelta is itself computed against means there is no
+		// window in which this read can be stale relative to the entries
+		// it's paired with; needs no per-Put O(n) resummation either.
+		estimatedBytes := oldData.totalBytes + memDelta
 		trimmedEntries, trimmedAccessCnt, bytesEvicted := c.evictToFit(
 			newEntries, newAccessCnt, estimatedBytes,
 		)
 
 		newData := &hotCacheData{
-			entries:   trimmedEntries,
-			accessCnt: trimmedAccessCnt,
+			entries:    trimmedEntries,
+			accessCnt:  trimmedAccessCnt,
+			totalBytes: estimatedBytes - bytesEvicted,
 		}
 
 		// Try to atomically update both maps together
 		c.casAttempts.Add(1)
 		if c.data.CompareAndSwap(oldData, newData) {
-			if c.maxBytes > 0 {
-				c.curBytes.Add(memDelta - bytesEvicted)
-			}
 			c.recordSuccessfulCommit(backoffTime)
 			return
 		}
@@ -378,8 +385,9 @@ func (c *HotCache) incrementAccess(key []byte) {
 		newAccessCnt[keyStr]++
 
 		newData := &hotCacheData{
-			entries:   oldData.entries, // reuse immutable entries map
-			accessCnt: newAccessCnt,
+			entries:    oldData.entries, // reuse immutable entries map
+			accessCnt:  newAccessCnt,
+			totalBytes: oldData.totalBytes, // unchanged: no entries added or removed
 		}
 
 		c.casAttempts.Add(1)

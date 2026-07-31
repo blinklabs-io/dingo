@@ -184,7 +184,7 @@ func TestHotCacheMemoryLimit(t *testing.T) {
 	// Memory usage should be controlled
 	assert.LessOrEqual(
 		t,
-		cache.curBytes.Load(),
+		cache.data.Load().totalBytes,
 		maxBytes+int64(valueSize*3),
 		"memory should be close to maxBytes after eviction",
 	)
@@ -670,4 +670,86 @@ func TestEvictToFitKeepsAtLeastOneEntryWhenMaxSizeIsOne(t *testing.T) {
 
 	assert.GreaterOrEqual(t, len(gotEntries), 1)
 	assert.LessOrEqual(t, len(gotEntries), 2)
+}
+
+// TestHotCacheTotalBytesStaysAccurateAcrossEvictions replaces an earlier
+// version of this test that proved a real gap by directly desyncing a
+// separate curBytes atomic (cache.curBytes.Store(0)) to simulate a delayed
+// concurrent writer, then showing Put trusted the stale value and let the
+// cache grow over maxBytes. That attack is no longer expressible at all:
+// totalBytes now lives inside hotCacheData itself, so every read of it is
+// tied to the exact entries snapshot it describes -- there is no separate
+// counter left to desync. This test instead verifies the new invariant
+// directly: after many sequential Puts (some of which force eviction),
+// data.totalBytes must always equal the real, independently-computed sum of
+// entry sizes, and must never exceed maxBytes.
+func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
+	const maxBytes = 1000             // per-entry cutoff = maxBytes/10 = 100
+	cache := NewHotCache(0, maxBytes) // maxSize unlimited: purely byte-driven
+
+	for i := range 30 {
+		cache.Put(fmt.Appendf(nil, "key-%d", i), make([]byte, 90)) // 95 bytes each; forces repeated eviction
+	}
+
+	data := cache.data.Load()
+	require.NotNil(t, data)
+	var actualBytes int64
+	for k, v := range data.entries {
+		actualBytes += int64(len(k) + len(v))
+	}
+
+	assert.Equal(
+		t, actualBytes, data.totalBytes,
+		"totalBytes must always match the real sum of entries",
+	)
+	assert.LessOrEqual(t, data.totalBytes, int64(maxBytes))
+}
+
+// TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention is the
+// byte-limit counterpart to
+// TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention: many
+// goroutines concurrently Put small entries against a small maxBytes limit,
+// and the final real byte total (computed independently from data.entries,
+// not trusted from any counter) must never permanently exceed maxBytes.
+//
+// This used to be a probabilistic, largely-decorative check: an earlier
+// design tracked the byte total in a separately-updated atomic (curBytes),
+// racy relative to the entries snapshot in a window only one or two
+// instructions wide -- narrow enough that a direct probe with 300 concurrent
+// writers over 50 rounds reproduced zero failures even on the buggy code
+// (see TestHotCacheTotalBytesStaysAccurateAcrossEvictions for how that gap
+// was proven instead). Now that the byte total lives inside hotCacheData
+// itself, this test holds deterministically, every round, by construction.
+func TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention(t *testing.T) {
+	const maxBytes = 2000 // per-entry cutoff = maxBytes/10 = 200
+	const rounds = 20
+	const numWriters = 200
+	const valueSize = 90 // 90 + ~10-byte key ~= 100, under the per-entry cutoff
+
+	for round := range rounds {
+		cache := NewHotCache(0, maxBytes) // maxSize unlimited: purely byte-driven
+
+		var wg sync.WaitGroup
+		wg.Add(numWriters)
+		for w := range numWriters {
+			go func(id int) {
+				defer wg.Done()
+				key := fmt.Appendf(nil, "key-%d-%d", round, id)
+				cache.Put(key, make([]byte, valueSize))
+			}(w)
+		}
+		wg.Wait()
+
+		data := cache.data.Load()
+		require.NotNil(t, data)
+		var actualBytes int64
+		for k, v := range data.entries {
+			actualBytes += int64(len(k) + len(v))
+		}
+		assert.LessOrEqual(
+			t, actualBytes, int64(maxBytes),
+			"round %d: cache holds %d bytes, over maxBytes=%d",
+			round, actualBytes, maxBytes,
+		)
+	}
 }
