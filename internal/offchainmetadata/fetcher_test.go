@@ -525,18 +525,17 @@ func TestResolveFetchURLRejectsBroadcastIPv4(t *testing.T) {
 	require.ErrorContains(t, err, "not allowed")
 }
 
-// TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit verifies that a pool
-// document is capped at 512 bytes at fetch time even though the fetcher's
-// generic max bytes (here left at the default 1 MiB) is far larger: pool
-// sources get the stake-pool-specific limit, not the generic one.
-func TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit(t *testing.T) {
-	padding := strings.Repeat("a", 500)
-	body := []byte(
-		`{"name":"` + padding + `","description":"d","ticker":"TEST",` +
-			`"homepage":"https://example.com"}`,
-	)
-	require.Greater(t, len(body), poolMetadataMaxBytes)
-	hash := blake2b.Sum256(body)
+// newFetchTestServerDoc starts a test server that serves body for every
+// request and returns a Fetcher wired to that server plus an OffchainMetadata
+// document for sourceType whose Hash is body's blake2b digest, so the fetch
+// passes hash verification and only per-source handling is under test. The
+// server is closed on test cleanup.
+func newFetchTestServerDoc(
+	t *testing.T,
+	sourceType string,
+	body []byte,
+) (*Fetcher, models.OffchainMetadata) {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write(body)
@@ -551,11 +550,30 @@ func TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	doc := models.OffchainMetadata{
-		SourceType: models.OffchainMetadataSourcePool,
+	hash := blake2b.Sum256(body)
+	return fetcher, models.OffchainMetadata{
+		SourceType: sourceType,
 		URL:        server.URL,
 		Hash:       hash[:],
 	}
+}
+
+// TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit verifies that a pool
+// document is capped at 512 bytes at fetch time even though the fetcher's
+// generic max bytes (here left at the default 1 MiB) is far larger: pool
+// sources get the stake-pool-specific limit, not the generic one.
+func TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit(t *testing.T) {
+	padding := strings.Repeat("a", 500)
+	body := []byte(
+		`{"name":"` + padding + `","description":"d","ticker":"TEST",` +
+			`"homepage":"https://example.com"}`,
+	)
+	require.Greater(t, len(body), poolMetadataMaxBytes)
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourcePool,
+		body,
+	)
 	fetcher.fetchOne(context.Background(), &doc)
 
 	require.Equal(t, models.OffchainMetadataStatusFailed, doc.Status)
@@ -574,26 +592,11 @@ func TestFetchOneDoesNotReducePoolLimitForOtherSources(t *testing.T) {
 		`{"abstract":"` + strings.Repeat("a", 600) + `"}`,
 	)
 	require.Greater(t, len(body), poolMetadataMaxBytes)
-	hash := blake2b.Sum256(body)
-	server := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write(body)
-		},
-	))
-	t.Cleanup(server.Close)
-
-	fetcher, err := New(Config{
-		Store:                 fakeStore{},
-		HTTPClient:            server.Client(),
-		AllowPrivateAddresses: true,
-	})
-	require.NoError(t, err)
-
-	doc := models.OffchainMetadata{
-		SourceType: models.OffchainMetadataSourceDrep,
-		URL:        server.URL,
-		Hash:       hash[:],
-	}
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourceDrep,
+		body,
+	)
 	fetcher.fetchOne(context.Background(), &doc)
 
 	require.Equal(t, models.OffchainMetadataStatusFetched, doc.Status)
@@ -607,26 +610,11 @@ func TestFetchOneDoesNotReducePoolLimitForOtherSources(t *testing.T) {
 // classification rather than stored as a successful fetch.
 func TestFetchOneRejectsInvalidPoolMetadataContent(t *testing.T) {
 	body := []byte(`{}`)
-	hash := blake2b.Sum256(body)
-	server := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write(body)
-		},
-	))
-	t.Cleanup(server.Close)
-
-	fetcher, err := New(Config{
-		Store:                 fakeStore{},
-		HTTPClient:            server.Client(),
-		AllowPrivateAddresses: true,
-	})
-	require.NoError(t, err)
-
-	doc := models.OffchainMetadata{
-		SourceType: models.OffchainMetadataSourcePool,
-		URL:        server.URL,
-		Hash:       hash[:],
-	}
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourcePool,
+		body,
+	)
 	fetcher.fetchOne(context.Background(), &doc)
 
 	require.Equal(t, models.OffchainMetadataStatusFailed, doc.Status)
@@ -644,26 +632,11 @@ func TestFetchOneAcceptsValidPoolMetadataContent(t *testing.T) {
 		`{"name":"Test Pool","description":"A pool used for testing.",` +
 			`"ticker":"TEST","homepage":"https://example.com"}`,
 	)
-	hash := blake2b.Sum256(body)
-	server := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write(body)
-		},
-	))
-	t.Cleanup(server.Close)
-
-	fetcher, err := New(Config{
-		Store:                 fakeStore{},
-		HTTPClient:            server.Client(),
-		AllowPrivateAddresses: true,
-	})
-	require.NoError(t, err)
-
-	doc := models.OffchainMetadata{
-		SourceType: models.OffchainMetadataSourcePool,
-		URL:        server.URL,
-		Hash:       hash[:],
-	}
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourcePool,
+		body,
+	)
 	fetcher.fetchOne(context.Background(), &doc)
 
 	require.Equal(t, models.OffchainMetadataStatusFetched, doc.Status)
