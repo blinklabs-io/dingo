@@ -65,9 +65,7 @@ func (a *NodeAdapter) PoolsList(
 	txn := db.Transaction(false)
 	defer txn.Release()
 
-	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashesOrdered(
-		txn.Metadata(),
-	)
+	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get active pool key hashes ordered: %w",

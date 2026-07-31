@@ -68,6 +68,7 @@ flowchart LR
 
 ## SQL Conventions
 
+- Minimum backend versions: MySQL 8.0, PostgreSQL 12, SQLite 3.25. Several queries use window functions (`ROW_NUMBER() OVER (...)`) and common table expressions (`WITH`), which are unavailable below those versions and fail at query time rather than at startup or migration. Examples across the backends include `GetActivePoolKeyHashesOrdered` (`internal/poolorder`), the live-stake ranking in `internal/rewardstate`, and per-backend queries in `account.go`, `drep.go`, `governance.go`, `pool.go`, and `poolreap.go`. CI exercises PostgreSQL 16 and MySQL 8.4, so those are the versions actually covered by tests.
 - Table and column names are snake_case GORM names unless a model has an explicit `gorm:"column:..."` tag.
 - Byte columns store raw bytes, not hex strings. In Postgres use `encode(col, 'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
 - `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
