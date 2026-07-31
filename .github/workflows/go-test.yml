@@ -98,7 +98,14 @@ jobs:
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race ./...
+        # Explicit -timeout because this job is race-instrumented. Go's
+        # default is 10m per package binary, and under -race the ledger
+        # package alone uses roughly 485s of it, so a runner 15-25% slower
+        # than average pushes it past the limit and fails a job on whichever
+        # PR happens to be running. See dingo #3032 for restoring real
+        # headroom; this only stops the default from being the binding
+        # constraint in the meantime.
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 20m ./...
 
   # macOS and Windows jobs without Postgres service
   go-test-other:
