@@ -46,10 +46,29 @@ var negG2Gen = func() bls12381.G2Affine {
 	return neg
 }()
 
+// prototypeRbHashCborHeader is the CBOR byte-string header for a 32-byte
+// payload: major type 2 with a one-byte length (0x58) followed by the length
+// itself (0x20). Equivalent to cbor.Encode of the hash, but the length is
+// fixed here, so the header is a constant and the encoding cannot fail.
+const prototypeRbHashCborHeader = "\x58\x20"
+
 // PrototypeVoteMessageBytes returns the current prototype's signed message:
-// the hash of the ranking block that announced the endorser block.
+// the hash of the ranking block that announced the endorser block, encoded
+// as a CBOR byte string.
+//
+// The reference signs the RbHash SignableRepresentation, which is
+// toStrictByteString (encodeRbHash h) == CBOR.encodeBytes of the hash, so
+// the signed preimage is the 34-byte CBOR encoding rather than the bare
+// 32 hash bytes. Signing the bare hash hashes a different preimage to the
+// curve and every pairing check fails, even with a correct key.
 func PrototypeVoteMessageBytes(announcingRbHash lcommon.Blake2b256) []byte {
-	return announcingRbHash.Bytes()
+	msg := make(
+		[]byte,
+		0,
+		len(prototypeRbHashCborHeader)+lcommon.Blake2b256Size,
+	)
+	msg = append(msg, prototypeRbHashCborHeader...)
+	return append(msg, announcingRbHash.Bytes()...)
 }
 
 // VoteMessageBytes retains the legacy standalone leios-votes message shape.

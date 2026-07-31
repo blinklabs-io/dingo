@@ -953,6 +953,70 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 	))
 }
 
+// TestVoteManagerPrototypeVerifiesOverflowPoolHashVote drives the full
+// prototype vote path for a pool whose zero-padded key hash exceeds the
+// BLS12-381 scalar field modulus. Around 55% of real pool key hashes look
+// like this, and their votes must verify, reach quorum, and certify.
+func TestVoteManagerPrototypeVerifiesOverflowPoolHashVote(t *testing.T) {
+	overflowPoolHash := make([]byte, voterPoolKeyHashSize)
+	overflowPoolHash[0] = 0xf3
+	overflowPoolHash[len(overflowPoolHash)-1] = 0x0d
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PrototypeMode = true
+			registry, err := NewVoterRegistry(nil)
+			require.NoError(t, err)
+			cfg.Registry = registry
+			// Single-pool committee so one vote crosses tau = 7/10
+			f.stake.pools = map[string]uint64{
+				hex.EncodeToString(overflowPoolHash): 100,
+			}
+			f.stake.total = 100
+		},
+	)
+	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
+	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+	member, ok := committee.Member(0)
+	require.True(t, ok)
+	require.Equal(t, overflowPoolHash, member.PoolKeyHash)
+
+	key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+	require.NoError(t, err)
+	sig, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer",
+		lcommon.LeiosPrototypeVote{
+			AnnouncingRbHash: rbHash,
+			VoterId:          member.VoterId,
+			VoteSignature:    sig,
+		},
+	))
+
+	evt := testutil.RequireReceive(
+		t,
+		quorumCh,
+		2*time.Second,
+		"prototype quorum for overflow pool key hash",
+	)
+	quorum, ok := evt.Data.(EbQuorumEvent)
+	require.True(t, ok)
+	require.NotNil(t, quorum.Certificate)
+	assert.Equal(t, uint64(100), quorum.VerifiedStake)
+	require.NoError(t, ValidatePrototypeEbCertificate(
+		quorum.Certificate,
+		quorum.AnnouncingRbHash,
+		committee,
+		big.NewRat(7, 10),
+	))
+}
+
 func TestVoteManagerPrototypeTalliesAreSeparatedByAnnouncingBlock(
 	t *testing.T,
 ) {
