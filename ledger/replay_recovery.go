@@ -305,6 +305,10 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			err,
 		)
 	}
+	// Recovery rewound the ledger (and usually the chain) to rewindPoint, so
+	// arm the continuation audit to attribute the next offending body to a
+	// peer and a fork instead of only reporting the unresolvable producer.
+	ls.armContinuationAudit(rewindPoint, "replay recovery rewind")
 	return true, nil
 }
 

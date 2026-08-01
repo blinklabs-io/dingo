@@ -2588,6 +2588,28 @@ func (ls *LedgerState) tryResolveFork(
 	)
 
 	if err := ls.rollbackChainAndState(rollbackPoint); err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The ancestor resolved but the chain no longer holds it at that
+			// index, so rolling back would splice a continuation onto a parent
+			// the chain does not have (issue #3005). Re-intersect instead of
+			// treating this as an internal failure.
+			ls.config.Logger.Warn(
+				"fork ancestor is no longer on the local chain, triggering chainsync re-sync",
+				"component", "ledger",
+				"error", err,
+				"ancestor_slot", ancestorBlock.Slot,
+				"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
+				"local_tip_slot", ls.chain.Tip().Point.Slot,
+				"connection_id", e.ConnectionId.String(),
+			)
+			ls.headerMismatchCount = 0
+			ls.rollbackHistory = nil
+			ls.requestChainsyncResync(
+				e.ConnectionId,
+				event.ChainsyncResyncReasonRollbackNotFound,
+			)
+			return true, nil
+		}
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
 			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
 				"fork resolution exceeds security parameter K",
@@ -2778,6 +2800,9 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 			}
 		}
 	}
+	// Cross-fork splice diagnostic (#3005). No-op unless a recent local
+	// rollback armed it; see ledger/continuation_audit.go.
+	ls.auditContinuationBlock(e, validationEnabled)
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
