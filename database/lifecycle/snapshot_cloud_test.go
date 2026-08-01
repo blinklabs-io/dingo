@@ -15,6 +15,7 @@
 package lifecycle_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +23,50 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/stretchr/testify/require"
 )
+
+// TestSnapshotToCloudLabelsBeforeMirroring verifies that a name/description
+// passed to SnapshotToCloud are already on the manifest MirrorToCloud
+// uploads, not applied to the local copy only after the upload already
+// happened. Labeling only the local manifest post-upload would leave the
+// remote copy permanently unlabeled: the upload already completed and the
+// cloud-mirrored marker already records that destination as done, so
+// nothing would ever retry the upload to pick up a label applied later.
+func TestSnapshotToCloudLabelsBeforeMirroring(t *testing.T) {
+	backingDir := t.TempDir()
+	setFakeCloudBackingDir(t, backingDir)
+
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	dir := filepath.Join(t.TempDir(), "snap-labeled")
+	m, err := lifecycle.SnapshotToCloud(
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		"faketest://bucket/prefix",
+		"my-label",
+		"my-description",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "my-label", m.Name)
+	require.Equal(t, "my-description", m.Description)
+
+	local, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	require.Equal(t, "my-label", local.Name)
+	require.Equal(t, "my-description", local.Description)
+
+	cloudDir := filepath.Join(backingDir, "prefix", "snap-labeled")
+	cloudManifest, err := lifecycle.ReadManifest(cloudDir)
+	require.NoError(t, err)
+	require.Equal(t, "my-label", cloudManifest.Name)
+	require.Equal(t, "my-description", cloudManifest.Description)
+}
 
 // TestIsCloudMirroredToDetectsChangedDestination guards the gap a bare
 // marker-presence check (IsCloudMirrored) has: the marker only proves a

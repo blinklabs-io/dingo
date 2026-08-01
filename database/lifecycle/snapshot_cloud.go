@@ -118,7 +118,8 @@ func MirrorToCloud(
 }
 
 // SnapshotToCloud calls Snapshot to produce the local copy at dir exactly
-// as before, then — if cloudDest is non-empty — additionally uploads
+// as before, then — if name or description is non-empty — labels it (see
+// LabelSnapshot), then — if cloudDest is non-empty — additionally uploads
 // dir's contents to that destination (a base URI like "s3://bucket/prefix"
 // or "gcs://bucket/prefix"; see DestinationRegistry), nested one level
 // under this snapshot's own ID (dir's base name), mirroring the local
@@ -128,6 +129,15 @@ func MirrorToCloud(
 // same configured cloudDest — a flat, unnested upload would silently
 // overwrite every previous snapshot's files with the newest one's. The
 // local copy is always kept; cloudDest is a mirror, not a replacement.
+//
+// Labeling happens before mirroring, not after: MirrorToCloud uploads
+// whatever is on disk at dir the moment it runs and then writes the
+// cloud-mirrored marker recording that destination as fully done. A caller
+// that labeled the local manifest only after this returned would leave the
+// already-uploaded remote copy permanently without the name/description —
+// and since the marker already says this destination is mirrored, nothing
+// would ever retry the upload to pick up the label. Labeling first means
+// the directory MirrorToCloud uploads already carries it.
 //
 // cloudDest == "" skips the upload — existing local-only callers are
 // unaffected, and registry may be nil in that case.
@@ -146,12 +156,30 @@ func SnapshotToCloud(
 	blobPluginName string,
 	metadataPluginName string,
 	cloudDest string,
+	name string,
+	description string,
 ) (Manifest, error) {
 	manifest, err := Snapshot(
 		ctx, db, dir, trigger, dingoVersion, blobPluginName, metadataPluginName,
 	)
 	if err != nil {
 		return Manifest{}, err
+	}
+	if name != "" || description != "" {
+		if err := LabelSnapshot(dir, name, description); err != nil {
+			return manifest, fmt.Errorf(
+				"snapshot written locally to %q, but labeling it failed: %w",
+				dir, err,
+			)
+		}
+		manifest, err = ReadManifest(dir)
+		if err != nil {
+			return manifest, fmt.Errorf(
+				"snapshot written locally to %q and labeled, but re-reading "+
+					"the labeled manifest failed: %w",
+				dir, err,
+			)
+		}
 	}
 	if err := MirrorToCloud(ctx, registry, dir, cloudDest); err != nil {
 		return manifest, fmt.Errorf(

@@ -68,7 +68,7 @@ func databaseSnapshotCommand() *cobra.Command {
 			}
 			logger := commonRun(cfg)
 			svc := dblifecycle.NewService(cfg, newCLIDestinationRegistry(), logger)
-			manifest, err := svc.Snapshot(cmd.Context(), destDir)
+			manifest, err := svc.Snapshot(cmd.Context(), destDir, "", "")
 			if err != nil {
 				return fmt.Errorf("snapshot: %w", err)
 			}

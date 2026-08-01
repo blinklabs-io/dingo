@@ -46,7 +46,12 @@ import (
 // dblifecycle for Manager; dingo.Node satisfies this interface
 // structurally, with no additional wiring on its side.
 type LiveNode interface {
-	Snapshot(ctx context.Context, destDir string) (lifecycle.Manifest, error)
+	Snapshot(
+		ctx context.Context,
+		destDir string,
+		name string,
+		description string,
+	) (lifecycle.Manifest, error)
 	Restore(ctx context.Context, snapshotDir string) (lifecycle.Manifest, error)
 	Truncate(ctx context.Context, target TruncateTarget) (blocksRemoved uint64, err error)
 }
@@ -141,13 +146,17 @@ func (s *Service) openDatabase(
 // into destDir, which must not already exist, or — if SetLiveNode was
 // called — captures it from the bound running node's own already-open
 // database instead of opening a second, competing handle on the same
-// data directory.
+// data directory. name/description are applied to the local manifest
+// before any cloud mirroring, per lifecycle.SnapshotToCloud's doc comment
+// — pass "" for either to leave a snapshot unlabeled.
 func (s *Service) Snapshot(
 	ctx context.Context,
 	destDir string,
+	name string,
+	description string,
 ) (lifecycle.Manifest, error) {
 	if s.liveNode != nil {
-		return s.liveNode.Snapshot(ctx, destDir)
+		return s.liveNode.Snapshot(ctx, destDir, name, description)
 	}
 	db, err := s.openDatabase(ctx)
 	if err != nil {
@@ -164,6 +173,8 @@ func (s *Service) Snapshot(
 		s.cfg.Plugins.Storage.Blob.Provider,
 		s.cfg.Plugins.Storage.Metadata.Provider,
 		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
+		name,
+		description,
 	)
 }
 

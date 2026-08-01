@@ -375,6 +375,8 @@ func (m *Manager) handleEpochTransition(
 		m.blobPluginName,
 		m.metadataPluginName,
 		m.cfg.SnapshotCloudDestination,
+		"",
+		"",
 	)
 	if err != nil {
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)

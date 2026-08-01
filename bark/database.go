@@ -344,16 +344,9 @@ func (h *databaseServiceHandler) CreateSnapshot(
 		defer h.finishOperation()
 		op.setRunning()
 		op.complete(runProtected(func() error {
-			_, snapErr := h.bark.config.Lifecycle.Snapshot(ctx, destDir)
-			if snapErr == nil && (name != "" || description != "") {
-				if labelErr := lifecycle.LabelSnapshot(destDir, name, description); labelErr != nil {
-					h.bark.config.Logger.Warn(
-						"failed to label snapshot with name/description",
-						"snapshot_id", snapshotID,
-						"error", labelErr,
-					)
-				}
-			}
+			_, snapErr := h.bark.config.Lifecycle.Snapshot(
+				ctx, destDir, name, description,
+			)
 			return snapErr
 		}), 0)
 	}()

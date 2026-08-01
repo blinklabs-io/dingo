@@ -1219,10 +1219,14 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 // serving normally. It still takes liveLifecycleMu, both to serialize
 // against a concurrent Restore/Truncate closing n.db out from under it,
 // and to match the bark DatabaseService's "only one operation at a time"
-// invariant.
+// invariant. name/description label the snapshot (pass "" for either to
+// leave it unlabeled) — see lifecycle.SnapshotToCloud's doc comment for
+// why labeling must happen before any cloud mirroring.
 func (n *Node) Snapshot(
 	ctx context.Context,
 	destDir string,
+	name string,
+	description string,
 ) (lifecycle.Manifest, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
@@ -1242,6 +1246,8 @@ func (n *Node) Snapshot(
 		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
 		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
 		n.config.databaseLifecycle.SnapshotCloudDestination,
+		name,
+		description,
 	)
 }
 

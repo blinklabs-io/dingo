@@ -74,7 +74,7 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	snapDir := filepath.Join(t.TempDir(), "snap")
-	m, err := svc.Snapshot(context.Background(), snapDir)
+	m, err := svc.Snapshot(context.Background(), snapDir, "", "")
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)
 
@@ -103,7 +103,7 @@ func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	snapDir := filepath.Join(t.TempDir(), "snap")
-	_, err = svc.Snapshot(context.Background(), snapDir)
+	_, err = svc.Snapshot(context.Background(), snapDir, "", "")
 	require.NoError(t, err)
 
 	restoreCfg := testConfig(filepath.Join(t.TempDir(), "restored"))
@@ -147,7 +147,7 @@ func TestServiceSnapshotRefusesCommitTimestampMismatch(t *testing.T) {
 	seedCommitTimestampMismatch(t, dir)
 
 	svc := dblifecycle.NewService(testConfig(dir), nil, nil)
-	_, err := svc.Snapshot(context.Background(), filepath.Join(t.TempDir(), "snap"))
+	_, err := svc.Snapshot(context.Background(), filepath.Join(t.TempDir(), "snap"), "", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "inconsistent")
 }
@@ -182,6 +182,8 @@ type fakeLiveNode struct {
 func (f *fakeLiveNode) Snapshot(
 	_ context.Context,
 	destDir string,
+	_ string,
+	_ string,
 ) (lifecycle.Manifest, error) {
 	f.snapshotCalled = true
 	f.snapshotDir = destDir
@@ -213,7 +215,7 @@ func TestServiceDelegatesToLiveNodeWhenSet(t *testing.T) {
 	live := &fakeLiveNode{}
 	svc.SetLiveNode(live)
 
-	snapManifest, err := svc.Snapshot(context.Background(), "/some/dest/dir")
+	snapManifest, err := svc.Snapshot(context.Background(), "/some/dest/dir", "", "")
 	require.NoError(t, err)
 	require.True(t, live.snapshotCalled)
 	require.Equal(t, "/some/dest/dir", live.snapshotDir)

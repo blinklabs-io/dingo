@@ -144,6 +144,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 
 	manifest, err := lifecycle.SnapshotToCloud(
 		ctx, cloudCredentialsTestRegistry, db, localDir, lifecycle.TriggerManual, "test", "badger", "sqlite", baseURI,
+		"", "",
 	)
 	require.NoError(t, err, "SnapshotToCloud (local write + cloud upload)")
 

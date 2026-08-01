@@ -26,8 +26,36 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/plugin"
 )
+
+// syncDir is fsyncdir.Sync by default; a package-level var (not a direct
+// call) so tests can inject a failure and verify RestoreValidated actually
+// surfaces it, instead of silently activating (or reporting success for) a
+// restore whose durability on disk was never confirmed.
+var syncDir = fsyncdir.Sync
+
+// syncDirTree fsyncs every directory under root, so a file written into
+// any of them has a durable directory entry, not just durable content --
+// a file's own fsync does not guarantee the directory entry naming it
+// survives a power loss. The restored files' own content durability is
+// each storage plugin's responsibility (sqlite's RestoreFrom and badger's
+// clean Close via host.StopCapability both already fsync what they wrote);
+// this closes the remaining directory-entry gap uniformly at this layer,
+// so restore's durability does not depend on trusting every plugin's
+// internals, present and future, to already cover it.
+func syncDirTree(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		return syncDir(path)
+	})
+}
 
 // Restore populates targetDataDir (which must not already exist, or must
 // be empty) from the snapshot at snapshotDir, then opens the result with
@@ -104,6 +132,19 @@ func Restore(
 // empty directory requireEmptyOrAbsent confirmed. The half-restored
 // staging directory (if any) is simply an orphaned sibling that a retry's
 // own os.RemoveAll(stagingDir) clears on its next attempt.
+//
+// Crash durability (power loss, not just an interrupted process that
+// leaves the OS itself running): atomic rename alone only guarantees
+// targetDataDir never shows a partially-visible directory -- it says
+// nothing about whether the renamed files, or the rename itself, survive
+// a power loss. Before activating the rename, every directory in the
+// staged tree is fsynced (syncDirTree); after the rename, the parent
+// directory is fsynced too, since the rename changed its own entries. If
+// either sync fails, this returns an error without pretending the restore
+// completed durably; a failed pre-rename sync leaves targetDataDir
+// untouched exactly like any other failure above, and a failed
+// post-rename sync is still surfaced even though targetDataDir was
+// already activated, since durability could not be confirmed.
 func RestoreValidated(
 	ctx context.Context,
 	host *plugin.Host,
@@ -176,6 +217,19 @@ func RestoreValidated(
 		return Manifest{}, err
 	}
 
+	// Durability: fsync every directory in the staged tree before
+	// activating it. Atomic rename only guarantees targetDataDir can never
+	// show a partially-visible directory; it says nothing about whether
+	// the rename itself, or the files it names, survive a power loss --
+	// that requires an explicit fsync of the directory entries involved,
+	// which this and the parent-directory sync below provide.
+	if err := syncDirTree(stagingDir); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"sync restored data directory %q before activating it: %w",
+			stagingDir, err,
+		)
+	}
+
 	// Every step above is validated against the staging copy; activate it
 	// with one atomic rename. targetDataDir was already confirmed empty
 	// or absent above and has not been touched since, so clearing it
@@ -191,6 +245,18 @@ func RestoreValidated(
 	if err := os.Rename(stagingDir, targetDataDir); err != nil {
 		return Manifest{}, fmt.Errorf(
 			"activate restored data directory: %w", err,
+		)
+	}
+
+	// The rename above changed the parent directory's own entries
+	// (removing stagingDir's name, adding targetDataDir's); fsync it so
+	// that change itself is durable, not just atomic. Without this, a
+	// power loss right after a successful rename could still lose the
+	// restored database on restart even though the rename was atomic.
+	if err := syncDir(filepath.Dir(targetDataDir)); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"sync parent directory of %q after activating restore: %w",
+			targetDataDir, err,
 		)
 	}
 

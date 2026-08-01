@@ -247,6 +247,7 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(), testDestinationRegistry, db, snapshotDir,
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite", "faketest://bucket/prefix",
+		"", "",
 	)
 	require.NoError(t, err)
 
