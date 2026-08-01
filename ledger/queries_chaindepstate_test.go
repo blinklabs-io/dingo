@@ -247,6 +247,79 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 		"the carried value stays in its own field")
 }
 
+// TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex covers a tip
+// whose block is stored but has no entry in the block hash index.
+//
+// The index has only been written since #1915, and a lookup that misses it
+// reports ErrBlockNotFound rather than scanning -- a deliberate trade, since
+// the scan was a top CPU consumer during catch-up. Blocks predating the index
+// need an offline backfill, so a database carrying them answers "no such
+// block" for a block it holds. A node restarted on such a database has
+// precisely one of them as its tip.
+//
+// Taking that answer at face value would quietly fall back to the epoch's
+// carried value and report a stale lab. The tip's slot and hash together
+// address the block directly, so the index is not needed to find it.
+func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
+	db := newTestDB(t)
+
+	carriedLab := bytes.Repeat([]byte{0x51}, 32)
+	parentHash := bytes.Repeat([]byte{0x52}, 32)
+	tipHash := bytes.Repeat([]byte{0x53}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		return db.BlockCreate(models.Block{
+			Slot:     1200,
+			Hash:     tipHash,
+			PrevHash: parentHash,
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn)
+	}))
+	// Drop the hash-index entry, leaving the block blob in place: the state a
+	// block written before the index existed is in.
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		return db.Blob().Delete(
+			txn.Blob(), dbtypes.BlockHashIndexKey(tipHash),
+		)
+	}))
+	// The block must still be unreachable by hash, or the test proves nothing.
+	require.NoError(t, db.Transaction(false).Do(func(txn *database.Txn) error {
+		_, err := database.BlockByHashTxn(txn, tipHash)
+		require.ErrorIs(t, err, models.ErrBlockNotFound,
+			"fixture must reproduce the index miss")
+		return nil
+	}))
+
+	require.NoError(t, db.Metadata().SetEpoch(
+		1000, 1, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
+	))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(1200, tipHash)},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	require.NotNil(t, decoded.LabNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(parentHash),
+	}, *decoded.LabNonce,
+		"a block missing only from the hash index is still the tip we hold")
+}
+
 // TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks covers the
 // other half of the lab: a chain with no block to take a parent hash from.
 //
@@ -277,6 +350,48 @@ func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(t *testing.
 		Value: [32]byte(carriedLab),
 	}, *decoded.LabNonce,
 		"with no block applied the lab is the value the epoch opened with")
+}
+
+// TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable covers a tip
+// naming a block the node does not hold the body of, which is where a
+// Mithril-bootstrapped node starts.
+//
+// There is no parent hash to derive a lab from, and the query must not fail:
+// an error here aborts the LocalStateQuery protocol and drops the connection,
+// which is the failure this whole handler exists to remove. Carrying the
+// epoch's value is wrong by at most one block.
+func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(t *testing.T) {
+	db := newTestDB(t)
+	carriedLab := bytes.Repeat([]byte{0x61}, 32)
+	absentTip := bytes.Repeat([]byte{0x62}, 32)
+
+	require.NoError(t, db.Metadata().SetEpoch(
+		1000, 1, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
+	))
+	// A well-formed tip hash with no block stored under it.
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(1200, absentTip)},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err,
+		"an unreadable tip block must not abort the protocol")
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	require.NotNil(t, decoded.LabNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(carriedLab),
+	}, *decoded.LabNonce)
 }
 
 // TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce covers the

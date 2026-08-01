@@ -177,18 +177,28 @@ func (ls *LedgerState) chainDepStateLabNonce(
 	tip ochainsync.Tip,
 	carriedLabNonce []byte,
 ) (lcommon.Nonce, error) {
-	if len(tip.Point.Hash) == 0 {
-		// No block applied: consensus has never moved the lab off the value
-		// the epoch opened with.
+	if len(tip.Point.Hash) != lcommon.Blake2b256Size {
+		// No block applied, so consensus has never moved the lab off the
+		// value the epoch opened with -- or a tip whose hash cannot name a
+		// block at all, which is the same answer and, more to the point, not
+		// a reason to abort the protocol and drop the connection.
 		return nonceFromBytes(carriedLabNonce), nil
 	}
-	block, err := database.BlockByHashTxn(txn, tip.Point.Hash)
+	// By point, not by hash. A hash lookup goes through the block hash index,
+	// which has only been written since #1915 and reports a miss rather than
+	// scanning for a block predating it -- so a database still carrying those
+	// blocks answers "no such block" for one it holds, and a node restarted on
+	// such a database has exactly one of them as its tip. The tip's slot and
+	// hash address the block's blob directly, which needs no index.
+	block, err := database.BlockByPointTxn(txn, tip.Point)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			// The tip names a block this transaction cannot read. Reporting
-			// the carried value is the same answer as before the epoch's
-			// first block, which is wrong by at most one block; failing would
-			// abort the protocol and take the whole query with it.
+			// The tip names a block this transaction cannot read at all --
+			// a Mithril-bootstrapped node whose tip body was never stored.
+			// Reporting the carried value is the same answer as before the
+			// epoch's first block, which is wrong by at most one block;
+			// failing would abort the protocol and take the whole query
+			// with it.
 			return nonceFromBytes(carriedLabNonce), nil
 		}
 		return lcommon.Nonce{}, err
