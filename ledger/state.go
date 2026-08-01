@@ -1965,7 +1965,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.RUnlock()
 	if currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
-		return nil
+		return ls.enforceDurableTipFloor()
 	}
 	if point.Slot > currentTip.Point.Slot {
 		ls.config.Logger.Debug(
@@ -2466,13 +2466,6 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		"component",
 		"ledger",
 	)
-	// A slot-based rollback sets currentTip to point but only deletes durable
-	// rows above it; it never verifies the durable applied state actually
-	// reached point. If point sits above the highest applied block, currentTip
-	// now leads applied state and forward replay would resume from a tip whose
-	// ancestor segment was never applied. Clamp the tip down to the durable
-	// applied floor to hold the currentTip <= applied-high-water invariant
-	// (#3005).
 	if err := ls.enforceDurableTipFloor(); err != nil {
 		return err
 	}
@@ -5679,19 +5672,10 @@ func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, err
 		}
 		return false, err
 	}
-	// Blob presence by point is NOT authoritative for primary-chain
-	// membership: the append-only blob store and the manager block cache
-	// retain abandoned-fork blocks, whose block key still resolves by point
-	// after the fork lost chain selection. Confirm the CURRENT primary chain
-	// actually carries this block at its index by resolving the authoritative
-	// block-index entry (bi<id>) and comparing hashes. A hash mismatch means a
-	// different block now occupies that index (this point is on an abandoned
-	// fork); a missing index entry means the primary chain no longer reaches
-	// that far. Both mean the point is not on the primary chain, so the
-	// divergence reconcilers must roll the ledger back to the true common
-	// ancestor rather than trusting a stale blob hit (#3005). The legitimate
-	// Mithril-bootstrap huge-gap-same-chain case still returns true because the
-	// imported ledger-tip block occupies its own index (bi<id> maps back to it).
+	// Blob presence by point is not authoritative: abandoned-fork blocks remain
+	// in the append-only blob store. The current primary chain is identified by
+	// its block-index entry, so compare the indexed block at this ID with the
+	// requested point.
 	indexedBlock, err := ls.db.BlockByIndex(block.ID, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
@@ -5704,14 +5688,8 @@ func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, err
 
 // durableAppliedFloor returns the point of the highest block whose ledger
 // effects are durably applied, identified by the highest-slot block_nonce row.
-// block_nonce is written in the same metadata transaction as the block's
-// UTxO/certificate effects and the ledger tip (ledgerProcessBlocks) and is
-// pruned only from below, so its maximum slot is the authoritative high-water
-// mark of applied state. A slot-based rollback can set the in-memory currentTip
-// above this floor — it deletes rows above the target but never verifies the
-// target was actually reached — decoupling the tip from applied state and
-// letting forward replay skip an un-applied ancestor segment (#3005). Returns
-// ok=false when the floor cannot be determined (e.g. no nonces persisted yet).
+// The nonce table is written in the same metadata transaction as block effects
+// and the ledger tip, so this is the applied high-water mark used by recovery.
 func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
 	if ls.db == nil {
 		return ocommon.Point{}, false, nil
@@ -5726,13 +5704,9 @@ func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
 	return ocommon.NewPoint(row.Slot, row.Hash), true, nil
 }
 
-// enforceDurableTipFloor repairs the in-memory ledger tip back down to the
-// durable applied floor when a preceding rollback left currentTip above it.
-// This upholds the invariant that currentTip never leads the durably applied
-// UTxO state, so forward replay always resumes from a tip whose entire ancestor
-// segment has been applied (#3005). It is bounded to at most one extra rollback:
-// after clamping currentTip to the floor, the floor no longer leads and the
-// nested call is a no-op.
+// enforceDurableTipFloor repairs currentTip when it leads the durably applied
+// state. Equal slots still require a hash comparison: a same-slot competing
+// block can be an unapplied fork even though its slot is within the floor.
 func (ls *LedgerState) enforceDurableTipFloor() error {
 	floor, ok, err := ls.durableAppliedFloor()
 	if err != nil {
@@ -5744,7 +5718,9 @@ func (ls *LedgerState) enforceDurableTipFloor() error {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
-	if currentTip.Point.Slot <= floor.Slot {
+	if currentTip.Point.Slot < floor.Slot ||
+		(currentTip.Point.Slot == floor.Slot &&
+			bytes.Equal(currentTip.Point.Hash, floor.Hash)) {
 		return nil
 	}
 	ls.config.Logger.Warn(

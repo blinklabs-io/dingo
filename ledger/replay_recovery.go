@@ -220,12 +220,10 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		replayHolding = ls.observeReplayRecoveryTip(ledgerTip.Point.Slot)
 		if replayHolding {
 			rewindPoint = ledgerTip.Point
-			// #3005: the applied high-water mark can trail currentTip when a
-			// prior slot-based rollback left the tip above the durable UTxO
-			// state. Holding at the decoupled currentTip re-runs the same
-			// non-convergent replay (and rollback(currentTip) is a no-op that
-			// never clamps the tip); hold at the true durable applied floor so
-			// forward replay resumes from state that is actually applied.
+			// The applied high-water mark can trail currentTip when a prior
+			// slot-based rollback left the tip above durable state. Holding at
+			// that decoupled tip repeats the same recovery loop; use the durable
+			// floor only when it is also on the current primary chain.
 			floor, ok, ferr := ls.durableAppliedFloor()
 			if ferr != nil {
 				return false, fmt.Errorf(
@@ -233,8 +231,19 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 					ferr,
 				)
 			}
-			if ok && floor.Slot < rewindPoint.Slot {
-				rewindPoint = floor
+			if ok {
+				onChain, ferr := ls.primaryChainContainsPoint(floor)
+				if ferr != nil {
+					return false, fmt.Errorf(
+						"check durable applied floor on primary chain: %w",
+						ferr,
+					)
+				}
+				if onChain && (floor.Slot < rewindPoint.Slot ||
+					(floor.Slot == rewindPoint.Slot &&
+						!bytes.Equal(floor.Hash, rewindPoint.Hash))) {
+					rewindPoint = floor
+				}
 			}
 			primaryChainAlreadyHeld = ls.chain.Tip().Point.Slot < rewindPoint.Slot
 		}
@@ -1067,17 +1076,9 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	if failingBlock.ID > uint64(rewindBlocks) {
 		targetIndex = failingBlock.ID - uint64(rewindBlocks)
 	}
-	// #3005: never anchor the rollback ABOVE the highest block whose effects are
-	// durably applied (the block_nonce high-water mark). The failing block
-	// creeps forward every recovery cycle while the applied high-water mark
-	// stays fixed, so a purely failingBlock-relative window can land above the
-	// true divergence floor and recovery cannot converge. Take whichever of the
-	// security-param window and the applied floor is DEEPER (lower index) so the
-	// rollback is at least as aggressive as before and always reaches at or
-	// below the applied floor. Only lower the anchor to the floor when it is on
-	// the current primary chain (durableAppliedFloorAnchorIndex enforces this);
-	// otherwise keep the deeper security-param window, which gives chainselection
-	// room to re-fetch a canonical chain from peers.
+	// Anchor no higher than the durable applied floor. Only use the floor when
+	// it belongs to the current primary chain; a stale fork floor must not be
+	// used to roll the primary chain onto the abandoned branch.
 	if floorIndex, ok, err := ls.durableAppliedFloorAnchorIndex(); err != nil {
 		return nil, err
 	} else if ok && floorIndex < targetIndex {
@@ -1104,22 +1105,16 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	}, nil
 }
 
-// durableAppliedFloorAnchorIndex resolves the block index of the durable
-// applied floor (the highest block whose ledger effects are actually applied)
-// when that block is on the current primary chain, so recovery rollbacks anchor
-// at the true divergence floor rather than above it (#3005). Returns ok=false
-// when no floor is available or the floor block is not on the primary chain.
+// durableAppliedFloorAnchorIndex returns the block index of the durable
+// applied floor when that point is present on the current primary chain.
 func (ls *LedgerState) durableAppliedFloorAnchorIndex() (uint64, bool, error) {
 	floor, ok, err := ls.durableAppliedFloor()
 	if err != nil || !ok {
 		return 0, false, err
 	}
 	onChain, err := ls.primaryChainContainsPoint(floor)
-	if err != nil {
+	if err != nil || !onChain {
 		return 0, false, err
-	}
-	if !onChain {
-		return 0, false, nil
 	}
 	floorBlock, err := database.BlockByPoint(ls.db, floor)
 	if err != nil {

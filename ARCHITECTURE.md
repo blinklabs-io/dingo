@@ -877,41 +877,18 @@ discarded.
 
 ## Ledger/chain reconciliation
 
-The divergence reconcilers (`reconcilePrimaryChainTipWithLedgerTip`,
-`reconcileLivePrimaryChainLedgerDivergence`, `primaryChainTipAtOrAheadOfLedgerTip`,
-`latestLedgerPrimaryChainAncestor`) decide whether the ledger tip is a valid
-ancestor of the primary chain through `primaryChainContainsPoint`. That test is
-authoritative against the *current* primary chain, not the append-only blob:
-after resolving the block by point it confirms the block-index entry (`bi<id>`)
-still maps back to the same hash. Blob presence alone is not sufficient because
-the blob store and the manager block cache retain abandoned-fork blocks whose
-block key still resolves by point after the fork lost chain selection; trusting
-that presence let a ledger tip stranded on an abandoned fork be treated as a
-valid primary-chain ancestor, so the reconcilers declined to roll back to the
-true common ancestor (issue #3005). The legitimate Mithril-bootstrap same-chain
-case, where the primary chain leads the ledger tip by more than the security
-parameter, still passes because the imported ledger-tip block occupies its own
-index.
+The divergence reconcilers decide whether a ledger point is on the current
+primary chain through `primaryChainContainsPoint`. That check confirms the
+authoritative block-index entry maps to the same hash; blob presence alone is
+not sufficient because abandoned-fork blocks remain in append-only storage.
 
-Two invariants keep forward replay from resuming above the durably applied
-state. First, `LedgerState.rollback` is slot-based: it deletes rows above the
-target and restores spent UTxOs, but does not verify the target slot was ever
-reached by the durable UTxO set, so a rollback whose target sits above the
-highest applied block would leave `currentTip` leading applied state and let
-replay skip an un-applied ancestor segment. After every rollback,
-`enforceDurableTipFloor` clamps `currentTip` back down to the durable applied
-floor (`GetLatestBlockNonce`, the highest-slot `block_nonce` row) when it would
-otherwise lead it, holding the invariant `currentTip <= applied-high-water`.
-Second, the replay-recovery fallback (`replayRecoveryFallbackCandidate`) anchors
-its rollback at whichever is deeper of the security-parameter window below the
-failing block and the durable applied floor, so a failing block that creeps
-forward each cycle cannot leave the anchor permanently above the floor. When the
-recovery hold engages (`observeReplayRecoveryTip`), it holds at the durable
-applied floor rather than the possibly-decoupled `currentTip`. The #3008
-non-convergence hold and the security-parameter K guard remain the backstops: a
-divergence deeper than K blocks is still refused outright (a node that far off
-the canonical chain must be resynced), so these fixes address the
-`currentTip`-above-a-canonical-floor decoupling, not a beyond-K wrong-fork.
+`LedgerState.rollback` and replay recovery also maintain the invariant that
+`currentTip` does not lead durably applied state. The durable applied floor is
+the highest-slot `block_nonce` row, written with the block's ledger effects and
+tip. Rollback and held replay recovery use that floor when it is on the current
+primary chain, while same-slot hash mismatches are repaired rather than treated
+as already covered. A floor from an abandoned fork is ignored so chain
+selection can recover the canonical branch.
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a

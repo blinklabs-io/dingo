@@ -25,7 +25,7 @@ type BlockNonce struct {
 	Hash         []byte `gorm:"uniqueIndex:hash_slot;size:32"`
 	Nonce        []byte
 	ID           uint   `gorm:"primarykey"`
-	Slot         uint64 `gorm:"uniqueIndex:hash_slot"`
+	Slot         uint64 `gorm:"uniqueIndex:hash_slot;index:idx_block_nonce_slot"`
 	IsCheckpoint bool
 }
 

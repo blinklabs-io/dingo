@@ -248,6 +248,35 @@ func TestLoadTipPrunesStaleBlockNonces(t *testing.T) {
 	)
 }
 
+func TestRollbackRepairsTipAtDurableFloorOnNoOpAndSameSlotPaths(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	// Leave currentTip at a point whose nonce was never durably applied. A
+	// rollback request at the current tip is normally a no-op, but the durable
+	// floor repair must still move it back to the last applied block.
+	require.NoError(t, fixture.ls.db.DeleteBlockNoncesAfterPoint(
+		fixture.ancestorTip.Point,
+		nil,
+	))
+	require.NoError(t, fixture.ls.rollback(fixture.currentTip.Point))
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+
+	// A competing same-slot hash is not covered by a slot-only comparison. Put
+	// the in-memory tip on that unapplied point and ensure the canonical floor
+	// still repairs it.
+	fixture.ls.currentTip = ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			fixture.ancestorTip.Point.Slot,
+			[]byte("unapplied-same-slot"),
+		),
+		BlockNumber: fixture.ancestorTip.BlockNumber,
+	}
+	require.NoError(t, fixture.ls.rollback(fixture.ls.currentTip.Point))
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+}
+
 func TestHandleEventChainsyncRollbackDoesNotSkipDifferentPeerHistory(
 	t *testing.T,
 ) {
