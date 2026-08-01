@@ -15,8 +15,10 @@
 package ledger
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,6 +96,8 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 	}
 
 	db := newTestDB(t)
+	// The epoch has to span the slot the reply reports, since the nonces are
+	// read from whichever epoch contains it.
 	require.NoError(t, db.Metadata().SetEpoch(
 		0,                   // slot
 		epochID,             // epoch
@@ -101,8 +106,8 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 		candidateNonce,      // candidateNonce
 		lastEpochBlockNonce, // lastEpochBlockNonce
 		0,                   // era
-		0,                   // slotLength
-		0,                   // lengthInSlots
+		1,                   // slotLength
+		1000,                // lengthInSlots
 		nil,                 // txn
 	))
 
@@ -156,6 +161,201 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 	}, *decoded.LabNonce)
 	assert.NotNil(t, decoded.OpCertCounters,
 		"counters must be a map even when no pool has minted")
+}
+
+// TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent covers the lab
+// nonce, which is the only field of the record that moves with every block
+// rather than only at an epoch boundary.
+//
+// In Praos the lab is prevHashToNonce(block.prevHash) for the last block
+// applied -- the PARENT hash of the tip, a deliberate one-block lag (see
+// epochLabNonce and #2734). The last-epoch-block nonce is the value that lag
+// had reached when the epoch opened. The two are equal only until the first
+// block of the epoch lands; after that, reporting the carried value in the lab
+// field is a stale answer for a field the chain has already moved on from.
+func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
+	db := newTestDB(t)
+
+	carriedLab := bytes.Repeat([]byte{0x31}, 32)
+	grandparentHash := bytes.Repeat([]byte{0x32}, 32)
+	parentHash := bytes.Repeat([]byte{0x33}, 32)
+	tipHash := bytes.Repeat([]byte{0x34}, 32)
+
+	// Two blocks inside the epoch, so the tip's parent is a block of this
+	// epoch rather than the carried value by coincidence.
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot:     1100,
+			Hash:     parentHash,
+			PrevHash: grandparentHash,
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		return db.BlockCreate(models.Block{
+			Slot:     1200,
+			Hash:     tipHash,
+			PrevHash: parentHash,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn)
+	}))
+	require.NoError(t, db.Metadata().SetEpoch(
+		1000,       // slot
+		1,          // epoch
+		nil,        // nonce
+		nil,        // evolvingNonce
+		nil,        // candidateNonce
+		carriedLab, // lastEpochBlockNonce
+		0,          // era
+		1,          // slotLength
+		1000,       // lengthInSlots
+		nil,        // txn
+	))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(1200, tipHash)},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	require.NotNil(t, decoded.LabNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(parentHash),
+	}, *decoded.LabNonce,
+		"the lab is the tip's parent hash, not the epoch's carried value")
+	require.NotNil(t, decoded.LastEpochBlockNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(carriedLab),
+	}, *decoded.LastEpochBlockNonce,
+		"the carried value stays in its own field")
+}
+
+// TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks covers the
+// other half of the lab: a chain with no block to take a parent hash from.
+//
+// Consensus only moves the lab when a block is applied, so before the first
+// one it holds whatever the epoch opened with.
+func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(t *testing.T) {
+	db := newTestDB(t)
+	carriedLab := bytes.Repeat([]byte{0x41}, 32)
+	require.NoError(t, db.Metadata().SetEpoch(
+		0, 0, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	require.NotNil(t, decoded.LabNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(carriedLab),
+	}, *decoded.LabNonce,
+		"with no block applied the lab is the value the epoch opened with")
+}
+
+// TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce covers the
+// previous-epoch nonce, which the epoch-0 cases above cannot reach: epoch 0 has
+// no predecessor, so that field stays neutral there and the branch that fills
+// it never runs.
+//
+// It sits between the epoch and lab nonces in the record, so a value landing in
+// the wrong slot is a reordering the earlier tests cannot see -- every field
+// around it there decodes to a value that is either neutral or shared with its
+// neighbour.
+func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(t *testing.T) {
+	previousNonce := make([]byte, 32)
+	for i := range previousNonce {
+		previousNonce[i] = 0x55
+	}
+	currentNonce := make([]byte, 32)
+	for i := range currentNonce {
+		currentNonce[i] = 0x66
+	}
+
+	db := newTestDB(t)
+	// Epoch 0's nonce is what the reply must carry as the previous-epoch
+	// nonce once the chain has moved on to epoch 1.
+	require.NoError(t, db.Metadata().SetEpoch(
+		0,             // slot
+		0,             // epoch
+		previousNonce, // nonce
+		nil,           // evolvingNonce
+		nil,           // candidateNonce
+		nil,           // lastEpochBlockNonce
+		0,             // era
+		1,             // slotLength
+		1000,          // lengthInSlots
+		nil,           // txn
+	))
+	require.NoError(t, db.Metadata().SetEpoch(
+		1000,         // slot
+		1,            // epoch
+		currentNonce, // nonce
+		nil,          // evolvingNonce
+		nil,          // candidateNonce
+		nil,          // lastEpochBlockNonce
+		0,            // era
+		1,            // slotLength
+		1000,         // lengthInSlots
+		nil,          // txn
+	))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(1500, []byte("tip"))},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	require.NotNil(t, decoded.EpochNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(currentNonce),
+	}, *decoded.EpochNonce, "the epoch nonce is the current epoch's")
+	require.NotNil(t, decoded.PreviousEpochNonce,
+		"an epoch with a predecessor must carry its nonce")
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(previousNonce),
+	}, *decoded.PreviousEpochNonce,
+		"the previous-epoch nonce is the preceding epoch's, not the current one's")
 }
 
 // TestQueryShelleyDebugChainDepState_ReportsOpCertCounters covers the other
@@ -224,4 +424,100 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 	)
 	assert.True(t, found, "a pool that minted must have a counter")
 	assert.Equal(t, uint64(5), counter)
+}
+
+// TestQueryShelleyDebugChainDepState_CountersOutliveRegistration covers a pool
+// that minted blocks but is not in the active set.
+//
+// The counters are the chain's record of the highest operational-certificate
+// issue number it has accepted, and that record does not expire when a pool
+// leaves the active set: the chain still holds it, and the node still enforces
+// it against any block claiming that cold key. Deriving the counters from the
+// currently registered pools instead would drop a retired pool's entry, so a
+// caller reading this reply would be told the chain has accepted nothing for a
+// cold key it would in fact reject a replayed certificate for.
+func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 1000, nil,
+	))
+
+	// A cold key the chain has accepted a certificate for, with no pool row
+	// backing it -- the state a pool reaches once its registration is gone.
+	gone := make([]byte, 28)
+	for i := range gone {
+		gone[i] = 0xC0
+	}
+	gonePkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(gone))
+	require.NoError(t, db.UpdatePoolOpCertSequence(gonePkh, 7, 1, nil))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	counter, found := decoded.OpCertCounter(lcommon.NewBlake2b224(gone))
+	require.True(t, found,
+		"the chain's accepted counter survives the pool leaving the active set")
+	assert.Equal(t, uint64(7), counter)
+}
+
+// TestQueryShelleyDebugChainDepState_HighestCounterPerPool covers a pool that
+// has minted under several operational certificates.
+//
+// The chain accepts a certificate only if its issue number is at least the
+// highest already accepted, so the reply has to carry that highest number
+// rather than whichever row happens to come back first.
+func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 1000, nil,
+	))
+
+	poolKeyHash := make([]byte, 28)
+	for i := range poolKeyHash {
+		poolKeyHash[i] = 0x5A
+	}
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+	// Rotated certificates, recorded newest-slot-last so a query returning the
+	// last row rather than the maximum would still pass; the middle rotation is
+	// the highest, so ordering by slot cannot stand in for the maximum.
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 2, 10, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 9, 20, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 4, 30, nil))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	counter, found := decoded.OpCertCounter(
+		lcommon.NewBlake2b224(poolKeyHash),
+	)
+	require.True(t, found)
+	assert.Equal(t, uint64(9), counter,
+		"the counter is the highest accepted, not the most recent")
 }

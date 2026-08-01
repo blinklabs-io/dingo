@@ -15,9 +15,15 @@
 package ledger
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -71,18 +77,22 @@ func nonceFromBytes(b []byte) lcommon.Nonce {
 // unsupported query aborts the LocalStateQuery protocol, the node drops the
 // connection, and the caller sees only a closed bearer.
 func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
-	// Every read below belongs to one view of the chain. Taken separately,
-	// each opens its own transaction, so an epoch boundary landing part-way
-	// through would pair one epoch's nonces with another's, and the opcert
-	// counters with neither.
+	// Every value in the reply is read from this one transaction, tip
+	// included. The in-memory tip and epoch snapshots would be the cheaper
+	// source, but they are published after the database write that advances
+	// the chain, so pairing a slot or epoch number from them with nonces read
+	// here can straddle an epoch boundary. The worst of that is silent: an
+	// epoch the snapshot has reached but this transaction has not yet seen has
+	// no record to read, and the reply would carry a populated last slot
+	// beside a neutral epoch nonce -- from which cardano-cli computes a
+	// leadership schedule that is wrong rather than absent.
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 
-	// One matched pair. Loading the tip and consensus snapshots separately
-	// lets a publication land between them, pairing a slot from one generation
-	// with epoch nonces from another -- a state the chain never held.
-	consensus, tipSnap := ls.loadStateSnapshots()
-	tip := tipSnap.currentTip
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return nil, err
+	}
 	lastSlot := olocalstatequery.WithOriginSlot{}
 	if len(tip.Point.Hash) > 0 {
 		lastSlot.HasSlot = true
@@ -99,34 +109,39 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		OpCertCounters: counters,
 	}
 
-	epochID := consensus.currentEpoch.EpochId
-	current, err := ls.db.GetEpoch(epochID, txn)
+	// The epoch containing the tip, so the nonces belong to the same slot the
+	// reply reports. A chain whose epoch records do not yet cover the tip has
+	// no nonces to report, and every nonce field stays neutral.
+	current, err := ls.db.GetEpochBySlot(tip.Point.Slot, txn)
 	if err != nil {
 		return nil, err
 	}
+	var carriedLabNonce []byte
 	if current != nil {
+		carriedLabNonce = current.LastEpochBlockNonce
 		state.EvolvingNonce = nonceFromBytes(current.EvolvingNonce)
 		state.CandidateNonce = nonceFromBytes(current.CandidateNonce)
 		state.EpochNonce = nonceFromBytes(current.Nonce)
-		// The ledger records the lab carried into this epoch, which is the
-		// nonce of the last block of the previous one.
+		// The lab carried into this epoch: the parent hash of the last block
+		// of the previous one.
 		state.LastEpochBlockNonce = nonceFromBytes(
 			current.LastEpochBlockNonce,
 		)
-		// PraosState's lab is the nonce of the last block applied so far.
-		// Within an epoch that is the evolving nonce's most recent input, and
-		// the ledger keeps no separate value for it.
-		state.LabNonce = nonceFromBytes(current.LastEpochBlockNonce)
+		// Epoch 0 has no predecessor; its previous-epoch nonce stays neutral.
+		if current.EpochId > 0 {
+			previous, err := ls.db.GetEpoch(current.EpochId-1, txn)
+			if err != nil {
+				return nil, err
+			}
+			if previous != nil {
+				state.PreviousEpochNonce = nonceFromBytes(previous.Nonce)
+			}
+		}
 	}
-	// Epoch 0 has no predecessor; its previous-epoch nonce stays neutral.
-	if epochID > 0 {
-		previous, err := ls.db.GetEpoch(epochID-1, txn)
-		if err != nil {
-			return nil, err
-		}
-		if previous != nil {
-			state.PreviousEpochNonce = nonceFromBytes(previous.Nonce)
-		}
+
+	state.LabNonce, err = ls.chainDepStateLabNonce(txn, tip, carriedLabNonce)
+	if err != nil {
+		return nil, err
 	}
 
 	return []any{
@@ -137,38 +152,86 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	}, nil
 }
 
+// chainDepStateLabNonce derives the nonce of the last block applied.
+//
+// Unlike every other field of the record, the lab moves with each block rather
+// than only at an epoch boundary. Praos sets it to prevHashToNonce of the
+// applied block's parent hash -- the PARENT, not the block's own hash, a
+// deliberate one-block lag that keeps the final block of an epoch out of the
+// nonce it seeds. See epochLabNonce, which computes the same value at a
+// boundary, and #2734 for what a shift by one costs.
+//
+// Serving the epoch's carried last-epoch-block nonce instead is right only
+// until the epoch's first block lands, since that carried value is what the
+// lag had reached when the epoch opened. After that it is a stale answer for a
+// field the chain has already moved on from.
+func (ls *LedgerState) chainDepStateLabNonce(
+	txn *database.Txn,
+	tip ochainsync.Tip,
+	carriedLabNonce []byte,
+) (lcommon.Nonce, error) {
+	if len(tip.Point.Hash) == 0 {
+		// No block applied: consensus has never moved the lab off the value
+		// the epoch opened with.
+		return nonceFromBytes(carriedLabNonce), nil
+	}
+	block, err := database.BlockByHashTxn(txn, tip.Point.Hash)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The tip names a block this transaction cannot read. Reporting
+			// the carried value is the same answer as before the epoch's
+			// first block, which is wrong by at most one block; failing would
+			// abort the protocol and take the whole query with it.
+			return nonceFromBytes(carriedLabNonce), nil
+		}
+		return lcommon.Nonce{}, err
+	}
+	prevHash, err := blockPrevHash(block)
+	if err != nil {
+		return lcommon.Nonce{}, fmt.Errorf(
+			"derive tip parent hash at slot %d: %w",
+			block.Slot,
+			err,
+		)
+	}
+	if len(prevHash) != lcommon.Blake2b256Size {
+		return nonceFromBytes(carriedLabNonce), nil
+	}
+	// prevHashToNonce maps GenesisHash to the neutral nonce rather than to the
+	// genesis hash bytes, so the chain's first block leaves the lab as it was.
+	if genesisHash, gErr := GenesisBlockHash(
+		ls.config.CardanoNodeConfig,
+	); gErr == nil && bytes.Equal(prevHash, genesisHash[:]) {
+		return nonceFromBytes(carriedLabNonce), nil
+	}
+	return nonceFromBytes(prevHash), nil
+}
+
 // chainDepStateOpCertCounters collects the highest operational-certificate
 // issue number the chain has accepted for each block issuer.
 //
-// The set is drawn from currently registered pools. A pool that minted and has
-// since retired is therefore absent, which differs from the Haskell node's
-// state; the counters exist to let an operator check their own pool's
-// certificate against the chain, and a retired pool has none to check.
+// The set is every pool that has issued a block, taken from the issuer record
+// itself rather than from the currently registered pools. Those two differ in
+// both directions, and each difference matters: a registered pool that has
+// never minted has no accepted number to report, and a pool that minted and
+// has since left the active set still has one the chain enforces against any
+// block claiming its cold key.
 func (ls *LedgerState) chainDepStateOpCertCounters(txn *database.Txn) (
 	map[lcommon.Blake2b224]uint64,
 	error,
 ) {
-	// Non-nil even when empty: the client-side decoder normalises a missing
-	// map, but emitting CBOR null here would differ from the node's output.
-	counters := map[lcommon.Blake2b224]uint64{}
-	keyHashes, err := ls.db.GetActivePoolKeyHashes(txn)
+	sequences, err := ls.db.LatestPoolOpCertSequences(txn)
 	if err != nil {
 		return nil, err
 	}
-	for _, pkh := range keyHashes {
-		poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pkh))
-		sequence, found, err := ls.db.LatestPoolOpCertSequence(
-			poolKeyHash, txn,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			// A registered pool that has never minted has no counter, which
-			// the Haskell state also omits rather than reporting as zero.
+	// Non-nil even when empty: the client-side decoder normalises a missing
+	// map, but emitting CBOR null here would differ from the node's output.
+	counters := make(map[lcommon.Blake2b224]uint64, len(sequences))
+	for keyHash, sequence := range sequences {
+		if len(keyHash) != lcommon.Blake2b224Size {
 			continue
 		}
-		counters[lcommon.Blake2b224(poolKeyHash)] = sequence
+		counters[lcommon.NewBlake2b224([]byte(keyHash))] = sequence
 	}
 	return counters, nil
 }
