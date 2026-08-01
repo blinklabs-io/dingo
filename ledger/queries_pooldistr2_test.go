@@ -277,43 +277,52 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 // taken.
 //
 // A leadership schedule is only useful if the node that produced it will accept
-// the blocks it promises. dingo decides that in verifyRegisteredVrfKey, which
-// resolves the producing pool's VRF key hash live at block-validation time
-// through registeredPoolVrfKeyHash. Whatever that returns is the key a block
-// must carry to be accepted, so it is the key the schedule has to be computed
-// against -- reporting anything else would hand an operator a schedule their
-// own node rejects.
+// the blocks it promises, so the key the reply names has to be the key a block
+// must carry to get past verifyRegisteredVrfKey.
 //
-// Pinning the two together here means a change to either resolution path fails
-// this test rather than quietly splitting the query from the validator.
+// The expected value is therefore taken from a real block header that the
+// validator is made to accept, not from the resolution helper the query itself
+// calls -- asserting against that helper would only restate the query's own
+// implementation and would hold even if the helper returned the wrong key.
 func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
-	db := newTestDB(t)
+	tb := createTestBlock(t, [32]byte{91}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
+	headerVrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, headerVrfKey)
+	// What the chain will hold this block's producer to.
+	acceptedVrfHash := lcommon.Blake2b256Hash(headerVrfKey)
+
+	issuerHash := tb.block.IssuerVkey().Hash()
+	pkh := lcommon.PoolKeyHash(issuerHash)
+
+	// The registration carries the key the header uses; the pool row keeps a
+	// superseded copy, so a reply built from the wrong one is distinguishable
+	// from a reply built from the right one.
 	supersededVrf := make([]byte, 32)
 	for i := range supersededVrf {
 		supersededVrf[i] = 0x01
 	}
-	inForceVrf := make([]byte, 32)
-	for i := range inForceVrf {
-		inForceVrf[i] = 0x02
-	}
-	poolKeyHash := make([]byte, 28)
-	for i := range poolKeyHash {
-		poolKeyHash[i] = 0x44
-	}
-	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
-
+	require.NotEqual(t, supersededVrf, acceptedVrfHash.Bytes())
 	require.NoError(t, db.Metadata().ImportPool(
 		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: supersededVrf},
 		&models.PoolRegistration{
 			PoolKeyHash: pkh.Bytes(),
-			VrfKeyHash:  inForceVrf,
-			AddedSlot:   9,
+			VrfKeyHash:  acceptedVrfHash.Bytes(),
+			AddedSlot:   1,
 			Pledge:      dbtypes.Uint64(1),
 			Cost:        dbtypes.Uint64(1),
 		},
 		nil,
 	))
+
+	// The premise: this block passes the validator. Whatever key that took is
+	// the key an operator's schedule has to be computed against.
+	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block),
+		"fixture must be a block the validator accepts")
+
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
 			Epoch:        0,
@@ -325,9 +334,6 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
-
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
 	arr, _ := result.([]any)
@@ -337,13 +343,6 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
 	require.True(t, ok, "pool missing from the distribution")
 
-	// The validator's own answer for this pool, from the same rows.
-	pool, err := db.GetPool(pkh, true, nil)
-	require.NoError(t, err)
-	require.NotNil(t, pool)
-	expected, ok := registeredPoolVrfKeyHash(pool)
-	require.True(t, ok, "header validation must be able to resolve the key")
-
-	assert.Equal(t, expected.Bytes(), entry.VrfHash[:],
-		"the reply's VRF key must be the one header validation will require")
+	assert.Equal(t, acceptedVrfHash.Bytes(), entry.VrfHash[:],
+		"the reply must name the VRF key of a header the validator accepts")
 }
