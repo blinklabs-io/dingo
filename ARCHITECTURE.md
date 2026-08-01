@@ -2479,16 +2479,36 @@ Inspecting components and then opening by absolute path cannot offer that, and
 `O_NOFOLLOW` would not close it either — it constrains only the final
 component, not traversal through a replaced parent.
 
-Entries are additionally rejected if a symlink already sits at the target, so
-extraction never writes through one even when it points back inside the root.
-That check produces a clearer error; the containment guarantee above does not
-rest on it.
+Entries are additionally rejected if a symlink already sits anywhere along the
+path they are written to, not only at its last component. `os.Root` refuses an
+absolute symlink outright and refuses a relative one whose target leaves the
+root, so what this covers is the case it does follow: a relative symlink
+pointing back inside the destination. That cannot carry bytes out, but it does
+mean the tree on disk stops matching the tree the archive described, with a
+directory the archive never created holding its contents.
 
-The root entry itself is checked before the handle is opened, so a destination
-that is a symlink is refused. Directories *above* the root are not inspected:
-they are chosen by the operator and are not part of this threat, and walking
-higher would reject ordinary layouts, since on macOS every temporary path
-resolves through `/var`, itself a symlink to `/private/var`.
+Every component is inspected because inspecting the complete path does not
+amount to the same thing — it reports on the last component and *resolves*
+everything before it, so a symlink at `immutable` goes unnoticed while a write
+to `immutable/sub/00000.chunk` follows it. Components are walked shortest
+first, so each is inspected before it is used to reach the next.
+
+The destination is created and opened through a handle on its parent rather
+than by pathname, so a symlink swapped in for it is not followed. Opening
+cannot be made to reject one outright — `os.Root` follows a symlink whose
+target stays inside the root, and Go offers no directory open keyed on
+`O_NOFOLLOW` — so the opened handle is compared against the entry afterwards,
+the same way publication compares the staging directory. Directories *above*
+the parent are not inspected: they are chosen by the operator and are not part
+of this threat, and walking higher would reject ordinary layouts, since on
+macOS every temporary path resolves through `/var`, itself a symlink to
+`/private/var`.
+
+Extracted directories carry `0750`. Group traversal is part of the contract for
+deployments that separate the downloader from the node, and it has to be
+restored explicitly on an exclusive extraction: staging is created `0700` so a
+partial extraction is never group-readable, and rename preserves the source
+mode, so publication widens the mode through the staging handle first.
 
 Destinations come in two shapes, selected by the caller:
 
@@ -2534,8 +2554,23 @@ Destinations come in two shapes, selected by the caller:
   standing.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
-  into it directly and accumulates. Staging is unavailable here, and the
-  per-path symlink checks carry the guarantee on their own.
+  into it directly and accumulates. Staging is unavailable here, so the
+  destination itself is what gets created and opened through the parent handle,
+  and the per-component symlink checks carry the rest of the guarantee.
+
+The v2 download applies the same rule to the directory it accumulates into:
+`<extract>/immutable` is created and opened through a handle on `<extract>`,
+and a failed trio is removed through that handle. Removing
+`<extract>/immutable/00000.chunk` by pathname resolves `immutable` on the way
+to the file, so a symlink there would make a failed download unlink somebody
+else's files.
+
+`findImmutableDir` refuses a candidate reached through a symlink and reports
+the snapshot as absent instead. Extraction never creates a symlink, so one in
+an extracted tree is evidence of tampering rather than something this node
+produced; treating the tree as absent re-extracts it from the verified archive,
+which discards it. Accepting it would skip extraction entirely and load the
+chain from a directory somebody else chose.
 
 ### Catch-up vs bootstrap dispatch
 
