@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -97,7 +98,7 @@ func openSQLStore(
 		// Build a proper file URI so ?, #, %, and other URI-reserved
 		// characters in the configured data directory remain part of the
 		// filename instead of being interpreted as DSN options/fragments.
-		databaseURI := (&url.URL{Scheme: "file", Path: databasePath}).String()
+		databaseURI := sqliteFileURI(databasePath)
 		commonPragmas := "&_pragma=journal_mode(WAL)" +
 			"&_pragma=synchronous(NORMAL)" +
 			"&_pragma=cache_size(-50000)" +
@@ -198,4 +199,15 @@ func sqliteDiskSize(
 		}
 		return total, nil
 	}
+}
+
+// sqliteFileURI converts an OS path to the file URI form expected by SQLite.
+// Windows volume paths need an extra leading slash (file:///C:/...), while
+// URL.String handles escaping reserved characters in either form.
+func sqliteFileURI(databasePath string) string {
+	path := filepath.ToSlash(databasePath)
+	if filepath.VolumeName(databasePath) != "" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return (&url.URL{Scheme: "file", Path: path}).String()
 }
