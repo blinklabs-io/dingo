@@ -2539,6 +2539,288 @@ Implements the Mesh (formerly Rosetta) API specification for wallet integration 
 
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. Supports optional TLS.
 
+### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
+
+An operator tool that validates Dingo's closed-epoch reward inputs against Koios
+reference data on preview and preprod networks. It is not part of the node
+process; it is a standalone binary built from `cmd/koios-parity/`.
+
+**Architecture:**
+
+```
+internal/koiosparity/      # shared library
+  cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
+  koios_client.go          # Koios v1 REST client with pagination + retry
+  dingo_db.go              # read-only GORM access to Dingo's metadata database
+  compare.go               # field-level comparison, Mismatch category constants
+  fetch.go                 # Koios fetch orchestration (worker pool per epoch)
+  check.go                 # parity check orchestration (pool-level comparison)
+  report.go                # human-readable status + JSON report generation
+
+cmd/koios-parity/          # thin Cobra CLI wrapper
+  main.go                  # root command (default action: fetch+check+status)
+  run.go, fetch.go, check.go, status.go, explain.go, watch.go
+```
+
+**Data sources:**
+- **Reference (Koios):** fetched once into `cache.db` (default `.koios/cache.db`)
+  via the `fetch` subcommand. The cache holds `koios_epoch_info`,
+  `koios_pool_epoch`, and `koios_totals` rows per closed epoch, storing the
+  full documented `/epoch_info`, `/pool_history`, and `/totals` field sets
+  (not just the subset compared against Dingo) so the cache is a complete
+  Koios reference even as new comparisons are added later.
+- **Dingo:** read directly from Dingo's metadata database during the `check`
+  phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
+  supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
+  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` (explicit
+  overrides) fall back to Dingo's own resolved `plugins.storage.metadata`
+  selection — loaded via `internal/config.LoadConfig` (`--dingo-config`, or the
+  same `~/.dingo/dingo.yaml`/`/etc/dingo/dingo.yaml` search Dingo itself does),
+  which applies `DINGO_PLUGINS_STORAGE_METADATA_PROVIDER`/`_CONFIG_*` the same
+  way the real node does — then default to `sqlite`. The data directory
+  likewise falls back through `--dingo-data`/`DINGO_DATA_DIR` (koios-parity-only
+  overrides) to Dingo's resolved `DatabasePath` (`CARDANO_DATABASE_PATH` or
+  `dingo.yaml`), then `.dingo`.
+  - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode
+  - `postgres` / `mysql`: a `dsn` config field is used verbatim; otherwise a
+    DSN is assembled from discrete host/port/user/password/database/sslMode/
+    timeZone fields, defaulting any field left unset to that provider's own
+    `RegisterProvider` descriptor default (e.g. postgres:
+    `host=localhost user=postgres dbname=postgres sslmode=disable`; mysql:
+    `host=localhost user=root database=dingo`) and building the connection
+    string the same way `database/plugin/metadata/{postgres,mysql}`'s own
+    `Start()` does (mysql via `go-sql-driver/mysql`'s own `Config`/
+    `FormatDSN`, so query-parameter encoding matches exactly). Selecting
+    `postgres`/`mysql` with no config section at all (or one missing every
+    discrete field) is valid Dingo configuration — the provider applies its
+    own complete defaults — so `dsnFromMetadataConfig` always resolves to a
+    working DSN for those two plugins rather than returning `""` and tripping
+    `dingo_db.go`'s `--metadata-dsn is required` error; that error remains as
+    a defensive check for direct `OpenDingoDB` callers that bypass this
+    resolution entirely.
+
+  Tables queried: `reward_pool_input` (per-pool stake/blocks/delegators),
+  `reward_pool_output` (per-pool `member_reward_total`, merged into the same
+  per-pool map keyed by pool-key-hash — a pool may have an input row before
+  its output row is computed), `epoch_summary` (total active stake, pool
+  count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
+  rewards — Dingo's full AdaPots).
+
+  **Epoch alignment.** Koios reports everything for a reporting epoch K, but
+  Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
+  all use K for the same ledger period, so `checkEpoch` (`check.go`) never
+  reads them at K directly — it resolves two distinct Dingo epoch numbers via
+  `koiosStakeEpoch`/`koiosParamEpoch` and reads each field group from the one
+  that actually matches:
+  - **stake epoch (K-1):** `epoch_summary.TotalActiveStake` and
+    `reward_pool_input`'s `DelegatedStake`/`DelegatorCount` are the mark stake
+    distribution Praos actually used as K's active-stake/reward-calculation
+    basis — derived from `ledger/reward_calculation.go`'s
+    `stakeRewardEpochsForNewEpoch` (`epochs.snapshot = epochs.performance - 1`,
+    where `epochs.performance` is the unambiguous calendar epoch whose blocks
+    are being measured, i.e. K itself). `reward_pool_output` (`member_reward_
+    total`) is written from that same `epochs.snapshot` value in the same
+    reward-application call, so it is read at the identical epoch as
+    `reward_pool_input`'s stake fields, never at K.
+  - **param epoch (K+1):** `reward_pool_input`'s `BlocksProduced`, `Margin`,
+    and `Cost` (fixed cost) describe the epoch *before* the row's own Epoch —
+    `ledger/snapshot/rotation.go`'s `buildRewardStateInputs` stamps them from
+    `evt.PreviousEpoch` onto the row captured for the new epoch at snapshot
+    time, independent of the stake-epoch offset above (which governs that
+    same row's `DelegatedStake`/`DelegatorCount` instead).
+  - `reward_ada_pots` (treasury/reserves/fees, compared in
+    `CompareEpochTotals`) is unaffected by either offset: it is a
+    point-in-time ledger pot balance captured at the boundary into K itself,
+    not a delayed reward-calculation input, so it is still read at K.
+
+  `GetPoolEpochDataMap` takes both `stakeEpoch` and `paramEpoch` explicitly and
+  merges up to three separate queries (`reward_pool_input` at each epoch plus
+  `reward_pool_output` at `stakeEpoch`) into one per-pool map. A pool present
+  in only one of the two `reward_pool_input` reads (e.g. captured at the
+  param epoch but not yet at the stake epoch, or the reverse — a freshly
+  registered pool whose param-epoch or output row lands before its
+  stake-epoch row does) still gets an entry;
+  `DingoPoolEpochData.StakePresent`/`ParamsPresent`/`MemberRewardPresent`
+  record which field groups actually resolved so `ComparePoolEpoch` never
+  mistakes "not yet captured at that specific epoch" for "compared and
+  equal" — see the mismatch categories subsection below for how presence
+  gaps are classified. Without `StakePresent`, a pool seeded only via the
+  param-epoch or output query gets a bare zero-value stub for
+  `DelegatedStake`/`DelegatorCount`, and `ComparePoolEpoch` would otherwise
+  compare that zero directly against Koios's real figures as a false
+  `value_mismatch` instead of reporting the row as genuinely absent. This
+  derivation could not be verified empirically against live Koios data from
+  this environment the way `CompareEpochTotals`'s field pairing was (see
+  below); it is derived directly from `stakeRewardEpochsForNewEpoch` and
+  `buildRewardStateInputs`, and should be spot-checked against a real synced
+  preview/preprod node's reward tables before being treated as final.
+
+  `/totals` and `/epoch_info` both have a `fees` field (and near-identically
+  named `reward` / `total_rewards` fields), but they are *not* the same
+  quantity: `/epoch_info.fees` is the raw sum of transaction fees for that
+  epoch's blocks, while `/totals.fees` is "the amount in the fee pot" — the
+  ledger AdaPots fee-pot value, which is what `reward_ada_pots.Fees` actually
+  stores. Verified empirically against a live preview node: for the same
+  epoch, `/totals.fees` matched `reward_ada_pots.Fees` exactly while
+  `/epoch_info.fees` did not. Because Dingo has no aggregate matching the raw
+  per-epoch tx-fee/reward sums `/epoch_info.fees`/`total_rewards` report,
+  `CompareEpochAggregates` does not compare either one against anything — it
+  checks only `total_active_stake` against Dingo's `epoch_summary`.
+
+  `/totals.reward` is not compared at all, for a second reason beyond the
+  field-pairing above: it isn't even a per-epoch pot snapshot the way
+  `/totals.treasury`/`reserves`/`fees` are — it's a monotonically increasing
+  *cumulative* accumulator. Verified against live preview data:
+  `/totals.reward` is flat at a genesis baseline (500000000) through epoch
+  11, then `totals.reward(12) - totals.reward(11) = 13101661554` — an exact
+  match to `/epoch_info.total_rewards` for epoch **10**, not 11 or 12 — a
+  2-epoch-lagged running sum, roughly matching the Shelley "mark→set→go"
+  stake-snapshot delay. Dingo's `reward_ada_pots.Rewards`, by contrast, is a
+  fresh per-epoch flow value — `rewards.Result.TotalRewardPot`, overwritten
+  (not carried forward) every epoch by `ledger/reward_calculation.go` — with
+  no stored cumulative counterpart anywhere in Dingo's schema. This checker
+  does not derive one by summing across epochs on Dingo's behalf: a missing
+  aggregate is a Dingo data-model gap to raise and fix at the source (see
+  `epoch10-koios-parity-issue.md`, Finding 3), not something for the parity
+  checker itself to compute and paper over — doing so would make the checker
+  a second, unverified implementation of reward accounting rather than a
+  faithful comparator. `CompareEpochTotals` checks `/totals.treasury`/
+  `reserves`/`fees` against `reward_ada_pots.Treasury`/`Reserves`/`Fees`
+  directly (both sides are already point-in-time balances) — the correct
+  Koios counterparts to that Dingo data, reported under distinct `totals_*`
+  field names so a mismatch report never conflates the two comparisons.
+  `CompareEpochTotals` distinguishes a `reward_ada_pots` row being *absent*
+  from its pot fields merely being empty: `DingoEpochData.RewardAdaPotsPresent`
+  is set only when `GetEpochData` finds the row, so a ready `epoch_summary`
+  with no matching `reward_ada_pots` (e.g. a bootstrap-from-snapshot import,
+  which sets `epoch_summary.SnapshotReady=true` without ever writing
+  `reward_ada_pots` for that epoch) is reported as a single `reward_ada_pots`
+  / `dingo_db_missing` mismatch instead of silently skipping the
+  treasury/reserves/fees comparison.
+
+  The Koios side has the same requirement: a missing `koios_totals` row for
+  an epoch that otherwise has cached `koios_epoch_info` — e.g. a `cache.db`
+  created before `/totals` fetching was added to this tool, or a
+  `--skip-fetch` run against such a cache — is reported as a `koios_totals`
+  / `dingo_db_missing` mismatch (`ERROR`) rather than skipped. Silently
+  skipping would let an epoch report a clean `PASS` despite
+  treasury/reserves/fees never actually being validated, which is exactly
+  the kind of false-positive parity result this tool exists to prevent. This
+  check runs only once `dingoEpoch` (`epoch_summary` at that epoch) is
+  confirmed present — a not-yet-ready `epoch_summary` is already reported
+  once by `CompareEpochAggregates` as `epoch_summary`, so `CompareEpochTotals`
+  still skips silently in that specific case to avoid double-reporting the
+  same root cause under a second field name.
+
+  `koios_epoch_info.fees`/`total_rewards` are still fetched and cached for
+  reference (the cache stores the full documented `/epoch_info` schema) but
+  play no part in any comparison. `/totals.circulation`, `supply`,
+  `deposits_stake`, `deposits_drep`, `deposits_proposal`,
+  `treasury_donation`, `treasury_withdrawal`, and `reserves_withdrawal` are
+  likewise fetched and cached for reference but not compared — Dingo's
+  AdaPots model has no circulating-supply or deposit-pot aggregate; computing
+  one would require a live UTxO-set scan or replaying every
+  registration/deregistration/governance event.
+
+  Koios's `pool_fees`/`deleg_rewards` pool_history fields are intentionally
+  *not* compared against Dingo's `LeaderReward`/`TotalReward`: Koios recomputes
+  `pool_fees` from `fixed_cost`+`margin` alone, omitting the pledge/owner-stake
+  bonus the Shelley ledger spec folds into the true leader reward, so it
+  systematically diverges from Dingo's exact value for any pool with owner
+  stake. `member_rewards` has no such approximation (it's a direct sum of
+  per-delegator reward amounts) and is compared 1:1 against
+  `reward_pool_output.member_reward_total` — but only once
+  `DingoPoolEpochData.MemberRewardPresent` is true. An absent
+  `reward_pool_output` row is never treated as "nothing to compare": within
+  `--grace-hours` of the epoch closing it is `reference_lag` (reward
+  calculation may simply not have finished yet); past that window it is
+  `dingo_db_missing` (a genuine gap in Dingo's own computation). Both are
+  `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
+  presence/grace split to `reward_pool_input`'s param-epoch fields
+  (`blocks_produced`/`fixed_cost`/`margin`, reported together as
+  `reward_pool_input_params` when absent) via `DingoPoolEpochData.
+  ParamsPresent`, for the same reason: a not-yet-captured param-epoch row must
+  not silently compare as zero blocks/cost/margin against Koios's real values.
+  The same split applies a third time to `reward_pool_input`'s stake-epoch
+  fields (`delegated_stake`/`delegator_count`, reported together as
+  `reward_pool_input_stake` when absent) via `DingoPoolEpochData.
+  StakePresent` — a pool whose stake-epoch row hasn't landed yet (e.g. a
+  freshly registered pool captured first at the param epoch) must not
+  silently compare as zero stake/delegators against Koios's real values
+  either.
+
+**Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
+`dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
+(DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
+may be transient). Results are stored in `check_mismatches` and summarised in
+`check_epoch_status`.
+
+Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
+epoch boundaries, so the go snapshot backing epoch E's active_stake needs
+E-2 >= 0) and Koios permanently returns `active_stake=null` there — `fetch`
+commits a `pre_staking` marker row instead of erroring, so `check` skips
+comparison for that epoch and it's never re-proposed by future `fetch` runs.
+A null `active_stake` on any other epoch is treated as a real, retryable
+error (Koios backend lag or an upstream problem), not silently marked
+permanent. `fetch` cancels the rest of its in-flight batch as soon as any
+epoch hits this or the analogous `end_time=0` ("epoch not fully closed yet")
+condition — both are systematic (every subsequent epoch in the batch would
+hit the same wall), so failing fast avoids grinding through a potentially
+hours-long backfill before surfacing it.
+
+An isolated HTTP-level failure on one request — `/epoch_info`, `/totals`, or
+a single pool's `/pool_history` call exhausting its retries (e.g. a brief
+Koios 5xx blip or a burst 429) — is different: it has no reason to affect any
+other epoch, so it only drops that one epoch (`FetchResult.FailedEpochs`; the
+epoch stays uncached and is retried by a future `fetch` run) instead of
+cancelling the whole batch's shared context.
+
+`koios_client.go`'s `get()` distinguishes this from a *permanent* failure —
+daily-quota exhaustion, or any other non-2xx/206 status it doesn't already
+retry internally (401/403 auth rejections, 400/404/422 bad request or
+unsupported query, etc.; 429 bursts and 5xx are retried in `get()` and only
+reach the caller once exhausted, so those remain transient) — by wrapping the
+error with the `ErrKoiosPermanent` sentinel. `fetchEpoch` checks
+`errors.Is(err, ErrKoiosPermanent)` at both the whole-epoch level
+(`/epoch_info`, `/totals`) and the per-pool `/pool_history` level: a permanent
+error is returned as-is (not wrapped in `transientEpochFetchErr`), which the
+`Fetch` dispatcher then treats as a hard failure — cancelling the shared
+`fetchCtx` so no further epochs are dispatched and in-flight ones stop early.
+Within the failing epoch's own pool loop, the same permanent error also
+cancels a pool-loop-local context, stopping the loop from scheduling any of
+the epoch's remaining pools once one has already hit a quota/auth failure,
+rather than fanning out doomed requests for every other pool first.
+
+`fetch` also hoists each pool's true first-active epoch once per run (the
+minimum `active_epoch_no` across every row `/pool_updates` returns for that
+pool, paginated across all pools in one pass) and skips `/pool_history`
+requests for any epoch before it — most of the network's ever-registered
+pools don't exist yet on early epochs, so this avoids a large number of
+guaranteed-empty requests. `/pool_list`'s own `active_epoch_no` is not used
+for this: it reflects only a pool's *current* (possibly re-registered)
+parameters, which can be well after its true first-active epoch and would
+unsafely skip epochs where the pool genuinely had history.
+
+`check` and the default `run` command return a non-nil error (surfaced as a
+non-zero process exit) whenever any epoch comes back `FAIL` or `ERROR`. This
+is based on the *persisted* `check_epoch_status` for the run's scope
+(`EffectiveCheckOutcome`, restricted to `--from-epoch`/`--through-epoch` when
+given), not just epochs freshly (re)checked during this invocation — a prior
+FAIL/ERROR whose reference row is still fresh (so `Check` found nothing
+needing rechecking and did no fresh work at all) must still surface, or
+CI/automation could mistake an already-known failure for success just because
+nothing new happened to fail this run. `watch`'s continuous loop only advances
+its own resume cursor
+past an epoch range once `fetch` reports no `FailedEpochs` and `check` reports
+no `ErrorEpochs` for it — `ERROR` (`dingo_db_error`/`dingo_db_missing`/
+`reference_lag`) and an isolated fetch failure are typically transient
+(a snapshot still being computed, or Dingo lagging Koios), so the range is
+retried on the next tick instead of being cached as permanently skipped. A
+`FAIL` (a real, confirmed mismatch) does not hold the cursor back, since
+retrying it every tick would not change the outcome.
+
+**Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
+
 ### Bark (`bark/`)
 
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
