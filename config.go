@@ -1031,10 +1031,11 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	}
 }
 
-// WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
-// Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
-// block producer whose pool is a Leios committee member, the node emits
-// votes for endorser blocks. Experimental, leios runMode only.
+// WithLeiosVoteSigningKeyFile specifies the path to a Cardano text-envelope
+// BLS12-381 Leios vote signing key (or a legacy raw hex scalar) via
+// DINGO_LEIOS_VOTE_SIGNING_KEY_FILE. When set on a block producer whose pool
+// is a Leios committee member, the node emits votes for endorser blocks.
+// Experimental, leios runMode only.
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.leiosVoteSigningKeyFile = path

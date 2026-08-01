@@ -1167,6 +1167,47 @@ func TestVoteManagerPrototypeCommitteeAndPoolDerivedKey(t *testing.T) {
 	require.Len(t, raws, 1)
 }
 
+func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
+	require.NoError(t, err)
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PrototypeMode = true
+			member := f.members[3]
+			f.registryEntries[hex.EncodeToString(member.PoolKeyHash)] =
+				hex.EncodeToString(key.PublicKeyBytes())
+			registry, err := NewVoterRegistry(f.registryEntries)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	poolMember := fixture.members[3]
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+	voterID, ok := committee.VoterIdFor(poolMember.PoolKeyHash)
+	require.True(t, ok)
+	rbHash := lcommon.NewBlake2b256([]byte("registered-key-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("registered-key-eb"))
+	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	signature, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer",
+		lcommon.LeiosPrototypeVote{
+			AnnouncingRbHash: rbHash,
+			VoterId:          voterID,
+			VoteSignature:    signature,
+		},
+	))
+	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 577, VoterId: voterID,
+	}})
+	require.Len(t, raws, 1)
+}
+
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
 	fixture := newManagerFixture(t)
 	var poolKeyHash lcommon.PoolKeyHash

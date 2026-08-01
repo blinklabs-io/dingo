@@ -173,6 +173,35 @@ func TestLoadVoteSigningKeyFile(t *testing.T) {
 	assert.Equal(t, expected.PublicKeyBytes(), key.PublicKeyBytes())
 }
 
+func TestLoadVoteSigningKeyFileCardanoTextEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bls.skey")
+	scalar := make([]byte, voteSigningKeySize)
+	scalar[len(scalar)-1] = 42
+	cborBytes := append([]byte{0x58, voteSigningKeySize}, scalar...)
+	content := fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","description":"Leios BLS signing key","cborHex":"%s"}`,
+		hex.EncodeToString(cborBytes),
+	)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	key, err := LoadVoteSigningKeyFile(path)
+	require.NoError(t, err)
+	expected, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
+	require.NoError(t, err)
+	assert.Equal(t, expected.PublicKeyBytes(), key.PublicKeyBytes())
+}
+
+func TestLoadVoteSigningKeyFileRejectsUnsupportedEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.skey")
+	content := `{"type":"Node KES Signing Key","description":"","cborHex":"582001"}`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	_, err := LoadVoteSigningKeyFile(path)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+}
+
 func TestLoadVoteSigningKeyFileRejectsLoosePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("file permission checks are not enforced on windows")

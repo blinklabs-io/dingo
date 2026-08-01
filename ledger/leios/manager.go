@@ -733,16 +733,24 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	verified := false
 	var pub *bls12381.G2Affine
 	if m.prototypeMode {
-		key, deriveErr := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
-		if deriveErr != nil {
-			m.rejectVote(
-				"signature",
-				lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
-				deriveErr,
-			)
-			return nil
+		// Prefer an explicitly registered key when present. This permits
+		// operators to use the BLS key carried by a Dijkstra pool
+		// registration while retaining the prototype-derived fallback for
+		// pools that have not registered one yet.
+		if registered, registeredOK := m.registry.PublicKeyFor(member.PoolKeyHash); registeredOK {
+			pub = registered
+		} else {
+			key, deriveErr := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+			if deriveErr != nil {
+				m.rejectVote(
+					"signature",
+					lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+					deriveErr,
+				)
+				return nil
+			}
+			pub = key.PublicKey()
 		}
-		pub = key.PublicKey()
 	} else if registered, ok := m.registry.PublicKeyFor(member.PoolKeyHash); ok {
 		pub = registered
 	}
