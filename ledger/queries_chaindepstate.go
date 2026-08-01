@@ -78,7 +78,11 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 
-	tip := ls.loadTipSnapshot().currentTip
+	// One matched pair. Loading the tip and consensus snapshots separately
+	// lets a publication land between them, pairing a slot from one generation
+	// with epoch nonces from another -- a state the chain never held.
+	consensus, tipSnap := ls.loadStateSnapshots()
+	tip := tipSnap.currentTip
 	lastSlot := olocalstatequery.WithOriginSlot{}
 	if len(tip.Point.Hash) > 0 {
 		lastSlot.HasSlot = true
@@ -95,7 +99,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		OpCertCounters: counters,
 	}
 
-	epochID := ls.loadConsensusSnapshot().currentEpoch.EpochId
+	epochID := consensus.currentEpoch.EpochId
 	current, err := ls.db.GetEpoch(epochID, txn)
 	if err != nil {
 		return nil, err

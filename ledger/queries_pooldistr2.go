@@ -64,11 +64,12 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 	if err != nil {
 		return nil, err
 	}
-	totalActiveStake, err := ls.db.Metadata().GetTotalActiveStake(
-		snapshotEpoch,
-		snapshotTypeMark,
-		metaTxn,
-	)
+	// Via the shared helper rather than the store directly: it clamps a zero
+	// total up to one, which matters because the ledger types this field as a
+	// NonZero Coin and cardano-cli's decoder rejects zero outright. A chain
+	// whose first snapshot has not been taken yet would otherwise produce a
+	// reply the caller cannot decode at all.
+	totalActiveStake, err := ls.totalActiveStake(snapshotEpoch, true, metaTxn)
 	if err != nil {
 		return nil, err
 	}

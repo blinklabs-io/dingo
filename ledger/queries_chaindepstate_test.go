@@ -82,19 +82,28 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 	for i := range candidateNonce {
 		candidateNonce[i] = 0x33
 	}
+	// Left nil, this decoded to the neutral nonce, and so did the
+	// previous-epoch and lab fields. Three fields sharing one indistinguishable
+	// value cannot pin an ordering: swapping any two of them would still
+	// satisfy the assertions. Giving it a distinct value separates the tail of
+	// the record from the head.
+	lastEpochBlockNonce := make([]byte, 32)
+	for i := range lastEpochBlockNonce {
+		lastEpochBlockNonce[i] = 0x44
+	}
 
 	db := newTestDB(t)
 	require.NoError(t, db.Metadata().SetEpoch(
-		0,              // slot
-		epochID,        // epoch
-		epochNonce,     // nonce
-		evolvingNonce,  // evolvingNonce
-		candidateNonce, // candidateNonce
-		nil,            // lastEpochBlockNonce
-		0,              // era
-		0,              // slotLength
-		0,              // lengthInSlots
-		nil,            // txn
+		0,                   // slot
+		epochID,             // epoch
+		epochNonce,          // nonce
+		evolvingNonce,       // evolvingNonce
+		candidateNonce,      // candidateNonce
+		lastEpochBlockNonce, // lastEpochBlockNonce
+		0,                   // era
+		0,                   // slotLength
+		0,                   // lengthInSlots
+		nil,                 // txn
 	))
 
 	ls := &LedgerState{db: db}
@@ -131,6 +140,20 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 		Type:  lcommon.NonceTypeNonce,
 		Value: [32]byte(candidateNonce),
 	}, decoded.CandidateNonce)
+	// The last two fields of the record. Both are served from the ledger's
+	// last-epoch-block nonce, since dingo keeps no separate value for the last
+	// applied block, so they cannot be told apart from each other -- but a
+	// swap with any earlier field now shows up.
+	require.NotNil(t, decoded.LastEpochBlockNonce)
+	require.NotNil(t, decoded.LabNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(lastEpochBlockNonce),
+	}, *decoded.LastEpochBlockNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(lastEpochBlockNonce),
+	}, *decoded.LabNonce)
 	assert.NotNil(t, decoded.OpCertCounters,
 		"counters must be a map even when no pool has minted")
 }

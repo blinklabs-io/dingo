@@ -162,7 +162,9 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 
 	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
 	require.True(t, ok)
-	assert.Zero(t, distr.TotalActiveStake)
+	// One, not zero: the ledger types this field as a NonZero Coin, so a zero
+	// total is not decodable by the client at all.
+	assert.Equal(t, uint64(1), distr.TotalActiveStake)
 	assert.Empty(t, distr.Pools)
 }
 
