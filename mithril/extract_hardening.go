@@ -114,6 +114,12 @@ func assertRealDir(path string, info os.FileInfo) error {
 	return nil
 }
 
+// extractDirMode is the mode extraction directories carry. Group traversal is
+// part of the contract: the extracted immutable tree is read by other members
+// of the node's group in deployments that separate the downloader from the
+// node.
+const extractDirMode = 0o750
+
 // dirIsEmpty reports whether dir exists and contains no entries. A missing
 // directory counts as empty.
 func dirIsEmpty(dir string) (bool, error) {
@@ -153,7 +159,7 @@ func prepareExtractDestination(
 	}
 
 	if cfg.merge {
-		if err := os.MkdirAll(cleanDest, 0o750); err != nil {
+		if err := os.MkdirAll(cleanDest, extractDirMode); err != nil {
 			return nil, nil, nil, fmt.Errorf(
 				"creating extraction directory: %w", err,
 			)
@@ -191,7 +197,7 @@ func prepareExtractDestination(
 	}
 
 	parent := filepath.Dir(cleanDest)
-	if err := os.MkdirAll(parent, 0o750); err != nil {
+	if err := os.MkdirAll(parent, extractDirMode); err != nil {
 		return nil, nil, nil, fmt.Errorf(
 			"creating extraction parent directory: %w", err,
 		)
@@ -209,7 +215,9 @@ func prepareExtractDestination(
 	}
 
 	// Staged alongside the destination so publishing is a rename within one
-	// filesystem. MkdirTemp creates with 0700 and never reuses a name.
+	// filesystem. MkdirTemp creates with 0700 and never reuses a name; the
+	// mode is widened to extractDirMode at publication, once the tree is
+	// complete, so a partially written extraction is never group-readable.
 	staging, err := os.MkdirTemp(parent, ".extract-*")
 	if err != nil {
 		_ = parentRoot.Close()
@@ -250,6 +258,18 @@ func prepareExtractDestination(
 		_ = parentRoot.Close()
 	}
 	publish = func() error {
+		// MkdirTemp creates the staging directory 0700 and rename preserves
+		// the source mode, so without this the published destination would
+		// inherit 0700 rather than the 0750 the extracted tree is expected to
+		// carry, silently dropping group traversal.
+		//
+		// Applied to the staging handle itself rather than by name. Resolving
+		// the name here would follow a symlink a writer had substituted for
+		// the staging entry and change the mode of whatever it pointed at; the
+		// open handle cannot be redirected.
+		if err := stagingRoot.Chmod(".", extractDirMode); err != nil {
+			return fmt.Errorf("setting extraction destination mode: %w", err)
+		}
 		// Release the handle before moving the directory it refers to.
 		if err := stagingRoot.Close(); err != nil {
 			return fmt.Errorf("closing staging root: %w", err)
@@ -398,7 +418,7 @@ func mkdirExtracted(root *os.Root, name string) error {
 			"%w: inspecting %s: %w", ErrExtractUnsafePath, name, err,
 		)
 	}
-	if err := root.MkdirAll(name, 0o750); err != nil {
+	if err := root.MkdirAll(name, extractDirMode); err != nil {
 		return fmt.Errorf(
 			"%w: creating %s: %w", ErrExtractUnsafePath, name, err,
 		)

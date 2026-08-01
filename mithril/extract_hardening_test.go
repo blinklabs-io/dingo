@@ -702,3 +702,29 @@ func TestExtractPublishAcceptsDestinationEmptiedConcurrently(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "data", string(data))
 }
+
+// TestExtractPublishesDestinationWithGroupTraversal pins the mode of the
+// published destination.
+//
+// Extraction stages into a temporary directory and renames it into place, and
+// rename preserves the source mode. MkdirTemp creates 0700, so without an
+// explicit widening the destination would silently arrive 0700 rather than the
+// 0750 the extracted tree carried before staging was introduced, dropping
+// group traversal for deployments that separate the downloader from the node.
+func TestExtractPublishesDestinationWithGroupTraversal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits are not meaningful on windows")
+	}
+	archivePath := writeTestArchive(t, map[string]string{
+		"immutable/00000.chunk": "chunk0",
+	})
+	destDir := filepath.Join(t.TempDir(), "extracted")
+
+	_, err := ExtractArchive(t.Context(), archivePath, destDir, nil)
+	require.NoError(t, err)
+
+	info, err := os.Stat(destDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o750), info.Mode().Perm(),
+		"the published destination keeps group traversal")
+}
