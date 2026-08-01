@@ -343,6 +343,10 @@ func BenchmarkMempoolPlugins(b *testing.B) {
 // BenchmarkMempoolPluginsDegenerate compares pathological dependency shapes
 // at an intentionally oversubscribed offered load. The large-occupancy case
 // starts from a prefilled pool, so setup is excluded from the timed interval.
+//
+// DINGO_MEMPOOL_BENCH_PREFILL=0 runs the large-occupancy case with no prefill.
+// It also sizes the removal cascade, which is skipped when there is nothing to
+// remove.
 func BenchmarkMempoolPluginsDegenerate(b *testing.B) {
 	config := readMempoolBenchmarkConfig(b)
 	prefill := benchmarkEnvInt(
@@ -953,6 +957,14 @@ func benchmarkRemovalCascade(
 	applyCPU time.Duration,
 ) {
 	b.Helper()
+	if count < 1 {
+		// A cascade needs a chain to remove. Without this the loop would
+		// report zero txs/cascade while still building and tearing down a
+		// plugin host per iteration, and because ns/op is the cascade alone
+		// the near-empty timed region drives b.N into the hundreds of
+		// thousands.
+		b.Skipf("removal cascade needs at least 1 transaction, got %d", count)
+	}
 	var cascadeTotal time.Duration
 	// Only the cascade itself is timed. Building a fresh count-deep chain per
 	// iteration costs far more than removing it, so leaving setup inside the
@@ -1147,8 +1159,8 @@ func benchmarkEnvInt(
 		}
 		value = parsed
 	}
-	if value < 1 {
-		b.Fatalf("%s must be positive", name)
+	if value < 0 {
+		b.Fatalf("%s must not be negative", name)
 	}
 	return value
 }
