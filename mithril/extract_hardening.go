@@ -159,6 +159,55 @@ func assertNoSymlinkComponents(root *os.Root, name string) error {
 	return nil
 }
 
+// openExtractRoot creates name under parentRoot if absent and returns a handle
+// on it.
+//
+// Both steps resolve through parentRoot, so neither can be redirected outside
+// it, and the directory is created rather than opened blindly because merge
+// mode has no staging directory to fall back on.
+//
+// Opening cannot be made to reject a symlink outright — Root follows one whose
+// target stays inside the root, and Go offers no directory open keyed on
+// O_NOFOLLOW — so the handle is compared against the entry afterwards instead.
+// A writer who substitutes the destination between the creation and the open
+// leaves the two disagreeing, which is what this rejects; a symlink present
+// beforehand is caught by the same comparison.
+func openExtractRoot(parentRoot *os.Root, name string) (*os.Root, error) {
+	if err := mkdirExtracted(parentRoot, name); err != nil {
+		return nil, err
+	}
+	root, err := parentRoot.OpenRoot(name)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: opening extraction root %s: %w",
+			ErrExtractUnsafePath, name, err,
+		)
+	}
+	opened, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf(
+			"%w: inspecting extraction root %s: %w",
+			ErrExtractUnsafePath, name, err,
+		)
+	}
+	named, err := parentRoot.Lstat(name)
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf(
+			"%w: inspecting %s: %w", ErrExtractUnsafePath, name, err,
+		)
+	}
+	if named.Mode()&os.ModeSymlink != 0 || !os.SameFile(named, opened) {
+		_ = root.Close()
+		return nil, fmt.Errorf(
+			"%w: %s was substituted before it could be opened",
+			ErrExtractUnsafePath, name,
+		)
+	}
+	return root, nil
+}
+
 // dirIsEmpty reports whether dir exists and contains no entries. A missing
 // directory counts as empty.
 func dirIsEmpty(dir string) (bool, error) {
@@ -197,31 +246,7 @@ func prepareExtractDestination(
 		return nil, nil, nil, err
 	}
 
-	if cfg.merge {
-		if err := os.MkdirAll(cleanDest, extractDirMode); err != nil {
-			return nil, nil, nil, fmt.Errorf(
-				"creating extraction directory: %w", err,
-			)
-		}
-		// Re-check after creation: MkdirAll succeeds against a symlink
-		// that already resolves to a directory.
-		if err := assertSafeExtractRoot(cleanDest); err != nil {
-			return nil, nil, nil, err
-		}
-		mergeRoot, err := os.OpenRoot(cleanDest)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf(
-				"%w: opening extraction root %s: %w",
-				ErrExtractUnsafePath, cleanDest, err,
-			)
-		}
-		return mergeRoot,
-			func() error { return nil },
-			func() { _ = mergeRoot.Close() },
-			nil
-	}
-
-	if !cfg.replace {
+	if !cfg.merge && !cfg.replace {
 		empty, err := dirIsEmpty(cleanDest)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf(
@@ -236,21 +261,43 @@ func prepareExtractDestination(
 	}
 
 	parent := filepath.Dir(cleanDest)
+	destName := filepath.Base(cleanDest)
 	if err := os.MkdirAll(parent, extractDirMode); err != nil {
 		return nil, nil, nil, fmt.Errorf(
 			"creating extraction parent directory: %w", err,
 		)
 	}
-	// The parent is held open for the whole extraction so publication can be
-	// performed relative to this handle. Renaming and removing are otherwise
-	// pathname-based, and a parent replaced after any check would redirect
-	// them however recently that check ran.
+	// The parent is held open for the whole extraction so everything acting on
+	// the destination — creating it, opening it, publishing into it — resolves
+	// relative to this handle. Those are otherwise pathname operations, and a
+	// parent replaced after any check would redirect them however recently that
+	// check ran.
 	parentRoot, err := os.OpenRoot(parent)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf(
 			"%w: opening extraction parent %s: %w",
 			ErrExtractUnsafePath, parent, err,
 		)
+	}
+
+	if cfg.merge {
+		// Merge writes into the destination itself, so the destination is what
+		// gets opened. Going through the parent handle is what keeps it from
+		// being a symlink someone swapped in: opening the pathname directly
+		// would follow one, and the check above cannot cover the gap between
+		// itself and the open.
+		mergeRoot, err := openExtractRoot(parentRoot, destName)
+		if err != nil {
+			_ = parentRoot.Close()
+			return nil, nil, nil, err
+		}
+		return mergeRoot,
+			func() error { return nil },
+			func() {
+				_ = mergeRoot.Close()
+				_ = parentRoot.Close()
+			},
+			nil
 	}
 
 	// Staged alongside the destination so publishing is a rename within one
@@ -265,7 +312,6 @@ func prepareExtractDestination(
 		)
 	}
 	stagingName := filepath.Base(staging)
-	destName := filepath.Base(cleanDest)
 	stagingRoot, err := parentRoot.OpenRoot(stagingName)
 	if err != nil {
 		_ = os.RemoveAll(staging)

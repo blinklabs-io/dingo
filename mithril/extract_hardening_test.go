@@ -817,3 +817,54 @@ func TestExtractRootRefusesEntrySubstitutedDuringExtraction(t *testing.T) {
 	assert.Empty(t, entries,
 		"a symlink planted mid-extraction must not redirect a write")
 }
+
+// TestOpenExtractRootRefusesSubstitutedDestination covers the destination
+// being replaced between the check that vetted it and the open that acts on
+// it, which is the window merge mode cannot stage into a private directory.
+//
+// The substitution is staged statically because the window itself cannot be
+// driven from a test, but the code exercised is what closes it: openExtractRoot
+// is handed a destination nothing has inspected, and must refuse it. The
+// symlink points at a sibling of the destination and is relative, so neither
+// the parent handle's containment nor os.Root's refusal of absolute links can
+// be what rejects it.
+func TestOpenExtractRootRefusesSubstitutedDestination(t *testing.T) {
+	parent := t.TempDir()
+	sibling := filepath.Join(parent, "sibling")
+	require.NoError(t, os.MkdirAll(sibling, 0o750))
+	requireSymlinkSupport(t, "sibling", filepath.Join(parent, "extracted"))
+
+	parentRoot, err := os.OpenRoot(parent)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parentRoot.Close() })
+
+	_, err = openExtractRoot(parentRoot, "extracted")
+	require.ErrorIs(t, err, ErrExtractUnsafePath)
+
+	entries, readErr := os.ReadDir(sibling)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries,
+		"nothing may be created through a substituted destination")
+}
+
+// TestOpenExtractRootCreatesMissingDestination pins the other half of
+// openExtractRoot: an absent destination is created, since merge mode has no
+// staging directory to fall back on.
+func TestOpenExtractRootCreatesMissingDestination(t *testing.T) {
+	parent := t.TempDir()
+
+	parentRoot, err := os.OpenRoot(parent)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parentRoot.Close() })
+
+	extractRoot, err := openExtractRoot(parentRoot, "extracted")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = extractRoot.Close() })
+
+	opened, err := extractRoot.Stat(".")
+	require.NoError(t, err)
+	created, err := os.Lstat(filepath.Join(parent, "extracted"))
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(opened, created),
+		"the handle must refer to the directory at the destination name")
+}
