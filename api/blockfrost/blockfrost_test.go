@@ -3253,8 +3253,19 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 
 	t.Run("parse failure keeps diagnostics", func(t *testing.T) {
 		_, err := adapter.Address("addr1stonks")
-		require.ErrorIs(t, err, ErrInvalidAddress)
-		assert.ErrorContains(t, err, "does not round-trip")
+		require.ErrorIs(t, err, ErrInvalidAddress,
+			"the HTTP layer maps this sentinel to 400")
+		// Which diagnostic comes back depends on the first check in the
+		// decoder that rejects the input, and that moves as the decoder
+		// gains validation: gouroboros v0.191.0 began rejecting the bad
+		// network ID before the round-trip check could run. What has to
+		// hold is that some diagnostic survives rather than being
+		// flattened into the bare sentinel, so assert that instead of
+		// pinning one decoder's wording.
+		assert.ErrorContains(t, err, "addr1stonks",
+			"the diagnostic names the input that failed to parse")
+		assert.NotEqual(t, ErrInvalidAddress.Error(), err.Error(),
+			"the underlying parse error is retained, not discarded")
 	})
 
 	t.Run("this network resolves to not found", func(t *testing.T) {
