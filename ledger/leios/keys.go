@@ -305,6 +305,38 @@ func (r *VoterRegistry) PublicKeyFor(
 	return pub, ok
 }
 
+// RegisterPublicKey adds a locally configured public key to the registry.
+// Existing entries must agree so a local signing key cannot silently diverge
+// from the verification trust root shared with peers.
+func (r *VoterRegistry) RegisterPublicKey(
+	poolKeyHash []byte,
+	pub *bls12381.G2Affine,
+) error {
+	if len(poolKeyHash) != voterPoolKeyHashSize {
+		return fmt.Errorf(
+			"pool key hash must be %d bytes, got %d",
+			voterPoolKeyHashSize,
+			len(poolKeyHash),
+		)
+	}
+	if pub == nil || pub.IsInfinity() {
+		return errors.New("voter public key must not be nil or infinity")
+	}
+	canonical := hex.EncodeToString(poolKeyHash)
+	if existing, ok := r.keys[canonical]; ok {
+		if !existing.Equal(pub) {
+			return fmt.Errorf(
+				"registered voter public key for pool %s conflicts with local signing key",
+				canonical,
+			)
+		}
+		return nil
+	}
+	pubCopy := *pub
+	r.keys[canonical] = &pubCopy
+	return nil
+}
+
 // Size returns the number of registered voter public keys.
 func (r *VoterRegistry) Size() int {
 	return len(r.keys)

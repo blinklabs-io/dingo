@@ -253,7 +253,9 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 			return fmt.Errorf("load leios vote signing key: %w", err)
 		}
 	}
-	n.leiosVoteManager.EnableVoting(poolKeyHash, key)
+	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
+		return fmt.Errorf("enable leios voting: %w", err)
+	}
 	n.config.logger.Info(
 		"leios voting enabled",
 		"component", "node",

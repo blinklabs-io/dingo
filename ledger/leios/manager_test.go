@@ -1174,10 +1174,7 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.PrototypeMode = true
-			member := f.members[3]
-			f.registryEntries[hex.EncodeToString(member.PoolKeyHash)] =
-				hex.EncodeToString(key.PublicKeyBytes())
-			registry, err := NewVoterRegistry(f.registryEntries)
+			registry, err := NewVoterRegistry(nil)
 			require.NoError(t, err)
 			cfg.Registry = registry
 		},
@@ -1187,6 +1184,9 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 	require.NoError(t, err)
 	voterID, ok := committee.VoterIdFor(poolMember.PoolKeyHash)
 	require.True(t, ok)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], poolMember.PoolKeyHash)
+	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, key))
 	rbHash := lcommon.NewBlake2b256([]byte("registered-key-rb"))
 	ebHash := lcommon.NewBlake2b256([]byte("registered-key-eb"))
 	fixture.mgr.HandleEndorserBlock(577, ebHash)

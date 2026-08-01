@@ -444,11 +444,18 @@ func (m *VoteManager) Stop() error {
 func (m *VoteManager) EnableVoting(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
-) {
+) error {
+	if key == nil {
+		return errors.New("nil leios vote signing key")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
+		return fmt.Errorf("register local leios voting key: %w", err)
+	}
 	m.votingPool = slices.Clone(poolKeyHash[:])
 	m.votingKey = key
+	return nil
 }
 
 // CommitteeForEpoch returns the memoized voting committee for an epoch,
