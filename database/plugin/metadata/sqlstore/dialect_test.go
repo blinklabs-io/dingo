@@ -37,3 +37,13 @@ func TestQuoteIdentifier(t *testing.T) {
 	require.Equal(t, `"a""b"`, SQLiteDialect().QuoteIdentifier(`a"b`))
 	require.Equal(t, "`a``b`", MySQLDialect().QuoteIdentifier("a`b"))
 }
+
+func TestTranslateMySQLReservedIdentifiers(t *testing.T) {
+	t.Parallel()
+	query := `SELECT "transaction"."hash", "index" FROM "transaction"`
+	require.Equal(
+		t,
+		"SELECT `transaction`.`hash`, `index` FROM `transaction`",
+		translateMySQLReservedIdentifiers(query),
+	)
+}

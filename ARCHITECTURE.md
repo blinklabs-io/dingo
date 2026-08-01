@@ -2602,9 +2602,9 @@ process; it is a standalone binary built from `cmd/koios-parity/`.
 
 ```
 internal/koiosparity/      # shared library
-  cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
+  cache.go                 # SQLite cache schema + CRUD (database/sql)
   koios_client.go          # Koios v1 REST client with pagination + retry
-  dingo_db.go              # read-only GORM access to Dingo's metadata database
+  dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
   check.go                 # parity check orchestration (pool-level comparison)

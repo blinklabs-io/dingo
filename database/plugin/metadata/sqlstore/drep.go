@@ -162,6 +162,9 @@ FROM drep WHERE added_slot > ?`,
 			if err := rows.Close(); err != nil {
 				return err
 			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
 			for _, item := range items {
 				registration, found, err := latestDrepEvent(
 					db,

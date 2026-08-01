@@ -168,7 +168,7 @@ func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
 }
 
 // newTestDingoDB creates an empty, WAL-mode, schema-migrated Dingo
-// metadata.sqlite (matching newTestDingoDataDir) but returns a writable GORM
+// metadata.sqlite (matching newTestDingoDataDir) but returns a writable SQL
 // handle to it too, so a test can seed reward_pool_input/reward_pool_output/
 // epoch_summary rows directly before Check opens its own read-only
 // connection against the same file.

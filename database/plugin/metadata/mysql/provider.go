@@ -194,9 +194,13 @@ func ensureDatabaseExists(ctx context.Context, dsn, configuredName string) error
 	if err != nil {
 		return fmt.Errorf("parse MySQL DSN: %w", err)
 	}
-	dbName := configuredName
+	// An explicit DSN is authoritative for the schema name. Provider config
+	// carries a default database (currently "dingo"), so preferring it here
+	// would provision the default while the pool subsequently connects to a
+	// different DBName from the DSN.
+	dbName := driverConfig.DBName
 	if dbName == "" {
-		dbName = driverConfig.DBName
+		dbName = configuredName
 	}
 	if dbName == "" {
 		return nil

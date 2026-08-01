@@ -620,10 +620,7 @@ func execDDL(
 }
 
 func isDDLAlreadyApplied(err error) bool {
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "already exists") ||
-		strings.Contains(message, "duplicate key name") ||
-		strings.Contains(message, "duplicate foreign key constraint")
+	return isMySQLDDLAlreadyApplied(err)
 }
 
 func boundedCursor(cursor string) string {

@@ -102,10 +102,27 @@ func (q dialectQueryer) translate(query string) string {
 		if hasReturningID(query) {
 			query, _, _ = translateMySQLReturning(query)
 		}
-		return translateMySQLUpsert(query)
+		return translateMySQLReservedIdentifiers(translateMySQLUpsert(query))
 	}
 	return query
 }
+
+// SQLite and PostgreSQL both accept double-quoted identifiers, while MySQL
+// treats double quotes as string delimiters unless ANSI_QUOTES is enabled.
+// Keep conversion here so every query path (including generated sqlc queries)
+// gets the same behavior without duplicating dialect branches in business
+// code. Shared SQL uses double quotes only for identifiers; values use the
+// standard single-quoted spelling.
+func translateMySQLReservedIdentifiers(query string) string {
+	return mysqlQuotedIdentifierPattern.ReplaceAllStringFunc(query, func(
+		quoted string,
+	) string {
+		inner := quoted[1 : len(quoted)-1]
+		return "`" + strings.ReplaceAll(inner, `""`, "``") + "`"
+	})
+}
+
+var mysqlQuotedIdentifierPattern = regexp.MustCompile(`"(?:""|[^"])*"`)
 
 func rebindPostgresQuery(query string) string {
 	return PostgresDialect().Rebind(query)

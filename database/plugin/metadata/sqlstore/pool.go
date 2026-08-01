@@ -1205,6 +1205,9 @@ WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 	return ret, nil
 }
@@ -1844,6 +1847,9 @@ WHERE pool_registration_id = ?`,
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	rows, err = db.QueryContext(context.Background(), `
 SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
@@ -1873,7 +1879,10 @@ WHERE pool_registration_id = ?`,
 		relay.Ipv6 = netIPPointer(ipv6)
 		registration.Relays = append(registration.Relays, relay)
 	}
-	return rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return rows.Err()
 }
 
 func queryReturnedID(

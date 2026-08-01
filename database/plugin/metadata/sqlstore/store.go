@@ -391,8 +391,8 @@ func (s *Store) withWriteTransaction(
 
 func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, error) {
 	s.bulkMu.RLock()
+	defer s.bulkMu.RUnlock()
 	conn := s.bulkConn
-	s.bulkMu.RUnlock()
 	if conn != nil {
 		return conn.BeginTx(ctx, s.dialect.BeginOptions(false))
 	}

@@ -132,6 +132,9 @@ FROM active_delegator_stake GROUP BY pool_key_hash`,
 		if err := rows.Close(); err != nil {
 			return nil, nil, err
 		}
+		if err := rows.Err(); err != nil {
+			return nil, nil, err
+		}
 	}
 	return stakes, delegators, nil
 }
@@ -187,6 +190,9 @@ FROM active_delegator_stake`,
 			ret[types.PoolCredentialStakeKey(pool, 0, key)] = stake
 		}
 		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
 			return nil, err
 		}
 	}
@@ -265,6 +271,9 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 			ret = append(ret, &input)
 		}
 		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
 			return nil, err
 		}
 	}

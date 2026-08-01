@@ -29,41 +29,39 @@ import (
 // KoiosEpochInfo holds Koios reference data for a closed epoch.
 // Note: pool_cnt and delegator_cnt are not returned by preview/preprod Koios and are omitted.
 type KoiosEpochInfo struct {
-	ID          uint   `gorm:"primarykey;autoIncrement"`
-	Network     string `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
-	Epoch       uint64 `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
-	ActiveStake string `gorm:"not null"`
+	ID          uint
+	Network     string
+	Epoch       uint64
+	ActiveStake string
 	// Fees and TotalRewards (/epoch_info.fees, /epoch_info.total_rewards) are
 	// raw block/tx accounting quantities — stored for reference only. Dingo has
 	// no matching aggregate, so CompareEpochAggregates does not compare them;
 	// see that function's doc comment and KoiosTotalsResp for why /totals.fees
 	// and /totals.reward (compared in CompareEpochTotals) are the correct
 	// counterpart to reward_ada_pots.Fees/Rewards instead.
-	Fees         string    `gorm:"not null"`
-	TotalRewards string    `gorm:"not null"`
+	Fees         string
+	TotalRewards string
 	EpochEndTime time.Time // when the epoch actually closed (from Koios end_time); zero for old cache rows
 	// PreStaking marks an epoch where Koios returned active_stake=null (e.g.
 	// epochs 0-1 on preview, before the first stake snapshot exists). There is
 	// no reference value to ever compare against, so fetch commits this marker
 	// instead of erroring/retrying forever, and check skips comparison entirely.
-	PreStaking bool      `gorm:"not null;default:false"`
-	FetchedAt  time.Time `gorm:"not null"`
+	PreStaking bool
+	FetchedAt  time.Time
 
 	// Remaining fields are stored for reference from the full Koios
 	// epoch_info schema but are not currently compared against any Dingo
 	// value (Dingo doesn't track tx/block counts or wall-clock block times
 	// per epoch).
-	Era            string    `gorm:"not null;default:''"`
-	OutSum         string    `gorm:"not null;default:''"` // "" when Koios returns null (early epochs)
-	TxCount        int64     `gorm:"not null;default:0"`
-	BlkCount       int64     `gorm:"not null;default:0"`
+	Era            string
+	OutSum         string // "" when Koios returns null (early epochs)
+	TxCount        int64
+	BlkCount       int64
 	EpochStartTime time.Time // from Koios start_time; zero for old cache rows
 	FirstBlockTime time.Time // from Koios first_block_time; zero for old cache rows
 	LastBlockTime  time.Time // from Koios last_block_time; zero for old cache rows
-	AvgBlkReward   string    `gorm:"not null;default:''"` // "" when Koios returns null (early epochs)
+	AvgBlkReward   string    // "" when Koios returns null (early epochs)
 }
-
-func (KoiosEpochInfo) TableName() string { return "koios_epoch_info" }
 
 // KoiosPoolEpoch holds per-pool Koios data for a closed epoch.
 //
@@ -71,29 +69,27 @@ func (KoiosEpochInfo) TableName() string { return "koios_epoch_info" }
 // deleg_rewards, member_rewards) come from /pool_history. Outputs are stored
 // for reference even when Dingo has no matching aggregate to compare yet.
 type KoiosPoolEpoch struct {
-	ID            uint      `gorm:"primarykey;autoIncrement"`
-	Network       string    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
-	Epoch         uint64    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
-	PoolBech32    string    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
-	ActiveStake   string    `gorm:"not null"`
-	BlockCnt      int       `gorm:"not null"`
-	Delegators    int       `gorm:"not null"`
-	Margin        string    `gorm:"not null;default:''"` // decimal string from Koios (e.g. "0.1"); "" if absent
-	FixedCost     string    `gorm:"not null;default:''"` // lovelace decimal string
-	PoolFees      string    `gorm:"not null;default:''"` // owner fees earned that epoch
-	DelegRewards  string    `gorm:"not null;default:''"` // total delegator rewards that epoch
-	MemberRewards string    `gorm:"not null;default:''"` // member (non-owner) rewards; "" when Koios returns null
-	FetchedAt     time.Time `gorm:"not null"`
+	ID            uint
+	Network       string
+	Epoch         uint64
+	PoolBech32    string
+	ActiveStake   string
+	BlockCnt      int
+	Delegators    int
+	Margin        string // decimal string from Koios (e.g. "0.1"); "" if absent
+	FixedCost     string // lovelace decimal string
+	PoolFees      string // owner fees earned that epoch
+	DelegRewards  string // total delegator rewards that epoch
+	MemberRewards string // member (non-owner) rewards; "" when Koios returns null
+	FetchedAt     time.Time
 
 	// Remaining fields are stored for reference from the full Koios
 	// pool_history schema but are not currently compared against any Dingo
 	// value — Dingo has no equivalent network-share/saturation aggregate.
-	ActiveStakePct string `gorm:"not null;default:''"` // "" when Koios returns null
-	SaturationPct  string `gorm:"not null;default:''"`
-	EpochRos       string `gorm:"not null;default:''"` // annualised return-on-stake
+	ActiveStakePct string // "" when Koios returns null
+	SaturationPct  string
+	EpochRos       string // annualised return-on-stake
 }
-
-func (KoiosPoolEpoch) TableName() string { return "koios_pool_epoch" }
 
 // KoiosTotals holds Koios /totals reference data for a closed epoch.
 //
@@ -103,90 +99,80 @@ func (KoiosPoolEpoch) TableName() string { return "koios_pool_epoch" }
 // CompareEpochTotals checks them against Dingo independently of
 // CompareEpochAggregates' epoch_info-based checks.
 type KoiosTotals struct {
-	ID        uint      `gorm:"primarykey;autoIncrement"`
-	Network   string    `gorm:"uniqueIndex:idx_kt_net_epoch;not null"`
-	Epoch     uint64    `gorm:"uniqueIndex:idx_kt_net_epoch;not null"`
-	Treasury  string    `gorm:"not null"`
-	Reserves  string    `gorm:"not null"`
-	Fees      string    `gorm:"not null"`
-	Reward    string    `gorm:"not null"`
-	FetchedAt time.Time `gorm:"not null"`
+	ID        uint
+	Network   string
+	Epoch     uint64
+	Treasury  string
+	Reserves  string
+	Fees      string
+	Reward    string
+	FetchedAt time.Time
 
 	// Remaining fields are stored for reference from the full Koios totals
 	// schema but are not currently compared against any Dingo value — Dingo's
 	// AdaPots model has no circulating-supply or deposit-pot aggregate (see
 	// KoiosTotalsResp for why).
-	Circulation   string `gorm:"not null;default:''"`
-	Supply        string `gorm:"not null;default:''"`
-	DepositsStake string `gorm:"not null;default:''"`
-	// column pinned explicitly: GORM's naming strategy converts DepositsDRep
+	Circulation   string
+	Supply        string
+	DepositsStake string
+	// Keep the persisted column name explicit for the database schema. The
 	// to "deposits_d_rep" (splitting the lone "D" from "Rep"), not
 	// "deposits_drep" — pin it to match Koios's own field name exactly.
-	DepositsDRep       string `gorm:"column:deposits_drep;not null;default:''"`
-	DepositsProposal   string `gorm:"not null;default:''"`
-	TreasuryDonation   string `gorm:"not null;default:''"`
-	TreasuryWithdrawal string `gorm:"not null;default:''"`
-	ReservesWithdrawal string `gorm:"not null;default:''"`
+	DepositsDRep       string
+	DepositsProposal   string
+	TreasuryDonation   string
+	TreasuryWithdrawal string
+	ReservesWithdrawal string
 }
-
-func (KoiosTotals) TableName() string { return "koios_totals" }
 
 // KoiosAccountRewards is schema-only; populated when #1875 is resolved.
 type KoiosAccountRewards struct {
-	ID           uint      `gorm:"primarykey;autoIncrement"`
-	Network      string    `gorm:"uniqueIndex:idx_kar_net_epoch_addr;not null"`
-	Epoch        uint64    `gorm:"uniqueIndex:idx_kar_net_epoch_addr;not null"`
-	StakeAddress string    `gorm:"uniqueIndex:idx_kar_net_epoch_addr;not null"`
-	Earned       string    `gorm:"not null"`
-	FetchedAt    time.Time `gorm:"not null"`
+	ID           uint
+	Network      string
+	Epoch        uint64
+	StakeAddress string
+	Earned       string
+	FetchedAt    time.Time
 }
-
-func (KoiosAccountRewards) TableName() string { return "koios_account_rewards" }
 
 // CheckEpochStatus stores the last check result for an epoch.
 type CheckEpochStatus struct {
-	ID             uint      `gorm:"primarykey;autoIncrement"`
-	Network        string    `gorm:"uniqueIndex:idx_ces_net_epoch;not null"`
-	Epoch          uint64    `gorm:"uniqueIndex:idx_ces_net_epoch;not null"`
-	LastCheckedAt  time.Time `gorm:"not null"`
-	Status         string    `gorm:"not null"` // PASS, FAIL, ERROR
-	MismatchCount  int       `gorm:"not null"`
-	DingoPoolCount int       `gorm:"not null"`
-	KoiosPoolCount int       `gorm:"not null"`
-	OnlyDingoPools string    `gorm:"not null"` // JSON array of pool IDs
-	OnlyKoiosPools string    `gorm:"not null"` // JSON array of pool IDs
+	ID             uint
+	Network        string
+	Epoch          uint64
+	LastCheckedAt  time.Time
+	Status         string // PASS, FAIL, ERROR
+	MismatchCount  int
+	DingoPoolCount int
+	KoiosPoolCount int
+	OnlyDingoPools string // JSON array of pool IDs
+	OnlyKoiosPools string // JSON array of pool IDs
 }
-
-func (CheckEpochStatus) TableName() string { return "check_epoch_status" }
 
 // CheckRun records a completed check-run invocation.
 type CheckRun struct {
-	ID            uint      `gorm:"primarykey;autoIncrement"`
-	Network       string    `gorm:"not null"`
-	RunAt         time.Time `gorm:"not null"`
-	EpochsChecked int       `gorm:"not null"`
-	PoolsChecked  int       `gorm:"not null"`
-	MismatchCount int       `gorm:"not null"`
-	ReportPath    string    `gorm:"not null"`
+	ID            uint
+	Network       string
+	RunAt         time.Time
+	EpochsChecked int
+	PoolsChecked  int
+	MismatchCount int
+	ReportPath    string
 }
-
-func (CheckRun) TableName() string { return "check_runs" }
 
 // CheckMismatch records a single field-level or set-level mismatch.
 type CheckMismatch struct {
-	ID           uint      `gorm:"primarykey;autoIncrement"                    json:"id"`
-	Network      string    `gorm:"index:idx_cm_net_epoch;not null"             json:"network"`
-	Epoch        uint64    `gorm:"index:idx_cm_net_epoch;not null"             json:"epoch"`
-	PoolBech32   string    `gorm:"not null"                                    json:"pool_bech32"`
-	StakeAddress string    `gorm:"not null"                                    json:"stake_address"`
-	Field        string    `gorm:"not null"                                    json:"field"`
-	DingoValue   string    `gorm:"not null"                                    json:"dingo_value"`
-	KoiosValue   string    `gorm:"not null"                                    json:"koios_value"`
-	Category     string    `gorm:"not null"                                    json:"category"`
-	CheckedAt    time.Time `gorm:"not null"                                    json:"checked_at"`
+	ID           uint      `json:"id"`
+	Network      string    `json:"network"`
+	Epoch        uint64    `json:"epoch"`
+	PoolBech32   string    `json:"pool_bech32"`
+	StakeAddress string    `json:"stake_address"`
+	Field        string    `json:"field"`
+	DingoValue   string    `json:"dingo_value"`
+	KoiosValue   string    `json:"koios_value"`
+	Category     string    `json:"category"`
+	CheckedAt    time.Time `json:"checked_at"`
 }
-
-func (CheckMismatch) TableName() string { return "check_mismatches" }
 
 // Cache wraps the SQLite cache.db.
 type Cache struct {
@@ -357,7 +343,7 @@ func (c *Cache) GetEpochInfo(network string, epoch uint64) (*KoiosEpochInfo, err
 	return &info, nil
 }
 
-// GetTotals retrieves a cached Koios /totals record. Returns gorm.ErrRecordNotFound
+// GetTotals retrieves a cached Koios /totals record.
 // when absent — e.g. an epoch cached before totals fetching was added, and not
 // yet re-fetched. Callers must treat this as an incomplete reference row (see
 // CompareEpochTotals's CategoryDBMissing "koios_totals" mismatch), not skip

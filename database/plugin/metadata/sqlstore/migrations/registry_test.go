@@ -59,6 +59,19 @@ func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaTranslationUsesCompatibleIntegerTypes(t *testing.T) {
+	t.Parallel()
+	expand, err := loadSQL("v1/sqlite/expand.sql")
+	require.NoError(t, err)
+	translated := translateSchemaSQL(expand, "postgres")
+	joined := strings.Join(translated, "\n")
+	require.Contains(t, joined, "BIGSERIAL PRIMARY KEY")
+	// SQLite INTEGER foreign-key columns must be widened alongside the
+	// BIGSERIAL IDs they reference; PostgreSQL rejects an integer→bigint FK.
+	require.NotRegexp(t, `(?i)\binteger\b`, joined)
+	require.Contains(t, joined, "BIGINT")
+}
+
 func TestSplitSQL(t *testing.T) {
 	t.Parallel()
 	statements, err := splitSQL(`

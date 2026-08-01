@@ -636,6 +636,9 @@ FROM account WHERE `+predicate,
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 		for _, table := range accountDeregistrationStateTables {
 			rows, err := db.QueryContext(context.Background(), `
 SELECT credential_tag, staking_key FROM `+table+`
@@ -656,6 +659,9 @@ GROUP BY credential_tag, staking_key`,
 				everDeregistered[models.NewStakeCredentialRef(tag, key).MapKey()] = struct{}{}
 			}
 			if err := rows.Close(); err != nil {
+				return nil, err
+			}
+			if err := rows.Err(); err != nil {
 				return nil, err
 			}
 		}

@@ -153,6 +153,12 @@ func translateSchemaSQL(statements []string, dialect string) []string {
 				value,
 				"BIGSERIAL PRIMARY KEY",
 			)
+			// SQLite's INTEGER columns are used for every metadata ID and
+			// foreign-key column.  AUTOINCREMENT IDs become BIGSERIAL above;
+			// widen the remaining integer columns as well so PostgreSQL accepts
+			// foreign keys that reference those bigint IDs (PostgreSQL requires
+			// matching integer types for FK constraints).
+			value = wordType("integer").ReplaceAllString(value, "BIGINT")
 			value = wordType("blob").ReplaceAllString(value, "BYTEA")
 			value = wordType("datetime").ReplaceAllString(
 				value,
