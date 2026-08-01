@@ -943,6 +943,14 @@ matching `bh` entry for each block). The
 `dingo_database_block_hash_index_misses_total` counters expose the hit and
 miss rates so operators can tell whether a backfill is needed.
 
+A caller that already knows the slot as well as the hash — anything holding a
+point, such as the tip — should use `BlockByPointTxn` rather than
+`BlockByHash`. It builds the `bp` key from slot and hash and reads the blob
+directly, so it neither consults the index nor scans, and it returns the block
+on a database whose index has not been backfilled. Reserve the by-hash lookup
+for callers that genuinely have only a hash, and treat its `ErrBlockNotFound`
+as "not reachable by hash" rather than "not present".
+
 ## SQL Examples Mirroring the Go API
 
 The examples below mirror common `metadata.MetadataStore` methods. Postgres examples use `decode($1, 'hex')`; MySQL equivalents use `UNHEX(?)`, `HEX(col)`, and `` `transaction` `` instead of `"transaction"`.
