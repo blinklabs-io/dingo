@@ -364,6 +364,40 @@ WHERE pool_key_hash = ?`,
 	return uint64(sequence), count > 0, err
 }
 
+// LatestPoolOpCertSequences returns the highest observed op-cert sequence for
+// every pool that has issued a block, keyed by pool key hash.
+//
+// The issuer table records one row per (pool, slot), so the highest sequence
+// is an aggregate rather than the newest row: a pool that rotated to a lower
+// issue number after a higher one has still had the higher number accepted,
+// and that is the number the chain enforces.
+func (s *Store) LatestPoolOpCertSequences(
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(context.Background(), `
+SELECT pool_key_hash, MAX(sequence)
+FROM pool_opcert_sequence
+GROUP BY pool_key_hash`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := map[string]uint64{}
+	for rows.Next() {
+		var poolKeyHash []byte
+		var sequence int64
+		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = uint64(sequence)
+	}
+	return ret, rows.Err()
+}
+
 func (s *Store) GetPoolBlockIssuersInSlotRange(
 	startSlot uint64,
 	endSlot uint64,
