@@ -740,24 +740,44 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 //   - extractDir/immutable/
 //   - extractDir/db/immutable/
 //   - any single top-level dir containing immutable/
+//
+// A candidate reached through a symlink is not accepted. Extraction never
+// creates one, so a symlink in the extracted tree is evidence the tree was
+// tampered with rather than produced by this node, and accepting it would load
+// the chain from a directory somebody else chose. Reporting the snapshot as
+// absent instead re-extracts it from the verified archive, which discards the
+// tampered tree.
 func findImmutableDir(extractDir string) string {
-	// Check if extractDir itself contains chunk files
+	// extractDir is the operator's own path, so it is used as given;
+	// everything below it is extracted content and is not.
 	if hasChunkFiles(extractDir) {
 		return extractDir
+	}
+	root, err := os.OpenRoot(extractDir)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	chunkDir := func(rel string) string {
+		if err := assertNoSymlinkComponents(root, rel); err != nil {
+			return ""
+		}
+		full := filepath.Join(extractDir, rel)
+		if !hasChunkFiles(full) {
+			return ""
+		}
+		return full
 	}
 
 	// Check common subdirectory layouts
 	candidates := []string{
-		filepath.Join(extractDir, "immutable"),
-		filepath.Join(extractDir, "db", "immutable"),
-	}
-	for _, c := range candidates {
-		if hasChunkFiles(c) {
-			return c
-		}
+		"immutable",
+		filepath.Join("db", "immutable"),
 	}
 
-	// Check for a single top-level directory
+	// Check for a single top-level directory. ReadDir reports a symlink as
+	// its own type rather than the directory it points at, so one is never
+	// collected here.
 	entries, err := os.ReadDir(extractDir)
 	if err != nil {
 		return ""
@@ -769,22 +789,16 @@ func findImmutableDir(extractDir string) string {
 		}
 	}
 	if len(dirs) == 1 {
-		// Check the single subdirectory
-		subDir := filepath.Join(extractDir, dirs[0])
-		if hasChunkFiles(subDir) {
-			return subDir
-		}
-		// Check for immutable inside the single subdirectory
-		immutableSub := filepath.Join(subDir, "immutable")
-		if hasChunkFiles(immutableSub) {
-			return immutableSub
-		}
-		// Check for db/immutable inside the single subdirectory
-		dbImmutableSub := filepath.Join(
-			subDir, "db", "immutable",
+		candidates = append(candidates,
+			dirs[0],
+			filepath.Join(dirs[0], "immutable"),
+			filepath.Join(dirs[0], "db", "immutable"),
 		)
-		if hasChunkFiles(dbImmutableSub) {
-			return dbImmutableSub
+	}
+
+	for _, c := range candidates {
+		if dir := chunkDir(c); dir != "" {
+			return dir
 		}
 	}
 

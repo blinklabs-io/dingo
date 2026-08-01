@@ -494,6 +494,45 @@ func TestFindImmutableDir(t *testing.T) {
 			setup:    func(t *testing.T, baseDir string) {},
 			expected: "",
 		},
+		// Extraction never creates a symlink, so one in the extracted tree
+		// is evidence the tree was tampered with rather than produced by
+		// this node. Reporting the snapshot as absent re-extracts it from
+		// the verified archive instead of reading the chain through a path
+		// someone else chose.
+		{
+			name: "symlinked immutable dir",
+			setup: func(t *testing.T, baseDir string) {
+				t.Helper()
+				outside := t.TempDir()
+				require.NoError(t, os.WriteFile(
+					filepath.Join(outside, "00000.chunk"),
+					[]byte("data"),
+					0o640,
+				))
+				requireSymlinkSupport(
+					t, outside, filepath.Join(baseDir, "immutable"),
+				)
+			},
+			expected: "",
+		},
+		{
+			name: "symlinked intermediate component",
+			setup: func(t *testing.T, baseDir string) {
+				t.Helper()
+				outside := t.TempDir()
+				dir := filepath.Join(outside, "immutable")
+				require.NoError(t, os.MkdirAll(dir, 0o750))
+				require.NoError(t, os.WriteFile(
+					filepath.Join(dir, "00000.chunk"),
+					[]byte("data"),
+					0o640,
+				))
+				requireSymlinkSupport(
+					t, outside, filepath.Join(baseDir, "db"),
+				)
+			},
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {
