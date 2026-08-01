@@ -14,6 +14,8 @@ make test         # tests with -race
 go test -v -race -run TestName ./path/to/pkg/
 ```
 
+The default target formats and builds; tests are a separate target.
+
 ## Pre-commit
 
 ```
@@ -21,6 +23,7 @@ golangci-lint run ./...
 nilaway ./...
 modernize ./...
 make import-boundaries
+make docs-parity
 make golines
 ```
 
