@@ -32,7 +32,7 @@ GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' 
 BUILD_TAGS ?= dingo_extra_plugins
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 
-.PHONY: all build help mod-tidy clean format golines lint import-boundaries proto test bench bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help mod-tidy clean format golines lint import-boundaries proto test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -105,6 +105,15 @@ bench: mod-tidy ## Run benchmarks
 
 bench-mempool-revalidation: ## Benchmark FIFO admission during normal and degenerate rebuilds
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkFIFO(AdmissionNoRevalidation|Revalidation)$$' -benchmem ./mempool
+
+bench-mempool: ## Compare FIFO and DAG mempool providers under concurrent load
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=^BenchmarkMempoolPlugins -benchmem ./mempool
+
+bench-mempool-normal: ## Compare FIFO and DAG under the normal load matrix
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=^BenchmarkMempoolPlugins$$ -benchmem ./mempool
+
+bench-mempool-degenerate: ## Compare FIFO and DAG under degenerate workloads
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=^BenchmarkMempoolPluginsDegenerate$$ -benchmem ./mempool
 
 test-load: build ## Load test data into a fresh database
 	rm -rf .dingo
