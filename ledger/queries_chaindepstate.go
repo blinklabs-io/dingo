@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -70,6 +71,13 @@ func nonceFromBytes(b []byte) lcommon.Nonce {
 // unsupported query aborts the LocalStateQuery protocol, the node drops the
 // connection, and the caller sees only a closed bearer.
 func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
+	// Every read below belongs to one view of the chain. Taken separately,
+	// each opens its own transaction, so an epoch boundary landing part-way
+	// through would pair one epoch's nonces with another's, and the opcert
+	// counters with neither.
+	txn := ls.db.Transaction(false)
+	defer txn.Release()
+
 	tip := ls.loadTipSnapshot().currentTip
 	lastSlot := olocalstatequery.WithOriginSlot{}
 	if len(tip.Point.Hash) > 0 {
@@ -77,7 +85,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		lastSlot.Slot = tip.Point.Slot
 	}
 
-	counters, err := ls.chainDepStateOpCertCounters()
+	counters, err := ls.chainDepStateOpCertCounters(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +96,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	}
 
 	epochID := ls.loadConsensusSnapshot().currentEpoch.EpochId
-	current, err := ls.db.GetEpoch(epochID, nil)
+	current, err := ls.db.GetEpoch(epochID, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +116,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	}
 	// Epoch 0 has no predecessor; its previous-epoch nonce stays neutral.
 	if epochID > 0 {
-		previous, err := ls.db.GetEpoch(epochID-1, nil)
+		previous, err := ls.db.GetEpoch(epochID-1, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -132,21 +140,21 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 // since retired is therefore absent, which differs from the Haskell node's
 // state; the counters exist to let an operator check their own pool's
 // certificate against the chain, and a retired pool has none to check.
-func (ls *LedgerState) chainDepStateOpCertCounters() (
+func (ls *LedgerState) chainDepStateOpCertCounters(txn *database.Txn) (
 	map[lcommon.Blake2b224]uint64,
 	error,
 ) {
 	// Non-nil even when empty: the client-side decoder normalises a missing
 	// map, but emitting CBOR null here would differ from the node's output.
 	counters := map[lcommon.Blake2b224]uint64{}
-	keyHashes, err := ls.db.GetActivePoolKeyHashes(nil)
+	keyHashes, err := ls.db.GetActivePoolKeyHashes(txn)
 	if err != nil {
 		return nil, err
 	}
 	for _, pkh := range keyHashes {
 		poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pkh))
 		sequence, found, err := ls.db.LatestPoolOpCertSequence(
-			poolKeyHash, nil,
+			poolKeyHash, txn,
 		)
 		if err != nil {
 			return nil, err
