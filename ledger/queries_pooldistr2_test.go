@@ -270,3 +270,80 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 	assert.Equal(t, currentVrf, entry.VrfHash[:],
 		"the registration in force decides the VRF key, not the pool row copy")
 }
+
+// TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation is the property that
+// decides which registration the reply should carry, and it is the reason this
+// query does not pick the registration that was in force when the snapshot was
+// taken.
+//
+// A leadership schedule is only useful if the node that produced it will accept
+// the blocks it promises. dingo decides that in verifyRegisteredVrfKey, which
+// resolves the producing pool's VRF key hash live at block-validation time
+// through registeredPoolVrfKeyHash. Whatever that returns is the key a block
+// must carry to be accepted, so it is the key the schedule has to be computed
+// against -- reporting anything else would hand an operator a schedule their
+// own node rejects.
+//
+// Pinning the two together here means a change to either resolution path fails
+// this test rather than quietly splitting the query from the validator.
+func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
+	db := newTestDB(t)
+
+	supersededVrf := make([]byte, 32)
+	for i := range supersededVrf {
+		supersededVrf[i] = 0x01
+	}
+	inForceVrf := make([]byte, 32)
+	for i := range inForceVrf {
+		inForceVrf[i] = 0x02
+	}
+	poolKeyHash := make([]byte, 28)
+	for i := range poolKeyHash {
+		poolKeyHash[i] = 0x44
+	}
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: supersededVrf},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  inForceVrf,
+			AddedSlot:   9,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        0,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(2_000_000),
+			CapturedSlot: 1,
+		},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(poolDistr2Query())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
+	require.True(t, ok)
+	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
+	require.True(t, ok, "pool missing from the distribution")
+
+	// The validator's own answer for this pool, from the same rows.
+	pool, err := db.GetPool(pkh, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pool)
+	expected, ok := registeredPoolVrfKeyHash(pool)
+	require.True(t, ok, "header validation must be able to resolve the key")
+
+	assert.Equal(t, expected.Bytes(), entry.VrfHash[:],
+		"the reply's VRF key must be the one header validation will require")
+}

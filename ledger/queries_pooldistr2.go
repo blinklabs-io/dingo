@@ -147,7 +147,23 @@ func stakeFraction(stake, total uint64) *cbor.Rat {
 	}
 }
 
-// poolVrfKeyHashes looks up the VRF key hash registered for each pool.
+// poolVrfKeyHashes looks up the VRF key hash each pool will be held to.
+//
+// Resolution goes through registeredPoolVrfKeyHash, the same function
+// verifyRegisteredVrfKey uses to decide whether an incoming block's VRF key
+// belongs to the pool that produced it. That is not an incidental reuse: a
+// leadership schedule is only worth anything if the node that produced it will
+// accept the blocks it promises, so the key this reply names has to be the key
+// block validation will require. Sharing the function means the two cannot
+// drift apart silently.
+//
+// It also settles which registration wins when a pool has re-registered with a
+// new VRF key. The Haskell node answers this query from a stake distribution
+// snapshotted at the epoch boundary, so it reports the key that was in force
+// then. dingo resolves the producing pool's key live at validation time, so
+// reporting the snapshot-era key here would describe a schedule dingo itself
+// would reject. Matching the validator is what keeps the reply true of the
+// node serving it.
 func (ls *LedgerState) poolVrfKeyHashes(
 	keyHashes []lcommon.PoolKeyHash,
 	txn types.Txn,
@@ -161,25 +177,12 @@ func (ls *LedgerState) poolVrfKeyHashes(
 		return nil, err
 	}
 	for _, pool := range pools {
-		// The VRF hash is taken from the newest registration rather than the
-		// denormalized copy on the pool row. A pool that re-registers with a
-		// new VRF key leaves that copy able to disagree with the key the chain
-		// actually accepts, and reporting the stale one would have cardano-cli
-		// check leadership against a key the producer no longer uses.
-		//
-		// Registrations are ordered newest first by added_slot, block_index
-		// and cert_index, so the first entry is the one in force.
-		if len(pool.Registration) == 0 {
-			continue
-		}
-		vrfKeyHash := pool.Registration[0].VrfKeyHash
-		if len(vrfKeyHash) != lcommon.Blake2b256Size {
+		vrfKeyHash, ok := registeredPoolVrfKeyHash(&pool)
+		if !ok {
 			continue
 		}
 		pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pool.PoolKeyHash))
-		out[pkh] = ledger.Blake2b256(
-			lcommon.NewBlake2b256(vrfKeyHash),
-		)
+		out[pkh] = ledger.Blake2b256(vrfKeyHash)
 	}
 	return out, nil
 }
