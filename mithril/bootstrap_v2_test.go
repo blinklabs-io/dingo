@@ -961,3 +961,75 @@ func TestBootstrapUnsupportedBackend(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported Mithril backend")
 }
+
+// TestOpenImmutableRootRefusesSymlinkedDir covers the immutable directory
+// itself being a symlink planted before the download starts.
+//
+// Extraction refuses to write through it, but the retry path removes a failed
+// trio by name, and removing `<extract>/immutable/00000.chunk` resolves
+// `immutable` on the way to the file. Following it there would delete
+// somebody else's files as the cost of a failed download, so the symlink is
+// refused up front instead.
+func TestOpenImmutableRootRefusesSymlinkedDir(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	canary := filepath.Join(outside, "00000.chunk")
+	require.NoError(t, os.WriteFile(canary, []byte("original"), 0o640))
+
+	extractDir := filepath.Join(root, "extract")
+	require.NoError(t, os.MkdirAll(extractDir, 0o750))
+	requireSymlinkSupport(t, outside, filepath.Join(extractDir, "immutable"))
+
+	_, _, err := openImmutableRoot(extractDir)
+	require.ErrorIs(t, err, ErrExtractUnsafePath)
+
+	data, readErr := os.ReadFile(canary)
+	require.NoError(t, readErr)
+	assert.Equal(t, "original", string(data))
+}
+
+// TestRemoveImmutableTrioStaysInsideRoot pins the cleanup itself: removal
+// resolves through the immutable directory's handle, so it can only unlink
+// files in the directory the download wrote into.
+func TestRemoveImmutableTrioStaysInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	canary := filepath.Join(outside, "00000.chunk")
+	require.NoError(t, os.WriteFile(canary, []byte("original"), 0o640))
+
+	extractDir := filepath.Join(root, "extract")
+	immutableDir, immutableRoot, err := openImmutableRoot(extractDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = immutableRoot.Close() })
+	require.Equal(t, filepath.Join(extractDir, "immutable"), immutableDir)
+
+	for _, ext := range immutableFileExtensions {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(immutableDir, "00000."+ext),
+			[]byte("partial"),
+			0o640,
+		))
+	}
+	// A symlink appearing after the handle was opened cannot redirect the
+	// removal, because the handle refers to the directory rather than to a
+	// name that can be repointed.
+	requireDirectorySwap(t, immutableDir, filepath.Join(root, "moved"))
+	requireSymlinkSupport(t, outside, immutableDir)
+
+	removeImmutableTrio(immutableRoot, 0)
+
+	data, readErr := os.ReadFile(canary)
+	require.NoError(t, readErr)
+	assert.Equal(t, "original", string(data),
+		"cleanup must not follow a symlink at the immutable directory")
+
+	for _, ext := range immutableFileExtensions {
+		_, statErr := os.Stat(
+			filepath.Join(root, "moved", "00000."+ext),
+		)
+		assert.True(t, os.IsNotExist(statErr),
+			"the failed trio must be removed from the real directory")
+	}
+}

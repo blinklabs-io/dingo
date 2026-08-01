@@ -659,10 +659,11 @@ func downloadImmutables(
 	downloadDir string,
 	extractDir string,
 ) error {
-	immutableDir := filepath.Join(extractDir, "immutable")
-	if err := os.MkdirAll(immutableDir, 0o750); err != nil {
-		return fmt.Errorf("creating immutable directory: %w", err)
+	immutableDir, immutableRoot, err := openImmutableRoot(extractDir)
+	if err != nil {
+		return err
 	}
+	defer immutableRoot.Close()
 	archiveDir := filepath.Join(
 		downloadDir,
 		"immutable-archives-"+truncateDigest(artifact.Hash),
@@ -802,7 +803,7 @@ func downloadImmutables(
 					archiveDir, extractDir,
 				); err != nil {
 					lastErr = err
-					removeImmutableTrio(immutableDir, num)
+					removeImmutableTrio(immutableRoot, num)
 					_ = os.Remove(
 						immutableArchivePath(archiveDir, num),
 					)
@@ -820,7 +821,7 @@ func downloadImmutables(
 					immutableDir, num, digests,
 				)
 				if lastErr != nil {
-					removeImmutableTrio(immutableDir, num)
+					removeImmutableTrio(immutableRoot, num)
 					_ = os.Remove(
 						immutableArchivePath(archiveDir, num),
 					)
@@ -856,7 +857,7 @@ func downloadImmutables(
 			return nil
 		})
 	}
-	err := g.Wait()
+	err = g.Wait()
 	if seq != nil {
 		// A download failure (or the copy-triggered cancel above) means the
 		// contiguous prefix can never advance, so unblock the consumer's Wait.
@@ -1032,12 +1033,44 @@ func checkImmutableTrio(
 	return totalBytes, nil
 }
 
+// openImmutableRoot creates the immutable directory under extractDir and
+// returns its path along with a handle to resolve cleanup through.
+//
+// A symlink at that name is refused rather than followed. Extraction already
+// refuses to write through one, but the retry path removes a failed trio by
+// name, and removing `<extract>/immutable/00000.chunk` resolves `immutable` on
+// the way to the file — through a symlink that unlinks somebody else's files
+// as the cost of a failed download. The handle closes the same gap against a
+// symlink planted later: it refers to the directory rather than to a name that
+// can be repointed once the download is under way.
+func openImmutableRoot(extractDir string) (string, *os.Root, error) {
+	if err := os.MkdirAll(extractDir, extractDirMode); err != nil {
+		return "", nil, fmt.Errorf("creating extraction directory: %w", err)
+	}
+	// extractDir is the operator's chosen path; everything below it is
+	// content this node extracts and is not trusted the same way.
+	extractRoot, err := os.OpenRoot(extractDir)
+	if err != nil {
+		return "", nil, fmt.Errorf(
+			"opening extraction directory %s: %w", extractDir, err,
+		)
+	}
+	defer extractRoot.Close()
+	immutableRoot, err := openExtractRoot(extractRoot, "immutable")
+	if err != nil {
+		return "", nil, fmt.Errorf("creating immutable directory: %w", err)
+	}
+	return filepath.Join(extractDir, "immutable"), immutableRoot, nil
+}
+
 // removeImmutableTrio deletes the three files of an immutable file
 // number so a corrupted download is not reused on resume.
-func removeImmutableTrio(dir string, num uint64) {
+//
+// Resolved through the immutable directory's handle so a failed download can
+// only ever unlink files in the directory it was writing into.
+func removeImmutableTrio(root *os.Root, num uint64) {
 	for _, ext := range immutableFileExtensions {
-		path := filepath.Join(dir, fmt.Sprintf("%05d.%s", num, ext))
-		_ = os.Remove(path) //nolint:gosec // path is constructed from our own extraction directory
+		_ = root.Remove(fmt.Sprintf("%05d.%s", num, ext))
 	}
 }
 
