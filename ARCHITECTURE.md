@@ -2582,6 +2582,30 @@ pre-intersect UTxOs are intentionally absent. Gap-block ingestion
 and the chain tip) is unconditionally strict already, since that range is
 always expected to be fully recoverable from the snapshot import.
 
+That default recovery is deliberately one-sided: it only fires when the
+producer row is *absent* from the metadata store, and it rebuilds it from the
+blob store, which is append-only and retains blocks from abandoned forks. In
+steady-state, at-tip, validated block application that recovery must never run:
+every consumed input's producer is already applied and live in the metadata
+store, so an absent row means the applied ledger has diverged from the header
+chain (issue #3005), and recovering the producer from a fork block the applied
+chain never followed would import a UTxO the chain never produced and persist an
+input-conservation violation — which, once it accumulates past the security
+parameter K, wedges the node behind the rollback-exceeds-K guard with no legal
+recovery. The ledger closes this by setting
+`BatchedTxIngestOpts.StrictAppliedInputConservation` on the delta apply whenever
+the block is validated and the node has already reached tip
+(`shouldValidate && reachedTip`, `ledgerProcessBlock`); with that flag and
+`StrictUtxoValidation` both set, `ensureTransactionConsumedUtxos` refuses to
+recover an absent producer past the Mithril boundary and instead errors, which
+aborts the block's transaction so the inconsistent state is never committed and
+the node stalls loudly for resync rather than baking in a beyond-K fork. The
+flag is left off for from-genesis bootstrap and Mithril gap-closure (both run
+before `reachedTip`) and for non-validated/trusted replay and Leios
+endorser-block apply, where an absent producer is legitimately recovered, so
+this is the primary #3005 prevention while the K-guard and the non-convergence
+recovery hold remain as backstops.
+
 Certified immutable blocks after the selected anchor remain in the primary
 chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
 node startup therefore replays that stable suffix through the ordinary ledger

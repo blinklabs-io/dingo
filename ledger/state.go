@@ -4287,6 +4287,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Process transactions
 	var delta *LedgerDelta
+	// Steady-state, at-tip, validated application refuses to recover an absent
+	// consumed-input producer from the blob store and treats it as a hard error
+	// instead (issue #3005). Gated on reachedTip so that from-genesis bootstrap
+	// and Mithril gap-closure, where absent producer rows are legitimately
+	// recovered, are unaffected.
+	strictConsumedInputs := shouldValidate && ls.reachedTip.Load()
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[string]lcommon.Utxo)
@@ -4298,6 +4304,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
 				delta.donate(blockDonation)
 				blockDonation = 0
