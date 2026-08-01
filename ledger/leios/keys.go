@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -201,8 +202,15 @@ func parseVoteSigningKeyFile(data []byte) (*VoteSigningKey, error) {
 		return nil, fmt.Errorf("decode Cardano signing key cborHex: %w", err)
 	}
 	var scalar []byte
-	if _, err := cbor.Decode(cborBytes, &scalar); err != nil {
+	read, err := cbor.Decode(cborBytes, &scalar)
+	if err != nil {
 		return nil, fmt.Errorf("decode Cardano signing key cborHex: %w", err)
+	}
+	if read != len(cborBytes) {
+		return nil, fmt.Errorf(
+			"%w: trailing bytes after Cardano signing key CBOR value",
+			ErrInvalidSigningKey,
+		)
 	}
 	return ParseVoteSigningKey(hex.EncodeToString(scalar))
 }
@@ -250,6 +258,7 @@ func ParseVoterPublicKey(hexStr string) (*bls12381.G2Affine, error) {
 // the registry, or aggregate certificate verification becomes forgeable
 // via rogue-key attacks.
 type VoterRegistry struct {
+	mu   sync.RWMutex
 	keys map[string]*bls12381.G2Affine // lowercase-hex pool key hash -> pubkey
 }
 
@@ -301,6 +310,8 @@ func NewVoterRegistry(entries map[string]string) (*VoterRegistry, error) {
 func (r *VoterRegistry) PublicKeyFor(
 	poolKeyHash []byte,
 ) (*bls12381.G2Affine, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	pub, ok := r.keys[hex.EncodeToString(poolKeyHash)]
 	return pub, ok
 }
@@ -323,6 +334,8 @@ func (r *VoterRegistry) RegisterPublicKey(
 		return errors.New("voter public key must not be nil or infinity")
 	}
 	canonical := hex.EncodeToString(poolKeyHash)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if existing, ok := r.keys[canonical]; ok {
 		if !existing.Equal(pub) {
 			return fmt.Errorf(
@@ -339,5 +352,7 @@ func (r *VoterRegistry) RegisterPublicKey(
 
 // Size returns the number of registered voter public keys.
 func (r *VoterRegistry) Size() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return len(r.keys)
 }

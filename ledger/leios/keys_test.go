@@ -192,6 +192,23 @@ func TestLoadVoteSigningKeyFileCardanoTextEnvelope(t *testing.T) {
 	assert.Equal(t, expected.PublicKeyBytes(), key.PublicKeyBytes())
 }
 
+func TestLoadVoteSigningKeyFileRejectsTrailingCbor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bls.skey")
+	scalar := make([]byte, voteSigningKeySize)
+	scalar[len(scalar)-1] = 42
+	cborBytes := append([]byte{0x58, voteSigningKeySize}, scalar...)
+	cborBytes = append(cborBytes, 0x00)
+	content := fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","cborHex":"%s"}`,
+		hex.EncodeToString(cborBytes),
+	)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	_, err := LoadVoteSigningKeyFile(path)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+}
+
 func TestLoadVoteSigningKeyFileRejectsUnsupportedEnvelope(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "node.skey")
