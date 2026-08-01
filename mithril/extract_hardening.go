@@ -18,7 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 // Errors reported when an extraction destination cannot be trusted. The
@@ -119,6 +121,43 @@ func assertRealDir(path string, info os.FileInfo) error {
 // of the node's group in deployments that separate the downloader from the
 // node.
 const extractDirMode = 0o750
+
+// assertNoSymlinkComponents rejects a name, relative to root, whose existing
+// path components include a symlink.
+//
+// Every component is inspected rather than the complete path alone. Inspecting
+// only the whole path reports on its last component and resolves everything
+// before it, so a symlink at `immutable` goes unnoticed while a write to
+// `immutable/00000.chunk` follows it. Components are walked shortest first, so
+// each is inspected before it is used to reach the next.
+//
+// A missing component ends the walk: nothing can exist below a name that does
+// not exist yet.
+func assertNoSymlinkComponents(root *os.Root, name string) error {
+	var walked string
+	for part := range strings.SplitSeq(filepath.ToSlash(name), "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		walked = path.Join(walked, part)
+		info, err := root.Lstat(walked)
+		switch {
+		case err == nil:
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf(
+					"%w: %s is a symlink", ErrExtractUnsafePath, walked,
+				)
+			}
+		case errors.Is(err, os.ErrNotExist):
+			return nil
+		default:
+			return fmt.Errorf(
+				"%w: inspecting %s: %w", ErrExtractUnsafePath, walked, err,
+			)
+		}
+	}
+	return nil
+}
 
 // dirIsEmpty reports whether dir exists and contains no entries. A missing
 // directory counts as empty.
@@ -365,23 +404,13 @@ func prepareExtractDestination(
 // createExtractedFile opens name for writing relative to the extraction root.
 //
 // The root refuses any name resolving outside it, so containment does not
-// depend on the lstat below. That check exists to reject writing through a
-// symlink that sits inside the root, which an archive should never do, and to
-// give a clearer error than the runtime would; O_NOFOLLOW makes the final
+// depend on the component checks below. Those exist to reject writing through
+// a symlink that sits inside the root, which an archive should never do, and
+// to give a clearer error than the runtime would; O_NOFOLLOW makes the final
 // component race-free where the platform supports it.
 func createExtractedFile(root *os.Root, name string) (*os.File, error) {
-	info, err := root.Lstat(name)
-	switch {
-	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf(
-				"%w: %s is a symlink", ErrExtractUnsafePath, name,
-			)
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return nil, fmt.Errorf(
-			"%w: inspecting %s: %w", ErrExtractUnsafePath, name, err,
-		)
+	if err := assertNoSymlinkComponents(root, name); err != nil {
+		return nil, err
 	}
 	file, err := root.OpenFile(
 		name,
@@ -399,24 +428,15 @@ func createExtractedFile(root *os.Root, name string) (*os.File, error) {
 // mkdirExtracted creates a directory relative to the extraction root.
 //
 // A name resolving outside the root is refused by the root itself. A symlink
-// at the name is rejected here so extraction never populates a directory the
-// archive did not create, even one pointing back inside the root.
+// anywhere along the name is rejected here so extraction never populates a
+// directory the archive did not create, even one pointing back inside the
+// root.
 func mkdirExtracted(root *os.Root, name string) error {
 	if name == "." || name == "" {
 		return nil
 	}
-	info, err := root.Lstat(name)
-	switch {
-	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf(
-				"%w: %s is a symlink", ErrExtractUnsafePath, name,
-			)
-		}
-	case !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf(
-			"%w: inspecting %s: %w", ErrExtractUnsafePath, name, err,
-		)
+	if err := assertNoSymlinkComponents(root, name); err != nil {
+		return err
 	}
 	if err := root.MkdirAll(name, extractDirMode); err != nil {
 		return fmt.Errorf(

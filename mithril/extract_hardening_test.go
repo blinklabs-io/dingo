@@ -728,3 +728,92 @@ func TestExtractPublishesDestinationWithGroupTraversal(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o750), info.Mode().Perm(),
 		"the published destination keeps group traversal")
 }
+
+// TestExtractRefusesSymlinkInsideDestination covers the symlinks the root
+// handle does not reject on its own.
+//
+// os.Root refuses an absolute symlink outright and refuses a relative one
+// whose target leaves the root, so the only symlink that can still redirect a
+// write is a relative one pointing back inside the destination. It cannot
+// carry bytes out, but it does mean the tree on disk is not the tree the
+// archive described — a directory the archive never created ends up holding
+// its contents.
+//
+// Both positions matter. Inspecting an entry's complete path reports on its
+// last component and resolves everything before it, so a symlink at
+// `immutable` goes unnoticed while a write to `immutable/sub/00000.chunk`
+// follows it.
+func TestExtractRefusesSymlinkInsideDestination(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		entry string
+	}{
+		{name: "final component", entry: "immutable/00000.chunk"},
+		{name: "intermediate component", entry: "immutable/sub/00000.chunk"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			archivePath := writeTestArchive(t, map[string]string{
+				tt.entry: "chunk0",
+			})
+
+			destDir := filepath.Join(t.TempDir(), "extracted")
+			elsewhere := filepath.Join(destDir, "elsewhere")
+			require.NoError(t, os.MkdirAll(elsewhere, 0o750))
+			// Relative, so os.Root will follow it rather than refuse it for
+			// being absolute.
+			requireSymlinkSupport(
+				t, "elsewhere", filepath.Join(destDir, "immutable"),
+			)
+
+			_, err := ExtractArchive(
+				t.Context(), archivePath, destDir, nil,
+				WithMergeIntoDestination(),
+			)
+			require.ErrorIs(t, err, ErrExtractUnsafePath)
+
+			entries, readErr := os.ReadDir(elsewhere)
+			require.NoError(t, readErr)
+			assert.Empty(t, entries,
+				"no write may be redirected through a symlink in the tree")
+		})
+	}
+}
+
+// TestExtractRootRefusesEntrySubstitutedDuringExtraction covers an escaping
+// symlink staged as a race rather than as pre-existing content: it appears
+// after the extraction root has been opened and every destination check has
+// run.
+//
+// Containment does not come from those checks, so the timing does not matter.
+// The root refuses any name resolving outside it whenever the write happens.
+// The symlink is relative so that it is refused for escaping rather than for
+// being absolute, which os.Root rejects on sight.
+func TestExtractRootRefusesEntrySubstitutedDuringExtraction(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	destDir := filepath.Join(root, "extracted")
+	require.NoError(t, os.MkdirAll(destDir, 0o750))
+
+	extractRoot, _, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{merge: true},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+
+	// Planted after every destination check has already run.
+	requireSymlinkSupport(
+		t, filepath.Join("..", "outside"),
+		filepath.Join(destDir, "immutable"),
+	)
+
+	_, err = createExtractedFile(
+		extractRoot, filepath.Join("immutable", "00000.chunk"),
+	)
+	require.Error(t, err, "a path escaping the root must not open")
+
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries,
+		"a symlink planted mid-extraction must not redirect a write")
+}
