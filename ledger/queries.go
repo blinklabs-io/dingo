@@ -465,6 +465,8 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		return ls.queryShelleyGetProposals(q.ActionIds.Items())
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		return ls.queryShelleyDebugChainDepState()
+	case *olocalstatequery.ShelleyPoolDistr2Query:
+		return ls.queryShelleyPoolDistr2(q)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
