@@ -156,3 +156,42 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	assert.Zero(t, distr.TotalActiveStake)
 	assert.Empty(t, distr.Pools)
 }
+
+// TestQueryShelleyPoolDistr2_RejectsPoolWithoutRegistration covers a pool that
+// holds snapshot stake but has no registration on record.
+//
+// Such a pool cannot be given a VRF key hash, and dropping it silently is
+// worse than it sounds: TotalActiveStake is summed over the whole snapshot and
+// still counts that pool's stake, so the reported fractions would sum to less
+// than one with nothing in the reply saying so. A caller would compute a
+// leadership schedule against a denominator covering stake it cannot see.
+//
+// The state is a database inconsistency rather than a routine case, so it
+// fails loudly instead of producing a quietly wrong distribution.
+func TestQueryShelleyPoolDistr2_RejectsPoolWithoutRegistration(t *testing.T) {
+	db := newTestDB(t)
+
+	orphan := make([]byte, 28)
+	for i := range orphan {
+		orphan[i] = 0x77
+	}
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(orphan))
+	// Stake in the snapshot, but no pool or registration row to match it.
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        0,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(5_000_000),
+			CapturedSlot: 1,
+		},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	_, err := ls.Query(poolDistr2Query())
+	require.ErrorIs(t, err, ErrPoolDistrUnregisteredPool,
+		"a pool with stake but no registration must not be dropped silently")
+}

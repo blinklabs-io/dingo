@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
@@ -23,6 +25,15 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+)
+
+// ErrPoolDistrUnregisteredPool reports a pool holding stake in the snapshot
+// with no registration on record. The pool cannot be given a VRF key hash, and
+// the total active stake is summed over the whole snapshot, so omitting it
+// would leave the reported fractions summing to less than one with nothing
+// saying so.
+var ErrPoolDistrUnregisteredPool = errors.New(
+	"pool holds snapshot stake but has no registration",
 )
 
 // queryShelleyPoolDistr2 answers GetPoolDistr2, the stake distribution across
@@ -97,10 +108,19 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 		stake := stakeByPool[string(pkh.Bytes())]
 		vrf, ok := vrfByPool[pkh]
 		if !ok {
-			// A pool holding snapshot stake with no registration on record
-			// cannot be checked against a VRF key, and reporting it with a
-			// zero hash would read as a real key. Leave it out.
-			continue
+			// Dropping the pool would be worse than failing. Its stake is
+			// still counted in TotalActiveStake, which is summed over the
+			// whole snapshot, so the remaining fractions would sum to less
+			// than one and the caller would have no way to tell. Reporting it
+			// with a zero VRF hash is no better, since that reads as a real
+			// key. This is a database inconsistency rather than a routine
+			// case, so it fails loudly.
+			return nil, fmt.Errorf(
+				"%w: pool %x at epoch %d",
+				ErrPoolDistrUnregisteredPool,
+				pkh.Bytes(),
+				snapshotEpoch,
+			)
 		}
 		result.Pools[ledger.PoolId(pkh)] = olocalstatequery.PoolDistr2IndividualStake{
 			StakeFraction:  stakeFraction(stake, totalActiveStake),
@@ -140,6 +160,12 @@ func (ls *LedgerState) poolVrfKeyHashes(
 		return nil, err
 	}
 	for _, pool := range pools {
+		// The VRF hash on the pool row is a denormalized copy that can outlive
+		// the registration it came from, so the registration itself is what
+		// decides whether the pool is usable here.
+		if len(pool.Registration) == 0 {
+			continue
+		}
 		if len(pool.VrfKeyHash) != lcommon.Blake2b256Size {
 			continue
 		}
