@@ -116,6 +116,11 @@ func TestMigrateBlockNonceUniqueIndex_PromotesLegacyIndex(t *testing.T) {
 		assert.True(t, unique, "hash_slot must be unique after migration")
 	}
 	require.True(t, found, "hash_slot index missing after AutoMigrate")
+	assert.True(
+		t,
+		db.Migrator().HasIndex(&BlockNonce{}, "idx_block_nonce_slot"),
+		"AutoMigrate should add the slot-leading index to upgraded databases",
+	)
 }
 
 func TestMigrateBlockNonceUniqueIndex_AlreadyUnique(t *testing.T) {
@@ -138,4 +143,9 @@ func TestMigrateBlockNonceUniqueIndex_AlreadyUnique(t *testing.T) {
 		assert.True(t, unique)
 	}
 	require.True(t, found, "hash_slot index should still be present")
+	assert.True(
+		t,
+		db.Migrator().HasIndex(&BlockNonce{}, "idx_block_nonce_slot"),
+		"slot-leading index should support highest-slot recovery queries",
+	)
 }

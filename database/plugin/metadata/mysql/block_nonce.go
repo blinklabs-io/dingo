@@ -151,6 +151,34 @@ func (d *MetadataStoreMysql) GetLastBlockNonceInRange(
 	return ret.Nonce, nil
 }
 
+// GetLatestBlockNonce returns the block_nonce row with the highest slot, the
+// authoritative high-water mark of durably applied ledger state. Returns
+// (zero, false, nil) when the table is empty.
+func (d *MetadataStoreMysql) GetLatestBlockNonce(
+	txn types.Txn,
+) (models.BlockNonce, bool, error) {
+	ret := models.BlockNonce{}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return models.BlockNonce{}, false, fmt.Errorf(
+			"resolveDB for latest block nonce: %w", err,
+		)
+	}
+	result := db.
+		Order("slot DESC, hash DESC").
+		Limit(1).
+		First(&ret)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return models.BlockNonce{}, false, nil
+		}
+		return models.BlockNonce{}, false, fmt.Errorf(
+			"query latest block nonce: %w", result.Error,
+		)
+	}
+	return ret, true, nil
+}
+
 // DeleteBlockNoncesBeforeSlot deletes block_nonce records with slot less than the specified value
 func (d *MetadataStoreMysql) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,

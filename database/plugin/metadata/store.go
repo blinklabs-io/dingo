@@ -694,6 +694,15 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]byte, error)
 
+	// GetLatestBlockNonce returns the block_nonce row with the highest slot.
+	// block_nonce is written in the same metadata transaction as a block's
+	// UTxO/certificate effects and the ledger tip, so the maximum slot is the
+	// authoritative high-water mark of durably applied ledger state. The bool
+	// is false (with a zero row and nil error) when the table is empty.
+	GetLatestBlockNonce(
+		txn types.Txn,
+	) (models.BlockNonce, bool, error)
+
 	// GetDatum retrieves a datum by its hash, returning nil if not found.
 	GetDatum(
 		lcommon.Blake2b256,

@@ -220,6 +220,31 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		replayHolding = ls.observeReplayRecoveryTip(ledgerTip.Point.Slot)
 		if replayHolding {
 			rewindPoint = ledgerTip.Point
+			// The applied high-water mark can trail currentTip when a prior
+			// slot-based rollback left the tip above durable state. Holding at
+			// that decoupled tip repeats the same recovery loop; use the durable
+			// floor only when it is also on the current primary chain.
+			floor, ok, ferr := ls.durableAppliedFloor()
+			if ferr != nil {
+				return false, fmt.Errorf(
+					"determine durable applied floor for replay hold: %w",
+					ferr,
+				)
+			}
+			if ok {
+				onChain, ferr := ls.primaryChainContainsPoint(floor)
+				if ferr != nil {
+					return false, fmt.Errorf(
+						"check durable applied floor on primary chain: %w",
+						ferr,
+					)
+				}
+				if onChain && (floor.Slot < rewindPoint.Slot ||
+					(floor.Slot == rewindPoint.Slot &&
+						!bytes.Equal(floor.Hash, rewindPoint.Hash))) {
+					rewindPoint = floor
+				}
+			}
 			primaryChainAlreadyHeld = ls.chain.Tip().Point.Slot < rewindPoint.Slot
 		}
 	}
@@ -1051,6 +1076,14 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	if failingBlock.ID > uint64(rewindBlocks) {
 		targetIndex = failingBlock.ID - uint64(rewindBlocks)
 	}
+	// Anchor no higher than the durable applied floor. Only use the floor when
+	// it belongs to the current primary chain; a stale fork floor must not be
+	// used to roll the primary chain onto the abandoned branch.
+	if floorIndex, ok, err := ls.durableAppliedFloorAnchorIndex(); err != nil {
+		return nil, err
+	} else if ok && floorIndex < targetIndex {
+		targetIndex = floorIndex
+	}
 	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1070,6 +1103,27 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 		Strategy:           "security-param-fallback",
 		ProducerUnresolved: true,
 	}, nil
+}
+
+// durableAppliedFloorAnchorIndex returns the block index of the durable
+// applied floor when that point is present on the current primary chain.
+func (ls *LedgerState) durableAppliedFloorAnchorIndex() (uint64, bool, error) {
+	floor, ok, err := ls.durableAppliedFloor()
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	onChain, err := ls.primaryChainContainsPoint(floor)
+	if err != nil || !onChain {
+		return 0, false, err
+	}
+	floorBlock, err := database.BlockByPoint(ls.db, floor)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	return floorBlock.ID, true, nil
 }
 
 func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
