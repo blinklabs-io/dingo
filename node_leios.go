@@ -241,16 +241,19 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	poolID := creds.GetPoolID()
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolID[:])
-	key, err := leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
-	if err != nil {
-		return fmt.Errorf("derive prototype leios vote signing key: %w", err)
-	}
+	var key *leios.VoteSigningKey
+	var err error
 	if n.config.leiosVoteSigningKeyFile != "" {
 		key, err = leios.LoadVoteSigningKeyFile(
 			n.config.leiosVoteSigningKeyFile,
 		)
 		if err != nil {
 			return fmt.Errorf("load leios vote signing key: %w", err)
+		}
+	} else {
+		key, err = leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
+		if err != nil {
+			return fmt.Errorf("derive prototype leios vote signing key: %w", err)
 		}
 	}
 	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
