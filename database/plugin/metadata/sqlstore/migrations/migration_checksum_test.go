@@ -12,21 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package migrations
 
-import "github.com/blinklabs-io/dingo/database/types"
+import "testing"
 
-// TransactionMetadataLabel stores per-label transaction metadata values
-// for efficient label-based querying.
-type TransactionMetadataLabel struct {
-	ID            uint
-	TransactionID uint
-	Label         types.Uint64
-	Slot          uint64
-	CborValue     []byte
-	JsonValue     string
-}
-
-func (TransactionMetadataLabel) TableName() string {
-	return "transaction_metadata_label"
+func TestChecksumIncludesPhaseBoundaries(t *testing.T) {
+	base := Migration{
+		Version:          1,
+		Name:             "v1alpha1",
+		BackfillRevision: "none",
+		SQL: map[string]SQL{
+			"sqlite": {Expand: []string{"one", "two"}, Contract: []string{"three"}},
+		},
+	}
+	moved := base
+	moved.SQL = map[string]SQL{
+		"sqlite": {Expand: []string{"one"}, Contract: []string{"two", "three"}},
+	}
+	if base.checksum() == moved.checksum() {
+		t.Fatal("moving SQL between migration phases must change checksum")
+	}
 }

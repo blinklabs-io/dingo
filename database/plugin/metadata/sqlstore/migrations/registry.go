@@ -305,6 +305,20 @@ func adoptSQLiteV1(
 			"id", "epoch", "credential_tag", "staking_key", "guarded",
 		},
 	}
+	// Validate every table and column in the released v1 schema, not only the
+	// handful of tables used by the adoption backfills below.  A partially
+	// created or damaged database must never be marked migrated: the expand
+	// phase intentionally uses IF NOT EXISTS and therefore cannot repair a
+	// table that exists with an incompatible shape.
+	expected, err := sqliteV1Columns()
+	if err != nil {
+		return err
+	}
+	for table, columns := range expected {
+		for column := range columns {
+			required[table] = append(required[table], column)
+		}
+	}
 	for table, columns := range required {
 		found, err := sqliteTableColumns(ctx, conn, table)
 		if err != nil {
@@ -332,7 +346,162 @@ func adoptSQLiteV1(
 			)
 		}
 	}
+	return repairSQLiteV1Indexes(ctx, conn)
+}
+
+// sqliteV1Columns derives the released table/column contract from the
+// immutable expand resource. Keeping this in one place avoids a second,
+// inevitably drifting list of dozens of metadata columns.
+func sqliteV1Columns() (map[string]map[string]struct{}, error) {
+	statements, err := loadSQL("v1/sqlite/expand.sql")
+	if err != nil {
+		return nil, err
+	}
+	ret := make(map[string]map[string]struct{})
+	for _, statement := range statements {
+		upper := strings.ToUpper(strings.TrimSpace(statement))
+		if !strings.HasPrefix(upper, "CREATE TABLE") {
+			continue
+		}
+		open := strings.IndexByte(statement, '(')
+		if open < 0 || !strings.HasSuffix(strings.TrimSpace(statement), ")") {
+			return nil, fmt.Errorf("%w: malformed CREATE TABLE statement", ErrLegacySchema)
+		}
+		header := strings.Fields(strings.TrimSpace(statement[:open]))
+		if len(header) == 0 {
+			return nil, fmt.Errorf("%w: missing table name", ErrLegacySchema)
+		}
+		table := strings.Trim(header[len(header)-1], "`\"")
+		body := strings.TrimSpace(statement[open+1:])
+		body = strings.TrimSuffix(body, ")")
+		columns := make(map[string]struct{})
+		for _, definition := range splitSQLList(body) {
+			definition = strings.TrimSpace(definition)
+			if definition == "" {
+				continue
+			}
+			first := strings.Fields(definition)
+			if len(first) == 0 {
+				continue
+			}
+			keyword := strings.ToUpper(strings.Trim(first[0], "`\""))
+			switch keyword {
+			case "CONSTRAINT", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK":
+				continue
+			}
+			columns[strings.Trim(first[0], "`\"")] = struct{}{}
+		}
+		ret[table] = columns
+	}
+	return ret, nil
+}
+
+// splitSQLList splits a CREATE TABLE body on top-level commas while retaining
+// commas nested in type declarations and constraints.
+func splitSQLList(value string) []string {
+	var ret []string
+	start, depth := 0, 0
+	var quote byte
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if quote != 0 {
+			if char == quote {
+				if index+1 < len(value) && value[index+1] == quote {
+					index++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch char {
+		case '\'', '"', '`':
+			quote = char
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				ret = append(ret, value[start:index])
+				start = index + 1
+			}
+		}
+	}
+	return append(ret, value[start:])
+}
+
+func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
+	// Older releases created a non-unique hash_slot index. Deduplicate before
+	// replacing it so the v1 ON CONFLICT (hash, slot) upsert is guaranteed to
+	// have a matching unique constraint.
+	if _, err := conn.ExecContext(ctx, `
+DELETE FROM block_nonce
+WHERE id NOT IN (
+    SELECT MIN(id) FROM block_nonce GROUP BY hash, slot
+)`); err != nil {
+		return fmt.Errorf("repair block_nonce duplicates: %w", err)
+	}
+	for _, index := range []string{
+		"hash_slot",
+		"idx_account_staking_key",
+		"idx_account_reward_delta_w_tx_s",
+	} {
+		exists, err := sqliteIndexExists(ctx, conn, index)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := conn.ExecContext(
+			ctx,
+			"DROP INDEX IF EXISTS `"+index+"`",
+		); err != nil {
+			return fmt.Errorf("drop legacy SQLite index %q: %w", index, err)
+		}
+	}
+	if _, err := conn.ExecContext(
+		ctx,
+		"CREATE UNIQUE INDEX IF NOT EXISTS `hash_slot` ON `block_nonce`(`hash`,`slot`)",
+	); err != nil {
+		return fmt.Errorf("create block_nonce unique index: %w", err)
+	}
 	return nil
+}
+
+func sqliteIndexExists(ctx context.Context, conn *sql.Conn, name string) (bool, error) {
+	var found int
+	err := conn.QueryRowContext(
+		ctx,
+		`SELECT 1 FROM pragma_index_list(?) WHERE name = ? LIMIT 1`,
+		"block_nonce", name,
+	).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Account and reward-delta indexes live on different tables. Query the
+		// catalog directly so the caller need not carry table-specific names.
+		for _, table := range []string{"account", "account_reward_delta"} {
+			err = conn.QueryRowContext(
+				ctx,
+				`SELECT 1 FROM pragma_index_list(?) WHERE name = ? LIMIT 1`,
+				table,
+				name,
+			).Scan(&found)
+			if err == nil {
+				return true, nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return false, fmt.Errorf("inspect SQLite index %q: %w", name, err)
+			}
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect SQLite index %q: %w", name, err)
+	}
+	return true, nil
 }
 
 func sqliteTableColumns(

@@ -459,6 +459,9 @@ SELECT hash FROM "transaction" WHERE slot > ?`,
 			if err := rows.Close(); err != nil {
 				return err
 			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("scan transactions for rollback: %w", err)
+			}
 			refs := []models.StakeCredentialRef{}
 			for start := 0; start < len(hashes); start += 400 {
 				end := min(start+400, len(hashes))
@@ -484,6 +487,9 @@ WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 				}
 				if err := stakeRows.Close(); err != nil {
 					return err
+				}
+				if err := stakeRows.Err(); err != nil {
+					return fmt.Errorf("scan affected stake credentials for rollback: %w", err)
 				}
 				if _, err := db.ExecContext(context.Background(), `
 UPDATE utxo SET spent_at_tx_id = NULL, deleted_slot = 0

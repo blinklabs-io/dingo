@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -30,6 +32,15 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
+
+var validDatabaseName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func validateDatabaseName(name string) error {
+	if !validDatabaseName.MatchString(name) {
+		return fmt.Errorf("invalid MySQL database name %q", name)
+	}
+	return nil
+}
 
 type Config struct {
 	Host                string        `yaml:"host"`
@@ -63,18 +74,18 @@ func RegisterProvider(host *plugin.Host) error {
 			}
 		},
 		func(
-			_ context.Context,
+			ctx context.Context,
 			cfg Config,
 			deps metadata.ProviderDependencies,
 		) (*sqlstore.Store, plugin.Instance, error) {
-			store, err := openStore(cfg, deps)
+			store, err := openStore(ctx, cfg, deps)
 			if err != nil {
 				return nil, nil, err
 			}
 			return store, plugin.Lifecycle{
 				StartFunc: store.Start,
-				StopFunc: func(context.Context) error {
-					return store.Close()
+				StopFunc: func(ctx context.Context) error {
+					return store.CloseContext(ctx)
 				},
 			}, nil
 		},
@@ -82,6 +93,7 @@ func RegisterProvider(host *plugin.Host) error {
 }
 
 func openStore(
+	ctx context.Context,
 	cfg Config,
 	deps metadata.ProviderDependencies,
 ) (*sqlstore.Store, error) {
@@ -116,6 +128,16 @@ func openStore(
 			driverConfig.TLSConfig = cfg.SSLMode
 		}
 		dsn = driverConfig.FormatDSN()
+	}
+	// Explicit DSNs without a configured database are commonly supplied by
+	// tests or connection brokers that provision schemas themselves; retain the
+	// lazy sql.Open behavior for those callers. Provider-generated DSNs (and
+	// explicit DSNs with Database set) use the administrator path so a missing
+	// configured database can be created before Store.Start pings it.
+	if cfg.DSN == "" || cfg.Database != "" {
+		if err := ensureDatabaseExists(ctx, dsn, cfg.Database); err != nil {
+			return nil, err
+		}
 	}
 	db, err := sqlstore.OpenDB("mysql", dsn, "mysql")
 	if err != nil {
@@ -162,4 +184,38 @@ func openStore(
 		return nil, err
 	}
 	return store, nil
+}
+
+// ensureDatabaseExists provisions a configured database before opening the
+// metadata pool. MySQL rejects Ping when the DBName in a DSN is absent, so
+// connect once without a default schema and create it explicitly.
+func ensureDatabaseExists(ctx context.Context, dsn, configuredName string) error {
+	driverConfig, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		return fmt.Errorf("parse MySQL DSN: %w", err)
+	}
+	dbName := configuredName
+	if dbName == "" {
+		dbName = driverConfig.DBName
+	}
+	if dbName == "" {
+		return nil
+	}
+	if err := validateDatabaseName(dbName); err != nil {
+		return fmt.Errorf("cannot create MySQL database: %w", err)
+	}
+	driverConfig.DBName = ""
+	admin, err := sqlstore.OpenDB("mysql", driverConfig.FormatDSN(), "mysql")
+	if err != nil {
+		return fmt.Errorf("open MySQL admin connection: %w", err)
+	}
+	defer admin.Close()
+	if err := admin.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping MySQL admin connection: %w", err)
+	}
+	quoted := "`" + strings.ReplaceAll(dbName, "`", "``") + "`"
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+quoted); err != nil {
+		return fmt.Errorf("create MySQL database %q: %w", dbName, err)
+	}
+	return nil
 }

@@ -93,6 +93,9 @@ func normalizedSQLiteSchema(db *sql.DB) ([]string, error) {
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	var schema []string
 	for _, table := range tables {
 		schema = append(schema, "table:"+table)
@@ -135,6 +138,9 @@ func normalizedSQLiteSchema(db *sql.DB) ([]string, error) {
 			))
 		}
 		if err := columns.Close(); err != nil {
+			return nil, err
+		}
+		if err := columns.Err(); err != nil {
 			return nil, err
 		}
 		indexes, err := db.Query(
@@ -186,6 +192,9 @@ func normalizedSQLiteSchema(db *sql.DB) ([]string, error) {
 		if err := indexes.Close(); err != nil {
 			return nil, err
 		}
+		if err := indexes.Err(); err != nil {
+			return nil, err
+		}
 		for _, index := range tableIndexes {
 			indexColumns, err := db.Query(
 				"PRAGMA index_info(" + quoteSQLite(index.name) + ")",
@@ -214,6 +223,9 @@ func normalizedSQLiteSchema(db *sql.DB) ([]string, error) {
 				))
 			}
 			if err := indexColumns.Close(); err != nil {
+				return nil, err
+			}
+			if err := indexColumns.Err(); err != nil {
 				return nil, err
 			}
 		}
@@ -251,6 +263,9 @@ func normalizedSQLiteSchema(db *sql.DB) ([]string, error) {
 			))
 		}
 		if err := foreignKeys.Close(); err != nil {
+			return nil, err
+		}
+		if err := foreignKeys.Err(); err != nil {
 			return nil, err
 		}
 	}

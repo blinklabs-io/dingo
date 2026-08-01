@@ -318,6 +318,7 @@ INSERT INTO pool_stake_snapshot (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
+    stake_denominator = excluded.stake_denominator,
     delegator_count = excluded.delegator_count,
     captured_slot = excluded.captured_slot,
     calculation_version = excluded.calculation_version,
@@ -812,7 +813,7 @@ UPDATE offchain_metadata
 SET status = ?, content_type = ?, last_error = ?, body_hash = ?,
     content = ?, fetched_at = ?, next_fetch_after = ?, fetch_attempts = ?,
     last_http_status = ?, updated_at = ?
-WHERE id = ?;
+WHERE id = ? AND updated_at = ?;
 
 -- name: GetOffchainMetadata :one
 SELECT fetched_at, next_fetch_after, created_at, updated_at, url,

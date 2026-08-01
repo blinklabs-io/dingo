@@ -79,18 +79,39 @@ func (s *Store) GetAssetQuantityByPolicyAndName(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
+	rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(`
+SELECT asset.amount
+FROM asset
+INNER JOIN utxo ON asset.utxo_id = utxo.id
+WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0`),
+		policyID[:], assetName,
+	)
 	if err != nil {
 		return 0, err
 	}
-	value, err := q.GetAssetQuantityByPolicyAndName(
-		context.Background(),
-		sqlitequery.GetAssetQuantityByPolicyAndNameParams{
-			PolicyID: policyID[:],
-			Name:     assetName,
-		},
-	)
-	return uint64(value), err
+	defer rows.Close()
+	var total uint64
+	for rows.Next() {
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil {
+			return 0, err
+		}
+		if !raw.Valid {
+			continue
+		}
+		amount, err := parseUint64("asset amount", raw.String)
+		if err != nil {
+			return 0, err
+		}
+		if ^uint64(0)-total < amount {
+			return 0, errors.New("asset quantity overflow")
+		}
+		total += amount
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (s *Store) GetAssetMintBurnInfo(

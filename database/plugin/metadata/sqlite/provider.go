@@ -50,8 +50,8 @@ func RegisterProvider(host *hostplugin.Host) error {
 			}
 			lifecycle := hostplugin.Lifecycle{
 				StartFunc: store.Start,
-				StopFunc: func(context.Context) error {
-					return store.Close()
+				StopFunc: func(ctx context.Context) error {
+					return store.CloseContext(ctx)
 				},
 			}
 			return store, lifecycle, nil

@@ -150,10 +150,6 @@ func (s *Store) RebuildRewardLiveStake(
 SELECT EXISTS (
     SELECT 1 FROM account
     WHERE staking_key IS NULL OR LENGTH(staking_key) = 0
-    UNION ALL
-    SELECT 1 FROM utxo
-    WHERE deleted_slot = 0
-      AND staking_key IS NULL
 )`).Scan(&invalid); err != nil {
 				return err
 			}
@@ -236,7 +232,9 @@ FROM (
     SELECT credential_tag, staking_key FROM account
     UNION
     SELECT credential_tag, staking_key FROM utxo
-    WHERE deleted_slot = 0 AND LENGTH(staking_key) > 0
+    WHERE deleted_slot = 0
+      AND staking_key IS NOT NULL
+      AND LENGTH(staking_key) > 0
 ) creds
 LEFT JOIN account
   ON account.credential_tag = creds.credential_tag

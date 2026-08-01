@@ -32,6 +32,16 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Len(t, registry[0].SQL["sqlite"].Expand, 302)
 }
 
+func TestSQLiteV1ColumnsDeriveCompleteContract(t *testing.T) {
+	t.Parallel()
+	columns, err := sqliteV1Columns()
+	require.NoError(t, err)
+	require.Greater(t, len(columns), 50)
+	for table, tableColumns := range columns {
+		require.NotEmpty(t, tableColumns, "table %q has no columns", table)
+	}
+}
+
 func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {
 	expand, err := loadSQL("v1/sqlite/expand.sql")
 	require.NoError(t, err)

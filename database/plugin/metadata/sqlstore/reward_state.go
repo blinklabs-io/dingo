@@ -374,8 +374,11 @@ func (s *Store) SaveRewardPoolInputs(
 				context.Background(),
 				params,
 			)
+			if err != nil {
+				return err
+			}
 			input.ID = uint(id)
-			return err
+			return nil
 		},
 	)
 }
@@ -432,8 +435,11 @@ func (s *Store) SaveRewardStakeInputs(
 				context.Background(),
 				params,
 			)
+			if err != nil {
+				return err
+			}
 			input.ID = uint(id)
-			return err
+			return nil
 		},
 	)
 }
@@ -536,8 +542,11 @@ func (s *Store) SaveRewardPoolOutputs(
 				context.Background(),
 				params,
 			)
+			if err != nil {
+				return err
+			}
 			output.ID = uint(id)
-			return err
+			return nil
 		},
 	)
 }
@@ -594,8 +603,11 @@ func (s *Store) SaveRewardAccountOutputs(
 				context.Background(),
 				params,
 			)
+			if err != nil {
+				return err
+			}
 			output.ID = uint(id)
-			return err
+			return nil
 		},
 	)
 }

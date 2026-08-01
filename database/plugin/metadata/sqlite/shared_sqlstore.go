@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -93,6 +94,10 @@ func openSQLStore(
 			)
 		}
 		databasePath := filepath.Join(dataDir, "metadata.sqlite")
+		// Build a proper file URI so ?, #, %, and other URI-reserved
+		// characters in the configured data directory remain part of the
+		// filename instead of being interpreted as DSN options/fragments.
+		databaseURI := (&url.URL{Scheme: "file", Path: databasePath}).String()
 		commonPragmas := "&_pragma=journal_mode(WAL)" +
 			"&_pragma=synchronous(NORMAL)" +
 			"&_pragma=cache_size(-50000)" +
@@ -102,8 +107,8 @@ func openSQLStore(
 		writeDB, err = sqlstore.OpenDB(
 			"sqlite",
 			fmt.Sprintf(
-				"file:%s?_txlock=immediate%s",
-				databasePath,
+				"%s?_txlock=immediate%s",
+				databaseURI,
 				commonPragmas,
 			),
 			"sqlite",
@@ -114,8 +119,8 @@ func openSQLStore(
 		readDB, err = sqlstore.OpenDB(
 			"sqlite",
 			fmt.Sprintf(
-				"file:%s?mode=ro%s",
-				databasePath,
+				"%s?mode=ro%s",
+				databaseURI,
 				commonPragmas,
 			),
 			"sqlite",

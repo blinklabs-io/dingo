@@ -16,7 +16,9 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -236,7 +238,10 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 		).Scan(&payment, &tag, &staking)
 		if err != nil {
 			// Missing input history is valid during gap ingestion.
-			continue
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return fmt.Errorf("lookup input address for transaction %d: %w", transactionID, err)
 		}
 		add(payment, tag, staking)
 	}

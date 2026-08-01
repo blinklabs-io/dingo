@@ -92,7 +92,7 @@ func (s *Store) hydrateTransaction(
 	if err := loadTransactionWitnessScripts(db, transaction); err != nil {
 		return err
 	}
-	if err := loadTransactionRedeemers(db, transaction); err != nil {
+	if err := s.loadTransactionRedeemers(db, transaction); err != nil {
 		return err
 	}
 	return loadTransactionPlutusData(db, transaction)
@@ -242,13 +242,13 @@ FROM witness_scripts WHERE transaction_id = ? ORDER BY id`,
 	return rows.Err()
 }
 
-func loadTransactionRedeemers(
+func (s *Store) loadTransactionRedeemers(
 	db queryer,
 	transaction *models.Transaction,
 ) error {
 	rows, err := db.QueryContext(context.Background(), `
 SELECT data, id, transaction_id, ex_units_memory, ex_units_cpu,
-       "index", tag
+	       `+s.dialect.QuoteIdentifier("index")+`, tag
 FROM redeemer WHERE transaction_id = ? ORDER BY id`,
 		transaction.ID,
 	)

@@ -217,6 +217,10 @@ func (s *Store) GetOffchainMetadataFetchBatch(
 			break
 		}
 		for _, row := range rows {
+			// MySQL/PostgreSQL timestamp columns have microsecond precision;
+			// normalize the claim token before writing and retaining it so the
+			// ownership predicate compares the exact persisted value.
+			claimedAt := time.Now().UTC().Truncate(time.Microsecond)
 			affected, err := q.ClaimOffchainMetadataFetch(
 				ctx,
 				sqlitequery.ClaimOffchainMetadataFetchParams{
@@ -225,7 +229,7 @@ func (s *Store) GetOffchainMetadataFetchBatch(
 						Valid: true,
 					},
 					UpdatedAt: sql.NullTime{
-						Time:  time.Now(),
+						Time:  claimedAt,
 						Valid: true,
 					},
 					ID: row.ID,
@@ -246,6 +250,7 @@ func (s *Store) GetOffchainMetadataFetchBatch(
 				continue
 			}
 			doc := offchainMetadataFromSQLite(row)
+			doc.UpdatedAt = claimedAt
 			nextFetchAfter := claimUntil
 			doc.NextFetchAfter = &nextFetchAfter
 			ret = append(ret, doc)
@@ -303,8 +308,9 @@ func (s *Store) SetOffchainMetadataFetchResult(
 				Int64: httpStatus,
 				Valid: true,
 			},
-			UpdatedAt: sql.NullTime{Time: time.Now(), Valid: true},
-			ID:        int64(doc.ID),
+			UpdatedAt:   sql.NullTime{Time: time.Now(), Valid: true},
+			ID:          int64(doc.ID),
+			UpdatedAt_2: nullableTime(&doc.UpdatedAt),
 		},
 	)
 	if err != nil {
@@ -331,7 +337,7 @@ func (s *Store) GetOffchainMetadata(
 		context.Background(),
 		sqlitequery.GetOffchainMetadataParams{
 			SourceType: sourceType,
-			Url:        url,
+			Url:        strings.TrimSpace(url),
 			Hash:       hash,
 		},
 	)
@@ -353,6 +359,7 @@ func (s *Store) GetOffchainMetadataBatch(
 	seen := make(map[string]struct{}, len(urls))
 	unique := make([]string, 0, len(urls))
 	for _, url := range urls {
+		url = strings.TrimSpace(url)
 		if url == "" {
 			continue
 		}

@@ -27,6 +27,7 @@ import (
 
 func TestOpenStoreAppliesPoolSettings(t *testing.T) {
 	store, err := openStore(
+		t.Context(),
 		Config{
 			DSN:                 "user:pass@tcp(localhost:3306)/dingo",
 			PoolMaxOpenConns:    17,
@@ -48,7 +49,7 @@ func TestOpenStoreRejectsNegativePoolSettings(t *testing.T) {
 		{PoolMaxIdleConns: -1},
 		{PoolConnMaxLifetime: -time.Second},
 	} {
-		_, err := openStore(cfg, metadata.ProviderDependencies{})
+		_, err := openStore(t.Context(), cfg, metadata.ProviderDependencies{})
 		require.Error(t, err)
 	}
 }

@@ -339,11 +339,19 @@ func (s *Store) CountTransactionsInSlotRange(
 	if err != nil {
 		return 0, err
 	}
+	start, err := checkedInt64(startSlot)
+	if err != nil {
+		return 0, err
+	}
+	end, err := checkedInt64(endSlot)
+	if err != nil {
+		return 0, err
+	}
 	count, err := q.CountTransactionsInSlotRange(
 		context.Background(),
 		sqlitequery.CountTransactionsInSlotRangeParams{
-			Slot:   sql.NullInt64{Int64: int64(startSlot), Valid: true},
-			Slot_2: sql.NullInt64{Int64: int64(endSlot), Valid: true},
+			Slot:   sql.NullInt64{Int64: start, Valid: true},
+			Slot_2: sql.NullInt64{Int64: end, Valid: true},
 		},
 	)
 	if err != nil {
@@ -368,11 +376,19 @@ func (s *Store) GetBlockSlotRangeStats(
 	if err != nil {
 		return metadata.SlotRangeStats{}, err
 	}
+	start, err := checkedInt64(startSlot)
+	if err != nil {
+		return metadata.SlotRangeStats{}, err
+	}
+	end, err := checkedInt64(endSlot)
+	if err != nil {
+		return metadata.SlotRangeStats{}, err
+	}
 	row, err := q.GetBlockSlotRangeStats(
 		context.Background(),
 		sqlitequery.GetBlockSlotRangeStatsParams{
-			Slot:   sql.NullInt64{Int64: int64(startSlot), Valid: true},
-			Slot_2: sql.NullInt64{Int64: int64(endSlot), Valid: true},
+			Slot:   sql.NullInt64{Int64: start, Valid: true},
+			Slot_2: sql.NullInt64{Int64: end, Valid: true},
 		},
 	)
 	if err != nil {

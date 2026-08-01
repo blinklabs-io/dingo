@@ -109,6 +109,9 @@ func exerciseOffchainStore(t *testing.T, store offchainStore) offchainState {
 	)
 	require.NoError(t, err)
 	require.Len(t, ret.firstBatch, 1)
+	require.Equal(t, 1, ret.created)
+	require.Zero(t, ret.createdAgain)
+	require.Empty(t, ret.secondBatch)
 	doc := ret.firstBatch[0]
 	doc.Status = models.OffchainMetadataStatusFetched
 	doc.ContentType = "application/json"
@@ -130,6 +133,16 @@ func exerciseOffchainStore(t *testing.T, store offchainStore) offchainState {
 		nil,
 	)
 	require.NoError(t, err)
+	require.NotNil(t, ret.fetched)
+	require.Equal(t, models.OffchainMetadataStatusFetched, ret.fetched.Status)
+	require.Equal(t, url, ret.fetched.URL)
+	require.Equal(t, models.OffchainMetadataSourceConstitution, ret.fetched.SourceType)
+	require.Equal(t, "application/json", ret.fetched.ContentType)
+	require.Equal(t, hash, ret.fetched.Hash)
+	require.Equal(t, bytes.Repeat([]byte{0x24}, 32), ret.fetched.BodyHash)
+	require.Equal(t, []byte(`{"name":"constitution"}`), ret.fetched.Content)
+	require.Equal(t, uint(1), ret.fetched.FetchAttempts)
+	require.Equal(t, uint(200), ret.fetched.LastHTTPStatus)
 	normalizeOffchainTimes(ret.firstBatch)
 	normalizeOffchainDocument(ret.fetched)
 	return ret

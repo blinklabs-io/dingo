@@ -36,6 +36,8 @@ type Dialect interface {
 	SetBulkMode(context.Context, Execer) error
 	RestoreNormalMode(context.Context, Execer) error
 	UpdatePlannerStats(context.Context, Execer) error
+	DropIndexSQL(name, table string) string
+	CreateIndexSQL(name, table string, columns []string) string
 }
 
 // Execer is implemented by *sql.DB, *sql.Conn, and *sql.Tx.
@@ -97,6 +99,26 @@ func (d dialect) RestoreNormalMode(ctx context.Context, exec Execer) error {
 
 func (d dialect) UpdatePlannerStats(ctx context.Context, exec Execer) error {
 	return d.analyze(ctx, exec)
+}
+
+func (d dialect) DropIndexSQL(name, table string) string {
+	if d.name == "mysql" {
+		return "DROP INDEX " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table)
+	}
+	return "DROP INDEX IF EXISTS " + d.QuoteIdentifier(name)
+}
+
+func (d dialect) CreateIndexSQL(name, table string, columns []string) string {
+	quoted := make([]string, len(columns))
+	for i, column := range columns {
+		quoted[i] = d.QuoteIdentifier(column)
+	}
+	if d.name == "mysql" {
+		return "CREATE INDEX " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table) +
+			" (" + strings.Join(quoted, ", ") + ")"
+	}
+	return "CREATE INDEX IF NOT EXISTS " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table) +
+		" (" + strings.Join(quoted, ", ") + ")"
 }
 
 // SQLiteDialect returns the capabilities used by the pure-Go SQLite driver.

@@ -322,7 +322,7 @@ RETURNING id`,
 			cert,
 			certificateID,
 			slot,
-			deposit,
+			uint64(cert.Amount),
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -493,14 +493,14 @@ func applyAccountCertificate(
 	if err := updateCertificateAccount(db, tag, key, slot, state); err != nil {
 		return 0, nil, err
 	}
-	switch certificate.(type) {
+	switch cert := certificate.(type) {
 	case *lcommon.StakeRegistrationCertificate,
 		*lcommon.RegistrationCertificate:
 		args = []any{key, tag, slot, decimalUint64(types.Uint64(deposit)), certificateID}
 	case *lcommon.StakeDeregistrationCertificate:
 		args = []any{key, tag, slot, certificateID}
 	case *lcommon.DeregistrationCertificate:
-		args = []any{key, tag, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, slot, decimalUint64(types.Uint64(cert.Amount)), certificateID}
 	case *lcommon.StakeDelegationCertificate:
 		args = []any{key, tag, state.pool, slot, certificateID}
 	case *lcommon.StakeRegistrationDelegationCertificate:

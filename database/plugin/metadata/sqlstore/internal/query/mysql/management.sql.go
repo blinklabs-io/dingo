@@ -61,8 +61,9 @@ func (q *Queries) GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, erro
 }
 
 const insertNodeSettings = `-- name: InsertNodeSettings :execrows
-INSERT IGNORE INTO node_settings (id, storage_mode, network)
+INSERT INTO node_settings (id, storage_mode, network)
 VALUES (1, ?, ?)
+ON DUPLICATE KEY UPDATE id = VALUES(id)
 `
 
 type InsertNodeSettingsParams struct {

@@ -64,7 +64,10 @@ registry. It then checks the read pool. File-backed SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
 failed or interrupted phase leaves readiness false and carries the migration
 version and phase in the returned error. Backfill data and its opaque cursor
-checkpoint commit atomically in one transaction.
+checkpoint commit atomically in one transaction. Shutdown serializes with
+startup and passes its lifecycle context through maintenance cancellation;
+bulk-load tuning is scoped to a dedicated write connection and restored before
+the connection is released.
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 

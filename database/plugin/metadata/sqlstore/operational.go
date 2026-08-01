@@ -449,6 +449,18 @@ func (s *Store) SetEpoch(
 	if err != nil {
 		return err
 	}
+	sqlEra, err := checkedInt64(uint64(era))
+	if err != nil {
+		return err
+	}
+	sqlSlotLength, err := checkedInt64(uint64(slotLength))
+	if err != nil {
+		return err
+	}
+	sqlLengthInSlots, err := checkedInt64(uint64(lengthInSlots))
+	if err != nil {
+		return err
+	}
 	if err := queries.SetEpoch(
 		context.Background(),
 		sqlitequery.SetEpochParams{
@@ -462,15 +474,15 @@ func (s *Store) SetEpoch(
 			CandidateNonce:      candidateNonce,
 			LastEpochBlockNonce: lastEpochBlockNonce,
 			EraID: sql.NullInt64{
-				Int64: int64(era),
+				Int64: sqlEra,
 				Valid: true,
 			},
 			SlotLength: sql.NullInt64{
-				Int64: int64(slotLength),
+				Int64: sqlSlotLength,
 				Valid: true,
 			},
 			LengthInSlots: sql.NullInt64{
-				Int64: int64(lengthInSlots),
+				Int64: sqlLengthInSlots,
 				Valid: true,
 			},
 		},

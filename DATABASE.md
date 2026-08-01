@@ -52,7 +52,9 @@ account, pool, DRep, certificate, tip, settings, and commit-timestamp columns.
 Unknown or partial legacy layouts fail startup instead of being guessed at.
 This narrow adoption rule is intentional: the deployed v1alpha1 schema is
 created fresh for PostgreSQL/MySQL and only the known pre-cutover SQLite shape
-is adopted automatically.
+is adopted automatically. Adoption also deduplicates and recreates the
+`block_nonce(hash, slot)` uniqueness constraint and replaces legacy account and
+reward-delta indexes whose uniqueness rules predate v1alpha1.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -66,7 +68,10 @@ binary are hard startup errors. File-backed SQLite uses a cross-process lock
 file and in-memory SQLite uses a process lock. Store readiness remains false
 until the locked, offline run succeeds. The generic migration package also
 contains connection-owned PostgreSQL/MySQL advisory-lock primitives for a
-future operational port.
+future operational port. Bulk-load session settings are held on a dedicated
+connection for the duration of a bulk window and restored before that
+connection returns to the pool; SQLite maintenance receives the provider stop
+context so shutdown deadlines can cancel a running vacuum.
 
 The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls `DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros' strict Conway decoder first and only falls back to reconstructing a Leios-extended block when strict decode fails. This is detection-based, so the Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field Leios-extended header body) decode from stored CBOR while real Conway networks (mainnet/preprod/preview) are unaffected. The reconstruct preserves the original wire bytes, so `Block.Cbor()` returns the verbatim block and any `DOFF` byte offsets recorded against the stored block CBOR stay valid.
 

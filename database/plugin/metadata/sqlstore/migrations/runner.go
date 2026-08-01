@@ -93,7 +93,7 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 	target := r.Registry[len(r.Registry)-1].Version
 	current := 0
 	for _, migrationState := range states {
-		if migrationState.phase == PhaseComplete {
+		if migrationState.phase == PhaseComplete && migrationState.version > current {
 			current = migrationState.version
 		}
 	}

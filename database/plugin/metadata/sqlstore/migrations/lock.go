@@ -81,11 +81,25 @@ func (l *advisoryLocker) Acquire(
 ) (func() error, error) {
 	switch l.dialect {
 	case "postgres":
+		acquireCtx := ctx
+		var cancel context.CancelFunc
+		if l.timeout > 0 {
+			acquireCtx, cancel = context.WithTimeout(ctx, l.timeout)
+			defer cancel()
+		}
 		if _, err := conn.ExecContext(
-			ctx,
+			acquireCtx,
 			"SELECT pg_advisory_lock($1)",
 			l.key,
 		); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) ||
+				errors.Is(acquireCtx.Err(), context.DeadlineExceeded) {
+				return nil, fmt.Errorf(
+					"acquire PostgreSQL migration lock timed out after %s: %w",
+					l.timeout,
+					acquireCtx.Err(),
+				)
+			}
 			return nil, fmt.Errorf("acquire PostgreSQL migration lock: %w", err)
 		}
 		// The release callback deliberately outlives the acquisition context:

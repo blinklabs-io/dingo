@@ -16,9 +16,9 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
@@ -46,8 +46,14 @@ func (s *Store) DropDeferredIndexes() error {
 				return fmt.Errorf("mark deferred indexes pending: %w", err)
 			}
 			for _, index := range deferred.Manifest {
-				statement := "DROP INDEX IF EXISTS " +
-					s.dialect.QuoteIdentifier(index.Name)
+				exists, err := s.deferredIndexExists(db, index)
+				if err != nil {
+					return fmt.Errorf("check deferred index %s: %w", index.Name, err)
+				}
+				if !exists {
+					continue
+				}
+				statement := s.dialect.DropIndexSQL(index.Name, index.Table)
 				if _, err := db.ExecContext(
 					context.Background(),
 					statement,
@@ -89,14 +95,14 @@ func (s *Store) buildDeferredIndexes(
 		nil,
 		func(db queryer) error {
 			for _, index := range indexes {
-				columns := make([]string, len(index.Columns))
-				for i, column := range index.Columns {
-					columns[i] = s.dialect.QuoteIdentifier(column)
+				exists, err := s.deferredIndexExists(db, index)
+				if err != nil {
+					return fmt.Errorf("check deferred index %s: %w", index.Name, err)
 				}
-				statement := "CREATE INDEX IF NOT EXISTS " +
-					s.dialect.QuoteIdentifier(index.Name) +
-					" ON " + s.dialect.QuoteIdentifier(index.Table) +
-					" (" + strings.Join(columns, ", ") + ")"
+				if exists {
+					continue
+				}
+				statement := s.dialect.CreateIndexSQL(index.Name, index.Table, index.Columns)
 				if _, err := db.ExecContext(
 					context.Background(),
 					statement,
@@ -123,6 +129,31 @@ func (s *Store) buildDeferredIndexes(
 			return nil
 		},
 	)
+}
+
+func (s *Store) deferredIndexExists(db queryer, index deferred.Index) (bool, error) {
+	var found int
+	var query string
+	var args []any
+	switch s.dialect.Name() {
+	case "mysql":
+		query = `SELECT 1 FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`
+		args = []any{index.Table, index.Name}
+	case "postgres":
+		query = `SELECT 1 FROM pg_indexes
+WHERE schemaname = current_schema() AND tablename = ? AND indexname = ? LIMIT 1`
+		args = []any{index.Table, index.Name}
+	default:
+		query = `SELECT 1 FROM sqlite_master
+WHERE type = 'index' AND name = ? LIMIT 1`
+		args = []any{index.Name}
+	}
+	err := db.QueryRowContext(context.Background(), query, args...).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return found != 0, err
 }
 
 // HasDeferredIndexesPending reports whether a prior drop/rebuild cycle still

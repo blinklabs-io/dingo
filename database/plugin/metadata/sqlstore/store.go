@@ -67,7 +67,10 @@ type Store struct {
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	ready             atomic.Bool
+	closed            atomic.Bool
 	startMu           sync.Mutex
+	bulkMu            sync.RWMutex
+	bulkConn          *sql.Conn
 
 	closeOnce sync.Once
 	closeErr  error
@@ -130,6 +133,9 @@ func (s *Store) DiskSize() (int64, error) {
 func (s *Store) Start(ctx context.Context) error {
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("sqlstore: store is closed")
+	}
 	if s.ready.Load() {
 		return nil
 	}
@@ -192,10 +198,7 @@ func (s *Store) Transaction() types.Txn {
 			beginErr: errors.New("sqlstore: store is not ready"),
 		}
 	}
-	tx, err := s.writeDB.BeginTx(
-		context.Background(),
-		s.dialect.BeginOptions(false),
-	)
+	tx, err := s.beginWriteTx(context.Background())
 	return &sqlTxn{owner: s, tx: tx, beginErr: err}
 }
 
@@ -226,7 +229,15 @@ func (s *Store) BeginTxn(
 	if readOnly {
 		db = s.readDB
 	}
-	tx, err := db.BeginTx(ctx, s.dialect.BeginOptions(readOnly))
+	var (
+		tx  *sql.Tx
+		err error
+	)
+	if !readOnly {
+		tx, err = s.beginWriteTx(ctx)
+	} else {
+		tx, err = db.BeginTx(ctx, s.dialect.BeginOptions(readOnly))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -235,11 +246,40 @@ func (s *Store) BeginTxn(
 
 // Close closes each owned pool exactly once.
 func (s *Store) Close() error {
+	return s.CloseContext(context.Background())
+}
+
+// CloseContext cancels maintenance and closes each owned pool. The lifecycle
+// context is also passed to the maintenance wait so cancellation can interrupt
+// a long-running VACUUM before the provider shutdown deadline expires.
+func (s *Store) CloseContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("sqlstore: close context is nil")
+	}
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
 	s.closeOnce.Do(func() {
+		s.closed.Store(true)
 		s.ready.Store(false)
+		if s.bulkConn != nil {
+			// Restore session variables before releasing the dedicated
+			// connection; this is especially important for pooled PostgreSQL
+			// sessions where session_replication_role is connection-scoped.
+			_ = s.restoreNormalPragmas(ctx)
+		}
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
-			<-s.maintenanceDone
+			select {
+			case <-s.maintenanceDone:
+			case <-ctx.Done():
+				closeErrors := []error{ctx.Err()}
+				if s.readDB != s.writeDB {
+					closeErrors = append(closeErrors, s.readDB.Close())
+				}
+				closeErrors = append(closeErrors, s.writeDB.Close())
+				s.closeErr = errors.Join(closeErrors...)
+				return
+			}
 		}
 		var closeErrors []error
 		if s.readDB != s.writeDB {
@@ -291,6 +331,15 @@ func (s *Store) startMaintenance() {
 
 func (s *Store) dbFromTxn(txn types.Txn) (queryer, error) {
 	if txn == nil {
+		if err := s.ensureReady(); err != nil {
+			return nil, err
+		}
+		s.bulkMu.RLock()
+		bulkConn := s.bulkConn
+		s.bulkMu.RUnlock()
+		if bulkConn != nil {
+			return newDialectQueryer(bulkConn, s.dialect.Name()), nil
+		}
 		return newDialectQueryer(s.writeDB, s.dialect.Name()), nil
 	}
 	sqlTransaction, ok := txn.(*sqlTxn)
@@ -310,6 +359,9 @@ func (s *Store) dbFromTxn(txn types.Txn) (queryer, error) {
 
 func (s *Store) readDBFromTxn(txn types.Txn) (queryer, error) {
 	if txn == nil {
+		if err := s.ensureReady(); err != nil {
+			return nil, err
+		}
 		return newDialectQueryer(s.readDB, s.dialect.Name()), nil
 	}
 	return s.dbFromTxn(txn)
@@ -327,10 +379,7 @@ func (s *Store) withWriteTransaction(
 		}
 		return fn(db)
 	}
-	sqlTransaction, err := s.writeDB.BeginTx(
-		ctx,
-		s.dialect.BeginOptions(false),
-	)
+	sqlTransaction, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -338,6 +387,16 @@ func (s *Store) withWriteTransaction(
 		return errors.Join(err, sqlTransaction.Rollback())
 	}
 	return sqlTransaction.Commit()
+}
+
+func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, error) {
+	s.bulkMu.RLock()
+	conn := s.bulkConn
+	s.bulkMu.RUnlock()
+	if conn != nil {
+		return conn.BeginTx(ctx, s.dialect.BeginOptions(false))
+	}
+	return s.writeDB.BeginTx(ctx, s.dialect.BeginOptions(false))
 }
 
 type queryer interface {
@@ -420,12 +479,39 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 
 // SetBulkLoadPragmas enables backend-specific session tuning.
 func (s *Store) SetBulkLoadPragmas() error {
-	return s.dialect.SetBulkMode(context.Background(), s.writeDB)
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if s.bulkConn != nil {
+		return nil
+	}
+	conn, err := s.writeDB.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	if err := s.dialect.SetBulkMode(context.Background(), conn); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	s.bulkConn = conn
+	return nil
 }
 
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
-	return s.dialect.RestoreNormalMode(context.Background(), s.writeDB)
+	return s.restoreNormalPragmas(context.Background())
+}
+
+func (s *Store) restoreNormalPragmas(ctx context.Context) error {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if s.bulkConn == nil {
+		return s.dialect.RestoreNormalMode(ctx, s.writeDB)
+	}
+	conn := s.bulkConn
+	restoreErr := s.dialect.RestoreNormalMode(ctx, conn)
+	closeErr := conn.Close()
+	s.bulkConn = nil
+	return errors.Join(restoreErr, closeErr)
 }
 
 // UpdatePlannerStats refreshes backend planner statistics.

@@ -84,9 +84,18 @@ func (m Migration) checksum() string {
 	sort.Strings(dialects)
 	for _, dialect := range dialects {
 		write(dialect)
+		// Include phase boundaries and statement counts.  Without these
+		// markers, moving a statement from Expand to Contract while keeping
+		// the concatenated SQL unchanged would not change the checksum.  That
+		// is unsafe for databases resuming an interrupted migration because
+		// the statement would then execute at a different lifecycle phase.
+		write("expand")
+		write(strconv.Itoa(len(m.SQL[dialect].Expand)))
 		for _, statement := range m.SQL[dialect].Expand {
 			write(statement)
 		}
+		write("contract")
+		write(strconv.Itoa(len(m.SQL[dialect].Contract)))
 		for _, statement := range m.SQL[dialect].Contract {
 			write(statement)
 		}

@@ -121,18 +121,14 @@ DELETE FROM pool_registration_relay WHERE pool_registration_id = ?`,
 				owner := &registration.Owners[i]
 				owner.PoolID = pool.ID
 				owner.PoolRegistrationID = registration.ID
-				result, err := db.ExecContext(context.Background(), `
+				ownerID, err := queryReturnedID(db, `
 INSERT INTO pool_registration_owner (
     key_hash, pool_registration_id, pool_id
-) VALUES (?, ?, ?)`,
+) VALUES (?, ?, ?) RETURNING id`,
 					owner.KeyHash,
 					owner.PoolRegistrationID,
 					owner.PoolID,
 				)
-				if err != nil {
-					return err
-				}
-				ownerID, err := result.LastInsertId()
 				if err != nil {
 					return err
 				}
@@ -142,10 +138,10 @@ INSERT INTO pool_registration_owner (
 				relay := &registration.Relays[i]
 				relay.PoolID = pool.ID
 				relay.PoolRegistrationID = registration.ID
-				result, err := db.ExecContext(context.Background(), `
+				relayID, err := queryReturnedID(db, `
 INSERT INTO pool_registration_relay (
     ipv4, ipv6, hostname, pool_registration_id, pool_id, port
-) VALUES (?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
 					netIPValue(relay.Ipv4),
 					netIPValue(relay.Ipv6),
 					relay.Hostname,
@@ -153,10 +149,6 @@ INSERT INTO pool_registration_relay (
 					relay.PoolID,
 					relay.Port,
 				)
-				if err != nil {
-					return err
-				}
-				relayID, err := result.LastInsertId()
 				if err != nil {
 					return err
 				}
@@ -180,20 +172,25 @@ func (s *Store) GetPool(
 	if err != nil || pool == nil {
 		return pool, err
 	}
-	if err := loadPoolAssociations(db, pool, true); err != nil {
+	if err := s.loadPoolAssociations(db, pool, true); err != nil {
 		return nil, err
 	}
 	if !includeInactive && len(pool.Registration) == 0 {
 		return nil, nil
 	}
-	if !includeInactive && len(pool.Retirement) > 0 &&
-		pool.Retirement[0].AddedSlot > pool.Registration[0].AddedSlot {
+	if !includeInactive && len(pool.Retirement) > 0 {
 		currentEpoch, ok, err := currentEpoch(db)
 		if err != nil {
 			return nil, err
 		}
 		if ok && pool.Retirement[0].Epoch <= currentEpoch {
-			return nil, nil
+			latestRetirement, err := latestPoolEventIsRetirement(db, s.dialect, pool.ID)
+			if err != nil {
+				return nil, err
+			}
+			if latestRetirement {
+				return nil, nil
+			}
 		}
 	}
 	return pool, nil
@@ -252,7 +249,7 @@ WHERE pool_key_hash IN (`+bindPlaceholders(len(hashes))+`)`,
 		return nil, err
 	}
 	for i := range ret {
-		if err := loadPoolAssociations(db, &ret[i], false); err != nil {
+		if err := s.loadPoolAssociations(db, &ret[i], false); err != nil {
 			return nil, err
 		}
 	}
@@ -1117,6 +1114,9 @@ FROM ranked WHERE rn = 1`,
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("query pool certificate events: %w", err)
+		}
 		for _, hash := range hashes {
 			if _, ok := seen[string(hash)]; !ok {
 				freshPools = append(freshPools, hash)
@@ -1177,11 +1177,11 @@ SELECT id FROM ranked WHERE rn = 1`,
 			args[i] = id
 		}
 		rows, err := db.QueryContext(context.Background(), `
-SELECT margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
-       reward_account_credential_tag, metadata_hash, pledge, cost,
-       certificate_id, id, pool_id, added_slot, deposit_amount
-FROM pool_registration
-WHERE id IN (`+bindPlaceholders(len(args))+`)`,
+SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
+       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
+       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount
+FROM pool_registration p
+WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 			args...,
 		)
 		if err != nil {
@@ -1219,12 +1219,12 @@ func (s *Store) GetPoolRegistrations(
 		return nil, err
 	}
 	rows, err := db.QueryContext(context.Background(), `
-SELECT margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
-       reward_account_credential_tag, metadata_hash, pledge, cost,
-       certificate_id, id, pool_id, added_slot, deposit_amount
-FROM pool_registration
-WHERE pool_key_hash = ?
-ORDER BY id DESC`,
+	SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
+	       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
+	       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount
+FROM pool_registration p
+WHERE p.pool_key_hash = ?
+ORDER BY p.id DESC`,
 		poolKeyHash.Bytes(),
 	)
 	if err != nil {
@@ -1667,7 +1667,7 @@ func scanPool(row rowScanner) (*models.Pool, error) {
 	return &pool, nil
 }
 
-func loadPoolAssociations(
+func (s *Store) loadPoolAssociations(
 	db queryer,
 	pool *models.Pool,
 	latestOnly bool,
@@ -1675,18 +1675,21 @@ func loadPoolAssociations(
 	pool.Registration = []models.PoolRegistration{}
 	pool.Retirement = []models.PoolRetirement{}
 	query := `
-SELECT margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
-       reward_account_credential_tag, metadata_hash, pledge, cost,
-       certificate_id, id, pool_id, added_slot, deposit_amount
-FROM pool_registration
-WHERE pool_id = ?
-ORDER BY added_slot DESC, id DESC`
+SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
+       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
+       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount
+FROM pool_registration p
+LEFT JOIN certs c ON c.id = p.certificate_id
+LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
+WHERE p.pool_id = ?
+ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC, p.id DESC`
 	if latestOnly {
 		query += " LIMIT 1"
 	}
 	rows, err := db.QueryContext(context.Background(), query, pool.ID)
 	if err != nil {
-		return err
+		return fmt.Errorf("load pool registrations query: %w", err)
 	}
 	for rows.Next() {
 		registration, err := scanPoolRegistration(rows)
@@ -1703,12 +1706,18 @@ ORDER BY added_slot DESC, id DESC`
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	rows, err = db.QueryContext(context.Background(), `
-SELECT pool_key_hash, certificate_id, id, pool_id, epoch, added_slot
-FROM pool_retirement
-WHERE pool_id = ?
-ORDER BY added_slot DESC,
-         CASE WHEN certificate_id = 0 THEN 1 ELSE 0 END DESC, id DESC`,
+SELECT r.pool_key_hash, r.certificate_id, r.id, r.pool_id, r.epoch, r.added_slot
+FROM pool_retirement r
+LEFT JOIN certs c ON c.id = r.certificate_id
+LEFT JOIN `+s.dialect.QuoteIdentifier("transaction")+` tx ON tx.id = c.transaction_id
+WHERE r.pool_id = ?
+ORDER BY r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC,
+         CASE WHEN r.certificate_id = 0 THEN 1 ELSE 0 END DESC, r.id DESC`,
 		pool.ID,
 	)
 	if err != nil {
@@ -1738,7 +1747,10 @@ ORDER BY added_slot DESC,
 			break
 		}
 	}
-	return rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return rows.Err()
 }
 
 func scanPoolRegistration(
@@ -1872,6 +1884,41 @@ func queryReturnedID(
 	var id int64
 	err := db.QueryRowContext(context.Background(), query, args...).Scan(&id)
 	return id, err
+}
+
+// latestPoolEventIsRetirement compares registration and retirement events at
+// their complete chain position. Slot alone is insufficient because multiple
+// certificates may occur in one slot; the transaction block index and
+// certificate index provide the remaining ordering, with retirement events
+// winning ties through the synthetic is_retirement component.
+func latestPoolEventIsRetirement(db queryer, dialect Dialect, poolID uint) (bool, error) {
+	var retirement bool
+	err := db.QueryRowContext(context.Background(), `
+WITH events AS (
+    SELECT 0 AS is_retirement, p.added_slot,
+           COALESCE(tx.block_index, 0) AS block_index,
+           COALESCE(c.cert_index, 0) AS cert_index,
+           p.id AS event_id
+    FROM pool_registration p
+    LEFT JOIN certs c ON c.id = p.certificate_id
+    LEFT JOIN `+dialect.QuoteIdentifier("transaction")+` tx ON tx.id = c.transaction_id
+    WHERE p.pool_id = ?
+    UNION ALL
+    SELECT 1 AS is_retirement, r.added_slot,
+           COALESCE(tx.block_index, 0), COALESCE(c.cert_index, 0), r.id
+    FROM pool_retirement r
+    LEFT JOIN certs c ON c.id = r.certificate_id
+    LEFT JOIN `+dialect.QuoteIdentifier("transaction")+` tx ON tx.id = c.transaction_id
+    WHERE r.pool_id = ?
+)
+SELECT is_retirement FROM events
+ORDER BY added_slot DESC, block_index DESC, cert_index DESC,
+         is_retirement DESC, event_id DESC
+LIMIT 1`, poolID, poolID).Scan(&retirement)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return retirement, err
 }
 
 func parseRat(value sql.NullString) (*types.Rat, error) {
