@@ -160,18 +160,24 @@ func (ls *LedgerState) poolVrfKeyHashes(
 		return nil, err
 	}
 	for _, pool := range pools {
-		// The VRF hash on the pool row is a denormalized copy that can outlive
-		// the registration it came from, so the registration itself is what
-		// decides whether the pool is usable here.
+		// The VRF hash is taken from the newest registration rather than the
+		// denormalized copy on the pool row. A pool that re-registers with a
+		// new VRF key leaves that copy able to disagree with the key the chain
+		// actually accepts, and reporting the stale one would have cardano-cli
+		// check leadership against a key the producer no longer uses.
+		//
+		// Registrations are ordered newest first by added_slot, block_index
+		// and cert_index, so the first entry is the one in force.
 		if len(pool.Registration) == 0 {
 			continue
 		}
-		if len(pool.VrfKeyHash) != lcommon.Blake2b256Size {
+		vrfKeyHash := pool.Registration[0].VrfKeyHash
+		if len(vrfKeyHash) != lcommon.Blake2b256Size {
 			continue
 		}
 		pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pool.PoolKeyHash))
 		out[pkh] = ledger.Blake2b256(
-			lcommon.NewBlake2b256(pool.VrfKeyHash),
+			lcommon.NewBlake2b256(vrfKeyHash),
 		)
 	}
 	return out, nil

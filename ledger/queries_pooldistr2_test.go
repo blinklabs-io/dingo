@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -134,6 +135,14 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 	entryB, ok := distr.Pools[lcommon.PoolId(pkhB)]
 	require.True(t, ok, "pool B missing from the distribution")
 	assert.Equal(t, uint64(1_000_000), entryB.TotalPoolStake)
+
+	// The property the query exists to preserve: the reported fractions are
+	// shares of the same total the reply carries, so they sum to one. Checking
+	// each fraction alone would not catch a pool being dropped while its stake
+	// stayed in the total.
+	sum := new(big.Rat).Add(entryA.StakeFraction.Rat, entryB.StakeFraction.Rat)
+	assert.Equal(t, 0, sum.Cmp(big.NewRat(1, 1)),
+		"reported fractions must sum to one over the snapshot, got %s", sum)
 }
 
 // TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide covers an epoch whose
@@ -194,4 +203,68 @@ func TestQueryShelleyPoolDistr2_RejectsPoolWithoutRegistration(t *testing.T) {
 	_, err := ls.Query(poolDistr2Query())
 	require.ErrorIs(t, err, ErrPoolDistrUnregisteredPool,
 		"a pool with stake but no registration must not be dropped silently")
+}
+
+// TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey covers a pool whose
+// denormalized VRF hash disagrees with its newest registration.
+//
+// A pool that re-registers with a new VRF key can leave the copy on the pool
+// row behind. Reporting that copy would have cardano-cli check leadership
+// against a key the producer no longer uses, so the registration in force is
+// what the reply carries.
+func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
+	db := newTestDB(t)
+
+	staleVrf := make([]byte, 32)
+	for i := range staleVrf {
+		staleVrf[i] = 0xDD
+	}
+	currentVrf := make([]byte, 32)
+	for i := range currentVrf {
+		currentVrf[i] = 0xEE
+	}
+	poolKeyHash := make([]byte, 28)
+	for i := range poolKeyHash {
+		poolKeyHash[i] = 0x33
+	}
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+
+	// The pool row keeps the superseded key; the registration carries the one
+	// in force.
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: staleVrf},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  currentVrf,
+			AddedSlot:   2,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        0,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(1_000_000),
+			CapturedSlot: 1,
+		},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(poolDistr2Query())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
+	require.True(t, ok)
+
+	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
+	require.True(t, ok, "pool missing from the distribution")
+	assert.Equal(t, currentVrf, entry.VrfHash[:],
+		"the registration in force decides the VRF key, not the pool row copy")
 }
