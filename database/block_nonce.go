@@ -71,6 +71,18 @@ func (d *Database) GetLastBlockNonceInRange(
 	)
 }
 
+// GetLatestBlockNonce returns the highest-slot block_nonce row, the
+// authoritative high-water mark of durably applied ledger state. The bool is
+// false when no rows exist.
+func (d *Database) GetLatestBlockNonce(
+	txn *Txn,
+) (models.BlockNonce, bool, error) {
+	if txn == nil {
+		return d.metadata.GetLatestBlockNonce(nil)
+	}
+	return d.metadata.GetLatestBlockNonce(txn.Metadata())
+}
+
 // DeleteBlockNoncesBeforeSlot removes all block_nonces older than the given slot number
 func (d *Database) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,

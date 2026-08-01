@@ -620,6 +620,41 @@ func (s *Store) GetLastBlockNonceInRange(
 	return nonce, err
 }
 
+// GetLatestBlockNonce returns the highest-slot nonce row. The nonce is
+// written in the same metadata transaction as the corresponding ledger
+// effects, so this row is the durable ledger-state high-water mark.
+func (s *Store) GetLatestBlockNonce(
+	txn types.Txn,
+) (models.BlockNonce, bool, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return models.BlockNonce{}, false, err
+	}
+	row := db.QueryRowContext(context.Background(),
+		`SELECT hash, nonce, id, slot, is_checkpoint
+		 FROM block_nonce
+		 ORDER BY slot DESC, hash DESC
+		 LIMIT 1`,
+	)
+	var ret models.BlockNonce
+	var slot sql.NullInt64
+	var checkpoint sql.NullBool
+	if err := row.Scan(
+		&ret.Hash, &ret.Nonce, &ret.ID, &slot, &checkpoint,
+	); errors.Is(err, sql.ErrNoRows) {
+		return models.BlockNonce{}, false, nil
+	} else if err != nil {
+		return models.BlockNonce{}, false, err
+	}
+	if slot.Valid {
+		ret.Slot = uint64(slot.Int64)
+	}
+	if checkpoint.Valid {
+		ret.IsCheckpoint = checkpoint.Bool
+	}
+	return ret, true, nil
+}
+
 func (s *Store) DeleteBlockNoncesBeforeSlot(
 	slotNumber uint64,
 	txn types.Txn,

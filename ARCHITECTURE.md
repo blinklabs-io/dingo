@@ -910,6 +910,21 @@ and which on a Mithril-bootstrapped node can reach the `mithril_ledger_slot`
 trust boundary, past which rollback is refused outright and the database must be
 discarded.
 
+## Ledger/chain reconciliation
+
+The divergence reconcilers decide whether a ledger point is on the current
+primary chain through `primaryChainContainsPoint`. That check confirms the
+authoritative block-index entry maps to the same hash; blob presence alone is
+not sufficient because abandoned-fork blocks remain in append-only storage.
+
+`LedgerState.rollback` and replay recovery also maintain the invariant that
+`currentTip` does not lead durably applied state. The durable applied floor is
+the highest-slot `block_nonce` row, written with the block's ledger effects and
+tip. Rollback and held replay recovery use that floor when it is on the current
+primary chain, while same-slot hash mismatches are repaired rather than treated
+as already covered. A floor from an abandoned fork is ignored so chain
+selection can recover the canonical branch.
+
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
 128MiB memtable, so the durability order inverts on an unclean host shutdown
