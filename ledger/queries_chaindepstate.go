@@ -110,8 +110,15 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	}
 
 	// The epoch containing the tip, so the nonces belong to the same slot the
-	// reply reports. A chain whose epoch records do not yet cover the tip has
-	// no nonces to report, and every nonce field stays neutral.
+	// reply reports. Resolving it from the slot rather than from an epoch
+	// number read elsewhere is what makes the pairing exact.
+	//
+	// A tip with no epoch record covering it would leave every nonce neutral,
+	// but the chain cannot reach that state: applying a block in an epoch
+	// requires that epoch's nonce to check the producer's leader VRF, and the
+	// nonce lives in the record. The record therefore exists before the tip
+	// can enter the epoch. What remains is the chain that has applied no
+	// blocks at all, where neutral is the right answer.
 	current, err := ls.db.GetEpochBySlot(tip.Point.Slot, txn)
 	if err != nil {
 		return nil, err
