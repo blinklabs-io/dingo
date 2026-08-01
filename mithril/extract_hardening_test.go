@@ -522,19 +522,19 @@ func TestExtractPublishRefusesSymlinkedStaging(t *testing.T) {
 		"publication must not reach through a substituted symlink")
 }
 
-// TestExtractPublishRefusesExistingDestination covers a destination that
-// already exists when publication runs, even an empty one.
+// TestExtractPublishRefusesNonDirectoryDestination covers a file occupying the
+// destination name when publication runs.
 //
-// Emptiness is deliberately not consulted. Knowing the occupant is empty
-// would only ever justify removing it, and that removal is the race this
-// mode exists to avoid; refusing instead is uniform across platforms, which
-// differ on whether a rename may replace an existing directory.
-func TestExtractPublishRefusesExistingDestination(t *testing.T) {
+// Clearing an empty destination directory is safe because rmdir refuses a
+// populated one, so the removal cannot cost anyone content. Unlinking a file
+// carries no such protection: it would destroy something this caller never
+// asked to replace. Only directories are removed; anything else is refused
+// where it stands.
+func TestExtractPublishRefusesNonDirectoryDestination(t *testing.T) {
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
 	destDir := filepath.Join(parent, "extracted")
-	require.NoError(t, os.MkdirAll(destDir, 0o750))
 
 	workDir, publish, cleanup, err := prepareExtractDestination(
 		destDir, extractConfig{},
@@ -543,12 +543,16 @@ func TestExtractPublishRefusesExistingDestination(t *testing.T) {
 	t.Cleanup(cleanup)
 	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
 
+	// Someone else takes the destination name for a file mid-extraction.
+	require.NoError(t, os.WriteFile(destDir, []byte("theirs"), 0o640))
+
 	require.ErrorIs(t, publish(), ErrExtractDestinationNotEmpty)
 
-	// The pre-existing directory is left exactly as it was found.
-	entries, err := os.ReadDir(destDir)
-	require.NoError(t, err)
-	assert.Empty(t, entries)
+	// The file is left exactly as it was found.
+	data, err := os.ReadFile(destDir)
+	require.NoError(t, err,
+		"a refused publication must not unlink another writer's file")
+	assert.Equal(t, "theirs", string(data))
 }
 
 // TestExtractPublishReplacesConcurrentDestinationContent is the counterpart:
@@ -637,4 +641,64 @@ func TestExtractArchiveMergeAccumulates(t *testing.T) {
 		require.NoError(t, err, "%s should have survived both extractions", name)
 		assert.Equal(t, want, string(data))
 	}
+}
+
+// TestExtractArchiveAcceptsEmptyDestination covers the other half of the
+// default exclusive mode: the contract is that the destination must be empty,
+// not that it must be absent.
+//
+// An empty destination directory is routine — an operator creating the
+// directory ahead of time, or a previous run cleaning up after itself — and
+// refusing it would turn a documented, supported arrangement into a failure.
+func TestExtractArchiveAcceptsEmptyDestination(t *testing.T) {
+	archivePath := writeTestArchive(t, map[string]string{
+		"immutable/00000.chunk": "chunk0",
+	})
+
+	destDir := filepath.Join(t.TempDir(), "extracted")
+	require.NoError(t, os.MkdirAll(destDir, 0o750))
+
+	_, err := ExtractArchive(
+		t.Context(), archivePath, destDir, nil,
+	)
+	require.NoError(t, err,
+		"an empty destination satisfies the exclusive-mode contract")
+
+	data, err := os.ReadFile(
+		filepath.Join(destDir, "immutable", "00000.chunk"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "chunk0", string(data))
+}
+
+// TestExtractPublishAcceptsDestinationEmptiedConcurrently covers the same
+// contract at publication, where the destination appears after the check that
+// preceded extraction.
+//
+// Removing an empty directory cannot cost anyone content: the removal is the
+// emptiness check, so a writer who populated it first makes the removal fail
+// rather than lose their files. That is what separates this case from a
+// populated destination, which is refused.
+func TestExtractPublishAcceptsDestinationEmptiedConcurrently(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "downloads")
+	require.NoError(t, os.MkdirAll(parent, 0o750))
+	destDir := filepath.Join(parent, "extracted")
+
+	workDir, publish, cleanup, err := prepareExtractDestination(
+		destDir, extractConfig{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NoError(t, workDir.WriteFile("chunk", []byte("data"), 0o640))
+
+	// The destination appears while extraction is running, but stays empty.
+	require.NoError(t, os.MkdirAll(destDir, 0o750))
+
+	require.NoError(t, publish(),
+		"an empty destination must not block publication")
+
+	data, err := os.ReadFile(filepath.Join(destDir, "chunk"))
+	require.NoError(t, err)
+	assert.Equal(t, "data", string(data))
 }

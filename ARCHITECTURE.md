@@ -2501,16 +2501,25 @@ Destinations come in two shapes, selected by the caller:
   resolves through that handle, so a parent replaced at any point cannot
   redirect it.
 
-  Without `WithReplaceDestination` nothing is deleted at all, and a destination
-  that already exists is refused. Checking that a destination is empty and then
-  removing it cannot be made safe however narrow the gap, because a writer
-  populating it in between loses their content; checking and then refusing has
-  no such failure, since the worst a stale answer costs is a refusal rather
-  than data. Whether an occupant is empty is deliberately not consulted — the
-  answer would only justify a removal — which also keeps the behaviour uniform
-  across platforms that differ on whether a rename may replace an existing
-  directory. `WithReplaceDestination` is the only path that removes an
-  existing destination, which is what that option exists to authorise.
+  Without `WithReplaceDestination` the destination must be empty, which is not
+  the same as absent: an operator creating the directory ahead of time, or a
+  previous run cleaning up after itself, both leave one behind. An empty
+  directory is cleared out of the way with `rmdir` rather than refused. That is
+  what makes clearing it safe — the emptiness test and the removal are one
+  step, so a writer who populated the destination first makes it fail rather
+  than lose their content. Testing separately and then removing could offer no
+  such guarantee, however narrow the gap between the two. Removing the
+  directory also keeps behaviour uniform across platforms that differ on
+  whether a rename may replace an existing one.
+
+  Only a directory is removed. A file or symlink at the destination is refused
+  untouched, since unlinking it would destroy something the caller never asked
+  to replace, and `rmdir`'s protection does not extend to it. One race remains
+  that the removal cannot close, where a writer swaps the empty directory for a
+  file after it is identified as a directory and before it is removed; the file
+  is then unlinked. Closing it needs a directory-only removal that `os.Root`
+  does not expose. `WithReplaceDestination` remains the only path that removes
+  a destination holding content, which is what that option exists to authorise.
 
   Renaming names its source, so it moves whatever occupies the staging name at
   the instant it runs rather than the directory extraction wrote into, and Go
@@ -2520,8 +2529,9 @@ Destinations come in two shapes, selected by the caller:
   it detects it: the staging directory's identity is recorded when it is
   created, and what landed at the destination is compared against it
   afterwards. A mismatch, or a symlink, removes the destination — only that
-  rename put anything there, the destination having been confirmed absent —
-  and fails the publish, so a substituted tree is never left standing.
+  rename put anything there, the destination having been left empty or absent
+  beforehand — and fails the publish, so a substituted tree is never left
+  standing.
 - **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
   archives populate one shared directory concurrently, so extraction writes
   into it directly and accumulates. Staging is unavailable here, and the

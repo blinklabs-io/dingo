@@ -265,23 +265,42 @@ func prepareExtractDestination(
 				)
 			}
 		}
-		// Without an explicit replacement request nothing is deleted at all,
-		// and anything occupying the destination means this extraction does
-		// not own the name.
+		// Without an explicit replacement request the destination must be
+		// empty, which is not the same as absent: an operator creating the
+		// directory ahead of time, or a previous run cleaning up after
+		// itself, both leave one behind. An empty directory is therefore
+		// cleared out of the way rather than refused.
 		//
-		// Checking and then removing can never be made safe however narrow
-		// the gap, because a writer populating the destination in between
-		// loses their content. Checking and then refusing has no such
-		// failure: the worst a stale answer can cost is a refusal, never
-		// data. Whether the occupant is empty is not asked, because the
-		// answer would only justify a removal.
+		// Remove is what makes clearing it safe. It is rmdir, so the
+		// emptiness test and the removal are one step: a writer who populated
+		// the destination first makes it fail rather than lose their content.
+		// Testing separately and then removing could offer no such guarantee,
+		// however narrow the gap between the two.
+		//
+		// Only a directory is removed. A file or a symlink at the destination
+		// is refused untouched, since unlinking it would destroy something
+		// this caller never asked to replace. That leaves one race the
+		// removal cannot close, where a writer swaps the empty directory for
+		// a file after it is identified as a directory and before it is
+		// removed; the file is then unlinked. Closing it needs a
+		// directory-only removal that Root does not expose.
 		if !cfg.replace {
-			if _, err := parentRoot.Lstat(destName); err == nil {
+			info, err := parentRoot.Lstat(destName)
+			switch {
+			case err == nil && !info.IsDir():
 				return fmt.Errorf(
 					"%w: %s already exists",
 					ErrExtractDestinationNotEmpty, cleanDest,
 				)
-			} else if !errors.Is(err, os.ErrNotExist) {
+			case err == nil:
+				if err := parentRoot.Remove(destName); err != nil &&
+					!errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf(
+						"%w: %s: %w",
+						ErrExtractDestinationNotEmpty, cleanDest, err,
+					)
+				}
+			case !errors.Is(err, os.ErrNotExist):
 				return fmt.Errorf(
 					"inspecting extraction destination: %w", err,
 				)
@@ -310,8 +329,8 @@ func prepareExtractDestination(
 		if published.Mode()&os.ModeSymlink != 0 ||
 			!os.SameFile(stagingInfo, published) {
 			// Only this rename put anything here — the destination was
-			// confirmed absent above — so removing it restores the prior
-			// state rather than destroying anyone's content.
+			// left empty or absent above — so removing it restores the
+			// prior state rather than destroying anyone's content.
 			_ = parentRoot.RemoveAll(destName)
 			return fmt.Errorf(
 				"%w: staging directory was substituted before publication",
