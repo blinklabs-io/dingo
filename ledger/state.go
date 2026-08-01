@@ -2466,6 +2466,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		"component",
 		"ledger",
 	)
+	// A slot-based rollback sets currentTip to point but only deletes durable
+	// rows above it; it never verifies the durable applied state actually
+	// reached point. If point sits above the highest applied block, currentTip
+	// now leads applied state and forward replay would resume from a tip whose
+	// ancestor segment was never applied. Clamp the tip down to the durable
+	// applied floor to hold the currentTip <= applied-high-water invariant
+	// (#3005).
+	if err := ls.enforceDurableTipFloor(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -5662,14 +5672,90 @@ func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, err
 	if ls.db == nil {
 		return false, nil
 	}
-	_, err := database.BlockByPoint(ls.db, point)
-	if err == nil {
-		return true, nil
+	block, err := database.BlockByPoint(ls.db, point)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
-	if errors.Is(err, models.ErrBlockNotFound) {
-		return false, nil
+	// Blob presence by point is NOT authoritative for primary-chain
+	// membership: the append-only blob store and the manager block cache
+	// retain abandoned-fork blocks, whose block key still resolves by point
+	// after the fork lost chain selection. Confirm the CURRENT primary chain
+	// actually carries this block at its index by resolving the authoritative
+	// block-index entry (bi<id>) and comparing hashes. A hash mismatch means a
+	// different block now occupies that index (this point is on an abandoned
+	// fork); a missing index entry means the primary chain no longer reaches
+	// that far. Both mean the point is not on the primary chain, so the
+	// divergence reconcilers must roll the ledger back to the true common
+	// ancestor rather than trusting a stale blob hit (#3005). The legitimate
+	// Mithril-bootstrap huge-gap-same-chain case still returns true because the
+	// imported ledger-tip block occupies its own index (bi<id> maps back to it).
+	indexedBlock, err := ls.db.BlockByIndex(block.ID, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
-	return false, err
+	return bytes.Equal(indexedBlock.Hash, point.Hash), nil
+}
+
+// durableAppliedFloor returns the point of the highest block whose ledger
+// effects are durably applied, identified by the highest-slot block_nonce row.
+// block_nonce is written in the same metadata transaction as the block's
+// UTxO/certificate effects and the ledger tip (ledgerProcessBlocks) and is
+// pruned only from below, so its maximum slot is the authoritative high-water
+// mark of applied state. A slot-based rollback can set the in-memory currentTip
+// above this floor — it deletes rows above the target but never verifies the
+// target was actually reached — decoupling the tip from applied state and
+// letting forward replay skip an un-applied ancestor segment (#3005). Returns
+// ok=false when the floor cannot be determined (e.g. no nonces persisted yet).
+func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
+	if ls.db == nil {
+		return ocommon.Point{}, false, nil
+	}
+	row, ok, err := ls.db.GetLatestBlockNonce(nil)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if !ok || row.Slot == 0 || len(row.Hash) == 0 {
+		return ocommon.Point{}, false, nil
+	}
+	return ocommon.NewPoint(row.Slot, row.Hash), true, nil
+}
+
+// enforceDurableTipFloor repairs the in-memory ledger tip back down to the
+// durable applied floor when a preceding rollback left currentTip above it.
+// This upholds the invariant that currentTip never leads the durably applied
+// UTxO state, so forward replay always resumes from a tip whose entire ancestor
+// segment has been applied (#3005). It is bounded to at most one extra rollback:
+// after clamping currentTip to the floor, the floor no longer leads and the
+// nested call is a no-op.
+func (ls *LedgerState) enforceDurableTipFloor() error {
+	floor, ok, err := ls.durableAppliedFloor()
+	if err != nil {
+		return fmt.Errorf("determine durable applied floor: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if currentTip.Point.Slot <= floor.Slot {
+		return nil
+	}
+	ls.config.Logger.Warn(
+		"ledger tip leads durable applied state, repairing tip down to applied floor",
+		"component", "ledger",
+		"ledger_tip_slot", currentTip.Point.Slot,
+		"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+		"applied_floor_slot", floor.Slot,
+		"applied_floor_hash", hex.EncodeToString(floor.Hash),
+	)
+	return ls.rollback(floor)
 }
 
 func (ls *LedgerState) latestLedgerPrimaryChainAncestor(

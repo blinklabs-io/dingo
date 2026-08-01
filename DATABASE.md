@@ -677,6 +677,17 @@ at that point, and let ordinary ledger replay fold every later block. The legacy
 heal remains idempotent and uses the primary chain index so retained fork blobs
 and synthetic endorser blobs are never folded.
 
+`GetLatestBlockNonce` returns the single highest-slot `block_nonce` row
+(`ORDER BY slot DESC, hash DESC LIMIT 1`). Because a `block_nonce` row is written
+in the same metadata transaction as its block's UTxO/certificate deltas and the
+ledger tip (`ledgerProcessBlocks`) and the table is only pruned from below, that
+maximum slot is the authoritative high-water mark of durably applied ledger
+state. The ledger uses it as the "durable applied floor" to detect and repair a
+slot-based rollback that left the in-memory `currentTip` above the applied state,
+and to anchor replay-recovery rollbacks at or below that floor (issue #3005; see
+ARCHITECTURE.md, "Ledger/chain reconciliation"). The row's `nonce` bytes are
+ignored by that path — only `(slot, hash)` are consumed as a rollback point.
+
 Whether the decoded endorser transactions are then applied to the ledger is
 selected by `LedgerStateConfig.LeiosApplyEndorserBlockTxs` (see
 `ARCHITECTURE.md`; wired from the network in `node.go`, false on the Musashi
