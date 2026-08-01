@@ -135,6 +135,10 @@ type MetadataStoreSqlite struct {
 	storageMode    string
 	timerMutex     sync.Mutex
 	closed         bool
+	// skipSchemaTemplate forces an in-memory store through the full
+	// migration chain instead of replaying the recorded schema. It exists so
+	// the schema template can be checked against the chain it stands in for.
+	skipSchemaTemplate bool
 }
 
 // New creates a new database
@@ -478,6 +482,22 @@ func (d *MetadataStoreSqlite) Start() error {
 	if err := d.init(); err != nil {
 		return err
 	}
+	// An in-memory store always starts from an empty database, so the
+	// migration chain below always produces the same schema: the model set is
+	// a compile-time constant and every fixup step is a no-op against a
+	// database with no tables. Replay the DDL captured from the first such
+	// migration in this process instead of driving AutoMigrate over ~80 models
+	// again. See migrateInMemoryFromTemplate for why this is schema-identical.
+	if d.dataDir == "" && !d.skipSchemaTemplate {
+		applied, err := d.migrateInMemoryFromTemplate()
+		if err != nil {
+			return err
+		}
+		if applied {
+			success = true
+			return nil
+		}
+	}
 	// Deduplicate pool_stake_snapshot rows before AutoMigrate
 	// creates the unique index idx_pool_stake_epoch_pool.
 	if err := models.DedupePoolStakeSnapshots(
@@ -617,6 +637,13 @@ func (d *MetadataStoreSqlite) Start() error {
 			return fmt.Errorf(
 				"account created_slot backfill failed: %w", err,
 			)
+		}
+	}
+	// Record the finished schema so the next in-memory store in this process
+	// can replay it instead of repeating the whole migration chain.
+	if d.dataDir == "" && !d.skipSchemaTemplate {
+		if err := d.captureInMemorySchemaTemplate(); err != nil {
+			return err
 		}
 	}
 	success = true
