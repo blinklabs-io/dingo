@@ -336,6 +336,9 @@ func (r *VoterRegistry) RegisterPublicKey(
 	canonical := hex.EncodeToString(poolKeyHash)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.keys == nil {
+		r.keys = make(map[string]*bls12381.G2Affine)
+	}
 	if existing, ok := r.keys[canonical]; ok {
 		if !existing.Equal(pub) {
 			return fmt.Errorf(

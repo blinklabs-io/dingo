@@ -943,6 +943,7 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 		quorum.AnnouncingRbHash,
 		committee,
 		big.NewRat(7, 10),
+		fixture.mgr.registry,
 	))
 	wrongRbHash := lcommon.NewBlake2b256([]byte("different-rb"))
 	require.Error(t, ValidatePrototypeEbCertificate(
@@ -950,6 +951,7 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 		wrongRbHash,
 		committee,
 		big.NewRat(7, 10),
+		fixture.mgr.registry,
 	))
 }
 
@@ -1014,6 +1016,7 @@ func TestVoteManagerPrototypeVerifiesOverflowPoolHashVote(t *testing.T) {
 		quorum.AnnouncingRbHash,
 		committee,
 		big.NewRat(7, 10),
+		fixture.mgr.registry,
 	))
 }
 
@@ -1186,7 +1189,10 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 	require.True(t, ok)
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolMember.PoolKeyHash)
-	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, key))
+	require.NoError(t, fixture.mgr.registry.RegisterPublicKey(
+		poolKeyHash[:],
+		key.PublicKey(),
+	))
 	rbHash := lcommon.NewBlake2b256([]byte("registered-key-rb"))
 	ebHash := lcommon.NewBlake2b256([]byte("registered-key-eb"))
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
@@ -1202,10 +1208,34 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 			VoteSignature:    signature,
 		},
 	))
-	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+	voteID := lcommon.LeiosVoteId{
 		SlotNo: 577, VoterId: voterID,
-	}})
+	}
+	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteID})
 	require.Len(t, raws, 1)
+	fixture.mgr.mu.Lock()
+	stored, ok := fixture.mgr.votesById[voteID]
+	if ok {
+		storedCopy := *stored
+		stored = &storedCopy
+	}
+	fixture.mgr.mu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, "peer", stored.originConn)
+	assert.True(t, stored.verified)
+
+	cert, err := BuildEbCertificate(577, ebHash, committee, []VerifiedVote{{
+		VoterId:   voterID,
+		Signature: signature,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, ValidatePrototypeEbCertificate(
+		cert,
+		rbHash,
+		committee,
+		big.NewRat(0, 1),
+		fixture.mgr.registry,
+	))
 }
 
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {

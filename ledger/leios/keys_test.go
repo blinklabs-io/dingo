@@ -304,6 +304,18 @@ func TestNewVoterRegistryEmpty(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestVoterRegistryZeroValueRegister(t *testing.T) {
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
+	require.NoError(t, err)
+	var registry VoterRegistry
+	poolHash, err := hex.DecodeString(testPoolHash(1))
+	require.NoError(t, err)
+	require.NoError(t, registry.RegisterPublicKey(poolHash, key.PublicKey()))
+	pub, ok := registry.PublicKeyFor(poolHash)
+	require.True(t, ok)
+	assert.True(t, pub.Equal(key.PublicKey()))
+}
+
 func TestNewVoterRegistryRejectsInvalidEntries(t *testing.T) {
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
 	require.NoError(t, err)
