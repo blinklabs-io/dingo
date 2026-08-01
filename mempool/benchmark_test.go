@@ -846,36 +846,56 @@ func (g *benchmarkTxGenerator) next() ([]byte, error) {
 	return txBytes, nil
 }
 
+// benchmarkTemplate decodes the shared transaction template once. Decoding it
+// per generated transaction cost more than the rest of generation combined,
+// and every generated transaction overwrites the same body fields anyway.
+var benchmarkTemplate = sync.OnceValues(
+	func() (*conway.ConwayTransaction, error) {
+		template, err := hex.DecodeString(testTxHex)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode benchmark transaction: %w",
+				err,
+			)
+		}
+		decoded, err := gledger.NewTransactionFromCbor(
+			uint(conway.EraIdConway),
+			template,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode benchmark transaction template: %w",
+				err,
+			)
+		}
+		tx, ok := decoded.(*conway.ConwayTransaction)
+		if !ok {
+			return nil, fmt.Errorf(
+				"benchmark transaction template decoded as %T",
+				decoded,
+			)
+		}
+		return tx, nil
+	},
+)
+
+// benchmarkTemplateMu guards the mutations below. Generation is sequential
+// today, but the template is now shared state, so the lock keeps it correct
+// if a caller ever generates from more than one goroutine.
+var benchmarkTemplateMu sync.Mutex
+
 func buildBenchmarkTransaction(
 	inputHash string,
 	inputIndex uint32,
 	nonce uint64,
 	outputCount int,
 ) ([]byte, string, error) {
-	template, err := hex.DecodeString(testTxHex)
+	tx, err := benchmarkTemplate()
 	if err != nil {
-		return nil, "", fmt.Errorf(
-			"decode benchmark transaction: %w",
-			err,
-		)
+		return nil, "", err
 	}
-	decoded, err := gledger.NewTransactionFromCbor(
-		uint(conway.EraIdConway),
-		template,
-	)
-	if err != nil {
-		return nil, "", fmt.Errorf(
-			"decode benchmark transaction template: %w",
-			err,
-		)
-	}
-	tx, ok := decoded.(*conway.ConwayTransaction)
-	if !ok {
-		return nil, "", fmt.Errorf(
-			"benchmark transaction template decoded as %T",
-			decoded,
-		)
-	}
+	benchmarkTemplateMu.Lock()
+	defer benchmarkTemplateMu.Unlock()
 	tx.Body.TxInputs.SetItems([]shelley.ShelleyTransactionInput{
 		shelley.NewShelleyTransactionInput(
 			inputHash,
@@ -934,6 +954,14 @@ func benchmarkRemovalCascade(
 ) {
 	b.Helper()
 	var cascadeTotal time.Duration
+	// Only the cascade itself is timed. Building a fresh count-deep chain per
+	// iteration costs far more than removing it, so leaving setup inside the
+	// timed interval would report admission cost as ns/op and hide the
+	// difference between the implementations. Because ns/op is now the cascade
+	// alone, the default benchtime buys many iterations of that untimed setup;
+	// ns/op is meaningful at a single iteration, so pass -benchtime=1x to keep
+	// a run short.
+	b.StopTimer()
 	for range b.N {
 		pluginPool := newBenchmarkPluginPool(
 			b,
@@ -964,9 +992,11 @@ func benchmarkRemovalCascade(
 				rootHash = generator.previousHash
 			}
 		}
+		b.StartTimer()
 		start := time.Now()
 		pluginPool.pool.RemoveTransaction(rootHash)
 		cascadeTotal += time.Since(start)
+		b.StopTimer()
 		if remaining := len(pluginPool.pool.Transactions()); remaining != 0 {
 			b.Fatalf(
 				"%s cascade left %d of %d transactions",
@@ -975,11 +1005,9 @@ func benchmarkRemovalCascade(
 				count,
 			)
 		}
-		b.StopTimer()
 		if err := pluginPool.host.Stop(context.Background()); err != nil {
 			b.Fatalf("stop plugin host: %v", err)
 		}
-		b.StartTimer()
 	}
 	b.ReportMetric(float64(count), "txs/cascade")
 	if cascadeTotal > 0 {
