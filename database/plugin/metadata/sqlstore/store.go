@@ -307,6 +307,12 @@ func (s *Store) startMaintenance() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Cancellation and a tick can become ready at the same time.
+				// Prefer shutdown so a maintenance callback cannot be started
+				// again after Close has begun.
+				if ctx.Err() != nil {
+					return
+				}
 				started := time.Now()
 				if err := s.maintenance(ctx); err != nil {
 					if ctx.Err() == nil {
@@ -316,6 +322,8 @@ func (s *Store) startMaintenance() {
 							"duration", time.Since(started),
 							"error", err,
 						)
+					} else {
+						return
 					}
 					continue
 				}
