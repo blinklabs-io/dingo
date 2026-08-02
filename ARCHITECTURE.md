@@ -1455,8 +1455,11 @@ stake-delegation deposits, the ledger peer snapshot, stake pools, DRep state,
 and account state. `GetCBOR` is a query combinator: it re-runs the wrapped
 inner query through the same dispatch path and returns the result as a tag-24
 CBOR-in-CBOR `Serialised` value, matching cardano-node. `GetStakeSnapshots`
-returns the mark/set/go stake for each requested pool (or the union of pools
-in those snapshots) and the corresponding totals.
+returns the mark/set/go stake for each requested pool and the corresponding
+totals. For protocol version 11 and later, requested pools whose mark, set,
+and go stake are all zero are omitted; without a pool filter, the result
+contains the union of pools present in those snapshots and the corresponding
+totals.
 
 ## Chain Management
 
