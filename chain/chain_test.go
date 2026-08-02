@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -1340,6 +1341,61 @@ func TestRecentPointsNoDatabase(t *testing.T) {
 			secondLastBlock.MockSlot,
 			points[1].Slot,
 		)
+	}
+}
+
+func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	primary := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := primary.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding test block: %s", err)
+		}
+	}
+
+	point := blockPoint(testBlocks[2])
+	fork, err := cm.NewChain(point)
+	if err != nil {
+		t.Fatalf("unexpected error creating fork: %s", err)
+	}
+
+	const iterations = 250
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		defer errMu.Unlock()
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_ = fork.RecentPoints(8)
+			_ = fork.IntersectPoints(8)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_, err := cm.NewChain(point)
+			recordErr(err)
+		}
+	}()
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("unexpected concurrent fork creation error: %s", firstErr)
 	}
 }
 

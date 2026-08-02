@@ -1490,6 +1490,14 @@ The `ChainManager` (`chain/manager.go`) manages multiple chains:
     -------------------------------------------------
 ```
 
+Chain index reads use the selected chain's read lock and the manager read lock.
+For an in-memory fork, reads that resolve the common prefix also take the
+primary chain's read lock before the manager lock; this protects both the
+primary block buffer and the manager's chain map while avoiding the primary
+chain/manager lock cycle used by chain creation. Iterator and reconciliation
+paths already hold the manager lock, so they call the locked index helper
+directly rather than re-entering the manager lock.
+
 ### Chain Selection (Ouroboros Praos)
 
 The `ChainSelector` (`chainselection/`) implements Ouroboros Praos rules:
