@@ -35,7 +35,10 @@ concurrency:
   group: antithesis
   # Once submitted, an Antithesis test continues running outside GitHub.
   # The default workflow exits after submission; callers can opt into polling
-  # with the poll_results dispatch input.
+  # with the poll_results dispatch input. Submit-only mode releases this
+  # GitHub Actions lock when submission finishes, so it cannot serialize
+  # external Antithesis runs; use poll_results=true when that serialization is
+  # required.
   cancel-in-progress: false
 
 env:
