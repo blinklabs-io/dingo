@@ -69,7 +69,41 @@ var (
 	portNumberRe     = regexp.MustCompile(`^3\d{3}$`)
 	flagRe           = regexp.MustCompile(`--[a-z][a-z-]*`)
 	scriptRefRe      = regexp.MustCompile(`(run-tests|start|stop)\.sh`)
+	caseStartRe      = regexp.MustCompile(`^\s*case\b.*\bin\s*$`)
+	caseEndRe        = regexp.MustCompile(`^\s*esac\b`)
+	scriptFlagRe     = regexp.MustCompile(`^--[a-z][a-z-]*$`)
 )
+
+// scriptFlags returns flags handled by shell case arms. Looking only at case
+// labels avoids accepting flags that occur in comments, usage text, or as a
+// substring of another token.
+func scriptFlags(script string) map[string]struct{} {
+	flags := map[string]struct{}{}
+	caseDepth := 0
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case caseEndRe.MatchString(trimmed):
+			if caseDepth > 0 {
+				caseDepth--
+			}
+		case caseStartRe.MatchString(trimmed):
+			caseDepth++
+		case caseDepth > 0 && strings.HasPrefix(trimmed, "--"):
+			close := strings.IndexByte(trimmed, ')')
+			if close < 0 {
+				continue
+			}
+			for pattern := range strings.SplitSeq(trimmed[:close], "|") {
+				pattern = strings.TrimSpace(pattern)
+				if scriptFlagRe.MatchString(pattern) {
+					flags[pattern] = struct{}{}
+				}
+			}
+		}
+	}
+	return flags
+}
 
 // ports parses the published ports of a service.
 func (s composeService) ports() []portMapping {
@@ -526,9 +560,11 @@ func assertCountedRole(t *testing.T, section string, count int, role string) {
 func TestDocumentedDevNetFlagsExist(t *testing.T) {
 	root := repoRoot(t)
 
-	scripts := map[string]string{}
+	scriptFlagsByName := map[string]map[string]struct{}{}
 	for _, name := range devnetScripts {
-		scripts[name] = readRepoFile(t, root, filepath.Join(devnetDir, name))
+		scriptFlagsByName[name] = scriptFlags(
+			readRepoFile(t, root, filepath.Join(devnetDir, name)),
+		)
 	}
 
 	checked := 0
@@ -540,13 +576,12 @@ func TestDocumentedDevNetFlagsExist(t *testing.T) {
 				continue
 			}
 			script := scriptRefRe.FindString(line)
-			body, ok := scripts[script]
-			if !ok {
+			if _, ok := scriptFlagsByName[script]; !ok {
 				continue
 			}
 			for _, flag := range flagRe.FindAllString(line[loc[1]:], -1) {
 				checked++
-				if !strings.Contains(body, flag) {
+				if _, accepted := scriptFlagsByName[script][flag]; !accepted {
 					t.Errorf(
 						"%s documents `%s %s`, which the script does not "+
 							"accept",

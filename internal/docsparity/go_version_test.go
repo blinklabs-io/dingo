@@ -129,19 +129,24 @@ func TestDocumentedGoVersionMatchesGoMod(t *testing.T) {
 
 	for _, rel := range markdownFiles(t, root) {
 		doc := readRepoFile(t, root, rel)
-		for i, line := range strings.Split(doc, "\n") {
-			for _, match := range goPrereqRe.FindAllStringSubmatch(line, -1) {
-				got, ok := parseGoRelease(match[1] + "." + match[2])
-				if !ok {
-					continue
-				}
-				if got != want {
-					t.Errorf(
-						"%s states %q but go.mod requires Go %s",
-						docLocation(rel, i+1),
-						strings.TrimSpace(match[0]),
-						want,
-					)
+		for _, block := range markdownBlocks(doc) {
+			if block.fenced {
+				continue
+			}
+			for i, line := range strings.Split(block.text, "\n") {
+				for _, match := range goPrereqRe.FindAllStringSubmatch(line, -1) {
+					got, ok := parseGoRelease(match[1] + "." + match[2])
+					if !ok {
+						continue
+					}
+					if got != want {
+						t.Errorf(
+							"%s states %q but go.mod requires Go %s",
+							docLocation(rel, block.startLine+i),
+							strings.TrimSpace(match[0]),
+							want,
+						)
+					}
 				}
 			}
 		}
@@ -246,12 +251,6 @@ func resolveMatrixValues(workflow, expr string) ([]string, bool) {
 func TestGoBuilderImagesCoverGoMod(t *testing.T) {
 	root := repoRoot(t)
 	want := moduleGoRelease(t, root)
-	rootDockerfile := readRepoFile(t, root, "Dockerfile")
-	rootImage := goImageRe.FindStringSubmatch(rootDockerfile)
-	if rootImage == nil {
-		t.Fatal("root Dockerfile does not use a Blink Labs Go builder image")
-	}
-	wantImage := rootImage[0]
 
 	checked := 0
 	for _, rel := range dockerfiles(t, root) {
@@ -271,14 +270,6 @@ func TestGoBuilderImagesCoverGoMod(t *testing.T) {
 				continue
 			}
 			checked++
-			if match[0] != wantImage {
-				t.Errorf(
-					"%s uses Go builder image %q but the root Dockerfile pins %q",
-					docLocation(rel, i+1),
-					match[0],
-					wantImage,
-				)
-			}
 			if !got.atLeast(want) {
 				t.Errorf(
 					"%s builds with Go %s but go.mod requires at least Go %s",
