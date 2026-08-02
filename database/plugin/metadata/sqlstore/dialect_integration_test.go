@@ -120,4 +120,20 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	loaded, err := store.GetAccountByCredential(0, account.StakingKey, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, account.ID, loaded.ID)
+
+	outputs := make([]*models.RewardAccountOutput, 120)
+	for index := range outputs {
+		outputs[index] = &models.RewardAccountOutput{
+			Epoch:       uint64(index),
+			StakingKey:  []byte{0x40, byte(index)},
+			PoolKeyHash: []byte{0x50, byte(index)},
+			RewardType:  "member",
+			Amount:      types.Uint64(index + 1),
+			Spendable:   true,
+		}
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	for _, output := range outputs {
+		require.NotZero(t, output.ID)
+	}
 }

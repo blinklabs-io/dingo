@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,6 +71,52 @@ func TestRewardAccountOutputsExcludeUncreditedRows(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, all, 1)
 	require.True(t, all[0].Guarded)
+}
+
+func TestSaveRewardAccountOutputsBatchesAndAssignsIDs(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	outputs := make([]*models.RewardAccountOutput, 250)
+	for index := range outputs {
+		outputs[index] = &models.RewardAccountOutput{
+			Epoch:       uint64(index),
+			StakingKey:  []byte{byte(index), 0x11},
+			PoolKeyHash: []byte{0x22, byte(index)},
+			RewardType:  "member",
+			Amount:      types.Uint64(index + 1),
+			Spendable:   true,
+		}
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	for _, output := range outputs {
+		require.NotZero(t, output.ID)
+	}
+	rows, err := store.GetRewardAccountOutputs(249, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	// Replaying the same natural keys updates in place and retains IDs.
+	ids := make([]uint, len(outputs))
+	for index, output := range outputs {
+		ids[index] = output.ID
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	for index, output := range outputs {
+		require.Equal(t, ids[index], output.ID)
+	}
+	duplicateA := &models.RewardAccountOutput{
+		Epoch: 500, StakingKey: []byte{1}, PoolKeyHash: []byte{2},
+		RewardType: "member", Amount: 1, Spendable: true,
+	}
+	duplicateB := &models.RewardAccountOutput{
+		Epoch: 500, StakingKey: []byte{1}, PoolKeyHash: []byte{2},
+		RewardType: "member", Amount: 2, Spendable: true,
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{duplicateA, duplicateB}, nil))
+	require.Equal(t, duplicateA.ID, duplicateB.ID)
+	rows, err = store.GetRewardAccountOutputs(500, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, types.Uint64(2), rows[0].Amount)
 }
 
 func TestRewardAccountGuardedQueryUsesIndex(t *testing.T) {

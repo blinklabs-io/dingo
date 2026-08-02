@@ -1021,26 +1021,26 @@ WHERE r.rn = 1`,
 				err,
 			)
 		}
+		batch := make([]*models.PoolRegistration, 0)
 		for rows.Next() {
 			registration, err := scanPoolRegistration(rows)
 			if err != nil {
 				rows.Close()
 				return nil, err
 			}
-			if err := loadPoolRegistrationChildren(
-				db,
-				registration,
-			); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			ret = append(ret, *registration)
+			batch = append(batch, registration)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
 		if err := rows.Err(); err != nil {
 			return nil, err
+		}
+		if err := loadPoolRegistrationChildrenBatch(db, batch); err != nil {
+			return nil, err
+		}
+		for _, registration := range batch {
+			ret = append(ret, *registration)
 		}
 	}
 	return ret, nil
@@ -1221,26 +1221,26 @@ WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 		if err != nil {
 			return nil, err
 		}
+		batch := make([]*models.PoolRegistration, 0)
 		for rows.Next() {
 			registration, err := scanPoolRegistration(rows)
 			if err != nil {
 				rows.Close()
 				return nil, err
 			}
-			if err := loadPoolRegistrationChildren(
-				db,
-				registration,
-			); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			ret = append(ret, *registration)
+			batch = append(batch, registration)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
 		if err := rows.Err(); err != nil {
 			return nil, err
+		}
+		if err := loadPoolRegistrationChildrenBatch(db, batch); err != nil {
+			return nil, err
+		}
+		for _, registration := range batch {
+			ret = append(ret, *registration)
 		}
 	}
 	return ret, nil
@@ -1274,19 +1274,15 @@ ORDER BY p.id DESC`,
 			rows.Close()
 			return nil, err
 		}
-		if err := loadPoolRegistrationChildren(
-			db,
-			registration,
-		); err != nil {
-			rows.Close()
-			return nil, err
-		}
 		registrations = append(registrations, registration)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := loadPoolRegistrationChildrenBatch(db, registrations); err != nil {
 		return nil, err
 	}
 	ret := make([]lcommon.PoolRegistrationCertificate, 0, len(registrations))
@@ -1917,6 +1913,84 @@ WHERE pool_registration_id = ?`,
 		return err
 	}
 	return rows.Err()
+}
+
+// loadPoolRegistrationChildrenBatch hydrates all owner and relay rows for a
+// registration slice with two queries per parameter-limited chunk. Keeping
+// the grouping in memory avoids the per-registration N+1 query pattern used
+// by the legacy helper while preserving child insertion order.
+func loadPoolRegistrationChildrenBatch(
+	db queryer,
+	registrations []*models.PoolRegistration,
+) error {
+	if len(registrations) == 0 {
+		return nil
+	}
+	byID := make(map[uint]*models.PoolRegistration, len(registrations))
+	ids := make([]any, len(registrations))
+	for i, registration := range registrations {
+		registration.Owners = []models.PoolRegistrationOwner{}
+		registration.Relays = []models.PoolRegistrationRelay{}
+		byID[registration.ID] = registration
+		ids[i] = registration.ID
+	}
+	for start := 0; start < len(ids); start += 400 {
+		end := min(start+400, len(ids))
+		rows, err := db.QueryContext(context.Background(), `
+SELECT key_hash, id, pool_registration_id, pool_id
+FROM pool_registration_owner
+WHERE pool_registration_id IN (`+bindPlaceholders(end-start)+`)
+ORDER BY id`, ids[start:end]...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var owner models.PoolRegistrationOwner
+			if err := rows.Scan(&owner.KeyHash, &owner.ID, &owner.PoolRegistrationID, &owner.PoolID); err != nil {
+				rows.Close()
+				return err
+			}
+			if registration := byID[owner.PoolRegistrationID]; registration != nil {
+				registration.Owners = append(registration.Owners, owner)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		rows, err = db.QueryContext(context.Background(), `
+SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
+FROM pool_registration_relay
+WHERE pool_registration_id IN (`+bindPlaceholders(end-start)+`)
+ORDER BY id`, ids[start:end]...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var relay models.PoolRegistrationRelay
+			var ipv4, ipv6 []byte
+			if err := rows.Scan(&ipv4, &ipv6, &relay.Hostname, &relay.ID, &relay.PoolRegistrationID, &relay.PoolID, &relay.Port); err != nil {
+				rows.Close()
+				return err
+			}
+			relay.Ipv4 = netIPPointer(ipv4)
+			relay.Ipv6 = netIPPointer(ipv6)
+			if registration := byID[relay.PoolRegistrationID]; registration != nil {
+				registration.Relays = append(registration.Relays, relay)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func queryReturnedID(

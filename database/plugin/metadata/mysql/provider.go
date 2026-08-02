@@ -219,6 +219,26 @@ func ensureDatabaseExists(ctx context.Context, dsn, configuredName string) error
 	if err := validateDatabaseName(dbName); err != nil {
 		return fmt.Errorf("cannot create MySQL database: %w", err)
 	}
+	// Probe the configured schema with the actual application credentials
+	// first. Existing databases must remain usable by least-privilege users;
+	// CREATE DATABASE requires an administrative privilege even when used with
+	// IF NOT EXISTS. Only fall back to the administrator connection for the
+	// specific unknown-database error.
+	if driverConfig.DBName != "" {
+		probe, probeErr := sqlstore.OpenDB("mysql", dsn, "mysql")
+		if probeErr != nil {
+			return fmt.Errorf("open MySQL metadata connection: %w", probeErr)
+		}
+		pingErr := probe.PingContext(ctx)
+		_ = probe.Close()
+		if pingErr == nil {
+			return nil
+		}
+		var mysqlErr *mysqldriver.MySQLError
+		if !errors.As(pingErr, &mysqlErr) || mysqlErr.Number != 1049 {
+			return fmt.Errorf("ping MySQL metadata database %q: %w", dbName, pingErr)
+		}
+	}
 	driverConfig.DBName = ""
 	admin, err := sqlstore.OpenDB("mysql", driverConfig.FormatDSN(), "mysql")
 	if err != nil {

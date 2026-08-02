@@ -1183,9 +1183,10 @@ credential's reward balance at the requested slot from `account.reward` and
 credits from the live balance; with a later withdrawal it starts from the first
 withdrawal's `previous_reward` and subtracts credits between the requested slot
 and that withdrawal. Events after the first withdrawal cannot affect its
-recorded pre-withdrawal balance. The resulting historical reward is added once
-per credential via `MAX(historical_reward.reward)`, avoiding multiplication
-across the UTxO join fan-out.
+recorded pre-withdrawal balance. The store computes this reward term in a
+bounded Go-side pass over account/reward-delta rows, keyed by credential, and
+adds it once while folding live UTxO rows. This keeps decimal `uint64` values
+exact and avoids multiplication across the UTxO join fan-out.
 
 `utxo.amount`, `account.reward`, and the reward-delta amounts are stored as text
 (`types.Uint64`) on postgres and mysql, so each is cast to the backend's native
@@ -1239,17 +1240,13 @@ WITH active_delegator_stake AS (
   SELECT active_delegation.pool_key_hash,
          active_delegation.credential_tag,
          active_delegation.staking_key,
-         COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0)
-           + COALESCE(MAX(historical_reward.reward), 0) AS total_stake
+         COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0) AS utxo_stake
   FROM active_delegation
   LEFT JOIN utxo
     ON utxo.credential_tag = active_delegation.credential_tag
    AND utxo.staking_key = active_delegation.staking_key
    AND utxo.added_slot <= $1
    AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > $1)
-  LEFT JOIN historical_reward
-    ON historical_reward.credential_tag = active_delegation.credential_tag
-   AND historical_reward.staking_key = active_delegation.staking_key
   -- CIP-0163 gate (emitted only when expiryEpoch > 0). The preceding
   -- historical_expiration CTE derives expiration at the requested slot.
   LEFT JOIN historical_expiration expiry_acct
@@ -1265,7 +1262,7 @@ WITH active_delegator_stake AS (
 )
 SELECT pool_key_hash,
        COUNT(*) AS delegator_count,
-       COALESCE(SUM(total_stake), 0) AS total_stake
+       COALESCE(SUM(utxo_stake), 0) AS total_stake
 FROM active_delegator_stake
 GROUP BY pool_key_hash;
 ```

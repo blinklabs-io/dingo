@@ -554,6 +554,9 @@ FROM account WHERE added_slot > ?`,
 			if err := rows.Close(); err != nil {
 				return err
 			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
 			refs := make([]models.StakeCredentialRef, 0, len(accounts))
 			for _, account := range accounts {
 				registration, hasRegistration, err := latestAccountEvent(
