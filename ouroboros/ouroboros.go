@@ -121,6 +121,12 @@ type Ouroboros struct {
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
+	// LeiosNotify ranking-block announcements observed on this node. The map
+	// is keyed by announcing ranking-block hash and prevents an inconsistent
+	// second description of the same ranking block from being relayed.
+	leiosAnnouncementsMu   sync.Mutex
+	leiosAnnouncements     map[string]leiosAnnouncement
+	leiosAnnouncementSizes map[string]uint64
 
 	// Asynchronous best-effort persistence of fetched endorser blocks to the
 	// blob store for historical serving. The blob write (CBOR encode + commit)
@@ -275,6 +281,8 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
 		leiosClosureWaiters:      make(map[string][]chan struct{}),
 		leiosEBLog:               newLeiosForgedEBLog(),
+		leiosAnnouncements:       make(map[string]leiosAnnouncement),
+		leiosAnnouncementSizes:   make(map[string]uint64),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond

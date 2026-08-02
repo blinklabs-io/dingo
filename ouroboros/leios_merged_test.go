@@ -247,7 +247,7 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestLeiosNotifyBlockAnnouncementWithHeaderIsIgnored(t *testing.T) {
+func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
 	conn, err := gouroboros.New()
 	require.NoError(t, err)
@@ -262,12 +262,50 @@ func TestLeiosNotifyBlockAnnouncementWithHeaderIsIgnored(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, components, 2)
 
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xaa
+	var headerTop []cbor.RawMessage
+	_, err = cbor.Decode(components[0], &headerTop)
+	require.NoError(t, err)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	headerBody = append(headerBody,
+		mustCbor(t, false),
+		mustCbor(t, []any{ebHash.Bytes(), uint64(1234)}),
+	)
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err := cbor.Encode(headerTop)
+	require.NoError(t, err)
+
 	o := NewOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
+	o.leiosEBLog.registerConn("test")
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
-		oleiosnotify.NewMsgBlockAnnouncement(components[0]),
+		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
 	)
 	require.NoError(t, err)
+	err = o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
+	)
+	require.NoError(t, err)
+	entry, _ := o.leiosEBLog.next("test")
+	require.NotNil(t, entry)
+	require.Equal(t, headerRaw, entry.announcement)
+	o.leiosEBLog.complete("test", true)
+	entry, _ = o.leiosEBLog.next("test")
+	require.Nil(t, entry)
+
+	// A different ranking block may not change the established size for the
+	// same endorser-block hash.
+	headerBody[len(headerBody)-1] = mustCbor(t, []any{ebHash.Bytes(), uint64(4321)})
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.ErrorContains(t, o.acceptLeiosAnnouncement(headerRaw, "test"), "inconsistent")
 }
 
 var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")

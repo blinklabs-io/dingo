@@ -26,6 +26,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -38,6 +39,21 @@ type leiosForgedEBEntry struct {
 	point *ocommon.Point
 	size  uint64
 	vote  *lcommon.LeiosPrototypeVote
+	// announcement is the raw Dijkstra ranking-block header sent in the
+	// w31 BlockAnnouncement message.
+	announcement []byte
+}
+
+// prototype-2026w31 accepts an announcement only while it is recent enough
+// to be useful for the current diffusion round. A header from a future slot
+// is never valid; an older header is stale once this bound is exceeded.
+const leiosNotifyMaxAnnouncementAge = 2
+
+type leiosAnnouncement struct {
+	raw    []byte
+	ebHash lcommon.Blake2b256
+	ebSize uint64
+	slot   uint64
 }
 
 type leiosDeliveryReservation struct {
@@ -349,6 +365,11 @@ func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOption
 				o.leiosnotifyClientNotification,
 			),
 		),
+		// Keep the bounded request window full. This is the gouroboros
+		// equivalent of the prototype's Lookahead server mode: the server can
+		// hold each request until a notification is available, while the client
+		// keeps several requests outstanding.
+		oleiosnotify.WithPipelineLimit(oleiosnotify.MaxPipelineLimit),
 		// Disable the Busy-state timeout. LeiosNotify is a push-based
 		// notification protocol where the server only sends when it has
 		// something to announce. Idle waits of arbitrary length are
@@ -445,10 +466,19 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	}
 	switch m := msg.(type) {
 	case *oleiosnotify.MsgBlockAnnouncement:
-		// prototype-2026w30 sends the full ranking-block header here instead of
-		// CBOR null. gouroboros retains that payload as raw CBOR; accept it but
-		// intentionally ignore it until dingo's announcement pipeline consumes
-		// ranking-block headers directly.
+		// w31 carries the full ranking-block header. Validate before accepting
+		// it into the relay log; invalid announcements are deliberately
+		// suppressed so a peer cannot tear down a shared connection with a
+		// malformed or stale experimental message.
+		if err := o.acceptLeiosAnnouncement(m.BlockHeaderRaw, connId); err != nil {
+			o.config.Logger.Debug(
+				"suppressing invalid leios announcement",
+				"component", "network",
+				"protocol", "leios-notify",
+				"connection_id", connId,
+				"error", err,
+			)
+		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
 		// While the ledger is deeply behind the head, do not prefetch this
@@ -1087,6 +1117,10 @@ func leiosCollectTxs(result []cbor.RawMessage) []cbor.RawMessage {
 // so the EB would never be offered, fetched, voted on, or certified.
 func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 	switch {
+	case entry.announcement != nil:
+		return oleiosnotify.NewMsgBlockAnnouncement(
+			cbor.RawMessage(entry.announcement),
+		)
 	case entry.vote != nil:
 		return oleiosnotify.NewMsgVotesOfferPrototype(
 			[]lcommon.LeiosPrototypeVote{*entry.vote},
@@ -1095,6 +1129,77 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 		return oleiosnotify.NewMsgBlockOffer(*entry.point, entry.size)
 	default:
 		return nil
+	}
+}
+
+// acceptLeiosAnnouncement validates and records one w31 announcement, then
+// queues it for diffusion to all connected LeiosNotify peers. The raw header
+// is retained so the relay preserves the producer's signed bytes.
+func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+	if err != nil {
+		return fmt.Errorf("decode ranking-block header: %w", err)
+	}
+	ebHash, ebSize, ok := header.LeiosAnnouncement()
+	if !ok {
+		return errors.New("ranking-block header has no valid endorser-block announcement")
+	}
+	if o.LedgerState != nil {
+		currentSlot, slotErr := o.LedgerState.CurrentSlot()
+		if slotErr != nil {
+			return fmt.Errorf("read current slot for announcement validation: %w", slotErr)
+		}
+		if header.SlotNumber() > currentSlot {
+			return fmt.Errorf("announcement slot %d is ahead of current slot %d", header.SlotNumber(), currentSlot)
+		}
+		age := currentSlot - header.SlotNumber()
+		if age > leiosNotifyMaxAnnouncementAge {
+			return fmt.Errorf("announcement is stale by %d slots", age)
+		}
+		o.config.Logger.Debug(
+			"accepted leios announcement",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", source,
+			"slot", header.SlotNumber(),
+			"lateness", age,
+		)
+	}
+	key := string(header.Hash().Bytes())
+	o.leiosAnnouncementsMu.Lock()
+	if o.leiosAnnouncements == nil {
+		o.leiosAnnouncements = make(map[string]leiosAnnouncement)
+	}
+	if o.leiosAnnouncementSizes == nil {
+		o.leiosAnnouncementSizes = make(map[string]uint64)
+	}
+	ebKey := string(ebHash.Bytes())
+	if previousSize, exists := o.leiosAnnouncementSizes[ebKey]; exists && previousSize != ebSize {
+		o.leiosAnnouncementsMu.Unlock()
+		return errors.New("announcement size is inconsistent with a previously observed endorser block")
+	}
+	if previous, exists := o.leiosAnnouncements[key]; exists {
+		if previous.ebHash != ebHash || previous.ebSize != ebSize || string(previous.raw) != string(raw) {
+			o.leiosAnnouncementsMu.Unlock()
+			return errors.New("announcement is inconsistent with a previously observed ranking block")
+		}
+		o.leiosAnnouncementsMu.Unlock()
+		return nil
+	}
+	o.leiosAnnouncements[key] = leiosAnnouncement{
+		raw: append([]byte(nil), raw...), ebHash: ebHash, ebSize: ebSize, slot: header.SlotNumber(),
+	}
+	o.leiosAnnouncementSizes[ebKey] = ebSize
+	o.leiosAnnouncementsMu.Unlock()
+	o.leiosEBLog.append(leiosForgedEBEntry{announcement: append([]byte(nil), raw...)})
+	return nil
+}
+
+// EnqueueLeiosBlockAnnouncement validates and queues a locally forged
+// ranking-block header for LeiosNotify diffusion.
+func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
+	if err := o.acceptLeiosAnnouncement(raw, "local"); err != nil {
+		o.config.Logger.Debug("suppressing local leios announcement", "error", err)
 	}
 }
 

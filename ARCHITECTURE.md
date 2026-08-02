@@ -1265,8 +1265,19 @@ importer nevertheless recognizes the matching Dijkstra `StakePoolState` field
 fields correctly; malformed key/proof lengths reject that pool state. The same
 prototype release also changes `MsgLeiosBlockAnnouncement` from a null
 placeholder to the full ranking-block header. The LeiosNotify client accepts
-that header and intentionally ignores it until ranking-header announcements
-feed a Dingo pipeline; chain-sync remains the source of ranking blocks.
+that header. In prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
+requires a valid `leios_announcement`, rejects future or more-than-two-slot-old
+announcements, and rejects a repeated endorser-block hash whose size differs
+from an earlier observation. Accepted headers retain their original CBOR and
+enter the same per-connection delivery log as locally forged announcements,
+so followers consume them and relays diffuse them without changing the block
+wire format. Duplicate observations are suppressed, and accepted traces log
+the observed slot and lateness. The Go dependency has no separate Lookahead
+state type; its bounded pipelined request window is configured to the protocol
+maximum, providing the w31 Lookahead behavior while remaining compatible with
+w30 peers that accept and ignore the announcement payload. Full consensus
+validation of the announced endorser block remains outside LeiosNotify and is
+intentionally handled by the existing leios-fetch/ledger paths.
 Dijkstra blocks and transactions retain their original wire CBOR when
 re-encoded, avoiding the definite/indefinite-list rewrite that
 prototype-2026w30 exposed in the Haskell ledger bridge.
