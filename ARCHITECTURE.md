@@ -1266,16 +1266,20 @@ fields correctly; malformed key/proof lengths reject that pool state. The same
 prototype release also changes `MsgLeiosBlockAnnouncement` from a null
 placeholder to the full ranking-block header. The LeiosNotify client accepts
 that header. In prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
-requires a valid `leios_announcement`, rejects future or more-than-two-slot-old
-announcements, and rejects a repeated endorser-block hash whose size differs
-from an earlier observation. Accepted headers retain their original CBOR and
-enter the same per-connection delivery log as locally forged announcements,
-so followers consume them and relays diffuse them without changing the block
-wire format. Duplicate observations are suppressed, and accepted traces log
-the observed slot and lateness. The Go dependency has no separate Lookahead
-state type; its bounded pipelined request window is configured to the protocol
-maximum, providing the w31 Lookahead behavior while remaining compatible with
-w30 peers that accept and ignore the announcement payload. Full consensus
+requires a valid `leios_announcement`, rejects future or more-than-ten-minute-
+old announcements, and rejects a repeated endorser-block hash whose size
+differs from an earlier observation. A valid announcement is relayed only
+while it is at most five minutes old; older-but-still-valid announcements are
+consumed without further propagation. Accepted headers retain their original
+CBOR; headers within the relay-age bound enter the same per-connection delivery
+log as locally forged announcements, so followers consume them and relays
+diffuse them without
+changing the block wire format. Duplicate observations and a third distinct
+announcement for one election are suppressed, and accepted traces log the
+observed slot and lateness. The Go dependency has no separate Lookahead state
+type; its bounded pipelined request window is configured to the protocol
+maximum, providing the w31 request-window behavior while remaining compatible
+with w30 peers that accept and ignore the announcement payload. Full consensus
 validation of the announced endorser block remains outside LeiosNotify and is
 intentionally handled by the existing leios-fetch/ledger paths.
 Dijkstra blocks and transactions retain their original wire CBOR when

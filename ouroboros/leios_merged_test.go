@@ -306,6 +306,29 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	headerRaw, err = cbor.Encode(headerTop)
 	require.NoError(t, err)
 	require.ErrorContains(t, o.acceptLeiosAnnouncement(headerRaw, "test"), "inconsistent")
+
+	// A peer may announce at most two distinct ranking blocks for one
+	// slot/issuer election. The third distinct message is suppressed even when
+	// its endorser-block size is otherwise consistent.
+	headerBody[len(headerBody)-1] = mustCbor(t, []any{ebHash.Bytes(), uint64(1234)})
+	headerBody[0] = mustCbor(t, uint64(2))
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.NoError(t, o.acceptLeiosAnnouncement(headerRaw, "test"))
+	headerBody[0] = mustCbor(t, uint64(3))
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.NoError(t, o.acceptLeiosAnnouncement(headerRaw, "test"))
+	headerBody[0] = mustCbor(t, uint64(4))
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.ErrorContains(t, o.acceptLeiosAnnouncement(headerRaw, "test"), "third distinct")
 }
 
 var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")

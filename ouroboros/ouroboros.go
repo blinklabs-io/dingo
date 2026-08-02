@@ -127,6 +127,11 @@ type Ouroboros struct {
 	leiosAnnouncementsMu   sync.Mutex
 	leiosAnnouncements     map[string]leiosAnnouncement
 	leiosAnnouncementSizes map[string]uint64
+	// LeiosNotify permits at most two distinct announcements for one election
+	// (slot plus issuer) from each peer. Keep that bound per source so one
+	// equivocating peer cannot inject an unbounded stream without suppressing
+	// independent observations from other peers.
+	leiosAnnouncementElections map[string]map[string]struct{}
 
 	// Asynchronous best-effort persistence of fetched endorser blocks to the
 	// blob store for historical serving. The blob write (CBOR encode + commit)
@@ -272,17 +277,18 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.ChainsyncBlockTimeout,
 	)
 	o := &Ouroboros{
-		config:                   cfg,
-		EventBus:                 cfg.EventBus,
-		ConnManager:              cfg.ConnManager,
-		blockFetchStarts:         make(map[ouroboros.ConnectionId]time.Time),
-		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
-		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
-		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosClosureWaiters:      make(map[string][]chan struct{}),
-		leiosEBLog:               newLeiosForgedEBLog(),
-		leiosAnnouncements:       make(map[string]leiosAnnouncement),
-		leiosAnnouncementSizes:   make(map[string]uint64),
+		config:                     cfg,
+		EventBus:                   cfg.EventBus,
+		ConnManager:                cfg.ConnManager,
+		blockFetchStarts:           make(map[ouroboros.ConnectionId]time.Time),
+		blockfetchNoBlocksCounts:   make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
+		chainsyncStats:             make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters:        make(map[string][]chan struct{}),
+		leiosEBLog:                 newLeiosForgedEBLog(),
+		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosAnnouncementSizes:     make(map[string]uint64),
+		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
