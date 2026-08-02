@@ -1344,37 +1344,34 @@ func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var name, nameHex, policyID, fingerprint []byte
-			var id int64
-			var utxoID sql.NullInt64
-			var amount sql.NullString
-			if err := rows.Scan(&name, &nameHex, &policyID, &fingerprint, &id, &utxoID, &amount); err != nil {
-				rows.Close()
-				return err
-			}
-			if !utxoID.Valid {
-				continue
-			}
-			value := uint64(0)
-			if amount.Valid {
-				value, err = parseUint64("asset amount", amount.String)
-				if err != nil {
-					rows.Close()
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var name, nameHex, policyID, fingerprint []byte
+				var id int64
+				var utxoID sql.NullInt64
+				var amount sql.NullString
+				if err := rows.Scan(&name, &nameHex, &policyID, &fingerprint, &id, &utxoID, &amount); err != nil {
 					return err
 				}
+				if !utxoID.Valid {
+					continue
+				}
+				value := uint64(0)
+				if amount.Valid {
+					value, err = parseUint64("asset amount", amount.String)
+					if err != nil {
+						return err
+					}
+				}
+				asset := models.Asset{Name: name, NameHex: nameHex, PolicyId: policyID, Fingerprint: fingerprint, ID: uint(id), UtxoID: uint(utxoID.Int64), Amount: types.Uint64(value)}
+				for _, utxo := range byID[asset.UtxoID] {
+					utxo.Assets = append(utxo.Assets, asset)
+				}
 			}
-			asset := models.Asset{Name: name, NameHex: nameHex, PolicyId: policyID, Fingerprint: fingerprint, ID: uint(id), UtxoID: uint(utxoID.Int64), Amount: types.Uint64(value)}
-			for _, utxo := range byID[asset.UtxoID] {
-				utxo.Assets = append(utxo.Assets, asset)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		if err := rows.Close(); err != nil {
+			return rows.Err()
+		}()
+		if err != nil {
 			return err
 		}
 	}
