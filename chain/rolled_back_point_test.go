@@ -164,33 +164,45 @@ func TestFromPointAcceptsCommonPointOnInMemoryFork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error creating fork: %s", err)
 	}
+	if err := fork.AddBlock(testBlocks[2], nil); err != nil {
+		t.Fatalf("unexpected error extending fork: %s", err)
+	}
 
-	iter, err := fork.FromPoint(commonPoint, true)
-	if err != nil {
-		t.Fatalf("unexpected error creating iterator at common point: %s", err)
-	}
-	defer iter.Cancel()
-	next, err := iter.Next(false)
-	if err != nil {
-		t.Fatalf("unexpected error reading common point: %s", err)
-	}
-	if next == nil || next.Rollback || next.Point.Slot != commonPoint.Slot ||
-		!bytes.Equal(next.Point.Hash, commonPoint.Hash) {
-		t.Fatalf("expected common point, got %+v", next)
-	}
-	reverse, err := fork.FromPointReverse(commonPoint, true)
-	if err != nil {
-		t.Fatalf("unexpected error creating reverse iterator at common point: %s", err)
-	}
-	defer reverse.Cancel()
-	reverseNext, err := reverse.Next(false)
-	if err != nil {
-		t.Fatalf("unexpected error reading common point in reverse: %s", err)
-	}
-	if reverseNext == nil || reverseNext.Rollback ||
-		reverseNext.Point.Slot != commonPoint.Slot ||
-		!bytes.Equal(reverseNext.Point.Hash, commonPoint.Hash) {
-		t.Fatalf("expected common point in reverse, got %+v", reverseNext)
+	for _, test := range []struct {
+		name      string
+		reverse   bool
+		inclusive bool
+		want      *MockBlock
+	}{
+		{name: "forward inclusive", inclusive: true, want: testBlocks[1]},
+		{name: "forward exclusive", inclusive: false, want: testBlocks[2]},
+		{name: "reverse inclusive", reverse: true, inclusive: true, want: testBlocks[1]},
+		{name: "reverse exclusive", reverse: true, inclusive: false, want: testBlocks[0]},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var (
+				iter *chain.ChainIterator
+				err  error
+			)
+			if test.reverse {
+				iter, err = fork.FromPointReverse(commonPoint, test.inclusive)
+			} else {
+				iter, err = fork.FromPoint(commonPoint, test.inclusive)
+			}
+			if err != nil {
+				t.Fatalf("unexpected error creating iterator: %s", err)
+			}
+			defer iter.Cancel()
+			next, err := iter.Next(false)
+			if err != nil {
+				t.Fatalf("unexpected error reading common point: %s", err)
+			}
+			want := blockPoint(test.want)
+			if next == nil || next.Rollback || next.Point.Slot != want.Slot ||
+				!bytes.Equal(next.Point.Hash, want.Hash) {
+				t.Fatalf("expected %v, got %+v", want, next)
+			}
+		})
 	}
 
 	// The same point remains in the cache after the primary rollback, but it
