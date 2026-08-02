@@ -293,7 +293,7 @@ func TestEpochBoundaryStakeSemanticsMysql(t *testing.T) {
 	pool := bytes.Repeat([]byte{0xE7}, 28)
 	retained := bytes.Repeat([]byte{0x3a}, 28)
 	underflow := bytes.Repeat([]byte{0x3b}, 28)
-	t.Cleanup(func() {
+	cleanup := func() {
 		for _, k := range [][]byte{retained, underflow} {
 			_ = db.Where("staking_key = ?", k).Delete(&models.Account{}).Error
 			_ = db.Where("staking_key = ?", k).Delete(&models.Utxo{}).Error
@@ -302,7 +302,9 @@ func TestEpochBoundaryStakeSemanticsMysql(t *testing.T) {
 			_ = db.Where("staking_key = ?", k).
 				Delete(&models.RewardLiveStake{}).Error
 		}
-	})
+	}
+	cleanup()
+	t.Cleanup(cleanup)
 
 	const (
 		snapshotSlot = uint64(199)

@@ -1853,12 +1853,12 @@ func (ls *LedgerState) epochBoundarySnapshotHook() func(*database.Txn, event.Epo
 //
 // cardano-ledger runs SNAP before POOLREAP and before governance enactment, so
 // the mark snapshot's stake must be read immediately after the delayed reward
-// update — the only boundary rule that precedes SNAP — while the snapshot row
+// update and MIR — the boundary rules that precede SNAP — while the snapshot row
 // itself can only be written at the end of the rollover, where the new epoch's
 // nonce and the post-enactment protocol version exist. This hook is the read
 // half; epochSnapshotHook is the write half. Both run in the same rollover
 // transaction. With no stake hook installed the write half reads the stake
-// itself, which is the pre-split behavior.
+// itself using boundary-aware historical reconstruction.
 func (ls *LedgerState) SetEpochBoundarySnapshotStakeHook(
 	fn func(*database.Txn, event.EpochTransitionEvent) error,
 ) {

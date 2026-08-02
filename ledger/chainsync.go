@@ -3992,7 +3992,11 @@ func (ls *LedgerState) processEpochRollover(
 	// before any of them — while the snapshot row is written at the end of the
 	// rollover where the new epoch record and the post-enactment protocol
 	// version exist.
-	ls.captureEpochBoundarySnapshotStake(txn, currentEpoch, epochStartSlot)
+	if err := ls.captureEpochBoundarySnapshotStake(
+		txn, currentEpoch, epochStartSlot,
+	); err != nil {
+		return nil, err
+	}
 
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
@@ -4275,10 +4279,10 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 	txn *database.Txn,
 	prevEpoch models.Epoch,
 	boundarySlot uint64,
-) {
+) error {
 	hook := ls.epochBoundarySnapshotStakeHook()
 	if hook == nil {
-		return
+		return nil
 	}
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch: prevEpoch.EpochId,
@@ -4294,7 +4298,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 			"epoch", evt.NewEpoch,
 			"component", "ledger",
 		)
-		return
+		return nil
 	}
 	if err := hook(txn, evt); err != nil {
 		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
@@ -4305,7 +4309,10 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 				"epoch", evt.NewEpoch,
 				"component", "ledger",
 			)
-			return
+			return fmt.Errorf(
+				"roll back snap-point stake savepoint (read error: %w): %w",
+				err, rbErr,
+			)
 		}
 		ls.config.Logger.Warn(
 			"snap-point stake read failed; deferring stake read to snapshot persist",
@@ -4314,6 +4321,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 			"component", "ledger",
 		)
 	}
+	return nil
 }
 
 // captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook

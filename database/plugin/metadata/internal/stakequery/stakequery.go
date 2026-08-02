@@ -279,11 +279,10 @@ func historicalDelegatorStakeCTE(
 		boundaryRewardClause = `
 		AND NOT (credit.added_slot = ? AND credit.post_snapshot = FALSE)`
 	}
-	// The expiry gate is hand-written positional-arg SQL. Its "?" sits in the
-	// WHERE clause ahead of the caller-supplied predicate's `IN ?`, so the
-	// expiryEpoch bind arg is appended right after the four slot args below and
-	// before the caller appends the pool chunk. Keeping the clause ahead of the
-	// predicate preserves the "caller appends last" contract of both callers.
+	// The historical-expiration CTE's bind args are appended here, immediately
+	// after the active-delegation CTE's args. The final expiry predicate is bound
+	// below, after the historical reward and UTxO slot predicates; callers then
+	// append the pool chunk to match the final IN placeholder.
 	var expiryCTE, expiryJoin, expiryPredicate string
 	if expiryEpoch > 0 {
 		if inactivityPeriod == 0 {
@@ -417,9 +416,8 @@ active_delegator_stake AS (
 		boundaryRewardClause)
 	// Bind order must match the "?" order in the generated SQL:
 	// ranked_future_withdrawal, future_credit (+ optional boundary slot),
-	// then the two utxo slot bounds. expiryEpoch's "?" sits in the final WHERE
-	// clause ahead of the caller-supplied predicate, preserving the
-	// "caller appends the pool chunk last" contract.
+	// then the two UTxO slot bounds, the final expiry predicate (when enabled),
+	// and finally the caller-supplied pool chunk.
 	args = append(args, slot, slot)
 	if boundarySlot > 0 {
 		args = append(args, boundarySlot)

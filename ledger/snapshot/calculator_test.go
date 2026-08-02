@@ -1007,3 +1007,29 @@ func TestDedupeStakeInputsIsIndependentOfInputOrder(t *testing.T) {
 	require.Equal(t, poolB, first[0].PoolKeyHash)
 	require.Equal(t, uint64(70), first[0].Stake)
 }
+
+func TestDedupeStakeInputsTieBreaks(t *testing.T) {
+	credential := bytes.Repeat([]byte{0x32}, 28)
+	poolA := bytes.Repeat([]byte{0x11}, 28)
+	poolB := bytes.Repeat([]byte{0x22}, 28)
+
+	t.Run("registered preference", func(t *testing.T) {
+		got := dedupeStakeInputs([]StakeInput{
+			{PoolKeyHash: poolA, StakingKey: credential, Stake: 40},
+			{PoolKeyHash: poolA, StakingKey: credential, Stake: 40, Registered: true},
+		})
+		require.Len(t, got, 1)
+		require.True(t, got[0].Registered)
+	})
+
+	t.Run("greatest stake then pool", func(t *testing.T) {
+		got := dedupeStakeInputs([]StakeInput{
+			{PoolKeyHash: poolB, StakingKey: credential, Stake: 40},
+			{PoolKeyHash: poolA, StakingKey: credential, Stake: 70},
+			{PoolKeyHash: poolB, StakingKey: credential, Stake: 70},
+		})
+		require.Len(t, got, 1)
+		require.Equal(t, poolB, got[0].PoolKeyHash)
+		require.Equal(t, uint64(70), got[0].Stake)
+	})
+}

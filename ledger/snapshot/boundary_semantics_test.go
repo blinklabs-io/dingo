@@ -145,6 +145,10 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 		Model(&models.RewardLiveStake{}).
 		Where("staking_key = ?", stakingKey).
 		Update("total_stake", types.Uint64(55_000_000)).Error)
+	require.NoError(t, snapshotGormDB(t, db).
+		Model(&models.Account{}).
+		Where("staking_key = ?", stakingKey).
+		Update("reward", types.Uint64(15_000_000)).Error)
 
 	// A different boundary: the stashed distribution must not be reused.
 	next := event.EpochTransitionEvent{
@@ -165,8 +169,8 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(40_000_000), uint64(poolSnapshot.TotalStake),
-		"a stale SNAP-point distribution must not be attached to another boundary; fallback is boundary-aware")
+	require.Equal(t, uint64(55_000_000), uint64(poolSnapshot.TotalStake),
+		"fallback must reconstruct the next boundary rather than reuse stale SNAP-point stake")
 }
 
 // TestCalculateStakeDistributionDedupesCredentialAcrossPools proves the
