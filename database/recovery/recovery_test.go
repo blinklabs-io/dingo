@@ -272,21 +272,20 @@ func TestManagerCheckpointWritesAndTruncates(t *testing.T) {
 	assert.NotEmpty(t, entries)
 }
 
-func TestManagerRecoverIgnoresTipSkewWhenFencesAgree(t *testing.T) {
+func TestManagerRecoverRepairsBlobBehindWhenFencesAgree(t *testing.T) {
 	t.Parallel()
 	mgr := newTestManager(t, t.TempDir())
-	// A blob tip below the metadata tip with both fences agreeing is real
-	// damage, but nothing recovery did caused it, and rolling the ledger back
-	// against the stores' own fences is too destructive to do unprompted.
+	// Equal commit timestamps do not prove the stores are complete. If the
+	// blob tip is behind, recovery must rewind the applied state to it.
 	source := healthySource(100, 7)
 	source.blobTip = Point{Slot: 90, Hash: []byte{90}}
 	repairer := &fakeRepairer{}
 
 	result, err := mgr.Recover(source, repairer)
 	require.NoError(t, err)
-	assert.Empty(t, repairer.rolledBackTo)
-	// The tip check still reports it, loudly.
-	assert.Equal(t, OutcomeUnrepaired, result.Outcome)
+	require.Equal(t, []Point{{Slot: 90, Hash: []byte{90}}}, repairer.rolledBackTo)
+	// The tip check still reports the original skew.
+	assert.Equal(t, OutcomeRepaired, result.Outcome)
 	tipCheck, ok := result.Report.Find(CheckTipConsistency)
 	require.True(t, ok)
 	assert.Equal(t, SeverityFail, tipCheck.Severity)
@@ -308,6 +307,11 @@ func TestManagerRecoverRefusesToTrimWithNoKnownTip(t *testing.T) {
 	assert.Equal(t, OutcomeUnrepaired, result.Outcome)
 	assert.Empty(t, repairer.trimmedAbove)
 	assert.Zero(t, repairer.fenceResets)
+}
+
+func TestNewRejectsNegativeCheckpointInterval(t *testing.T) {
+	_, err := New(Config{Dir: t.TempDir(), CheckpointInterval: -time.Second})
+	assert.Error(t, err)
 }
 
 func TestManagerCheckpointToleratesTransientTimestampSkew(t *testing.T) {

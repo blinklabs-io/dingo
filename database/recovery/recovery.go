@@ -52,6 +52,12 @@ type Repairer interface {
 	ResetCommitFence() error
 }
 
+// ChainRewinder is optionally implemented by repairers whose persistent chain
+// must be brought back with the blob store before ledger recovery runs.
+type ChainRewinder interface {
+	RewindPrimaryChainTo(point Point) error
+}
+
 // Config configures the recovery manager.
 type Config struct {
 	Logger *slog.Logger
@@ -137,7 +143,10 @@ func New(cfg Config) (*Manager, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	if cfg.CheckpointInterval <= 0 {
+	if cfg.CheckpointInterval < 0 {
+		return nil, errors.New("checkpoint interval cannot be negative")
+	}
+	if cfg.CheckpointInterval == 0 {
 		cfg.CheckpointInterval = DefaultCheckpointInterval
 	}
 	if cfg.CheckMode == "" {
@@ -175,13 +184,16 @@ func (m *Manager) Begin(intent Intent, commitTimestamp int64) (uint64, error) {
 	if m == nil {
 		return 0, nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return 0, ErrWALClosed
+	}
 	seq, err := m.wal.Begin(intent, commitTimestamp)
 	if err != nil {
 		return 0, err
 	}
-	m.mu.Lock()
 	m.open[seq] = struct{}{}
-	m.mu.Unlock()
 	return seq, nil
 }
 
@@ -190,8 +202,11 @@ func (m *Manager) Commit(seq uint64) error {
 	if m == nil {
 		return nil
 	}
-	m.resolve(seq)
-	return m.wal.Commit(seq)
+	err := m.wal.Commit(seq)
+	if err == nil {
+		m.resolve(seq)
+	}
+	return err
 }
 
 // Abort marks a sequence as rolled back before either store committed.
@@ -199,8 +214,11 @@ func (m *Manager) Abort(seq uint64) error {
 	if m == nil {
 		return nil
 	}
-	m.resolve(seq)
-	return m.wal.Abort(seq)
+	err := m.wal.Abort(seq)
+	if err == nil {
+		m.resolve(seq)
+	}
+	return err
 }
 
 func (m *Manager) resolve(seq uint64) {
@@ -485,7 +503,15 @@ func (m *Manager) repair(
 	if err != nil {
 		return fmt.Errorf("read commit timestamps: %w", err)
 	}
-	if metadataTS == blobTS {
+	metaTip, _, err := source.MetadataTip()
+	if err != nil {
+		return fmt.Errorf("read metadata tip: %w", err)
+	}
+	blobTip, err := source.BlobTip()
+	if err != nil {
+		return fmt.Errorf("read blob tip: %w", err)
+	}
+	if metadataTS == blobTS && metaTip.Equal(blobTip) {
 		// The stores hold the same fence, so no commit was half applied.
 		// Unresolved intents on their own do not change that: only the
 		// begin record is synced, so a crash routinely loses the commit
@@ -510,16 +536,7 @@ func (m *Manager) repair(
 		)
 		return nil
 	}
-	metaTip, _, err := source.MetadataTip()
-	if err != nil {
-		return fmt.Errorf("read metadata tip: %w", err)
-	}
-	blobTip, err := source.BlobTip()
-	if err != nil {
-		return fmt.Errorf("read blob tip: %w", err)
-	}
-
-	if blobTS < metadataTS {
+	if blobTip.Slot < metaTip.Slot {
 		// The blob store is behind the state the metadata store claims
 		// to have applied. Rewind onto what the blob store holds.
 		//
@@ -536,6 +553,12 @@ func (m *Manager) repair(
 			"metadata_tip_slot", metaTip.Slot,
 			"blob_tip_slot", blobTip.Slot,
 		)
+		if rewinder, ok := repairer.(ChainRewinder); ok {
+			if err := rewinder.RewindPrimaryChainTo(blobTip); err != nil {
+				result.Outcome = OutcomeUnrepaired
+				return fmt.Errorf("rewind primary chain to blob tip %d: %w", blobTip.Slot, err)
+			}
+		}
 		if err := repairer.RollbackTo(blobTip); err != nil {
 			result.Outcome = OutcomeUnrepaired
 			return fmt.Errorf(
@@ -559,6 +582,11 @@ func (m *Manager) repair(
 		result.Outcome = OutcomeRepaired
 		return nil
 	}
+	if metaTip.Slot == blobTip.Slot && !metaTip.Equal(blobTip) {
+		result.Outcome = OutcomeUnrepaired
+		result.Actions = append(result.Actions, fmt.Sprintf("detected same-slot metadata/blob fork at slot %d", metaTip.Slot))
+		return nil
+	}
 
 	// The blob store is ahead, the expected shape. Blocks above the trim
 	// boundary are the interrupted commit's residue.
@@ -574,6 +602,14 @@ func (m *Manager) repair(
 		chainTip, _, err := chainSource.ChainTip()
 		if err != nil {
 			return fmt.Errorf("read chain tip: %w", err)
+		}
+		if chainTip.Slot == blobTip.Slot && !chainTip.Equal(blobTip) {
+			result.Outcome = OutcomeUnrepaired
+			result.Actions = append(result.Actions, fmt.Sprintf(
+				"detected same-slot primary-chain/blob fork at slot %d",
+				blobTip.Slot,
+			))
+			return nil
 		}
 		if chainTip.Slot > boundary {
 			boundary = chainTip.Slot

@@ -16,6 +16,7 @@ package database
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -175,10 +176,7 @@ func (d *Database) Close() error {
 		// for commits still in flight survive a shutdown that races
 		// them.
 		if err := d.recovery.Close(); err != nil {
-			d.logger.Warn(
-				"failed to close crash recovery journal",
-				"error", err,
-			)
+			d.closeErr = errors.Join(d.closeErr, fmt.Errorf("close crash recovery journal: %w", err))
 		}
 	})
 	return d.closeErr

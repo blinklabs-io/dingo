@@ -354,6 +354,9 @@ func decodePayload(t RecordType, payload []byte) (Record, error) {
 		if err != nil {
 			return Record{}, err
 		}
+		if err := cp.Verify(); err != nil {
+			return Record{}, fmt.Errorf("invalid checkpoint: %w", err)
+		}
 		r.Checkpoint = &cp
 		r.Seq = cp.Seq
 		return r, nil

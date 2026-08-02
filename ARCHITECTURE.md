@@ -236,6 +236,7 @@ graph LR
     ledger_snapshot --> db & db_models & db_meta & db_types & ev
 
     mempool --> chain & ev & plugin
+    root --> db_recovery
 
     db --> db_blob & db_meta & db_types & db_models & db_recovery
     db_blob --> db_types

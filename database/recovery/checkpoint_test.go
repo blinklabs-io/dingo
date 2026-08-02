@@ -113,6 +113,17 @@ func TestCheckpointStoreSkipsCorruptGeneration(t *testing.T) {
 	assert.Equal(t, uint64(1), latest.Seq)
 }
 
+func TestCheckpointStoreRejectsFilenamePayloadSequenceMismatch(t *testing.T) {
+	t.Parallel()
+	store := newTestCheckpointStore(t, 3)
+	require.NoError(t, store.Write(testCheckpoint(1)))
+	oldPath := filepath.Join(store.Dir(), "checkpoint-00000000000000000001.bin")
+	newPath := filepath.Join(store.Dir(), "checkpoint-00000000000000000002.bin")
+	require.NoError(t, os.Rename(oldPath, newPath))
+	_, err := store.Latest()
+	assert.ErrorIs(t, err, ErrNoCheckpoint)
+}
+
 func TestCheckpointStoreReportsNoUsableGeneration(t *testing.T) {
 	t.Parallel()
 	store := newTestCheckpointStore(t, 3)

@@ -150,8 +150,16 @@ func (s recoveryStateSource) OrphanBlobs(
 	}
 	readTxn := blobStore.NewTransaction(false)
 	defer readTxn.Rollback() //nolint:errcheck
+	if afterSlot == ^uint64(0) {
+		return nil, nil
+	}
+	seekKey := make([]byte, 0, len(types.BlockBlobKeyPrefix)+8)
+	seekKey = append(seekKey, types.BlockBlobKeyPrefix...)
+	seekKey = binary.BigEndian.AppendUint64(seekKey, afterSlot+1)
 	it := blobStore.NewIterator(readTxn, types.BlobIteratorOptions{
 		Prefix: []byte(types.BlockBlobKeyPrefix),
+		Start:  seekKey,
+		Limit:  limit*4 + 16,
 	})
 	if it == nil {
 		return nil, errors.New("blob iterator is nil")
@@ -159,9 +167,6 @@ func (s recoveryStateSource) OrphanBlobs(
 	defer it.Close()
 	// Seek past the boundary slot. Keys are prefix + big-endian slot, so
 	// seeking to slot+1 lands on the first block above it.
-	seekKey := make([]byte, 0, len(types.BlockBlobKeyPrefix)+8)
-	seekKey = append(seekKey, types.BlockBlobKeyPrefix...)
-	seekKey = binary.BigEndian.AppendUint64(seekKey, afterSlot+1)
 	var refs []recovery.BlockRef
 	for it.Seek(seekKey); it.ValidForPrefix(
 		[]byte(types.BlockBlobKeyPrefix),
@@ -184,7 +189,7 @@ func (s recoveryStateSource) OrphanBlobs(
 		}
 		slot, hash, err := types.ParseBlockBlobKey(key)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("parse block blob key %q: %w", key, err)
 		}
 		if slot <= afterSlot {
 			continue
@@ -310,6 +315,14 @@ func (d *Database) trimBlobBatch(
 			orphan.Hash,
 		)
 		if err != nil {
+			var expired *types.HistoryExpiredError
+			if errors.As(err, &expired) && metadata.ID != 0 {
+				// Tombstoned blocks retain their metadata/index so they
+				// can be served by an archive wrapper. Recovery still
+				// removes the complete orphan, using the retained ID.
+				ids[i] = metadata.ID
+				continue
+			}
 			_ = readTxn.Rollback()
 			return 0, fmt.Errorf(
 				"read metadata for block at slot %d: %w",

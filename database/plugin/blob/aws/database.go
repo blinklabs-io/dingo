@@ -334,10 +334,6 @@ func (d *BlobStoreS3) GetBlock(
 		}
 		return nil, types.BlockMetadata{}, err
 	}
-	if types.IsBlockTombstone(cborData) {
-		return nil, types.BlockMetadata{},
-			&types.HistoryExpiredError{Slot: slot, Hash: hash}
-	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
 	if err != nil {
@@ -349,6 +345,10 @@ func (d *BlobStoreS3) GetBlock(
 	var tmpMetadata types.BlockMetadata
 	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
 		return nil, types.BlockMetadata{}, err
+	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, tmpMetadata,
+			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	return cborData, tmpMetadata, nil
 }
@@ -732,6 +732,9 @@ func (d *BlobStoreS3) listKeys(
 	} else if d.prefix != "" {
 		input.Prefix = aws.String(d.prefix)
 	}
+	if len(opts.Start) > 0 {
+		input.StartAfter = aws.String(d.fullKey(string(opts.Start)))
+	}
 	paginator := s3.NewListObjectsV2Paginator(d.client, input)
 	keys := make([]string, 0)
 	for paginator.HasMorePages() {
@@ -746,6 +749,12 @@ func (d *BlobStoreS3) listKeys(
 				return nil, fmt.Errorf("error decoding s3 key: %w", err)
 			}
 			keys = append(keys, string(externalKey))
+			if opts.Limit > 0 && len(keys) >= opts.Limit {
+				break
+			}
+		}
+		if opts.Limit > 0 && len(keys) >= opts.Limit {
+			break
 		}
 	}
 	sort.Strings(keys)

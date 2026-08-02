@@ -93,6 +93,16 @@ func TestRecordCheckpointRoundTrip(t *testing.T) {
 	assert.NoError(t, got.Checkpoint.Verify())
 }
 
+func TestDecodePayloadRejectsUnverifiedCheckpoint(t *testing.T) {
+	cp := testCheckpoint(3)
+	cp.Seal()
+	cp.Seq = 4
+	payload, err := encodeCheckpoint(cp)
+	require.NoError(t, err)
+	_, err = decodePayload(RecordTypeCheckpoint, payload)
+	assert.Error(t, err)
+}
+
 func TestReadFrameRejectsCorruptedPayload(t *testing.T) {
 	t.Parallel()
 	frame, err := appendFrame(nil, Record{

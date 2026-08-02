@@ -356,6 +356,10 @@ type BlobIterator interface {
 type BlobIteratorOptions struct {
 	Prefix  []byte
 	Reverse bool
+	// Start is an optional inclusive key boundary for remote iterators.
+	// Limit bounds the number of keys fetched from a remote listing.
+	Start []byte
+	Limit int
 }
 
 // Txn is a simple transaction handle for commit/rollback only.

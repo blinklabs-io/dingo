@@ -287,6 +287,15 @@ func TestWALRejectsUseAfterClose(t *testing.T) {
 	assert.ErrorIs(t, truncErr, ErrWALClosed)
 }
 
+func TestWALDoesNotContinueAfterAppendFailure(t *testing.T) {
+	w := newTestWAL(t, t.TempDir(), 0)
+	w.mu.Lock()
+	w.unusable = true
+	w.mu.Unlock()
+	_, err := w.Begin(Intent{Kind: IntentBlockAdd}, 1)
+	assert.ErrorIs(t, err, ErrWALUnusable)
+}
+
 func TestOpenWALRequiresDir(t *testing.T) {
 	t.Parallel()
 	_, err := OpenWAL(WALConfig{})

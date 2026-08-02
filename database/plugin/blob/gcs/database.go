@@ -467,10 +467,6 @@ func (d *BlobStoreGCS) GetBlock(
 		d.logger.Errorf("%v", wrappedErr)
 		return nil, types.BlockMetadata{}, wrappedErr
 	}
-	if types.IsBlockTombstone(cborData) {
-		return nil, types.BlockMetadata{},
-			&types.HistoryExpiredError{Slot: slot, Hash: hash}
-	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	r, err = d.object(metadataKey).NewReader(ctx)
 	if err != nil {
@@ -507,6 +503,10 @@ func (d *BlobStoreGCS) GetBlock(
 	var tmpMetadata types.BlockMetadata
 	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
 		return nil, types.BlockMetadata{}, err
+	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, tmpMetadata,
+			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	return cborData, tmpMetadata, nil
 }
@@ -940,6 +940,12 @@ func (d *BlobStoreGCS) listKeys(
 	ctx, cancel := d.opContext()
 	defer cancel()
 	iter := d.objects(ctx, opts.Prefix)
+	if len(opts.Start) > 0 {
+		iter = d.bucket.Objects(ctx, &storage.Query{
+			Prefix:      d.fullKey(string(opts.Prefix)),
+			StartOffset: d.fullKey(string(opts.Start)),
+		})
+	}
 	keys := make([]string, 0)
 	for {
 		objAttrs, err := iter.Next()
@@ -955,6 +961,9 @@ func (d *BlobStoreGCS) listKeys(
 			return nil, err
 		}
 		keys = append(keys, externalKey)
+		if opts.Limit > 0 && len(keys) >= opts.Limit {
+			break
+		}
 	}
 	sort.Strings(keys)
 	if opts.Reverse {

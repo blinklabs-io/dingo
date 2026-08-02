@@ -309,6 +309,10 @@ func (s *CheckpointStore) Latest() (Checkpoint, error) {
 			)
 			continue
 		}
+		if c.Seq != seq {
+			s.logger.Warn("skipping checkpoint whose payload sequence does not match its filename", "path", path, "filename_seq", seq, "payload_seq", c.Seq)
+			continue
+		}
 		return c, nil
 	}
 	return Checkpoint{}, ErrNoCheckpoint

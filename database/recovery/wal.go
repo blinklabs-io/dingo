@@ -46,6 +46,8 @@ const (
 // ErrWALClosed reports use of a journal that has been closed.
 var ErrWALClosed = errors.New("recovery journal is closed")
 
+var ErrWALUnusable = errors.New("recovery journal is unusable after an append failure")
+
 // WALConfig configures a journal.
 type WALConfig struct {
 	Logger *slog.Logger
@@ -82,6 +84,7 @@ type WAL struct {
 	segmentBytes    int64
 	syncOnBegin     bool
 	closed          bool
+	unusable        bool
 }
 
 // OpenWAL opens (creating if needed) a journal directory and positions the
@@ -322,6 +325,9 @@ func (w *WAL) Begin(intent Intent, commitTimestamp int64) (uint64, error) {
 	if w.closed {
 		return 0, ErrWALClosed
 	}
+	if w.unusable {
+		return 0, ErrWALUnusable
+	}
 	seq := w.nextSeq
 	record := Record{
 		Type:            RecordTypeBegin,
@@ -330,6 +336,10 @@ func (w *WAL) Begin(intent Intent, commitTimestamp int64) (uint64, error) {
 		Intent:          intent,
 	}
 	if err := w.appendLocked(record, w.syncOnBegin); err != nil {
+		// A buffered writer or file may have accepted part of a frame. Do not
+		// issue the same sequence again in this process; recovery must reopen
+		// the journal and inspect the durable tail before assigning numbers.
+		w.unusable = true
 		return 0, err
 	}
 	w.nextSeq++
@@ -352,7 +362,14 @@ func (w *WAL) resolve(seq uint64, t RecordType) error {
 	if w.closed {
 		return ErrWALClosed
 	}
-	return w.appendLocked(Record{Type: t, Seq: seq}, false)
+	if w.unusable {
+		return ErrWALUnusable
+	}
+	err := w.appendLocked(Record{Type: t, Seq: seq}, false)
+	if err != nil {
+		w.unusable = true
+	}
+	return err
 }
 
 // AppendCheckpoint records a checkpoint inline in the journal and makes it
@@ -365,12 +382,19 @@ func (w *WAL) AppendCheckpoint(c Checkpoint) error {
 	if w.closed {
 		return ErrWALClosed
 	}
+	if w.unusable {
+		return ErrWALUnusable
+	}
 	record := Record{
 		Type:       RecordTypeCheckpoint,
 		Seq:        c.Seq,
 		Checkpoint: &c,
 	}
-	return w.appendLocked(record, true)
+	err := w.appendLocked(record, true)
+	if err != nil {
+		w.unusable = true
+	}
+	return err
 }
 
 // NextSeq returns the sequence the next Begin will use.
@@ -440,9 +464,14 @@ func (w *WAL) TruncateThrough(seq uint64) (int, error) {
 			continue
 		}
 		path := w.segmentPath(first)
-		records, err := readSegment(path, w.logger)
+		records, complete, err := readSegmentStatus(path, w.logger)
 		if err != nil {
 			return removed, err
+		}
+		if !complete {
+			// A corrupt or torn segment may contain an unresolved begin
+			// before its unreadable tail. Keep it as a recovery artifact.
+			break
 		}
 		highest := uint64(0)
 		for _, r := range records {
@@ -518,12 +547,17 @@ func (w *WAL) Close() error {
 // a missing file yields no records, and a torn tail ends the read after the
 // records that did survive.
 func readSegment(path string, logger *slog.Logger) ([]Record, error) {
+	records, _, err := readSegmentStatus(path, logger)
+	return records, err
+}
+
+func readSegmentStatus(path string, logger *slog.Logger) ([]Record, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+			return nil, true, nil
 		}
-		return nil, fmt.Errorf("open journal segment %q: %w", path, err)
+		return nil, false, fmt.Errorf("open journal segment %q: %w", path, err)
 	}
 	defer f.Close() //nolint:errcheck
 	reader := bufio.NewReader(f)
@@ -531,7 +565,7 @@ func readSegment(path string, logger *slog.Logger) ([]Record, error) {
 	for {
 		record, err := readFrame(reader)
 		if errors.Is(err, io.EOF) {
-			return records, nil
+			return records, true, nil
 		}
 		if err != nil {
 			logger.Warn(
@@ -540,7 +574,7 @@ func readSegment(path string, logger *slog.Logger) ([]Record, error) {
 				"records_recovered", len(records),
 				"error", err,
 			)
-			return records, nil
+			return records, false, nil
 		}
 		records = append(records, record)
 	}

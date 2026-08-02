@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/recovery"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
@@ -2262,7 +2263,14 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				return fmt.Errorf("failed to get block nonce: %w", err)
 			}
 		}
-		// Write tip to DB
+		// Write tip to DB. This transaction is a rollback, not a normal
+		// block append; preserve that distinction for crash recovery.
+		txn.SetRecoveryIntent(recovery.Intent{
+			Kind:        recovery.IntentRollback,
+			Slot:        point.Slot,
+			Hash:        point.Hash,
+			BlockNumber: newTip.BlockNumber,
+		})
 		if err = ls.db.SetTip(newTip, txn); err != nil {
 			return fmt.Errorf("failed to set tip: %w", err)
 		}

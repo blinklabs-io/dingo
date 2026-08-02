@@ -80,6 +80,7 @@ func (s nodeRecoverySource) ChainTip() (recovery.Point, uint64, error) {
 type nodeRecoveryRepairer struct {
 	db     *database.Database
 	ledger *ledger.LedgerState
+	chain  *chain.ChainManager
 }
 
 // TrimBlobAbove removes blocks the blob store holds above slot.
@@ -90,6 +91,16 @@ func (r nodeRecoveryRepairer) TrimBlobAbove(slot uint64) (int, error) {
 // RollbackTo rewinds applied ledger state to point.
 func (r nodeRecoveryRepairer) RollbackTo(point recovery.Point) error {
 	return r.ledger.RollbackToPoint(ocommon.Point{
+		Slot: point.Slot,
+		Hash: point.Hash,
+	})
+}
+
+func (r nodeRecoveryRepairer) RewindPrimaryChainTo(point recovery.Point) error {
+	if r.chain == nil {
+		return fmt.Errorf("primary chain manager is unavailable")
+	}
+	return r.chain.RewindPrimaryChainToPoint(ocommon.Point{
 		Slot: point.Slot,
 		Hash: point.Hash,
 	})
@@ -119,6 +130,7 @@ func (n *Node) runCrashRecovery() error {
 	result, err := mgr.Recover(source, nodeRecoveryRepairer{
 		db:     n.db,
 		ledger: n.ledgerState,
+		chain:  n.chainManager,
 	})
 	if err != nil {
 		return fmt.Errorf("crash recovery failed: %w", err)
