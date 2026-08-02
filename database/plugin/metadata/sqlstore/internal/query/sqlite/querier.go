@@ -79,7 +79,7 @@ type Querier interface {
 	GetActiveDreps(ctx context.Context) ([]Drep, error)
 	GetAssetByPolicyAndName(ctx context.Context, arg GetAssetByPolicyAndNameParams) (Asset, error)
 	GetAssetMintBurnInfo(ctx context.Context, arg GetAssetMintBurnInfoParams) (GetAssetMintBurnInfoRow, error)
-	GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAssetQuantityByPolicyAndNameParams) (int64, error)
+	GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAssetQuantityByPolicyAndNameParams) ([]sql.NullString, error)
 	GetAssetsByUtxoID(ctx context.Context, utxoID sql.NullInt64) ([]Asset, error)
 	GetBackfillCheckpoint(ctx context.Context, phase string) (BackfillCheckpoint, error)
 	GetBlockNonce(ctx context.Context, arg GetBlockNonceParams) ([]byte, error)
@@ -90,7 +90,7 @@ type Querier interface {
 	GetCommitteeMembersIncludeDeleted(ctx context.Context) ([]CommitteeMember, error)
 	GetCommitteeQuorum(ctx context.Context) (sql.NullString, error)
 	GetConstitution(ctx context.Context) (Constitution, error)
-	GetControlledAmountByCredential(ctx context.Context, arg GetControlledAmountByCredentialParams) (int64, error)
+	GetControlledAmountByCredential(ctx context.Context, arg GetControlledAmountByCredentialParams) ([]sql.NullString, error)
 	GetDRepDelegators(ctx context.Context, arg GetDRepDelegatorsParams) ([]GetDRepDelegatorsRow, error)
 	GetDatum(ctx context.Context, hash []byte) (Datum, error)
 	GetDrepByCredential(ctx context.Context, arg GetDrepByCredentialParams) (Drep, error)
@@ -133,7 +133,7 @@ type Querier interface {
 	GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotParams) (RewardSnapshot, error)
 	GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error)
 	GetScript(ctx context.Context, hash []byte) (Script, error)
-	GetScriptLockedSupply(ctx context.Context) (int64, error)
+	GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error)
 	GetSyncState(ctx context.Context, syncKey string) (string, error)
 	GetTip(ctx context.Context) (GetTipRow, error)
 	GetTransactionByHash(ctx context.Context, hash []byte) (Transaction, error)
@@ -186,9 +186,9 @@ type Querier interface {
 	SetTip(ctx context.Context, arg SetTipParams) error
 	SoftDeleteAllCommitteeMembers(ctx context.Context, deletedSlot sql.NullInt64) error
 	SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteCommitteeMemberParams) error
-	SumNetworkDonationsForEpoch(ctx context.Context, epoch int64) (int64, error)
-	SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSnapshotsParams) (int64, error)
-	SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) (int64, error)
+	SumNetworkDonationsForEpoch(ctx context.Context, epoch int64) ([]int64, error)
+	SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSnapshotsParams) ([]string, error)
+	SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) ([]interface{}, error)
 	UpdateDRepActivity(ctx context.Context, arg UpdateDRepActivityParams) (int64, error)
 	UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) error
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)

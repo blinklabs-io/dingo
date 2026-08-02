@@ -54,7 +54,12 @@ This narrow adoption rule is intentional: the deployed v1alpha1 schema is
 created fresh for PostgreSQL/MySQL and only the known pre-cutover SQLite shape
 is adopted automatically. Adoption also deduplicates and recreates the
 `block_nonce(hash, slot)` uniqueness constraint and replaces legacy account and
-reward-delta indexes whose uniqueness rules predate v1alpha1.
+reward-delta indexes whose uniqueness rules predate v1alpha1. It normalizes
+legacy NULL reward-delta hashes to the empty source hash, merges duplicate
+block-nonce rows only when their nonce values agree, and preserves checkpoint
+flags. Reference inputs are stored in the v1alpha1 `utxo_reference_input`
+association table so multiple transactions can reference one output; the
+legacy single-column marker is retained only for compatibility.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,

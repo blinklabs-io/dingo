@@ -372,6 +372,9 @@ func (s *Store) withWriteTransaction(
 	txn types.Txn,
 	fn func(queryer) error,
 ) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
 	if txn != nil {
 		db, err := s.dbFromTxn(txn)
 		if err != nil {
@@ -479,6 +482,11 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 
 // SetBulkLoadPragmas enables backend-specific session tuning.
 func (s *Store) SetBulkLoadPragmas() error {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("sqlstore: store is closed")
+	}
 	s.bulkMu.Lock()
 	defer s.bulkMu.Unlock()
 	if s.bulkConn != nil {
@@ -489,8 +497,12 @@ func (s *Store) SetBulkLoadPragmas() error {
 		return err
 	}
 	if err := s.dialect.SetBulkMode(context.Background(), conn); err != nil {
-		_ = conn.Close()
-		return err
+		// A backend may apply some session settings before a later setup
+		// statement fails. Restore before releasing the connection so a
+		// pooled session cannot leak partial bulk-load state.
+		restoreErr := s.dialect.RestoreNormalMode(context.Background(), conn)
+		closeErr := conn.Close()
+		return errors.Join(err, restoreErr, closeErr)
 	}
 	s.bulkConn = conn
 	return nil
@@ -498,6 +510,8 @@ func (s *Store) SetBulkLoadPragmas() error {
 
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
 	return s.restoreNormalPragmas(context.Background())
 }
 

@@ -963,6 +963,10 @@ func rewardSnapshotParams(
 	if err != nil {
 		return rewardSnapshotQueryParams{}, err
 	}
+	calculationVersion, err := checkedInt64(uint64(snapshot.CalculationVersion))
+	if err != nil {
+		return rewardSnapshotQueryParams{}, err
+	}
 	return rewardSnapshotQueryParams{
 		Epoch:              epoch,
 		SnapshotType:       snapshot.SnapshotType,
@@ -974,7 +978,7 @@ func rewardSnapshotParams(
 		EpochNonce:         snapshot.EpochNonce,
 		ProtocolVersion:    protocolVersion,
 		Authoritative:      snapshot.Authoritative,
-		CalculationVersion: int64(snapshot.CalculationVersion),
+		CalculationVersion: calculationVersion,
 	}, nil
 }
 

@@ -28,6 +28,171 @@ type historicalStakeSource struct {
 	registered int
 }
 
+type historicalRewardKey struct {
+	tag uint8
+	key string
+}
+
+type historicalWithdrawal struct {
+	slot     int64
+	id       int64
+	previous uint64
+}
+
+// historicalRewards evaluates future reward credits in Go. Amounts are
+// persisted as decimal text and can exceed a signed SQL integer; keeping the
+// ordering logic here avoids lossy CAST/SUM arithmetic in SQLite.
+func historicalRewards(db queryer, slot uint64) (map[historicalRewardKey]uint64, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	base := make(map[historicalRewardKey]uint64)
+	rows, err := db.QueryContext(context.Background(),
+		"SELECT credential_tag, staking_key, reward FROM account")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		value, err := parseUint64("historical account reward", raw.String)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		base[historicalRewardKey{tag: tag, key: string(key)}] = value
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	withdrawals := make(map[historicalRewardKey]historicalWithdrawal)
+	rows, err = db.QueryContext(context.Background(), `
+SELECT credential_tag, staking_key, id, added_slot, previous_reward
+FROM account_reward_delta
+WHERE withdrawal = TRUE AND added_slot > ?
+	ORDER BY credential_tag, staking_key, added_slot, id`, slotValue)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var id, addedSlot int64
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &id, &addedSlot, &raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ref := historicalRewardKey{tag: tag, key: string(key)}
+		if _, exists := withdrawals[ref]; exists {
+			continue
+		}
+		previous := uint64(0)
+		if raw.Valid && raw.String != "" {
+			previous, err = parseUint64("historical previous reward", raw.String)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+		}
+		withdrawals[ref] = historicalWithdrawal{slot: addedSlot, id: id, previous: previous}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	total := make(map[historicalRewardKey]uint64)
+	beforeWithdrawal := make(map[historicalRewardKey]uint64)
+	rows, err = db.QueryContext(context.Background(), `
+SELECT credential_tag, staking_key, id, added_slot, amount
+FROM account_reward_delta
+WHERE withdrawal = FALSE AND added_slot > ?
+	ORDER BY credential_tag, staking_key, added_slot, id`, slotValue)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var id, addedSlot int64
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &id, &addedSlot, &raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		value, err := parseUint64("historical future reward credit", raw.String)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ref := historicalRewardKey{tag: tag, key: string(key)}
+		if ^uint64(0)-total[ref] < value {
+			rows.Close()
+			return nil, fmt.Errorf("historical reward credit overflow")
+		}
+		total[ref] += value
+		withdrawal, hasWithdrawal := withdrawals[ref]
+		if hasWithdrawal && (addedSlot < withdrawal.slot ||
+			(addedSlot == withdrawal.slot && id < withdrawal.id)) {
+			if ^uint64(0)-beforeWithdrawal[ref] < value {
+				rows.Close()
+				return nil, fmt.Errorf("historical reward credit overflow")
+			}
+			beforeWithdrawal[ref] += value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	ret := make(map[historicalRewardKey]uint64, len(base)+len(total))
+	for ref, reward := range base {
+		ret[ref] = reward
+	}
+	for ref, withdrawal := range withdrawals {
+		if beforeWithdrawal[ref] > withdrawal.previous {
+			return nil, fmt.Errorf("historical reward underflow")
+		}
+		ret[ref] = withdrawal.previous - beforeWithdrawal[ref]
+	}
+	for ref, credits := range total {
+		if _, hasWithdrawal := withdrawals[ref]; hasWithdrawal {
+			continue
+		}
+		reward := ret[ref]
+		if credits > reward {
+			return nil, fmt.Errorf("historical reward underflow")
+		}
+		ret[ref] = reward - credits
+	}
+	return ret, nil
+}
+
 var historicalDelegationSources = []historicalStakeSource{
 	{"stake_delegation", uint(lcommon.CertificateTypeStakeDelegation), 0},
 	{
@@ -93,6 +258,10 @@ func (s *Store) GetStakeByPoolsAtSlot(
 	if err != nil {
 		return nil, nil, err
 	}
+	rewardsByCredential, err := historicalRewards(db, slot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("calculate historical rewards: %w", err)
+	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
 	for start := 0; start < len(poolKeyHashes); start += 400 {
 		end := min(start+400, len(poolKeyHashes))
@@ -111,29 +280,64 @@ func (s *Store) GetStakeByPoolsAtSlot(
 			args = append(args, hash)
 		}
 		rows, err := db.QueryContext(context.Background(), query+`
-SELECT pool_key_hash, COUNT(*), COALESCE(SUM(total_stake), 0)
-FROM active_delegator_stake GROUP BY pool_key_hash`,
+SELECT pool_key_hash, credential_tag, staking_key, utxo_amount
+FROM active_delegator_stake`,
 			args...,
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("query historical stake: %w", err)
 		}
+		type stakeKey struct {
+			pool string
+			tag  uint8
+			key  string
+		}
+		amounts := make(map[stakeKey]uint64)
+		rewards := make(map[stakeKey]uint64)
 		for rows.Next() {
-			var hash []byte
-			var count uint64
-			var stake uint64
-			if err := rows.Scan(&hash, &count, &stake); err != nil {
+			var hash, key []byte
+			var tag uint8
+			var rawAmount sql.NullString
+			if err := rows.Scan(&hash, &tag, &key, &rawAmount); err != nil {
 				rows.Close()
 				return nil, nil, err
 			}
-			delegators[string(hash)] = count
-			stakes[string(hash)] = stake
+			ref := stakeKey{pool: string(hash), tag: tag, key: string(key)}
+			if _, ok := amounts[ref]; !ok {
+				amounts[ref] = 0
+			}
+			if rawAmount.Valid && rawAmount.String != "" {
+				value, err := parseUint64("historical UTxO amount", rawAmount.String)
+				if err != nil {
+					rows.Close()
+					return nil, nil, err
+				}
+				if ^uint64(0)-amounts[ref] < value {
+					rows.Close()
+					return nil, nil, fmt.Errorf("historical stake overflow")
+				}
+				amounts[ref] += value
+			}
+			rewards[ref] = rewardsByCredential[historicalRewardKey{tag: tag, key: string(key)}]
 		}
 		if err := rows.Close(); err != nil {
 			return nil, nil, err
 		}
 		if err := rows.Err(); err != nil {
 			return nil, nil, err
+		}
+		for ref, amount := range amounts {
+			stake := amount
+			if reward := rewards[ref]; ^uint64(0)-stake < reward {
+				return nil, nil, fmt.Errorf("historical stake overflow")
+			} else {
+				stake += reward
+			}
+			delegators[ref.pool]++
+			if ^uint64(0)-stakes[ref.pool] < stake {
+				return nil, nil, fmt.Errorf("historical stake overflow")
+			}
+			stakes[ref.pool] += stake
 		}
 	}
 	return stakes, delegators, nil
@@ -154,6 +358,10 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 	if err != nil {
 		return nil, err
 	}
+	rewardsByCredential, err := historicalRewards(db, slot)
+	if err != nil {
+		return nil, fmt.Errorf("calculate historical rewards: %w", err)
+	}
 	for start := 0; start < len(ownerKeys); start += 400 {
 		end := min(start+400, len(ownerKeys))
 		query, args, err := s.historicalStakeCTE(
@@ -172,28 +380,54 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 			args = append(args, key)
 		}
 		rows, err := db.QueryContext(context.Background(), query+`
-SELECT pool_key_hash, staking_key, total_stake
+SELECT pool_key_hash, staking_key, credential_tag, utxo_amount
 FROM active_delegator_stake`,
 			args...,
 		)
 		if err != nil {
 			return nil, err
 		}
+		type ownerKey struct{ pool, key string }
+		amounts := make(map[ownerKey]uint64)
+		rewards := make(map[ownerKey]uint64)
 		for rows.Next() {
-			var pool []byte
-			var key []byte
-			var stake uint64
-			if err := rows.Scan(&pool, &key, &stake); err != nil {
+			var pool, key []byte
+			var tag uint8
+			var rawAmount sql.NullString
+			if err := rows.Scan(&pool, &key, &tag, &rawAmount); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			ret[types.PoolCredentialStakeKey(pool, 0, key)] = stake
+			ref := ownerKey{pool: string(pool), key: string(key)}
+			if _, ok := amounts[ref]; !ok {
+				amounts[ref] = 0
+			}
+			if rawAmount.Valid && rawAmount.String != "" {
+				value, err := parseUint64("historical UTxO amount", rawAmount.String)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				if ^uint64(0)-amounts[ref] < value {
+					rows.Close()
+					return nil, fmt.Errorf("historical stake overflow")
+				}
+				amounts[ref] += value
+			}
+			rewards[ref] = rewardsByCredential[historicalRewardKey{tag: tag, key: string(key)}]
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
 		if err := rows.Err(); err != nil {
 			return nil, err
+		}
+		for ref, amount := range amounts {
+			if ^uint64(0)-amount < rewards[ref] {
+				return nil, fmt.Errorf("historical stake overflow")
+			}
+			stake := amount + rewards[ref]
+			ret[types.PoolCredentialStakeKey([]byte(ref.pool), 0, []byte(ref.key))] = stake
 		}
 	}
 	return ret, nil
@@ -226,6 +460,10 @@ func (s *Store) GetRewardStakeInputsForPools(
 	if err != nil {
 		return nil, err
 	}
+	rewardsByCredential, err := historicalRewards(db, slot)
+	if err != nil {
+		return nil, fmt.Errorf("calculate historical rewards: %w", err)
+	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
 	ret := []*models.RewardStakeInput{}
 	for start := 0; start < len(poolKeyHashes); start += 400 {
@@ -245,36 +483,65 @@ func (s *Store) GetRewardStakeInputsForPools(
 			args = append(args, hash)
 		}
 		rows, err := db.QueryContext(context.Background(), query+`
-SELECT pool_key_hash, credential_tag, staking_key, total_stake
+SELECT pool_key_hash, credential_tag, staking_key, utxo_amount
 FROM active_delegator_stake
-WHERE total_stake > 0
 ORDER BY pool_key_hash, credential_tag, staking_key`,
 			args...,
 		)
 		if err != nil {
 			return nil, err
 		}
+		type inputKey struct {
+			pool string
+			tag  uint8
+			key  string
+		}
+		amountByInput := make(map[inputKey]uint64)
+		rewardByInput := make(map[inputKey]uint64)
 		for rows.Next() {
-			var input models.RewardStakeInput
-			var stake uint64
+			var pool, key []byte
+			var tag uint8
+			var rawAmount sql.NullString
 			if err := rows.Scan(
-				&input.PoolKeyHash,
-				&input.CredentialTag,
-				&input.StakingKey,
-				&stake,
+				&pool, &tag, &key, &rawAmount,
 			); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			input.Stake = types.Uint64(stake)
-			input.Registered = true
-			ret = append(ret, &input)
+			ref := inputKey{pool: string(pool), tag: tag, key: string(key)}
+			if _, ok := amountByInput[ref]; !ok {
+				amountByInput[ref] = 0
+			}
+			if rawAmount.Valid && rawAmount.String != "" {
+				value, err := parseUint64("historical UTxO amount", rawAmount.String)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				if ^uint64(0)-amountByInput[ref] < value {
+					rows.Close()
+					return nil, fmt.Errorf("historical stake overflow")
+				}
+				amountByInput[ref] += value
+			}
+			rewardByInput[ref] = rewardsByCredential[historicalRewardKey{tag: tag, key: string(key)}]
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
 		if err := rows.Err(); err != nil {
 			return nil, err
+		}
+		for ref, amount := range amountByInput {
+			stake := amount
+			if ^uint64(0)-stake < rewardByInput[ref] {
+				return nil, fmt.Errorf("historical stake overflow")
+			}
+			stake += rewardByInput[ref]
+			if stake == 0 {
+				continue
+			}
+			ret = append(ret, &models.RewardStakeInput{PoolKeyHash: []byte(ref.pool), CredentialTag: ref.tag, StakingKey: []byte(ref.key), Stake: types.Uint64(stake), Registered: true})
 		}
 	}
 	return ret, nil
@@ -315,77 +582,21 @@ LEFT JOIN historical_expiration expiry
  OR expiry.expiration_epoch >= ? OR expiry.expiration_epoch IS NULL) AND `
 	}
 	query += `,
-ranked_future_withdrawal AS (
- SELECT credential_tag, staking_key, id, added_slot,
-        CAST(previous_reward AS INTEGER) previous_reward,
-        ROW_NUMBER() OVER (
-          PARTITION BY credential_tag, staking_key
-          ORDER BY added_slot, id
-        ) event_order
- FROM account_reward_delta
- WHERE withdrawal = TRUE AND added_slot > ?
-),
-first_future_withdrawal AS (
- SELECT credential_tag, staking_key, id, added_slot, previous_reward
- FROM ranked_future_withdrawal WHERE event_order = 1
-),
-future_credit AS (
- SELECT credit.credential_tag, credit.staking_key,
-        COALESCE(SUM(CAST(credit.amount AS INTEGER)), 0) total,
-        COALESCE(SUM(CASE
-          WHEN withdrawal.id IS NOT NULL
-           AND (credit.added_slot < withdrawal.added_slot
-             OR (credit.added_slot = withdrawal.added_slot
-               AND credit.id < withdrawal.id))
-          THEN CAST(credit.amount AS INTEGER) ELSE 0 END), 0)
-          before_first_withdrawal
- FROM account_reward_delta credit
- LEFT JOIN first_future_withdrawal withdrawal
-   ON withdrawal.credential_tag = credit.credential_tag
-  AND withdrawal.staking_key = credit.staking_key
- WHERE credit.withdrawal = FALSE AND credit.added_slot > ?
- GROUP BY credit.credential_tag, credit.staking_key
-),
-historical_reward AS (
- SELECT active_delegation.credential_tag, active_delegation.staking_key,
-        CASE WHEN withdrawal.id IS NOT NULL
-          THEN withdrawal.previous_reward
-             - COALESCE(credit.before_first_withdrawal, 0)
-          ELSE COALESCE(CAST(account.reward AS INTEGER), 0)
-             - COALESCE(credit.total, 0) END reward
- FROM active_delegation
- LEFT JOIN account
-   ON account.credential_tag = active_delegation.credential_tag
-  AND account.staking_key = active_delegation.staking_key
- LEFT JOIN first_future_withdrawal withdrawal
-   ON withdrawal.credential_tag = active_delegation.credential_tag
-  AND withdrawal.staking_key = active_delegation.staking_key
- LEFT JOIN future_credit credit
-   ON credit.credential_tag = active_delegation.credential_tag
-  AND credit.staking_key = active_delegation.staking_key
-),
 active_delegator_stake AS (
  SELECT active_delegation.pool_key_hash,
         active_delegation.credential_tag,
         active_delegation.staking_key,
-        COALESCE(SUM(CAST(utxo.amount AS INTEGER)), 0)
-          + COALESCE(MAX(historical_reward.reward), 0) total_stake
+        utxo.amount AS utxo_amount
  FROM active_delegation
  LEFT JOIN utxo
    ON utxo.credential_tag = active_delegation.credential_tag
   AND utxo.staking_key = active_delegation.staking_key
   AND utxo.added_slot <= ?
   AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
- LEFT JOIN historical_reward
-   ON historical_reward.credential_tag = active_delegation.credential_tag
-  AND historical_reward.staking_key = active_delegation.staking_key
 ` + expiryJoin + `
  WHERE ` + expiryPredicate + predicate + `
- GROUP BY active_delegation.pool_key_hash,
-          active_delegation.credential_tag,
-          active_delegation.staking_key
 )`
-	args = append(args, slot, slot, slot, slot)
+	args = append(args, slot, slot)
 	if expiryEpoch > 0 {
 		args = append(args, expiryEpoch)
 	}

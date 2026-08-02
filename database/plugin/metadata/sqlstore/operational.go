@@ -846,11 +846,15 @@ func (s *Store) GetPParams(
 	if err != nil {
 		return nil, err
 	}
+	sqlEraID, err := checkedInt64(uint64(eraID))
+	if err != nil {
+		return nil, err
+	}
 	rows, err := queries.GetPParams(
 		context.Background(),
 		sqlitequery.GetPParamsParams{
 			Epoch: sql.NullInt64{Int64: sqlEpoch, Valid: true},
-			EraID: sql.NullInt64{Int64: int64(eraID), Valid: true},
+			EraID: sql.NullInt64{Int64: sqlEraID, Valid: true},
 		},
 	)
 	if err != nil {
@@ -1087,18 +1091,12 @@ func (s *Store) SumNetworkDonationsForEpoch(
 	if err != nil {
 		return 0, fmt.Errorf("sum network donations: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return 0, err
 	}
-	total, err := queries.SumNetworkDonationsForEpoch(
-		context.Background(),
-		sqlEpoch,
-	)
+	total, err := sumUint64Rows(db, s.dialect.Rebind(`
+SELECT amount FROM network_donation WHERE epoch = ?`), sqlEpoch)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"sum network donations for epoch %d: %w",
@@ -1106,10 +1104,7 @@ func (s *Store) SumNetworkDonationsForEpoch(
 			err,
 		)
 	}
-	if total < 0 {
-		return 0, fmt.Errorf("sum network donations returned %d", total)
-	}
-	return uint64(total), nil
+	return total, nil
 }
 
 func (s *Store) DeleteNetworkDonationsAfterSlot(

@@ -62,10 +62,6 @@ type DrepListRow struct {
 	LastRegistrationSlot uint64
 }
 
-func (d *Drep) TableName() string {
-	return "drep"
-}
-
 type DeregistrationDrep struct {
 	DrepCredential []byte
 	CertificateID  uint
@@ -73,10 +69,6 @@ type DeregistrationDrep struct {
 	CredentialTag  uint8
 	AddedSlot      uint64
 	DepositAmount  types.Uint64
-}
-
-func (DeregistrationDrep) TableName() string {
-	return "deregistration_drep"
 }
 
 type RegistrationDrep struct {
@@ -90,10 +82,6 @@ type RegistrationDrep struct {
 	DepositAmount  types.Uint64
 }
 
-func (RegistrationDrep) TableName() string {
-	return "registration_drep"
-}
-
 type UpdateDrep struct {
 	AnchorURL     string
 	Credential    []byte
@@ -102,8 +90,4 @@ type UpdateDrep struct {
 	ID            uint
 	CredentialTag uint8
 	AddedSlot     uint64
-}
-
-func (UpdateDrep) TableName() string {
-	return "update_drep"
 }

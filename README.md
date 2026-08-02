@@ -443,10 +443,9 @@ Dingo supports pluggable storage backends for both blob storage (blocks, transac
 
 For local source builds, `badger`, `sqlite`, the default mempool, and all three
 built-in API providers are always available. GCS and S3 require
-`-tags dingo_extra_plugins` or an official release binary. The same tag retains
-the PostgreSQL and MySQL metadata selectors for source compatibility, but the
-SQLite-first `database/sql` cutover rejects them at startup until their
-operational query ports are complete.
+`-tags dingo_extra_plugins` or an official release binary. The same tag adds
+the operational PostgreSQL and MySQL metadata providers, backed by the shared
+`database/sql` store and v1alpha1 schema.
 
 Blob Storage Plugins:
 - `badger` - BadgerDB local key-value store (default)
@@ -455,8 +454,8 @@ Blob Storage Plugins:
 
 Metadata Storage Plugins:
 - `sqlite` - SQLite relational database (default)
-- `postgres` - Reserved PostgreSQL adapter; not currently operational
-- `mysql` - Reserved MySQL adapter; not currently operational
+- `postgres` - PostgreSQL metadata store (requires `dingo_extra_plugins`)
+- `mysql` - MySQL metadata store (requires `dingo_extra_plugins`)
 
 ### Plugin Selection
 

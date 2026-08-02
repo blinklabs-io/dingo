@@ -183,8 +183,8 @@ ON CONFLICT (slot) DO UPDATE SET
     epoch = excluded.epoch,
     amount = excluded.amount;
 
--- name: SumNetworkDonationsForEpoch :one
-SELECT CAST(COALESCE(SUM(amount), 0) AS INTEGER)
+-- name: SumNetworkDonationsForEpoch :many
+SELECT amount
 FROM network_donation
 WHERE epoch = ?;
 
@@ -344,8 +344,8 @@ FROM pool_stake_snapshot
 WHERE epoch = ? AND snapshot_type = ?
 ORDER BY id;
 
--- name: SumPoolStakeSnapshots :one
-SELECT CAST(COALESCE(SUM(CAST(total_stake AS INTEGER)), 0) AS INTEGER)
+-- name: SumPoolStakeSnapshots :many
+SELECT total_stake
 FROM pool_stake_snapshot
 WHERE epoch = ? AND snapshot_type = ?;
 
@@ -874,13 +874,13 @@ FROM utxo
 WHERE deleted_slot > 0 AND deleted_slot <= ?
 LIMIT ?;
 
--- name: GetControlledAmountByCredential :one
-SELECT CAST(COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS INTEGER)
+-- name: GetControlledAmountByCredential :many
+SELECT amount
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
 
--- name: GetScriptLockedSupply :one
-SELECT CAST(COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS INTEGER)
+-- name: GetScriptLockedSupply :many
+SELECT amount
 FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0;
 
@@ -930,8 +930,8 @@ WHERE policy_id = ? AND name = ?
 ORDER BY id
 LIMIT 1;
 
--- name: GetAssetQuantityByPolicyAndName :one
-SELECT CAST(COALESCE(SUM(CAST(asset.amount AS INTEGER)), 0) AS INTEGER)
+-- name: GetAssetQuantityByPolicyAndName :many
+SELECT asset.amount
 FROM asset
 INNER JOIN utxo ON asset.utxo_id = utxo.id
 WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0;
@@ -1120,13 +1120,8 @@ FROM "transaction"
 WHERE block_hash = ?
 ORDER BY block_index ASC;
 
--- name: SumTransactionFeesInSlotRange :one
-SELECT CAST(COALESCE(SUM(
-    CASE WHEN valid
-         THEN CAST(fee AS INTEGER)
-         ELSE CAST(collateral_fee AS INTEGER)
-    END
-), 0) AS INTEGER)
+-- name: SumTransactionFeesInSlotRange :many
+SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
 FROM "transaction"
 WHERE slot >= ? AND slot <= ?;
 

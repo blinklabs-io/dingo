@@ -125,6 +125,13 @@ func validateRegistry(registry []Migration, dialect string) error {
 				migration.Version,
 			)
 		}
+		if migration.BackfillRevision == "" {
+			return fmt.Errorf(
+				"%w: version %d has an empty backfill revision",
+				ErrInvalidRegistry,
+				migration.Version,
+			)
+		}
 		if _, exists := seenNames[migration.Name]; exists {
 			return fmt.Errorf(
 				"%w: duplicate name %q",

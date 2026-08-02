@@ -39,7 +39,7 @@ func TestNoDuplicateManifestEntries(t *testing.T) {
 	}
 }
 
-// TestManifestEntriesAreExplicit confirms each entry carries everything the
+// TestManifestEntriesHaveResolvableName confirms each entry carries everything the
 // shared SQL store needs to rebuild it.
 func TestManifestEntriesHaveResolvableName(t *testing.T) {
 	for i, idx := range Manifest {

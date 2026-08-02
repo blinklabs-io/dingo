@@ -46,6 +46,8 @@ CREATE INDEX IF NOT EXISTS `idx_utxo_payment_key` ON `utxo`(`payment_key`);
 CREATE UNIQUE INDEX IF NOT EXISTS `tx_id_output_idx` ON `utxo`(`tx_id`,`output_idx`);
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_utxo_collateral_return_for_tx_id` ON `utxo`(`collateral_return_for_tx_id`);
 CREATE INDEX IF NOT EXISTS `idx_utxo_transaction_id` ON `utxo`(`transaction_id`);
+CREATE TABLE IF NOT EXISTS `utxo_reference_input` (`utxo_id` integer NOT NULL,`transaction_hash` blob NOT NULL,PRIMARY KEY (`utxo_id`,`transaction_hash`),CONSTRAINT `fk_utxo_reference_input` FOREIGN KEY (`utxo_id`) REFERENCES `utxo`(`id`) ON DELETE CASCADE);
+CREATE INDEX IF NOT EXISTS `idx_utxo_reference_input_tx` ON `utxo_reference_input`(`transaction_hash`);
 CREATE TABLE IF NOT EXISTS `asset` (`name` blob,`name_hex` blob,`policy_id` blob,`fingerprint` blob,`id` integer PRIMARY KEY AUTOINCREMENT,`utxo_id` integer,`amount` text,CONSTRAINT `fk_utxo_assets` FOREIGN KEY (`utxo_id`) REFERENCES `utxo`(`id`) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS `idx_asset_amount` ON `asset`(`amount`);
 CREATE INDEX IF NOT EXISTS `idx_asset_utxo_id` ON `asset`(`utxo_id`);

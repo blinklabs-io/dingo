@@ -208,17 +208,13 @@ func (s *Store) GetTotalActiveStake(
 			return value, nil
 		}
 	}
-	value, err := queries.SumPoolStakeSnapshots(
-		context.Background(),
-		sqlitequery.SumPoolStakeSnapshotsParams{
-			Epoch:        sqlEpoch,
-			SnapshotType: snapshotType,
-		},
-	)
+	value, err := sumUint64Rows(db, s.dialect.Rebind(`
+SELECT total_stake FROM pool_stake_snapshot
+WHERE epoch = ? AND snapshot_type = ?`), sqlEpoch, snapshotType)
 	if err != nil {
 		return 0, fmt.Errorf("get total active stake: %w", err)
 	}
-	return uint64(value), nil
+	return value, nil
 }
 
 func (s *Store) SaveEpochSummary(
@@ -458,6 +454,10 @@ func poolStakeSnapshotParams(
 	if err != nil {
 		return poolStakeSnapshotQueryParams{}, err
 	}
+	calculationVersion, err := checkedInt64(uint64(snapshot.CalculationVersion))
+	if err != nil {
+		return poolStakeSnapshotQueryParams{}, err
+	}
 	return poolStakeSnapshotQueryParams{
 		Epoch:        epoch,
 		SnapshotType: snapshot.SnapshotType,
@@ -467,11 +467,9 @@ func poolStakeSnapshotParams(
 			uint64(snapshot.StakeDenominator),
 			10,
 		),
-		DelegatorCount: delegatorCount,
-		CapturedSlot:   capturedSlot,
-		CalculationVersion: int64(
-			snapshot.CalculationVersion,
-		),
+		DelegatorCount:     delegatorCount,
+		CapturedSlot:       capturedSlot,
+		CalculationVersion: calculationVersion,
 		RewardAccountAutoVote: int64(
 			snapshot.RewardAccountAutoVote,
 		),

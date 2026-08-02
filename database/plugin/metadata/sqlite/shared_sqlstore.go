@@ -205,6 +205,11 @@ func sqliteDiskSize(
 // Windows volume paths need an extra leading slash (file:///C:/...), while
 // URL.String handles escaping reserved characters in either form.
 func sqliteFileURI(databasePath string) string {
+	if !filepath.IsAbs(databasePath) {
+		if absolutePath, err := filepath.Abs(databasePath); err == nil {
+			databasePath = absolutePath
+		}
+	}
 	path := filepath.ToSlash(databasePath)
 	if filepath.VolumeName(databasePath) != "" && !strings.HasPrefix(path, "/") {
 		path = "/" + path

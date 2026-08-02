@@ -29,7 +29,9 @@ func TestOpenStoreAppliesPoolSettings(t *testing.T) {
 	store, err := openStore(
 		t.Context(),
 		Config{
-			DSN:                 "user:pass@tcp(localhost:3306)/dingo",
+			// A schema-less explicit DSN must not trigger CREATE DATABASE or
+			// require a live server just to verify pool configuration.
+			DSN:                 "user:pass@tcp(localhost:3306)/",
 			PoolMaxOpenConns:    17,
 			PoolMaxIdleConns:    3,
 			PoolConnMaxLifetime: 30 * time.Minute,

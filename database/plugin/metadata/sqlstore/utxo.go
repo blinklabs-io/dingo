@@ -383,31 +383,50 @@ func (s *Store) GetUtxoBalanceByAddress(
 		return ret, nil
 	}
 	addressPredicate := "(" + strings.Join(predicates, " OR ") + ")"
-	var lovelace int64
-	if err := db.QueryRowContext(
-		context.Background(),
-		s.dialect.Rebind(`
-SELECT COUNT(*),
-       CAST(COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS INTEGER)
+	rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(`
+SELECT amount
 FROM utxo
-WHERE deleted_slot = 0 AND `+addressPredicate),
-		args...,
-	).Scan(&ret.UtxoCount, &lovelace); err != nil {
+WHERE deleted_slot = 0 AND `+addressPredicate), args...)
+	if err != nil {
 		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
 	}
-	ret.Lovelace = uint64(lovelace)
+	for rows.Next() {
+		ret.UtxoCount++
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return ret, fmt.Errorf("scan utxo balance by address: %w", err)
+		}
+		if raw.Valid && raw.String != "" {
+			amount, err := parseUint64("utxo amount", raw.String)
+			if err != nil {
+				rows.Close()
+				return ret, err
+			}
+			if ^uint64(0)-ret.Lovelace < amount {
+				rows.Close()
+				return ret, errors.New("utxo balance overflow")
+			}
+			ret.Lovelace += amount
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
 	if ret.UtxoCount == 0 {
 		return ret, nil
 	}
-	rows, err := db.QueryContext(
+	rows, err = db.QueryContext(
 		context.Background(),
 		s.dialect.Rebind(`
-SELECT asset.policy_id, asset.name,
-       CAST(COALESCE(SUM(CAST(asset.amount AS INTEGER)), 0) AS INTEGER)
+SELECT asset.policy_id, asset.name, asset.amount
 FROM utxo
 JOIN asset ON asset.utxo_id = utxo.id
 WHERE utxo.deleted_slot = 0 AND `+addressPredicate+`
-GROUP BY asset.policy_id, asset.name
 ORDER BY asset.policy_id, asset.name`),
 		args...,
 	)
@@ -418,18 +437,37 @@ ORDER BY asset.policy_id, asset.name`),
 		)
 	}
 	defer rows.Close()
+	type assetKey struct{ policy, name string }
+	assetIndexes := make(map[assetKey]int)
 	for rows.Next() {
 		var asset models.AssetBalance
-		var amount int64
+		var raw sql.NullString
 		if err := rows.Scan(
 			&asset.PolicyId,
 			&asset.Name,
-			&amount,
+			&raw,
 		); err != nil {
 			return ret, err
 		}
-		asset.Amount = uint64(amount)
-		ret.Assets = append(ret.Assets, asset)
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("asset amount", raw.String)
+		if err != nil {
+			return ret, err
+		}
+		key := assetKey{policy: string(asset.PolicyId), name: string(asset.Name)}
+		idx, ok := assetIndexes[key]
+		if !ok {
+			asset.Amount = amount
+			assetIndexes[key] = len(ret.Assets)
+			ret.Assets = append(ret.Assets, asset)
+			continue
+		}
+		if ^uint64(0)-ret.Assets[idx].Amount < amount {
+			return ret, errors.New("asset balance overflow")
+		}
+		ret.Assets[idx].Amount += amount
 	}
 	return ret, rows.Err()
 }
@@ -1047,18 +1085,9 @@ func (s *Store) GetControlledAmountByCredential(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
-	value, err := q.GetControlledAmountByCredential(
-		context.Background(),
-		sqlitequery.GetControlledAmountByCredentialParams{
-			CredentialTag: int64(credentialTag),
-			StakingKey:    stakingKey,
-		},
-	)
-	return uint64(value), err
+	return sumUint64Rows(db, s.dialect.Rebind(`
+SELECT amount FROM utxo
+WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`), credentialTag, stakingKey)
 }
 
 func (s *Store) GetUtxoPaymentScriptByCredential(
@@ -1127,12 +1156,9 @@ func (s *Store) GetScriptLockedSupply(txn types.Txn) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
-	value, err := q.GetScriptLockedSupply(context.Background())
-	return uint64(value), err
+	return sumUint64Rows(db, s.dialect.Rebind(`
+SELECT amount FROM utxo
+WHERE payment_script = TRUE AND deleted_slot = 0`))
 }
 
 func (s *Store) GetUtxosByAssets(
@@ -1270,36 +1296,73 @@ func (s *Store) loadUtxoAssets(
 	if len(utxos) == 0 {
 		return nil
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
+	return s.loadUtxoAssetsPointers(db, utxos)
+}
+
+func (s *Store) loadUtxoAssetsBatch(db queryer, groups ...map[string][]models.Utxo) error {
+	pointers := make([]*models.Utxo, 0)
+	for _, group := range groups {
+		for _, items := range group {
+			for i := range items {
+				pointers = append(pointers, &items[i])
+			}
+		}
+	}
+	return s.loadUtxoAssetsPointers(db, pointers)
+}
+
+func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
+	if len(utxos) == 0 {
+		return nil
 	}
 	for _, utxo := range utxos {
-		rows, err := q.GetAssetsByUtxoID(
-			context.Background(),
-			sql.NullInt64{Int64: int64(utxo.ID), Valid: true},
-		)
+		utxo.Assets = make([]models.Asset, 0)
+	}
+	args := make([]any, len(utxos))
+	byID := make(map[uint][]*models.Utxo, len(utxos))
+	for i, utxo := range utxos {
+		args[i] = utxo.ID
+		byID[utxo.ID] = append(byID[utxo.ID], utxo)
+	}
+	for start := 0; start < len(args); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(args))
+		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(
+			"SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(end-start)+") ORDER BY id",
+		), args[start:end]...)
 		if err != nil {
 			return err
 		}
-		utxo.Assets = make([]models.Asset, 0, len(rows))
-		for _, row := range rows {
-			amount := uint64(0)
-			if row.Amount.Valid {
-				amount, err = parseUint64("asset amount", row.Amount.String)
+		for rows.Next() {
+			var name, nameHex, policyID, fingerprint []byte
+			var id int64
+			var utxoID sql.NullInt64
+			var amount sql.NullString
+			if err := rows.Scan(&name, &nameHex, &policyID, &fingerprint, &id, &utxoID, &amount); err != nil {
+				rows.Close()
+				return err
+			}
+			if !utxoID.Valid {
+				continue
+			}
+			value := uint64(0)
+			if amount.Valid {
+				value, err = parseUint64("asset amount", amount.String)
 				if err != nil {
+					rows.Close()
 					return err
 				}
 			}
-			utxo.Assets = append(utxo.Assets, models.Asset{
-				Name:        row.Name,
-				NameHex:     row.NameHex,
-				PolicyId:    row.PolicyID,
-				Fingerprint: row.Fingerprint,
-				ID:          uint(row.ID),
-				UtxoID:      uint(row.UtxoID.Int64),
-				Amount:      types.Uint64(amount),
-			})
+			asset := models.Asset{Name: name, NameHex: nameHex, PolicyId: policyID, Fingerprint: fingerprint, ID: uint(id), UtxoID: uint(utxoID.Int64), Amount: types.Uint64(value)}
+			for _, utxo := range byID[asset.UtxoID] {
+				utxo.Assets = append(utxo.Assets, asset)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
 		}
 	}
 	return nil

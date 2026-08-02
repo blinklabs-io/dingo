@@ -136,10 +136,6 @@ func (s *Store) SumTransactionFeesInSlotRange(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
 	start, err := checkedInt64(startSlot)
 	if err != nil {
 		return 0, err
@@ -148,13 +144,10 @@ func (s *Store) SumTransactionFeesInSlotRange(
 	if err != nil {
 		return 0, err
 	}
-	total, err := q.SumTransactionFeesInSlotRange(
-		context.Background(),
-		sqlitequery.SumTransactionFeesInSlotRangeParams{
-			Slot:   validInt64(start),
-			Slot_2: validInt64(end),
-		},
-	)
+	total, err := sumUint64Rows(db, s.dialect.Rebind(`
+SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
+FROM "transaction"
+WHERE slot >= ? AND slot <= ?`), validInt64(start), validInt64(end))
 	if err != nil {
 		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
 	}
@@ -783,6 +776,7 @@ func (s *Store) queryTransactions(
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	ret := []models.Transaction{}
 	for rows.Next() {
 		row, err := scanSQLiteTransaction(rows)
@@ -796,7 +790,6 @@ func (s *Store) queryTransactions(
 		ret = append(ret, *item)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		return nil, err
 	}
 	if err := rows.Close(); err != nil {

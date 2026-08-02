@@ -47,3 +47,16 @@ func TestTranslateMySQLReservedIdentifiers(t *testing.T) {
 		translateMySQLReservedIdentifiers(query),
 	)
 }
+
+func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
+	t.Parallel()
+	dialect := MySQLDialect()
+	require.Equal(t,
+		"CREATE INDEX `idx_utxo_deleted_payment_script` ON `utxo` (`deleted_slot`, `payment_script`, `amount`(255))",
+		dialect.CreateIndexSQL("idx_utxo_deleted_payment_script", "utxo", []string{"deleted_slot", "payment_script", "amount"}),
+	)
+	require.Equal(t,
+		"DROP INDEX `idx_utxo_deleted_payment_script` ON `utxo`",
+		dialect.DropIndexSQL("idx_utxo_deleted_payment_script", "utxo"),
+	)
+}

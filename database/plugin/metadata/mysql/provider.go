@@ -134,7 +134,18 @@ func openStore(
 	// lazy sql.Open behavior for those callers. Provider-generated DSNs (and
 	// explicit DSNs with Database set) use the administrator path so a missing
 	// configured database can be created before Store.Start pings it.
-	if cfg.DSN == "" || cfg.Database != "" {
+	provisionDatabase := cfg.DSN == ""
+	if cfg.DSN != "" {
+		parsed, parseErr := mysqldriver.ParseDSN(dsn)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse MySQL DSN: %w", parseErr)
+		}
+		// An explicit schema in the DSN is authoritative and should be
+		// provisioned. A DSN without a schema is intentionally left alone;
+		// callers may select it later through connection/session setup.
+		provisionDatabase = parsed.DBName != ""
+	}
+	if provisionDatabase {
 		if err := ensureDatabaseExists(ctx, dsn, cfg.Database); err != nil {
 			return nil, err
 		}

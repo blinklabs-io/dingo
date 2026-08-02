@@ -315,11 +315,14 @@ func (s *Store) GetCommitteeQuorum(
 		return nil, err
 	}
 	value, err := queries.GetCommitteeQuorum(context.Background())
-	if errors.Is(err, sql.ErrNoRows) || !value.Valid {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get committee quorum: %w", err)
+	}
+	if !value.Valid {
+		return nil, nil
 	}
 	rat, ok := new(big.Rat).SetString(value.String)
 	if !ok {

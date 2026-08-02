@@ -1305,8 +1305,8 @@ func (q *Queries) GetAssetMintBurnInfo(ctx context.Context, arg GetAssetMintBurn
 	return i, err
 }
 
-const getAssetQuantityByPolicyAndName = `-- name: GetAssetQuantityByPolicyAndName :one
-SELECT CAST(COALESCE(SUM(CAST(asset.amount AS INTEGER)), 0) AS INTEGER)
+const getAssetQuantityByPolicyAndName = `-- name: GetAssetQuantityByPolicyAndName :many
+SELECT asset.amount
 FROM asset
 INNER JOIN utxo ON asset.utxo_id = utxo.id
 WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0
@@ -1317,11 +1317,27 @@ type GetAssetQuantityByPolicyAndNameParams struct {
 	Name     []byte
 }
 
-func (q *Queries) GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAssetQuantityByPolicyAndNameParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getAssetQuantityByPolicyAndName, arg.PolicyID, arg.Name)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
+func (q *Queries) GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAssetQuantityByPolicyAndNameParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, getAssetQuantityByPolicyAndName, arg.PolicyID, arg.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []sql.NullString{}
+	for rows.Next() {
+		var amount sql.NullString
+		if err := rows.Scan(&amount); err != nil {
+			return nil, err
+		}
+		items = append(items, amount)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getAssetsByUtxoID = `-- name: GetAssetsByUtxoID :many
@@ -1575,8 +1591,8 @@ func (q *Queries) GetConstitution(ctx context.Context) (Constitution, error) {
 	return i, err
 }
 
-const getControlledAmountByCredential = `-- name: GetControlledAmountByCredential :one
-SELECT CAST(COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS INTEGER)
+const getControlledAmountByCredential = `-- name: GetControlledAmountByCredential :many
+SELECT amount
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0
 `
@@ -1586,11 +1602,27 @@ type GetControlledAmountByCredentialParams struct {
 	StakingKey    []byte
 }
 
-func (q *Queries) GetControlledAmountByCredential(ctx context.Context, arg GetControlledAmountByCredentialParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getControlledAmountByCredential, arg.CredentialTag, arg.StakingKey)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
+func (q *Queries) GetControlledAmountByCredential(ctx context.Context, arg GetControlledAmountByCredentialParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, getControlledAmountByCredential, arg.CredentialTag, arg.StakingKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []sql.NullString{}
+	for rows.Next() {
+		var amount sql.NullString
+		if err := rows.Scan(&amount); err != nil {
+			return nil, err
+		}
+		items = append(items, amount)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getDRepDelegators = `-- name: GetDRepDelegators :many
@@ -3003,17 +3035,33 @@ func (q *Queries) GetScript(ctx context.Context, hash []byte) (Script, error) {
 	return i, err
 }
 
-const getScriptLockedSupply = `-- name: GetScriptLockedSupply :one
-SELECT CAST(COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS INTEGER)
+const getScriptLockedSupply = `-- name: GetScriptLockedSupply :many
+SELECT amount
 FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0
 `
 
-func (q *Queries) GetScriptLockedSupply(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getScriptLockedSupply)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
+func (q *Queries) GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, getScriptLockedSupply)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []sql.NullString{}
+	for rows.Next() {
+		var amount sql.NullString
+		if err := rows.Scan(&amount); err != nil {
+			return nil, err
+		}
+		items = append(items, amount)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getSyncState = `-- name: GetSyncState :one
@@ -4524,21 +4572,37 @@ func (q *Queries) SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteC
 	return err
 }
 
-const sumNetworkDonationsForEpoch = `-- name: SumNetworkDonationsForEpoch :one
-SELECT CAST(COALESCE(SUM(amount), 0) AS INTEGER)
+const sumNetworkDonationsForEpoch = `-- name: SumNetworkDonationsForEpoch :many
+SELECT amount
 FROM network_donation
 WHERE epoch = ?
 `
 
-func (q *Queries) SumNetworkDonationsForEpoch(ctx context.Context, epoch int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, sumNetworkDonationsForEpoch, epoch)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
+func (q *Queries) SumNetworkDonationsForEpoch(ctx context.Context, epoch int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, sumNetworkDonationsForEpoch, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var amount int64
+		if err := rows.Scan(&amount); err != nil {
+			return nil, err
+		}
+		items = append(items, amount)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const sumPoolStakeSnapshots = `-- name: SumPoolStakeSnapshots :one
-SELECT CAST(COALESCE(SUM(CAST(total_stake AS INTEGER)), 0) AS INTEGER)
+const sumPoolStakeSnapshots = `-- name: SumPoolStakeSnapshots :many
+SELECT total_stake
 FROM pool_stake_snapshot
 WHERE epoch = ? AND snapshot_type = ?
 `
@@ -4548,20 +4612,31 @@ type SumPoolStakeSnapshotsParams struct {
 	SnapshotType string
 }
 
-func (q *Queries) SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSnapshotsParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, sumPoolStakeSnapshots, arg.Epoch, arg.SnapshotType)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
+func (q *Queries) SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSnapshotsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, sumPoolStakeSnapshots, arg.Epoch, arg.SnapshotType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var total_stake string
+		if err := rows.Scan(&total_stake); err != nil {
+			return nil, err
+		}
+		items = append(items, total_stake)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const sumTransactionFeesInSlotRange = `-- name: SumTransactionFeesInSlotRange :one
-SELECT CAST(COALESCE(SUM(
-    CASE WHEN valid
-         THEN CAST(fee AS INTEGER)
-         ELSE CAST(collateral_fee AS INTEGER)
-    END
-), 0) AS INTEGER)
+const sumTransactionFeesInSlotRange = `-- name: SumTransactionFeesInSlotRange :many
+SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
 FROM "transaction"
 WHERE slot >= ? AND slot <= ?
 `
@@ -4571,11 +4646,27 @@ type SumTransactionFeesInSlotRangeParams struct {
 	Slot_2 sql.NullInt64
 }
 
-func (q *Queries) SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, sumTransactionFeesInSlotRange, arg.Slot, arg.Slot_2)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
+func (q *Queries) SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) ([]interface{}, error) {
+	rows, err := q.db.QueryContext(ctx, sumTransactionFeesInSlotRange, arg.Slot, arg.Slot_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []interface{}{}
+	for rows.Next() {
+		var column_1 interface{}
+		if err := rows.Scan(&column_1); err != nil {
+			return nil, err
+		}
+		items = append(items, column_1)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateDRepActivity = `-- name: UpdateDRepActivity :execrows

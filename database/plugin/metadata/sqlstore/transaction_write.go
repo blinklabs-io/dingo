@@ -183,6 +183,7 @@ RETURNING id`,
 				0,
 				len(transaction.Produced()),
 			)
+			producedStakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model := models.UtxoLedgerToModel(produced, point.Slot)
 				if collateralReturn != nil &&
@@ -202,6 +203,14 @@ RETURNING id`,
 					)
 				}
 				producedModels = append(producedModels, model)
+				if len(model.StakingKey) > 0 {
+					producedStakeRefs = append(producedStakeRefs,
+						models.NewStakeCredentialRef(
+							model.CredentialTag,
+							model.StakingKey,
+						),
+					)
+				}
 			}
 			if err := s.applyTransactionAPIDetails(
 				db,
@@ -287,10 +296,11 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 					input.Index(),
 				)
 			}
-			stakeRefs, err := queryUtxoStakeRefs(db, refs, true)
+			stakeRefs, err := queryUtxoStakeRefs(db, refs, false)
 			if err != nil {
 				return err
 			}
+			stakeRefs = append(stakeRefs, producedStakeRefs...)
 			return s.refreshRewardLiveStakeRefs(db, stakeRefs, point.Slot)
 		},
 	)
@@ -343,6 +353,7 @@ RETURNING id`,
 				return err
 			}
 			collateralReturn := transaction.CollateralReturn()
+			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model := models.UtxoLedgerToModel(produced, point.Slot)
 				id := uint(transactionID)
@@ -355,8 +366,14 @@ RETURNING id`,
 				if err := s.insertUtxoModel(db, &model, true); err != nil {
 					return err
 				}
+				if len(model.StakingKey) > 0 {
+					stakeRefs = append(stakeRefs, models.NewStakeCredentialRef(
+						model.CredentialTag,
+						model.StakingKey,
+					))
+				}
 			}
-			return nil
+			return s.refreshRewardLiveStakeRefs(db, stakeRefs, point.Slot)
 		},
 	)
 }
@@ -510,6 +527,11 @@ UPDATE utxo SET referenced_by_tx_id = NULL
 WHERE referenced_by_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 					args...,
 				); err != nil {
+					return err
+				}
+				if _, err := db.ExecContext(context.Background(), `
+DELETE FROM utxo_reference_input
+WHERE transaction_hash IN (`+bindPlaceholders(len(args))+`)`, args...); err != nil {
 					return err
 				}
 			}

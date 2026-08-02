@@ -16,7 +16,16 @@
 
 package migrations
 
+import (
+	"context"
+	"database/sql"
+)
+
 // Keep the default SQLite build free of optional MySQL driver dependencies.
-func isMySQLDDLAlreadyApplied(error) bool {
+func isMySQLDDLAlreadyApplied(context.Context, *sql.Conn, string, error) bool {
+	return false
+}
+
+func isMySQLDDLAlreadyAppliedOnConn(context.Context, *sql.Conn, string, error) bool {
 	return false
 }

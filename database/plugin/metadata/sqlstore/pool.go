@@ -78,7 +78,18 @@ INSERT INTO pool_registration (
     reward_account_credential_tag, metadata_hash, pledge, cost,
     certificate_id, pool_id, added_slot, deposit_amount
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (pool_id, added_slot) DO NOTHING
+ON CONFLICT (pool_id, added_slot) DO UPDATE SET
+    margin = excluded.margin,
+    metadata_url = excluded.metadata_url,
+    vrf_key_hash = excluded.vrf_key_hash,
+    pool_key_hash = excluded.pool_key_hash,
+    reward_account = excluded.reward_account,
+    reward_account_credential_tag = excluded.reward_account_credential_tag,
+    metadata_hash = excluded.metadata_hash,
+    pledge = excluded.pledge,
+    cost = excluded.cost,
+    certificate_id = excluded.certificate_id,
+    deposit_amount = excluded.deposit_amount
 RETURNING id`,
 				nullableRat(registration.Margin),
 				registration.MetadataUrl,
@@ -903,19 +914,21 @@ GROUP BY pool`,
 			}
 			delegators[string(hash)] = uint64(count)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
 		if err := rows.Close(); err != nil {
 			return nil, nil, err
 		}
 		rows, err = db.QueryContext(context.Background(), `
-SELECT account.pool,
-       CAST(COALESCE(SUM(CAST(utxo.amount AS INTEGER)), 0) AS INTEGER)
-FROM account
+		SELECT account.pool, utxo.amount
+		FROM account
 JOIN utxo
   ON utxo.credential_tag = account.credential_tag
  AND utxo.staking_key = account.staking_key
 WHERE account.active = TRUE AND utxo.deleted_slot = 0
-  AND account.pool IN (`+bindPlaceholders(len(chunk))+`)
-GROUP BY account.pool`,
+  AND account.pool IN (`+bindPlaceholders(len(chunk))+`)`,
 			args...,
 		)
 		if err != nil {
@@ -923,12 +936,29 @@ GROUP BY account.pool`,
 		}
 		for rows.Next() {
 			var hash []byte
-			var stake int64
-			if err := rows.Scan(&hash, &stake); err != nil {
+			var raw sql.NullString
+			if err := rows.Scan(&hash, &raw); err != nil {
 				rows.Close()
 				return nil, nil, err
 			}
-			stakes[string(hash)] = uint64(stake)
+			if !raw.Valid || raw.String == "" {
+				continue
+			}
+			amount, err := parseUint64("pool stake amount", raw.String)
+			if err != nil {
+				rows.Close()
+				return nil, nil, err
+			}
+			key := string(hash)
+			if ^uint64(0)-stakes[key] < amount {
+				rows.Close()
+				return nil, nil, fmt.Errorf("pool stake overflow for %x", hash)
+			}
+			stakes[key] += amount
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, nil, err
 		}
 		if err := rows.Close(); err != nil {
 			return nil, nil, err
@@ -1165,6 +1195,10 @@ SELECT id FROM ranked WHERE rn = 1`,
 				return nil, err
 			}
 			registrationIDs = append(registrationIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("query in-epoch fresh pool registrations: %w", err)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err

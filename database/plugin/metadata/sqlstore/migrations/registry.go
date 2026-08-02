@@ -15,6 +15,7 @@
 package migrations
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
@@ -274,6 +275,27 @@ func adoptSQLiteV1(
 	if dialect != "sqlite" {
 		return fmt.Errorf("SQLite version-1 adoption called for %q", dialect)
 	}
+	// Reference inputs used to be represented by the single
+	// utxo.referenced_by_tx_id column. Preserve that legacy edge while adding
+	// the many-to-many association required when multiple transactions reuse a
+	// reference UTxO.
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS utxo_reference_input (
+    utxo_id INTEGER NOT NULL,
+    transaction_hash BLOB NOT NULL,
+    PRIMARY KEY (utxo_id, transaction_hash),
+    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_utxo_reference_input_tx
+    ON utxo_reference_input(transaction_hash);`); err != nil {
+		return fmt.Errorf("create reference-input association table: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT OR IGNORE INTO utxo_reference_input (utxo_id, transaction_hash)
+SELECT id, referenced_by_tx_id FROM utxo
+WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`); err != nil {
+		return fmt.Errorf("adopt legacy reference inputs: %w", err)
+	}
 	required := map[string][]string{
 		"transaction": {
 			"id", "hash", "block_hash", "metadata", "slot", "type",
@@ -440,15 +462,70 @@ func splitSQLList(value string) []string {
 }
 
 func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
-	// Older releases created a non-unique hash_slot index. Deduplicate before
-	// replacing it so the v1 ON CONFLICT (hash, slot) upsert is guaranteed to
-	// have a matching unique constraint.
-	if _, err := conn.ExecContext(ctx, `
-DELETE FROM block_nonce
-WHERE id NOT IN (
-    SELECT MIN(id) FROM block_nonce GROUP BY hash, slot
-)`); err != nil {
-		return fmt.Errorf("repair block_nonce duplicates: %w", err)
+	// Legacy reward deltas used NULL for credits without a source hash. Treat
+	// that value as the canonical empty hash before the slot-aware unique index
+	// is installed; SQLite otherwise permits every replay because NULLs do not
+	// collide in a unique index.
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE account_reward_delta SET tx_hash = X'' WHERE tx_hash IS NULL`); err != nil {
+		return fmt.Errorf("normalize legacy reward delta hashes: %w", err)
+	}
+	// Older releases created a non-unique hash_slot index. Merge duplicates
+	// deterministically before replacing it: checkpoint flags are ORed, and
+	// conflicting nonces are rejected rather than silently discarded.
+	type nonceRow struct {
+		id, slot    int64
+		hash, nonce []byte
+		checkpoint  bool
+	}
+	rows, err := conn.QueryContext(ctx,
+		`SELECT id, hash, slot, nonce, is_checkpoint FROM block_nonce ORDER BY hash, slot, id`)
+	if err != nil {
+		return fmt.Errorf("inspect block_nonce duplicates: %w", err)
+	}
+	defer rows.Close()
+	kept := make(map[string]nonceRow)
+	var remove []int64
+	for rows.Next() {
+		var row nonceRow
+		var checkpoint int64
+		if err := rows.Scan(&row.id, &row.hash, &row.slot, &row.nonce, &checkpoint); err != nil {
+			return fmt.Errorf("scan block_nonce duplicates: %w", err)
+		}
+		row.checkpoint = checkpoint != 0
+		key := fmt.Sprintf("%x/%d", row.hash, row.slot)
+		previous, exists := kept[key]
+		if !exists {
+			kept[key] = row
+			continue
+		}
+		if len(previous.nonce) > 0 && len(row.nonce) > 0 && !bytes.Equal(previous.nonce, row.nonce) {
+			return fmt.Errorf("conflicting block_nonce values for hash %x slot %d", row.hash, row.slot)
+		}
+		if len(previous.nonce) == 0 && len(row.nonce) > 0 {
+			previous.nonce = row.nonce
+		}
+		previous.checkpoint = previous.checkpoint || row.checkpoint
+		kept[key] = previous
+		remove = append(remove, row.id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate block_nonce duplicates: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close block_nonce cursor: %w", err)
+	}
+	for _, row := range kept {
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE block_nonce SET nonce = ?, is_checkpoint = ? WHERE id = ?`,
+			row.nonce, row.checkpoint, row.id); err != nil {
+			return fmt.Errorf("merge block_nonce row: %w", err)
+		}
+	}
+	for _, id := range remove {
+		if _, err := conn.ExecContext(ctx, `DELETE FROM block_nonce WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("remove duplicate block_nonce row: %w", err)
+		}
 	}
 	for _, index := range []string{
 		"hash_slot",

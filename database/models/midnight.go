@@ -32,10 +32,6 @@ type MidnightAssetCreate struct {
 	BlockTimestampMs uint64
 }
 
-func (MidnightAssetCreate) TableName() string {
-	return "midnight_asset_creates"
-}
-
 // BlockTxPosition implements pagination.BlockTxPositioned.
 func (r MidnightAssetCreate) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
 	return r.BlockNumber, r.TxIndex
@@ -55,10 +51,6 @@ type MidnightAssetSpend struct {
 	BlockTimestampMs uint64
 }
 
-func (MidnightAssetSpend) TableName() string {
-	return "midnight_asset_spends"
-}
-
 // BlockTxPosition implements pagination.BlockTxPositioned.
 func (r MidnightAssetSpend) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
 	return r.BlockNumber, r.TxIndex
@@ -74,10 +66,6 @@ type MidnightRegistration struct {
 	BlockHash        []byte
 	TxIndex          uint32
 	BlockTimestampMs uint64
-}
-
-func (MidnightRegistration) TableName() string {
-	return "midnight_registrations"
 }
 
 // BlockTxPosition implements pagination.BlockTxPositioned.
@@ -98,10 +86,6 @@ type MidnightDeregistration struct {
 	BlockTimestampMs uint64
 }
 
-func (MidnightDeregistration) TableName() string {
-	return "midnight_deregistrations"
-}
-
 // BlockTxPosition implements pagination.BlockTxPositioned.
 func (r MidnightDeregistration) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
 	return r.BlockNumber, r.TxIndex
@@ -117,19 +101,11 @@ type MidnightGovernanceDatum struct {
 	BlockNumber uint64
 }
 
-func (MidnightGovernanceDatum) TableName() string {
-	return "midnight_governance_datums"
-}
-
 // MidnightAriadneParams stores Ariadne parameters per epoch when changed.
 type MidnightAriadneParams struct {
 	ID    uint
 	Epoch uint64
 	Datum []byte
-}
-
-func (MidnightAriadneParams) TableName() string {
-	return "midnight_ariadne_params"
 }
 
 // MidnightAriadneRollback stores the previous Ariadne row for a block upsert,
@@ -142,20 +118,12 @@ type MidnightAriadneRollback struct {
 	PreviousDatum  []byte
 }
 
-func (MidnightAriadneRollback) TableName() string {
-	return "midnight_ariadne_rollbacks"
-}
-
 // MidnightEpochCandidates stores candidate snapshots at epoch boundaries.
 type MidnightEpochCandidates struct {
 	ID             uint
 	Epoch          uint64
 	BlockNumber    uint64
 	CandidatesCbor []byte
-}
-
-func (MidnightEpochCandidates) TableName() string {
-	return "midnight_epoch_candidates"
 }
 
 // MidnightCommitteeCandidateRegistration stores full on-chain provenance for
@@ -175,8 +143,4 @@ type MidnightCommitteeCandidateRegistration struct {
 	SlotNumber   uint64
 	TxIndex      uint32
 	TxInputsCbor []byte
-}
-
-func (MidnightCommitteeCandidateRegistration) TableName() string {
-	return "midnight_committee_candidate_registrations"
 }

@@ -112,6 +112,12 @@ func (d dialect) CreateIndexSQL(name, table string, columns []string) string {
 	quoted := make([]string, len(columns))
 	for i, column := range columns {
 		quoted[i] = d.QuoteIdentifier(column)
+		// MySQL translates SQLite BLOB/TEXT columns to VARBINARY/TEXT.
+		// Those types require an explicit key prefix, matching the prefix
+		// used by the version-1 schema translator for static indexes.
+		if d.name == "mysql" && mysqlDeferredIndexPrefix(table, column) {
+			quoted[i] += "(255)"
+		}
 	}
 	if d.name == "mysql" {
 		return "CREATE INDEX " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table) +
@@ -119,6 +125,25 @@ func (d dialect) CreateIndexSQL(name, table string, columns []string) string {
 	}
 	return "CREATE INDEX IF NOT EXISTS " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table) +
 		" (" + strings.Join(quoted, ", ") + ")"
+}
+
+func mysqlDeferredIndexPrefix(table, column string) bool {
+	return mysqlDeferredIndexPrefixColumns[table][column]
+}
+
+var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
+	"utxo": {
+		"payment_key": true, "staking_key": true,
+		"spent_at_tx_id": true, "referenced_by_tx_id": true,
+		"collateral_by_tx_id": true, "amount": true,
+	},
+	"transaction": {"block_hash": true},
+	"asset": {
+		"name_hex": true, "policy_id": true, "fingerprint": true,
+		"amount": true,
+	},
+	"certs":           {"block_hash": true},
+	"witness_scripts": {"script_hash": true},
 }
 
 // SQLiteDialect returns the capabilities used by the pure-Go SQLite driver.

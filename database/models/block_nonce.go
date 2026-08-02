@@ -21,8 +21,3 @@ type BlockNonce struct {
 	Slot         uint64
 	IsCheckpoint bool
 }
-
-// TableName overrides default table name
-func (BlockNonce) TableName() string {
-	return "block_nonce"
-}

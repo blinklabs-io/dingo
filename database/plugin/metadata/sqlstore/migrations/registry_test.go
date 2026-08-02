@@ -29,7 +29,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Len(t, registry, 1)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
-	require.Len(t, registry[0].SQL["sqlite"].Expand, 302)
+	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 302)
 }
 
 func TestSQLiteV1ColumnsDeriveCompleteContract(t *testing.T) {

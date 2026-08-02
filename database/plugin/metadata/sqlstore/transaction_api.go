@@ -142,14 +142,8 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return err
 	}
-	if transaction.IsValid() {
-		if err := storeTransactionDatumIndex(
-			db,
-			transaction,
-			slot,
-		); err != nil {
-			return err
-		}
+	if err := storeTransactionDatumIndex(db, transaction, slot); err != nil {
+		return err
 	}
 	return nil
 }
@@ -165,6 +159,24 @@ func markTransactionUtxoReferences(
 		return fmt.Errorf("unsupported UTxO reference column %q", column)
 	}
 	for _, input := range inputs {
+		if column == "referenced_by_tx_id" {
+			if _, err := db.ExecContext(
+				context.Background(),
+				`INSERT INTO utxo_reference_input (utxo_id, transaction_hash)
+SELECT u.id, ? FROM utxo AS u
+WHERE u.tx_id = ? AND u.output_idx = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM utxo_reference_input AS r
+      WHERE r.utxo_id = u.id AND r.transaction_hash = ?
+  )`,
+				hash,
+				input.Id().Bytes(),
+				input.Index(),
+				hash,
+			); err != nil {
+				return err
+			}
+		}
 		query := "UPDATE utxo SET " + column +
 			" = ? WHERE tx_id = ? AND output_idx = ?"
 		if _, err := db.ExecContext(
@@ -426,7 +438,7 @@ func storeTransactionDatumIndex(
 		}
 	}
 	witnesses := transaction.Witnesses()
-	if witnesses == nil {
+	if witnesses == nil || !transaction.IsValid() {
 		return nil
 	}
 	for _, datum := range witnesses.PlutusData() {

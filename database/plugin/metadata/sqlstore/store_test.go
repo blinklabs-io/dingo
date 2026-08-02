@@ -88,6 +88,20 @@ func TestTransactionSavepointAndCommit(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestSumUint64RowsPreservesFullRange(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	_, err := store.writeDB.Exec("CREATE TABLE amounts (amount TEXT NOT NULL)")
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec("INSERT INTO amounts (amount) VALUES (?)", "18446744073709551615")
+	require.NoError(t, err)
+	db, err := store.readDBFromTxn(nil)
+	require.NoError(t, err)
+	value, err := sumUint64Rows(db, "SELECT amount FROM amounts")
+	require.NoError(t, err)
+	require.Equal(t, ^uint64(0), value)
+}
+
 func TestTransactionRejectsUnsafeSavepoint(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
@@ -144,8 +158,9 @@ func TestStoreMigrationFailurePreventsReadiness(t *testing.T) {
 		Dialect:         SQLiteDialect(),
 		MigrationLocker: migrations.NewProcessLocker(),
 		Migrations: []migrations.Migration{{
-			Version: 1,
-			Name:    "broken",
+			Version:          1,
+			Name:             "broken",
+			BackfillRevision: "test",
 			SQL: map[string]migrations.SQL{
 				"sqlite": {
 					Expand: []string{"invalid sql"},

@@ -469,18 +469,10 @@ func (s *Store) GetAccountSumsByCredential(
 		return ret, fmt.Errorf("resolve read DB for account sums: %w", err)
 	}
 	sum := func(query string, args ...any) (uint64, error) {
-		var value int64
-		if err := db.QueryRowContext(
-			context.Background(),
-			query,
-			args...,
-		).Scan(&value); err != nil {
-			return 0, err
-		}
-		return uint64(value), nil
+		return sumUint64Rows(db, s.dialect.Rebind(query), args...)
 	}
 	ret.WithdrawalsSum, err = sum(`
-SELECT CAST(COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS INTEGER)
+SELECT amount
 FROM account_reward_delta
 WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		credentialTag,
@@ -493,7 +485,7 @@ WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		)
 	}
 	ret.ReservesSum, err = sum(`
-SELECT CAST(COALESCE(SUM(CAST(reward.amount AS INTEGER)), 0) AS INTEGER)
+SELECT reward.amount
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
 WHERE mir.pot = 0 AND reward.credential_tag = ?
@@ -508,7 +500,7 @@ WHERE mir.pot = 0 AND reward.credential_tag = ?
 		)
 	}
 	ret.TreasurySum, err = sum(`
-SELECT CAST(COALESCE(SUM(CAST(reward.amount AS INTEGER)), 0) AS INTEGER)
+SELECT reward.amount
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
 WHERE mir.pot = 1 AND reward.credential_tag = ?

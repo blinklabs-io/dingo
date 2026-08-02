@@ -610,7 +610,7 @@ func execDDL(
 ) error {
 	for index, statement := range statements {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
-			if dialect == "mysql" && isDDLAlreadyApplied(err) {
+			if dialect == "mysql" && isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
 				continue
 			}
 			return fmt.Errorf("statement %d: %w", index+1, err)
@@ -620,7 +620,7 @@ func execDDL(
 }
 
 func isDDLAlreadyApplied(err error) bool {
-	return isMySQLDDLAlreadyApplied(err)
+	return isMySQLDDLAlreadyApplied(context.Background(), nil, "", err)
 }
 
 func boundedCursor(cursor string) string {

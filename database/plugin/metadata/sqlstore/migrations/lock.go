@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -97,7 +98,7 @@ func (l *advisoryLocker) Acquire(
 				return nil, fmt.Errorf(
 					"acquire PostgreSQL migration lock timed out after %s: %w",
 					l.timeout,
-					acquireCtx.Err(),
+					context.DeadlineExceeded,
 				)
 			}
 			return nil, fmt.Errorf("acquire PostgreSQL migration lock: %w", err)
@@ -113,7 +114,10 @@ func (l *advisoryLocker) Acquire(
 			return err
 		}, nil
 	case "mysql":
-		timeoutSeconds := max(int64(l.timeout/time.Second), 0)
+		timeoutSeconds := int64(0)
+		if l.timeout > 0 {
+			timeoutSeconds = int64(math.Ceil(l.timeout.Seconds()))
+		}
 		var acquired sql.NullInt64
 		if err := conn.QueryRowContext(
 			ctx,
@@ -123,8 +127,14 @@ func (l *advisoryLocker) Acquire(
 		).Scan(&acquired); err != nil {
 			return nil, fmt.Errorf("acquire MySQL migration lock: %w", err)
 		}
-		if !acquired.Valid || acquired.Int64 != 1 {
+		if !acquired.Valid {
+			return nil, errors.New("MySQL metadata migration lock returned NULL")
+		}
+		if acquired.Int64 == 0 {
 			return nil, errors.New("MySQL metadata migration lock timed out")
+		}
+		if acquired.Int64 != 1 {
+			return nil, fmt.Errorf("MySQL metadata migration lock returned %d", acquired.Int64)
 		}
 		// The release callback deliberately outlives the acquisition context:
 		// advisory locks still need releasing after startup cancellation.
