@@ -66,7 +66,7 @@ type Store struct {
 	maintenanceEvery  time.Duration
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
-	maintenanceMu     sync.RWMutex
+	maintenanceState  atomic.Uint32
 	ready             atomic.Bool
 	closed            atomic.Bool
 	startMu           sync.Mutex
@@ -260,6 +260,7 @@ func (s *Store) CloseContext(ctx context.Context) error {
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
 	s.closeOnce.Do(func() {
+		s.closeMaintenanceAdmission()
 		s.closed.Store(true)
 		s.ready.Store(false)
 		if s.bulkConn != nil {
@@ -270,11 +271,6 @@ func (s *Store) CloseContext(ctx context.Context) error {
 		}
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
-			// Stop admitting callbacks and wait for any callback that already
-			// holds the read side of the gate. Cancellation is issued first so
-			// context-aware maintenance can finish while Close waits.
-			s.maintenanceMu.Lock()
-			s.maintenanceMu.Unlock()
 			select {
 			case <-s.maintenanceDone:
 			case <-ctx.Done():
@@ -313,18 +309,20 @@ func (s *Store) startMaintenance() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// Serialize callback admission with shutdown. Close marks the
-				// store closed before cancelling this context, so a tick that
-				// races with shutdown is discarded under the same mutex instead
-				// of starting maintenance against closing pools.
-				s.maintenanceMu.RLock()
+				// Admission is an atomic state transition. Close moves the
+				// state to closed before cancelling the callback context, so a
+				// racing tick cannot start maintenance against closing pools.
+				if !s.maintenanceState.CompareAndSwap(0, 1) {
+					return
+				}
 				if ctx.Err() != nil || s.closed.Load() {
-					s.maintenanceMu.RUnlock()
+					s.maintenanceState.CompareAndSwap(1, 0)
 					return
 				}
 				started := time.Now()
-				if err := s.maintenance(ctx); err != nil {
-					s.maintenanceMu.RUnlock()
+				err := s.maintenance(ctx)
+				s.maintenanceState.CompareAndSwap(1, 0)
+				if err != nil {
 					if ctx.Err() == nil {
 						s.logger.Error(
 							"metadata database maintenance failed",
@@ -337,7 +335,6 @@ func (s *Store) startMaintenance() {
 					}
 					continue
 				}
-				s.maintenanceMu.RUnlock()
 				s.logger.Debug(
 					"metadata database maintenance complete",
 					"dialect", s.dialect.Name(),
@@ -346,6 +343,15 @@ func (s *Store) startMaintenance() {
 			}
 		}
 	}()
+}
+
+func (s *Store) closeMaintenanceAdmission() {
+	for {
+		state := s.maintenanceState.Load()
+		if state == 2 || s.maintenanceState.CompareAndSwap(state, 2) {
+			return
+		}
+	}
 }
 
 func (s *Store) dbFromTxn(txn types.Txn) (queryer, error) {
