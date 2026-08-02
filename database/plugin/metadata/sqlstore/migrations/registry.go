@@ -91,9 +91,6 @@ func adoptExistingV1(ctx context.Context, conn *sql.Conn, dialect string) error 
 	if dialect != "postgres" && dialect != "mysql" {
 		return fmt.Errorf("%w: unsupported adoption dialect %q", ErrLegacySchema, dialect)
 	}
-	if err := ensureExistingReferenceInputs(ctx, conn, dialect); err != nil {
-		return err
-	}
 	expected, err := sqliteV1Columns()
 	if err != nil {
 		return err
@@ -117,6 +114,12 @@ func adoptExistingV1(ctx context.Context, conn *sql.Conn, dialect string) error 
 				)
 			}
 		}
+	}
+	// Copy legacy reference-input edges only after validating the complete
+	// contract. An incomplete utxo table must report ErrLegacySchema rather
+	// than failing with a misleading missing-column error from the copy query.
+	if err := ensureExistingReferenceInputs(ctx, conn, dialect); err != nil {
+		return err
 	}
 	return nil
 }
