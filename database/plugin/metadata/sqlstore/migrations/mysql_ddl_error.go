@@ -40,7 +40,9 @@ func isMySQLDDLAlreadyAppliedOnConn(ctx context.Context, conn *sql.Conn, stateme
 		return false
 	}
 	if conn == nil {
-		return true
+		// Without a connection the existing object cannot be inspected safely;
+		// never turn an unrelated duplicate-definition error into a no-op.
+		return false
 	}
 	match := mysqlDDLObjectPattern.FindStringSubmatch(statement)
 	if len(match) != 3 {

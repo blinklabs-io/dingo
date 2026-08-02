@@ -31,6 +31,11 @@ func isMySQLDDLAlreadyApplied(context.Context, *sql.Conn, string, error) bool {
 var mysqlDuplicateDDLPattern = regexp.MustCompile(
 	"(?is)^CREATE\\s+(?:UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s+ON\\s+[`\\\"]?([a-zA-Z0-9_]+)",
 )
+var mysqlIndexDefinitionPatternDefault = regexp.MustCompile(
+	"(?is)^CREATE\\s+(UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s+ON\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s*\\((.*)\\)$",
+)
+var mysqlIndexSortPatternDefault = regexp.MustCompile(`(?i)\s+(?:ASC|DESC)\b`)
+var mysqlIndexPrefixPatternDefault = regexp.MustCompile(`\(\d+\)?`)
 
 // isMySQLDDLAlreadyAppliedOnConn is deliberately driver-independent. The
 // default build cannot import go-sql-driver/mysql, but migration adoption still
@@ -51,14 +56,53 @@ func isMySQLDDLAlreadyAppliedOnConn(
 		!strings.Contains(message, "error 1826") {
 		return false
 	}
-	match := mysqlDuplicateDDLPattern.FindStringSubmatch(strings.TrimSpace(statement))
-	if len(match) != 3 {
+	definition := mysqlIndexDefinitionPatternDefault.FindStringSubmatch(strings.TrimSpace(statement))
+	if len(definition) != 5 {
+		match := mysqlDuplicateDDLPattern.FindStringSubmatch(strings.TrimSpace(statement))
+		if len(match) != 3 {
+			return false
+		}
+		return mysqlIndexExistsDefault(ctx, conn, match[2], match[1])
+	}
+	var actual sql.NullString
+	if err := conn.QueryRowContext(ctx, `
+SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',')
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`,
+		definition[3], definition[2]).Scan(&actual); err != nil || !actual.Valid {
 		return false
 	}
+	requested := normalizeMySQLIndexColumnsDefault(definition[4])
+	if requested != normalizeMySQLIndexColumnsDefault(actual.String) {
+		return false
+	}
+	var nonUnique int
+	if err := conn.QueryRowContext(ctx, `
+SELECT non_unique
+FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?
+LIMIT 1`, definition[3], definition[2]).Scan(&nonUnique); err != nil {
+		return false
+	}
+	return (definition[1] != "") == (nonUnique == 0)
+}
+
+func mysqlIndexExistsDefault(
+	ctx context.Context,
+	conn *sql.Conn,
+	table, name string,
+) bool {
 	var exists int
 	return conn.QueryRowContext(ctx, `
 SELECT 1
 FROM information_schema.statistics
 WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?
-LIMIT 1`, match[2], match[1]).Scan(&exists) == nil && exists == 1
+LIMIT 1`, table, name).Scan(&exists) == nil && exists == 1
+}
+
+func normalizeMySQLIndexColumnsDefault(value string) string {
+	value = strings.ReplaceAll(value, "`", "")
+	value = mysqlIndexPrefixPatternDefault.ReplaceAllString(value, "")
+	value = mysqlIndexSortPatternDefault.ReplaceAllString(value, "")
+	return strings.ReplaceAll(value, " ", "")
 }

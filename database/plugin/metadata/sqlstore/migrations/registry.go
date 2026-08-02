@@ -96,6 +96,12 @@ func adoptExistingV1(ctx context.Context, conn *sql.Conn, dialect string) error 
 		return err
 	}
 	for table, columns := range expected {
+		// The association table is new at the database/sql boundary and is
+		// created from the legacy utxo.referenced_by_tx_id column below. The
+		// rest of the released contract must exist before we mutate anything.
+		if table == "utxo_reference_input" {
+			continue
+		}
 		found, err := existingDialectTableColumns(ctx, conn, dialect, table)
 		if err != nil {
 			return err
@@ -137,6 +143,17 @@ func ensureExistingReferenceInputs(ctx context.Context, conn *sql.Conn, dialect 
 		// column instead of issuing a copy query that cannot run.
 		return nil
 	}
+	associationColumns, err := existingDialectTableColumns(
+		ctx, conn, dialect, "utxo_reference_input",
+	)
+	if err != nil {
+		return err
+	}
+	if len(associationColumns) > 0 {
+		if err := validateReferenceInputColumns(associationColumns, dialect); err != nil {
+			return err
+		}
+	}
 	statements, err := loadSQL("v1/sqlite/expand.sql")
 	if err != nil {
 		return err
@@ -167,6 +184,27 @@ WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`
 	}
 	if _, err := conn.ExecContext(ctx, insert); err != nil {
 		return fmt.Errorf("adopt legacy reference inputs: %w", err)
+	}
+	associationColumns, err = existingDialectTableColumns(
+		ctx, conn, dialect, "utxo_reference_input",
+	)
+	if err != nil {
+		return err
+	}
+	return validateReferenceInputColumns(associationColumns, dialect)
+}
+
+func validateReferenceInputColumns(
+	columns map[string]struct{},
+	dialect string,
+) error {
+	for _, column := range []string{"utxo_id", "transaction_hash"} {
+		if _, ok := columns[column]; !ok {
+			return fmt.Errorf(
+				"%w: table %q is missing column %q in %s database",
+				ErrLegacySchema, "utxo_reference_input", column, dialect,
+			)
+		}
 	}
 	return nil
 }
@@ -445,6 +483,12 @@ func adoptSQLiteV1(
 		}
 	}
 	for table, columns := range required {
+		// This association table was introduced by the database/sql store and
+		// is created from the legacy utxo column immediately after the legacy
+		// contract is validated.
+		if table == "utxo_reference_input" {
+			continue
+		}
 		found, err := sqliteTableColumns(ctx, conn, table)
 		if err != nil {
 			return err
@@ -487,6 +531,18 @@ CREATE TABLE IF NOT EXISTS utxo_reference_input (
 CREATE INDEX IF NOT EXISTS idx_utxo_reference_input_tx
     ON utxo_reference_input(transaction_hash);`); err != nil {
 		return fmt.Errorf("create reference-input association table: %w", err)
+	}
+	associationColumns, err := sqliteTableColumns(ctx, conn, "utxo_reference_input")
+	if err != nil {
+		return err
+	}
+	for column := range expected["utxo_reference_input"] {
+		if _, ok := associationColumns[column]; !ok {
+			return fmt.Errorf(
+				"%w: table %q is missing column %q",
+				ErrLegacySchema, "utxo_reference_input", column,
+			)
+		}
 	}
 	if _, err := conn.ExecContext(ctx, `
 INSERT OR IGNORE INTO utxo_reference_input (utxo_id, transaction_hash)

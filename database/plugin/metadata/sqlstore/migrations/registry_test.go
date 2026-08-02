@@ -264,3 +264,25 @@ func TestAdoptSQLiteV1RejectsUnknownSchemaBeforeReferenceCopy(t *testing.T) {
 	).Scan(&referenceTableCount))
 	require.Zero(t, referenceTableCount)
 }
+
+func TestAdoptSQLiteV1CreatesReferenceAssociationForLegacySchema(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	for _, statement := range registry[0].SQL["sqlite"].Expand {
+		_, err = db.Exec(statement)
+		require.NoError(t, err)
+	}
+	_, err = db.Exec("DROP TABLE utxo_reference_input")
+	require.NoError(t, err)
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+	require.NoError(t, adoptSQLiteV1(context.Background(), conn, "sqlite"))
+	var tableCount int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'utxo_reference_input'",
+	).Scan(&tableCount))
+	require.Equal(t, 1, tableCount)
+}

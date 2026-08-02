@@ -112,6 +112,10 @@ func testSQLStoreAdoptionIntegration(t *testing.T, driver, dsn, dialectName stri
 		_, err = db.Exec(statement)
 		require.NoError(t, err)
 	}
+	// The association table was introduced by the database/sql store. Verify
+	// adoption recreates it when opening a legacy schema that predates it.
+	_, err = db.Exec("DROP TABLE utxo_reference_input")
+	require.NoError(t, err)
 	var dialect Dialect
 	var locker migrations.Locker
 	if dialectName == "postgres" {
@@ -135,6 +139,11 @@ func testSQLStoreAdoptionIntegration(t *testing.T, driver, dsn, dialectName stri
 	var version int
 	require.NoError(t, db.QueryRow("SELECT version FROM schema_migrations WHERE version = 1").Scan(&version))
 	require.Equal(t, 1, version)
+	var associationTable string
+	require.NoError(t, db.QueryRow(
+		"SELECT table_name FROM information_schema.tables WHERE table_name = 'utxo_reference_input' LIMIT 1",
+	).Scan(&associationTable))
+	require.Equal(t, "utxo_reference_input", associationTable)
 }
 
 func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {

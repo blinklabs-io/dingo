@@ -26,8 +26,8 @@ import (
 
 func TestIsDDLAlreadyAppliedOnlyAcceptsDuplicateDefinitions(t *testing.T) {
 	t.Parallel()
-	require.True(t, isMySQLDDLAlreadyAppliedOnConn(context.Background(), nil, "", &mysqldriver.MySQLError{Number: 1061}))
-	require.True(t, isMySQLDDLAlreadyAppliedOnConn(context.Background(), nil, "", &mysqldriver.MySQLError{Number: 1826}))
+	require.False(t, isMySQLDDLAlreadyAppliedOnConn(context.Background(), nil, "", &mysqldriver.MySQLError{Number: 1061}))
+	require.False(t, isMySQLDDLAlreadyAppliedOnConn(context.Background(), nil, "", &mysqldriver.MySQLError{Number: 1826}))
 	require.False(t, isMySQLDDLAlreadyAppliedOnConn(context.Background(), nil, "", &mysqldriver.MySQLError{
 		Number:  1005,
 		Message: "already exists but is incompatible",
