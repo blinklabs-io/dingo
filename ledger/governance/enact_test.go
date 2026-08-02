@@ -386,6 +386,35 @@ func TestApplyTreasuryWithdrawal_DistinguishesSameTxActionIndex(
 		proposalRewardSourceHash(first),
 		proposalRewardSourceHash(second),
 	)
+	// Pin the caller contract: each journaled row must carry the per-proposal
+	// source hash as its replay discriminator, so the same tx hash at two
+	// action indexes cannot collapse into one row. Rows are matched by their
+	// stored discriminator rather than by query order.
+	bySourceHash := make(map[string]models.AccountRewardDelta, len(deltas))
+	for _, delta := range deltas {
+		bySourceHash[string(delta.TxHash)] = delta
+	}
+	require.Len(t, bySourceHash, 2, "journaled TxHash values must be distinct")
+	for _, tc := range []struct {
+		name     string
+		proposal *models.GovernanceProposal
+		amount   uint64
+	}{
+		{name: "first", proposal: first, amount: 7},
+		{name: "second", proposal: second, amount: 11},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantHash := proposalRewardSourceHash(tc.proposal)
+			delta, ok := bySourceHash[string(wantHash)]
+			require.True(
+				t,
+				ok,
+				"no reward delta journaled with proposalRewardSourceHash",
+			)
+			assert.Equal(t, wantHash, delta.TxHash)
+			assert.Equal(t, tc.amount, uint64(delta.Amount))
+		})
+	}
 }
 
 func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(

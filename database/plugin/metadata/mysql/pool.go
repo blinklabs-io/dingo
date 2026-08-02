@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/poolcerthistory"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/poolorder"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/stakequery"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1067,6 +1068,38 @@ func (d *MetadataStoreMysql) GetActivePoolKeyHashesAtSlot(
 	}
 
 	return poolKeyHashes, nil
+}
+
+// GetActivePoolKeyHashesOrdered retrieves the key hashes of all currently
+// active pools, ordered oldest-first by each pool's first on-chain
+// registration certificate. See poolorder.GetActivePoolKeyHashesOrdered for
+// the full ordering and active-pool semantics; this delegates to it using
+// the current tip's slot, mirroring GetActivePoolKeyHashes's delegation to
+// GetActivePoolKeyHashesAtSlot.
+func (d *MetadataStoreMysql) GetActivePoolKeyHashesOrdered(
+	txn types.Txn,
+) ([][]byte, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesOrdered: resolve db: %w",
+			err,
+		)
+	}
+
+	// Get the current tip slot
+	var tmpTip models.Tip
+	if res := db.Where("id = ?", tipEntryId).First(&tmpTip); res.Error != nil {
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			return [][]byte{}, nil
+		}
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesOrdered: get tip: %w",
+			res.Error,
+		)
+	}
+
+	return poolorder.GetActivePoolKeyHashesOrdered(db, tmpTip.Slot)
 }
 
 // GetStakeByPool returns the total delegated stake and delegator count for a pool.

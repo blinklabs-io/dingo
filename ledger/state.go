@@ -2098,7 +2098,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.RUnlock()
 	if currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
-		return nil
+		return ls.enforceDurableTipFloor()
 	}
 	if point.Slot > currentTip.Point.Slot {
 		ls.config.Logger.Debug(
@@ -2391,6 +2391,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		"component",
 		"ledger",
 	)
+	if err := ls.enforceDurableTipFloor(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -5719,14 +5722,73 @@ func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, err
 	if ls.db == nil {
 		return false, nil
 	}
-	_, err := database.BlockByPoint(ls.db, point)
-	if err == nil {
-		return true, nil
+	block, err := database.BlockByPoint(ls.db, point)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
-	if errors.Is(err, models.ErrBlockNotFound) {
-		return false, nil
+	// Blob presence by point is not authoritative: abandoned-fork blocks remain
+	// in the append-only blob store. The current primary chain is identified by
+	// its block-index entry, so compare the indexed block at this ID with the
+	// requested point.
+	indexedBlock, err := ls.db.BlockByIndex(block.ID, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
-	return false, err
+	return bytes.Equal(indexedBlock.Hash, point.Hash), nil
+}
+
+// durableAppliedFloor returns the point of the highest block whose ledger
+// effects are durably applied, identified by the highest-slot block_nonce row.
+// The nonce table is written in the same metadata transaction as block effects
+// and the ledger tip, so this is the applied high-water mark used by recovery.
+func (ls *LedgerState) durableAppliedFloor() (ocommon.Point, bool, error) {
+	if ls.db == nil {
+		return ocommon.Point{}, false, nil
+	}
+	row, ok, err := ls.db.GetLatestBlockNonce(nil)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if !ok || row.Slot == 0 || len(row.Hash) == 0 {
+		return ocommon.Point{}, false, nil
+	}
+	return ocommon.NewPoint(row.Slot, row.Hash), true, nil
+}
+
+// enforceDurableTipFloor repairs currentTip when it leads the durably applied
+// state. Equal slots still require a hash comparison: a same-slot competing
+// block can be an unapplied fork even though its slot is within the floor.
+func (ls *LedgerState) enforceDurableTipFloor() error {
+	floor, ok, err := ls.durableAppliedFloor()
+	if err != nil {
+		return fmt.Errorf("determine durable applied floor: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if currentTip.Point.Slot < floor.Slot ||
+		(currentTip.Point.Slot == floor.Slot &&
+			bytes.Equal(currentTip.Point.Hash, floor.Hash)) {
+		return nil
+	}
+	ls.config.Logger.Warn(
+		"ledger tip leads durable applied state, repairing tip down to applied floor",
+		"component", "ledger",
+		"ledger_tip_slot", currentTip.Point.Slot,
+		"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+		"applied_floor_slot", floor.Slot,
+		"applied_floor_hash", hex.EncodeToString(floor.Hash),
+	)
+	return ls.rollback(floor)
 }
 
 func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
@@ -6596,6 +6658,21 @@ func (ls *LedgerState) ActiveSlotCoeff() float64 {
 	return float64(num) / float64(denom)
 }
 
+// ActiveSlotCoeffRat returns the active slot coefficient (f) as an exact
+// *big.Rat taken straight from the Shelley genesis, with no float64 roundtrip.
+// Returns nil when the genesis is unavailable.
+//
+// Prefer this over ActiveSlotCoeff for anything that feeds a leader check.
+// ActiveSlotCoeff divides the genesis numerator and denominator as float64, and
+// the nearest double to a value like 1/20 is strictly larger than 1/20, so a
+// threshold derived from it is strictly larger than the reference node's and
+// admits a strict superset of eligible slots. Both the header-verification path
+// and the leader-schedule precompute must use this exact value so they cannot
+// disagree with each other or with the reference.
+func (ls *LedgerState) ActiveSlotCoeffRat() *big.Rat {
+	return ls.activeSlotCoeffRat()
+}
+
 // activeSlotCoeffRat returns the active slot coefficient as a *big.Rat,
 // preserving the full precision from the Shelley genesis without a
 // float64 roundtrip. Returns nil when the genesis is unavailable.
@@ -6607,7 +6684,9 @@ func (ls *LedgerState) activeSlotCoeffRat() *big.Rat {
 	if shelleyGenesis == nil || shelleyGenesis.ActiveSlotsCoeff.Rat == nil {
 		return nil
 	}
-	return shelleyGenesis.ActiveSlotsCoeff.Rat
+	// big.Rat is mutable and this value is shared genesis state, so hand out a
+	// copy rather than the genesis pointer itself.
+	return new(big.Rat).Set(shelleyGenesis.ActiveSlotsCoeff.Rat)
 }
 
 // Database returns the underlying database for transaction operations.

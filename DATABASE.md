@@ -32,6 +32,8 @@ Dingo stores chain state in two sibling stores:
 
 The SQL schema is generated from GORM models in `database/models/` plus the plugin-local singleton tables `commit_timestamp` and `node_settings`. There are no checked-in SQL migrations; startup runs `AutoMigrate` for the active metadata plugin. The SQLite plugin migrates the full model set in one pass after its compatibility migrations so GORM-declared relationships and cascade constraints are present on fresh SQLite databases. On a database created before auto-migrate was enabled, adding a missing `OnDelete:CASCADE` foreign key rebuilds the child table with the constraint enforced; because those older databases never enforced the cascade, orphaned child rows may have accumulated (for example `asset` rows left behind when their `utxo` was deleted) and would fail the rebuild with `FOREIGN KEY constraint failed (787)`. To avoid this, every plugin purges orphaned rows whose cascade-FK parent no longer exists before running `AutoMigrate` (`models.PurgeOrphanedCascadeRows` in `database/models/purge_orphans.go`); this is a no-op once the foreign keys exist, since the constraint then prevents orphans.
 
+An in-memory SQLite store (empty `dataDir`, used by tests) takes a shortcut through that chain. Such a database always starts empty, the model set is fixed at compile time, and every compatibility migration returns early when its table is absent, so the schema the chain produces is the same for every in-memory store in a process. The first one runs the full chain and records the DDL it ended up with; later ones replay that DDL instead (`database/plugin/metadata/sqlite/schema_template.go`). The recorded schema is per-process and is never used for a file-backed database, which may hold an older schema or data a compatibility migration needs to repair. `TestInMemorySchemaTemplateMatchesFullMigration` pins the replayed schema against the full chain, so a model or migration that makes the chain's output depend on anything else fails there.
+
 The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls `DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros' strict Conway decoder first and only falls back to reconstructing a Leios-extended block when strict decode fails. This is detection-based, so the Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field Leios-extended header body) decode from stored CBOR while real Conway networks (mainnet/preprod/preview) are unaffected. The reconstruct preserves the original wire bytes, so `Block.Cbor()` returns the verbatim block and any `DOFF` byte offsets recorded against the stored block CBOR stay valid.
 
 ## API Surface
@@ -133,6 +135,7 @@ flowchart LR
 
 ## SQL Conventions
 
+- Minimum backend versions: MySQL 8.0, PostgreSQL 12, SQLite 3.25. Several queries use window functions (`ROW_NUMBER() OVER (...)`) and common table expressions (`WITH`), which are unavailable below those versions and fail at query time rather than at startup or migration. Examples across the backends include `GetActivePoolKeyHashesOrdered` (`internal/poolorder`), the live-stake ranking in `internal/rewardstate`, and per-backend queries in `account.go`, `drep.go`, `governance.go`, `pool.go`, and `poolreap.go`. CI exercises PostgreSQL 16 and MySQL 8.4, so those are the versions actually covered by tests.
 - Table and column names are snake_case GORM names unless a model has an explicit `gorm:"column:..."` tag.
 - Byte columns store raw bytes, not hex strings. In Postgres use `encode(col, 'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
 - `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
@@ -258,7 +261,7 @@ erDiagram
 | `node_settings` | `id`, `storage_mode`, `network` | PK `id`; singleton row `id = 1` | Immutable startup settings. Dingo rejects storage-mode or network changes after initialization. |
 | `tip` | `id`, `hash`, `slot`, `block_number` | PK `id` | Current metadata tip. Block CBOR is in the blob store, not SQL. |
 | `epoch` | `id`, `epoch_id`, `start_slot`, `era_id`, `slot_length`, `length_in_slots`, `nonce`, `evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce` | PK `id`; unique `epoch_id` | Epoch nonce and era boundary state. `last_epoch_block_nonce` is the Praos lab carried at the boundary: the previous epoch's last block `PrevHash`, or the previously carried lab when that epoch had no blocks. Join snapshots and rewards with `epoch.epoch_id = ... .epoch`. |
-| `block_nonce` | `id`, `hash`, `slot`, `nonce`, `is_checkpoint` | PK `id`; unique `(hash, slot)` | Per-block nonce history (cumulative evolving nonce through each block) used by Praos nonce computation. New Mithril imports retain the ledger cursor at the stable imported anchor, so ordinary replay creates subsequent nonce rows. For databases produced by older releases, `healMithrilGapBlockNonces` can reconstruct missing gap-block rows at startup (see below). |
+| `block_nonce` | `id`, `hash`, `slot`, `nonce`, `is_checkpoint` | PK `id`; unique `(hash, slot)`; index `slot` | Per-block nonce history (cumulative evolving nonce through each block) used by Praos nonce computation. New Mithril imports retain the ledger cursor at the stable imported anchor, so ordinary replay creates subsequent nonce rows. For databases produced by older releases, `healMithrilGapBlockNonces` can reconstruct missing gap-block rows at startup (see below). |
 | `network_state` | `id`, `treasury`, `reserves`, `slot` | PK `id`; unique `slot` | Treasury/reserves at a slot. Genesis sync writes the slot-0 baseline with treasury `0` and reserves equal to `maxLovelaceSupply` minus the combined Byron and Shelley genesis UTxO values. Startup also adds that baseline to an older matching-genesis database when this table is empty. It does not rewrite a non-empty pot history; operators of a pre-feature from-genesis database that already contains later `network_state` rows must resync to reconstruct the correct history. Mithril import instead writes the certified `NewEpochState.AccountState` treasury/reserves at the imported tip. |
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. All donation sources applied under the same block slot, including Leios endorser-block effects recorded under a ranking block, are accumulated before this per-slot row is written. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
@@ -487,15 +490,15 @@ process the same pointer unless the claim expires before a result is recorded.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. Authoritative `"mark"` rows aggregate the transactionally maintained `reward_live_stake` rows at the exact rollover SNAP point; a late fallback whose tip has passed `captured_slot` uses historical delegation, UTxO liveness, and reward deltas instead. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Mark snapshot refreshes atomically replace all rows for the same `(epoch, snapshot_type)` before inserting the freshly captured set, so disappeared pools cannot remain in the snapshot. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
+| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `calculation_version`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. Authoritative `"mark"` rows aggregate the transactionally maintained `reward_live_stake` rows at the exact rollover SNAP point; a late fallback whose tip has passed `captured_slot` uses historical delegation, UTxO liveness, and reward deltas instead. `calculation_version` records the accounting algorithm; Mark/Set/Go rows from an older version are not safe to reconstruct after tombstone pruning, so startup requires rebootstrap rather than use them. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Mark snapshot refreshes atomically replace all rows for the same `(epoch, snapshot_type)` before inserting the freshly captured set, so disappeared pools cannot remain in the snapshot. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
 | `epoch_summary` | `id`, `epoch`, `total_active_stake`, `total_pool_count`, `total_delegators`, `epoch_nonce`, `boundary_slot`, `snapshot_ready` | PK `id`; unique `epoch` | Aggregate epoch snapshot state, written by the same transaction that captures the Mark snapshot. Retained for the life of the database (see the retention note below), so it is the durable record of every epoch boundary the node captured and a missing row means the boundary was never captured. Re-crossing a boundary after a rollback upserts the row, replacing the stake/pool/delegator totals, nonce, and boundary slot; `snapshot_ready` is sticky (`snapshot_ready OR excluded.snapshot_ready`) so a later partial write cannot clear it. `GetTotalActiveStake` reads `total_active_stake` from here for `"mark"` queries whenever `snapshot_ready` is set, which keeps historical epoch totals answerable after the per-pool rows are pruned. |
-| `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot` | PK `id`; unique `(credential_tag, staking_key)`; index `(pool_key_hash, credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. Authoritative epoch-boundary capture reads all registered, delegated rows through `GetLiveStakeInputsForPools`: zero-stake rows contribute to Mark delegator counts, while positive rows also become `reward_stake_input`. The pool/credential index supports this ordered boundary scan without retaining the legacy index on `total_stake`. A late fallback uses historical reconstruction when its transaction tip has passed the snapshot slot. Node startup checks for missing aggregate credentials and rebuilds from canonical state when necessary. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. Capture defensively applies the same credential-only identity before deriving `reward_pool_input` totals. Before AutoMigrate creates the unique index, startup repairs duplicates left by upgraded or partially-written databases by preserving the lowest-`id` row, which is the row the pre-index incremental refresh path updates. |
+| `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot`, `calculation_version` | PK `id`; unique `(credential_tag, staking_key)`; index `(pool_key_hash, credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. Authoritative epoch-boundary capture reads all registered, delegated rows through `GetLiveStakeInputsForPools`: zero-stake rows contribute to Mark delegator counts, while positive rows also become `reward_stake_input`. The pool/credential index supports this ordered boundary scan without retaining the legacy index on `total_stake`. A late fallback uses historical reconstruction when its transaction tip has passed the snapshot slot. `calculation_version` is set by rebuilds and incremental writes. Startup compares each canonical credential's UTxO, reward, total, registration, pool, and calculation version to the aggregate and rebuilds it atomically when any differs. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. Capture defensively applies the same credential-only identity before deriving `reward_pool_input` totals. Before AutoMigrate creates the unique index, startup repairs duplicates left by upgraded or partially-written databases by preserving the lowest-`id` row, which is the row the pre-index incremental refresh path updates. |
 | `reward_ada_pots` | `id`, `epoch`, `treasury`, `reserves`, `fees`, `rewards`, `captured_slot` | PK `id`; unique `epoch`; index `captured_slot` | Reward ADA pots captured at an epoch boundary. Reward application reads the row for its pots epoch and skips the epoch when it is absent. Retained for the life of the database (see the retention note below). |
-| `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version`, `authoritative` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward snapshot metadata recorded by the epoch rotation path. `authoritative` is `true` for a snapshot captured inside the ledger epoch-rollover write transaction at the SNAP point (`CaptureEpochBoundarySnapshot`) and `false` for the event-driven fallback (`captureMarkSnapshot`). The fallback claims the `(epoch, mark)` row atomically (INSERT ... ON CONFLICT DO NOTHING, then a `FOR UPDATE` recheck) and skips when an `authoritative` row already exists, so it can never overwrite the authoritative capture; the authoritative writer always overwrites a fallback row. When ended-epoch metadata is unavailable and no reward inputs can be persisted, the fallback uses `ClaimFallbackRewardSnapshotGuard` to insert-or-lock the same key, writes the leader-election Mark rows, then deletes only the temporary row it inserted before commit. The transaction retains the row/unique-key lock through commit, so serialization still closes the MySQL/Postgres capture race (SQLite is already serial) while no durable `reward_snapshot` row remains without reward inputs. That guard is a capture-time invariant: retention later prunes `reward_stake_input` out from under a retained snapshot, so outside the four-epoch window a row is accompanied by `reward_pool_input` only. Retained for the life of the database (see the retention note below). Guard claim/release require the same non-nil metadata transaction. |
+| `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version`, `authoritative`, `calculation_version` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward snapshot metadata recorded by the epoch rotation path. `authoritative` is `true` for a snapshot captured inside the ledger epoch-rollover write transaction at the SNAP point (`CaptureEpochBoundarySnapshot`) and `false` for the event-driven fallback (`captureMarkSnapshot`). Its `calculation_version` must match the current stake accounting version before the manager treats an authoritative Mark as already captured. The fallback claims the `(epoch, mark)` row atomically (INSERT ... ON CONFLICT DO NOTHING, then a `FOR UPDATE` recheck) and skips when an `authoritative` row already exists, so it can never overwrite the authoritative capture; the authoritative writer always overwrites a fallback row. When ended-epoch metadata is unavailable and no reward inputs can be persisted, the fallback uses `ClaimFallbackRewardSnapshotGuard` to insert-or-lock the same key, writes the leader-election Mark rows, then deletes only the temporary row it inserted before commit. The transaction retains the row/unique-key lock through commit, so serialization still closes the MySQL/Postgres capture race (SQLite is already serial) while no durable `reward_snapshot` row remains without reward inputs. That guard is a capture-time invariant: retention later prunes `reward_stake_input` out from under a retained snapshot, so outside the four-epoch window a row is accompanied by `reward_pool_input` only. Retained for the life of the database (see the retention note below). Guard claim/release require the same non-nil metadata transaction. |
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot` | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
-| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; index `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. Backs the Blockfrost `GET /accounts/{stake_address}/rewards` endpoint via `GetRewardAccountOutputsByCredential` / `CountRewardAccountOutputsByCredential` (see below), which the `(credential_tag, staking_key, spendable, ...)` index exists specifically to serve: the unique index leads with `epoch`, so without a second, credential-leading index that query would be a full scan of every retained row rather than a range scan over one account's spendable rows; `spendable` is in that index's equality prefix (not just the base query filter) so the `spendable = true` filter those two methods apply stays a pure index seek rather than a seek followed by a per-row filter. Pruning is storage-mode dependent (see the retention note below): pruned to the four-epoch window in `core` mode, retained for the life of the database in `api` mode. |
+| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; index `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)`; index `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. Backs the Blockfrost `GET /accounts/{stake_address}/rewards` endpoint via `GetRewardAccountOutputsByCredential` / `CountRewardAccountOutputsByCredential` (see below), which the `(credential_tag, staking_key, spendable, guarded, ...)` index exists specifically to serve: the unique index leads with `epoch`, so without a second, credential-leading index that query would be a full scan of every retained row rather than a range scan over one account's actually-credited rows; `spendable` and `guarded` are both in that index's equality prefix (not just the base query filter) so the `spendable = true AND guarded = false` filter those two methods apply stays a pure index seek rather than a seek followed by a per-row filter. `guarded` (dingo #3021) records the CIP-0163 reward-crediting guard decision (`rewardOutputGuarded`, `ledger/reward_calculation.go`) the same way `spendable` already records deregistration; see `GetRewardAccountOutputsByCredential` below for why this is a second column rather than folded into `spendable`. Pruning is storage-mode dependent (see the retention note below): pruned to the four-epoch window in `core` mode, retained for the life of the database in `api` mode. |
 
 #### Snapshot and Reward-State Retention
 
@@ -536,28 +539,34 @@ per epoch on mainnet, ~5k on preview — so retaining it without bound in `api`
 mode grows the table by that amount every epoch for the life of the database,
 an ongoing, unbounded storage cost, not a one-time one. `core` mode never
 serves that endpoint and has no reason to pay it. The
-`(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)`
-index (above) is what keeps `GetRewardAccountOutputsByCredential` a bounded
-lookup against that growing table rather than a full scan of it.
+`(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash,
+reward_type)` index (above) is what keeps `GetRewardAccountOutputsByCredential`
+a bounded lookup against that growing table rather than a full scan of it.
 
 The row counts above are not the same as disk bytes, and in `api` mode the
 gap matters for sizing: `reward_account_output` carries the pre-existing
 unique index (`epoch, credential_tag, staking_key, pool_key_hash,
-reward_type`) *and*, since dingo #1875, the credential-leading
+reward_type`), the credential-leading
 `idx_reward_account_output_credential_spendable` (`credential_tag,
-staking_key, spendable, epoch, pool_key_hash, reward_type`) needed to serve
-`GetRewardAccountOutputsByCredential` without a full scan. Both indexes key
-on nearly the same columns as the base row — each carries its own copy of the
-28-byte `staking_key` and `pool_key_hash` — so each index entry is comparable
-in size to the row itself: roughly 100-110 bytes for the row (`id`, `epoch`,
-`credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`,
-`spendable`, `captured_slot`, `boundary_slot`) plus roughly 80-90 bytes per
-index entry for each of the two indexes. An operator sizing a disk from the
-row count alone (1.3M rows/epoch on mainnet) would be sizing for roughly half
-the real number: the base row plus two comparably-sized indexes is on the
-order of 250-300 bytes/row, not ~100-110, so budget roughly double the naive
+staking_key, spendable, epoch, pool_key_hash, reward_type`) dingo #1875
+added, *and*, since dingo #3021, a second credential-leading index,
+`idx_reward_account_output_credential_spendable_guarded` (`credential_tag,
+staking_key, spendable, guarded, epoch, pool_key_hash, reward_type`), needed
+to serve `GetRewardAccountOutputsByCredential`'s `guarded` filter without a
+full scan. The two credential-leading indexes coexist rather than the second
+superseding the first (see `GetRewardAccountOutputsByCredential` below for
+why); all three indexes key on nearly the same columns as the base row — each
+carries its own copy of the 28-byte `staking_key` and `pool_key_hash` — so
+each index entry is comparable in size to the row itself: roughly 100-115
+bytes for the row (`id`, `epoch`, `credential_tag`, `staking_key`,
+`pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`,
+`captured_slot`, `boundary_slot`) plus roughly 80-90 bytes per index entry
+for each of the three indexes. An operator sizing a disk from the row count
+alone (1.3M rows/epoch on mainnet) would be sizing for roughly a third the
+real number: the base row plus three comparably-sized indexes is on the
+order of 340-390 bytes/row, not ~100-115, so budget roughly triple the naive
 row-count estimate for `reward_account_output` specifically in `api` mode —
-on the order of 300-400MB of *added, unbounded* storage per mainnet epoch,
+on the order of 450-500MB of *added, unbounded* storage per mainnet epoch,
 before compression, compounding for the life of the database. `core` mode
 prunes this table on the same four-epoch window as `reward_stake_input`, so
 it never accumulates this cost.
@@ -736,6 +745,18 @@ below the certified immutable tip, keep both the metadata tip and trust boundary
 at that point, and let ordinary ledger replay fold every later block. The legacy
 heal remains idempotent and uses the primary chain index so retained fork blobs
 and synthetic endorser blobs are never folded.
+
+`GetLatestBlockNonce` returns the single highest-slot `block_nonce` row
+(`ORDER BY slot DESC, hash DESC LIMIT 1`). Because a `block_nonce` row is written
+in the same metadata transaction as its block's UTxO/certificate deltas and the
+ledger tip (`ledgerProcessBlocks`) and is trimmed from below by retention pruning
+(and from above, including competing same-slot hashes, when rollback removes an
+abandoned fork), that maximum slot is the authoritative high-water mark of
+durably applied ledger state for the surviving chain. The ledger uses it as the
+"durable applied floor" to detect and repair a slot-based rollback that left the
+in-memory `currentTip` above the applied state, and to anchor replay-recovery
+rollbacks at or below that floor. The row's `nonce` bytes are ignored by that
+path — only `(slot, hash)` are consumed as a rollback point.
 
 Whether the decoded endorser transactions are then applied to the ledger is
 selected by `LedgerStateConfig.LeiosApplyEndorserBlockTxs` (see
@@ -1489,7 +1510,9 @@ current epoch's slot range (`blocks_epoch`); no new storage or index was
 needed. The upper slot bound passed for "no bound" is `math.MaxInt64`, not
 `math.MaxUint64`: slot columns are bound as signed 64-bit integers through
 `database/sql`, and a `uint64` value with the high bit set is rejected by the
-sqlite driver.
+sqlite driver. `/pools/extended` reuses the same lifetime query, called once
+with every active pool's key hash so the whole page's `blocks_minted` values
+come from a single call rather than one per pool.
 
 `blocks_minted` undercounts on a Mithril-bootstrapped node. `pool_opcert_sequence`
 is populated only by `UpdatePoolOpCertSequence`, called from the same
@@ -1505,12 +1528,36 @@ dingo has itself applied block-by-block since that boundary, not the pool's
 true full-history total; the gap is silent (no error, just a smaller count)
 and permanent (it does not shrink or get backfilled as the node runs). This
 is the same class of Mithril-boundary gap as the `account` table's
-pre-snapshot registration history documented above. `blocks_epoch` (current
-epoch only) is not affected in ordinary steady-state operation, since a
-caught-up node's current epoch is entirely post-boundary, but it inherits the
-same gap for the one epoch that straddles the snapshot's boundary slot: if
-that epoch has not yet rolled over, `blocks_epoch` only counts the
-post-boundary portion of it.
+pre-snapshot registration history documented above, and it applies equally to
+`/pools/extended`'s `blocks_minted`, which reads the same table the same way.
+`blocks_epoch` (current epoch only) is not affected in ordinary steady-state
+operation, since a caught-up node's current epoch is entirely post-boundary,
+but it inherits the same gap for the one epoch that straddles the snapshot's
+boundary slot: if that epoch has not yet rolled over, `blocks_epoch` only
+counts the post-boundary portion of it.
+
+### `GetOffchainMetadataBatch`
+
+`GetOffchainMetadataBatch(sourceType, urls, txn)` retrieves cached
+`offchain_metadata` rows for many URLs of one source type in a single query
+(`WHERE source_type = ? AND url IN (?, ...)`), for callers that need
+per-item off-chain metadata across a whole page of results without issuing
+one `GetOffchainMetadata` call per item. It uses the leading two columns
+(`source_type`, `url`) of the existing `(source_type, url, hash)` unique
+index (`idx_offchain_metadata_source_url_hash`); no new index was needed.
+Because a URL is only unique together with its hash, two returned rows can
+share a URL under different hashes (metadata republished at the same URL
+with new content); callers match each row against their own `(url, hash)`
+pointer rather than assuming one row per URL. The sqlite implementation
+chunks the `url IN (...)` list at the shared `sqliteBindVarLimit` (400, see
+above) to stay under sqlite's bound-parameter limit; postgres and MySQL,
+whose limits are far higher, issue one query regardless of list size. The
+Blockfrost `/pools/extended` endpoint uses this to resolve every active
+pool's registered metadata anchor in one query for the whole active-pool
+set, instead of one `GetOffchainMetadata` call per pool; its metadata
+object shares the same fetch/validation semantics as `PoolMetadata`
+documented above (pending/failed/fetched off-chain document classification,
+including the `source_type = 'pool'` schema re-validation on read).
 
 ### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
 
@@ -1639,33 +1686,51 @@ deterministically:
 ```sql
 SELECT *
 FROM reward_account_output
-WHERE credential_tag = $1 AND staking_key = decode($2, 'hex') AND spendable = true
+WHERE credential_tag = $1 AND staking_key = decode($2, 'hex') AND spendable = true AND guarded = false
 ORDER BY epoch ASC, pool_key_hash ASC, reward_type ASC   -- DESC ASC ASC when order=desc
 LIMIT $3 OFFSET $4;
 ```
 
-`spendable = true` is required, not optional filtering: `Spendable = false`
-means the reward was never actually credited to the account.
-`applyStakeRewardApplication` (`ledger/reward_calculation.go`) skips crediting
-a non-spendable output and instead folds its amount into the epoch's
-unspendable total, and `finalizePrecomputedRewardOutputs` persists
-`Spendable = false` permanently for a credential that deregistered before its
-reward's payout boundary. Without this filter both the row and the count
-would misreport an uncredited reward as one the account received (dingo #1875
-review finding 1); `CountRewardAccountOutputsByCredential` applies the same
-filter to its `COUNT(*)` so the reported total always matches the rows that
-can actually be paginated.
+`spendable = true AND guarded = false` is required, not optional filtering:
+either flag means the reward was never actually credited to the account, for
+two distinct reasons.
 
-NOTE (not fixed by the `spendable` filter, tracked as a follow-up): a
-CIP-0163-guarded reward (`rewardOutputGuarded`,
-`ledger/reward_calculation.go`) is also skipped at crediting time and folded
-into undistributed/reserves, but that guard is never written back to
-`Spendable` — a guarded row keeps `spendable = true`. This filter does not
-catch it, so once CIP-0163 (delegator inactivity) activates, a
-CIP-0163-expired credential's guarded reward can still be overstated by this
-endpoint the same way non-spendable rows were before this fix. Out of scope
-for dingo #1875; needs its own follow-up (e.g. persisting the guard decision
-onto the row, the same way `Spendable` already is).
+`Spendable = false` means the credential deregistered before the reward's
+payout boundary. `applyStakeRewardApplication`
+(`ledger/reward_calculation.go`) skips crediting a non-spendable output and
+instead folds its amount into the epoch's unspendable total (routed to the
+treasury), and `finalizePrecomputedRewardOutputs` persists `Spendable = false`
+permanently for that credential. Without this filter both the row and the
+count would misreport an uncredited reward as one the account received (dingo
+#1875 review finding 1).
+
+`Guarded = true` means the reward account was CIP-0163-expired as of the
+reward's snapshot epoch (`rewardOutputGuarded`, `ledger/reward_calculation.go`,
+`applyStakeRewardApplication`): the row keeps `spendable = true` (it was never
+deregistered), so the `spendable` filter alone does not catch it, but the
+guard skipped crediting it the same way — the amount instead falls through to
+undistributed and refunds reserves, a different pot than the
+non-spendable/unspendable path above. This gap in the `spendable` filter was
+flagged but deliberately left unaddressed by dingo #1875 (see the model doc
+comment on `RewardAccountOutput`, `database/models/reward_state.go`, before
+this change) and is fixed by dingo #3021:
+`applyGuardedFlagToAccountOutputs`
+(`ledger/reward_calculation.go`) persists the guard decision onto `Guarded`
+the same way `Spendable` already records deregistration, computed before
+`saveStakeRewardOutputs` writes the row so a freshly calculated or reused
+precomputed application both end up with the correct value, and reconciled
+fresh on every application (including a reused precomputed one, whose rows
+were written before the guard was even known) rather than trusted from a
+prior run, so a stale `guarded = true` left by an earlier pass — e.g. the
+credential was since renewed, or the gate has since been disabled — is
+corrected rather than persisting indefinitely. `Guarded` stays `false` for
+every row whenever the delegator-inactivity gate is off, keeping that path
+byte-identical to pre-CIP behavior; the gate is default-off today, so this is
+otherwise dormant.
+
+`CountRewardAccountOutputsByCredential` applies the identical
+`spendable = true AND guarded = false` filter to its `COUNT(*)` so the
+reported total always matches the rows that can actually be paginated.
 
 The adapter maps `reward_type` (dingo's `ledger/rewards.RewardType`: `leader`,
 `member`) to the Blockfrost `account_reward_content` `type` enum (`leader`,
@@ -1696,59 +1761,62 @@ pagination/ordering are unaffected since they are driven by the stored
 
 `reward_account_output`'s pre-existing unique index leads with `epoch`
 (`idx_reward_account_output_epoch_cred_pool_type`), so it cannot serve this
-query's `credential_tag`/`staking_key`/`spendable` equality predicate without
-scanning every row — a real cost once `api` mode retains the table without
-bound (previous paragraph). `idx_reward_account_output_credential_spendable`
-`(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)`
-exists so the planner instead does a range scan restricted to one
-credential's spendable rows, confirmed with `EXPLAIN QUERY PLAN` (SQLite),
-`EXPLAIN` (MySQL: `type: ref`), and `EXPLAIN` (PostgreSQL: `Index Scan`) all
-reporting index use rather than a table/sequential scan for the query above.
-Putting `spendable` in the index's equality prefix (rather than leaving it a
-post-filter after a `credential_tag`/`staking_key`-only seek) is what keeps
-the query a pure index range scan: `EXPLAIN QUERY PLAN` against the older
-two-column prefix reports
-`SEARCH reward_account_output USING INDEX idx_reward_account_output_credential (credential_tag=? AND staking_key=?)`
-— `spendable` is not part of the search key, so every one of the credential's
-rows must still be visited and filtered — while the six-column index reports
-`SEARCH reward_account_output USING INDEX idx_reward_account_output_credential_spendable (credential_tag=? AND staking_key=? AND spendable=?)`,
-with `spendable` folded into the seek itself. The ascending case is served
-entirely from the index; a descending `epoch` request still uses the index for
-the credential/spendable lookup but sorts the (typically small,
+query's `credential_tag`/`staking_key`/`spendable`/`guarded` equality
+predicate without scanning every row — a real cost once `api` mode retains
+the table without bound (previous paragraph).
+`idx_reward_account_output_credential_spendable_guarded` `(credential_tag,
+staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)` exists so
+the planner instead does a range scan restricted to one credential's
+actually-credited rows, confirmed with `EXPLAIN QUERY PLAN` (SQLite) reporting
+index use rather than a table/sequential scan for the query above. Putting
+both `spendable` and `guarded` in the index's equality prefix (rather than
+leaving either a post-filter after a shorter seek) is what keeps the query a
+pure index range scan: `EXPLAIN QUERY PLAN` against the older three-column
+prefix (`idx_reward_account_output_credential_spendable`, below) reports
+`SEARCH reward_account_output USING INDEX idx_reward_account_output_credential_spendable (credential_tag=? AND staking_key=? AND spendable=?)`
+for this query — `guarded` is not part of that search key, so every one of
+the credential's spendable rows must still be visited and filtered — while
+the seven-column index reports
+`SEARCH reward_account_output USING INDEX idx_reward_account_output_credential_spendable_guarded (credential_tag=? AND staking_key=? AND spendable=? AND guarded=?)`,
+with `guarded` folded into the seek itself. The ascending case is served
+entirely from the index; a descending `epoch` request still uses the index
+for the credential/spendable/guarded lookup but sorts the (typically small,
 single-credential) matched rows for the `pool_key_hash`/`reward_type`
 tie-break, since no practical index can be ordered
-`epoch DESC, pool_key_hash ASC, reward_type ASC` and `epoch ASC, ...` at once.
-`TestGetRewardAccountOutputsByCredentialUsesIndex` pins the plan (including
-that `spendable` is part of the search key) so a future index rename, drop,
-or narrowing fails loudly instead of silently degrading to a scan or a
-seek-plus-filter.
+`epoch DESC, pool_key_hash ASC, reward_type ASC` and `epoch ASC, ...` at once
+— the same tie-break cost `idx_reward_account_output_credential_spendable`
+already had.
+`TestGetRewardAccountOutputsByCredentialGuardedUsesIndex`
+(`database/plugin/metadata/sqlite`) pins the plan (including that `guarded`
+is part of the search key) so a future index rename, drop, or narrowing fails
+loudly instead of silently degrading to a scan or a seek-plus-filter.
 
-`idx_reward_account_output_credential_spendable` supersedes an earlier
-`idx_reward_account_output_credential` (`credential_tag, staking_key, epoch,
-pool_key_hash, reward_type` — no `spendable`) that dingo #1875 originally
-shipped. AutoMigrate creates the new index directly on both a fresh database
-and one that predates dingo #1875 entirely
-(`TestMigrateRewardAccountOutputCredentialIndex` in `database/models`): it is
-a new, non-unique secondary index over unchanged column types, so
-SQLite/MySQL/PostgreSQL all add it with a plain `CREATE INDEX` rather than a
-table rebuild, and no pre-migration repair step is needed to create it.
-Dropping the now-superseded five-column index on a database that already
-upgraded to it, however, does need a helper —
-`MigrateRewardAccountOutputCredentialIndex` in `database/models`, called after
-`AutoMigrate` in each of the sqlite/mysql/postgres `database.go` plugins —
-because AutoMigrate does not alter or drop an index it no longer sees
-declared; left alone, an upgraded database would carry both indexes forever.
-The helper deliberately runs *after* `AutoMigrate` rather than before (unlike
-the legacy-index migrations elsewhere in this file, which drop a unique index
-first because it could otherwise reject valid rows or block a column-type
-change): `idx_reward_account_output_credential` is a plain non-unique
-secondary index, so keeping it a little longer is only wasted space, never a
-correctness problem, and running the drop after guarantees the replacement
-index already exists first.
-`TestMigrateRewardAccountOutputCredentialSpendableIndex` in
-`database/models` pins that upgrade path against a populated database: rows
-of both spendable states survive, the superseded index is gone afterward, and
-the replacement is in place throughout.
+Unlike `idx_reward_account_output_credential_spendable` (which superseded an
+even earlier `idx_reward_account_output_credential` when dingo #1875 added
+`spendable` to it, dropped via `MigrateRewardAccountOutputCredentialIndex`
+after `AutoMigrate` creates the replacement — the same pattern used
+throughout this file for a superseded non-unique index),
+`idx_reward_account_output_credential_spendable_guarded` (dingo #3021) does
+**not** supersede `idx_reward_account_output_credential_spendable`,
+which stays declared on `RewardAccountOutput` and is not dropped. This is
+additive rather than a clean rename because
+`TestMigrateRewardAccountOutputCredentialIndex` and
+`TestMigrateRewardAccountOutputCredentialSpendableIndex` (`database/models`,
+both predating dingo #3021) pin that a plain `AutoMigrate(&RewardAccountOutput{})`
+creates an index literally named `idx_reward_account_output_credential_spendable`;
+renaming or dropping it would have broken that existing, unrelated regression
+coverage. The two credential-leading indexes therefore coexist: neither
+`AutoMigrate` nor any migration helper touches
+`idx_reward_account_output_credential_spendable` going forward, and no new
+`Migrate*` helper was needed for the new index either — it is a new,
+non-unique secondary index over unchanged column types, the same reasoning
+`TestMigrateRewardAccountOutputCredentialIndex`'s doc comment gives for why
+`idx_reward_account_output_credential_spendable` itself needed no helper when
+it was first introduced — so `AutoMigrate` creates it directly with
+`CREATE INDEX` on any prior schema shape, pinned by
+`TestMigrateRewardAccountOutputAddsSpendableGuardedIndex` in
+`database/models`. The modest extra index storage this leaves behind is
+accounted for in the sizing paragraph above.
 
 ### `GetAccountWithdrawalHistory`
 
@@ -1983,6 +2051,117 @@ slot. Such rows have no `certs`/`transaction` join, so without the
 `CASE WHEN` key their `COALESCE(..., 0)` values could lose the same-slot
 tie-break to a registration, incorrectly keeping the pool active for stake
 snapshots and reward inputs.
+
+### `GetActivePoolKeyHashesOrdered`
+
+Backs the Blockfrost `GET /pools` (`pool_list`) endpoint: the same active-pool
+set as `GetActivePoolKeyHashes`/`GetActivePoolKeyHashesAtSlot` (registration
+with `added_slot <= tip`, no retirement or the retirement is cancelled by a
+later registration or targets a not-yet-started epoch), but with an explicit,
+deterministic order instead of `GetActivePoolKeyHashesAtSlot`'s incidental row
+order (no terminal `ORDER BY`, so its result order is not a documented
+contract). "Oldest first, newest last" (the OpenAPI schema's wording) is keyed
+on each pool's EARLIEST registration certificate, not its most recent one: a
+pool that later re-registers to update its margin or relays keeps its
+original list position rather than jumping to the end. This is a deliberate
+semantic choice, not one pinned by the schema itself -- the schema only says
+"oldest first" without defining "oldest" -- so a future change that keys the
+sort on the LATEST registration instead would be a silent behavior reversal,
+not a bug fix; if that is ever revisited, update this paragraph, the
+`poolorder.GetActivePoolKeyHashesOrdered` doc comment, and
+`PoolsList`'s doc comment (`api/blockfrost/adapter_pools_list.go`) together.
+Verified identical across backends: `TestNodeAdapterPoolsListOrderingAndActiveSet`
+(sqlite, via the Blockfrost adapter) and its direct-store counterparts
+`TestGetActivePoolKeyHashesOrderedPostgres`/`TestGetActivePoolKeyHashesOrderedMysql`
+(`database/plugin/metadata/{postgres,mysql}/pool_active_ordered_test.go`, run
+against real Postgres 16 / MySQL 8.4 containers) seed the same 8-pool fixture
+-- a re-registration, a retirement cancelled by a later re-registration, a
+same-slot three-way tie broken by `block_index`/`cert_index`, a pending
+future retirement, and an already-effective retirement that must be excluded
+-- and assert the exact same expected oldest-first sequence on all three
+backends, not independently-relaxed per-backend expectations. The query, shared
+verbatim across the sqlite/postgres/mysql backends
+(`database/plugin/metadata/internal/poolorder`, mirroring the
+`poolcerthistory` sharing pattern above), computes both the latest-registration
+ranking (needed for the active/retired determination) and the
+earliest-registration ranking (needed for the sort key) as two `ROW_NUMBER()`
+columns over one CTE scan of `pool_registration` joined to `certs`/
+`transaction`, rather than scanning that join twice:
+
+```sql
+WITH reg_ranked AS (
+  SELECT pr.pool_id, pr.added_slot,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0) AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn_latest,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot ASC, COALESCE(t.block_index, 0) ASC, COALESCE(c.cert_index, 0) ASC
+    ) AS rn_first
+  FROM pool_registration pr
+  LEFT JOIN certs c ON c.id = pr.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE pr.added_slot <= $1
+),
+latest_ret AS ( -- same shape as GetActivePoolKeyHashesAtSlot's latest_ret
+  ...
+)
+SELECT p.pool_key_hash
+FROM pool p
+INNER JOIN reg_ranked lr ON lr.pool_id = p.id AND lr.rn_latest = 1
+INNER JOIN reg_ranked fr ON fr.pool_id = p.id AND fr.rn_first = 1
+LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+WHERE lrt.pool_id IS NULL
+  OR lrt.added_slot < lr.added_slot
+  OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+  OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+  OR lrt.epoch > $2
+ORDER BY fr.added_slot ASC, fr.blk_idx ASC, fr.cert_idx ASC, p.pool_key_hash ASC;
+```
+
+A final `p.pool_key_hash ASC` tie-break makes the order fully deterministic
+even when two rows collapse to the same `(added_slot, block_index,
+cert_index)` key, e.g. registrations with no linked certificate/transaction
+(both default to 0 via `COALESCE`).
+
+Query cost was verified per backend, not assumed to generalize from one:
+`EXPLAIN QUERY PLAN` on sqlite, `EXPLAIN` on a real Postgres 16 container, and
+`EXPLAIN FORMAT=TREE` on a real MySQL 8.4 container, the latter two populated
+with ~8,000 pools / ~10,000 historical registrations (including ~2,000
+re-registrations, to exercise the `rn_latest`/`rn_first` split at scale) /
+~500 retirements -- large enough that a backend-specific plan flip would show
+up, rather than the toy row counts a unit test would otherwise use. All three
+agree on the shape: the `reg_ranked` CTE does a full scan of `pool_registration`
+(sqlite: `SCAN pr USING INDEX idx_pool_reg_pool_slot`, a full index scan since
+its leading column is `pool_id` rather than `added_slot`, so `added_slot <= ?`
+can't narrow the index range; Postgres: `Seq Scan on pool_registration ...
+Filter: (added_slot <= ...)`; MySQL: `Table scan on pr ... Filter: (pr.added_slot
+<= ...)`) -- bounded by the total historical `pool_registration` row count, not
+just the active-pool count, on every backend. This is the same cost
+`/pools/extended` already pays via `GetActivePoolKeyHashesAtSlot`, which has
+the identical `WHERE pr.added_slot <= ?` filter over the same table; this
+query adds one extra `ROW_NUMBER()` column computed over the same
+already-scanned rows, not a second scan. `pool_retirement` fares better on
+sqlite at small scale (`SEARCH rt USING INDEX idx_pool_retirement_added_slot
+(added_slot<?)`, a genuine range search) but all three backends fell back to
+a full scan of `pool_retirement` at the populated scale above, since the
+`added_slot <= ?` filter matched nearly every row (Postgres and sqlite's
+planners both prefer a full scan over an index scan once the filter is not
+selective; this is normal cost-based planning, not a regression). No backend
+was materially worse than the others for this query, unlike a prior branch in
+this campaign where a SQLite-verified plan did not hold on MySQL. The final
+join/sort touches one row per active pool on all three backends.
+Because the sort key is a per-pool ranking computed across the whole
+registration/retirement history, the entire active set must be ranked before
+any page boundary can be determined; the Blockfrost adapter (`PoolsList`,
+`api/blockfrost/adapter_pools_list.go`) therefore fetches every active pool's
+key hash in this one query and applies `count`/`page`/`order` in memory
+(reversing the slice for `desc`), matching `GetRetiringPools`/`PoolsRetiring`'s
+existing split below rather than pushing `LIMIT`/`OFFSET` into SQL, which
+would only trim rows after the ranking work, not reduce it.
 
 ### `GetPoolsRetiringAtEpoch`
 

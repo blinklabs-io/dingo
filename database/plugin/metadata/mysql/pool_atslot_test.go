@@ -18,7 +18,14 @@ import (
 // backend-specific regressions that the sqlite tests cannot.
 func TestGetStakeByPoolsAtSlotAggregatesFallbackAccountsMysql(t *testing.T) {
 	store := newTestMysqlStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	poolA := bytes.Repeat([]byte{0xA1}, 28)
@@ -75,7 +82,14 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccountsMysql(t *testing.T) {
 // yields non-zero stake.
 func TestGetStakeByPoolsAtSlotIncludesRewardBalanceMysql(t *testing.T) {
 	store := newTestMysqlStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	poolA := bytes.Repeat([]byte{0xA2}, 28)
@@ -125,7 +139,14 @@ func TestGetStakeByPoolsAtSlotIncludesRewardBalanceMysql(t *testing.T) {
 // 2^53 expose MySQL's lossy implicit DOUBLE conversion.
 func TestGetStakeByPoolsPreservesIntegerPrecisionMysql(t *testing.T) {
 	store := newTestMysqlStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	pool := bytes.Repeat([]byte{0xC1}, 28)
@@ -181,7 +202,14 @@ func TestGetStakeByPoolsPreservesIntegerPrecisionMysql(t *testing.T) {
 // catching backend-specific regressions the sqlite test cannot.
 func TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationMysql(t *testing.T) {
 	store := newTestMysqlStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	pool := bytes.Repeat([]byte{0xD5}, 28)

@@ -81,6 +81,9 @@ func (m StorageMode) IsAPI() bool {
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
+// Expiry is deliberately opt-in: NewConfig defaults only Frequency and
+// leaves Enabled false, so Enabled must be set to true (usually through
+// WithHistoryExpiry) before the pruner runs.
 type HistoryExpiryConfig struct {
 	Enabled   bool
 	Frequency time.Duration
@@ -532,6 +535,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// We do this so we don't have to add guards around every log operation
 		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		genesisBootstrap: true,
+		// Frequency only; Enabled stays false because expiry is opt-in
 		historyExpiry: HistoryExpiryConfig{
 			Frequency: time.Hour,
 		},

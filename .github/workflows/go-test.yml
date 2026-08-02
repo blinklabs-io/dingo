@@ -1,15 +1,14 @@
 name: go-test
 
 on:
-  push:
-    tags:
-      - v*
-    branches:
-      - main
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Linux job with Postgres, MySQL and MinIO (fake s3) services for integration tests
@@ -98,41 +97,6 @@ jobs:
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race ./...
-
-  # macOS and Windows jobs without Postgres service
-  go-test-other:
-    name: go-test (${{ matrix.platform }}) (${{ matrix.go-version }})
-    strategy:
-      matrix:
-        go-version: [1.26.x]
-        platform: [macos-latest, windows-latest]
-        include:
-          - platform: macos-latest
-            cache_path: ~/Library/Caches/go-build
-          - platform: windows-latest
-            cache_path: ~\AppData\Local\go-build
-    runs-on: ${{ matrix.platform }}
-    env:
-      # Use Go's internal linker. Without this, Windows runners auto-enable CGO
-      # because gcc is in PATH, then MinGW's ld.exe runs out of memory linking
-      # the integration test binary. The project has no cgo code, and -race
-      # (the only consumer of CGO) only runs on the Linux job.
-      CGO_ENABLED: 0
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: ${{ matrix.go-version }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ${{ matrix.cache_path }}
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
-      - name: go-build
-        run: go build ./cmd/dingo
-      - name: go-test
-        run: go test ./...
+        # Keep PR feedback fast by omitting race instrumentation. Release
+        # validation runs in the publish workflow before draft creation.
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 20m ./...

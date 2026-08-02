@@ -36,6 +36,7 @@ import (
 // be announced to peers via LeiosNotify.
 type leiosForgedEBEntry struct {
 	point *ocommon.Point
+	size  uint64
 	vote  *lcommon.LeiosPrototypeVote
 }
 
@@ -320,7 +321,7 @@ func (o *Ouroboros) BroadcastEndorserBlock(
 	if err := o.storeLeiosEndorserBlock(point, data, txsRaw); err != nil {
 		return fmt.Errorf("store forged endorser block: %w", err)
 	}
-	o.leiosEBLog.append(leiosForgedEBEntry{point: &point})
+	o.leiosEBLog.append(leiosForgedEBEntry{point: &point, size: uint64(len(data))})
 	return nil
 }
 
@@ -462,6 +463,14 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		client := conn.LeiosFetch().Client
 		point := m.Point
+		// The relay offers each endorser block on every connection. The
+		// manifest is content-addressed, so once any peer's copy is cached a
+		// refetch returns identical bytes: skip it instead of spending a fetch
+		// slot and the manifest's bandwidth once per connected peer. Mirrors
+		// the same guard on the txs offer below.
+		if _, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
+			return nil
+		}
 		// Fetch the manifest off the handler so a slow fetch cannot head-of-line
 		// block later offers on this connection. The transactions arrive as a
 		// separate notify offer (MsgBlockTxsOffer): the prototype diffuses an
@@ -1069,6 +1078,26 @@ func leiosCollectTxs(result []cbor.RawMessage) []cbor.RawMessage {
 	return out
 }
 
+// leiosForgedEBOffer builds the LeiosNotify offer for a queued forged-EB log
+// entry: a votes-offer for a locally emitted vote, or a block-offer for a
+// forged endorser block. Both go through the gouroboros constructors so the
+// message MessageType (and, for a block offer, the EB size) are set. A bare
+// struct literal would leave MessageType at its zero value, which the leios-
+// notify state machine rejects when the server has agency in the Busy state,
+// so the EB would never be offered, fetched, voted on, or certified.
+func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
+	switch {
+	case entry.vote != nil:
+		return oleiosnotify.NewMsgVotesOfferPrototype(
+			[]lcommon.LeiosPrototypeVote{*entry.vote},
+		)
+	case entry.point != nil:
+		return oleiosnotify.NewMsgBlockOffer(*entry.point, entry.size)
+	default:
+		return nil
+	}
+}
+
 func (o *Ouroboros) leiosnotifyServerRequestNext(
 	ctx oleiosnotify.CallbackContext,
 ) (protocol.Message, error) {
@@ -1090,13 +1119,8 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	for {
 		entry, wakeCh := o.leiosEBLog.next(connKey)
 		if entry != nil {
-			if entry.vote != nil {
-				return oleiosnotify.NewMsgVotesOfferPrototype(
-					[]lcommon.LeiosPrototypeVote{*entry.vote},
-				), nil
-			}
-			if entry.point != nil {
-				return &oleiosnotify.MsgBlockOffer{Point: *entry.point}, nil
+			if msg := leiosForgedEBOffer(entry); msg != nil {
+				return msg, nil
 			}
 		}
 		select {

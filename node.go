@@ -280,6 +280,7 @@ func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) error {
 	// Configure tracing
+	n.warnIfTracingMisconfigured()
 	if n.config.tracing {
 		if err := n.setupTracing(ctx); err != nil {
 			return err
@@ -1681,19 +1682,31 @@ func (n *Node) backfillRewardLiveStake() error {
 		if err != nil {
 			return fmt.Errorf("check reward live stake backfill: %w", err)
 		}
-		if !needed {
-			return nil
-		}
-		tip, err := n.db.GetTip(txn)
-		if err != nil {
-			return fmt.Errorf("get tip for reward live stake backfill: %w", err)
-		}
-		n.config.logger.Info(
-			"rebuilding reward live stake aggregate",
-			"slot", tip.Point.Slot,
+		staleSnapshots, err := n.db.Metadata().StaleConsensusStakeSnapshotsExist(
+			txn.Metadata(),
 		)
-		if err := n.db.RebuildRewardLiveStake(tip.Point.Slot, txn); err != nil {
-			return fmt.Errorf("backfill reward live stake: %w", err)
+		if err != nil {
+			return fmt.Errorf("check stake snapshot provenance: %w", err)
+		}
+		if needed {
+			tip, err := n.db.GetTip(txn)
+			if err != nil {
+				return fmt.Errorf("get tip for reward live stake backfill: %w", err)
+			}
+			n.config.logger.Info(
+				"rebuilding reward live stake aggregate",
+				"slot", tip.Point.Slot,
+			)
+			if err := n.db.RebuildRewardLiveStake(tip.Point.Slot, txn); err != nil {
+				return fmt.Errorf("backfill reward live stake: %w", err)
+			}
+		}
+		if staleSnapshots {
+			return errors.New(
+				"consensus stake snapshots were produced by an older accounting " +
+					"version and cannot be safely reconstructed from this database; " +
+					"rebootstrap from immutable blocks or a trusted snapshot",
+			)
 		}
 		return nil
 	})

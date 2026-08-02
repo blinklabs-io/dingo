@@ -120,6 +120,146 @@ func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
 	}
 }
 
+func TestBackfillRewardLiveStakeRepairsStaleValues(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
+	require.True(t, ok)
+	stakeKey := make([]byte, 28)
+	stakeKey[0] = 0x53
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeKey,
+		Pool:       make([]byte, 28),
+		Reward:     5,
+		AddedSlot:  50,
+		Active:     true,
+	}).Error)
+	// The identity and calculation version are current, but the UTxO and total
+	// values are not. A presence-only check would incorrectly accept this row.
+	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
+		StakingKey:         stakeKey,
+		PoolKeyHash:        make([]byte, 28),
+		Registered:         true,
+		UtxoStake:          9,
+		RewardStake:        5,
+		TotalStake:         14,
+		UpdatedSlot:        75,
+		CalculationVersion: models.RewardStakeCalculationVersion,
+	}).Error)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, make([]byte, 32)),
+	}, nil))
+
+	n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	require.NoError(t, n.backfillRewardLiveStake())
+
+	var live models.RewardLiveStake
+	require.NoError(t, store.DB().Where("staking_key = ?", stakeKey).First(&live).Error)
+	require.Equal(t, uint64(0), uint64(live.UtxoStake))
+	require.Equal(t, uint64(5), uint64(live.RewardStake))
+	require.Equal(t, uint64(5), uint64(live.TotalStake))
+	require.Equal(t, models.RewardStakeCalculationVersion, live.CalculationVersion)
+}
+
+func TestBackfillRewardLiveStakeAcceptsCurrentUndelegatedAccount(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
+	require.True(t, ok)
+	stakeKey := make([]byte, 28)
+	stakeKey[0] = 0x54
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeKey,
+		Reward:     5,
+		AddedSlot:  50,
+		Active:     true,
+	}).Error)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, make([]byte, 32)),
+	}, nil))
+
+	n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	require.NoError(t, n.backfillRewardLiveStake())
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.False(t, needed)
+}
+
+func TestBackfillRewardLiveStakeRejectsStaleConsensusSnapshots(t *testing.T) {
+	tests := []struct {
+		name string
+		seed func(*testing.T, *metadatasqlite.MetadataStoreSqlite)
+	}{
+		{
+			name: "mark pool snapshot",
+			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
+				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+					Epoch:        3,
+					SnapshotType: models.PoolStakeSnapshotTypeMark,
+					PoolKeyHash:  make([]byte, 28),
+					TotalStake:   1,
+					CapturedSlot: 100,
+				}).Error)
+			},
+		},
+		{
+			name: "set pool snapshot",
+			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
+				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+					Epoch:        3,
+					SnapshotType: models.PoolStakeSnapshotTypeSet,
+					PoolKeyHash:  make([]byte, 28),
+					TotalStake:   1,
+					CapturedSlot: 100,
+				}).Error)
+			},
+		},
+		{
+			name: "go pool snapshot",
+			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
+				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+					Epoch:        3,
+					SnapshotType: models.PoolStakeSnapshotTypeGo,
+					PoolKeyHash:  make([]byte, 28),
+					TotalStake:   1,
+					CapturedSlot: 100,
+				}).Error)
+			},
+		},
+		{
+			name: "authoritative mark metadata",
+			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
+				require.NoError(t, store.DB().Create(&models.RewardSnapshot{
+					Epoch:         3,
+					SnapshotType:  models.PoolStakeSnapshotTypeMark,
+					CapturedSlot:  100,
+					BoundarySlot:  101,
+					Authoritative: true,
+				}).Error)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+			store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
+			require.True(t, ok)
+			test.seed(t, store)
+
+			n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+			err = n.backfillRewardLiveStake()
+			require.ErrorContains(t, err, "rebootstrap from immutable blocks")
+		})
+	}
+}
+
 func newNodeTestConnId(id uint) ouroboros.ConnectionId {
 	return ouroboros.ConnectionId{
 		LocalAddr: &net.TCPAddr{

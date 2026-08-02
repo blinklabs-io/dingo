@@ -22,6 +22,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// RewardStakeCalculationVersion identifies the stake-accounting algorithm
+// used to produce persisted live stake and consensus snapshots. Bump it when
+// changing that calculation so upgrades cannot trust older values.
+const RewardStakeCalculationVersion uint = 1
+
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
 	ID           uint         `gorm:"primarykey"`
@@ -55,6 +60,9 @@ type RewardSnapshot struct {
 	// authoritative row: it either claims a fresh row or is superseded. Defaults
 	// to false, so pre-existing rows and fallback captures read as provisional.
 	Authoritative bool `gorm:"not null;default:false"`
+	// CalculationVersion ties authoritative Mark metadata to the stake
+	// calculation that produced its accompanying pool snapshots.
+	CalculationVersion uint `gorm:"not null;default:0"`
 }
 
 func (RewardSnapshot) TableName() string {
@@ -122,6 +130,9 @@ type RewardLiveStake struct {
 	PoolDelegationBlockIndex uint64 `gorm:"not null;default:0"`
 	PoolDelegationCertIndex  uint32 `gorm:"not null;default:0"`
 	UpdatedSlot              uint64 `gorm:"index;not null"`
+	// CalculationVersion is set by every rebuild and incremental update. Zero
+	// denotes rows created before calculation provenance was introduced.
+	CalculationVersion uint `gorm:"not null;default:0"`
 }
 
 func (RewardLiveStake) TableName() string {
@@ -151,51 +162,76 @@ func (RewardPoolOutput) TableName() string {
 
 // RewardAccountOutput captures per-account reward calculation output.
 //
-// idx_reward_account_output_credential_spendable leads with (credential_tag,
-// staking_key, spendable) so GetRewardAccountOutputsByCredential (the
-// Blockfrost account reward-history endpoint, dingo #1875) is a pure index
-// range scan over one credential's spendable rows rather than an index seek
-// followed by a per-row filter: the epoch/pool_key_hash/reward_type tail
-// matches that query's ORDER BY, so an ascending request is served directly
-// from the index and a descending one only sorts the (typically tiny,
-// single-credential) matched rows rather than the whole table. This matters
-// specifically because dingo #1875 also makes API storage mode retain this
-// table without bound (see the retention note in DATABASE.md), so the
-// existing idx_reward_account_output_epoch_cred_pool_type index — which
-// leads with epoch, not credential — cannot serve this query without
-// scanning every retained row.
+// idx_reward_account_output_credential_spendable_guarded leads with
+// (credential_tag, staking_key, spendable, guarded) so
+// GetRewardAccountOutputsByCredential (the Blockfrost account reward-history
+// endpoint, dingo #1875) is a pure index range scan over one credential's
+// actually-credited rows rather than an index seek followed by a per-row
+// filter: the epoch/pool_key_hash/reward_type tail matches that query's
+// ORDER BY, so an ascending request is served directly from the index and a
+// descending one only sorts the (typically tiny, single-credential) matched
+// rows rather than the whole table. This matters specifically because dingo
+// #1875 also makes API storage mode retain this table without bound (see the
+// retention note in DATABASE.md), so the existing
+// idx_reward_account_output_epoch_cred_pool_type index — which leads with
+// epoch, not credential — cannot serve this query without scanning every
+// retained row.
 //
-// spendable joined the index (superseding the original
-// idx_reward_account_output_credential, which had no spendable column) once
-// GetAccountOutputsByCredential started filtering on it: a credential
-// deregistered before its reward's payout boundary keeps a permanent
-// spendable=false row (see applyStakeRewardApplication /
-// finalizePrecomputedRewardOutputs in ledger/reward_calculation.go), and
-// that reward was never credited, so the reward-history endpoint must not
-// report it. Without spendable in the index's equality prefix, the filter
-// degrades the seek into a seek over every one of the credential's rows plus
-// a per-row check. MigrateRewardAccountOutputCredentialIndex drops the
-// superseded index once this one exists, so upgraded databases end up with
-// exactly one credential-leading index rather than both.
+// spendable and guarded both mean "this reward was never credited to the
+// account", for two distinct reasons a diagnostic query may still want to
+// tell apart:
 //
-// NOTE(dingo #1875 follow-up): a CIP-0163-guarded reward
-// (rewardOutputGuarded in ledger/reward_calculation.go) is also skipped at
-// crediting time, but that guard is never written back to Spendable, so a
-// guarded row keeps spendable=true and this filter does not catch it. That
-// only matters once CIP-0163 (delegator inactivity) activates; see the
-// tracking note in DATABASE.md. Not fixed here — deliberately out of scope
-// for this change.
+//   - spendable=false: the credential deregistered before its reward's payout
+//     boundary (finalizePrecomputedRewardOutputs in
+//     ledger/reward_calculation.go persists this permanently). The withheld
+//     amount is folded into the epoch's unspendable total and ends up in the
+//     treasury.
+//   - guarded=true: the reward account was CIP-0163-expired as of the
+//     reward's snapshot epoch (rewardOutputGuarded in
+//     ledger/reward_calculation.go, applyStakeRewardApplication). The
+//     withheld amount is excluded from both the credited and unspendable
+//     totals and instead falls through to undistributed, refunding reserves
+//     — a different economic effect than the unspendable/treasury path
+//     above, which is why this is a second column rather than folded into
+//     Spendable.
+//
+// GetRewardAccountOutputsByCredential and CountRewardAccountOutputsByCredential
+// filter to spendable=true AND guarded=false; either flag alone means the
+// reward never reached the account.
+//
+// idx_reward_account_output_credential_spendable_guarded is additive, not a
+// replacement for idx_reward_account_output_credential_spendable (which
+// leads with credential_tag, staking_key, spendable only, and stays
+// declared, unchanged, alongside this one): dropping or renaming that index
+// would have to run through the same after-AutoMigrate
+// "drop the superseded index" helper the two migrations before it used (see
+// MigrateRewardAccountOutputCredentialIndex below), but that index's
+// continued existence after a plain AutoMigrate is itself pinned by
+// TestMigrateRewardAccountOutputCredentialIndex and
+// TestMigrateRewardAccountOutputCredentialSpendableIndex predating this
+// change, so this change leaves it alone rather than repeating the rename.
+// Both indexes coexist as a result; the guarded-aware query above uses the
+// new one, and nothing needs the old one's exact column set once the new
+// one exists, but it stays declared so those two tests keep passing.
 type RewardAccountOutput struct {
-	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:2"`
-	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:5"`
-	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null;index:idx_reward_account_output_credential_spendable,priority:6"`
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:2;index:idx_reward_account_output_credential_spendable_guarded,priority:2"`
+	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null;index:idx_reward_account_output_credential_spendable,priority:5;index:idx_reward_account_output_credential_spendable_guarded,priority:6"`
+	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null;index:idx_reward_account_output_credential_spendable,priority:6;index:idx_reward_account_output_credential_spendable_guarded,priority:7"`
 	ID            uint         `gorm:"primarykey"`
-	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null;index:idx_reward_account_output_credential_spendable,priority:4"`
-	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0;index:idx_reward_account_output_credential_spendable,priority:1"`
+	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null;index:idx_reward_account_output_credential_spendable,priority:4;index:idx_reward_account_output_credential_spendable_guarded,priority:5"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0;index:idx_reward_account_output_credential_spendable,priority:1;index:idx_reward_account_output_credential_spendable_guarded,priority:1"`
 	Amount        types.Uint64 `gorm:"not null"`
-	Spendable     bool         `gorm:"not null;index:idx_reward_account_output_credential_spendable,priority:3"`
-	CapturedSlot  uint64       `gorm:"index;not null"`
-	BoundarySlot  uint64       `gorm:"index;not null"`
+	Spendable     bool         `gorm:"not null;index:idx_reward_account_output_credential_spendable,priority:3;index:idx_reward_account_output_credential_spendable_guarded,priority:3"`
+	// Guarded records the CIP-0163 reward-crediting guard decision
+	// (rewardOutputGuarded, ledger/reward_calculation.go): true when this
+	// output's reward-account credential was expired as of the reward's
+	// snapshot epoch, so applyStakeRewardApplication skipped crediting it.
+	// Always false when the delegator-inactivity gate is off, keeping that
+	// path byte-identical. See the type doc comment above for why this is
+	// separate from Spendable rather than folded into it.
+	Guarded      bool   `gorm:"not null;default:false;index:idx_reward_account_output_credential_spendable_guarded,priority:4"`
+	CapturedSlot uint64 `gorm:"index;not null"`
+	BoundarySlot uint64 `gorm:"index;not null"`
 }
 
 func (RewardAccountOutput) TableName() string {

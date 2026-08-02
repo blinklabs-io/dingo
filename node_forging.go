@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -634,6 +635,14 @@ func (a *epochInfoAdapter) EpochForSlot(slot uint64) (uint64, error) {
 
 func (a *epochInfoAdapter) ActiveSlotCoeff() float64 {
 	return a.ledgerState.ActiveSlotCoeff()
+}
+
+// ActiveSlotCoeffRat satisfies leader.ActiveSlotCoeffRatProvider so the leader
+// schedule derives its threshold from the exact Shelley genesis rational, the
+// same value LedgerState.verifyLeaderEligibility uses, instead of a float64
+// approximation of it.
+func (a *epochInfoAdapter) ActiveSlotCoeffRat() *big.Rat {
+	return a.ledgerState.ActiveSlotCoeffRat()
 }
 
 func (a *epochInfoAdapter) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {

@@ -1585,12 +1585,13 @@ func AggregatePoolStake(
 		}
 
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:          epoch,
-			SnapshotType:   snapshotType,
-			PoolKeyHash:    poolKeyHash,
-			TotalStake:     types.Uint64(agg.totalStake),
-			DelegatorCount: agg.delegatorCount,
-			CapturedSlot:   capturedSlot,
+			Epoch:              epoch,
+			SnapshotType:       snapshotType,
+			PoolKeyHash:        poolKeyHash,
+			TotalStake:         types.Uint64(agg.totalStake),
+			DelegatorCount:     agg.delegatorCount,
+			CapturedSlot:       capturedSlot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
 

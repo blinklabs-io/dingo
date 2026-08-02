@@ -90,6 +90,7 @@ func SaveSnapshot(db *gorm.DB, snapshot *models.RewardSnapshot) error {
 				"epoch_nonce",
 				"protocol_version",
 				"authoritative",
+				"calculation_version",
 			}),
 		},
 	).Create(snapshot).Error; err != nil {
@@ -160,14 +161,15 @@ func ClaimFallbackSnapshot(
 				snapshot.Epoch,
 				snapshot.SnapshotType,
 			).Updates(map[string]any{
-			"total_active_stake": snapshot.TotalActiveStake,
-			"total_pool_count":   snapshot.TotalPoolCount,
-			"total_delegators":   snapshot.TotalDelegators,
-			"captured_slot":      snapshot.CapturedSlot,
-			"boundary_slot":      snapshot.BoundarySlot,
-			"epoch_nonce":        snapshot.EpochNonce,
-			"protocol_version":   snapshot.ProtocolVersion,
-			"authoritative":      false,
+			"total_active_stake":  snapshot.TotalActiveStake,
+			"total_pool_count":    snapshot.TotalPoolCount,
+			"total_delegators":    snapshot.TotalDelegators,
+			"captured_slot":       snapshot.CapturedSlot,
+			"boundary_slot":       snapshot.BoundarySlot,
+			"epoch_nonce":         snapshot.EpochNonce,
+			"protocol_version":    snapshot.ProtocolVersion,
+			"authoritative":       false,
+			"calculation_version": snapshot.CalculationVersion,
 		}).Error; err != nil {
 			return false, fmt.Errorf("replace fallback reward snapshot: %w", err)
 		}
@@ -577,7 +579,7 @@ func SaveAccountOutputs(db *gorm.DB, outputs []*models.RewardAccountOutput) erro
 			{Name: "reward_type"},
 		},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"amount", "spendable", "captured_slot", "boundary_slot",
+			"amount", "spendable", "guarded", "captured_slot", "boundary_slot",
 		}),
 	}).CreateInBatches(outputs, rewardSaveBatchSize).Error; err != nil {
 		return fmt.Errorf("save reward account outputs: %w", err)
@@ -603,27 +605,33 @@ func GetAccountOutputs(db *gorm.DB, epoch uint64) ([]*models.RewardAccountOutput
 // by the Blockfrost account reward-history endpoint
 // (GET /accounts/{stake_address}/rewards, dingo #1875).
 //
-// Filters to spendable = true. applyStakeRewardApplication
-// (ledger/reward_calculation.go) never credits a reward whose row has
-// Spendable = false — the amount is added to the epoch's unspendable total
-// instead — so a non-spendable row here was never actually paid to the
-// account. Reporting it as reward history would overstate what the account
+// Filters to spendable = true AND guarded = false. Both flags mean the same
+// thing to a caller of this query: the row's amount was never actually paid
+// to the account, for two distinct reasons.
+//
+//   - spendable = false: applyStakeRewardApplication (ledger/reward_calculation.go)
+//     never credits a reward whose row has Spendable = false — the amount is
+//     added to the epoch's unspendable total instead.
+//     finalizePrecomputedRewardOutputs persists Spendable = false permanently
+//     for a credential that deregistered before its reward's payout boundary,
+//     so this is not a transient state.
+//   - guarded = true: the CIP-0163 reward-crediting guard
+//     (rewardOutputGuarded, ledger/reward_calculation.go) skipped crediting
+//     this row because its reward-account credential was expired as of the
+//     reward's snapshot epoch; the amount falls through to undistributed and
+//     refunds reserves instead. A guarded row keeps spendable = true (it is
+//     not a deregistration), which is exactly why guarded needs its own
+//     column and filter rather than being folded into spendable (dingo #3021,
+//     the follow-up to dingo #1875).
+//
+// Reporting either as reward history would overstate what the account
 // received (and, added into the endpoint's total, overstate the count of
-// rewards too). finalizePrecomputedRewardOutputs persists Spendable = false
-// permanently for a credential that deregistered before its reward's payout
-// boundary, so this is not a transient state.
+// rewards too).
 //
-// idx_reward_account_output_credential_spendable puts spendable in the
-// index's equality prefix alongside credential_tag/staking_key specifically
-// so this filter stays a pure index range scan.
-//
-// NOTE(dingo #1875 follow-up, not fixed here): a CIP-0163-guarded reward
-// (rewardOutputGuarded, ledger/reward_calculation.go) is also skipped at
-// crediting time without ever being credited, but that guard is not written
-// back to Spendable, so a guarded row keeps spendable = true and this filter
-// does not catch it. That only bites once CIP-0163 (delegator inactivity)
-// activates; see DATABASE.md and the RewardAccountOutput doc comment for the
-// same note. Tracked as a follow-up, not addressed in this change.
+// idx_reward_account_output_credential_spendable_guarded puts both spendable
+// and guarded in the index's equality prefix alongside
+// credential_tag/staking_key specifically so this filter stays a pure index
+// range scan.
 func GetAccountOutputsByCredential(
 	db *gorm.DB,
 	credentialTag uint8,
@@ -637,10 +645,11 @@ func GetAccountOutputsByCredential(
 		return ret, nil
 	}
 	query := db.Where(
-		"credential_tag = ? AND staking_key = ? AND spendable = ?",
+		"credential_tag = ? AND staking_key = ? AND spendable = ? AND guarded = ?",
 		credentialTag,
 		stakingKey,
 		true,
+		false,
 	)
 	if strings.EqualFold(order, "desc") {
 		query = query.Order("epoch DESC, pool_key_hash ASC, reward_type ASC")
@@ -664,10 +673,11 @@ func GetAccountOutputsByCredential(
 
 // CountAccountOutputsByCredential returns the total count of reward account
 // output rows for a stake credential across every epoch that has not yet
-// been pruned. Filters to spendable = true for the same reason
-// GetAccountOutputsByCredential does: a non-spendable row was never credited,
-// so it must not be counted as reward history either, or pagination
-// advertises pages of rewards that were never paid.
+// been pruned. Filters to spendable = true AND guarded = false for the same
+// reason GetAccountOutputsByCredential does: neither a non-spendable nor a
+// CIP-0163-guarded row was ever credited, so neither may be counted as
+// reward history, or pagination advertises pages of rewards that were never
+// paid.
 func CountAccountOutputsByCredential(
 	db *gorm.DB,
 	credentialTag uint8,
@@ -678,10 +688,11 @@ func CountAccountOutputsByCredential(
 	}
 	var count int64
 	if err := db.Model(&models.RewardAccountOutput{}).Where(
-		"credential_tag = ? AND staking_key = ? AND spendable = ?",
+		"credential_tag = ? AND staking_key = ? AND spendable = ? AND guarded = ?",
 		credentialTag,
 		stakingKey,
 		true,
+		false,
 	).Count(&count).Error; err != nil {
 		return 0, fmt.Errorf(
 			"count reward account outputs by credential: %w",

@@ -203,6 +203,21 @@ func (d *Database) GetActivePoolKeyHashes(
 	return d.metadata.GetActivePoolKeyHashes(txn.Metadata())
 }
 
+// GetActivePoolKeyHashesOrdered returns the key hashes of all currently
+// active (registered, non-retired) stake pools, ordered oldest-first by
+// each pool's earliest on-chain registration certificate. See
+// metadata.MetadataStore.GetActivePoolKeyHashesOrdered for the full
+// ordering semantics. This backs the Blockfrost pool_list endpoint.
+func (d *Database) GetActivePoolKeyHashesOrdered(
+	txn *Txn,
+) ([][]byte, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetActivePoolKeyHashesOrdered(txn.Metadata())
+}
+
 // GetPoolCertificateHistory returns the transaction hashes of a pool's
 // registration and retirement certificates, in chronological order.
 func (d *Database) GetPoolCertificateHistory(

@@ -93,6 +93,9 @@ type PoolStakeSnapshot struct {
 	StakeDenominator types.Uint64 `gorm:"not null;default:0"`
 	DelegatorCount   uint64       `gorm:"not null"`
 	CapturedSlot     uint64       `gorm:"not null"`
+	// CalculationVersion identifies the stake-accounting algorithm used to
+	// produce Mark/Set/Go rows. Zero denotes a pre-provenance snapshot.
+	CalculationVersion uint `gorm:"not null;default:0"`
 	// RewardAccountAutoVote captures the CIP-1694 SPO auto-vote
 	// outcome implied by the pool's reward-account DRep delegation at
 	// the snapshot epoch. Values come from PoolRewardAccountAutoVote*.

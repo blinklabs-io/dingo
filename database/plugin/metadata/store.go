@@ -321,6 +321,23 @@ type MetadataStore interface {
 		txn types.Txn,
 	) (*models.OffchainMetadata, error)
 
+	// GetOffchainMetadataBatch retrieves cached off-chain documents for
+	// many URLs of the given source type in a single query, rather than
+	// one GetOffchainMetadata call per item. Used by callers that need
+	// per-item off-chain metadata for a whole page of results (for
+	// example, pool metadata for /pools/extended): the unique index on
+	// (source_type, url, hash) covers source_type + url IN (...) as its
+	// leading columns, so this is index-backed the same way
+	// GetOffchainMetadata is. Because two documents can share a URL under
+	// different hashes (metadata republished at the same URL with new
+	// content), callers must still match each returned row against their
+	// own (url, hash) pointer rather than assuming one row per URL.
+	GetOffchainMetadataBatch(
+		sourceType string,
+		urls []string,
+		txn types.Txn,
+	) ([]models.OffchainMetadata, error)
+
 	// GetRetiringPools returns pools whose latest retirement
 	// certificate targets an epoch after currentEpoch and has not been
 	// cancelled by a later registration certificate. Certificate
@@ -430,6 +447,18 @@ type MetadataStore interface {
 	// A pool is active if it has a registration and either no retirement or
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
+
+	// GetActivePoolKeyHashesOrdered retrieves the key hashes of all
+	// currently active pools (same active-pool semantics as
+	// GetActivePoolKeyHashes), ordered oldest-first by each pool's
+	// earliest on-chain registration certificate: added_slot ascending,
+	// then block_index and cert_index ascending to disambiguate
+	// certificates recorded in the same slot. This backs the Blockfrost
+	// pool_list endpoint's documented "oldest first, newest last"
+	// ordering. See poolorder.GetActivePoolKeyHashesOrdered for the full
+	// rationale, including why "oldest" is keyed on first registration
+	// rather than the most recent one.
+	GetActivePoolKeyHashesOrdered(types.Txn) ([][]byte, error)
 
 	// GetPoolCertificateHistory returns the transaction hashes of a pool's
 	// registration and retirement certificates, in chronological order
@@ -565,6 +594,11 @@ type MetadataStore interface {
 	// misfiring on a legitimately fresh, empty database.
 	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
 
+	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
+	// stake snapshots or authoritative Mark metadata use an older calculation
+	// version. Such snapshots cannot safely be recreated from a pruned database.
+	StaleConsensusStakeSnapshotsExist(types.Txn) (bool, error)
+
 	// GetStakeRegistrationsByCredential retrieves stake registration certificates
 	// using the full credential identity: credential tag plus 28-byte hash.
 	GetStakeRegistrationsByCredential(
@@ -659,6 +693,15 @@ type MetadataStore interface {
 		endSlot uint64,
 		txn types.Txn,
 	) ([]byte, error)
+
+	// GetLatestBlockNonce returns the block_nonce row with the highest slot.
+	// block_nonce is written in the same metadata transaction as a block's
+	// UTxO/certificate effects and the ledger tip, so the maximum slot is the
+	// authoritative high-water mark of durably applied ledger state. The bool
+	// is false (with a zero row and nil error) when the table is empty.
+	GetLatestBlockNonce(
+		txn types.Txn,
+	) (models.BlockNonce, bool, error)
 
 	// GetDatum retrieves a datum by its hash, returning nil if not found.
 	GetDatum(

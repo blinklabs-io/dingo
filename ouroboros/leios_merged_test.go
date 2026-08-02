@@ -893,3 +893,79 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
 }
+
+// TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs reproduces the
+// field failure where a producer repeatedly logged "certified Leios endorser
+// block unavailable" for an endorser block whose transactions had already been
+// fetched in full, minutes earlier, several times over.
+//
+// The relay offers every endorser block on every connection, so a
+// manifest-only store (txsRaw nil, from the MsgBlockOffer handler) routinely
+// lands AFTER the transactions have been fetched by some other connection.
+// Replacing the cache entry then drops the transaction set, making a complete
+// endorser block report itself unavailable again.
+func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 2636557, 2)
+	txsRaw := []cbor.RawMessage{
+		mustCbor(t, "tx0"),
+		mustCbor(t, "tx1"),
+	}
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+
+	// One connection delivers the manifest, another completes the txs.
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
+	_, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, txsRaw, gotTxs)
+
+	// Every remaining connection's redundant manifest fetch must leave the
+	// completed transaction set intact.
+	for range 3 {
+		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+		data, found := o.lookupLeiosEndorserBlock(point.Hash)
+		require.True(t, found)
+		require.True(
+			t,
+			data.completeTxCache(),
+			"redundant manifest store dropped the cached endorser transactions",
+		)
+	}
+
+	slot, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, point.Slot, slot)
+	require.Equal(t, txsRaw, gotTxs)
+
+	// The leios-fetch serving path must keep answering downstream peers too.
+	txsResp, err := o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	txsMsg, ok := txsResp.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Equal(t, txsRaw, txsMsg.TxsRaw)
+}
+
+// TestStoreLeiosEndorserBlockKeepsLargerTxSet guards the general invariant:
+// a store never shrinks a cached endorser block's transaction set, whichever
+// caller supplies the smaller one.
+func TestStoreLeiosEndorserBlockKeepsLargerTxSet(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 4242, 3)
+	full := []cbor.RawMessage{
+		mustCbor(t, "tx0"),
+		mustCbor(t, "tx1"),
+		mustCbor(t, "tx2"),
+	}
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full[:1]))
+
+	_, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, full, gotTxs)
+}

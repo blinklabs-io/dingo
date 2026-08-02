@@ -61,6 +61,11 @@ type BlockfrostNode interface {
 	// extended details.
 	PoolsExtended() ([]PoolExtendedInfo, error)
 
+	// PoolsList returns the paginated list of registered (active,
+	// non-retired) stake pool IDs, along with the total number of
+	// matching results before pagination.
+	PoolsList(PaginationParams) ([]string, int, error)
+
 	// Address returns summary information for an address,
 	// including balances aggregated across its live UTxOs.
 	Address(address string) (AddressInfo, error)
@@ -425,26 +430,38 @@ type OffchainFetchErrorInfo struct {
 	Message string
 }
 
-// PoolExtendedInfo holds pool data needed by the
-// /pools/extended endpoint.
+// PoolExtendedInfo holds pool data needed by the /pools/extended endpoint,
+// following the Blockfrost OpenAPI 0.1.90 pool_list_extended schema.
+// Neither vrf_key nor relays is part of that schema (vrf_key belongs to the
+// pool-detail schema instead; see PoolDetailInfo), so this type omits both.
 type PoolExtendedInfo struct {
 	PoolID         string
 	Hex            string
-	VrfKey         string
 	ActiveStake    string
 	LiveStake      string
+	BlocksMinted   uint64
+	LiveSaturation float64
 	DeclaredPledge string
-	FixedCost      string
 	MarginCost     float64
-	Relays         []PoolRelayInfo
+	FixedCost      string
+	Metadata       *PoolExtendedMetadataInfo
 }
 
-// PoolRelayInfo holds relay data for pool responses.
-type PoolRelayInfo struct {
-	IPv4 string
-	IPv6 string
-	DNS  string
-	Port *int
+// PoolExtendedMetadataInfo holds the nullable metadata object nested in
+// pool_list_extended: the on-chain anchor (URL/hash) plus the off-chain
+// document fields when fetched and validated, or Error when the fetch or
+// validation failed. A nil *PoolExtendedMetadataInfo means the pool has no
+// registered metadata anchor at all (metadata: null); this mirrors
+// PoolMetadataInfo's fields but omits PoolID/Hex, which pool_list_extended
+// carries at the parent object level instead of inside metadata.
+type PoolExtendedMetadataInfo struct {
+	URL         *string
+	Hash        *string
+	Ticker      *string
+	Name        *string
+	Description *string
+	Homepage    *string
+	Error       *OffchainFetchErrorInfo
 }
 
 // PoolDetailInfo holds pool data needed by the /pools/{pool_id} endpoint,

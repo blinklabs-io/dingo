@@ -19,7 +19,14 @@ import (
 // text-encoded amount column) that the sqlite tests cannot.
 func TestGetStakeByPoolsAtSlotAggregatesFallbackAccountsPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	poolA := bytes.Repeat([]byte{0xA1}, 28)
@@ -74,7 +81,14 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccountsPostgres(t *testing.T) {
 // stake query casts the text-encoded amount to BIGINT before SUM.
 func TestGetStakeByPoolsAggregatesTextAmountsPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	pool := bytes.Repeat([]byte{0xC1}, 28)
@@ -128,7 +142,14 @@ func TestGetStakeByPoolsAggregatesTextAmountsPostgres(t *testing.T) {
 // yields non-zero stake.
 func TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	poolA := bytes.Repeat([]byte{0xA2}, 28)
@@ -181,7 +202,14 @@ func TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres(t *testing.T) {
 // catching backend-specific regressions the sqlite test cannot.
 func TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
+	// Registered via t.Cleanup (not a plain defer) and ahead of the data
+	// cleanup below so LIFO ordering runs the data cleanup BEFORE the
+	// connection closes: t.Cleanup callbacks run after every plain defer
+	// in this function body has already executed, so a plain
+	// "defer store.Close()" here would close the connection before any
+	// later-registered t.Cleanup data cleanup runs against it (see
+	// dingo #3025).
+	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 
 	pool := bytes.Repeat([]byte{0xD5}, 28)

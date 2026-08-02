@@ -37,20 +37,22 @@ type fileState struct {
 // Analyzer reads node log files, parses events, and reports Antithesis
 // assertions on each check interval.
 type Analyzer struct {
-	cfg       *Config
-	metrics   *Metrics
-	files     map[string]*fileState // keyed by file path
-	logger    *slog.Logger
-	setupDone bool
+	cfg           *Config
+	metrics       *Metrics
+	files         map[string]*fileState // keyed by file path
+	logger        *slog.Logger
+	setupDone     bool
+	setupComplete func()
 }
 
 // NewAnalyzer creates an Analyzer with the given config and a fresh Metrics.
 func NewAnalyzer(cfg *Config, logger *slog.Logger) *Analyzer {
 	return &Analyzer{
-		cfg:     cfg,
-		metrics: NewMetrics(),
-		files:   make(map[string]*fileState),
-		logger:  logger,
+		cfg:           cfg,
+		metrics:       NewMetrics(),
+		files:         make(map[string]*fileState),
+		logger:        logger,
+		setupComplete: SetupComplete,
 	}
 }
 
@@ -75,6 +77,10 @@ func (a *Analyzer) Run(ctx context.Context) error {
 	case <-waitTimer.C:
 	}
 
+	// Signal readiness independently of observed workload. A test run can
+	// legitimately have no forged blocks yet, but Antithesis still needs this
+	// lifecycle event before it will begin fault injection.
+	a.signalSetupComplete()
 	a.logger.Info("initial wait complete; beginning analysis loop")
 
 	ticker := time.NewTicker(a.cfg.CheckInterval)
@@ -95,14 +101,19 @@ func (a *Analyzer) Run(ctx context.Context) error {
 func (a *Analyzer) check() {
 	a.readNewLines()
 	snap := a.metrics.Snapshot()
-	if !a.setupDone && snap.TotalBlocksForged > 0 {
-		SetupComplete()
-		a.logger.Info("setup complete signaled")
-		a.setupDone = true
-	}
 	a.reportSafetyAssertions(&snap)
 	a.reportLivenessAssertions(&snap)
 	a.reportReachable(&snap)
+}
+
+// signalSetupComplete emits the Antithesis readiness event once per analyzer.
+func (a *Analyzer) signalSetupComplete() {
+	if a.setupDone {
+		return
+	}
+	a.setupComplete()
+	a.logger.Info("setup complete signaled")
+	a.setupDone = true
 }
 
 // readNewLines discovers log files matching p*.log and txpump.log in

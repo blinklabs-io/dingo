@@ -1657,12 +1657,13 @@ func ActivePoolDistributionSnapshots(
 			continue
 		}
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     models.PoolStakeSnapshotTypeActive,
-			PoolKeyHash:      slices.Clone(pool.PoolKeyHash),
-			TotalStake:       types.Uint64(pool.StakeNumerator),
-			StakeDenominator: types.Uint64(pool.StakeDenominator),
-			CapturedSlot:     capturedSlot,
+			Epoch:              epoch,
+			SnapshotType:       models.PoolStakeSnapshotTypeActive,
+			PoolKeyHash:        slices.Clone(pool.PoolKeyHash),
+			TotalStake:         types.Uint64(pool.StakeNumerator),
+			StakeDenominator:   types.Uint64(pool.StakeDenominator),
+			CapturedSlot:       capturedSlot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
 	return snapshots

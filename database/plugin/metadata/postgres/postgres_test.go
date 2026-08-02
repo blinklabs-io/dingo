@@ -657,7 +657,11 @@ func TestPostgresSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 // the database constraint alone cannot reject these two replay rows.
 func TestPostgresConcurrentWithdrawalReplayAtDifferentSlots(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
+	// t.Cleanup, not a plain defer: a plain "defer store.Close()" here would
+	// run before the "blocker" transaction's t.Cleanup rollback below (see
+	// dingo #3025). TestMysqlConcurrentWithdrawalReplayAtDifferentSlots
+	// (mysql/reward_live_stake_test.go) already uses this ordering.
+	t.Cleanup(func() { _ = store.Close() })
 
 	stakeKey := bytes.Repeat([]byte{0xE3}, lcommon.AddressHashSize)
 	txHash := bytes.Repeat([]byte{0x73}, 32)

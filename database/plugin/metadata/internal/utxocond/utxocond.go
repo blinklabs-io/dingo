@@ -31,7 +31,10 @@
 // the prepared-statement cache can reuse them.
 package utxocond
 
-import "strings"
+import (
+	"math/bits"
+	"strings"
+)
 
 // Ref is a (tx_id, output_idx) UTxO reference.
 type Ref struct {
@@ -43,8 +46,9 @@ type Ref struct {
 type Chunk struct {
 	// Condition is the parenthesized OR-list, e.g.
 	// "(tx_id = ? AND output_idx = ?) OR (tx_id = ? AND output_idx = ?)".
-	// Its placeholder count is padded to a power of two, so only a handful
-	// of distinct Condition strings are ever produced.
+	// Its term count is always a power of two and never exceeds the maxTerms
+	// passed to Chunks, so only a handful of distinct Condition strings are
+	// ever produced.
 	Condition string
 	// Args holds TxID, Idx pairs for every term including padding, in order:
 	// len(Args) == 2 * (padded term count).
@@ -64,12 +68,18 @@ const DefaultMaxTerms = 256
 
 const term = "(tx_id = ? AND output_idx = ?)"
 
-// Chunks splits refs into chunks of at most maxTerms terms and pads each chunk's
-// term count up to the next power of two (repeating the chunk's last ref). It
-// returns nil for an empty input. maxTerms values below 1 fall back to
-// DefaultMaxTerms; a maxTerms that is not a power of two is used as-is for the
-// split boundary, but padded chunk lengths are still powers of two capped at
-// maxTerms.
+// Chunks splits refs into chunks and pads each chunk's term count up to the
+// next power of two (repeating the chunk's last ref). It returns nil for an
+// empty input.
+//
+// maxTerms is an upper bound on the padded term count, and so on the bound
+// parameter count (two per term) of the statements callers build from a Chunk.
+// Every padded term count is a power of two and must not exceed maxTerms, so
+// the effective bound is maxTerms rounded down to a power of two: rounding down
+// (never up) is what keeps the parameter count inside the caller's limit. The
+// split boundary uses that same rounded value, so a chunk is never larger than
+// the term count it is padded to. maxTerms values below 1 fall back to
+// DefaultMaxTerms, which is already a power of two.
 func Chunks(refs []Ref, maxTerms int) []Chunk {
 	if len(refs) == 0 {
 		return nil
@@ -77,6 +87,10 @@ func Chunks(refs []Ref, maxTerms int) []Chunk {
 	if maxTerms < 1 {
 		maxTerms = DefaultMaxTerms
 	}
+	// Round the caller's bound down to a power of two so that padded term
+	// counts are always powers of two (bounding the number of distinct SQL
+	// shapes) and always <= maxTerms (respecting driver parameter limits).
+	maxTerms = floorPow2(maxTerms)
 	var chunks []Chunk
 	for start := 0; start < len(refs); start += maxTerms {
 		end := min(start+maxTerms, len(refs))
@@ -116,7 +130,9 @@ func condition(n int) string {
 }
 
 // nextPow2Capped returns the smallest power of two >= n, capped at limit. n is
-// assumed to be in [1, limit].
+// assumed to be in [1, limit] and limit is assumed to be a power of two (Chunks
+// guarantees both), so the result is always a power of two and never exceeds
+// limit. The cap is defensive: it cannot trigger while those preconditions hold.
 func nextPow2Capped(n, limit int) int {
 	p := 1
 	for p < n {
@@ -126,4 +142,9 @@ func nextPow2Capped(n, limit int) int {
 		return limit
 	}
 	return p
+}
+
+// floorPow2 returns the largest power of two <= n. n is assumed to be >= 1.
+func floorPow2(n int) int {
+	return 1 << (bits.Len(uint(n)) - 1)
 }

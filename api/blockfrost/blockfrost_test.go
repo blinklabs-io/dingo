@@ -67,6 +67,9 @@ type mockNode struct {
 	networkEras                   []NetworkEraInfo
 	genesis                       GenesisInfo
 	pools                         []PoolExtendedInfo
+	poolsList                     []string
+	poolsListTotal                int
+	poolsListParams               PaginationParams
 	poolsRetiring                 []PoolRetiringInfo
 	poolsRetiringTotal            int
 	poolMetadata                  PoolMetadataInfo
@@ -126,6 +129,7 @@ type mockNode struct {
 	networkErasErr                error
 	genesisErr                    error
 	poolsErr                      error
+	poolsListErr                  error
 	poolsRetiringErr              error
 	poolMetadataErr               error
 	assetErr                      error
@@ -225,6 +229,13 @@ func (m *mockNode) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
 	return m.pools, m.poolsErr
+}
+
+func (m *mockNode) PoolsList(
+	params PaginationParams,
+) ([]string, int, error) {
+	m.poolsListParams = params
+	return m.poolsList, m.poolsListTotal, m.poolsListErr
 }
 
 func (m *mockNode) PoolsRetiring(
@@ -643,10 +654,12 @@ func TestRouterUnimplementedRouteReturns404(t *testing.T) {
 	b := newTestBlockfrost(mock)
 	handler := b.handler()
 
+	// "/api/v0/pools" used to belong here as an unimplemented route. It is
+	// now registered (dingo #3011), so it no longer falls through to the
+	// catch-all. The remaining entries still cover that path.
 	paths := []string{
 		"/api/v0/",
 		"/api/v0/scripts",
-		"/api/v0/pools",
 		"/does-not-exist",
 	}
 	for _, path := range paths {
@@ -1381,18 +1394,70 @@ func TestHandleDRepsInvalidParams(t *testing.T) {
 	}
 	b := newTestBlockfrost(&mockNode{})
 	for _, tc := range cases {
-		req := httptest.NewRequest(
-			http.MethodGet,
-			"/api/v0/governance/dreps?"+tc.query,
-			nil,
-		)
-		w := httptest.NewRecorder()
-		b.handleDReps(w, req)
+		t.Run(tc.query, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v0/governance/dreps?"+tc.query,
+				nil,
+			)
+			w := httptest.NewRecorder()
+			b.handleDReps(w, req)
 
-		assert.Equal(t, http.StatusBadRequest, w.Code, tc.query)
-		var resp ErrorResponse
-		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), tc.query)
-		assert.Equal(t, tc.message, resp.Message, tc.query)
+			assert.Equal(t, http.StatusBadRequest, w.Code, tc.query)
+			var resp ErrorResponse
+			require.NoError(
+				t,
+				json.NewDecoder(w.Body).Decode(&resp),
+				tc.query,
+			)
+			assert.Equal(t, tc.message, resp.Message, tc.query)
+		})
+	}
+}
+
+// TestNodeAdapterDRepsEpochForSlot pins the slot-to-epoch resolution behind a
+// DRep's registration epoch, which is the reported last-active epoch when the
+// DRep has no recorded activity: the epoch is the latest one whose start slot
+// is at or before the registration slot, and a slot equal to a start slot
+// belongs to the epoch it starts.
+func TestNodeAdapterDRepsEpochForSlot(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	for _, epoch := range []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 100},
+		{EpochId: 1, StartSlot: 100, LengthInSlots: 100},
+		{EpochId: 2, StartSlot: 200, LengthInSlots: 100},
+	} {
+		require.NoError(t, store.DB().Create(&epoch).Error)
+	}
+
+	// LastActivityEpoch 0 makes the reported last-active epoch fall back
+	// to the registration epoch derived from added_slot.
+	for _, drep := range []models.Drep{
+		{Credential: bytes.Repeat([]byte{0x01}, 28), AddedSlot: 150, Active: true},
+		{Credential: bytes.Repeat([]byte{0x02}, 28), AddedSlot: 200, Active: true},
+		{Credential: bytes.Repeat([]byte{0x03}, 28), AddedSlot: 250, Active: true},
+	} {
+		require.NoError(t, store.DB().Create(&drep).Error)
+	}
+
+	items, total, err := adapter.DReps(DRepListParams{
+		Pagination: PaginationParams{
+			Count: 100,
+			Page:  1,
+			Order: PaginationOrderAsc,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, items, 3)
+	// Rows are ordered by first on-chain appearance: slots 150, 200, 250.
+	wantEpochs := []uint64{1, 2, 2}
+	for i, item := range items {
+		require.NotNil(t, item.LastActiveEpoch, i)
+		assert.Equal(t, wantEpochs[i], *item.LastActiveEpoch, i)
+		assert.False(t, item.Retired, i)
+		assert.False(t, item.Expired, i)
 	}
 }
 
@@ -1571,38 +1636,34 @@ func TestHandlePoolsExtended(t *testing.T) {
 			{
 				PoolID:         "pool1zzz",
 				Hex:            "ff",
-				VrfKey:         "vrf2",
 				ActiveStake:    "200",
 				LiveStake:      "300",
+				BlocksMinted:   7,
+				LiveSaturation: 0.8,
 				DeclaredPledge: "400",
 				FixedCost:      "500",
 				MarginCost:     0.2,
-				Relays: []PoolRelayInfo{
-					{
-						IPv4: "192.168.0.1",
-						DNS:  "relay-two.example",
-						Port: new(3002),
-					},
-				},
+				// No registered metadata anchor: pool_list_extended
+				// requires the metadata key to be present as null.
+				Metadata: nil,
 			},
 			{
 				PoolID:         "pool1aaa",
 				Hex:            "01",
-				VrfKey:         "vrf1",
 				ActiveStake:    "20",
 				LiveStake:      "30",
+				BlocksMinted:   69,
+				LiveSaturation: 0.93,
 				DeclaredPledge: "40",
 				FixedCost:      "50",
 				MarginCost:     0.1,
-				Relays: []PoolRelayInfo{
-					{
-						IPv6: "2001:db8::1",
-						DNS:  "relay-one.example",
-						Port: new(3001),
-					},
-					{
-						DNS: "relay-no-port.example",
-					},
+				Metadata: &PoolExtendedMetadataInfo{
+					URL:         new("https://stakenuts.com/mainnet.json"),
+					Hash:        new("47c0c68c"),
+					Ticker:      new("NUTS"),
+					Name:        new("Stake Nuts"),
+					Description: new("The best pool ever"),
+					Homepage:    new("https://stakentus.com/"),
 				},
 			},
 		},
@@ -1629,29 +1690,53 @@ func TestHandlePoolsExtended(t *testing.T) {
 		w.Header().Get("X-Pagination-Page-Total"),
 	)
 
+	// Capture the body before decoding: the raw-JSON assertions at the end
+	// of this test need it, and a json.Decoder over w.Body would drain it.
+	body := w.Body.Bytes()
+
 	var resp []PoolExtendedResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
+	err := json.Unmarshal(body, &resp)
 	require.NoError(t, err)
 	require.Len(t, resp, 1)
 	assert.Equal(t, "pool1aaa", resp[0].PoolID)
 	assert.Equal(t, "01", resp[0].Hex)
-	assert.Equal(t, "vrf1", resp[0].VrfKey)
 	assert.Equal(t, "20", resp[0].ActiveStake)
 	assert.Equal(t, "30", resp[0].LiveStake)
+	assert.Equal(t, uint64(69), resp[0].BlocksMinted)
+	assert.InDelta(t, 0.93, resp[0].LiveSaturation, 0.0001)
 	assert.Equal(t, "40", resp[0].DeclaredPledge)
 	assert.Equal(t, "50", resp[0].FixedCost)
 	assert.InDelta(t, 0.1, resp[0].MarginCost, 0.0001)
-	require.Len(t, resp[0].Relays, 2)
-	assert.Nil(t, resp[0].Relays[0].IPv4)
-	require.NotNil(t, resp[0].Relays[0].IPv6)
-	assert.Equal(t, "2001:db8::1", *resp[0].Relays[0].IPv6)
-	require.NotNil(t, resp[0].Relays[0].DNS)
-	assert.Equal(t, "relay-one.example", *resp[0].Relays[0].DNS)
-	require.NotNil(t, resp[0].Relays[0].Port)
-	assert.Equal(t, 3001, *resp[0].Relays[0].Port)
-	require.NotNil(t, resp[0].Relays[1].DNS)
-	assert.Equal(t, "relay-no-port.example", *resp[0].Relays[1].DNS)
-	assert.Nil(t, resp[0].Relays[1].Port)
+	// pool_list_extended requires metadata; a registered anchor with a
+	// successfully fetched document populates all six nullable fields
+	// and carries no error object.
+	require.NotNil(t, resp[0].Metadata)
+	require.NotNil(t, resp[0].Metadata.URL)
+	assert.Equal(
+		t,
+		"https://stakenuts.com/mainnet.json",
+		*resp[0].Metadata.URL,
+	)
+	require.NotNil(t, resp[0].Metadata.Hash)
+	assert.Equal(t, "47c0c68c", *resp[0].Metadata.Hash)
+	require.NotNil(t, resp[0].Metadata.Ticker)
+	assert.Equal(t, "NUTS", *resp[0].Metadata.Ticker)
+	require.NotNil(t, resp[0].Metadata.Name)
+	assert.Equal(t, "Stake Nuts", *resp[0].Metadata.Name)
+	require.NotNil(t, resp[0].Metadata.Description)
+	assert.Equal(t, "The best pool ever", *resp[0].Metadata.Description)
+	require.NotNil(t, resp[0].Metadata.Homepage)
+	assert.Equal(t, "https://stakentus.com/", *resp[0].Metadata.Homepage)
+	assert.Nil(t, resp[0].Metadata.Error)
+
+	// vrf_key and relays are not part of pool_list_extended and must not
+	// be emitted. Assert on the raw JSON, since the typed struct can no
+	// longer express them.
+	var raw []map[string]any
+	require.NoError(t, json.Unmarshal(body, &raw))
+	require.Len(t, raw, 1)
+	assert.NotContains(t, raw[0], "vrf_key")
+	assert.NotContains(t, raw[0], "relays")
 }
 
 func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
@@ -2983,45 +3068,161 @@ func TestDefaultListenAddress(t *testing.T) {
 }
 
 func TestParseAddressOrPaymentCred(t *testing.T) {
-	// CIP-5 payment key hash credential
-	addr, isPaymentCred, err := parseAddressOrPaymentCred(
-		"addr_vkh1x0ph3nhyrvhpttyy3alk78f00q244vfdjwm38h5f3kz47kpgum5",
-	)
+	cases := []struct {
+		name  string
+		input string
+		// wantType is asserted when non-nil.
+		wantType *uint8
+		// wantStakeAddress is asserted when non-empty.
+		wantStakeAddress string
+		wantPaymentCred  bool
+		// wantNilStakeAddress asserts StakeAddress() is nil.
+		wantNilStakeAddress bool
+		wantErr             bool
+	}{
+		{
+			name:                "CIP-5 payment key hash credential",
+			input:               "addr_vkh1x0ph3nhyrvhpttyy3alk78f00q244vfdjwm38h5f3kz47kpgum5",
+			wantPaymentCred:     true,
+			wantType:            new(uint8(lcommon.AddressTypeKeyNone)),
+			wantNilStakeAddress: true,
+		},
+		{
+			name:            "CIP-5 script hash credential",
+			input:           "script1tx3c5y302fupjrm0xs3skumkaw97h2le97rjgrfzw8spydzr5ej",
+			wantPaymentCred: true,
+			wantType:        new(uint8(lcommon.AddressTypeScriptNone)),
+		},
+		{
+			// Full base address still parses through the normal path.
+			name:             "full base address",
+			input:            "addr_test1qprwyxzmswhtjstxvj7epjc28gskffsqcxuurx80qrjdy3uayerntq74us2hsgxymgk3f5nka58z46zcqgctv9c05ctq8g0qn7",
+			wantPaymentCred:  false,
+			wantStakeAddress: "stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
+		},
+		{
+			// Garbage input fails despite decoding as base58 bytes.
+			name:    "garbage input",
+			input:   "addr1stonks",
+			wantErr: true,
+		},
+		{
+			// Stake addresses have no payment part and are rejected.
+			name:    "stake address has no payment part",
+			input:   "stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, isPaymentCred, err := parseAddressOrPaymentCred(
+				tc.input,
+			)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPaymentCred, isPaymentCred)
+			if tc.wantType != nil {
+				assert.Equal(t, *tc.wantType, addr.Type())
+			}
+			if tc.wantNilStakeAddress {
+				assert.Nil(t, addr.StakeAddress())
+			}
+			if tc.wantStakeAddress != "" {
+				require.NotNil(t, addr.StakeAddress())
+				assert.Equal(
+					t,
+					tc.wantStakeAddress,
+					addr.StakeAddress().String(),
+				)
+			}
+		})
+	}
+}
+
+// TestNodeAdapterAddressRejectsInvalidInput covers NodeAdapter.Address's
+// rejection paths: the network guard (queries match on bare credential hashes,
+// so a foreign-network address must not answer with this network's balances)
+// and the parse-failure path, which must keep ErrInvalidAddress for the HTTP
+// 400 mapping while retaining the underlying parse diagnostics.
+func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
+	adapter, _, _ := newDBBackedAdapter(t)
+	paymentKey := bytes.Repeat([]byte{0x11}, lcommon.AddressHashSize)
+
+	t.Run("foreign network", func(t *testing.T) {
+		// newDBBackedAdapter supplies no CardanoNodeConfig, so the
+		// adapter's network is testnet; a mainnet-encoded address is
+		// foreign to it.
+		mainnetAddr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkMainnet,
+			paymentKey,
+			nil,
+		)
+		require.NoError(t, err)
+
+		_, err = adapter.Address(mainnetAddr.String())
+		require.ErrorIs(t, err, ErrInvalidAddress)
+		assert.ErrorContains(t, err, "network mismatch")
+	})
+
+	t.Run("parse failure keeps diagnostics", func(t *testing.T) {
+		_, err := adapter.Address("addr1stonks")
+		require.ErrorIs(t, err, ErrInvalidAddress)
+		assert.ErrorContains(t, err, "does not round-trip")
+	})
+
+	t.Run("this network resolves to not found", func(t *testing.T) {
+		// The same credential encoded for this network passes both
+		// guards and reaches the lookup.
+		testnetAddr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			paymentKey,
+			nil,
+		)
+		require.NoError(t, err)
+		_, err = adapter.Address(testnetAddr.String())
+		require.ErrorIs(t, err, ErrAddressNotFound)
+	})
+}
+
+// TestNodeAdapterAddressPaymentCredTransactionFallback covers the
+// CountTransactionsByPaymentCred fallback: a bare payment credential whose
+// UTxOs are all spent must still resolve with a zero balance, because the
+// synthetic enterprise address alone would not match base-address history.
+func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+	credID, err := bech32EncodeData("addr_vkh", paymentKey)
 	require.NoError(t, err)
-	assert.True(t, isPaymentCred)
-	assert.Equal(t, uint8(lcommon.AddressTypeKeyNone), addr.Type())
-	assert.Nil(t, addr.StakeAddress())
 
-	// CIP-5 script hash credential
-	addr, isPaymentCred, err = parseAddressOrPaymentCred(
-		"script1tx3c5y302fupjrm0xs3skumkaw97h2le97rjgrfzw8spydzr5ej",
-	)
+	// No UTxOs and no transaction history: the credential is unknown.
+	_, err = adapter.Address(credID)
+	require.ErrorIs(t, err, ErrAddressNotFound)
+
+	// Spent history recorded against the payment credential (via a base
+	// address, so the synthetic enterprise form never matches) resolves
+	// with a zero lovelace balance.
+	require.NoError(t, store.DB().Create(&models.AddressTransaction{
+		PaymentKey:    paymentKey,
+		StakingKey:    bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		TransactionID: 1,
+		Slot:          10,
+	}).Error)
+
+	info, err := adapter.Address(credID)
 	require.NoError(t, err)
-	assert.True(t, isPaymentCred)
-	assert.Equal(t, uint8(lcommon.AddressTypeScriptNone), addr.Type())
-
-	// Full base address still parses through the normal path
-	addr, isPaymentCred, err = parseAddressOrPaymentCred(
-		"addr_test1qprwyxzmswhtjstxvj7epjc28gskffsqcxuurx80qrjdy3uayerntq74us2hsgxymgk3f5nka58z46zcqgctv9c05ctq8g0qn7",
-	)
-	require.NoError(t, err)
-	assert.False(t, isPaymentCred)
-	require.NotNil(t, addr.StakeAddress())
-	assert.Equal(
-		t,
-		"stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
-		addr.StakeAddress().String(),
-	)
-
-	// Garbage input fails despite decoding as base58 bytes
-	_, _, err = parseAddressOrPaymentCred("addr1stonks")
-	require.Error(t, err)
-
-	// Stake addresses have no payment part and are rejected
-	_, _, err = parseAddressOrPaymentCred(
-		"stake_test1uzwjv3e4s027g9tcyrzd5tg56fmw6r32apvqyv9kzu86v9sqrx6ye",
-	)
-	require.Error(t, err)
+	assert.Equal(t, credID, info.Address)
+	require.Len(t, info.Amount, 1)
+	assert.Equal(t, "lovelace", info.Amount[0].Unit)
+	assert.Equal(t, "0", info.Amount[0].Quantity)
+	assert.Equal(t, "shelley", info.Type)
+	assert.False(t, info.Script)
+	assert.Nil(t, info.StakeAddress)
 }
 
 func TestKeyScriptStakeAddressDerivation(t *testing.T) {

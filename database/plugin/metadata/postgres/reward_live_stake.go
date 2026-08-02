@@ -297,3 +297,13 @@ func (d *MetadataStorePostgres) RewardLiveStakeNeedsBackfill(
 	}
 	return rewardstate.LiveStakeNeedsBackfill(db)
 }
+
+func (d *MetadataStorePostgres) StaleConsensusStakeSnapshotsExist(
+	txn types.Txn,
+) (bool, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return false, fmt.Errorf("check stale stake snapshots: resolve db: %w", err)
+	}
+	return rewardstate.StaleConsensusStakeSnapshotsExist(db)
+}

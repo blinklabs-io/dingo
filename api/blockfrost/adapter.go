@@ -1358,21 +1358,30 @@ func (a *NodeAdapter) DReps(
 		return nil, 0, fmt.Errorf("get dreps: %w", err)
 	}
 
-	// Slot-to-epoch resolution walks the epoch table once instead of
-	// querying per DRep.
+	// Slot-to-epoch resolution reads the epoch table once instead of
+	// querying per DRep. The metadata stores order by epoch_id, which is
+	// monotonic with start_slot, but sorting locally makes the binary
+	// search below independent of store ordering. The sort is stable so
+	// epochs sharing a start slot keep their query order, matching the
+	// previous linear scan's choice of the last such row.
 	epochs, err := meta.GetEpochs(txn.Metadata())
 	if err != nil {
 		return nil, 0, fmt.Errorf("get epochs: %w", err)
 	}
+	sort.SliceStable(epochs, func(i, j int) bool {
+		return epochs[i].StartSlot < epochs[j].StartSlot
+	})
 	epochForSlot := func(slot uint64) uint64 {
-		id := uint64(0)
-		for i := range epochs {
-			if epochs[i].StartSlot > slot {
-				break
-			}
-			id = epochs[i].EpochId
+		// Index of the first epoch starting after slot; the epoch
+		// containing slot is the one before it. Slots before the first
+		// recorded epoch resolve to 0, as they did before.
+		next := sort.Search(len(epochs), func(i int) bool {
+			return epochs[i].StartSlot > slot
+		})
+		if next == 0 {
+			return 0
 		}
-		return id
+		return epochs[next-1].EpochId
 	}
 
 	currentEpoch := a.ledgerState.CurrentEpoch()
@@ -1480,27 +1489,32 @@ func (a *NodeAdapter) DReps(
 				Key: items[i].credential,
 			})
 		}
+		// Both lookups declare their own error so the closure never
+		// writes through the enclosing err, which the caller reads on
+		// unrelated paths.
 		powers := map[string]uint64{}
 		if len(refs) > 0 {
-			powers, err = meta.GetDRepVotingPowerBatch(
+			batch, batchErr := meta.GetDRepVotingPowerBatch(
 				refs, 0, txn.Metadata(),
 			)
-			if err != nil {
+			if batchErr != nil {
 				return fmt.Errorf(
-					"get drep voting power batch: %w", err,
+					"get drep voting power batch: %w", batchErr,
 				)
 			}
+			powers = batch
 		}
 		typePowers := map[uint64]uint64{}
 		if len(specialTypes) > 0 {
-			typePowers, err = meta.GetDRepVotingPowerByType(
+			byType, typeErr := meta.GetDRepVotingPowerByType(
 				specialTypes, 0, txn.Metadata(),
 			)
-			if err != nil {
+			if typeErr != nil {
 				return fmt.Errorf(
-					"get predefined drep voting power: %w", err,
+					"get predefined drep voting power: %w", typeErr,
 				)
 			}
+			typePowers = byType
 		}
 		for i := range items {
 			if items[i].predefined != nil {
@@ -1596,7 +1610,8 @@ func (a *NodeAdapter) DReps(
 // drepAnchorMetadata resolves a DRep's anchor document from the
 // off-chain metadata cache. It returns nil when the DRep has no anchor
 // or the document has not been fetched successfully; cache lookup
-// failures degrade to nil rather than failing the listing.
+// failures degrade to nil rather than failing the listing, but are
+// logged so a broken cache is not silently invisible.
 func (a *NodeAdapter) drepAnchorMetadata(
 	anchorURL string,
 	anchorHash []byte,
@@ -1611,7 +1626,17 @@ func (a *NodeAdapter) drepAnchorMetadata(
 		anchorHash,
 		txn,
 	)
-	if err != nil || doc == nil ||
+	if err != nil {
+		slog.Debug(
+			"drep anchor metadata lookup failed",
+			"component", "blockfrost",
+			"url", anchorURL,
+			"hash", hex.EncodeToString(anchorHash),
+			"error", err,
+		)
+		return nil
+	}
+	if doc == nil ||
 		doc.Status != models.OffchainMetadataStatusFetched ||
 		len(doc.Content) == 0 {
 		return nil
@@ -1687,6 +1712,16 @@ func (a *NodeAdapter) liveStake(txn dbtypes.Txn) (uint64, error) {
 // Blockfrost's error object, matching the hosted API's codes and
 // message formats. sourceLabel is the capitalized source name used in
 // the message ("Pool", "Drep").
+//
+// Every current caller passes "Pool" because pool metadata is the only
+// off-chain source whose fetch errors are surfaced through a Blockfrost
+// response so far. The parameter is kept rather than hardcoded because
+// models.OffchainMetadataSource* defines seven other sources (drep,
+// drep_registration, drep_update, gov_proposal, gov_vote, constitution,
+// committee_resign) that share this cache and this error classification,
+// and whose messages differ only by this label.
+//
+//nolint:unparam // sourceLabel is "Pool" for every caller today; see above.
 func offchainFetchError(
 	sourceLabel string,
 	url string,
@@ -1925,6 +1960,11 @@ func (a *NodeAdapter) PoolMetadata(
 	return ret, nil
 }
 
+// PoolsExtended returns the current active pools with the fields required
+// by the Blockfrost OpenAPI 0.1.90 pool_list_extended schema (active/live
+// stake, blocks_minted, live_saturation, margin/pledge/cost, and the
+// nullable off-chain metadata object). Pagination and ordering are applied
+// by the caller (handlePoolsExtended); this returns every active pool.
 func (a *NodeAdapter) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
@@ -1976,6 +2016,30 @@ func (a *NodeAdapter) PoolsExtended() (
 		activeStakeByPool[hex.EncodeToString(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
 
+	// live_saturation is a required, non-nullable float in the OpenAPI
+	// schema (0.0 is itself a legitimate saturation value), so there is
+	// no schema-compatible placeholder for "protocol parameters
+	// unavailable"; propagate the error instead of guessing, matching
+	// PoolDetail (adapter_pool_detail.go).
+	protocolParams, err := a.CurrentProtocolParams()
+	if err != nil {
+		return nil, fmt.Errorf("get protocol parameters: %w", err)
+	}
+	totalActiveStake, err := db.Metadata().GetTotalActiveStake(
+		activeStakeEpoch, "mark", txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get total active stake: %w", err)
+	}
+	// live_saturation's denominator is the per-pool saturation threshold
+	// totalCirculation/nOpt, not total active stake. See
+	// poolSizeSaturation's doc comment and ledger/rewards.
+	// Resolved once for the whole page rather than per pool.
+	totalCirculation, err := a.totalCirculation(txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get total circulation: %w", err)
+	}
+
 	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolKeyHash))
@@ -1990,6 +2054,45 @@ func (a *NodeAdapter) PoolsExtended() (
 		poolsByHash[string(pool.PoolKeyHash)] = pool
 	}
 
+	// blocks_minted (lifetime): one query across every active pool,
+	// keyed by pool, exactly like CountPoolBlocksInSlotRange is already
+	// used for pool detail (adapter_pool_detail.go) -- not a per-pool
+	// query. Undercounts on a Mithril-bootstrapped node; see DATABASE.md.
+	blocksMintedByPool, _, err := db.Metadata().CountPoolBlocksInSlotRange(
+		poolHashes, 0, noSlotUpperBound, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("count lifetime blocks for pools: %w", err)
+	}
+
+	// Off-chain metadata: one batched query across every active pool's
+	// registered metadata URL (GetOffchainMetadataBatch), instead of one
+	// GetOffchainMetadata call per pool.
+	metadataURLs := make([]string, 0, len(pools))
+	for i := range pools {
+		if len(pools[i].Registration) > 0 &&
+			pools[i].Registration[0].MetadataUrl != "" {
+			metadataURLs = append(
+				metadataURLs, pools[i].Registration[0].MetadataUrl,
+			)
+		}
+	}
+	metadataDocs, err := db.Metadata().GetOffchainMetadataBatch(
+		models.OffchainMetadataSourcePool, metadataURLs, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get off-chain metadata for pools: %w", err)
+	}
+	metadataDocsByKey := make(
+		map[string]*models.OffchainMetadata, len(metadataDocs),
+	)
+	for i := range metadataDocs {
+		key := poolExtendedMetadataKey(
+			metadataDocs[i].URL, metadataDocs[i].Hash,
+		)
+		metadataDocsByKey[key] = &metadataDocs[i]
+	}
+
 	ret := make([]PoolExtendedInfo, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		pool, ok := poolsByHash[string(poolKeyHash)]
@@ -1999,47 +2102,50 @@ func (a *NodeAdapter) PoolsExtended() (
 		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pool.PoolKeyHash))
 		poolHex := hex.EncodeToString(pool.PoolKeyHash)
 
-		latestRelays := pool.Relays
-		if len(pool.Registration) > 0 {
-			latestRelays = pool.Registration[0].Relays
-		}
-
-		relays := make([]PoolRelayInfo, 0, len(latestRelays))
-		for _, relay := range latestRelays {
-			tmpRelay := PoolRelayInfo{
-				DNS: relay.Hostname,
-			}
-			if relay.Port != 0 {
-				if relay.Port > uint(math.MaxInt) {
-					return nil, fmt.Errorf("relay port out of range for pool %x", pool.PoolKeyHash)
-				}
-				port := int(relay.Port)
-				tmpRelay.Port = &port
-			}
-			if relay.Ipv4 != nil {
-				tmpRelay.IPv4 = relay.Ipv4.String()
-			}
-			if relay.Ipv6 != nil {
-				tmpRelay.IPv6 = relay.Ipv6.String()
-			}
-			relays = append(relays, tmpRelay)
-		}
-
 		marginCost := 0.0
 		if pool.Margin != nil && pool.Margin.Rat != nil {
 			marginCost, _ = pool.Margin.Float64()
 		}
 
+		liveStake := liveStakeByPool[string(pool.PoolKeyHash)]
+		activeStake := activeStakeByPool[poolHex]
+		// pool_list_extended only needs live_saturation, which
+		// poolSizeSaturation derives from liveStake, totalCirculation
+		// and nOpt; the live-size/active-size outputs (and the
+		// totalLiveStake/totalActiveStake inputs they need) are
+		// pool-detail-only fields, so totalLiveStake is passed as 0
+		// rather than paying for another network-wide live-stake query
+		// just to compute values this endpoint discards.
+		_, _, liveSaturation := poolSizeSaturation(
+			liveStake, activeStake, 0, totalActiveStake,
+			totalCirculation, protocolParams.NOpt,
+		)
+
+		var metadataURL string
+		var metadataHash []byte
+		if len(pool.Registration) > 0 {
+			metadataURL = pool.Registration[0].MetadataUrl
+			metadataHash = pool.Registration[0].MetadataHash
+		}
+		var doc *models.OffchainMetadata
+		if metadataURL != "" {
+			key := poolExtendedMetadataKey(metadataURL, metadataHash)
+			doc = metadataDocsByKey[key]
+		}
+
 		ret = append(ret, PoolExtendedInfo{
 			PoolID:         poolID.String(),
 			Hex:            poolHex,
-			VrfKey:         hex.EncodeToString(pool.VrfKeyHash),
-			ActiveStake:    strconv.FormatUint(activeStakeByPool[poolHex], 10),
-			LiveStake:      strconv.FormatUint(liveStakeByPool[string(pool.PoolKeyHash)], 10),
+			ActiveStake:    strconv.FormatUint(activeStake, 10),
+			LiveStake:      strconv.FormatUint(liveStake, 10),
+			BlocksMinted:   blocksMintedByPool[string(pool.PoolKeyHash)],
+			LiveSaturation: liveSaturation,
 			DeclaredPledge: strconv.FormatUint(uint64(pool.Pledge), 10),
-			FixedCost:      strconv.FormatUint(uint64(pool.Cost), 10),
 			MarginCost:     marginCost,
-			Relays:         relays,
+			FixedCost:      strconv.FormatUint(uint64(pool.Cost), 10),
+			Metadata: buildPoolExtendedMetadata(
+				metadataURL, metadataHash, doc,
+			),
 		})
 	}
 
@@ -2932,10 +3038,14 @@ func (a *NodeAdapter) Address(
 ) (AddressInfo, error) {
 	addr, isPaymentCred, err := parseAddressOrPaymentCred(address)
 	if err != nil {
+		// ErrInvalidAddress drives the HTTP 400 mapping
+		// (errors.Is in the handler); the parse error is kept
+		// alongside it so logs retain the reason.
 		return AddressInfo{}, fmt.Errorf(
-			"parse address %q: %w",
+			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
+			err,
 		)
 	}
 	// Blockfrost rejects addresses encoded for a different network than
@@ -3089,9 +3199,10 @@ func (a *NodeAdapter) AddressUTXOs(
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
-			"parse address %q: %w",
+			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
+			err,
 		)
 	}
 
@@ -3219,9 +3330,10 @@ func (a *NodeAdapter) AddressTransactions(
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
-			"parse address %q: %w",
+			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
+			err,
 		)
 	}
 
