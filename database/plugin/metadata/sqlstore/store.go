@@ -66,7 +66,7 @@ type Store struct {
 	maintenanceEvery  time.Duration
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
-	maintenanceMu     sync.Mutex
+	maintenanceMu     sync.RWMutex
 	ready             atomic.Bool
 	closed            atomic.Bool
 	startMu           sync.Mutex
@@ -270,6 +270,11 @@ func (s *Store) CloseContext(ctx context.Context) error {
 		}
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
+			// Stop admitting callbacks and wait for any callback that already
+			// holds the read side of the gate. Cancellation is issued first so
+			// context-aware maintenance can finish while Close waits.
+			s.maintenanceMu.Lock()
+			s.maintenanceMu.Unlock()
 			select {
 			case <-s.maintenanceDone:
 			case <-ctx.Done():
@@ -312,14 +317,14 @@ func (s *Store) startMaintenance() {
 				// store closed before cancelling this context, so a tick that
 				// races with shutdown is discarded under the same mutex instead
 				// of starting maintenance against closing pools.
-				s.maintenanceMu.Lock()
+				s.maintenanceMu.RLock()
 				if ctx.Err() != nil || s.closed.Load() {
-					s.maintenanceMu.Unlock()
+					s.maintenanceMu.RUnlock()
 					return
 				}
 				started := time.Now()
 				if err := s.maintenance(ctx); err != nil {
-					s.maintenanceMu.Unlock()
+					s.maintenanceMu.RUnlock()
 					if ctx.Err() == nil {
 						s.logger.Error(
 							"metadata database maintenance failed",
@@ -332,7 +337,7 @@ func (s *Store) startMaintenance() {
 					}
 					continue
 				}
-				s.maintenanceMu.Unlock()
+				s.maintenanceMu.RUnlock()
 				s.logger.Debug(
 					"metadata database maintenance complete",
 					"dialect", s.dialect.Name(),
