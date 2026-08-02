@@ -62,7 +62,12 @@ func (q dialectQueryer) QueryRowContext(
 		return q.queryer.QueryRowContext(ctx, q.translate(query), args...)
 	}
 
-	base, doNothing, isUpsert := translateMySQLReturning(query)
+	base, doNothing := translateMySQLReturning(query)
+	// QueryRowContext executes the stripped INSERT directly instead of going
+	// through translate(), so apply identifier quoting here as well.  This is
+	// required for statements touching reserved names such as `transaction`
+	// and `index` when MySQL ANSI_QUOTES is disabled.
+	base = translateMySQLReservedIdentifiers(base)
 	result, err := q.queryer.ExecContext(ctx, base, args...)
 	if err != nil {
 		// QueryRowContext cannot carry an eager error. Return a row whose Scan
@@ -78,13 +83,27 @@ func (q dialectQueryer) QueryRowContext(
 			return q.queryer.QueryRowContext(ctx, "SELECT NULL WHERE FALSE")
 		}
 	}
-	if !isUpsert {
-		lastID, idErr := result.LastInsertId()
-		if idErr == nil && lastID == 0 {
-			return q.queryer.QueryRowContext(ctx, "SELECT NULL WHERE FALSE")
-		}
+	// LastInsertId is returned in the same OK packet as the INSERT/UPDATE.
+	// Reading LAST_INSERT_ID() with a second query is unsafe when queryer is a
+	// *sql.DB: database/sql may route that query to another pooled connection,
+	// whose session state belongs to a different request.  The translated
+	// upsert assigns LAST_INSERT_ID(id) on the server, so the result carries the
+	// existing row ID as well as newly generated IDs.  Return a one-row query
+	// backed by the value already obtained from this execution instead.
+	lastID, idErr := result.LastInsertId()
+	if idErr != nil {
+		return q.queryer.QueryRowContext(
+			ctx,
+			"SELECT * FROM __dingo_sqlstore_query_error__",
+		)
 	}
-	return q.queryer.QueryRowContext(ctx, "SELECT LAST_INSERT_ID()")
+	if lastID == 0 {
+		// A zero ID cannot satisfy the public queryReturnedID contract.  This is
+		// also the safe result for a driver that does not report an ID for an
+		// unusual upsert statement.
+		return q.queryer.QueryRowContext(ctx, "SELECT NULL WHERE FALSE")
+	}
+	return q.queryer.QueryRowContext(ctx, "SELECT ?", lastID)
 }
 
 func (q dialectQueryer) PrepareContext(
@@ -100,7 +119,7 @@ func (q dialectQueryer) translate(query string) string {
 	}
 	if q.dialect == "mysql" {
 		if hasReturningID(query) {
-			query, _, _ = translateMySQLReturning(query)
+			query, _ = translateMySQLReturning(query)
 		}
 		return translateMySQLReservedIdentifiers(translateMySQLUpsert(query))
 	}
@@ -137,12 +156,12 @@ func hasReturningID(query string) bool {
 	return returningIDPattern.MatchString(query)
 }
 
-func translateMySQLReturning(query string) (string, bool, bool) {
+func translateMySQLReturning(query string) (string, bool) {
 	base := strings.TrimSpace(returningIDPattern.ReplaceAllString(query, ""))
 	base = mysqlIntegerCastPattern.ReplaceAllString(base, "AS SIGNED")
 	doNothing := regexp.MustCompile(`(?is)ON\s+CONFLICT(?:\s*\([^)]*\))?\s+DO\s+NOTHING`).MatchString(base)
 	isUpsert := regexp.MustCompile(`(?is)ON\s+CONFLICT(?:\s*\([^)]*\))?\s+DO\s+UPDATE`).MatchString(base)
-	return translateMySQLUpsertWithID(base, isUpsert), doNothing, isUpsert
+	return translateMySQLUpsertWithID(base, isUpsert), doNothing
 }
 
 var (
@@ -155,6 +174,9 @@ var (
 	mysqlExcludedColumnPattern = regexp.MustCompile(
 		`(?i)excluded\.([a-zA-Z_][a-zA-Z0-9_]*)`,
 	)
+	mysqlInsertColumnsPattern = regexp.MustCompile(
+		`(?is)\bINSERT\s+INTO\s+(?:[\w.]+|` + "`[^`]+`" + `|"[^"]+")\s*\(([^)]*)\)`,
+	)
 )
 
 func translateMySQLUpsert(query string) string {
@@ -164,9 +186,13 @@ func translateMySQLUpsert(query string) string {
 
 func translateMySQLUpsertWithID(query string, returning bool) string {
 	if mysqlDoNothingPattern.MatchString(query) {
+		// MySQL has no DO NOTHING form.  Use a no-op assignment on a column
+		// that is actually present in the INSERT list; not every metadata
+		// table has an `id` column (sync_state is the notable example).
+		column := mysqlInsertNoOpColumn(query)
 		return mysqlDoNothingPattern.ReplaceAllString(
 			query,
-			"ON DUPLICATE KEY UPDATE id = id",
+			"ON DUPLICATE KEY UPDATE "+column+" = "+column,
 		)
 	}
 	if !mysqlUpdatePattern.MatchString(query) {
@@ -184,4 +210,19 @@ func translateMySQLUpsertWithID(query string, returning bool) string {
 		translated += ", id = LAST_INSERT_ID(id)"
 	}
 	return translated
+}
+
+func mysqlInsertNoOpColumn(query string) string {
+	match := mysqlInsertColumnsPattern.FindStringSubmatch(query)
+	if len(match) != 2 {
+		// All current INSERT statements provide an explicit column list. Keep a
+		// syntactically valid fallback for future statements that do not; every
+		// metadata table with a duplicate-key path currently has an ID column.
+		return "id"
+	}
+	columns := strings.Split(match[1], ",")
+	if len(columns) == 0 || strings.TrimSpace(columns[0]) == "" {
+		return "id"
+	}
+	return strings.TrimSpace(columns[0])
 }

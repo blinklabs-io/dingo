@@ -296,6 +296,13 @@ SELECT id, referenced_by_tx_id FROM utxo
 WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`); err != nil {
 		return fmt.Errorf("adopt legacy reference inputs: %w", err)
 	}
+	// The GORM provider performed these repairs before AutoMigrate created
+	// v1's unique indexes and cascade foreign keys.  CREATE ... IF NOT EXISTS
+	// cannot repair an existing index or constraint, so keep the compatibility
+	// work in the adoption path while the migration lock is held.
+	if err := ensureSQLiteAdoptionColumns(ctx, conn); err != nil {
+		return err
+	}
 	required := map[string][]string{
 		"transaction": {
 			"id", "hash", "block_hash", "metadata", "slot", "type",
@@ -374,7 +381,71 @@ WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`); err
 			)
 		}
 	}
-	return repairSQLiteV1Indexes(ctx, conn)
+	if err := repairSQLiteV1Indexes(ctx, conn); err != nil {
+		return err
+	}
+	if err := dedupeSQLiteV1Rows(ctx, conn); err != nil {
+		return err
+	}
+	if err := purgeSQLiteV1Orphans(ctx, conn); err != nil {
+		return err
+	}
+	if err := repairSQLiteV1ForeignKeys(ctx, conn); err != nil {
+		return err
+	}
+	return backfillSQLiteV1CreatedSlot(ctx, conn)
+}
+
+// ensureSQLiteAdoptionColumns contains only additive columns known to have
+// existed in supported pre-v1 databases.  The full contract is still checked
+// below; unknown/damaged schemas are rejected rather than guessed at.
+func ensureSQLiteAdoptionColumns(ctx context.Context, conn *sql.Conn) error {
+	additions := []struct {
+		table, column, definition string
+	}{
+		{"account", "created_slot", "INTEGER NOT NULL DEFAULT 0"},
+		{"account", "credential_tag", "INTEGER NOT NULL DEFAULT 0"},
+		{"account_reward_delta", "credential_tag", "INTEGER NOT NULL DEFAULT 0"},
+		{"account_reward_delta", "tx_hash", "BLOB NOT NULL DEFAULT X''"},
+		{"account_reward_delta", "previous_reward", "TEXT"},
+		{"drep", "credential_tag", "INTEGER NOT NULL DEFAULT 0"},
+		{"governance_vote", "voter_credential_tag", "INTEGER NOT NULL DEFAULT 0"},
+		{"utxo", "transaction_id", "INTEGER"},
+		{"utxo", "collateral_return_for_tx_id", "INTEGER"},
+		{"plutus_data", "transaction_id", "INTEGER"},
+		{"certs", "transaction_id", "INTEGER"},
+		{"key_witness", "transaction_id", "INTEGER"},
+		{"witness_scripts", "transaction_id", "INTEGER"},
+		{"redeemer", "transaction_id", "INTEGER"},
+		{"asset", "utxo_id", "INTEGER"},
+		{"pool_registration", "pool_id", "INTEGER"},
+		{"pool_retirement", "pool_id", "INTEGER"},
+		{"pool_registration_owner", "pool_registration_id", "INTEGER"},
+		{"pool_registration_relay", "pool_registration_id", "INTEGER"},
+		{"move_instantaneous_rewards_reward", "mir_id", "INTEGER"},
+	}
+	for _, addition := range additions {
+		exists, err := sqliteTableExists(ctx, conn, addition.table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		columns, err := sqliteTableColumns(ctx, conn, addition.table)
+		if err != nil {
+			return err
+		}
+		if _, ok := columns[addition.column]; ok {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx,
+			"ALTER TABLE `"+addition.table+"` ADD COLUMN `"+addition.column+"` "+addition.definition,
+		); err != nil {
+			return fmt.Errorf("add %s.%s during adoption: %w", addition.table, addition.column, err)
+		}
+	}
+	return nil
 }
 
 // sqliteV1Columns derives the released table/column contract from the
@@ -486,6 +557,9 @@ func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
 		`UPDATE account_reward_delta SET tx_hash = X'' WHERE tx_hash IS NULL`); err != nil {
 		return fmt.Errorf("normalize legacy reward delta hashes: %w", err)
 	}
+	if err := rewriteSQLiteRewardDeltaNotNull(ctx, conn); err != nil {
+		return err
+	}
 	// Older releases created a non-unique hash_slot index. Merge duplicates
 	// deterministically before replacing it: checkpoint flags are ORed, and
 	// conflicting nonces are rejected rather than silently discarded.
@@ -543,22 +617,30 @@ func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
 			return fmt.Errorf("remove duplicate block_nonce row: %w", err)
 		}
 	}
-	for _, index := range []string{
-		"hash_slot",
-		"idx_account_staking_key",
+	// Every index below either changed uniqueness/columns or was superseded by
+	// a wider replacement in the final GORM schema. Drop it before v1 expand so
+	// CREATE INDEX IF NOT EXISTS cannot preserve an incompatible definition.
+	for _, legacy := range []struct {
+		table string
+		name  string
+	}{
+		{"block_nonce", "hash_slot"},
+		{"account", "idx_account_staking_key"},
+		{"drep", "idx_drep_credential"},
+		{"governance_vote", "idx_vote_unique"},
+		{"reward_live_stake", "idx_reward_live_stake_pool"},
+		{"reward_account_output", "idx_reward_account_output_credential"},
+		{"address_transaction", "idx_addr_tx_staking"},
 	} {
-		exists, err := sqliteIndexExists(ctx, conn, index)
+		exists, err := sqliteIndexExistsOnTable(ctx, conn, legacy.table, legacy.name)
 		if err != nil {
 			return err
 		}
 		if !exists {
 			continue
 		}
-		if _, err := conn.ExecContext(
-			ctx,
-			"DROP INDEX IF EXISTS `"+index+"`",
-		); err != nil {
-			return fmt.Errorf("drop legacy SQLite index %q: %w", index, err)
+		if _, err := conn.ExecContext(ctx, "DROP INDEX IF EXISTS `"+legacy.name+"`"); err != nil {
+			return fmt.Errorf("drop legacy SQLite index %q: %w", legacy.name, err)
 		}
 	}
 	if _, err := conn.ExecContext(
@@ -568,6 +650,763 @@ func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
 		return fmt.Errorf("create block_nonce unique index: %w", err)
 	}
 	return nil
+}
+
+func rewriteSQLiteRewardDeltaNotNull(ctx context.Context, conn *sql.Conn) error {
+	columns, err := sqliteTableColumnsInfo(ctx, conn, "account_reward_delta")
+	if err != nil {
+		return err
+	}
+	txHashInfo, ok := columns["tx_hash"]
+	if !ok || txHashInfo.notNull {
+		return nil
+	}
+	// SQLite cannot add NOT NULL to an existing column in place. Rebuild only
+	// the released table shape, preserving primary IDs and every supported
+	// value. Extra columns are rejected rather than silently discarded.
+	expected := map[string]struct{}{
+		"staking_key": {}, "credential_tag": {}, "tx_hash": {}, "amount": {},
+		"previous_reward": {}, "id": {}, "added_slot": {}, "withdrawal": {},
+	}
+	for column := range columns {
+		if _, ok := expected[column]; !ok {
+			return fmt.Errorf("%w: account_reward_delta has unsupported column %q", ErrLegacySchema, column)
+		}
+	}
+	credentialTag := "0"
+	if _, ok := columns["credential_tag"]; ok {
+		credentialTag = "credential_tag" //nolint:gosec // fixed SQL column identifier
+	}
+	previousReward := "NULL"
+	if _, ok := columns["previous_reward"]; ok {
+		previousReward = "previous_reward"
+	}
+	txHashExpr := "X''"
+	if _, ok := columns["tx_hash"]; ok {
+		txHashExpr = "tx_hash"
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin account_reward_delta rewrite: %w", err)
+	}
+	rollback := func(cause error) error {
+		_ = tx.Rollback()
+		return fmt.Errorf("rewrite account_reward_delta tx_hash constraint: %w", cause)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS account_reward_delta_v1`); err != nil {
+		return rollback(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE account_reward_delta_v1 (
+ staking_key BLOB NOT NULL,
+ credential_tag INTEGER NOT NULL DEFAULT 0,
+ tx_hash BLOB NOT NULL,
+ amount TEXT NOT NULL,
+ previous_reward TEXT,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ added_slot INTEGER NOT NULL,
+ withdrawal NUMERIC NOT NULL DEFAULT FALSE
+)`); err != nil {
+		return rollback(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO account_reward_delta_v1
+ (staking_key, credential_tag, tx_hash, amount, previous_reward, id, added_slot, withdrawal)
+SELECT staking_key, `+credentialTag+`, `+txHashExpr+`, amount, `+previousReward+`, id, added_slot, withdrawal
+FROM account_reward_delta`,
+	); err != nil {
+		return rollback(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE account_reward_delta`); err != nil {
+		return rollback(err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`ALTER TABLE account_reward_delta_v1 RENAME TO account_reward_delta`,
+	); err != nil {
+		return rollback(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit account_reward_delta rewrite: %w", err)
+	}
+	return nil
+}
+
+type sqliteColumnInfo struct {
+	notNull bool
+}
+
+func sqliteTableColumnsInfo(
+	ctx context.Context,
+	conn *sql.Conn,
+	table string,
+) (map[string]sqliteColumnInfo, error) {
+	rows, err := conn.QueryContext(ctx, "PRAGMA table_info(`"+table+"`)")
+	if err != nil {
+		return nil, fmt.Errorf("inspect SQLite table %q: %w", table, err)
+	}
+	defer rows.Close()
+	ret := make(map[string]sqliteColumnInfo)
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
+			return nil, err
+		}
+		ret[name] = sqliteColumnInfo{notNull: notNull != 0}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func sqliteIndexExistsOnTable(
+	ctx context.Context,
+	conn *sql.Conn,
+	table string,
+	name string,
+) (bool, error) {
+	var found int
+	err := conn.QueryRowContext(
+		ctx,
+		`SELECT 1 FROM pragma_index_list(?) WHERE name = ? LIMIT 1`,
+		table,
+		name,
+	).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect SQLite index %q on %s: %w", name, table, err)
+	}
+	return true, nil
+}
+
+type sqliteDuplicateSpec struct {
+	table   string
+	columns []string
+	keep    string
+}
+
+// dedupeSQLiteV1Rows repairs duplicate data that would make v1's unique
+// indexes fail.  Queries intentionally avoid DELETE self-subqueries, which
+// are rejected by MySQL in the equivalent legacy path and are less portable
+// than selecting IDs then deleting by primary key.
+func dedupeSQLiteV1Rows(ctx context.Context, conn *sql.Conn) error {
+	specs := []sqliteDuplicateSpec{
+		{table: "pool_stake_snapshot", columns: []string{"epoch", "snapshot_type", "pool_key_hash"}, keep: "MAX"},
+		{table: "reward_live_stake", columns: []string{"credential_tag", "staking_key"}, keep: "MIN"},
+	}
+	for _, spec := range specs {
+		if exists, err := sqliteTableExists(ctx, conn, spec.table); err != nil {
+			return err
+		} else if !exists {
+			continue
+		}
+		groupColumns := strings.Join(spec.columns, ", ")
+		rows, err := conn.QueryContext(ctx,
+			"SELECT "+groupColumns+" FROM `"+spec.table+"` GROUP BY "+groupColumns+" HAVING COUNT(*) > 1", //nolint:gosec // table and columns come from fixed migration specs
+		)
+		if err != nil {
+			return fmt.Errorf("inspect duplicate %s rows: %w", spec.table, err)
+		}
+		groups, err := scanDuplicateGroups(rows, len(spec.columns))
+		if err != nil {
+			return fmt.Errorf("scan duplicate %s rows: %w", spec.table, err)
+		}
+		for _, values := range groups {
+			where := make([]string, len(spec.columns))
+			args := make([]any, len(spec.columns), len(spec.columns)+1)
+			for index, column := range spec.columns {
+				where[index] = "`" + column + "` = ?"
+				args[index] = values[index]
+			}
+			var keepID int64
+			query := "SELECT " + spec.keep + "(id) FROM `" + spec.table + "` WHERE " + strings.Join(where, " AND ")
+			if err := conn.QueryRowContext(ctx, query, args...).Scan(&keepID); err != nil {
+				return fmt.Errorf("select retained %s row: %w", spec.table, err)
+			}
+			deleteArgs := make([]any, len(args)+1)
+			copy(deleteArgs, args)
+			deleteArgs[len(args)] = keepID
+			if _, err := conn.ExecContext(ctx,
+				"DELETE FROM `"+spec.table+"` WHERE "+strings.Join(where, " AND ")+" AND id <> ?", //nolint:gosec // identifiers come from fixed migration specs
+				deleteArgs...,
+			); err != nil { //nolint:gosec // table and columns come from fixed migration specs
+				return fmt.Errorf("deduplicate %s rows: %w", spec.table, err)
+			}
+		}
+	}
+	return nil
+}
+
+func scanDuplicateGroups(rows *sql.Rows, width int) ([][]any, error) {
+	defer rows.Close()
+	groups := make([][]any, 0)
+	for rows.Next() {
+		values := make([]any, width)
+		dest := make([]any, width)
+		for index := range values {
+			dest[index] = &values[index]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		groups = append(groups, values)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func sqliteTableExists(ctx context.Context, conn *sql.Conn, table string) (bool, error) {
+	var found int
+	err := conn.QueryRowContext(ctx,
+		`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+	).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect SQLite table %q: %w", table, err)
+	}
+	return true, nil
+}
+
+func purgeSQLiteV1Orphans(ctx context.Context, conn *sql.Conn) error {
+	type orphanSpec struct {
+		child, parent, column string
+		nullable              bool
+	}
+	specs := []orphanSpec{
+		{"utxo", "transaction", "transaction_id", true},
+		{"utxo", "transaction", "collateral_return_for_tx_id", true},
+		{"plutus_data", "transaction", "transaction_id", false},
+		{"certs", "transaction", "transaction_id", false},
+		{"key_witness", "transaction", "transaction_id", false},
+		{"witness_scripts", "transaction", "transaction_id", false},
+		{"redeemer", "transaction", "transaction_id", false},
+		{"asset", "utxo", "utxo_id", false},
+		{"pool_registration", "pool", "pool_id", false},
+		{"pool_retirement", "pool", "pool_id", false},
+		{"pool_registration_owner", "pool_registration", "pool_registration_id", false},
+		{"pool_registration_relay", "pool_registration", "pool_registration_id", false},
+		{"move_instantaneous_rewards_reward", "move_instantaneous_rewards", "mir_id", false},
+	}
+	for _, spec := range specs {
+		childExists, err := sqliteTableExists(ctx, conn, spec.child)
+		if err != nil {
+			return err
+		}
+		if !childExists {
+			continue
+		}
+		parentExists, err := sqliteTableExists(ctx, conn, spec.parent)
+		if err != nil {
+			return err
+		}
+		if !parentExists {
+			return fmt.Errorf("%w: orphan parent table %q is missing", ErrLegacySchema, spec.parent)
+		}
+		columns, err := sqliteTableColumns(ctx, conn, spec.child)
+		if err != nil {
+			return err
+		}
+		if _, ok := columns[spec.column]; !ok {
+			continue
+		}
+		predicate := "`" + spec.column + "` IS NOT NULL AND "
+		if !spec.nullable {
+			predicate = ""
+		}
+		query := "DELETE FROM `" + spec.child + "` WHERE " + predicate + //nolint:gosec // identifiers come from fixed migration specs
+			"NOT EXISTS (SELECT 1 FROM `" + spec.parent + "` p WHERE p.id = `" + spec.child + "`.`" + spec.column + "`)"
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("purge orphan %s.%s rows: %w", spec.child, spec.column, err)
+		}
+	}
+	return nil
+}
+
+type sqliteForeignKeySpec struct {
+	child, column  string
+	parent, target string
+	onDelete       string
+}
+
+var sqliteV1ForeignKeys = []sqliteForeignKeySpec{
+	{child: "utxo", column: "collateral_return_for_tx_id", parent: "transaction", target: "id", onDelete: "CASCADE"},
+	{child: "utxo", column: "transaction_id", parent: "transaction", target: "id", onDelete: "CASCADE"},
+	{child: "utxo", column: "collateral_by_tx_id", parent: "transaction", target: "hash", onDelete: "NO ACTION"},
+	{child: "utxo", column: "spent_at_tx_id", parent: "transaction", target: "hash", onDelete: "NO ACTION"},
+	{child: "utxo", column: "referenced_by_tx_id", parent: "transaction", target: "hash", onDelete: "NO ACTION"},
+	{child: "utxo_reference_input", column: "utxo_id", parent: "utxo", target: "id", onDelete: "CASCADE"},
+	{child: "asset", column: "utxo_id", parent: "utxo", target: "id", onDelete: "CASCADE"},
+	{child: "certs", column: "transaction_id", parent: "transaction", target: "id", onDelete: "CASCADE"},
+	{child: "key_witness", column: "transaction_id", parent: "transaction", target: "id", onDelete: "CASCADE"},
+	{child: "move_instantaneous_rewards_reward", column: "mir_id", parent: "move_instantaneous_rewards", target: "id", onDelete: "CASCADE"},
+	{child: "pool_registration", column: "pool_id", parent: "pool", target: "id", onDelete: "CASCADE"},
+	{child: "pool_registration_owner", column: "pool_id", parent: "pool", target: "id", onDelete: "NO ACTION"},
+	{child: "pool_registration_owner", column: "pool_registration_id", parent: "pool_registration", target: "id", onDelete: "CASCADE"},
+	{child: "pool_registration_relay", column: "pool_id", parent: "pool", target: "id", onDelete: "NO ACTION"},
+	{child: "pool_registration_relay", column: "pool_registration_id", parent: "pool_registration", target: "id", onDelete: "CASCADE"},
+	{child: "pool_retirement", column: "pool_id", parent: "pool", target: "id", onDelete: "CASCADE"},
+	{child: "plutus_data", column: "transaction_id", parent: "transaction", target: "id", onDelete: "CASCADE"},
+	{child: "redeemer", column: "transaction_id", parent: "transaction", target: "id", onDelete: "CASCADE"},
+	{child: "witness_scripts", column: "transaction_id", parent: "transaction", target: "id", onDelete: "CASCADE"},
+}
+
+func repairSQLiteV1ForeignKeys(ctx context.Context, conn *sql.Conn) error {
+	byTable := make(map[string][]sqliteForeignKeySpec)
+	for _, spec := range sqliteV1ForeignKeys {
+		byTable[spec.child] = append(byTable[spec.child], spec)
+	}
+	var rebuild []string
+	for table, expected := range byTable {
+		exists, err := sqliteTableExists(ctx, conn, table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		actual, err := sqliteForeignKeys(ctx, conn, table)
+		if err != nil {
+			return err
+		}
+		if sameSQLiteForeignKeys(actual, expected) {
+			continue
+		}
+		if hasUnexpectedSQLiteForeignKeys(actual, expected) {
+			return fmt.Errorf("%w: table %q has unsupported foreign-key definitions", ErrLegacySchema, table)
+		}
+		rebuild = append(rebuild, table)
+	}
+	if len(rebuild) == 0 {
+		return nil
+	}
+	// SQLite cannot toggle foreign_keys inside a transaction. Disable it only
+	// around this short, locked rebuild and restore the prior setting after the
+	// transaction commits or rolls back.
+	var foreignKeys int
+	if err := conn.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		return fmt.Errorf("inspect SQLite foreign-key enforcement: %w", err)
+	}
+	if foreignKeys != 0 {
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+			return fmt.Errorf("disable SQLite foreign-key enforcement for adoption: %w", err)
+		}
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		if foreignKeys != 0 {
+			_, _ = conn.ExecContext(ctx, "PRAGMA foreign_keys = ON")
+		}
+		return fmt.Errorf("begin SQLite foreign-key adoption: %w", err)
+	}
+	rollback := func(cause error) error {
+		_ = tx.Rollback()
+		if foreignKeys != 0 {
+			_, _ = conn.ExecContext(ctx, "PRAGMA foreign_keys = ON")
+		}
+		return fmt.Errorf("rebuild SQLite foreign keys: %w", cause)
+	}
+	for _, table := range rebuild {
+		if err := rebuildSQLiteV1Table(ctx, tx, table); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		if foreignKeys != 0 {
+			_, _ = conn.ExecContext(ctx, "PRAGMA foreign_keys = ON")
+		}
+		return fmt.Errorf("commit SQLite foreign-key adoption: %w", err)
+	}
+	if foreignKeys != 0 {
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+			return fmt.Errorf("restore SQLite foreign-key enforcement: %w", err)
+		}
+	}
+	return nil
+}
+
+type sqliteForeignKey struct {
+	column, parent, target, onDelete string
+}
+
+func sqliteForeignKeys(
+	ctx context.Context,
+	conn *sql.Conn,
+	table string,
+) ([]sqliteForeignKey, error) {
+	rows, err := conn.QueryContext(ctx, "PRAGMA foreign_key_list(`"+table+"`)") //nolint:gosec // table comes from fixed migration specs
+	if err != nil {
+		return nil, fmt.Errorf("inspect SQLite foreign keys on %s: %w", table, err)
+	}
+	defer rows.Close()
+	ret := make([]sqliteForeignKey, 0)
+	for rows.Next() {
+		var (
+			id, sequence                                      int
+			parent, column, target, onUpdate, onDelete, match string
+		)
+		if err := rows.Scan(&id, &sequence, &parent, &column, &target, &onUpdate, &onDelete, &match); err != nil {
+			return nil, fmt.Errorf("scan SQLite foreign keys on %s: %w", table, err)
+		}
+		ret = append(ret, sqliteForeignKey{
+			column: column, parent: parent, target: target,
+			onDelete: strings.ToUpper(onDelete),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate SQLite foreign keys on %s: %w", table, err)
+	}
+	return ret, nil
+}
+
+func sameSQLiteForeignKeys(actual []sqliteForeignKey, expected []sqliteForeignKeySpec) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	matched := make([]bool, len(expected))
+	for _, row := range actual {
+		found := false
+		for index, spec := range expected {
+			if matched[index] || row.column != spec.column ||
+				row.parent != spec.parent || row.target != spec.target ||
+				row.onDelete != spec.onDelete {
+				continue
+			}
+			matched[index] = true
+			found = true
+			break
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func hasUnexpectedSQLiteForeignKeys(actual []sqliteForeignKey, expected []sqliteForeignKeySpec) bool {
+	for _, row := range actual {
+		matched := false
+		for _, spec := range expected {
+			if row.column == spec.column && row.parent == spec.parent &&
+				row.target == spec.target && row.onDelete == spec.onDelete {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return true
+		}
+	}
+	return false
+}
+
+func rebuildSQLiteV1Table(ctx context.Context, tx *sql.Tx, table string) error {
+	statements, err := loadSQL("v1/sqlite/expand.sql")
+	if err != nil {
+		return err
+	}
+	var create string
+	prefix := "CREATE TABLE IF NOT EXISTS `" + table + "`"
+	for _, statement := range statements {
+		if strings.HasPrefix(statement, prefix) {
+			create = statement
+			break
+		}
+	}
+	if create == "" {
+		return fmt.Errorf("%w: no v1 CREATE TABLE statement for %q", ErrLegacySchema, table)
+	}
+	columns, err := sqliteTableColumnNamesTx(ctx, tx, table)
+	if err != nil {
+		return err
+	}
+	contract, err := sqliteV1Columns()
+	if err != nil {
+		return err
+	}
+	allowed := contract[table]
+	for _, column := range columns {
+		if _, ok := allowed[column]; !ok {
+			return fmt.Errorf(
+				"%w: table %q has unsupported column %q",
+				ErrLegacySchema,
+				table,
+				column,
+			)
+		}
+	}
+	temp := table + "__v1_fk"
+	recreated := "CREATE TABLE `" + temp + "`" + strings.TrimPrefix(create, prefix) //nolint:gosec // temp/table names are derived from validated v1 schema
+	var tempExists int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, temp,
+	).Scan(&tempExists); err == nil {
+		return fmt.Errorf("%w: stale SQLite FK rebuild table %q exists", ErrLegacySchema, temp)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("inspect stale SQLite FK rebuild table %q: %w", table, err)
+	}
+	if _, err := tx.ExecContext(ctx, recreated); err != nil {
+		return fmt.Errorf("create SQLite FK rebuild table %q: %w", table, err)
+	}
+	quoted := make([]string, len(columns))
+	for index, column := range columns {
+		quoted[index] = "`" + strings.ReplaceAll(column, "`", "``") + "`"
+	}
+	columnList := strings.Join(quoted, ", ")
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO `"+temp+"` ("+columnList+") SELECT "+columnList+" FROM `"+table+"`", //nolint:gosec // table/columns come from validated v1 schema
+	); err != nil {
+		return fmt.Errorf("copy %s rows during SQLite FK rebuild: %w", table, err)
+	}
+	if _, err := tx.ExecContext(ctx, "DROP TABLE `"+table+"`"); err != nil {
+		return fmt.Errorf("drop old SQLite FK table %q: %w", table, err)
+	}
+	if _, err := tx.ExecContext(ctx, "ALTER TABLE `"+temp+"` RENAME TO `"+table+"`"); err != nil {
+		return fmt.Errorf("rename SQLite FK table %q: %w", table, err)
+	}
+	return nil
+}
+
+func sqliteTableColumnNamesTx(ctx context.Context, tx *sql.Tx, table string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, "PRAGMA table_info(`"+table+"`)") //nolint:gosec // table comes from fixed migration specs
+	if err != nil {
+		return nil, fmt.Errorf("inspect SQLite columns on %s: %w", table, err)
+	}
+	defer rows.Close()
+	ret := make([]string, 0)
+	for rows.Next() {
+		var (
+			cid, notNull, primaryKey int
+			name, columnType         string
+			defaultValue             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, fmt.Errorf("scan SQLite columns on %s: %w", table, err)
+		}
+		ret = append(ret, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate SQLite columns on %s: %w", table, err)
+	}
+	if len(ret) == 0 {
+		return nil, fmt.Errorf("%w: table %q has no columns", ErrLegacySchema, table)
+	}
+	return ret, nil
+}
+
+const sqliteCreatedSlotBackfillPhase = "account_created_slot"
+
+// backfillSQLiteV1CreatedSlot is intentionally checkpointed in the legacy
+// backfill_checkpoint table.  It runs during adoption, before schema_migrations
+// version 1 is recorded, and therefore remains resumable if a process exits
+// between batches.  Each batch commits account updates and its cursor together.
+func backfillSQLiteV1CreatedSlot(ctx context.Context, conn *sql.Conn) error {
+	if exists, err := sqliteTableExists(ctx, conn, "account"); err != nil {
+		return err
+	} else if !exists {
+		return nil
+	}
+	if exists, err := sqliteTableExists(ctx, conn, "backfill_checkpoint"); err != nil {
+		return err
+	} else if !exists {
+		if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS backfill_checkpoint (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ phase TEXT NOT NULL,
+ last_slot INTEGER,
+ total_slots INTEGER,
+ started_at DATETIME,
+ updated_at DATETIME,
+ completed NUMERIC
+)`); err != nil {
+			return fmt.Errorf("create account created-slot checkpoint: %w", err)
+		}
+	}
+	// Older checkpoint tables were not always created with the phase unique
+	// index. Keep one deterministic row per phase before v1 creates it.
+	if _, err := conn.ExecContext(ctx, `
+DELETE FROM backfill_checkpoint
+WHERE id NOT IN (
+ SELECT MIN(id) FROM backfill_checkpoint GROUP BY phase
+)`); err != nil {
+		return fmt.Errorf("deduplicate account backfill checkpoints: %w", err)
+	}
+	var completed bool
+	var cursor sql.NullInt64
+	err := conn.QueryRowContext(ctx,
+		`SELECT completed, last_slot FROM backfill_checkpoint WHERE phase = ? LIMIT 1`,
+		sqliteCreatedSlotBackfillPhase,
+	).Scan(&completed, &cursor)
+	if err == nil && completed {
+		return nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read account created-slot checkpoint: %w", err)
+	}
+	lastID := int64(0)
+	if cursor.Valid {
+		lastID = cursor.Int64
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT OR IGNORE INTO backfill_checkpoint (phase, last_slot, started_at, updated_at, completed)
+VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, FALSE)`,
+		sqliteCreatedSlotBackfillPhase, lastID); err != nil {
+		return fmt.Errorf("initialize account created-slot checkpoint: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE backfill_checkpoint SET updated_at = CURRENT_TIMESTAMP WHERE phase = ?`,
+		sqliteCreatedSlotBackfillPhase,
+	); err != nil {
+		return fmt.Errorf("refresh account created-slot checkpoint: %w", err)
+	}
+	registrationTables := []string{
+		"stake_registration",
+		"stake_registration_delegation",
+		"stake_vote_registration_delegation",
+		"vote_registration_delegation",
+		"registration",
+	}
+	genesisTables := []string{
+		"registration", "stake_delegation", "stake_vote_delegation", "vote_delegation",
+	}
+	registrationTables, err = existingSQLiteTables(ctx, conn, registrationTables)
+	if err != nil {
+		return err
+	}
+	genesisTables, err = existingSQLiteTables(ctx, conn, genesisTables)
+	if err != nil {
+		return err
+	}
+	const batchSize = 400
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin account created-slot batch: %w", err)
+		}
+		rows, err := tx.QueryContext(ctx, `
+SELECT id, credential_tag, staking_key
+FROM account
+WHERE id > ? AND staking_key IS NOT NULL
+ORDER BY id
+LIMIT ?`, lastID, batchSize)
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("scan account created-slot batch: %w", err)
+		}
+		type accountKey struct {
+			id  int64
+			tag int64
+			key []byte
+		}
+		accounts := make([]accountKey, 0, batchSize)
+		scanErr := func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var account accountKey
+				if err := rows.Scan(&account.id, &account.tag, &account.key); err != nil {
+					return fmt.Errorf("scan account created-slot row: %w", err)
+				}
+				accounts = append(accounts, account)
+			}
+			return rows.Err()
+		}()
+		if scanErr != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("iterate account created-slot rows: %w", scanErr)
+		}
+		for _, account := range accounts {
+			var minimum sql.NullInt64
+			for _, table := range registrationTables {
+				var slot sql.NullInt64
+				err := tx.QueryRowContext(ctx,
+					"SELECT MIN(added_slot) FROM `"+table+"` WHERE credential_tag = ? AND staking_key = ?",
+					account.tag, account.key).Scan(&slot)
+				if err != nil {
+					_ = tx.Rollback()
+					return fmt.Errorf("read %s registration history: %w", table, err)
+				}
+				if slot.Valid && (!minimum.Valid || slot.Int64 < minimum.Int64) {
+					minimum = slot
+				}
+			}
+			if !minimum.Valid || minimum.Int64 == 0 {
+				continue
+			}
+			var genesis bool
+			for _, table := range genesisTables {
+				var found int
+				err := tx.QueryRowContext(ctx,
+					"SELECT 1 FROM `"+table+"` WHERE credential_tag = ? AND staking_key = ? AND added_slot = 0 LIMIT 1",
+					account.tag, account.key).Scan(&found)
+				if err == nil {
+					genesis = true
+					break
+				}
+				if !errors.Is(err, sql.ErrNoRows) {
+					_ = tx.Rollback()
+					return fmt.Errorf("read %s genesis evidence: %w", table, err)
+				}
+			}
+			if genesis {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE account SET created_slot = ? WHERE id = ? AND (created_slot = 0 OR created_slot > ?) AND certificate_id <> 0`,
+				minimum.Int64, account.id, minimum.Int64); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("update account created_slot: %w", err)
+			}
+		}
+		if len(accounts) == 0 {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE backfill_checkpoint SET completed = TRUE, updated_at = CURRENT_TIMESTAMP WHERE phase = ?`, sqliteCreatedSlotBackfillPhase); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("complete account created-slot checkpoint: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit account created-slot completion: %w", err)
+			}
+			return nil
+		}
+		lastID = accounts[len(accounts)-1].id
+		if _, err := tx.ExecContext(ctx, `
+UPDATE backfill_checkpoint SET last_slot = ?, updated_at = CURRENT_TIMESTAMP WHERE phase = ?`, lastID, sqliteCreatedSlotBackfillPhase); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("checkpoint account created-slot batch: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit account created-slot batch: %w", err)
+		}
+	}
+}
+
+func existingSQLiteTables(ctx context.Context, conn *sql.Conn, tables []string) ([]string, error) {
+	existing := make([]string, 0, len(tables))
+	for _, table := range tables {
+		ok, err := sqliteTableExists(ctx, conn, table)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			existing = append(existing, table)
+		}
+	}
+	return existing, nil
 }
 
 func sqliteIndexExists(ctx context.Context, conn *sql.Conn, name string) (bool, error) {

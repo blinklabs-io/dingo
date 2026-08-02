@@ -50,16 +50,16 @@ unversioned database is adopted only when it has the
 known final pre-cutover SQLite shape, including the required transaction, UTxO,
 account, pool, DRep, certificate, tip, settings, and commit-timestamp columns.
 Unknown or partial legacy layouts fail startup instead of being guessed at.
-This narrow adoption rule is intentional: the deployed v1alpha1 schema is
-created fresh for PostgreSQL/MySQL and only the known pre-cutover SQLite shape
-is adopted automatically. Adoption also deduplicates and recreates the
-`block_nonce(hash, slot)` uniqueness constraint and replaces legacy account and
-reward-delta indexes whose uniqueness rules predate v1alpha1. It normalizes
-legacy NULL reward-delta hashes to the empty source hash, merges duplicate
-block-nonce rows only when their nonce values agree, and preserves checkpoint
-flags. Reference inputs are stored in the v1alpha1 `utxo_reference_input`
-association table so multiple transactions can reference one output; the
-legacy single-column marker is retained only for compatibility.
+The deployed v1alpha1 schema is created fresh for PostgreSQL/MySQL; automatic
+adoption is provided for the known pre-cutover SQLite shape. Adoption repairs
+legacy indexes and foreign keys, purges cascade orphans, deduplicates rows
+needed by new uniqueness constraints, and resumes the account `created_slot`
+backfill from its durable checkpoint. It also normalizes legacy NULL
+reward-delta hashes to the empty source hash, merges duplicate block-nonce rows
+only when their nonce values agree, and preserves checkpoint flags. Reference
+inputs are stored in the v1alpha1 `utxo_reference_input` association table so
+multiple transactions can reference one output; the legacy single-column
+marker is retained only for compatibility.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -71,9 +71,8 @@ after contract/index DDL succeeds. Completed checksum drift, registry gaps,
 unknown phases, inconsistent completion state, and a database newer than the
 binary are hard startup errors. File-backed SQLite uses a cross-process lock
 file and in-memory SQLite uses a process lock. Store readiness remains false
-until the locked, offline run succeeds. The generic migration package also
-contains connection-owned PostgreSQL/MySQL advisory-lock primitives for a
-future operational port. Bulk-load session settings are held on a dedicated
+until the locked, offline run succeeds. PostgreSQL/MySQL advisory locks are
+connection-owned for the complete migration run. Bulk-load session settings are held on a dedicated
 connection for the duration of a bulk window and restored before that
 connection returns to the pool; SQLite maintenance receives the provider stop
 context so shutdown deadlines can cancel a running vacuum.
@@ -260,7 +259,7 @@ erDiagram
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
 | `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates by epoch. |
 | `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. For new imports this is the selected ledger-state point at or below the certificate-backed ImmutableDB tip; the metadata `tip` remains at the same point so later raw blocks undergo ordinary ledger replay. Ancillary-only volatile state is never recorded as trusted. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. |
-| `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable application-level backfill progress keyed by `phase`; `metadata` tracks API-mode historical metadata backfill. Schema/data upgrade checkpoints belong to `schema_migrations` instead. The retired `account_created_slot` phase may remain in adopted databases but is not consulted by `v1alpha1`, which only adopts schemas where `account.created_slot` already exists. |
+| `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable application-level backfill progress keyed by `phase`; `metadata` tracks API-mode historical metadata backfill. Schema/data upgrade checkpoints belong to `schema_migrations` instead. The `account_created_slot` phase is resumed until complete during SQLite v1alpha1 adoption. |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. Catch-up imports leave `import_key` empty to force a full pass. |
 
 Mithril v2 catch-up reconcile: when `dingo mithril sync` advances an existing
@@ -290,6 +289,13 @@ added for retired pools. This uses the `metadata.MetadataStore` methods
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. |
 | `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. |
+
+Deferred-index bulk mode is shared by SQLite, PostgreSQL, and MySQL. InnoDB
+requires indexes supporting foreign-key child columns and rejects their removal,
+so the MySQL dialect keeps those specific indexes resident while dropping and
+rebuilding the rest of the deferred manifest. The durable `sync_state` marker
+still covers the complete cycle and is cleared only after all rebuildable
+indexes are present.
 
 ### Midnight Indexer
 

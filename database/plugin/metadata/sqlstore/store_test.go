@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
 )
@@ -149,6 +150,58 @@ CREATE TABLE reward_live_stake (
 	require.NoError(t, err)
 	require.Equal(t, uint64(9), stakes[string(pool)])
 	require.Equal(t, uint64(1), delegators[string(pool)])
+}
+
+func TestRebuildRewardLiveStakeBatchesCredentials(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const count = 200
+	for index := range count {
+		account := &models.Account{
+			StakingKey:    []byte{0x42, byte(index >> 8), byte(index)},
+			CredentialTag: 0,
+			Pool:          []byte{0x50, byte(index % 3)},
+			AddedSlot:     uint64(index + 1),
+			CreatedSlot:   uint64(index + 1),
+			Active:        true,
+		}
+		require.NoError(t, store.ImportAccount(account, nil))
+	}
+	require.NoError(t, store.RebuildRewardLiveStake(1000, nil))
+	var rows int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM reward_live_stake",
+	).Scan(&rows))
+	require.Equal(t, count, rows)
+	var version int64
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT calculation_version FROM reward_live_stake LIMIT 1",
+	).Scan(&version))
+	require.Equal(t, int64(models.RewardStakeCalculationVersion), version)
+}
+
+func TestGetPoolsBatchesAssociations(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	poolKeys := make([]lcommon.PoolKeyHash, 3)
+	for index := range 3 {
+		poolKey := lcommon.PoolKeyHash{}
+		poolKey[0], poolKey[1] = 0x60, byte(index)
+		poolKeys[index] = poolKey
+		pool := &models.Pool{PoolKeyHash: poolKey.Bytes()}
+		registration := &models.PoolRegistration{
+			PoolKeyHash: poolKey.Bytes(),
+			AddedSlot:   uint64(index + 1),
+		}
+		require.NoError(t, store.ImportPool(pool, registration, nil))
+	}
+	got, err := store.GetPools(poolKeys, nil)
+	require.NoError(t, err)
+	require.Len(t, got, len(poolKeys))
+	for _, pool := range got {
+		require.Len(t, pool.Registration, 1)
+		require.Empty(t, pool.Retirement)
+	}
 }
 
 func TestTransactionRejectsUnsafeSavepoint(t *testing.T) {

@@ -114,6 +114,7 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 		Pool:          []byte{4, 5, 6},
 		AddedSlot:     1,
 		CreatedSlot:   1,
+		Reward:        types.Uint64(9),
 		Active:        true,
 	}
 	require.NoError(t, store.ImportAccount(account, nil))
@@ -135,6 +136,11 @@ INSERT INTO reward_live_stake (
 	require.NoError(t, err)
 	require.Equal(t, uint64(9), stakes[string(account.Pool)])
 	require.Equal(t, uint64(1), delegators[string(account.Pool)])
+	require.NoError(t, store.RebuildRewardLiveStake(2, nil))
+	inputs, err := store.GetLiveStakeInputsForPools([][]byte{account.Pool}, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, types.Uint64(9), inputs[0].Stake)
 
 	outputs := make([]*models.RewardAccountOutput, 120)
 	for index := range outputs {
@@ -151,4 +157,51 @@ INSERT INTO reward_live_stake (
 	for _, output := range outputs {
 		require.NotZero(t, output.ID)
 	}
+
+	// Exercise the shared RETURNING adapter against a reserved table name and
+	// a reserved column name.  MySQL must quote both identifiers even when
+	// ANSI_QUOTES is disabled, and the duplicate path must return the same ID
+	// without a second pooled connection carrying LAST_INSERT_ID state.
+	queryer := newDialectQueryer(db, dialectName)
+	transactionHash := []byte{0xa0, 0xb0, 0xc0}
+	transactionQuery := `INSERT INTO "transaction" (
+ hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+ block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (hash) DO UPDATE SET block_hash = excluded.block_hash
+RETURNING id`
+	var transactionID int64
+	require.NoError(t, queryer.QueryRowContext(context.Background(), transactionQuery,
+		transactionHash, []byte{0xd0}, nil, int64(100), 0, "0", "0", "0", 0, true,
+	).Scan(&transactionID))
+	require.NotZero(t, transactionID)
+	firstTransactionID := transactionID
+	require.NoError(t, queryer.QueryRowContext(context.Background(), transactionQuery,
+		transactionHash, []byte{0xe0}, nil, int64(100), 0, "0", "0", "0", 0, true,
+	).Scan(&transactionID))
+	require.Equal(t, firstTransactionID, transactionID)
+	var redeemerCount int
+	_, err = queryer.ExecContext(context.Background(), `
+INSERT INTO redeemer (
+		data, transaction_id, ex_units_memory, ex_units_cpu, "index", tag
+) VALUES (?, ?, ?, ?, ?, ?)`,
+		[]byte{0xf0}, transactionID, int64(1), int64(2), int64(0), int64(0),
+	)
+	require.NoError(t, err)
+	require.NoError(t, queryer.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM redeemer WHERE transaction_id = ?`, transactionID,
+	).Scan(&redeemerCount))
+	require.Equal(t, 1, redeemerCount)
+
+	// The deferred-index lifecycle is also shared across dialects.  In
+	// particular, MySQL requires `DROP INDEX ... ON table` and a non-IF-NOT-
+	// EXISTS CREATE form, while sync_state has no synthetic id column.
+	require.NoError(t, store.DropDeferredIndexes())
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.NoError(t, store.BuildDeferredIndexes())
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
 }

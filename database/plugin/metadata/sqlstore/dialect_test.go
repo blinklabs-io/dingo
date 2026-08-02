@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -59,4 +60,33 @@ func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 		"DROP INDEX `idx_utxo_deleted_payment_script` ON `utxo`",
 		dialect.DropIndexSQL("idx_utxo_deleted_payment_script", "utxo"),
 	)
+	require.False(t, dialect.CanDropIndex("idx_utxo_spent_at_tx_id", "utxo"))
+	require.True(t, dialect.CanDropIndex("idx_utxo_payment_key", "utxo"))
+}
+
+func TestMySQLDoNothingUsesAnInsertedColumn(t *testing.T) {
+	t.Parallel()
+	query := `INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+ON CONFLICT (sync_key) DO NOTHING`
+	got := translateMySQLUpsert(query)
+	require.Contains(t, got, "ON DUPLICATE KEY UPDATE sync_key = sync_key")
+	require.NotContains(t, got, "id = id")
+}
+
+func TestMySQLReturningTranslationQuotesReservedIdentifiers(t *testing.T) {
+	t.Parallel()
+	query := `INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`
+	base, _ := translateMySQLReturning(query)
+	base = translateMySQLReservedIdentifiers(base)
+	require.Contains(t, base, "INSERT INTO `transaction`")
+}
+
+func TestMySQLForeignKeyIndexErrorDetection(t *testing.T) {
+	t.Parallel()
+	require.True(t, isMySQLForeignKeyIndexError(
+		fmt.Errorf("Error 1553 (HY000): Cannot drop index: needed in a foreign key constraint"),
+	))
+	require.False(t, isMySQLForeignKeyIndexError(
+		fmt.Errorf("Error 1553 (HY000): unrelated DDL failure"),
+	))
 }

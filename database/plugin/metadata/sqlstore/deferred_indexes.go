@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
@@ -46,6 +47,9 @@ func (s *Store) DropDeferredIndexes() error {
 				return fmt.Errorf("mark deferred indexes pending: %w", err)
 			}
 			for _, index := range deferred.Manifest {
+				if !s.dialect.CanDropIndex(index.Name, index.Table) {
+					continue
+				}
 				exists, err := s.deferredIndexExists(db, index)
 				if err != nil {
 					return fmt.Errorf("check deferred index %s: %w", index.Name, err)
@@ -58,6 +62,14 @@ func (s *Store) DropDeferredIndexes() error {
 					context.Background(),
 					statement,
 				); err != nil {
+					// InnoDB requires an index for every foreign-key child
+					// column. Those indexes cannot be dropped independently;
+					// keep them in place while deferring the rest of the
+					// manifest and let BuildDeferredIndexes treat them as
+					// already present.
+					if s.dialect.Name() == "mysql" && isMySQLForeignKeyIndexError(err) {
+						continue
+					}
 					return fmt.Errorf(
 						"drop deferred index %s: %w",
 						index.Name,
@@ -68,6 +80,16 @@ func (s *Store) DropDeferredIndexes() error {
 			return nil
 		},
 	)
+}
+
+func isMySQLForeignKeyIndexError(err error) bool {
+	// Keep this backend-specific fallback narrow to the invariant message
+	// emitted for an index required by an InnoDB FK.  Do not import the MySQL
+	// driver here: sqlstore is part of the default SQLite build and optional
+	// drivers must remain behind dingo_extra_plugins.
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "1553") &&
+		strings.Contains(message, "foreign key constraint")
 }
 
 // BuildCriticalDeferredIndexes restores the indexes needed before API and

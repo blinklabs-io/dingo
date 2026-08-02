@@ -274,10 +274,8 @@ WHERE pool_key_hash IN (`+bindPlaceholders(len(hashes))+`)`,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for i := range ret {
-		if err := s.loadPoolAssociations(db, &ret[i], false); err != nil {
-			return nil, err
-		}
+	if err := s.loadPoolsAssociations(db, ret); err != nil {
+		return nil, err
 	}
 	return ret, nil
 }
@@ -1896,6 +1894,137 @@ ORDER BY r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 		return err
 	}
 	return rows.Err()
+}
+
+// loadPoolsAssociations hydrates all registrations, owners, and relays for a
+// pool slice with bounded set queries.  GetPools is used by pool-list APIs and
+// ledger snapshots, where the old per-pool loader issued three round trips for
+// every result.  Keep the association order identical to loadPoolAssociations
+// while reducing the query count to one query per association table (per
+// parameter-limit chunk).
+func (s *Store) loadPoolsAssociations(
+	db queryer,
+	pools []models.Pool,
+) error {
+	if len(pools) == 0 {
+		return nil
+	}
+	poolIDs := make([]any, len(pools))
+	poolByID := make(map[uint]int, len(pools))
+	for i := range pools {
+		pools[i].Registration = []models.PoolRegistration{}
+		pools[i].Retirement = []models.PoolRetirement{}
+		poolIDs[i] = pools[i].ID
+		poolByID[pools[i].ID] = i
+	}
+	for start := 0; start < len(poolIDs); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(poolIDs))
+		query := `
+SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
+       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
+       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount
+FROM pool_registration p
+LEFT JOIN certs c ON c.id = p.certificate_id
+LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
+WHERE p.pool_id IN (` + bindPlaceholders(end-start) + `)
+ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC, p.id DESC`
+		rows, err := db.QueryContext(
+			context.Background(),
+			s.dialect.Rebind(query),
+			poolIDs[start:end]...,
+		)
+		if err != nil {
+			return fmt.Errorf("load pool registrations query: %w", err)
+		}
+		for rows.Next() {
+			registration, err := scanPoolRegistration(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			poolIndex, ok := poolByID[registration.PoolID]
+			if !ok {
+				rows.Close()
+				return fmt.Errorf("pool registration %d references unknown pool %d", registration.ID, registration.PoolID)
+			}
+			pools[poolIndex].Registration = append(pools[poolIndex].Registration, *registration)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	registrationCount := 0
+	for poolIndex := range pools {
+		registrationCount += len(pools[poolIndex].Registration)
+	}
+	registrations := make([]*models.PoolRegistration, 0, registrationCount)
+	for poolIndex := range pools {
+		for registrationIndex := range pools[poolIndex].Registration {
+			registrations = append(registrations, &pools[poolIndex].Registration[registrationIndex])
+		}
+	}
+	if err := loadPoolRegistrationChildrenBatch(db, registrations); err != nil {
+		return err
+	}
+	return s.loadPoolRetirementsBatch(db, pools)
+}
+
+func (s *Store) loadPoolRetirementsBatch(
+	db queryer,
+	pools []models.Pool,
+) error {
+	poolIDs := make([]any, len(pools))
+	poolByID := make(map[uint]int, len(pools))
+	for i := range pools {
+		poolIDs[i] = pools[i].ID
+		poolByID[pools[i].ID] = i
+	}
+	for start := 0; start < len(poolIDs); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(poolIDs))
+		query := `
+SELECT r.pool_key_hash, r.certificate_id, r.id, r.pool_id, r.epoch, r.added_slot
+FROM pool_retirement r
+LEFT JOIN certs c ON c.id = r.certificate_id
+LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
+WHERE r.pool_id IN (` + bindPlaceholders(end-start) + `)
+ORDER BY r.pool_id, r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC,
+         CASE WHEN r.certificate_id = 0 THEN 1 ELSE 0 END DESC, r.id DESC`
+		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(query), poolIDs[start:end]...)
+		if err != nil {
+			return fmt.Errorf("load pool retirements: %w", err)
+		}
+		for rows.Next() {
+			var retirement models.PoolRetirement
+			var certificateID, epoch, addedSlot sql.NullInt64
+			if err := rows.Scan(&retirement.PoolKeyHash, &certificateID, &retirement.ID, &retirement.PoolID, &epoch, &addedSlot); err != nil {
+				rows.Close()
+				return err
+			}
+			retirement.CertificateID = uint(certificateID.Int64)
+			retirement.Epoch = uint64(epoch.Int64)
+			retirement.AddedSlot = uint64(addedSlot.Int64)
+			index, ok := poolByID[retirement.PoolID]
+			if !ok {
+				rows.Close()
+				return fmt.Errorf("pool retirement %d references unknown pool %d", retirement.ID, retirement.PoolID)
+			}
+			pools[index].Retirement = append(pools[index].Retirement, retirement)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func scanPoolRegistration(

@@ -2439,8 +2439,8 @@ bootstrap boundary escapes it), wedging the node at the tip of the following
 epoch. For an empty closing epoch (no blocks of its own) the previous carried
 nonce is passed through unchanged.
 
-In API storage mode, the SQLite metadata plugin can defer selected query indexes
-during bulk load. Deferred indexes are classified as critical or lazy in
+In API storage mode, the shared SQL metadata providers can defer selected query
+indexes during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries
 and rollback predicates, while lazy indexes cover secondary query paths. The
 metadata plugin exposes `BuildCriticalDeferredIndexes` for the critical subset
@@ -2449,7 +2449,9 @@ critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the marker is
 cleared only after the full manifest has been rebuilt. Core-mode startup still
-repairs the full manifest synchronously before serving.
+repairs the full manifest synchronously before serving. On MySQL, InnoDB
+requires indexes supporting foreign-key child columns, so the dialect leaves
+those indexes in place while deferring the remaining manifest entries.
 
 ## External Interfaces
 

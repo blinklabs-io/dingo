@@ -38,6 +38,7 @@ type Dialect interface {
 	UpdatePlannerStats(context.Context, Execer) error
 	DropIndexSQL(name, table string) string
 	CreateIndexSQL(name, table string, columns []string) string
+	CanDropIndex(name, table string) bool
 }
 
 // Execer is implemented by *sql.DB, *sql.Conn, and *sql.Tx.
@@ -108,6 +109,18 @@ func (d dialect) DropIndexSQL(name, table string) string {
 	return "DROP INDEX IF EXISTS " + d.QuoteIdentifier(name)
 }
 
+// CanDropIndex reports whether a deferred-index cycle may remove an index.
+// InnoDB requires an index on every foreign-key child column and refuses to
+// drop that index even when foreign_key_checks is disabled. SQLite and
+// PostgreSQL do not have that restriction for the child side, so only the
+// MySQL dialect needs a protected set here.
+func (d dialect) CanDropIndex(name, table string) bool {
+	if d.name != "mysql" {
+		return true
+	}
+	return !mysqlForeignKeyIndexes[table][name]
+}
+
 func (d dialect) CreateIndexSQL(name, table string, columns []string) string {
 	quoted := make([]string, len(columns))
 	for i, column := range columns {
@@ -144,6 +157,18 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	},
 	"certs":           {"block_hash": true},
 	"witness_scripts": {"script_hash": true},
+}
+
+var mysqlForeignKeyIndexes = map[string]map[string]bool{
+	"utxo": {
+		"idx_utxo_transaction_id":      true,
+		"idx_utxo_spent_at_tx_id":      true,
+		"idx_utxo_referenced_by_tx_id": true,
+		"idx_utxo_collateral_by_tx_id": true,
+	},
+	"redeemer":        {"idx_redeemer_transaction_id": true},
+	"key_witness":     {"idx_key_witness_transaction_id": true},
+	"witness_scripts": {"idx_witness_scripts_transaction_id": true},
 }
 
 // SQLiteDialect returns the capabilities used by the pure-Go SQLite driver.

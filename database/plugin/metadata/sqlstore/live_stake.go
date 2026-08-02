@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -293,6 +294,7 @@ LEFT JOIN latest_delegation
 			if err := rows.Close(); err != nil {
 				return fmt.Errorf("close reward live stake credentials: %w", err)
 			}
+			values := make([]rewardLiveStakeRow, 0, len(credentials))
 			for _, credential := range credentials {
 				tag := credential.tag
 				key := credential.key
@@ -330,27 +332,90 @@ LEFT JOIN latest_delegation
 						certIndex = credential.delegationCert.Int64
 					}
 				}
-				if _, err := db.ExecContext(context.Background(), `
-INSERT INTO reward_live_stake (credential_tag, staking_key, pool_key_hash,
+				values = append(values, rewardLiveStakeRow{
+					tag:             tag,
+					key:             key,
+					pool:            pool,
+					utxoStake:       utxoStake,
+					rewardStake:     rewardStake,
+					totalStake:      total,
+					registered:      registered,
+					delegationSlot:  delegSlot,
+					delegationBlock: blockIndex,
+					delegationCert:  certIndex,
+				})
+			}
+			if err := s.insertRewardLiveStakeRows(db, values, slotValue); err != nil {
+				return err
+			}
+			return nil
+		},
+	)
+}
+
+// rewardLiveStakeRow is the materialized form of one canonical credential
+// used by RebuildRewardLiveStake. Keeping this separate from the scan row
+// allows the rebuild to issue bounded multi-row upserts instead of one round
+// trip per credential.
+type rewardLiveStakeRow struct {
+	tag                             uint8
+	key, pool                       []byte
+	utxoStake, rewardStake          uint64
+	totalStake                      uint64
+	registered                      bool
+	delegationSlot, delegationBlock int64
+	delegationCert                  int64
+}
+
+func (s *Store) insertRewardLiveStakeRows(
+	db queryer,
+	rows []rewardLiveStakeRow,
+	updatedSlot int64,
+) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	const columns = `credential_tag, staking_key, pool_key_hash,
  utxo_stake, reward_stake, total_stake, registered, pool_delegation_slot,
  pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
- calculation_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ calculation_version`
+	const valuesPerRow = 12
+	chunkSize := max(1, s.dialect.ParameterLimit()/valuesPerRow)
+	for start := 0; start < len(rows); start += chunkSize {
+		end := min(start+chunkSize, len(rows))
+		placeholders := make([]string, end-start)
+		args := make([]any, 0, (end-start)*valuesPerRow)
+		for index, row := range rows[start:end] {
+			placeholders[index] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+			args = append(args,
+				row.tag,
+				row.key,
+				row.pool,
+				decimalUint64(types.Uint64(row.utxoStake)),
+				decimalUint64(types.Uint64(row.rewardStake)),
+				decimalUint64(types.Uint64(row.totalStake)),
+				row.registered,
+				row.delegationSlot,
+				row.delegationBlock,
+				row.delegationCert,
+				updatedSlot,
+				models.RewardStakeCalculationVersion,
+			)
+		}
+		query := `INSERT INTO reward_live_stake (` + columns + `)
+VALUES ` + strings.Join(placeholders, ", ") + `
 ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
  pool_key_hash = excluded.pool_key_hash, utxo_stake = excluded.utxo_stake,
  reward_stake = excluded.reward_stake, total_stake = excluded.total_stake,
  registered = excluded.registered, pool_delegation_slot = excluded.pool_delegation_slot,
  pool_delegation_block_index = excluded.pool_delegation_block_index,
  pool_delegation_cert_index = excluded.pool_delegation_cert_index,
- updated_slot = excluded.updated_slot, calculation_version = excluded.calculation_version`,
-					tag, key, pool, decimalUint64(types.Uint64(utxoStake)), decimalUint64(types.Uint64(rewardStake)),
-					decimalUint64(types.Uint64(total)), registered, delegSlot, blockIndex, certIndex, slotValue,
-					models.RewardStakeCalculationVersion); err != nil {
-					return fmt.Errorf("populate reward live stake: %w", err)
-				}
-			}
-			return nil
-		},
-	)
+ updated_slot = excluded.updated_slot, calculation_version = excluded.calculation_version`
+		if _, err := db.ExecContext(context.Background(), query, args...); err != nil {
+			return fmt.Errorf("populate reward live stake: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) RewardLiveStakeNeedsBackfill(
