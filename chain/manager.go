@@ -313,7 +313,7 @@ func (cm *ChainManager) blockByIndex(
 	blockIndex uint64,
 	txn *database.Txn,
 ) (models.Block, error) {
-	// Query database
+	// Query database when available.
 	if cm.db != nil {
 		tmpBlock, err := cm.db.BlockByIndex(blockIndex, txn)
 		if err != nil {
@@ -323,6 +323,16 @@ func (cm *ChainManager) blockByIndex(
 			return models.Block{}, err
 		}
 		return tmpBlock, nil
+	}
+	// An in-memory manager has no index-backed store. Common blocks of an
+	// ephemeral chain are still held by the primary chain, whose point buffer
+	// resolves them through the manager's block cache. Callers of this helper
+	// already hold the manager read/write lock when chain state must be
+	// consistent, so use the lock-free primary lookup here just as the other
+	// internal chain reconciliation paths do.
+	if primaryChain := cm.primaryChainLocked(); primaryChain != nil &&
+		!primaryChain.persistent {
+		return primaryChain.blockByIndex(blockIndex)
 	}
 	return models.Block{}, models.ErrBlockNotFound
 }

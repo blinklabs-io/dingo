@@ -64,14 +64,14 @@ const (
 	blockfetchMaxBatchHeadersWhenBehind = 500
 	blockfetchMinBatchGapSlots          = 64
 
-	// Maximum number of failures to obtain one queued header range before
-	// the queue is dropped. Both failure shapes count against the same
+	// Maximum number of definitive failures to obtain one queued header range
+	// before the queue is dropped. Both failure shapes count against the same
 	// range, because a peer that rolled the queued block back can produce
 	// either one: a NoBlocks reply (surfacing synchronously as a
 	// GetBlockRange error) when its range server rejects the start point,
-	// or a StartBatch/BatchDone pair carrying no blocks. Counting them
-	// separately would let the two alternate while each stayed under its
-	// own bound.
+	// or a StartBatch/BatchDone pair carrying no blocks. Transport, shutdown,
+	// and wiring errors from GetBlockRange do not count: they do not establish
+	// that the peer cannot serve the range.
 	//
 	// The count is keyed to the range start point rather than being a
 	// global consecutive streak, and it deliberately survives both
@@ -2877,9 +2877,24 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	return ls.startQueuedBlockfetchLocked(connId)
 }
 
-// blockfetchRangeFailureState counts failures to obtain one specific queued
-// range, identified by its start point. Keying by point is what lets the count
-// survive the unrelated traffic that separates real failures.
+// blockfetchNoBlocksErrorText is the error text emitted by the gouroboros
+// blockfetch client for MsgNoBlocks. That client currently exposes NoBlocks
+// as a plain error rather than a sentinel, so keep the classification at this
+// adapter boundary and do not treat every synchronous request error as a
+// range-unavailable result.
+const blockfetchNoBlocksErrorText = "block(s) not found"
+
+func isBlockfetchNoBlocksError(err error) bool {
+	return err != nil && strings.HasSuffix(
+		strings.TrimSpace(err.Error()),
+		blockfetchNoBlocksErrorText,
+	)
+}
+
+// blockfetchRangeFailureState counts definitive failures to obtain one
+// specific queued range, identified by its start point. Keying by point is
+// what lets the count survive the unrelated traffic that separates real
+// failures.
 type blockfetchRangeFailureState struct {
 	slot  uint64
 	hash  string
@@ -2904,10 +2919,10 @@ func (ls *LedgerState) noteBlockfetchRangeProgress(point ocommon.Point) {
 	}
 }
 
-// noteBlockfetchRangeUnavailable records one failed attempt to obtain the
-// queued header range starting at start and, once that same range has failed
-// blockfetchMaxSameRangeFailures times, drops the queue and asks for a fresh
-// intersect. It reports whether it dropped the queue.
+// noteBlockfetchRangeUnavailable records one definitive failed attempt to
+// obtain the queued header range starting at start and, once that same range
+// has failed blockfetchMaxSameRangeFailures times, drops the queue and asks
+// for a fresh intersect. It reports whether it dropped the queue.
 //
 // Dropping the headers is the purpose rather than a side effect: while a
 // header sits at the head of the queue, Chain.AddBlock rejects every locally
@@ -2994,14 +3009,18 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 		// A peer whose range server rejects the start point answers
 		// NoBlocks, which gouroboros resolves into this synchronous error
 		// rather than a BatchDone event. Several callers only log what we
-		// return (notably the fork-resolution restarts), so the streak has
-		// to be recorded here, at the single point every queued-range
-		// request passes through, instead of relying on any caller.
-		ls.noteBlockfetchRangeUnavailable(
-			connId,
-			headerStart,
-			fmt.Sprintf("blockfetch request failed: %v", err),
-		)
+		// return (notably the fork-resolution restarts), so genuine NoBlocks
+		// must be recorded here, at the single point every queued-range
+		// request passes through. Other synchronous errors are transport,
+		// shutdown, or wiring failures and must not poison this range's
+		// unavailable count.
+		if isBlockfetchNoBlocksError(err) {
+			ls.noteBlockfetchRangeUnavailable(
+				connId,
+				headerStart,
+				fmt.Sprintf("blockfetch request returned NoBlocks: %v", err),
+			)
+		}
 		return err
 	}
 	// Near tip: dispatch the same range to one shadow peer if any

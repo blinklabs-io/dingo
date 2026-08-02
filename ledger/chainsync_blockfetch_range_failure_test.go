@@ -136,6 +136,76 @@ func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
 	assert.Equal(t, connId, resync.ConnectionId)
 }
 
+// TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate verifies that
+// request failures which do not establish NoBlocks leave the range-failure
+// record untouched. A reconnecting peer can return these errors repeatedly
+// for the same queued range while the range remains servable.
+func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		unconfigured bool
+	}{
+		{
+			name: "transport reset",
+			err:  errors.New("connection reset by peer"),
+		},
+		{
+			name: "protocol shutdown",
+			err:  errors.New("protocol is shutting down"),
+		},
+		{
+			name: "send queue failure",
+			err:  errors.New("failed to enqueue blockfetch request"),
+		},
+		{
+			name:         "wiring error",
+			unconfigured: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ls, _, resyncChan := newNoBlocksLedgerState(
+				t,
+				"hdr-transient-"+test.name,
+			)
+			if test.unconfigured {
+				ls.config.BlockfetchRequestRangeFunc = nil
+			} else {
+				requestErr := test.err
+				ls.config.BlockfetchRequestRangeFunc = func(
+					ouroboros.ConnectionId,
+					ocommon.Point,
+					ocommon.Point,
+				) error {
+					return requestErr
+				}
+			}
+
+			connId := testChainsyncConnId(6110, 3001)
+			for range blockfetchMaxSameRangeFailures * 3 {
+				err := ls.startQueuedBlockfetchLocked(connId)
+				require.Error(t, err)
+			}
+
+			assert.Equal(t, 1, ls.chain.HeaderCount())
+			assert.Equal(
+				t,
+				0,
+				ls.blockfetchRangeFailure.count,
+				"transient request errors must not advance the unavailable count",
+			)
+			testutil.RequireNoReceive(
+				t,
+				resyncChan,
+				100*time.Millisecond,
+				"transient request errors must not trigger resync",
+			)
+		})
+	}
+}
+
 // TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks covers
 // the specific caller observed wedging on DevNet. After a slot battle,
 // tryResolveFork rolls back to the common ancestor, re-queues the winning

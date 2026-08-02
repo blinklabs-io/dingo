@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -139,5 +140,68 @@ func TestFromPointRejectsRolledBackPointInMemory(t *testing.T) {
 	}
 	if !errors.Is(err, models.ErrBlockNotFound) {
 		t.Fatalf("expected ErrBlockNotFound, got: %s", err)
+	}
+}
+
+// TestFromPointAcceptsCommonPointOnInMemoryFork verifies that a fork iterator
+// can start at its in-memory primary chain intersection. The common prefix is
+// not stored in the fork's blocks slice, and an in-memory manager has no
+// database index for blockByIndex to query directly.
+func TestFromPointAcceptsCommonPointOnInMemoryFork(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	primary := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := primary.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding primary block: %s", err)
+		}
+	}
+
+	commonPoint := blockPoint(testBlocks[1])
+	fork, err := cm.NewChain(commonPoint)
+	if err != nil {
+		t.Fatalf("unexpected error creating fork: %s", err)
+	}
+
+	iter, err := fork.FromPoint(commonPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating iterator at common point: %s", err)
+	}
+	defer iter.Cancel()
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error reading common point: %s", err)
+	}
+	if next == nil || next.Rollback || next.Point.Slot != commonPoint.Slot ||
+		!bytes.Equal(next.Point.Hash, commonPoint.Hash) {
+		t.Fatalf("expected common point, got %+v", next)
+	}
+	reverse, err := fork.FromPointReverse(commonPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse iterator at common point: %s", err)
+	}
+	defer reverse.Cancel()
+	reverseNext, err := reverse.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error reading common point in reverse: %s", err)
+	}
+	if reverseNext == nil || reverseNext.Rollback ||
+		reverseNext.Point.Slot != commonPoint.Slot ||
+		!bytes.Equal(reverseNext.Point.Hash, commonPoint.Hash) {
+		t.Fatalf("expected common point in reverse, got %+v", reverseNext)
+	}
+
+	// The same point remains in the cache after the primary rollback, but it
+	// is no longer part of the primary chain and must still be rejected.
+	if err := primary.Rollback(blockPoint(testBlocks[0])); err != nil {
+		t.Fatalf("unexpected primary rollback error: %s", err)
+	}
+	if _, err := fork.FromPoint(commonPoint, true); !errors.Is(
+		err,
+		models.ErrBlockNotFound,
+	) {
+		t.Fatalf("expected rolled-back common point to be rejected, got: %v", err)
 	}
 }

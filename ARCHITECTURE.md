@@ -341,6 +341,12 @@ the client as a `GetBlockRange` error, driving peer failover) and repeated
 NoBlocks for the same point closes the stuck peer. This condition is normal
 during a tip slot battle, where two nodes each roll back their own block in
 favor of the other's and are then asked for a body neither still has.
+For an in-memory ephemeral fork, the common-prefix portion of that index
+check and iterator lookup is resolved against the primary chain's active
+in-memory points and cache; the fork's divergent tail is resolved from its own
+in-memory points. If the primary has since rolled the common point back, it is
+not considered held even though the retained cache can still resolve it by
+point.
 
 ### Peer-to-Peer Networking
 
@@ -1514,7 +1520,10 @@ because one peer can produce either: a `NoBlocks` reply, which gouroboros
 resolves into a synchronous `GetBlockRange` error and so never reaches
 `BatchDone`; and a `StartBatch`/`BatchDone` pair carrying no blocks, seen in
 `handleEventBlockfetchBatchDone`. Counting them separately would let the two
-alternate while each stayed under its own bound.
+alternate while each stayed under its own bound. Other synchronous
+`GetBlockRange` errors — including transport resets, protocol shutdown,
+send-queue failures, and missing callback wiring — do not count, because they
+do not establish that the peer cannot serve the range.
 
 The count is keyed to the range's start point, not kept as a global
 consecutive streak, and this is what makes it able to fire at all. Failures

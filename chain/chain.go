@@ -1310,7 +1310,27 @@ func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
 	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
 		return false
 	}
-	tmpBlock, err := c.blockByIndex(blockIndex)
+	lookupChain := c
+	if !c.persistent && blockIndex <= c.lastCommonBlockIndex {
+		// Ephemeral chains keep their common prefix on the primary chain.
+		// In-memory managers do not have an index-backed manager lookup, but
+		// the primary chain can resolve that prefix through its own in-memory
+		// points and the manager's block cache. Use the primary chain here so
+		// a valid common point is not mistaken for a rolled-back point.
+		if c.manager == nil {
+			return false
+		}
+		var err error
+		lookupChain, err = c.manager.primaryChain()
+		if err != nil {
+			return false
+		}
+	}
+	if lookupChain != c {
+		lookupChain.mutex.RLock()
+		defer lookupChain.mutex.RUnlock()
+	}
+	tmpBlock, err := lookupChain.blockByIndex(blockIndex)
 	if err != nil {
 		return false
 	}
