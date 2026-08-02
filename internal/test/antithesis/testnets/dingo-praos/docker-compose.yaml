@@ -88,6 +88,7 @@ services:
       - p5-configs:/configs/5
       - utxo-keys:/configs/utxo-keys
       - testnet-config:/testnet-config
+      - logs:/logs
     networks:
       - testnet
 
