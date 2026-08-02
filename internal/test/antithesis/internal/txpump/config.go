@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/antithesis/internal/genesis"
 )
@@ -66,6 +67,11 @@ type Config struct {
 	// Empty string means no fallback.
 	FallbackAddr string
 
+	// StartupTimeout is the maximum time allowed to establish a connection and
+	// successfully submit the first transaction. A zero value disables the
+	// startup deadline; the default is 60 seconds.
+	StartupTimeout time.Duration
+
 	// GenesisUTxOFile is a path to a directory (or a single JSON file) containing
 	// initial UTxO entries. When signing keys are present it must be a directory:
 	// LoadSigningKeys globs genesis.*.skey inside it, while LoadGenesisUTxOs
@@ -107,6 +113,7 @@ func LoadConfig() (*Config, error) {
 		Types:             []string{"payment", "delegation", "governance", "plutus"},
 		LogDir:            envString("TXPUMP_LOG_DIR", "/logs"),
 		FallbackAddr:      envString("TXPUMP_FALLBACK_ADDR", ""),
+		StartupTimeout:    60 * time.Second,
 		GenesisUTxOFile: envString(
 			"TXPUMP_GENESIS_UTXO_FILE", "",
 		),
@@ -181,6 +188,17 @@ func LoadConfig() (*Config, error) {
 			)
 		}
 		cfg.ConfirmationSlots = n
+	}
+
+	if v := os.Getenv("TXPUMP_STARTUP_TIMEOUT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf(
+				"TXPUMP_STARTUP_TIMEOUT: must be a non-negative integer (seconds), got %q",
+				v,
+			)
+		}
+		cfg.StartupTimeout = time.Duration(n) * time.Second
 	}
 
 	if v := os.Getenv("TXPUMP_TYPES"); v != "" {

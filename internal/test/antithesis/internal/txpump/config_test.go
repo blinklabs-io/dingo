@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -65,6 +66,32 @@ func TestLoadConfig_LoadsConfirmationSlots(t *testing.T) {
 	require.Equal(t, uint64(42), cfg.ConfirmationSlots)
 }
 
+func TestLoadConfig_StartUpTimeout(t *testing.T) {
+	clearTxpumpEnv(t)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 60*time.Second, cfg.StartupTimeout)
+
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "7")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 7*time.Second, cfg.StartupTimeout)
+
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "0")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Zero(t, cfg.StartupTimeout)
+}
+
+func TestLoadConfig_RejectsInvalidStartupTimeout(t *testing.T) {
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_STARTUP_TIMEOUT", "-1")
+
+	_, err := LoadConfig()
+	require.ErrorContains(t, err, "TXPUMP_STARTUP_TIMEOUT")
+}
+
 func clearTxpumpEnv(t *testing.T) {
 	t.Helper()
 
@@ -76,6 +103,7 @@ func clearTxpumpEnv(t *testing.T) {
 		"TXPUMP_COOLDOWN_MIN",
 		"TXPUMP_COOLDOWN_MAX",
 		"TXPUMP_CONFIRMATION_SLOTS",
+		"TXPUMP_STARTUP_TIMEOUT",
 		"TXPUMP_TYPES",
 		"TXPUMP_LOG_DIR",
 		"TXPUMP_FALLBACK_ADDR",

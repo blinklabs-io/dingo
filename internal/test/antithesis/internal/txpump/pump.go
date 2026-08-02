@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -58,10 +59,23 @@ func NewPump(
 //  3. Submits the batch, one transaction at a time.
 //  4. Waits a random cooldown in [CooldownMin, CooldownMax] milliseconds.
 func (p *Pump) Run(ctx context.Context) error {
+	var startupTimer *time.Timer
+	var startup <-chan time.Time
+	if p.cfg.StartupTimeout > 0 {
+		startupTimer = time.NewTimer(p.cfg.StartupTimeout)
+		defer startupTimer.Stop()
+		startup = startupTimer.C
+	}
+	ready := false
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-startup:
+			return fmt.Errorf(
+				"txpump readiness timeout after %s: no transaction was successfully submitted",
+				p.cfg.StartupTimeout,
+			)
 		default:
 		}
 
@@ -88,8 +102,26 @@ func (p *Pump) Run(ctx context.Context) error {
 			}
 		}
 
-		p.runBatch(ctx, client, batchSize)
+		submitted := p.runBatch(ctx, client, batchSize)
 		client.Close() //nolint:errcheck // best-effort close
+		if submitted > 0 && !ready {
+			ready = true
+			p.logger.Info(
+				"txpump ready",
+				"workload_types", p.cfg.Types,
+				"submitted", submitted,
+			)
+			if p.txlog != nil {
+				if logErr := p.txlog.Log(TxLog{
+					Event:         "ready",
+					Status:        "ready",
+					NodeAddr:      client.Addr(),
+					WorkloadTypes: append([]string(nil), p.cfg.Types...),
+				}); logErr != nil {
+					p.logger.Error("txlog readiness write failed", "err", logErr)
+				}
+			}
+		}
 
 		if !p.cooldown(ctx) {
 			return ctx.Err()
@@ -169,31 +201,40 @@ func (p *Pump) runBatch(
 	ctx context.Context,
 	client *NodeClient,
 	batchSize int,
-) {
+) int {
 	slot := p.currentSlot()
 	epoch := p.epochFromSlot(slot)
 	active := enabledTypes(p.cfg.Types, epoch, p.cfg.delegationEnabled())
 	if len(active) == 0 {
-		return
+		return 0
 	}
 
+	submitted := 0
 	for i := 0; i < batchSize; i++ {
 		select {
 		case <-ctx.Done():
-			return
+			return submitted
 		default:
 		}
 
 		txType := active[IntRange(0, len(active)-1)]
 		switch txType {
 		case "payment":
-			p.submitPayment(client, batchSize)
+			if p.submitPayment(client, batchSize) {
+				submitted++
+			}
 		case "delegation":
-			p.submitDelegation(client, batchSize)
+			if p.submitDelegation(client, batchSize) {
+				submitted++
+			}
 		case "governance":
-			p.submitGovernance(client, batchSize)
+			if p.submitGovernance(client, batchSize) {
+				submitted++
+			}
 		case "plutus":
-			p.submitPlutus(client, batchSize)
+			if p.submitPlutus(client, batchSize) {
+				submitted++
+			}
 		default:
 			p.logger.Warn(
 				"unknown tx type in config, skipping",
@@ -201,10 +242,11 @@ func (p *Pump) runBatch(
 			)
 		}
 	}
+	return submitted
 }
 
 // submitPayment builds and submits a single payment transaction.
-func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
+func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 	// Determine a send amount between minSendAmount and half the wallet balance
 	// (leaving room for fees and change).  Fall back to minSendAmount when the
 	// balance is very small.
@@ -215,7 +257,7 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			"wallet balance too low for payment, skipping",
 			"balance_lovelace", balance,
 		)
-		return
+		return false
 	}
 
 	upper := maxSend - MinFee
@@ -232,7 +274,7 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			"required_lovelace", required,
 			"err", err,
 		)
-		return
+		return false
 	}
 
 	// Collect a witness key for every distinct signing key among the inputs.
@@ -270,7 +312,7 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 	if err != nil {
 		p.logger.Error("build payment failed", "err", err)
 		p.wallet.ReturnUTxOs(inputs)
-		return
+		return false
 	}
 
 	submitErr := client.SubmitTx(conwayEraID, txBytes)
@@ -317,12 +359,13 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 // submitDelegation builds and submits a single stake-delegation transaction.
-func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
+func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 	if !p.cfg.delegationEnabled() {
-		return
+		return false
 	}
 	stakeKeyHash, err := decodeConfiguredHash(
 		"TXPUMP_DELEGATION_STAKE_KEY_HASH",
@@ -331,7 +374,7 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
 	)
 	if err != nil {
 		p.logger.Error("invalid delegation stake key hash", "err", err)
-		return
+		return false
 	}
 	poolKeyHash, err := decodeConfiguredHash(
 		"TXPUMP_DELEGATION_POOL_KEY_HASH",
@@ -340,7 +383,7 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
 	)
 	if err != nil {
 		p.logger.Error("invalid delegation pool key hash", "err", err)
-		return
+		return false
 	}
 
 	required := MinFee
@@ -351,7 +394,7 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
 			"required_lovelace", required,
 			"err", err,
 		)
-		return
+		return false
 	}
 
 	changeAddr := deterministicAddr(inputs[0].TxHash)
@@ -360,7 +403,7 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
 	if err != nil {
 		p.logger.Error("build delegation failed", "err", err)
 		p.wallet.ReturnUTxOs(inputs)
-		return
+		return false
 	}
 
 	txID := deriveTestTxID(txBytes)
@@ -391,11 +434,12 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 // submitGovernance builds and submits either a DRep registration or a vote
 // transaction (chosen randomly).
-func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
+func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 	// Decide the type first so we can compute the correct coin selection.
 	// DRep registration needs fee + deposit; votes only need the fee.
 	var txKind string
@@ -420,7 +464,7 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
 			"kind", txKind,
 			"err", err,
 		)
-		return
+		return false
 	}
 
 	raw, _ := hex.DecodeString(inputs[0].TxHash)
@@ -446,7 +490,7 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
 	if buildErr != nil {
 		p.logger.Error("build governance tx failed", "kind", txKind, "err", buildErr)
 		p.wallet.ReturnUTxOs(inputs)
-		return
+		return false
 	}
 
 	txID := deriveTestTxID(txBytes)
@@ -482,11 +526,12 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 // submitPlutus builds and submits either a Plutus lock or unlock transaction
 // (chosen randomly).
-func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
+func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 	txKind := "plutus_lock"
 	var lockedInput UTxO
 	if len(p.plutusLocked) > 0 && IntRange(0, 1) == 1 {
@@ -513,7 +558,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 				"required_lovelace", required,
 				"err", err,
 			)
-			return
+			return false
 		}
 	} else {
 		inputs = []UTxO{lockedInput}
@@ -526,7 +571,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 				"fee", MinFee,
 			)
 			p.addLockedPlutusUTxO(lockedInput)
-			return
+			return false
 		}
 		change = lockedInput.Amount - MinFee
 	}
@@ -556,7 +601,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 		} else {
 			p.addLockedPlutusUTxO(lockedInput)
 		}
-		return
+		return false
 	}
 
 	txID := deriveTestTxID(txBytes)
@@ -608,6 +653,7 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
+	return submitErr == nil
 }
 
 func (p *Pump) addLockedPlutusUTxO(utxo UTxO) {
