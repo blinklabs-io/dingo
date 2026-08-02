@@ -17,6 +17,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,12 +40,28 @@ const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
 
 // PendingTruncate records enough information to resume a truncate whose
 // batched blob deletion was interrupted before metadata was truncated.
+// Checksum protects every field that controls the resumed delete range. The
+// blob tip may already have been deleted when a truncate resumes, so it cannot
+// safely be re-read from the blob store for validation.
 type PendingTruncate struct {
 	TargetID     uint64 `json:"targetId"`
 	TargetSlot   uint64 `json:"targetSlot"`
 	TargetHash   []byte `json:"targetHash"`
 	TipID        uint64 `json:"tipId"`
+	TipSlot      uint64 `json:"tipSlot"`
+	TipHash      []byte `json:"tipHash"`
 	MithrilFloor uint64 `json:"mithrilFloor"`
+	Checksum     []byte `json:"checksum"`
+}
+
+func pendingTruncateChecksum(pending PendingTruncate) ([]byte, error) {
+	pending.Checksum = nil
+	value, err := json.Marshal(pending)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(value)
+	return sum[:], nil
 }
 
 // GetPendingTruncate reports a previously-started truncate that still needs
@@ -73,9 +90,20 @@ func GetPendingTruncate(db *database.Database) (*PendingTruncate, error) {
 	// with TargetID=0 would make DeleteBlocksAfter/TruncateAfterSlot
 	// delete from the very first block -- a full, unintended chain wipe
 	// instead of the narrow range the marker was meant to record.
-	if pending.TargetID == 0 || pending.TipID == 0 || len(pending.TargetHash) == 0 {
+	if pending.TargetID == 0 || pending.TipID == 0 ||
+		len(pending.TargetHash) == 0 || len(pending.TipHash) == 0 ||
+		len(pending.Checksum) == 0 {
 		return nil, errors.New(
 			"invalid pending truncate marker: missing required field",
+		)
+	}
+	expectedChecksum, err := pendingTruncateChecksum(pending)
+	if err != nil {
+		return nil, fmt.Errorf("checksum pending truncate marker: %w", err)
+	}
+	if !bytes.Equal(pending.Checksum, expectedChecksum) {
+		return nil, errors.New(
+			"invalid pending truncate marker: checksum mismatch",
 		)
 	}
 	if pending.TipID < pending.TargetID {
@@ -86,7 +114,12 @@ func GetPendingTruncate(db *database.Database) (*PendingTruncate, error) {
 	// TargetSlot/TargetHash combination, or a stale marker left over from
 	// before some other operation altered the chain, must not be resumed
 	// as if it still safely names the same block. Mirrors Truncate's own
-	// on-lineage check for a fresh (non-resumed) target.
+	// on-lineage check for a fresh (non-resumed) target. Safe to check
+	// against the blob store specifically for the TARGET (unlike TipID
+	// below): target.ID is the exclusive lower bound of the delete range
+	// (afterID, tipID], so it is never itself a deletion candidate and is
+	// guaranteed to still be present regardless of how far a previous
+	// attempt's batched delete got.
 	onLineage, err := db.BlockByIndex(pending.TargetID, nil)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -114,6 +147,11 @@ func setPendingTruncate(
 	db *database.Database,
 	pending PendingTruncate,
 ) error {
+	checksum, err := pendingTruncateChecksum(pending)
+	if err != nil {
+		return fmt.Errorf("checksum pending truncate marker: %w", err)
+	}
+	pending.Checksum = checksum
 	value, err := json.Marshal(pending)
 	if err != nil {
 		return err
@@ -498,6 +536,8 @@ func Truncate(
 		TargetSlot:   target.Slot,
 		TargetHash:   append([]byte(nil), target.Hash...),
 		TipID:        tipBlock.ID,
+		TipSlot:      tipBlock.Slot,
+		TipHash:      append([]byte(nil), tipBlock.Hash...),
 		MithrilFloor: mithrilFloor,
 	}
 	if err := setPendingTruncate(db, pending); err != nil {

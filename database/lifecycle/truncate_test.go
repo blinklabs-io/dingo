@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"testing"
@@ -601,6 +602,71 @@ func TestGetPendingTruncateRejectsMarkerNotMatchingActualBlock(t *testing.T) {
 	pending, err := lifecycle.GetPendingTruncate(f.db)
 	require.Error(t, err)
 	require.Nil(t, pending)
+}
+
+// TestGetPendingTruncateRejectsMarkerWithCorruptedTipID verifies that changing
+// the deletion upper bound in an otherwise valid durable marker is detected.
+func TestGetPendingTruncateRejectsMarkerWithCorruptedTipID(t *testing.T) {
+	f := buildTestChain(t, 5)
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	marker, err := f.db.GetSyncState(pendingTruncateSyncKey, nil)
+	require.NoError(t, err)
+	var pending lifecycle.PendingTruncate
+	require.NoError(t, json.Unmarshal([]byte(marker), &pending))
+	pending.TipID--
+	corruptedMarker, err := json.Marshal(pending)
+	require.NoError(t, err)
+	require.NoError(t, f.db.SetSyncState(
+		pendingTruncateSyncKey,
+		string(corruptedMarker),
+		nil,
+	))
+
+	got, err := lifecycle.GetPendingTruncate(f.db)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "checksum mismatch")
+	require.Nil(t, got)
+
+	// Reading the corrupted marker must not continue the interrupted delete.
+	for _, b := range f.blocks[3:] {
+		_, err := f.db.BlockByIndex(b.ID, nil)
+		require.NoError(t, err)
+	}
+}
+
+// TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip verifies that marker
+// validation does not confuse the latest downloaded blob with the applied
+// metadata tip. BlockFetch is allowed to persist such a speculative tail.
+func TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip(t *testing.T) {
+	f := buildTestChain(t, 5)
+	appliedTip := f.blocks[3]
+	require.NoError(t, f.db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: appliedTip.Slot,
+			Hash: appliedTip.Hash,
+		},
+		BlockNumber: appliedTip.Number,
+	}, nil))
+
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	require.Equal(t, f.blocks[4].ID, pending.TipID)
+
+	_, err = lifecycle.Truncate(
+		context.Background(), f.db, models.Block{}, 1, false, 0,
+	)
+	require.NoError(t, err)
+	tip, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[1].Slot, tip.Point.Slot)
 }
 
 // TestTruncateRejectsPreCancelledContextWithoutRecordingMarker verifies

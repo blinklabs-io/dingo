@@ -200,8 +200,24 @@ func (p *PeerGovernor) AddPeer(
 	// are enabled before spawning. Topology peers added before
 	// Start() are covered by startOutboundConnections(); this
 	// handles peers added at runtime (e.g., gossip).
+	//
+	// The spawn itself must happen inside this same critical section,
+	// not after unlocking: Stop() closes and nils p.stopCh while
+	// holding p.mu, then unlocks and calls p.wg.Wait() with the lock
+	// released. Reading p.stopCh here and only calling
+	// spawnOutboundConnection (which does p.wg.Go, registering this
+	// dial with that same WaitGroup) after unlocking would leave a
+	// window where Stop's Wait() observes the WaitGroup counter back
+	// at zero and returns before this goroutine is ever registered --
+	// letting Stop return while a dial it should have drained is still
+	// about to start. Spawning while still holding p.mu forces Stop's
+	// stopCh-clearing critical section (and therefore its Wait) to
+	// happen strictly after this dial is already counted.
 	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound &&
 		source != PeerSourceInboundConn
+	if shouldConnect {
+		p.spawnOutboundConnection(newPeer)
+	}
 	evt = &pendingEvent{
 		PeerAddedEventType,
 		PeerStateChangeEvent{Address: address, Reason: reason},
@@ -210,13 +226,6 @@ func (p *PeerGovernor) AddPeer(
 
 	// Publish event outside of lock to avoid deadlock
 	p.publishEvent(evt.eventType, evt.data)
-
-	// Spawn an outbound connection goroutine for the new peer.
-	// Without this, peers added after startup stay cold
-	// indefinitely.
-	if shouldConnect {
-		p.spawnOutboundConnection(newPeer)
-	}
 	return nil
 }
 

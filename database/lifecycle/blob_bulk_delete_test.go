@@ -17,6 +17,7 @@ package lifecycle_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -329,6 +330,242 @@ func TestDeleteBlocksAfterSkipsSparseGapWithoutPerIDLookups(t *testing.T) {
 	// across the whole gap -- about 100,000 calls here.)
 	require.Zero(t, getCallsDuringDelete)
 	require.Equal(t, int64(len(ids)), deleteCallsDuringDelete)
+}
+
+// erroringIterator mimics how the real gcs/s3 iterators behave when their
+// eager listing call fails (see gcsIterator/s3Iterator): Valid/ValidForPrefix
+// report false immediately -- identical to "prefix is genuinely empty" --
+// and the stored error is only observable through Err().
+type erroringIterator struct {
+	err error
+}
+
+func (i *erroringIterator) Rewind()                           {}
+func (i *erroringIterator) Seek(prefix []byte)                {}
+func (i *erroringIterator) Valid() bool                       { return false }
+func (i *erroringIterator) ValidForPrefix(prefix []byte) bool { return false }
+func (i *erroringIterator) Next()                             {}
+func (i *erroringIterator) Item() types.BlobItem              { return nil }
+func (i *erroringIterator) Close()                            {}
+func (i *erroringIterator) Err() error                        { return i.err }
+
+// erroringIteratorBlobStore wraps a real blob.BlobStore and replaces every
+// iterator it hands out with erroringIterator, simulating a cloud listing
+// call that failed before yielding a single key.
+type erroringIteratorBlobStore struct {
+	blob.BlobStore
+	err error
+}
+
+func (e *erroringIteratorBlobStore) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	return &erroringIterator{err: e.err}
+}
+
+func newErroringIteratorTestDB(
+	t *testing.T,
+	iterErr error,
+) *database.Database {
+	t.Helper()
+	config := &database.Config{DataDir: t.TempDir()}
+	host := plugin.NewHost()
+	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, sqlite.RegisterProvider(host))
+
+	realBlob, err := plugin.Resolve[blob.BlobStore](
+		context.Background(), host,
+		plugin.CapabilityStorageBlob, "badger", nil,
+		blob.ProviderDependencies{DataDir: config.DataDir},
+	)
+	require.NoError(t, err)
+
+	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
+		context.Background(), host,
+		plugin.CapabilityStorageMetadata, "sqlite", nil,
+		metadata.ProviderDependencies{DataDir: config.DataDir},
+	)
+	require.NoError(t, err)
+
+	db, err := database.New(
+		config,
+		database.Stores{
+			Blob:     &erroringIteratorBlobStore{BlobStore: realBlob, err: iterErr},
+			Metadata: metadataStore,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+		_ = host.Stop(context.Background())
+	})
+	return db
+}
+
+// TestDeleteBlocksAfterSurfacesIteratorErrorInsteadOfTreatingItAsEmptyRange
+// guards against a real gap: the real gcs/s3 iterators page their full key
+// listing eagerly inside NewIterator, and a failed list call is recorded on
+// the iterator itself, surfacing only through Err() -- ValidForPrefix
+// reports false immediately, indistinguishable from "this prefix has no
+// keys". Without checking it.Err(), a failed listing would make
+// DeleteBlocksAfter conclude the batch's range is simply empty, commit
+// (deleting nothing), and report success -- silently letting a subsequent
+// metadata truncation advance past blob blocks that were never actually
+// examined, let alone deleted.
+func TestDeleteBlocksAfterSurfacesIteratorErrorInsteadOfTreatingItAsEmptyRange(
+	t *testing.T,
+) {
+	sentinel := errors.New("simulated cloud list failure")
+	db := newErroringIteratorTestDB(t, sentinel)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	require.NoError(t, db.BlockCreate(testBlock(2, 0x02), nil))
+
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
+		context.Background(), db, 0, 2, 0,
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, sentinel)
+	require.Zero(t, blocksDeleted)
+
+	for id := uint64(1); id <= 2; id++ {
+		_, err := db.BlockByIndex(id, nil)
+		require.NoErrorf(
+			t, err,
+			"block %d must survive: a failed listing must not be reported "+
+				"as a successfully completed, empty batch", id,
+		)
+	}
+}
+
+// midWalkErrorIterator wraps a real BlobIterator and induces a listing
+// failure after n successful ValidForPrefix checks, mirroring a cloud
+// paginator that fails partway through a multi-page listing: it visited the
+// first n keys through the real iterator, but the next ValidForPrefix call
+// reports false -- indistinguishable from "no more keys" -- while Err()
+// surfaces the injected error.
+type midWalkErrorIterator struct {
+	types.BlobIterator
+	remaining int
+	err       error
+}
+
+func (i *midWalkErrorIterator) ValidForPrefix(prefix []byte) bool {
+	if i.remaining <= 0 {
+		return false
+	}
+	i.remaining--
+	return i.BlobIterator.ValidForPrefix(prefix)
+}
+
+func (i *midWalkErrorIterator) Err() error {
+	if i.remaining <= 0 {
+		return i.err
+	}
+	return i.BlobIterator.Err()
+}
+
+// midWalkErrorBlobStore wraps a real blob.BlobStore and replaces every
+// iterator it hands out with midWalkErrorIterator.
+type midWalkErrorBlobStore struct {
+	blob.BlobStore
+	n   int
+	err error
+}
+
+func (m *midWalkErrorBlobStore) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	return &midWalkErrorIterator{
+		BlobIterator: m.BlobStore.NewIterator(txn, opts),
+		remaining:    m.n,
+		err:          m.err,
+	}
+}
+
+func newMidWalkErrorTestDB(
+	t *testing.T,
+	n int,
+	iterErr error,
+) *database.Database {
+	t.Helper()
+	config := &database.Config{DataDir: t.TempDir()}
+	host := plugin.NewHost()
+	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, sqlite.RegisterProvider(host))
+
+	realBlob, err := plugin.Resolve[blob.BlobStore](
+		context.Background(), host,
+		plugin.CapabilityStorageBlob, "badger", nil,
+		blob.ProviderDependencies{DataDir: config.DataDir},
+	)
+	require.NoError(t, err)
+
+	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
+		context.Background(), host,
+		plugin.CapabilityStorageMetadata, "sqlite", nil,
+		metadata.ProviderDependencies{DataDir: config.DataDir},
+	)
+	require.NoError(t, err)
+
+	db, err := database.New(
+		config,
+		database.Stores{
+			Blob:     &midWalkErrorBlobStore{BlobStore: realBlob, n: n, err: iterErr},
+			Metadata: metadataStore,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+		_ = host.Stop(context.Background())
+	})
+	return db
+}
+
+// TestDeleteBlocksAfterSurfacesIteratorErrorPartwayThroughWalk guards the
+// other half of the same gap: a listing failure that happens after some
+// keys were already visited, not before any. Without checking it.Err()
+// after the walk, the loop exiting because ValidForPrefix went false would
+// look identical to "reached the end of this batch's range", the batch
+// would commit whatever partial deletes it made, and DeleteBlocksAfter
+// would report success -- even though blocks later in the range were never
+// examined at all (not "absent", simply never looked at) because the
+// listing itself broke. This must instead fail the whole batch so nothing
+// commits, exactly as if the transaction's own db.Blob*() calls had failed.
+func TestDeleteBlocksAfterSurfacesIteratorErrorPartwayThroughWalk(
+	t *testing.T,
+) {
+	sentinel := errors.New("simulated mid-listing cloud failure")
+	// n=2: the iterator behaves normally for the first two entries (blocks
+	// 1 and 2), then reports "no more keys" while Err() reveals the
+	// injected failure -- before ever reaching block 3.
+	db := newMidWalkErrorTestDB(t, 2, sentinel)
+	for id := uint64(1); id <= 3; id++ {
+		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
+	}
+
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
+		context.Background(), db, 0, 3, 0,
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, sentinel)
+
+	// A real (non-cloud) blob store's transaction rolls back on error, so
+	// nothing committed: all three blocks must survive even though the
+	// first two were visited and issued for deletion before the failure
+	// was detected.
+	for id := uint64(1); id <= 3; id++ {
+		_, err := db.BlockByIndex(id, nil)
+		require.NoErrorf(
+			t, err,
+			"block %d must survive: a partial listing failure must roll "+
+				"back the whole batch, not commit a silent partial delete",
+			id,
+		)
+	}
+	_ = blocksDeleted
 }
 
 // cloudLikeTxn wraps a real blob.BlobStore transaction so it behaves like

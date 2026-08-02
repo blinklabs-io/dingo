@@ -105,6 +105,16 @@ func DeleteBlocksAfter(
 				return errors.New("blob iterator is nil")
 			}
 			defer it.Close()
+			// Cloud-backed iterators (gcs/s3) page the full key listing
+			// eagerly inside NewIterator itself: a failed list call is
+			// stored on the iterator and surfaces only through Err(),
+			// not as a nil return above. Left unchecked, ValidForPrefix
+			// below would look identical to "prefix is genuinely empty"
+			// and this batch would silently delete nothing while still
+			// being reported as a clean success.
+			if err := it.Err(); err != nil {
+				return fmt.Errorf("blob iterator: %w", err)
+			}
 			// Seek once to the first index entry at or after start, then
 			// walk forward: present blocks are visited in order and any
 			// gap in between costs nothing, unlike looping every numeric
@@ -170,6 +180,13 @@ func DeleteBlocksAfter(
 				}
 				batchDeleted++
 				it.Next()
+			}
+			// A cloud iterator can also fail mid-walk (a paginator error
+			// partway through listing), which ValidForPrefix again
+			// reports identically to "no more keys" -- so the loop above
+			// exiting cleanly is not proof every block in range was seen.
+			if err := it.Err(); err != nil {
+				return fmt.Errorf("blob iterator: %w", err)
 			}
 			return nil
 		})
