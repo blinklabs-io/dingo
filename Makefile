@@ -33,6 +33,9 @@ COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 BUILD_TAGS ?= dingo_extra_plugins
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# Generated sqlc and protobuf packages are validated by their generators;
+# run modernize only against hand-written packages to avoid generator drift.
+MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
 .PHONY: all build help mod-tidy clean format golines lint import-boundaries proto sql sql-check gorm-check test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
@@ -70,7 +73,7 @@ golines: ## Enforce 80-character line limit
 lint: import-boundaries ## Run linters (golangci-lint + nilaway + modernize)
 	golangci-lint run ./...
 	nilaway $(GO_TAG_FLAGS) ./...
-	modernize $(GO_TAG_FLAGS) ./...
+	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
