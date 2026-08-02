@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,9 +70,7 @@ func historicalRewards(
 		if err != nil {
 			return nil, err
 		}
-		for key, value := range batch {
-			ret[key] = value
-		}
+		maps.Copy(ret, batch)
 	}
 	return ret, nil
 }
@@ -216,9 +215,7 @@ WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
 	}
 
 	ret := make(map[historicalRewardKey]uint64, len(base)+len(total))
-	for ref, reward := range base {
-		ret[ref] = reward
-	}
+	maps.Copy(ret, base)
 	for ref, withdrawal := range withdrawals {
 		if beforeWithdrawal[ref] > withdrawal.previous {
 			return nil, errors.New("historical reward underflow")

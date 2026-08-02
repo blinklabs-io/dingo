@@ -340,9 +340,7 @@ func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 	// an accidental return to independently-read live fields fail logically as
 	// well as through the race detector.
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -369,7 +367,7 @@ func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	// Publish many generations while all readers are active. The existing
@@ -408,9 +406,7 @@ func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
 	done := make(chan struct{})
 
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -430,7 +426,7 @@ func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	for generation := 1; generation <= generations; generation++ {
