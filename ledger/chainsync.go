@@ -4267,11 +4267,10 @@ func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
 // prevEpoch.EpochId+1 starting at boundarySlot) and matches the event the
 // persist half builds from that record.
 //
-// A failure is not fatal and is not surfaced: the stake read is wrapped in a
-// savepoint so a failed read cannot poison the rollover transaction on backends
-// that abort a transaction on SQL error, and leaving no SNAP-point distribution
-// behind makes the persist half read the stake itself — the pre-split behavior —
-// rather than wedging the epoch boundary.
+// A failure is isolated with a savepoint so it cannot poison the rollover
+// transaction on backends that abort a transaction on SQL error. The persist
+// half then uses the boundary-aware historical reconstruction; load mode also
+// records the failure so an incomplete capture is surfaced to the operator.
 func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 	txn *database.Txn,
 	prevEpoch models.Epoch,

@@ -991,3 +991,19 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 	require.ErrorContains(t, err, "total active stake overflow")
 	require.Nil(t, dist)
 }
+
+func TestDedupeStakeInputsIsIndependentOfInputOrder(t *testing.T) {
+	poolA := bytes.Repeat([]byte{0x11}, 28)
+	poolB := bytes.Repeat([]byte{0x22}, 28)
+	credential := bytes.Repeat([]byte{0x31}, 28)
+	rows := []StakeInput{
+		{PoolKeyHash: poolB, StakingKey: credential, Stake: 70},
+		{PoolKeyHash: poolA, StakingKey: credential, Stake: 40},
+	}
+	first := dedupeStakeInputs(rows)
+	second := dedupeStakeInputs([]StakeInput{rows[1], rows[0]})
+	require.Equal(t, first, second)
+	require.Len(t, first, 1)
+	require.Equal(t, poolB, first[0].PoolKeyHash)
+	require.Equal(t, uint64(70), first[0].Stake)
+}

@@ -15,11 +15,13 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -216,33 +218,12 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	if err != nil {
 		return nil, fmt.Errorf("get live stake inputs: %w", err)
 	}
-	inputs, err := dedupeRewardStakeInputRows(rawInputs)
+	inputs, err := rewardStakeInputsFromRows(rawInputs)
 	if err != nil {
 		return nil, err
 	}
 	dist.StakeInputs = make([]StakeInput, 0, len(inputs))
 	for _, input := range inputs {
-		if input == nil {
-			return nil, errors.New("nil live stake input")
-		}
-		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
-			return nil, fmt.Errorf(
-				"invalid live stake input pool key length %d",
-				len(input.PoolKeyHash),
-			)
-		}
-		if len(input.StakingKey) != len(lcommon.PoolKeyHash{}) {
-			return nil, fmt.Errorf(
-				"invalid live stake input credential length %d",
-				len(input.StakingKey),
-			)
-		}
-		if input.CredentialTag > 1 {
-			return nil, fmt.Errorf(
-				"invalid live stake input credential tag %d",
-				input.CredentialTag,
-			)
-		}
 		var poolHash lcommon.PoolKeyHash
 		copy(poolHash[:], input.PoolKeyHash)
 		dist.DelegatorCount[poolHash]++
@@ -476,32 +457,11 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 	if err != nil {
 		return nil, fmt.Errorf("get reward stake inputs: %w", err)
 	}
-	inputs, err := dedupeRewardStakeInputRows(rawInputs)
+	inputs, err := rewardStakeInputsFromRows(rawInputs)
 	if err != nil {
 		return nil, err
 	}
 	for _, input := range inputs {
-		if input == nil {
-			return nil, errors.New("nil reward stake input")
-		}
-		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
-			return nil, fmt.Errorf(
-				"invalid reward stake input pool key length %d",
-				len(input.PoolKeyHash),
-			)
-		}
-		if len(input.StakingKey) != len(lcommon.PoolKeyHash{}) {
-			return nil, fmt.Errorf(
-				"invalid reward stake input credential length %d",
-				len(input.StakingKey),
-			)
-		}
-		if input.CredentialTag > 1 {
-			return nil, fmt.Errorf(
-				"invalid reward stake input credential tag %d",
-				input.CredentialTag,
-			)
-		}
 		var poolHash lcommon.PoolKeyHash
 		copy(poolHash[:], input.PoolKeyHash)
 		stake := uint64(input.Stake)
@@ -575,8 +535,9 @@ type rewardStakeAggregation struct {
 	values map[lcommon.PoolKeyHash]uint64
 }
 
-// dedupeRewardStakeInputRows collapses duplicate stake-credential rows before
-// they are aggregated, keeping the final occurrence.
+// rewardStakeInputsFromRows converts and canonically deduplicates reward rows
+// before they are aggregated. The canonical ordering makes the selected row
+// independent of SQL backend order and pool-query chunking.
 //
 // reward_live_stake is unique on (credential_tag, staking_key), so a credential
 // cannot legitimately contribute stake under two pools. Duplicate rows do occur
@@ -591,26 +552,65 @@ type rewardStakeAggregation struct {
 // PoolStakeSnapshot and EpochSummary. Deduping here, ahead of aggregation, makes
 // the protection real and keeps the two dedupe rules identical (same key, same
 // last-wins tie-break) so rewardStakeDistribution stays a no-op validator.
-func dedupeRewardStakeInputRows(
+func rewardStakeInputsFromRows(
 	rows []*models.RewardStakeInput,
-) ([]*models.RewardStakeInput, error) {
-	type credentialKey struct {
-		key string
-		tag uint8
-	}
-	seen := make(map[credentialKey]int, len(rows))
-	deduped := make([]*models.RewardStakeInput, 0, len(rows))
+) ([]StakeInput, error) {
+	inputs := make([]StakeInput, 0, len(rows))
 	for _, row := range rows {
 		if row == nil {
 			return nil, errors.New("nil reward stake input")
 		}
-		k := credentialKey{key: string(row.StakingKey), tag: row.CredentialTag}
-		if idx, ok := seen[k]; ok {
-			deduped[idx] = row
+		if len(row.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
+			return nil, fmt.Errorf("invalid reward stake input pool key length %d", len(row.PoolKeyHash))
+		}
+		if len(row.StakingKey) != len(lcommon.PoolKeyHash{}) {
+			return nil, fmt.Errorf("invalid reward stake input credential length %d", len(row.StakingKey))
+		}
+		if row.CredentialTag > 1 {
+			return nil, fmt.Errorf("invalid reward stake input credential tag %d", row.CredentialTag)
+		}
+		inputs = append(inputs, StakeInput{
+			PoolKeyHash:   append([]byte(nil), row.PoolKeyHash...),
+			CredentialTag: row.CredentialTag,
+			StakingKey:    append([]byte(nil), row.StakingKey...),
+			Stake:         uint64(row.Stake), Registered: row.Registered,
+		})
+	}
+	return dedupeStakeInputs(inputs), nil
+}
+
+// dedupeStakeInputs selects the lexicographically greatest complete row for a
+// duplicate credential after sorting by credential, pool, stake, and
+// registration state. This explicit tie-break prevents backend/chunk order
+// from changing consensus-critical leader stake snapshots.
+func dedupeStakeInputs(inputs []StakeInput) []StakeInput {
+	canonical := append([]StakeInput(nil), inputs...)
+	sort.Slice(canonical, func(i, j int) bool {
+		a, b := canonical[i], canonical[j]
+		if a.CredentialTag != b.CredentialTag {
+			return a.CredentialTag < b.CredentialTag
+		}
+		if c := bytes.Compare(a.StakingKey, b.StakingKey); c != 0 {
+			return c < 0
+		}
+		if c := bytes.Compare(a.PoolKeyHash, b.PoolKeyHash); c != 0 {
+			return c < 0
+		}
+		if a.Stake != b.Stake {
+			return a.Stake < b.Stake
+		}
+		return !a.Registered && b.Registered
+	})
+	seen := make(map[string]int, len(canonical))
+	result := make([]StakeInput, 0, len(canonical))
+	for _, input := range canonical {
+		key := string([]byte{input.CredentialTag}) + string(input.StakingKey)
+		if idx, ok := seen[key]; ok {
+			result[idx] = input
 			continue
 		}
-		seen[k] = len(deduped)
-		deduped = append(deduped, row)
+		seen[key] = len(result)
+		result = append(result, input)
 	}
-	return deduped, nil
+	return result
 }

@@ -502,8 +502,8 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 		expiryEpoch,
 	)
 	if err != nil {
-		// Leave nothing stashed: the persist phase then recomputes inline,
-		// which is the pre-split behavior rather than a wedged boundary.
+		// Leave nothing stashed: the persist phase recomputes with the
+		// boundary-aware historical fallback and returns any failure.
 		m.stashBoundaryDistribution(nil)
 		return fmt.Errorf("calculate snap-point stake distribution: %w", err)
 	}
@@ -534,9 +534,9 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 // The stake distribution it persists is the one ComputeEpochBoundarySnapshot
 // read at the SNAP point earlier in this same transaction. When no matching
 // SNAP-point distribution exists — the compute hook is not installed, or its
-// read failed — it falls back to reading the distribution here, which reproduces
-// the pre-split behavior including that ordering flaw rather than skipping the
-// capture.
+// read failed — it reconstructs the exact boundary with slot-aware reward
+// semantics. It never falls back to the live aggregate, whose post-SNAP
+// credits would corrupt the Mark snapshot.
 func (m *Manager) CaptureEpochBoundarySnapshot(
 	ctx context.Context,
 	txn *database.Txn,
@@ -556,11 +556,13 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		)
 		calculator := NewCalculator(m.db)
 		var err error
-		distribution, err = calculator.calculateStakeDistributionInTxn(
+		distribution, err = calculator.calculateBoundaryStakeDistributionInTxn(
 			ctx,
 			txn,
 			evt.SnapshotSlot,
+			evt.BoundarySlot,
 			expiryEpoch,
+			m.inactivityPeriod(),
 		)
 		if err != nil {
 			if m.metrics != nil {

@@ -3223,7 +3223,7 @@ Key configuration areas:
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and before POOLREAP, MIR and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
 
@@ -3578,8 +3578,8 @@ write belong at different places in the sequence:
 
 - `Manager.ComputeEpochBoundarySnapshot`, installed via
   `LedgerState.SetEpochBoundarySnapshotStakeHook`, reads the stake distribution at
-  the SNAP point — immediately after `applyStakeRewards` and before POOLREAP, MIR
-  and governance enactment. It writes nothing and holds the distribution in the
+  the SNAP point — immediately after `applyStakeRewards` and `applyMIRCerts`, and
+  before POOLREAP and governance enactment. It writes nothing and holds the distribution in the
   manager, keyed to the exact boundary (new epoch, boundary slot, snapshot slot,
   CIP-0163 gate argument).
 - `Manager.CaptureEpochBoundarySnapshot`, installed via
@@ -3608,13 +3608,13 @@ Aligning with that required swapping dingo's POOLREAP and MIR, which had run in
 the opposite order; MIR is now also pre-POOLREAP, matching the reference, so its
 pot movements are visible to the deposit refunds.
 
-A failed SNAP-point read is not fatal and is not surfaced: it is savepoint-wrapped
-(so a read error cannot poison the rollover transaction on a backend that aborts
-on SQL error) and leaves no distribution behind, which makes the persist half read
-the stake itself — the pre-split behavior — rather than wedging the boundary. A
-distribution left behind by a rollover that never reached its persist phase is
-discarded rather than attached to a different boundary, because the persist half
-requires an exact match on the boundary identity.
+A failed SNAP-point read is isolated with a savepoint (so a read error cannot
+poison the rollover transaction on a backend that aborts on SQL error). The
+persist half then performs the same boundary-aware historical reconstruction;
+if that also fails, capture returns the error rather than silently reverting to
+the live aggregate. A distribution left behind by a rollover that never reached
+its persist phase is discarded rather than attached to a different boundary,
+because the persist half requires an exact match on the boundary identity.
 
 This wiring is consensus-affecting and must be DevNet-validated before merge (see
 the note at the end of this section).

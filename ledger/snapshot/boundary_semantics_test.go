@@ -165,8 +165,8 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(55_000_000), uint64(poolSnapshot.TotalStake),
-		"a stale SNAP-point distribution must not be attached to another boundary")
+	require.Equal(t, uint64(40_000_000), uint64(poolSnapshot.TotalStake),
+		"a stale SNAP-point distribution must not be attached to another boundary; fallback is boundary-aware")
 }
 
 // TestCalculateStakeDistributionDedupesCredentialAcrossPools proves the

@@ -352,8 +352,9 @@ func TestEpochBoundaryStakeSemanticsMysql(t *testing.T) {
 		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
 	)
 	require.NoError(t, err)
-	// retained: 100 utxo + 10 live reward + 50 retained boundary update - 7
-	// post-SNAP = 160. underflow: 100 utxo + floored 0 reward = 100.
+	// retained: 100 UTxO + 10 live reward + 50 pre-SNAP boundary credit;
+	// the 7 post-SNAP credit is excluded, for 160. underflow is 100 UTxO
+	// plus a floored-zero reconstructed reward, for 100.
 	require.Equal(t, uint64(260), stakes[string(pool)])
 	require.Equal(t, uint64(2), delegators[string(pool)])
 
