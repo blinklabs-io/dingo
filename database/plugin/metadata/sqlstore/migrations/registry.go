@@ -462,6 +462,22 @@ func splitSQLList(value string) []string {
 }
 
 func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
+	// Legacy releases enforced a slot-less unique index on reward deltas.  It
+	// cannot represent multiple NULL-hash credits for the same account (for
+	// example MIR/POOLREAP rows), and normalizing those NULLs to the canonical
+	// empty hash below would make the duplicate values collide immediately.
+	// Remove that obsolete index before rewriting the data; the v1 expand phase
+	// installs the slot-aware replacement afterwards.
+	if exists, err := sqliteIndexExists(ctx, conn, "idx_account_reward_delta_w_tx_s"); err != nil {
+		return err
+	} else if exists {
+		if _, err := conn.ExecContext(
+			ctx,
+			"DROP INDEX IF EXISTS `idx_account_reward_delta_w_tx_s`",
+		); err != nil {
+			return fmt.Errorf("drop legacy SQLite reward-delta index: %w", err)
+		}
+	}
 	// Legacy reward deltas used NULL for credits without a source hash. Treat
 	// that value as the canonical empty hash before the slot-aware unique index
 	// is installed; SQLite otherwise permits every replay because NULLs do not
@@ -530,7 +546,6 @@ func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
 	for _, index := range []string{
 		"hash_slot",
 		"idx_account_staking_key",
-		"idx_account_reward_delta_w_tx_s",
 	} {
 		exists, err := sqliteIndexExists(ctx, conn, index)
 		if err != nil {

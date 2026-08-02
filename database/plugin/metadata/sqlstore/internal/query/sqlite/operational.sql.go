@@ -4572,35 +4572,6 @@ func (q *Queries) SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteC
 	return err
 }
 
-const sumNetworkDonationsForEpoch = `-- name: SumNetworkDonationsForEpoch :many
-SELECT amount
-FROM network_donation
-WHERE epoch = ?
-`
-
-func (q *Queries) SumNetworkDonationsForEpoch(ctx context.Context, epoch int64) ([]int64, error) {
-	rows, err := q.db.QueryContext(ctx, sumNetworkDonationsForEpoch, epoch)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []int64{}
-	for rows.Next() {
-		var amount int64
-		if err := rows.Scan(&amount); err != nil {
-			return nil, err
-		}
-		items = append(items, amount)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const sumPoolStakeSnapshots = `-- name: SumPoolStakeSnapshots :many
 SELECT total_stake
 FROM pool_stake_snapshot

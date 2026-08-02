@@ -260,22 +260,48 @@ LEFT JOIN latest_delegation
 			if err != nil {
 				return fmt.Errorf("load reward live stake credentials: %w", err)
 			}
-			defer rows.Close()
+			// Materialize the credential cursor before issuing any upserts.  On
+			// PostgreSQL a query keeps the transaction's sole connection busy
+			// until its rows are closed; attempting the first INSERT while this
+			// cursor is open therefore blocks/fails with a connection error.
+			type rewardLiveStakeCredential struct {
+				tag             uint8
+				key, pool       []byte
+				reward          sql.NullString
+				active          sql.NullBool
+				addedSlot       sql.NullInt64
+				delegationSlot  sql.NullInt64
+				delegationBlock sql.NullInt64
+				delegationCert  sql.NullInt64
+			}
+			credentials := make([]rewardLiveStakeCredential, 0)
 			for rows.Next() {
-				var tag uint8
-				var key, pool []byte
-				var reward sql.NullString
-				var active sql.NullBool
-				var addedSlot, delegationSlot, delegationBlock, delegationCert sql.NullInt64
-				if err := rows.Scan(&tag, &key, &pool, &reward, &active, &addedSlot,
-					&delegationSlot, &delegationBlock, &delegationCert); err != nil {
+				var credential rewardLiveStakeCredential
+				if err := rows.Scan(&credential.tag, &credential.key, &credential.pool,
+					&credential.reward, &credential.active, &credential.addedSlot,
+					&credential.delegationSlot, &credential.delegationBlock, &credential.delegationCert,
+				); err != nil {
+					_ = rows.Close()
 					return fmt.Errorf("scan reward live stake credential: %w", err)
 				}
+				credentials = append(credentials, credential)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("iterate reward live stake credentials: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("close reward live stake credentials: %w", err)
+			}
+			for _, credential := range credentials {
+				tag := credential.tag
+				key := credential.key
+				pool := credential.pool
 				ref := credentialKey{tag: tag, key: string(key)}
 				utxoStake := utxoStakes[ref]
 				rewardStake := uint64(0)
-				if reward.Valid && reward.String != "" {
-					rewardStake, err = parseUint64("reward live stake reward", reward.String)
+				if credential.reward.Valid && credential.reward.String != "" {
+					rewardStake, err = parseUint64("reward live stake reward", credential.reward.String)
 					if err != nil {
 						return err
 					}
@@ -284,7 +310,7 @@ LEFT JOIN latest_delegation
 					return fmt.Errorf("reward live stake overflow for credential %d:%x", tag, key)
 				}
 				total := utxoStake + rewardStake
-				registered := active.Valid && active.Bool
+				registered := credential.active.Valid && credential.active.Bool
 				if !registered {
 					pool = nil
 				}
@@ -292,16 +318,16 @@ LEFT JOIN latest_delegation
 				blockIndex := int64(0)
 				certIndex := int64(0)
 				if registered && len(pool) > 0 {
-					if delegationSlot.Valid {
-						delegSlot = delegationSlot.Int64
-					} else if addedSlot.Valid {
-						delegSlot = addedSlot.Int64
+					if credential.delegationSlot.Valid {
+						delegSlot = credential.delegationSlot.Int64
+					} else if credential.addedSlot.Valid {
+						delegSlot = credential.addedSlot.Int64
 					}
-					if delegationBlock.Valid {
-						blockIndex = delegationBlock.Int64
+					if credential.delegationBlock.Valid {
+						blockIndex = credential.delegationBlock.Int64
 					}
-					if delegationCert.Valid {
-						certIndex = delegationCert.Int64
+					if credential.delegationCert.Valid {
+						certIndex = credential.delegationCert.Int64
 					}
 				}
 				if _, err := db.ExecContext(context.Background(), `
@@ -321,9 +347,6 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 					models.RewardStakeCalculationVersion); err != nil {
 					return fmt.Errorf("populate reward live stake: %w", err)
 				}
-			}
-			if err := rows.Err(); err != nil {
-				return fmt.Errorf("iterate reward live stake credentials: %w", err)
 			}
 			return nil
 		},

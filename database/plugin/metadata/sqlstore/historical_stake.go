@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -39,17 +40,59 @@ type historicalWithdrawal struct {
 	previous uint64
 }
 
-// historicalRewards evaluates future reward credits in Go. Amounts are
+// historicalRewards evaluates future reward credits only for the selected
+// credentials.  Filters are split into bounded batches so the generated
+// predicate stays below SQLite/PostgreSQL/MySQL parameter limits.
+func historicalRewards(
+	db queryer,
+	slot uint64,
+	selected map[historicalRewardKey]struct{},
+) (map[historicalRewardKey]uint64, error) {
+	keys := make([]historicalRewardKey, 0, len(selected))
+	for key := range selected {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].tag != keys[j].tag {
+			return keys[i].tag < keys[j].tag
+		}
+		return keys[i].key < keys[j].key
+	})
+	ret := make(map[historicalRewardKey]uint64, len(selected))
+	for start := 0; start < len(keys); start += 400 {
+		end := min(start+400, len(keys))
+		batchSelected := make(map[historicalRewardKey]struct{}, end-start)
+		for _, key := range keys[start:end] {
+			batchSelected[key] = struct{}{}
+		}
+		batch, err := historicalRewardsBatch(db, slot, batchSelected)
+		if err != nil {
+			return nil, err
+		}
+		for key, value := range batch {
+			ret[key] = value
+		}
+	}
+	return ret, nil
+}
+
+// historicalRewardsBatch evaluates future reward credits in Go. Amounts are
 // persisted as decimal text and can exceed a signed SQL integer; keeping the
 // ordering logic here avoids lossy CAST/SUM arithmetic in SQLite.
-func historicalRewards(db queryer, slot uint64) (map[historicalRewardKey]uint64, error) {
+func historicalRewardsBatch(
+	db queryer,
+	slot uint64,
+	selected map[historicalRewardKey]struct{},
+) (map[historicalRewardKey]uint64, error) {
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
 	}
 	base := make(map[historicalRewardKey]uint64)
+	predicate, predicateArgs := historicalRewardCredentialPredicate(selected)
 	rows, err := db.QueryContext(context.Background(),
-		"SELECT credential_tag, staking_key, reward FROM account")
+		"SELECT credential_tag, staking_key, reward FROM account WHERE "+predicate,
+		predicateArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,11 +123,12 @@ func historicalRewards(db queryer, slot uint64) (map[historicalRewardKey]uint64,
 	}
 
 	withdrawals := make(map[historicalRewardKey]historicalWithdrawal)
+	withdrawalArgs := append([]any{slotValue}, predicateArgs...)
 	rows, err = db.QueryContext(context.Background(), `
 SELECT credential_tag, staking_key, id, added_slot, previous_reward
 FROM account_reward_delta
-WHERE withdrawal = TRUE AND added_slot > ?
-	ORDER BY credential_tag, staking_key, added_slot, id`, slotValue)
+WHERE withdrawal = TRUE AND added_slot > ? AND (`+predicate+`)
+	ORDER BY credential_tag, staking_key, added_slot, id`, withdrawalArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -121,11 +165,12 @@ WHERE withdrawal = TRUE AND added_slot > ?
 
 	total := make(map[historicalRewardKey]uint64)
 	beforeWithdrawal := make(map[historicalRewardKey]uint64)
+	creditArgs := append([]any{slotValue}, predicateArgs...)
 	rows, err = db.QueryContext(context.Background(), `
 SELECT credential_tag, staking_key, id, added_slot, amount
 FROM account_reward_delta
-WHERE withdrawal = FALSE AND added_slot > ?
-	ORDER BY credential_tag, staking_key, added_slot, id`, slotValue)
+WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
+	ORDER BY credential_tag, staking_key, added_slot, id`, creditArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +238,36 @@ WHERE withdrawal = FALSE AND added_slot > ?
 	return ret, nil
 }
 
+// historicalRewardCredentialPredicate builds a bounded, deterministic filter
+// for the credentials participating in one historical stake request.  Reward
+// reconstruction used to scan every account and reward delta in the database,
+// even when a caller requested a single pool; keeping the selected set in the
+// SQL predicates makes the work proportional to the request.
+func historicalRewardCredentialPredicate(
+	selected map[historicalRewardKey]struct{},
+) (string, []any) {
+	if len(selected) == 0 {
+		return "1 = 0", nil
+	}
+	keys := make([]historicalRewardKey, 0, len(selected))
+	for key := range selected {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].tag != keys[j].tag {
+			return keys[i].tag < keys[j].tag
+		}
+		return keys[i].key < keys[j].key
+	})
+	parts := make([]string, 0, len(keys))
+	args := make([]any, 0, len(keys)*2)
+	for _, key := range keys {
+		parts = append(parts, "(credential_tag = ? AND staking_key = ?)")
+		args = append(args, key.tag, []byte(key.key))
+	}
+	return strings.Join(parts, " OR "), args
+}
+
 var historicalDelegationSources = []historicalStakeSource{
 	{"stake_delegation", uint(lcommon.CertificateTypeStakeDelegation), 0},
 	{
@@ -258,10 +333,6 @@ func (s *Store) GetStakeByPoolsAtSlot(
 	if err != nil {
 		return nil, nil, err
 	}
-	rewardsByCredential, err := historicalRewards(db, slot)
-	if err != nil {
-		return nil, nil, fmt.Errorf("calculate historical rewards: %w", err)
-	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
 	for start := 0; start < len(poolKeyHashes); start += 400 {
 		end := min(start+400, len(poolKeyHashes))
@@ -293,7 +364,7 @@ FROM active_delegator_stake`,
 			key  string
 		}
 		amounts := make(map[stakeKey]uint64)
-		rewards := make(map[stakeKey]uint64)
+		selected := make(map[historicalRewardKey]struct{})
 		for rows.Next() {
 			var hash, key []byte
 			var tag uint8
@@ -318,7 +389,7 @@ FROM active_delegator_stake`,
 				}
 				amounts[ref] += value
 			}
-			rewards[ref] = rewardsByCredential[historicalRewardKey{tag: tag, key: string(key)}]
+			selected[historicalRewardKey{tag: tag, key: string(key)}] = struct{}{}
 		}
 		if err := rows.Close(); err != nil {
 			return nil, nil, err
@@ -326,9 +397,14 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, nil, err
 		}
+		rewardsByCredential, err := historicalRewards(db, slot, selected)
+		if err != nil {
+			return nil, nil, fmt.Errorf("calculate historical rewards: %w", err)
+		}
 		for ref, amount := range amounts {
 			stake := amount
-			if reward := rewards[ref]; ^uint64(0)-stake < reward {
+			reward := rewardsByCredential[historicalRewardKey{tag: ref.tag, key: ref.key}]
+			if ^uint64(0)-stake < reward {
 				return nil, nil, fmt.Errorf("historical stake overflow")
 			} else {
 				stake += reward
@@ -358,10 +434,6 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 	if err != nil {
 		return nil, err
 	}
-	rewardsByCredential, err := historicalRewards(db, slot)
-	if err != nil {
-		return nil, fmt.Errorf("calculate historical rewards: %w", err)
-	}
 	for start := 0; start < len(ownerKeys); start += 400 {
 		end := min(start+400, len(ownerKeys))
 		query, args, err := s.historicalStakeCTE(
@@ -389,7 +461,7 @@ FROM active_delegator_stake`,
 		}
 		type ownerKey struct{ pool, key string }
 		amounts := make(map[ownerKey]uint64)
-		rewards := make(map[ownerKey]uint64)
+		selected := make(map[historicalRewardKey]struct{})
 		for rows.Next() {
 			var pool, key []byte
 			var tag uint8
@@ -414,7 +486,7 @@ FROM active_delegator_stake`,
 				}
 				amounts[ref] += value
 			}
-			rewards[ref] = rewardsByCredential[historicalRewardKey{tag: tag, key: string(key)}]
+			selected[historicalRewardKey{tag: tag, key: string(key)}] = struct{}{}
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
@@ -422,11 +494,16 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
+		rewardsByCredential, err := historicalRewards(db, slot, selected)
+		if err != nil {
+			return nil, fmt.Errorf("calculate historical rewards: %w", err)
+		}
 		for ref, amount := range amounts {
-			if ^uint64(0)-amount < rewards[ref] {
+			reward := rewardsByCredential[historicalRewardKey{tag: 0, key: ref.key}]
+			if ^uint64(0)-amount < reward {
 				return nil, fmt.Errorf("historical stake overflow")
 			}
-			stake := amount + rewards[ref]
+			stake := amount + reward
 			ret[types.PoolCredentialStakeKey([]byte(ref.pool), 0, []byte(ref.key))] = stake
 		}
 	}
@@ -459,10 +536,6 @@ func (s *Store) GetRewardStakeInputsForPools(
 	db, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
-	}
-	rewardsByCredential, err := historicalRewards(db, slot)
-	if err != nil {
-		return nil, fmt.Errorf("calculate historical rewards: %w", err)
 	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
 	ret := []*models.RewardStakeInput{}
@@ -497,7 +570,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 			key  string
 		}
 		amountByInput := make(map[inputKey]uint64)
-		rewardByInput := make(map[inputKey]uint64)
+		selected := make(map[historicalRewardKey]struct{})
 		for rows.Next() {
 			var pool, key []byte
 			var tag uint8
@@ -524,7 +597,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 				}
 				amountByInput[ref] += value
 			}
-			rewardByInput[ref] = rewardsByCredential[historicalRewardKey{tag: tag, key: string(key)}]
+			selected[historicalRewardKey{tag: tag, key: string(key)}] = struct{}{}
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
@@ -532,12 +605,17 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
+		rewardsByCredential, err := historicalRewards(db, slot, selected)
+		if err != nil {
+			return nil, fmt.Errorf("calculate historical rewards: %w", err)
+		}
 		for ref, amount := range amountByInput {
 			stake := amount
-			if ^uint64(0)-stake < rewardByInput[ref] {
+			reward := rewardsByCredential[historicalRewardKey{tag: ref.tag, key: ref.key}]
+			if ^uint64(0)-stake < reward {
 				return nil, fmt.Errorf("historical stake overflow")
 			}
-			stake += rewardByInput[ref]
+			stake += reward
 			if stake == 0 {
 				continue
 			}

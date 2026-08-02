@@ -1154,12 +1154,13 @@ AND a.active = true
 
 ### `GetStakeByPools`
 
-Current live stake by pool joins active `account` rows to UTxOs with
-`deleted_slot = 0` and sums their lovelace amounts. Because `utxo.amount` is
-stored as text (`types.Uint64`) on postgres and mysql, implementations cast it
-before summation: `INTEGER` on sqlite, `BIGINT` on postgres, and `UNSIGNED` on
-mysql. The casts keep postgres from rejecting `SUM(text)` and prevent mysql
-from implicitly converting amounts to `DOUBLE` and losing integer precision.
+Current live stake by pool reads the maintained `reward_live_stake.utxo_stake`
+value once per active credential, preserving exact decimal `uint64` arithmetic
+without materializing every live UTxO. During first adoption or an interrupted
+backfill, if any requested active credential lacks a current aggregate row, the
+store falls back to the canonical account/UTxO scan until
+`RebuildRewardLiveStake` completes; this preserves correctness while making
+steady-state ledger-peer and pool-detail requests proportional to credentials.
 
 ### `GetStakeByPoolsAtSlot`
 

@@ -15,9 +15,14 @@
 package migrations
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,4 +90,56 @@ func TestSplitSQL(t *testing.T) {
 		"CREATE TABLE thing (value TEXT DEFAULT ';')",
 		"INSERT INTO thing VALUES ('it''s;fine')",
 	}, statements)
+}
+
+func TestRepairSQLiteV1IndexesDropsLegacyRewardDeltaIndexBeforeNormalizing(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(t.TempDir(), "legacy.sqlite"),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.Exec(`
+CREATE TABLE account_reward_delta (
+ staking_key BLOB NOT NULL,
+ credential_tag INTEGER NOT NULL,
+ tx_hash BLOB,
+ amount TEXT NOT NULL,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ added_slot INTEGER NOT NULL,
+ withdrawal BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX idx_account_reward_delta_w_tx_s
+ ON account_reward_delta(withdrawal, tx_hash, credential_tag, staking_key);
+INSERT INTO account_reward_delta
+ (staking_key, credential_tag, tx_hash, amount, added_slot)
+ VALUES ('stake', 0, NULL, '1', 10), ('stake', 0, NULL, '2', 11);
+CREATE TABLE block_nonce (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ hash BLOB NOT NULL,
+ slot INTEGER NOT NULL,
+ nonce BLOB,
+ is_checkpoint BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX hash_slot ON block_nonce(hash, slot);
+CREATE TABLE account (id INTEGER PRIMARY KEY, staking_key BLOB);
+`)
+	require.NoError(t, err)
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+	require.NoError(t, repairSQLiteV1Indexes(context.Background(), conn))
+
+	var count int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM account_reward_delta WHERE tx_hash = X''",
+	).Scan(&count))
+	require.Equal(t, 2, count)
+	var indexName string
+	err = db.QueryRow(
+		"SELECT name FROM pragma_index_list('account_reward_delta') WHERE name = ?",
+		"idx_account_reward_delta_w_tx_s",
+	).Scan(&indexName)
+	require.ErrorIs(t, err, sql.ErrNoRows, fmt.Sprintf("legacy index still present: %s", indexName))
 }

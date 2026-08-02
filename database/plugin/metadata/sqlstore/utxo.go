@@ -1318,17 +1318,28 @@ func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
 	for _, utxo := range utxos {
 		utxo.Assets = make([]models.Asset, 0)
 	}
-	args := make([]any, len(utxos))
+	// The same UTxO can be present in multiple association groups (for
+	// example, when hydrating transactions by block/hash/address).  Keep the
+	// fan-out map keyed by ID, but deduplicate IDs before chunking the query;
+	// otherwise a repeated ID straddling two parameter chunks causes its asset
+	// rows to be loaded twice and appended twice to every instance.
+	ids := make([]uint, 0, len(utxos))
 	byID := make(map[uint][]*models.Utxo, len(utxos))
-	for i, utxo := range utxos {
-		args[i] = utxo.ID
+	for _, utxo := range utxos {
+		if _, exists := byID[utxo.ID]; !exists {
+			ids = append(ids, utxo.ID)
+		}
 		byID[utxo.ID] = append(byID[utxo.ID], utxo)
 	}
-	for start := 0; start < len(args); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(args))
+	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(ids))
+		args := make([]any, end-start)
+		for i, id := range ids[start:end] {
+			args[i] = id
+		}
 		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(
 			"SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(end-start)+") ORDER BY id",
-		), args[start:end]...)
+		), args...)
 		if err != nil {
 			return err
 		}

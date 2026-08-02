@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
@@ -100,6 +101,54 @@ func TestSumUint64RowsPreservesFullRange(t *testing.T) {
 	value, err := sumUint64Rows(db, "SELECT amount FROM amounts")
 	require.NoError(t, err)
 	require.Equal(t, ^uint64(0), value)
+}
+
+func TestSumNetworkDonationsReadsSQLiteIntegerAmounts(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	_, err := store.writeDB.Exec(`
+CREATE TABLE network_donation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    UNIQUE (slot)
+)`)
+	require.NoError(t, err)
+	require.NoError(t, store.AddNetworkDonation(7, 3, 123, nil))
+	total, err := store.SumNetworkDonationsForEpoch(3, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(123), total)
+}
+
+func TestGetStakeByPoolsUsesLiveCredentialAggregate(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	_, err := store.writeDB.Exec(`
+CREATE TABLE account (
+ credential_tag INTEGER, staking_key BLOB, pool BLOB, active BOOLEAN
+);
+CREATE TABLE reward_live_stake (
+ credential_tag INTEGER, staking_key BLOB, utxo_stake TEXT,
+ calculation_version INTEGER
+)`)
+	require.NoError(t, err)
+	pool := []byte{0x01, 0x02}
+	key := []byte{0x03, 0x04}
+	_, err = store.writeDB.Exec(
+		"INSERT INTO account (credential_tag, staking_key, pool, active) VALUES (0, ?, ?, TRUE)",
+		key, pool,
+	)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(
+		"INSERT INTO reward_live_stake (credential_tag, staking_key, utxo_stake, calculation_version) VALUES (0, ?, ?, ?)",
+		key, "9", models.RewardStakeCalculationVersion,
+	)
+	require.NoError(t, err)
+	stakes, delegators, err := store.GetStakeByPools([][]byte{pool}, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), stakes[string(pool)])
+	require.Equal(t, uint64(1), delegators[string(pool)])
 }
 
 func TestTransactionRejectsUnsafeSavepoint(t *testing.T) {

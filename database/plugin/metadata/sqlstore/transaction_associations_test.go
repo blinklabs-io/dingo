@@ -37,3 +37,34 @@ VALUES ('a', '61', 'p', 'f1', 1, 10, '18446744073709551615'),
 	require.Len(t, utxos["second"][0].Assets, 1)
 	require.Equal(t, uint64(7), uint64(utxos["second"][0].Assets[0].Amount))
 }
+
+func TestLoadUtxoAssetsDeduplicatesIDsAcrossChunks(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	_, err := store.writeDB.Exec(`
+CREATE TABLE asset (
+ name BLOB, name_hex BLOB, policy_id BLOB, fingerprint BLOB,
+ id INTEGER PRIMARY KEY, utxo_id INTEGER, amount TEXT
+)`)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`
+INSERT INTO asset (name, name_hex, policy_id, fingerprint, id, utxo_id, amount)
+VALUES ('a', '61', 'p', 'f1', 1, 10, '1')`)
+	require.NoError(t, err)
+
+	// Use enough repeated instances to force the same ID into two parameter
+	// chunks.  Each instance still needs one asset, but the asset row must be
+	// queried only once.
+	utxos := make([]models.Utxo, 1000)
+	for i := range utxos {
+		utxos[i].ID = 10
+	}
+	pointers := make([]*models.Utxo, len(utxos))
+	for i := range utxos {
+		pointers[i] = &utxos[i]
+	}
+	require.NoError(t, store.loadUtxoAssets(store.writeDB, pointers))
+	for i := range utxos {
+		require.Len(t, utxos[i].Assets, 1)
+	}
+}

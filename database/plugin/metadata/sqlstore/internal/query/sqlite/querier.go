@@ -186,7 +186,6 @@ type Querier interface {
 	SetTip(ctx context.Context, arg SetTipParams) error
 	SoftDeleteAllCommitteeMembers(ctx context.Context, deletedSlot sql.NullInt64) error
 	SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteCommitteeMemberParams) error
-	SumNetworkDonationsForEpoch(ctx context.Context, epoch int64) ([]int64, error)
 	SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSnapshotsParams) ([]string, error)
 	SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) ([]interface{}, error)
 	UpdateDRepActivity(ctx context.Context, arg UpdateDRepActivityParams) (int64, error)

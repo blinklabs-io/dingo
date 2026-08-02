@@ -644,26 +644,7 @@ RETURNING id`,
 		metadataURL = cert.PoolMetadata.Url
 		metadataHash = cert.PoolMetadata.Hash[:]
 	}
-	registrationID, err := queryReturnedID(db, `
-INSERT INTO pool_registration (
-    margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
-    reward_account_credential_tag, metadata_hash, pledge, cost,
-    certificate_id, pool_id, added_slot, deposit_amount
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (pool_id, added_slot) DO UPDATE SET
-    margin = excluded.margin,
-    metadata_url = excluded.metadata_url,
-    vrf_key_hash = excluded.vrf_key_hash,
-    pool_key_hash = excluded.pool_key_hash,
-    reward_account = excluded.reward_account,
-    reward_account_credential_tag =
-        excluded.reward_account_credential_tag,
-    metadata_hash = excluded.metadata_hash,
-    pledge = excluded.pledge,
-    cost = excluded.cost,
-    certificate_id = excluded.certificate_id,
-    deposit_amount = excluded.deposit_amount
-RETURNING id`,
+	registrationID, err := insertPoolRegistration(db, []any{
 		margin,
 		metadataURL,
 		cert.VrfKeyHash[:],
@@ -677,7 +658,7 @@ RETURNING id`,
 		poolID,
 		slot,
 		decimalUint64(types.Uint64(deposit)),
-	)
+	}, poolID, slot)
 	if err != nil {
 		return 0, err
 	}

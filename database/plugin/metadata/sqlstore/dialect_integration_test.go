@@ -111,6 +111,7 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	account := &models.Account{
 		StakingKey:    []byte{1, 2, 3},
 		CredentialTag: 0,
+		Pool:          []byte{4, 5, 6},
 		AddedSlot:     1,
 		CreatedSlot:   1,
 		Active:        true,
@@ -120,6 +121,20 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	loaded, err := store.GetAccountByCredential(0, account.StakingKey, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, account.ID, loaded.ID)
+	_, err = db.Exec(`
+INSERT INTO reward_live_stake (
+ pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,
+ total_stake, registered, pool_delegation_slot, pool_delegation_block_index,
+ pool_delegation_cert_index, updated_slot, calculation_version
+) VALUES (?, ?, 0, ?, ?, ?, TRUE, 1, 0, 0, 1, ?)`,
+		account.Pool, account.StakingKey, "9", "0", "9",
+		models.RewardStakeCalculationVersion,
+	)
+	require.NoError(t, err)
+	stakes, delegators, err := store.GetStakeByPools([][]byte{account.Pool}, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), stakes[string(account.Pool)])
+	require.Equal(t, uint64(1), delegators[string(account.Pool)])
 
 	outputs := make([]*models.RewardAccountOutput, 120)
 	for index := range outputs {

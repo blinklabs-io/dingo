@@ -22,11 +22,51 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+// poolRegistrationID returns the existing registration for the unique
+// (pool, slot) key after an idempotent INSERT ... DO NOTHING. Keeping this
+// lookup in one place ensures import and certificate paths preserve the
+// first-write-wins behavior consistently across dialects.
+func poolRegistrationID(db queryer, poolID int64, slot uint64) (int64, error) {
+	var id int64
+	err := db.QueryRowContext(context.Background(), `
+SELECT id FROM pool_registration WHERE pool_id = ? AND added_slot = ?`,
+		poolID,
+		slot,
+	).Scan(&id)
+	return id, err
+}
+
+const poolRegistrationInsertSQL = `
+INSERT INTO pool_registration (
+    margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
+    reward_account_credential_tag, metadata_hash, pledge, cost,
+    certificate_id, pool_id, added_slot, deposit_amount
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (pool_id, added_slot) DO NOTHING
+RETURNING id`
+
+// insertPoolRegistration is shared by genesis/import and certificate paths so
+// conflict semantics cannot diverge. Registrations are first-write-wins for
+// the unique (pool, slot) key; a duplicate returns the existing row ID.
+func insertPoolRegistration(
+	db queryer,
+	values []any,
+	poolID int64,
+	slot uint64,
+) (int64, error) {
+	id, err := queryReturnedID(db, poolRegistrationInsertSQL, values...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return poolRegistrationID(db, poolID, slot)
+	}
+	return id, err
+}
 
 func (s *Store) ImportPool(
 	pool *models.Pool,
@@ -72,25 +112,7 @@ RETURNING id`,
 			}
 			pool.ID = uint(id)
 			registration.PoolID = pool.ID
-			registrationID, err := queryReturnedID(db, `
-INSERT INTO pool_registration (
-    margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
-    reward_account_credential_tag, metadata_hash, pledge, cost,
-    certificate_id, pool_id, added_slot, deposit_amount
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (pool_id, added_slot) DO UPDATE SET
-    margin = excluded.margin,
-    metadata_url = excluded.metadata_url,
-    vrf_key_hash = excluded.vrf_key_hash,
-    pool_key_hash = excluded.pool_key_hash,
-    reward_account = excluded.reward_account,
-    reward_account_credential_tag = excluded.reward_account_credential_tag,
-    metadata_hash = excluded.metadata_hash,
-    pledge = excluded.pledge,
-    cost = excluded.cost,
-    certificate_id = excluded.certificate_id,
-    deposit_amount = excluded.deposit_amount
-RETURNING id`,
+			registrationID, err := insertPoolRegistration(db, []any{
 				nullableRat(registration.Margin),
 				registration.MetadataUrl,
 				registration.VrfKeyHash,
@@ -104,14 +126,7 @@ RETURNING id`,
 				registration.PoolID,
 				registration.AddedSlot,
 				decimalUint64(registration.DepositAmount),
-			)
-			if errors.Is(err, sql.ErrNoRows) {
-				err = db.QueryRowContext(context.Background(), `
-SELECT id FROM pool_registration WHERE pool_id = ? AND added_slot = ?`,
-					registration.PoolID,
-					registration.AddedSlot,
-				).Scan(&registrationID)
-			}
+			}, int64(registration.PoolID), registration.AddedSlot)
 			if err != nil {
 				return fmt.Errorf("import pool registration: %w", err)
 			}
@@ -871,6 +886,103 @@ func (s *Store) GetStakeByPool(
 }
 
 func (s *Store) GetStakeByPools(
+	poolKeyHashes [][]byte,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	if len(poolKeyHashes) == 0 {
+		stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
+		return stakes, delegators, nil
+	}
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, nil, err
+	}
+	stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
+	complete, err := s.getStakeByPoolsFromLive(db, poolKeyHashes, stakes, delegators)
+	if err == nil && complete {
+		return stakes, delegators, nil
+	}
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		return nil, nil, err
+	}
+	return s.getStakeByPoolsDirect(poolKeyHashes, txn)
+}
+
+func emptyPoolStakeMaps(poolKeyHashes [][]byte) (map[string]uint64, map[string]uint64) {
+	stakes := make(map[string]uint64, len(poolKeyHashes))
+	delegators := make(map[string]uint64, len(poolKeyHashes))
+	for _, hash := range poolKeyHashes {
+		stakes[string(hash)] = 0
+		delegators[string(hash)] = 0
+	}
+	return stakes, delegators
+}
+
+func (s *Store) getStakeByPoolsFromLive(
+	db queryer,
+	poolKeyHashes [][]byte,
+	stakes, delegators map[string]uint64,
+) (bool, error) {
+	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
+	for start := 0; start < len(poolKeyHashes); start += 400 {
+		end := min(start+400, len(poolKeyHashes))
+		chunk := poolKeyHashes[start:end]
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, models.RewardStakeCalculationVersion)
+		for _, hash := range chunk {
+			args = append(args, hash)
+		}
+		rows, err := db.QueryContext(context.Background(), `
+SELECT account.pool, reward_live_stake.utxo_stake
+FROM account
+LEFT JOIN reward_live_stake
+  ON reward_live_stake.credential_tag = account.credential_tag
+ AND reward_live_stake.staking_key = account.staking_key
+ AND reward_live_stake.calculation_version = ?
+WHERE account.active = TRUE AND account.pool IN (`+bindPlaceholders(len(chunk))+`)`, args...)
+		if err != nil {
+			return false, err
+		}
+		complete := true
+		for rows.Next() {
+			var hash []byte
+			var raw sql.NullString
+			if err := rows.Scan(&hash, &raw); err != nil {
+				rows.Close()
+				return false, err
+			}
+			key := string(hash)
+			delegators[key]++
+			if !raw.Valid || raw.String == "" {
+				complete = false
+				continue
+			}
+			amount, err := parseUint64("pool stake amount", raw.String)
+			if err != nil {
+				rows.Close()
+				return false, err
+			}
+			if ^uint64(0)-stakes[key] < amount {
+				rows.Close()
+				return false, fmt.Errorf("pool stake overflow for %x", hash)
+			}
+			stakes[key] += amount
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if err := rows.Close(); err != nil {
+			return false, err
+		}
+		if !complete {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (s *Store) getStakeByPoolsDirect(
 	poolKeyHashes [][]byte,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {

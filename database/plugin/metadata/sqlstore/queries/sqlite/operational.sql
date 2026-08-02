@@ -183,11 +183,6 @@ ON CONFLICT (slot) DO UPDATE SET
     epoch = excluded.epoch,
     amount = excluded.amount;
 
--- name: SumNetworkDonationsForEpoch :many
-SELECT amount
-FROM network_donation
-WHERE epoch = ?;
-
 -- name: DeleteNetworkDonationsAfterSlot :exec
 DELETE FROM network_donation
 WHERE slot > ?;

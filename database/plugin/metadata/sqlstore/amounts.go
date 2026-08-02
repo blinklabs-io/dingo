@@ -16,8 +16,8 @@ package sqlstore
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"strconv"
 )
 
 // sumUint64Rows sums a decimal column in Go instead of asking SQL to coerce
@@ -32,14 +32,18 @@ func sumUint64Rows(db queryer, query string, args ...any) (uint64, error) {
 	defer rows.Close()
 	var total uint64
 	for rows.Next() {
-		var raw sql.NullString
+		var raw any
 		if err := rows.Scan(&raw); err != nil {
 			return 0, err
 		}
-		if !raw.Valid || raw.String == "" {
+		text, err := decimalAmountText(raw)
+		if err != nil {
+			return 0, err
+		}
+		if text == "" {
 			continue
 		}
-		value, err := parseUint64("amount", raw.String)
+		value, err := parseUint64("amount", text)
 		if err != nil {
 			return 0, err
 		}
@@ -52,4 +56,35 @@ func sumUint64Rows(db queryer, query string, args ...any) (uint64, error) {
 		return 0, err
 	}
 	return total, nil
+}
+
+// decimalAmountText normalizes the values returned by database/sql drivers
+// for decimal amount columns. SQLite/MySQL may expose an INTEGER column as
+// int64 while text columns are returned as string/[]byte; all represent the
+// same non-negative decimal domain to the metadata API.
+func decimalAmountText(value any) (string, error) {
+	switch value := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	case []byte:
+		return string(value), nil
+	case int64:
+		if value < 0 {
+			return "", fmt.Errorf("negative amount %d", value)
+		}
+		return strconv.FormatInt(value, 10), nil
+	case int:
+		if value < 0 {
+			return "", fmt.Errorf("negative amount %d", value)
+		}
+		return strconv.Itoa(value), nil
+	case uint64:
+		return strconv.FormatUint(value, 10), nil
+	case uint:
+		return strconv.FormatUint(uint64(value), 10), nil
+	default:
+		return "", fmt.Errorf("unsupported amount type %T", value)
+	}
 }
