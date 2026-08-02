@@ -102,13 +102,12 @@ jobs:
       - name: gorm-dependency-absence
         run: make gorm-check
       - name: go-test
-        # Explicit -timeout because this job is race-instrumented. Go's
-        # default is 10m per package binary, and under -race the ledger
-        # package alone uses roughly 485s of it, so a runner 15-25% slower
-        # than average pushes it past the limit and fails a job on whichever
-        # PR happens to be running. See dingo #3032 for restoring real
-        # headroom; this only stops the default from being the binding
-        # constraint in the meantime.
+        # Explicit -timeout because this job is race-instrumented and Go's
+        # default is 10m per package binary. The ledger package used to spend
+        # much of that re-migrating an in-memory schema once per test; it now
+        # replays a recorded schema instead, which bought back most of the
+        # margin (dingo #3032). The explicit timeout stays as a guard so the
+        # default cannot become the binding constraint again.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 20m ./...
 
   # macOS and Windows jobs without Postgres service

@@ -54,6 +54,10 @@ func TestLeiosForgedEBOfferSetsVotesOfferType(t *testing.T) {
 	msg := leiosForgedEBOffer(entry)
 	require.NotNil(t, msg)
 	require.Equal(t, uint8(oleiosnotify.MessageTypeVotesOffer), msg.Type())
+
+	offer, ok := msg.(*oleiosnotify.MsgVotesOffer)
+	require.True(t, ok)
+	require.Equal(t, []lcommon.LeiosPrototypeVote{vote}, offer.PrototypeVotes)
 }
 
 // An empty entry yields no offer.
