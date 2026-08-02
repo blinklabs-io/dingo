@@ -207,6 +207,7 @@ services:
       TXPUMP_COOLDOWN_MIN: "5"
       TXPUMP_COOLDOWN_MAX: "15"
       TXPUMP_TYPES: "payment,delegation,governance,plutus"
+      TXPUMP_STARTUP_TIMEOUT: "60"
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_FILE: "/testnet-config/testnet.yaml"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
