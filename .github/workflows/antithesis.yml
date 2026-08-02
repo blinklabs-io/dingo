@@ -29,7 +29,6 @@ on:
 
 concurrency:
   group: antithesis
-  queue: max
   # Once submitted, an Antithesis test continues running outside GitHub.
   # Keep its polling workflow alive so the result is not lost and the next
   # test waits for the active run to finish.
