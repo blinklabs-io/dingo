@@ -93,7 +93,7 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 		EraId:     ^uint(0),
 	}
 
-	err := ls.setEpochCache(nil, []models.Epoch{invalidEpoch})
+	err := ls.setEpochCache(&database.Txn{}, []models.Epoch{invalidEpoch})
 	require.ErrorContains(t, err, "unknown era ID")
 
 	// The deferred publication must expose the mutation through the atomic
@@ -294,6 +294,9 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		)
 		return rolloverErr
 	}))
+	if result == nil {
+		t.Fatal("epoch rollover returned no result")
+	}
 
 	updatedShelley, ok := result.NewCurrentPParams.(*shelley.ShelleyProtocolParameters)
 	require.True(t, ok)
