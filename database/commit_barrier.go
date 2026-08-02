@@ -203,6 +203,25 @@ func (b *cancellableBarrier) lockContext(
 		}
 		b.mu.Lock()
 	}
+	// The wait above can be woken via either case of that select: ctx
+	// being cancelled, or the last reader releasing (closing ch). Those
+	// two events can happen at essentially the same instant -- ctx
+	// cancelled right as the last reader releases -- and select does not
+	// favor one ready case over another, so <-ch can win that race even
+	// though ctx is already cancelled. Without this recheck, that
+	// leaves this call claiming exclusive access (and pausing commits)
+	// for a caller who already gave up, exactly the phantom-writer
+	// problem this type's doc comment says LockContext avoids. Mirror
+	// the same withdrawal the ctx.Done() case above already performs
+	// (clear writerWaiting, notify any other waiter) rather than
+	// leaving writerWaiting stuck true with no queued acquisition left
+	// to ever clear it.
+	if err := ctx.Err(); err != nil {
+		b.writerWaiting = false
+		b.notifyLocked()
+		b.mu.Unlock()
+		return 0, err
+	}
 	b.nextToken++
 	b.holder = b.nextToken
 	b.held = true

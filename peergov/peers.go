@@ -215,7 +215,7 @@ func (p *PeerGovernor) AddPeer(
 	// Without this, peers added after startup stay cold
 	// indefinitely.
 	if shouldConnect {
-		go p.createOutboundConnection(newPeer)
+		p.spawnOutboundConnection(newPeer)
 	}
 	return nil
 }

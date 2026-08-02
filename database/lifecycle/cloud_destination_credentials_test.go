@@ -173,6 +173,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	restoreMan, err := lifecycle.Restore(
 		ctx, newTestStorageHost(t), cloudCredentialsTestRegistry, snapshotURI, restoredDir,
+		lifecycle.RestoreStorageConfig{},
 	)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)

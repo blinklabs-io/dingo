@@ -17,6 +17,7 @@ package ledger
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,7 +49,15 @@ type Scheduler struct {
 	interval           time.Duration
 	startOnce          sync.Once
 	stopOnce           sync.Once
-	mutex              sync.Mutex
+	// started is set once Start's startOnce.Do closure has actually created
+	// the ticker and worker pool. Stop consults it before ever touching
+	// stopOnce: without this check, a Stop() called before Start() has ever
+	// run would consume stopOnce for a no-op teardown, and a subsequent
+	// legitimate Start() would then create a ticker/worker pool that no
+	// later Stop() could ever tear down (stopOnce already fired) -- a
+	// goroutine leak.
+	started atomic.Bool
+	mutex   sync.Mutex
 	// Worker pool fields
 	workerPoolSize int
 	taskQueue      chan func()
@@ -88,6 +97,7 @@ func (st *Scheduler) Start() {
 	st.startOnce.Do(func() {
 		st.ticker = time.NewTicker(st.interval)
 		st.startWorkerPool()
+		st.started.Store(true)
 		go st.run()
 	})
 }
@@ -210,8 +220,18 @@ func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 }
 
 // Stop the timer (terminates). Safe to call more than once, or on a
-// Scheduler that was never Start-ed: only the first call does anything.
+// Scheduler that was never Start-ed: only the first call that follows a
+// real Start() does anything.
 func (st *Scheduler) Stop() {
+	if !st.started.Load() {
+		// Start has never (yet) created a ticker/worker pool for this
+		// Scheduler, so there is nothing to tear down. Return without
+		// touching stopOnce: if Stop() consumed it here, a Start() called
+		// afterwards would create a ticker and worker-pool goroutines that
+		// no later Stop() could ever shut down, since stopOnce would
+		// already be spent on this no-op.
+		return
+	}
 	st.stopOnce.Do(func() {
 		close(st.quit)
 		// st.ticker is reassigned under st.mutex by run's interval-update

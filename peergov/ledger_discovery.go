@@ -308,7 +308,7 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 	// Without this, ledger peers stay cold indefinitely since
 	// startOutboundConnections only runs once at startup.
 	if shouldConnect {
-		go p.createOutboundConnection(newPeer)
+		p.spawnOutboundConnection(newPeer)
 	}
 
 	return added

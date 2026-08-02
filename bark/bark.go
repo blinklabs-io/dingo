@@ -39,7 +39,13 @@ import (
 )
 
 type Bark struct {
-	mu           sync.Mutex // protects server, config.DB, and listenerAddr
+	// mu protects server and listenerAddr, plus config.DB writes (ResumeDB
+	// takes it too). It must never be held across a blocking call whose
+	// completion depends on Acquire succeeding (e.g. server.Shutdown
+	// draining an in-flight request that itself calls Acquire) — see
+	// Acquire's doc comment for why its config.DB read deliberately does
+	// NOT take mu, to avoid exactly that deadlock.
+	mu           sync.Mutex
 	server       *http.Server
 	config       BarkConfig
 	listenerAddr net.Addr
@@ -111,13 +117,22 @@ var ErrDBUnavailable = errors.New("bark: database temporarily unavailable")
 // currently set, or if PauseDB currently has the gate held: Acquire never
 // blocks waiting for a pause to end, since that could be a long-running
 // Restore/Truncate — callers report unavailable immediately instead.
+//
+// The config.DB read below deliberately does not take b.mu: Stop holds
+// b.mu for the entire duration of its blocking server.Shutdown call, which
+// waits for in-flight requests — including ones calling Acquire — to
+// finish. If Acquire also needed b.mu here, a request whose handler is
+// exactly what Shutdown is waiting to drain could deadlock against Stop
+// forever. It's safe to skip: dbGate alone is sufficient synchronization
+// for this access, since ResumeDB always finishes writing config.DB (under
+// its own b.mu critical section) before it unlocks dbGate, and Go's mutex
+// happens-before guarantee means that unlock is visible to whichever
+// Acquire's TryRLock above next succeeds — no separate b.mu read needed.
 func (b *Bark) Acquire() (db *database.Database, release func(), err error) {
 	if !b.dbGate.TryRLock() {
 		return nil, nil, ErrDBUnavailable
 	}
-	b.mu.Lock()
 	db = b.config.DB
-	b.mu.Unlock()
 	if db == nil {
 		b.dbGate.RUnlock()
 		return nil, nil, ErrDBUnavailable
@@ -336,16 +351,30 @@ func (b *Bark) startServer(server *http.Server) error {
 	serverType := "non-TLS"
 	if useTLS {
 		serverType = "TLS"
-		if _, err := tls.LoadX509KeyPair(
+		cert, err := tls.LoadX509KeyPair(
 			b.config.TlsCertFilePath,
 			b.config.TlsKeyFilePath,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf(
 				"failed to load TLS keypair for bark gRPC %s server: %w",
 				serverType, err,
 			)
 		}
 		server.TLSConfig = tlsutil.ServerConfig(server.TLSConfig)
+		// Pin the preflight-loaded keypair onto the config so the
+		// serving goroutine's ServeTLS call below (passed "", "" for
+		// certFile/keyFile) reuses it instead of reloading the same
+		// files from disk a second time. Without this, ServeTLS always
+		// reloads regardless of configHasCert whenever it's passed
+		// non-empty cert/key paths, and if that redundant reload failed
+		// (e.g. the files changed or became unreadable between here and
+		// the goroutine running), ServeTLS returns before ever calling
+		// srv.Serve — meaning it returns before Serve's own
+		// `defer l.Close()` is installed, leaking ln and leaving
+		// b.listenerAddr/b.server reporting a listener that is open but
+		// nobody is Accept-ing on.
+		server.TLSConfig.Certificates = []tls.Certificate{cert}
 	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
@@ -358,22 +387,41 @@ func (b *Bark) startServer(server *http.Server) error {
 	go func() {
 		var serveErr error
 		if useTLS {
-			serveErr = server.ServeTLS(
-				ln,
-				b.config.TlsCertFilePath,
-				b.config.TlsKeyFilePath,
-			)
+			serveErr = server.ServeTLS(ln, "", "")
 		} else {
 			serveErr = server.Serve(ln)
 		}
-		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			b.config.Logger.Error(
-				"bark gRPC server error",
-				"error", serveErr,
-			)
-		}
+		b.handleServeExit(server, ln, serveErr)
 	}()
 	return nil
+}
+
+// handleServeExit runs once the serving goroutine's Serve/ServeTLS call
+// returns. A nil error, or http.ErrServerClosed, means an intentional
+// shutdown path (Stop, or Start's ctx-cancellation goroutine) already
+// closed the listener and cleared server/listenerAddr itself, so there's
+// nothing to do. Any other error means Serve/ServeTLS exited on its own —
+// belt-and-suspenders alongside startServer reusing the preflight-loaded
+// TLS keypair (to avoid the redundant reload that used to cause exactly
+// this): close ln and clear server/listenerAddr (only if they still
+// match this call's server, so a concurrent Stop/cancellation isn't
+// clobbered) so Addr() stops reporting a dead address for a listener
+// that's either already leaked or about to be if left unclosed here.
+func (b *Bark) handleServeExit(server *http.Server, ln net.Listener, serveErr error) {
+	if serveErr == nil || errors.Is(serveErr, http.ErrServerClosed) {
+		return
+	}
+	b.config.Logger.Error(
+		"bark gRPC server error",
+		"error", serveErr,
+	)
+	_ = ln.Close()
+	b.mu.Lock()
+	if b.server == server {
+		b.server = nil
+		b.listenerAddr = nil
+	}
+	b.mu.Unlock()
 }
 
 func (b *Bark) Stop(ctx context.Context) error {

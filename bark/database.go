@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -237,17 +236,41 @@ func (h *databaseServiceHandler) acquireBusy() error {
 	return nil
 }
 
-// startOperation registers a new operation and marks the handler busy, or
+// startOperation claims the busy flag and registers a new operation, or
 // returns CodeFailedPrecondition if one is already running. The returned
 // context is cancelled by CancelOperation (or by the caller, on request
 // completion) and should be threaded through to whatever
 // lifecycle.Snapshot/Restore/Truncate call the operation performs.
+//
+// Restore/VerifySnapshot must claim the busy flag (via acquireBusy) before
+// resolving their snapshot source, not after: resolveSnapshotSource reads
+// the snapshot's manifest/directory, and DeleteSnapshot claims this same
+// busy flag before removing a snapshot's files (see acquireBusy's doc
+// comment) -- so a Restore/VerifySnapshot that resolved its source first
+// and only claimed the flag afterward would leave a window where
+// DeleteSnapshot could run concurrently and delete the very snapshot
+// Restore/VerifySnapshot just resolved, out from under it. Those two RPCs
+// therefore call acquireBusy directly and registerOperation only once
+// their source is resolved, rather than calling startOperation as a single
+// step the way CreateSnapshot/Truncate (which have no source to resolve)
+// do.
 func (h *databaseServiceHandler) startOperation(
 	opType databasev1alpha1.OperationType,
 ) (*operation, context.Context, error) {
 	if err := h.acquireBusy(); err != nil {
 		return nil, nil, err
 	}
+	op, ctx := h.registerOperation(opType)
+	return op, ctx, nil
+}
+
+// registerOperation creates and records a new operation, assuming the
+// caller has already claimed the busy flag via acquireBusy. Also prunes
+// old terminal operations (see pruneOperations) so h.operations does not
+// grow without bound over the life of the process.
+func (h *databaseServiceHandler) registerOperation(
+	opType databasev1alpha1.OperationType,
+) (*operation, context.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -261,7 +284,56 @@ func (h *databaseServiceHandler) startOperation(
 		updatedAt: time.Now(),
 	}
 	h.operations[op.id] = op
-	return op, ctx, nil
+	h.pruneOperations()
+	return op, ctx
+}
+
+// maxRetainedOperations bounds how many operations GetOperationHistory
+// retains at once. Operation history is in-memory only (see the package
+// doc comment) and, without a cap, a long-running bark process would keep
+// every CreateSnapshot/Restore/Truncate/VerifySnapshot record it ever saw
+// for the life of the process -- an unbounded memory footprint, and an
+// ever-growing sort/scan cost in GetOperationHistory. 500 is generous
+// enough that a reasonably-paced poller/history viewer won't notice
+// entries aging out from under it, while still bounding both costs.
+const maxRetainedOperations = 500
+
+// pruneOperations removes the oldest terminal (completed/failed/
+// cancelled) operations once h.operations holds more than
+// maxRetainedOperations entries, so the map -- and GetOperationHistory's
+// per-call sort over it -- stay bounded regardless of how long the
+// process has been running. A still-running operation is never pruned,
+// even if that temporarily leaves more than maxRetainedOperations entries
+// in the map (which can only happen if a great many operations were
+// started -- impossible in practice, since only one operation may be in
+// flight at a time). Must be called with h.mu held.
+func (h *databaseServiceHandler) pruneOperations() {
+	excess := len(h.operations) - maxRetainedOperations
+	if excess <= 0 {
+		return
+	}
+	type terminalOp struct {
+		id        string
+		startedAt time.Time
+	}
+	terminal := make([]terminalOp, 0, len(h.operations))
+	for id, op := range h.operations {
+		op.mu.Lock()
+		done := op.hasCompleted
+		op.mu.Unlock()
+		if done {
+			terminal = append(terminal, terminalOp{id: id, startedAt: op.startedAt})
+		}
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		return terminal[i].startedAt.Before(terminal[j].startedAt)
+	})
+	if excess > len(terminal) {
+		excess = len(terminal)
+	}
+	for _, t := range terminal[:excess] {
+		delete(h.operations, t.id)
+	}
 }
 
 func (h *databaseServiceHandler) finishOperation() {
@@ -383,9 +455,9 @@ func snapshotInfoFromEntry(dir string, e lifecycle.SnapshotEntry) *databasev1alp
 		Name:        m.Name,
 		Description: m.Description,
 		Tip: &databasev1alpha1.BlockRef{
-			Hash:        proto.String(hex.EncodeToString(m.TipHash)),
-			Slot:        proto.Uint64(m.TipSlot),
-			BlockNumber: proto.Uint64(m.TipBlockNumber),
+			Hash:        new(hex.EncodeToString(m.TipHash)),
+			Slot:        new(m.TipSlot),
+			BlockNumber: new(m.TipBlockNumber),
 		},
 		SizeBytes: uint64(m.BlobBytes + m.MetadataBytes), //nolint:gosec // G115: file sizes are never negative
 		Checksum:  "sha256:" + m.Checksum,
@@ -427,9 +499,24 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 	}
 	entries, err := lifecycle.ListSnapshots(h.bark.config.SnapshotDir)
 	if err != nil {
-		return nil, "", connect.NewError(
-			connect.CodeInternal,
-			fmt.Errorf("list snapshots: %w", err),
+		// entries == nil distinguishes a total failure (the catalog root
+		// itself is unreadable) from lifecycle.ListSnapshots' own
+		// per-entry-problem case, where it still returns every
+		// successfully-read entry alongside an errors.Join of whatever
+		// individual manifests it couldn't read (see its doc comment). One
+		// corrupt snapshot must not hide every other, otherwise-valid one
+		// from the catalog -- only a genuinely unreadable root directory
+		// should fail this RPC.
+		if entries == nil {
+			return nil, "", connect.NewError(
+				connect.CodeInternal,
+				fmt.Errorf("list snapshots: %w", err),
+			)
+		}
+		h.bark.config.Logger.Warn(
+			"list snapshots: some entries could not be read, omitting them from the catalog",
+			"component", "bark",
+			"error", err,
 		)
 	}
 	if offset > len(entries) {
@@ -501,9 +588,20 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 
 	localEntries, err := lifecycle.ListSnapshots(h.bark.config.SnapshotDir)
 	if err != nil {
-		return nil, "", connect.NewError(
-			connect.CodeInternal,
-			fmt.Errorf("list snapshots: %w", err),
+		// See snapshotCatalogPage's identical check: entries == nil means a
+		// total failure (unreadable root), while a non-nil result alongside
+		// an error means only some individual entries were unreadable --
+		// those should be logged and skipped, not hide every valid entry.
+		if localEntries == nil {
+			return nil, "", connect.NewError(
+				connect.CodeInternal,
+				fmt.Errorf("list snapshots: %w", err),
+			)
+		}
+		h.bark.config.Logger.Warn(
+			"list snapshots: some entries could not be read, omitting them from the catalog",
+			"component", "bark",
+			"error", err,
 		)
 	}
 
@@ -809,7 +907,9 @@ func verifySnapshotIntegrity(
 		return fmt.Errorf("build storage plugin host: %w", err)
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
-	if _, err := lifecycle.Restore(ctx, host, registry, snapshotDir, tempDir); err != nil {
+	if _, err := lifecycle.Restore(
+		ctx, host, registry, snapshotDir, tempDir, lifecycle.RestoreStorageConfig{},
+	); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
 	return nil
@@ -819,21 +919,27 @@ func verifySnapshotIntegrity(
 // copy if one exists, otherwise the cloud copy — so a cloud-only snapshot
 // can be verified the same way a local one can.
 //
+// The busy flag is claimed (acquireBusy) before resolveSnapshotSource runs,
+// not after: see startOperation's doc comment for why -- otherwise a
+// concurrent DeleteSnapshot could remove the very snapshot this call just
+// resolved before the operation claiming exclusivity ever starts.
+//
 //nolint:contextcheck // deliberately detached from the request context via startOperation; the async operation must outlive this RPC call
 func (h *databaseServiceHandler) VerifySnapshot(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.VerifySnapshotRequest],
 ) (*connect.Response[databasev1alpha1.VerifySnapshotResponse], error) {
+	if err := h.acquireBusy(); err != nil {
+		return nil, err
+	}
 	source, err := h.resolveSnapshotSource(ctx, req.Msg.GetSnapshotId())
 	if err != nil {
+		h.finishOperation()
 		return nil, err
 	}
-	op, opCtx, err := h.startOperation(
+	op, opCtx := h.registerOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_VERIFY,
 	)
-	if err != nil {
-		return nil, err
-	}
 
 	go func() {
 		defer h.finishOperation()
@@ -856,21 +962,27 @@ func (h *databaseServiceHandler) VerifySnapshot(
 // source itself, so this needs no further change once the source is
 // resolved.
 //
+// The busy flag is claimed (acquireBusy) before resolveSnapshotSource runs,
+// not after: see startOperation's doc comment for why -- otherwise a
+// concurrent DeleteSnapshot could remove the very snapshot this call just
+// resolved before the operation claiming exclusivity ever starts.
+//
 //nolint:contextcheck // deliberately detached from the request context via startOperation; the async operation must outlive this RPC call
 func (h *databaseServiceHandler) Restore(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.RestoreRequest],
 ) (*connect.Response[databasev1alpha1.RestoreResponse], error) {
+	if err := h.acquireBusy(); err != nil {
+		return nil, err
+	}
 	source, err := h.resolveSnapshotSource(ctx, req.Msg.GetSnapshotId())
 	if err != nil {
+		h.finishOperation()
 		return nil, err
 	}
-	op, opCtx, err := h.startOperation(
+	op, opCtx := h.registerOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_RESTORE,
 	)
-	if err != nil {
-		return nil, err
-	}
 
 	go func() {
 		defer h.finishOperation()
@@ -899,11 +1011,16 @@ func (h *databaseServiceHandler) GetRestoreStatus(
 	}), nil
 }
 
-// blockRefToTarget converts a BlockRef to a dblifecycle.TruncateTarget.
-// The proto allows hash/slot/block_number to be combined as long as they
-// agree on the same block; this doesn't implement that cross-validation
-// yet, so — for a destructive operation — it requires exactly one field
-// rather than risk silently trusting an unverified combination.
+// blockRefToTarget converts a BlockRef to a dblifecycle.TruncateTarget. Per
+// the proto's documented BlockRef contract, at least one of hash/slot/
+// block_number must be set, and — when more than one is set — they need
+// not all identify the same lookup path here: dblifecycle.ResolveTarget
+// resolves the target block using whichever single field is authoritative
+// (hash, then block number, then slot) and cross-validates any other
+// supplied fields against the resolved block, rejecting the request only
+// if they disagree. That keeps the actual agreement check next to the
+// other on-lineage slot/hash verification database/lifecycle.Truncate
+// already does, rather than duplicating it here.
 func blockRefToTarget(
 	ref *databasev1alpha1.BlockRef,
 ) (dblifecycle.TruncateTarget, error) {
@@ -934,12 +1051,11 @@ func blockRefToTarget(
 		target.BlockNumber = ref.BlockNumber
 		set++
 	}
-	if set != 1 {
+	if set == 0 {
 		return dblifecycle.TruncateTarget{}, connect.NewError(
 			connect.CodeInvalidArgument,
 			errors.New(
-				"target must set exactly one of hash, slot, or block_number "+
-					"(combined cross-validation not yet implemented)",
+				"target must set at least one of hash, slot, or block_number",
 			),
 		)
 	}
@@ -1154,9 +1270,9 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 
 	resp := &databasev1alpha1.GetDatabaseInfoResponse{
 		Tip: &databasev1alpha1.BlockRef{
-			Hash:        proto.String(hex.EncodeToString(tip.Point.Hash)),
-			Slot:        proto.Uint64(tip.Point.Slot),
-			BlockNumber: proto.Uint64(tip.BlockNumber),
+			Hash:        new(hex.EncodeToString(tip.Point.Hash)),
+			Slot:        new(tip.Point.Slot),
+			BlockNumber: new(tip.BlockNumber),
 		},
 		SizeBytes:           sizeBytes,
 		BlockCount:          blockCount,
@@ -1164,7 +1280,7 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 		OperationInProgress: busy,
 	}
 	if currentID != "" {
-		resp.CurrentOperationId = proto.String(currentID)
+		resp.CurrentOperationId = new(currentID)
 	}
 	return connect.NewResponse(resp), nil
 }

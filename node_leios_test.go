@@ -23,8 +23,8 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -157,15 +157,16 @@ func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(t *testing.T)
 		leios.VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{}},
 	))
 
+	// A single require.Eventually asserting the exact count (not >= 1)
+	// both waits for delivery and stays red if a stale, over-counted
+	// subscription pushes the count past 1: EventBus dispatches every
+	// live subscriber for one Publish call around the same time, so if a
+	// duplicate delivery were going to happen, it already would have by
+	// the time any poll first observes the count reaching 1 -- no
+	// additional settle-time sleep is needed to catch it.
 	require.Eventually(t, func() bool {
-		return n.ouroboros.LeiosVoteEnqueueCount() >= 1
-	}, 2*time.Second, 10*time.Millisecond, "the live subscription must receive the published event")
-
-	// Give any stale (buggy) extra subscriptions a moment to also fire,
-	// then check the settled final count.
-	time.Sleep(50 * time.Millisecond)
-	require.EqualValues(
-		t, 1, n.ouroboros.LeiosVoteEnqueueCount(),
-		"a single emitted vote must be enqueued exactly once, not once per accumulated live-lifecycle cycle",
-	)
+		return n.ouroboros.LeiosVoteEnqueueCount() == 1
+	}, 2*time.Second, 10*time.Millisecond,
+		"exactly one vote must be enqueued for the single published event, "+
+			"not once per accumulated live-lifecycle cycle")
 }

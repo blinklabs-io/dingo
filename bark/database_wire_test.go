@@ -97,8 +97,7 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	require.NoError(t, b.Start(ctx))
 	defer func() { _ = b.Stop(context.Background()) }()
 	require.NotEmpty(t, b.Addr())

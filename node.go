@@ -116,7 +116,25 @@ type Node struct {
 
 	// liveLifecycleMu serializes live database Restore/Truncate calls
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
+	// Deliberately NOT held by Snapshot (see snapshotMu): Snapshot never
+	// nils/rebuilds n.ledgerState or n.chainsyncState the way Restore/
+	// Truncate do, so a background reader like the chainsync recycler
+	// tick only needs to know whether a REBUILD is in flight -- not
+	// whether an unrelated, non-rebuilding Snapshot happens to be
+	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
+
+	// snapshotMu serializes Snapshot calls against each other and against
+	// a concurrent Restore/Truncate (which closes n.db out from under an
+	// in-progress Snapshot if not excluded), and is what enforces bark
+	// DatabaseService's "one operation at a time" invariant for Snapshot
+	// specifically. Restore/Truncate take both this and liveLifecycleMu;
+	// Snapshot takes only this one -- so a long-running Snapshot (a full
+	// local copy plus cloud upload) never blocks a background reader that
+	// only cares about liveLifecycleMu, such as the chainsync recycler
+	// tick's stall-detection/plateau-recovery check, matching Snapshot's
+	// own documented "keeps syncing normally" behavior.
+	snapshotMu sync.Mutex
 
 	// rebuildableMetrics tracks every Prometheus collector registered by a
 	// component a live database restore/truncate rebuilds, so
@@ -238,6 +256,25 @@ func (n *Node) apiPluginSelection(
 		)
 	}
 	return selection, uint(port), nil
+}
+
+// effectiveBarkHost decides the interface Bark actually binds to.
+// configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when
+// set -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
+// database lifecycle service's destructive, unauthenticated Restore/Truncate
+// RPCs will be mounted), this defaults to loopback-only rather than letting
+// bark.go's own empty-Host default ("0.0.0.0") expose them on every
+// interface; with no lifecycle service mounted, "" is returned unchanged so
+// bark's own existing default behavior (all interfaces) is preserved for
+// deployments only using it for the read-only Archive service.
+func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
+	if configuredHost != "" {
+		return configuredHost
+	}
+	if lifecycleEnabled {
+		return "127.0.0.1"
+	}
+	return ""
 }
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
@@ -1348,11 +1385,20 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.barkPort > 0 {
+		lifecycleEnabled := n.config.databaseLifecycle.SnapshotDir != ""
+		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
+		if barkHost != n.config.barkHost {
+			n.config.logger.Warn(
+				"bark database lifecycle service (Restore/Truncate) defaults to a loopback-only bind since no --bark-host was set; these RPCs are unauthenticated, so widen this only behind your own trusted network/auth controls",
+				"component", "bark",
+			)
+		}
 		barkConfig := bark.BarkConfig{
 			Logger:              n.config.logger,
 			DB:                  db,
 			TlsCertFilePath:     n.config.tlsCertFilePath,
 			TlsKeyFilePath:      n.config.tlsKeyFilePath,
+			Host:                barkHost,
 			Port:                n.config.barkPort,
 			CORSAllowedOrigins:  n.config.corsAllowedOrigins,
 			DestinationRegistry: n.destinationRegistry,
@@ -1361,7 +1407,7 @@ func (n *Node) Run(ctx context.Context) error {
 		// configured — bark.NewBark requires one alongside Lifecycle, and
 		// an operator who enabled bark only for its Archive service
 		// shouldn't get a DatabaseService that fails on first call.
-		if n.config.databaseLifecycle.SnapshotDir != "" {
+		if lifecycleEnabled {
 			// cfg is never read: SetLiveNode below makes every Service
 			// method delegate straight to n's own Restore/Truncate/
 			// Snapshot rather than the offline path that would use it.

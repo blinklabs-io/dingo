@@ -288,6 +288,115 @@ func TestPauseCommitsContextCancellationDoesNotStallLaterTxns(t *testing.T) {
 	db.commitBarrier.RUnlock()
 }
 
+// controlledCtx is a context.Context whose Err() is set independently of
+// its Done() channel (inherited unclosed from context.Background(), which
+// never fires). A real context always closes Done() and sets its error
+// together, so forcing the specific interleaving
+// TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace targets --
+// woken via the reader-release channel while ctx.Err() is already
+// non-nil -- via two real goroutines and timing would be flaky (select
+// does not deterministically favor one ready case over another when
+// both a real Done() close and a reader release are ready at once).
+// controlledCtx instead lets the test pick that interleaving outright:
+// Done() never closes, so the only way lockContext's blocked select can
+// wake is the reader release the test triggers, and Err() can be flipped
+// beforehand to simulate "already cancelled by the time that happens".
+type controlledCtx struct {
+	context.Context
+	mu  sync.Mutex
+	err error
+}
+
+func (c *controlledCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+func (c *controlledCtx) setErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.err = err
+}
+
+// TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace guards
+// against a real race cubic-dev-ai flagged in review: lockContext's
+// reader-drain loop can be woken either by ctx being cancelled or by the
+// last reader releasing, and those two events can land at essentially
+// the same instant. If the reader-release case wins that race, the
+// pre-fix code fell straight through to claiming the exclusive side
+// (b.nextToken++ and friends) without ever rechecking ctx.Err() again --
+// so a caller whose ctx was already cancelled could still end up pausing
+// commits, and writerWaiting would never be withdrawn since the
+// cancellation was never even noticed on that path.
+//
+// This uses controlledCtx (rather than a real context.CancelFunc) to
+// force that exact interleaving deterministically instead of hoping a
+// genuine goroutine-scheduling race manifests: ctx.Err() is flipped to
+// non-nil immediately before the simulated reader releases, and
+// controlledCtx's Done() channel never closes, so the only path left for
+// lockContext's blocked select to wake is that reader release -- exactly
+// the race window the fix must catch.
+func TestPauseCommitsContextChecksCtxErrAfterReaderReleaseRace(t *testing.T) {
+	db := openTestDB(t)
+
+	// Simulated reader, occupying the barrier's read side -- see
+	// TestPauseCommitsContextCancellationDoesNotStallLaterTxns for why
+	// this uses commitBarrier.RLock directly rather than a real Txn.
+	db.commitBarrier.RLock()
+
+	ctx := &controlledCtx{Context: context.Background()}
+
+	type pauseResult struct {
+		resume func()
+		err    error
+	}
+	resultCh := make(chan pauseResult, 1)
+	go func() {
+		resume, err := db.PauseCommitsContext(ctx)
+		resultCh <- pauseResult{resume, err}
+	}()
+
+	// Confirm PauseCommitsContext is genuinely blocked in the
+	// readers-draining wait (not just racing to observe a cancellation
+	// before it ever gets there) before manipulating ctx.
+	testutil.RequireNoReceive(
+		t, resultCh, 150*time.Millisecond,
+		"PauseCommitsContext must block while the simulated reader is held",
+	)
+
+	// Flip ctx.Err() to cancelled *before* releasing the reader, but
+	// without closing Done() -- forcing the woken-via-reader-release
+	// path to be the one that observes ctx already cancelled, rather
+	// than relying on scheduling luck.
+	ctx.setErr(context.Canceled)
+	db.commitBarrier.RUnlock()
+
+	result := testutil.RequireReceive(
+		t, resultCh, time.Second,
+		"PauseCommitsContext must return promptly once ctx.Err() is set, "+
+			"even when woken via the reader-release path rather than "+
+			"ctx.Done()",
+	)
+	require.ErrorIs(t, result.err, context.Canceled)
+	require.Nil(t, result.resume)
+
+	// writerWaiting must have been withdrawn on this path too: a fresh
+	// RLock must succeed promptly, not stall as if a pause were still
+	// pending.
+	newRLockDone := make(chan struct{})
+	go func() {
+		db.commitBarrier.RLock()
+		close(newRLockDone)
+	}()
+	testutil.RequireReceive(
+		t, newRLockDone, time.Second,
+		"a new RLock must succeed promptly; writerWaiting must not be "+
+			"left stuck true by the raced-but-cancelled acquisition attempt",
+	)
+	db.commitBarrier.RUnlock()
+}
+
 // TestPauseCommitsContextSucceedsWhenUncontended verifies the ordinary,
 // non-cancelled path still works exactly like PauseCommits when nothing
 // is holding the barrier.

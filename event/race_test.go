@@ -446,3 +446,84 @@ func TestCloseDoesNotDeadlockWithFullChannel(t *testing.T) {
 		eb.Stop()
 	}
 }
+
+// TestSubscribeFuncDoneVisibleBeforeSubIdPublished guards against a real
+// bug: subscribeInternal published chSub into channelSubsById while still
+// holding e.mu, but chSub.done for a SubscribeFuncWithBuffer subscriber was
+// only set afterwards, in SubscribeFuncWithBuffer, after subscribeInternal
+// had already returned and released e.mu. That left a window where a
+// subId was visible in channelSubsById with done still nil, and two
+// problems followed: (1) a concurrent Unsubscribe/UnsubscribeAndWait call
+// for that exact subId (e.g. the next sequential ID, which is entirely
+// predictable since subIds increment by one) reads done == nil as "no
+// dispatch goroutine exists for this subscriber" and deletes the
+// channelSubsById entry and returns without ever waiting -- defeating
+// UnsubscribeAndWait's entire purpose; and (2) the write to chSub.done in
+// SubscribeFuncWithBuffer and unsubscribe's reads of it were not
+// synchronized by any shared lock, i.e. a genuine data race.
+//
+// This runs many iterations of SubscribeFuncWithBuffer racing against
+// UnsubscribeAndWait for the predicted next subId, while a concurrent
+// checker goroutine continuously scans channelSubsById (under e.mu, the
+// same lock both the subscribe and unsubscribe paths use) asserting that
+// every entry present there always has a non-nil done -- which must hold
+// at every instant once the fix keeps the map publish and the done
+// assignment inside the same e.mu critical section. Run with -race: with
+// the old ordering restored, this both trips the invariant check below
+// and is reliably flagged by the race detector as an unsynchronized
+// read/write of chSub.done.
+func TestSubscribeFuncDoneVisibleBeforeSubIdPublished(t *testing.T) {
+	eb := NewEventBus(nil, nil)
+	defer eb.Stop()
+	typ := EventType("race.subscribefunc.done-visibility")
+
+	var invariantViolated atomic.Bool
+	stopChecker := make(chan struct{})
+	checkerDone := make(chan struct{})
+	go func() {
+		defer close(checkerDone)
+		for {
+			select {
+			case <-stopChecker:
+				return
+			default:
+			}
+			eb.mu.RLock()
+			for _, chSub := range eb.channelSubsById {
+				if chSub.done == nil {
+					invariantViolated.Store(true)
+				}
+			}
+			eb.mu.RUnlock()
+		}
+	}()
+
+	const iterations = 300
+	for range iterations {
+		eb.mu.RLock()
+		predictedSubId := eb.lastSubId + 1
+		eb.mu.RUnlock()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			eb.SubscribeFuncWithBuffer(typ, DefaultSubscriberBuffer, func(Event) {})
+		}()
+		go func() {
+			defer wg.Done()
+			eb.UnsubscribeAndWait(typ, predictedSubId)
+		}()
+		wg.Wait()
+	}
+
+	close(stopChecker)
+	<-checkerDone
+
+	require.False(
+		t, invariantViolated.Load(),
+		"a channelSubsById entry for a SubscribeFuncWithBuffer subscriber "+
+			"must never be observable with done == nil; the map publish "+
+			"raced ahead of done initialization",
+	)
+}

@@ -136,6 +136,7 @@ type Config struct {
 	barkBaseUrl              string
 	barkBlockDownloadHosts   []string
 	barkPort                 uint
+	barkHost                 string
 	historyExpiry            HistoryExpiryConfig
 	corsAllowedOrigins       []string
 	networkMagic             uint32
@@ -1125,6 +1126,15 @@ func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 func WithBarkPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.barkPort = port
+	}
+}
+
+// WithBarkHost sets the interface Bark binds to. Empty leaves it to node.go's
+// own safe-default logic (loopback-only when the database lifecycle service
+// is mounted, all interfaces otherwise) rather than forcing a value here.
+func WithBarkHost(host string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkHost = host
 	}
 }
 

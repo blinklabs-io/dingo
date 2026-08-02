@@ -145,9 +145,29 @@ func (p *PeerGovernor) startOutboundConnections() {
 
 	for _, tmpPeer := range peers {
 		if tmpPeer != nil {
-			go p.createOutboundConnection(tmpPeer)
+			p.spawnOutboundConnection(tmpPeer)
 		}
 	}
+}
+
+// spawnOutboundConnection launches createOutboundConnection in a goroutine
+// tracked by p.wg. Every outbound dial (initial connect, reconnect, or
+// recovery redial) must go through this instead of a bare
+// `go p.createOutboundConnection(...)`: Stop's p.wg.Wait() only waits for
+// goroutines counted here, and the live database restore/truncate quiesce
+// path relies on Stop fully draining every dial before the caller tears
+// down/replaces p.config.ConnManager (see the wg field's doc comment). An
+// untracked dial could still be running when Stop returns and later attach
+// to or publish events against a connection manager that no longer belongs
+// to this PeerGovernor incarnation.
+//
+// wg.Add is called here, synchronously before the goroutine is launched, so
+// it happens-before any concurrent Stop/wg.Wait — adding inside the
+// goroutine would race against Wait returning first.
+func (p *PeerGovernor) spawnOutboundConnection(peer *Peer) {
+	p.wg.Go(func() {
+		p.createOutboundConnection(peer)
+	})
 }
 
 func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
@@ -901,7 +921,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// here would cause the goroutine to see it as already
 			// active and immediately return.
 			if !peer.Reconnecting {
-				go p.createOutboundConnection(peer)
+				p.spawnOutboundConnection(peer)
 			}
 		}
 	}

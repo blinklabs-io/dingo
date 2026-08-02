@@ -202,6 +202,72 @@ func TestUtxorpc_StopForcesCloseOnUnboundedStream(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "forcing close")
 }
 
+// TestUtxorpc_StopObservesCtxCancellation covers the ctx.Done() case added
+// alongside the ShutdownTimeout timer: a cancellation-only ctx (no
+// deadline) must force-close promptly instead of waiting out the full
+// ShutdownTimeout, since a live database restore/truncate quiesce may want
+// to abandon a slow shutdown well before that fixed timeout elapses.
+func TestUtxorpc_StopObservesCtxCancellation(t *testing.T) {
+	var logBuf bytes.Buffer
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:   slog.New(slog.NewJSONHandler(&logBuf, nil)),
+		EventBus: event.NewEventBus(nil, nil),
+		// Deliberately long relative to the ctx cancellation below -- if
+		// Stop ever regresses to ignoring ctx.Done(), it will block for
+		// this entire duration instead of returning promptly.
+		ShutdownTimeout: 30 * time.Second,
+	})
+
+	requestReceived := make(chan struct{})
+	blockHandler := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		close(requestReceived)
+		<-blockHandler
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := &http.Server{Handler: mux}
+	u.server = server
+	go server.Serve(ln)
+	t.Cleanup(func() { close(blockHandler) })
+
+	client := &http.Client{}
+	go func() {
+		resp, getErr := client.Get("http://" + ln.Addr().String() + "/") //nolint:noctx
+		if getErr == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-requestReceived
+
+	// A ctx that is already cancelled by the time Stop's select runs --
+	// standing in for a quiesce caller that wants to give up immediately,
+	// well before ShutdownTimeout would fire, and carries no deadline of
+	// its own for the existing ctx.Deadline()-based min() logic to catch.
+	stopCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- u.Stop(stopCtx) }()
+
+	// Bounded overall wait: far shorter than ShutdownTimeout, so a
+	// regression (Stop still blocking on the timer) fails this test
+	// quickly instead of costing 30+ seconds per run.
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"Stop did not return promptly after ctx was cancelled -- " +
+				"it appears to be ignoring ctx.Done() and waiting out " +
+				"the full ShutdownTimeout instead",
+		)
+	}
+	assert.Contains(t, logBuf.String(), "forcing close")
+	assert.Contains(t, logBuf.String(), "cancelled by caller context")
+}
+
 // TestAnyChainBlockNativeBytes_NonNil ensures that AnyChainBlock.NativeBytes
 // is a real field in the generated type and can be set to non-nil, which is
 // what the SyncService handlers rely on for raw CBOR propagation.

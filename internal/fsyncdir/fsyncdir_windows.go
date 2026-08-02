@@ -37,16 +37,22 @@ import (
 // CreateFile with GENERIC_WRITE added, which FlushFileBuffers then
 // accepts.
 //
-// This is best-effort, not a guarantee: if the directory can't be
-// reopened with write access, or the underlying filesystem still
-// rejects the flush (some non-NTFS or network filesystems have no
-// directory-flush support at all), this returns nil rather than failing
-// the restore/snapshot that depends on it -- a narrower durability
-// guarantee than POSIX is preferable to refusing to serve Windows
-// entirely. NTFS itself journals directory-entry changes through its
-// own transaction log independently of this call succeeding, which is
-// what keeps the practical gap here far narrower than the POSIX case
-// this function exists to close.
+// Reopening the directory with write access is best-effort: if that fails
+// for a reason other than the path genuinely not existing (e.g. some
+// non-NTFS or network filesystem refuses a write-capable directory handle
+// outright), this returns nil rather than failing the restore/snapshot
+// that depends on it -- a narrower durability guarantee than POSIX is
+// preferable to refusing to serve Windows entirely. NTFS itself journals
+// directory-entry changes through its own transaction log independently
+// of this call succeeding, which is what keeps the practical gap here far
+// narrower than the POSIX case this function exists to close.
+//
+// FlushFileBuffers' own error, once a write-capable handle was actually
+// obtained, is NOT swallowed the same way: a caller depending on this to
+// gate real durability (e.g. database/lifecycle.RestoreValidated's
+// post-rename parent-directory sync) must get the same reliable
+// could-not-confirm signal POSIX's fsyncdir_other.go already gives it,
+// not a Windows-only silent "success" that defeats that gate entirely.
 func Sync(path string) error {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -75,9 +81,8 @@ func Sync(path string) error {
 		return nil
 	}
 	defer windows.CloseHandle(handle) //nolint:errcheck
-	// Best-effort: some filesystems reject this outright even with a
-	// write-capable handle (see doc comment), which is not a failure of
-	// this call's own correctness.
-	_ = windows.FlushFileBuffers(handle)
+	if err := windows.FlushFileBuffers(handle); err != nil {
+		return fmt.Errorf("flush directory entries for %q: %w", path, err)
+	}
 	return nil
 }

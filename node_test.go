@@ -45,6 +45,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled guards a real
+// P0 gap: bark.go's own empty-Host default is "0.0.0.0" (all interfaces),
+// which would expose the database lifecycle service's unauthenticated,
+// destructive Restore/Truncate RPCs on every interface by default. An
+// operator's explicit --bark-host must still always win.
+func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
+	require.Equal(t, "127.0.0.1", effectiveBarkHost("", true))
+	require.Equal(t, "", effectiveBarkHost("", false))
+	require.Equal(t, "0.0.0.0", effectiveBarkHost("0.0.0.0", true))
+	require.Equal(t, "10.0.0.5", effectiveBarkHost("10.0.0.5", false))
+}
+
 func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
@@ -1308,9 +1320,9 @@ func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.
 // restore/truncate reassigns those exact fields concurrently under
 // n.liveLifecycleMu — a real, unsynchronized data race that could panic
 // on a nil or mid-swap value. The fix makes every tick TryLock
-// n.liveLifecycleMu (the same mutex Restore/Truncate/Snapshot hold for
-// their entire quiesce-through-reinitialize duration) and skip entirely
-// on contention.
+// n.liveLifecycleMu (the same mutex Restore/Truncate hold for their
+// entire quiesce-through-reinitialize duration) and skip entirely on
+// contention.
 //
 // This holds that mutex on the test goroutine (simulating an in-progress
 // live lifecycle op) across several tick intervals and confirms the
@@ -1320,7 +1332,10 @@ func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.
 // unmarked is direct proof every tick was skipped, not just a side effect
 // of the pre-existing nil-check (both n.ledgerState and n.chainsyncState
 // are real, non-nil objects here). Releasing the mutex must let ticks
-// resume normally.
+// resume normally. See TestChainsyncStallRecyclerDoesNotSkipTicksWhile
+// SnapshotMuHolds below for the companion case: Snapshot deliberately
+// does NOT hold this same mutex (see snapshotMu's doc comment, node.go),
+// so an in-progress Snapshot must not skip ticks the way this does.
 func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(t *testing.T) {
 	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
 
@@ -1385,6 +1400,77 @@ func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(t *testing.T)
 		t, isStalled, time.Second, 5*time.Millisecond,
 		"ticks must resume and mark the stalled client once the mutex is released",
 	)
+}
+
+// TestChainsyncStallRecyclerDoesNotSkipTicksWhileSnapshotMuHolds guards
+// the companion gap to the test above: Snapshot used to take
+// n.liveLifecycleMu, the same mutex this recycler's tick TryLocks --
+// meaning a long-running Snapshot (a full local copy plus cloud upload)
+// disabled stall detection and plateau recovery for its entire duration,
+// contradicting Snapshot's own documented "keeps syncing normally"
+// behavior (unlike Restore/Truncate, Snapshot never nils or rebuilds
+// n.ledgerState/n.chainsyncState, so there is nothing for this tick to
+// race against while a Snapshot runs). The fix gives Snapshot its own
+// snapshotMu instead (node.go), leaving liveLifecycleMu meaning only "a
+// rebuild is in flight." This holds snapshotMu (simulating an in-progress
+// Snapshot) across several tick intervals and confirms ticks proceed
+// normally regardless -- the mirror image of the require.Never assertion
+// above, which uses liveLifecycleMu instead.
+func TestChainsyncStallRecyclerDoesNotSkipTicksWhileSnapshotMuHolds(t *testing.T) {
+	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	const stallTimeout = 10 * time.Millisecond
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+	)
+	conn := newNodeTestConnId(1)
+	require.True(t, state.AddClientConnId(conn))
+	state.SetClientConnId(conn)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ledgerState:    ledgerState,
+		chainsyncState: state,
+	}
+
+	isStalled := func() bool {
+		for _, tc := range state.GetTrackedClients() {
+			if tc.ConnId == conn {
+				return tc.Status == chainsync.ClientStatusStalled
+			}
+		}
+		return false
+	}
+
+	n.snapshotMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	recyclerCancel := n.startChainsyncStallRecycler(
+		ctx,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+		5*time.Millisecond,
+		time.Second,
+		time.Second,
+	)
+	t.Cleanup(func() {
+		recyclerCancel()
+		cancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
+
+	require.Eventually(
+		t, isStalled, time.Second, 5*time.Millisecond,
+		"a tick must still reach CheckStalledClients while only snapshotMu "+
+			"is held -- Snapshot no longer holds liveLifecycleMu",
+	)
+
+	n.snapshotMu.Unlock()
 }
 
 // TestStopWaitsForChainsyncStallRecycler verifies shutdown blocks while the

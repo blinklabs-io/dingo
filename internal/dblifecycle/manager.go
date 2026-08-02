@@ -21,7 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,6 +211,30 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.retryUnmirroredSnapshots(childCtx)
 	})
 
+	// A missing per-node prefix is not fatal -- a single node, or several
+	// nodes each already pointed at distinct SnapshotCloudDestination
+	// values, need no prefix at all -- but every automatic snapshot's
+	// remote key is the deterministic epoch-<N> (see destDir in
+	// handleEpochTransition), identical across every node. Two nodes
+	// sharing the same SnapshotCloudDestination with no distinguishing
+	// prefix would silently race to upload to the same remote path at
+	// every epoch boundary, so this is worth flagging even though it
+	// can't be ruled out as a deliberate, correct single-node setup.
+	if m.cfg.SnapshotCloudDestination != "" &&
+		m.cfg.SnapshotCloudDestinationPrefix == "" {
+		m.logger.Warn(
+			"databaseLifecycle.snapshotCloudDestination is configured "+
+				"without snapshotCloudDestinationPrefix: if another node "+
+				"shares this same cloud destination, their automatic "+
+				"epoch-boundary snapshots will collide at the same remote "+
+				"key and can corrupt each other's uploads; set a distinct "+
+				"snapshotCloudDestinationPrefix per node sharing a "+
+				"destination",
+			"component", "dblifecycle",
+			"cloud_destination", m.cfg.SnapshotCloudDestination,
+		)
+	}
+
 	m.logger.Info(
 		"database lifecycle manager started",
 		"component", "dblifecycle",
@@ -218,6 +242,27 @@ func (m *Manager) Start(ctx context.Context) error {
 		"every_n_epochs", m.cfg.SnapshotEveryNEpochs,
 	)
 	return nil
+}
+
+// effectiveCloudDestination returns the cloud destination automatic
+// snapshots are actually mirrored to, retried against, and pruned from:
+// cfg.SnapshotCloudDestination with cfg.SnapshotCloudDestinationPrefix
+// appended as an additional path segment, if configured. See
+// SnapshotCloudDestinationPrefix's doc comment for why this exists --
+// without it, two nodes sharing one SnapshotCloudDestination would
+// collide at the same deterministic epoch-<N> remote key. Every call site
+// that mirrors to, checks mirror status against, or deletes from the
+// configured cloud destination must go through this rather than reading
+// m.cfg.SnapshotCloudDestination directly, so all of them agree on the
+// same effective location.
+func (m *Manager) effectiveCloudDestination() string {
+	if m.cfg.SnapshotCloudDestination == "" ||
+		m.cfg.SnapshotCloudDestinationPrefix == "" {
+		return m.cfg.SnapshotCloudDestination
+	}
+	return lifecycle.JoinCloudURI(
+		m.cfg.SnapshotCloudDestination, m.cfg.SnapshotCloudDestinationPrefix,
+	)
 }
 
 // Stop stops the manager, waiting for any in-flight snapshot handler call
@@ -331,8 +376,9 @@ func (m *Manager) handleEpochTransition(
 		// is actually marked as mirrored; otherwise retry just the
 		// upload from the already-valid local copy, not the whole
 		// snapshot.
-		if m.cfg.SnapshotCloudDestination == "" ||
-			lifecycle.IsCloudMirroredTo(destDir, m.cfg.SnapshotCloudDestination) {
+		cloudDest := m.effectiveCloudDestination()
+		if cloudDest == "" ||
+			lifecycle.IsCloudMirroredTo(destDir, cloudDest) {
 			m.logger.Debug(
 				"automatic snapshot for epoch already exists, skipping",
 				"component", "dblifecycle",
@@ -348,7 +394,7 @@ func (m *Manager) handleEpochTransition(
 			"dir", destDir,
 		)
 		if err := lifecycle.MirrorToCloud(
-			ctx, m.destinationRegistry, destDir, m.cfg.SnapshotCloudDestination,
+			ctx, m.destinationRegistry, destDir, cloudDest,
 		); err != nil {
 			return fmt.Errorf(
 				"retry epoch-boundary snapshot cloud mirror: %w", err,
@@ -374,7 +420,7 @@ func (m *Manager) handleEpochTransition(
 		version.GetVersionString(),
 		m.blobPluginName,
 		m.metadataPluginName,
-		m.cfg.SnapshotCloudDestination,
+		m.effectiveCloudDestination(),
 		"",
 		"",
 	)
@@ -409,7 +455,8 @@ func (m *Manager) handleEpochTransition(
 // since this is opportunistic healing on top of whatever handling already
 // happened for the snapshot that triggered this call.
 func (m *Manager) retryUnmirroredSnapshots(ctx context.Context) {
-	if m.cfg.SnapshotCloudDestination == "" {
+	cloudDest := m.effectiveCloudDestination()
+	if cloudDest == "" {
 		return
 	}
 	m.retryMu.Lock()
@@ -430,7 +477,7 @@ func (m *Manager) retryUnmirroredSnapshots(ctx context.Context) {
 			continue
 		}
 		dir := filepath.Join(m.cfg.SnapshotDir, entry.Name())
-		if lifecycle.IsCloudMirroredTo(dir, m.cfg.SnapshotCloudDestination) {
+		if lifecycle.IsCloudMirroredTo(dir, cloudDest) {
 			continue
 		}
 		m.logger.Warn(
@@ -476,7 +523,7 @@ func (m *Manager) retryMirrorToCloud(ctx context.Context, dir string) (err error
 		}
 	}()
 	return lifecycle.MirrorToCloud(
-		ctx, m.destinationRegistry, dir, m.cfg.SnapshotCloudDestination,
+		ctx, m.destinationRegistry, dir, m.effectiveCloudDestination(),
 	)
 }
 
@@ -519,12 +566,43 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 	if len(epochs) <= m.cfg.SnapshotRetention {
 		return
 	}
-	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
+	slices.Sort(epochs)
 
+	cloudDest := m.effectiveCloudDestination()
 	toRemove := epochs[:len(epochs)-m.cfg.SnapshotRetention]
 	for _, epoch := range toRemove {
 		epochName := fmt.Sprintf("%s%d", epochSnapshotDirPrefix, epoch)
 		dir := filepath.Join(m.cfg.SnapshotDir, epochName)
+
+		// A cloud destination is configured but this directory was never
+		// actually confirmed mirrored to it (no valid .cloud-mirrored
+		// marker for the CURRENTLY configured destination — see
+		// IsCloudMirroredTo): DeleteCloudSnapshot below can't tell "deleted
+		// a real remote copy" apart from "there was nothing there because
+		// it was never mirrored in the first place" (both a real object
+		// deletion and a no-op against an empty/nonexistent remote prefix
+		// return ok=true, err=nil). Removing the local directory in that
+		// case would destroy the only surviving copy of a snapshot that
+		// was never actually backed up to the cloud, with nothing left to
+		// retry from. So skip pruning this one entirely -- neither
+		// deleting a (nonexistent) cloud copy nor the local directory --
+		// and leave it for retryUnmirroredSnapshots to find and mirror on
+		// a later pass, after which a later pruning pass can finish the
+		// job. This deliberately means retention no longer strictly bounds
+		// local disk usage for a snapshot that has never been
+		// successfully mirrored: that's the safer tradeoff, since the
+		// alternative is silently losing the snapshot's only copy.
+		if cloudDest != "" && !lifecycle.IsCloudMirroredTo(dir, cloudDest) {
+			m.logger.Warn(
+				"old automatic snapshot beyond retention was never "+
+					"confirmed mirrored to the configured cloud "+
+					"destination, keeping local copy so a later retry can "+
+					"still mirror (and then prune) it",
+				"component", "dblifecycle",
+				"dir", dir,
+			)
+			continue
+		}
 
 		// Cloud deletion must happen before the local directory is
 		// removed, not after: the next pruning pass rediscovers retry
@@ -533,8 +611,8 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 		// its cloud mirror would permanently orphan that cloud copy —
 		// nothing would ever select it for a retry again, and retention
 		// would no longer bound cloud storage at all.
-		if m.cfg.SnapshotCloudDestination != "" {
-			cloudURI := lifecycle.JoinCloudURI(m.cfg.SnapshotCloudDestination, epochName)
+		if cloudDest != "" {
+			cloudURI := lifecycle.JoinCloudURI(cloudDest, epochName)
 			ok, err := lifecycle.DeleteCloudSnapshot(ctx, m.destinationRegistry, cloudURI)
 			if err != nil {
 				m.logger.Warn(

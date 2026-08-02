@@ -311,18 +311,13 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 
 // Stop shuts down the server, escalating to a hard Close if it does not
 // complete within u.config.ShutdownTimeout (or the caller ctx's own
-// deadline, if sooner). WatchTx/WatchMempool are unbounded streaming RPCs,
-// so a connected client can otherwise keep http.Server.Shutdown blocked
-// indefinitely, hanging any live database restore/truncate quiesce that
-// waits on Stop -- matching midnight/server's identical Stop/gracefulStop
-// pattern for a grpc.Server.
-// Stop shuts down the server, escalating to a hard Close if it does not
-// complete within u.config.ShutdownTimeout (or the caller ctx's own
-// deadline, if sooner). WatchTx/WatchMempool are unbounded streaming RPCs,
-// so a connected client can otherwise keep http.Server.Shutdown blocked
-// indefinitely, hanging any live database restore/truncate quiesce that
-// waits on Stop -- matching midnight/server's identical Stop/gracefulStop
-// pattern for a grpc.Server.
+// deadline, if sooner), and also escalates immediately if ctx is cancelled
+// (even when ctx carries no deadline at all), so a caller that wants to
+// give up early is never stuck waiting out the full ShutdownTimeout.
+// WatchTx/WatchMempool are unbounded streaming RPCs, so a connected client
+// can otherwise keep http.Server.Shutdown blocked indefinitely, hanging any
+// live database restore/truncate quiesce that waits on Stop -- matching
+// midnight/server's identical Stop/gracefulStop pattern for a grpc.Server.
 func (u *Utxorpc) Stop(ctx context.Context) error {
 	u.mu.Lock()
 	server := u.server
@@ -367,12 +362,30 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 			"utxorpc gRPC graceful shutdown timed out; forcing close",
 			"timeout", timeout,
 		)
-		if err := server.Close(); err != nil {
-			return fmt.Errorf("failed to force-close utxorpc gRPC server: %w", err)
-		}
-		<-shutdownErr
-		return nil
+		return forceCloseUtxorpc(server, shutdownErr)
+	case <-ctx.Done():
+		// The caller gave up before ShutdownTimeout (or its own deadline)
+		// elapsed -- e.g. a live database restore/truncate quiesce that
+		// wants to abandon a slow shutdown quickly. Escalate immediately
+		// instead of continuing to wait out the timer above.
+		u.config.Logger.Warn(
+			"utxorpc gRPC graceful shutdown cancelled by caller context; forcing close",
+			"error", ctx.Err(),
+		)
+		return forceCloseUtxorpc(server, shutdownErr)
 	}
+}
+
+// forceCloseUtxorpc hard-closes server after a graceful Shutdown failed to
+// finish in time -- whether because ShutdownTimeout (or the caller's own
+// deadline) elapsed or because the caller's ctx was cancelled early -- then
+// drains shutdownErr so the Shutdown goroutine started in Stop never leaks.
+func forceCloseUtxorpc(server *http.Server, shutdownErr <-chan error) error {
+	if err := server.Close(); err != nil {
+		return fmt.Errorf("failed to force-close utxorpc gRPC server: %w", err)
+	}
+	<-shutdownErr
+	return nil
 }
 
 // startServer starts the HTTP server with deterministic error

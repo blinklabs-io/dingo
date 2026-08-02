@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -144,11 +145,11 @@ func newLiveLifecycleTestNodeWithGenesis(
 	})
 
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:           db,
-		ChainManager:       cm,
-		EventBus:           eventBus,
-		CardanoNodeConfig:  cardanoNodeCfg,
-		Logger:             logger,
+		Database:                 db,
+		ChainManager:             cm,
+		EventBus:                 eventBus,
+		CardanoNodeConfig:        cardanoNodeCfg,
+		Logger:                   logger,
 		ValidateHistorical:       false,
 		DatabaseWorkerPoolConfig: workerPoolCfg,
 	})
@@ -881,6 +882,50 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 // newSwapTestNode returns a *Node with just enough config to exercise the
 // directory-swap functions above, none of which touch anything else on
 // Node.
+// TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedConnShutdown
+// guards two related gaps flagged in review: (1) quiesceForLiveLifecycleOp
+// used to unconditionally dereference n.ouroboros to pause the Leios
+// persist writer, panicking if quiesce ever ran against a node that isn't
+// fully initialized (e.g. a partially-constructed Node, or a future call
+// site); (2) a connManager.Stop failure -- meaning it could not confirm
+// every connection/listener goroutine actually exited -- was not escalated
+// to errStorageDrainUnconfirmed, even though PauseLeiosPersistWriterFor-
+// LiveLifecycleOp's own safety (see its doc comment) depends on
+// connManager.Stop having actually succeeded: an unconfirmed shutdown means
+// a straggling connection could still call enqueueLeiosPersist concurrently
+// with the reset PauseLeiosPersistWriterForLiveLifecycleOp performs.
+func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedConnShutdown(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
+		Logger: logger,
+	})
+
+	n := &Node{
+		config:      NewConfig(WithLogger(logger)),
+		connManager: cm,
+	}
+
+	// Already past its deadline before quiesceForLiveLifecycleOp ever calls
+	// connManager.Stop(ctx), so Stop's own select reliably takes its
+	// ctx.Done() branch (ready from the moment this context was created)
+	// well before its closeDone/goroutineDone goroutines could plausibly
+	// finish, forcing Stop to return its own unconfirmed-shutdown error
+	// deterministically rather than racing a real timer.
+	ctx, cancel := context.WithDeadline(
+		context.Background(), time.Now().Add(-time.Hour),
+	)
+	defer cancel()
+
+	var err error
+	require.NotPanics(t, func() {
+		err = n.quiesceForLiveLifecycleOp(ctx)
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+}
+
 func newSwapTestNode(t *testing.T, dataDir string) *Node {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

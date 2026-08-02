@@ -998,6 +998,288 @@ func setFlakyDeleteCloudBackingDir(t *testing.T, dir string) {
 	})
 }
 
+// permanentUploadFailureCloudDestination behaves exactly like
+// managerFakeCloudDestination (a real, directory-backed upload) except
+// that UploadDir permanently fails whenever localDir's base name matches
+// the currently configured target (see setPermanentUploadFailureTarget) —
+// simulating a snapshot whose cloud upload never completes, as opposed to
+// flakyCloudDestination's clears-after-one-retry failure above. The
+// target can be changed later to simulate the underlying outage finally
+// clearing for that specific snapshot.
+type permanentUploadFailureCloudDestination struct {
+	dir string
+	mu  *sync.Mutex
+	// target, guarded by mu, names the one directory basename UploadDir
+	// currently fails for; every other directory uploads normally.
+	target *string
+}
+
+func (d *permanentUploadFailureCloudDestination) UploadDir(_ context.Context, localDir string) error {
+	d.mu.Lock()
+	target := *d.target
+	d.mu.Unlock()
+	if filepath.Base(localDir) == target {
+		return errors.New("simulated permanent cloud upload failure")
+	}
+	if err := os.MkdirAll(d.dir, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(localDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(d.dir, entry.Name()), data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *permanentUploadFailureCloudDestination) DownloadDir(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func (d *permanentUploadFailureCloudDestination) Delete(context.Context) error {
+	return os.RemoveAll(d.dir)
+}
+
+var (
+	_ lifecycle.CloudDestination = &permanentUploadFailureCloudDestination{}
+	_ lifecycle.CloudDeleter     = &permanentUploadFailureCloudDestination{}
+)
+
+var (
+	permanentUploadFailureMu      sync.Mutex
+	permanentUploadFailureBaseDir string
+	permanentUploadFailureTarget  string
+)
+
+func init() {
+	testDestinationRegistry.Register(
+		"managerfaketest-permanentuploadfail",
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			permanentUploadFailureMu.Lock()
+			base := permanentUploadFailureBaseDir
+			permanentUploadFailureMu.Unlock()
+			return &permanentUploadFailureCloudDestination{
+				dir:    filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+				mu:     &permanentUploadFailureMu,
+				target: &permanentUploadFailureTarget,
+			}, nil
+		},
+	)
+}
+
+func setPermanentUploadFailureTarget(t *testing.T, backingDir, target string) {
+	t.Helper()
+	permanentUploadFailureMu.Lock()
+	permanentUploadFailureBaseDir = backingDir
+	permanentUploadFailureTarget = target
+	permanentUploadFailureMu.Unlock()
+	t.Cleanup(func() {
+		permanentUploadFailureMu.Lock()
+		permanentUploadFailureBaseDir = ""
+		permanentUploadFailureTarget = ""
+		permanentUploadFailureMu.Unlock()
+	})
+}
+
+// TestManagerPruningPreservesNeverMirroredSnapshotLocally guards against a
+// real bug: DeleteCloudSnapshot's ok=true return doesn't distinguish
+// "actually deleted a real remote object" from "there was nothing there
+// because this snapshot was never mirrored in the first place" (both an
+// S3/GCS delete against an empty/nonexistent prefix and a real deletion
+// return ok=true, err=nil). pruneOldSnapshots used to treat that ok=true
+// as license to also remove the local directory — permanently destroying
+// the only surviving copy of a snapshot that failed to mirror, since
+// nothing would ever select an already-deleted local directory for a
+// retry again. This proves the opposite: a snapshot beyond retention that
+// was never confirmed mirrored to the configured cloud destination keeps
+// its local copy during pruning, and once a later retry actually mirrors
+// it, a subsequent pruning pass finishes the job for real.
+func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
+	db := newManagerTestDB(t)
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	const cloudDest = "managerfaketest-permanentuploadfail://bucket/prefix"
+	cloudPrefixDir := filepath.Join(cloudBackingDir, "prefix")
+	setPermanentUploadFailureTarget(t, cloudBackingDir, "epoch-1")
+
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:          true,
+		SnapshotDir:              snapshotDir,
+		SnapshotEveryNEpochs:     1,
+		SnapshotRetention:        1,
+		SnapshotCloudDestination: cloudDest,
+	}, "badger", "sqlite", testDestinationRegistry, nil)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	// epoch 1: local write succeeds, its cloud upload permanently fails.
+	publishEpochTransition(eb, 1)
+	epoch1Dir := filepath.Join(snapshotDir, "epoch-1")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(epoch1Dir, "manifest.json"))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	require.False(
+		t, lifecycle.IsCloudMirrored(epoch1Dir),
+		"must not be marked mirrored after a failed upload",
+	)
+
+	// epoch 2: its own capture succeeds and mirrors normally, which is
+	// what triggers pruning -- retention (1) now puts epoch-1 (never
+	// mirrored) up for removal. Without the fix, its local directory
+	// would be deleted right here even though it was never backed up to
+	// the cloud.
+	publishEpochTransition(eb, 2)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(cloudPrefixDir, "epoch-2", "manifest.json"))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.DirExists(
+		t, epoch1Dir,
+		"epoch-1's local copy must survive pruning since it was never mirrored to the cloud",
+	)
+
+	// Once the underlying outage clears, a later epoch's opportunistic
+	// retry scan mirrors epoch-1 for real, and a subsequent pruning pass
+	// must then actually finish removing both its local and cloud copies
+	// -- proving the fix doesn't just leak local storage forever either.
+	setPermanentUploadFailureTarget(t, cloudBackingDir, "")
+	publishEpochTransition(eb, 3)
+	require.Eventually(t, func() bool {
+		return lifecycle.IsCloudMirrored(epoch1Dir)
+	}, 15*time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		_, localErr := os.Stat(epoch1Dir)
+		_, cloudErr := os.Stat(filepath.Join(cloudPrefixDir, "epoch-1"))
+		return os.IsNotExist(localErr) && os.IsNotExist(cloudErr)
+	}, 15*time.Second, 10*time.Millisecond,
+		"once mirrored for real, a later pruning pass must finish removing "+
+			"both copies of the now-retired epoch-1 snapshot",
+	)
+}
+
+// TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath guards
+// against a real gap: automatic epoch-boundary snapshots are named
+// deterministically (epoch-<N>), identical across every node, so two
+// nodes pointed at the same SnapshotCloudDestination would otherwise
+// upload to the exact same remote key at every epoch boundary --
+// interleaved uploads could even leave one node's manifest.json paired
+// with another node's backup files at the same remote path. This proves
+// SnapshotCloudDestinationPrefix, once configured, is actually
+// incorporated into the remote upload path as an extra path segment ahead
+// of the snapshot's own ID, giving each node using a distinct prefix a
+// disjoint remote location.
+func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(t *testing.T) {
+	db := newManagerTestDB(t)
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setManagerFakeCloudBackingDir(t, cloudBackingDir)
+	const baseCloudDest = "managerfaketest://bucket/shared-prefix"
+
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:                true,
+		SnapshotDir:                    snapshotDir,
+		SnapshotEveryNEpochs:           1,
+		SnapshotCloudDestination:       baseCloudDest,
+		SnapshotCloudDestinationPrefix: "node-a",
+	}, "badger", "sqlite", testDestinationRegistry, nil)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	publishEpochTransition(eb, 5)
+
+	// With the prefix configured, the upload must land under an extra
+	// "node-a" path segment ahead of the snapshot's own epoch-5 ID -- not
+	// directly under the shared base destination, where a second node
+	// sharing baseCloudDest (with its own distinct prefix) would otherwise
+	// collide.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(
+			cloudBackingDir, "shared-prefix", "node-a", "epoch-5", "manifest.json",
+		))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NoDirExists(
+		t, filepath.Join(cloudBackingDir, "shared-prefix", "epoch-5"),
+		"must not upload directly under the shared base destination, bypassing the per-node prefix",
+	)
+}
+
+// TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix verifies
+// Start logs a warning when a cloud destination is configured with no
+// distinguishing SnapshotCloudDestinationPrefix -- the situation that lets
+// two nodes sharing one destination silently collide at the same
+// deterministic epoch-<N> remote key.
+func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
+	db := newManagerTestDB(t)
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:          true,
+		SnapshotDir:              snapshotDir,
+		SnapshotEveryNEpochs:     1,
+		SnapshotCloudDestination: "managerfaketest://bucket/prefix",
+	}, "badger", "sqlite", testDestinationRegistry, logger)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	require.Contains(
+		t, logBuf.String(), "snapshotCloudDestinationPrefix",
+		"must warn when a cloud destination is configured without a distinguishing per-node prefix",
+	)
+}
+
+// TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet is the negative
+// case: once a distinguishing prefix is configured, Start must not warn
+// about the same missing-prefix collision risk.
+func TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet(t *testing.T) {
+	db := newManagerTestDB(t)
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:                true,
+		SnapshotDir:                    snapshotDir,
+		SnapshotEveryNEpochs:           1,
+		SnapshotCloudDestination:       "managerfaketest://bucket/prefix",
+		SnapshotCloudDestinationPrefix: "node-a",
+	}, "badger", "sqlite", testDestinationRegistry, logger)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	require.NotContains(
+		t, logBuf.String(), "snapshotCloudDestinationPrefix",
+		"must not warn when a distinguishing per-node prefix is already configured",
+	)
+}
+
 // TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds guards the
 // actual bug this fix addresses: pruneOldSnapshots used to remove
 // the local snapshot directory before attempting to delete its cloud

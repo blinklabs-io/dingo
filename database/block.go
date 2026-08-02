@@ -78,8 +78,7 @@ func RegisterBlockByHashMetrics(reg prometheus.Registerer) error {
 		// and the new collector read the same process-wide atomics, so the
 		// registry still observes the correct totals and the duplicate is
 		// safe to ignore.
-		var alreadyRegistered prometheus.AlreadyRegisteredError
-		if !errors.As(err, &alreadyRegistered) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			return err
 		}
 	}

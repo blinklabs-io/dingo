@@ -212,11 +212,9 @@ func (e *Election) Start(ctx context.Context) error {
 			"component", "leader",
 		)
 	} else {
-		e.wg.Add(1)
-		go func() {
-			defer e.wg.Done()
+		e.wg.Go(func() {
 			e.epochTransitionLoop(ctx, evtCh)
-		}()
+		})
 	}
 
 	var nonceReadyCh <-chan event.Event
@@ -229,11 +227,9 @@ func (e *Election) Start(ctx context.Context) error {
 			"component", "leader",
 		)
 	} else {
-		e.wg.Add(1)
-		go func() {
-			defer e.wg.Done()
+		e.wg.Go(func() {
 			e.epochNonceReadyLoop(ctx, nonceReadyCh)
-		}()
+		})
 	}
 	// Captured into a local before spawning: e.computeCh is read here while
 	// Start still holds e.mu, but the goroutine below reads it again at
@@ -243,11 +239,9 @@ func (e *Election) Start(ctx context.Context) error {
 	// field. The local copy is never touched by anything else, so passing
 	// it in is race-free regardless of scheduling order.
 	computeCh := e.computeCh
-	e.wg.Add(1)
-	go func() {
-		defer e.wg.Done()
+	e.wg.Go(func() {
 		e.scheduleComputeLoop(ctx, computeCh)
-	}()
+	})
 
 	// Kick off initial schedule computation for the current epoch.
 	currentEpoch := e.epochProvider.CurrentEpoch()
@@ -270,15 +264,42 @@ func (e *Election) Start(ctx context.Context) error {
 
 	// Monitor context cancellation to automatically stop.
 	// The goroutine exits when either the context is canceled or Stop() is called.
+	//
+	// Tracked in e.wg (like the three loops above), not left to dangle:
+	// otherwise a completed Stop() could return with this goroutine still
+	// alive, watching the now-defunct ctx/stopCh from this Start generation.
+	// A later Start() on the same *Election creates a new ctx/stopCh, but
+	// does nothing about a stale monitor from a previous generation still
+	// running -- if THAT ctx's parent is ever cancelled afterward, the
+	// stale goroutine would call e.Stop() on the new, currently-running
+	// generation it has no business touching.
 	stopCh := e.stopCh
-	go func() {
+	e.wg.Go(func() {
 		select {
-		case <-ctx.Done():
-			_ = e.Stop()
 		case <-stopCh:
-			// Stop() was called directly, goroutine should exit
+			// Stop() was called directly, goroutine should exit.
+			return
+		case <-ctx.Done():
+			// ctx can be canceled either because Stop() itself was called
+			// directly (which always closes stopCh strictly before its
+			// own e.cancel() call below) or because the caller's parent
+			// context died externally -- and since both channels can be
+			// simultaneously ready by the time this select actually runs,
+			// Go may have picked this case even though stopCh is also
+			// already closed. Re-check stopCh, non-blockingly: if it's
+			// already closed, a direct Stop() is the reason ctx died and
+			// must not be re-entered here -- a second, concurrent Stop()
+			// call would deadlock waiting on e.wg for this very goroutine
+			// (now tracked above). Only a genuinely external cancellation
+			// (stopCh still open) should trigger our own Stop() call.
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+			_ = e.Stop()
 		}
-	}()
+	})
 
 	e.logger.Info(
 		"leader election started",

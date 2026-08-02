@@ -408,11 +408,17 @@ type Config struct {
 	BarkBaseUrl            string        `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
 	BarkBlockDownloadHosts []string      `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
 	BarkPort               uint          `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
-	CORSAllowedOrigins     []string      `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort            uint          `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort              uint          `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip           bool          `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical     bool          `yaml:"validateHistorical"                                               split_words:"true"`
+	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
+	// it to loopback-only (127.0.0.1) whenever the database lifecycle
+	// service (Restore/Truncate — destructive, unauthenticated RPCs) is
+	// mounted, rather than bark's own all-interfaces "0.0.0.0" default;
+	// set explicitly to widen that on purpose.
+	BarkHost           string   `yaml:"barkHost" envconfig:"DINGO_BARK_HOST"`
+	CORSAllowedOrigins []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort        uint     `yaml:"metricsPort"                                                      split_words:"true"`
+	DebugPort          uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip       bool     `yaml:"intersectTip"                                                     split_words:"true"`
+	ValidateHistorical bool     `yaml:"validateHistorical"                                               split_words:"true"`
 	// StrictUtxoValidation errors out (instead of silently skipping) when a
 	// consumed UTxO cannot be found or recovered for a block past the
 	// recorded Mithril sync boundary. Leave disabled when bootstrapping from
@@ -779,6 +785,21 @@ type DatabaseLifecycleConfig struct {
 	// as a local restore. This is also how a snapshot created on one node
 	// can be restored onto another.
 	SnapshotCloudDestination string `yaml:"snapshotCloudDestination" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_CLOUD_DESTINATION"`
+	// SnapshotCloudDestinationPrefix is an additional path segment appended
+	// after SnapshotCloudDestination and before each snapshot's own ID
+	// (e.g. epoch-<N> for automatic snapshots), so multiple nodes can point
+	// at the very same SnapshotCloudDestination (a shared disaster-recovery
+	// bucket, say) without their automatic epoch-boundary snapshots
+	// colliding at the same remote key: every node captures its epoch-<N>
+	// snapshot under the identical deterministic name, so without a
+	// distinct prefix per node, two nodes sharing one destination would
+	// race to upload to the same path, and an interleaving could even
+	// leave one node's manifest.json paired with another node's backup
+	// files at the same remote location. Leave unset for a single node (or
+	// multiple nodes each already using distinct SnapshotCloudDestination
+	// values); operators sharing one destination across nodes must set
+	// this to a distinct value per node.
+	SnapshotCloudDestinationPrefix string `yaml:"snapshotCloudDestinationPrefix" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_CLOUD_DESTINATION_PREFIX"`
 	// SnapshotRetention is the number of most-recent automatic snapshots
 	// to keep before pruning older ones. Zero keeps all of them.
 	SnapshotRetention int `yaml:"snapshotRetention" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_RETENTION"`
@@ -807,6 +828,7 @@ var globalConfig = &Config{
 	RelayPort:            3001,
 	BarkBaseUrl:          "",
 	BarkPort:             0,
+	BarkHost:             "",
 	CORSAllowedOrigins:   []string{"*"},
 	Topology:             "",
 	TlsCertFilePath:      "",

@@ -68,7 +68,26 @@ func databaseSnapshotCommand() *cobra.Command {
 			}
 			logger := commonRun(cfg)
 			svc := dblifecycle.NewService(cfg, newCLIDestinationRegistry(), logger)
-			manifest, err := svc.Snapshot(cmd.Context(), destDir, "", "")
+
+			// Snapshot can run for a long time against a large database,
+			// and Cobra's default cmd.Context() is a plain
+			// context.Background() with no signal handling wired in
+			// anywhere above this command -- without this, an operator's
+			// Ctrl+C (SIGINT) or a SIGTERM would not cancel ctx at all,
+			// so Snapshot would have no way to notice the interrupt and
+			// unwind its own failure cleanup (e.g. removing an
+			// incomplete destDir); the process would just be killed
+			// outright mid-backup, leaving destDir existing-but-
+			// incomplete so a retry with the same --dir fails as
+			// already existing instead of cleanly resuming. See
+			// databaseRestoreCommand/databaseTruncateCommand above for
+			// the same reasoning.
+			ctx, stop := signal.NotifyContext(
+				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
+			)
+			defer stop()
+
+			manifest, err := svc.Snapshot(ctx, destDir, "", "")
 			if err != nil {
 				return fmt.Errorf("snapshot: %w", err)
 			}

@@ -548,17 +548,29 @@ func (c *ConnectionManager) ResolvedListeners() []ListenerConfig {
 		// Only rewrite an entry that came in with a caller-supplied
 		// Listener -- an already address-configured entry (Listener nil)
 		// already rebinds correctly on its own via ListenNetwork/
-		// ListenAddress and needs no help; leaving it untouched also
-		// avoids overwriting a Windows named-pipe entry's ListenNetwork
-		// ("unix", checked explicitly by startListener's pipe branch)
-		// with whatever network name its winio.PipeAddr.Network() call
-		// happens to report, which could otherwise break its own
-		// self-healing rebind.
+		// ListenAddress and needs no help.
 		if cfg.Listener != nil && i < len(c.listeners) && c.listeners[i] != nil {
 			addr := c.listeners[i].Addr()
 			cfg.Listener = nil
-			cfg.ListenNetwork = addr.Network()
 			cfg.ListenAddress = addr.String()
+			// Preserve a "unix" ListenNetwork instead of deriving it from
+			// addr.Network(): "unix" doubles as the cross-platform
+			// sentinel startListener uses to dispatch to
+			// createPipeListener on Windows for a caller-supplied
+			// named-pipe listener. That listener's underlying
+			// winio.PipeAddr.Network() reports "pipe", not "unix" -- so
+			// naively overwriting ListenNetwork here would corrupt the
+			// sentinel, and the next reinit's
+			// `runtime.GOOS == "windows" && l.ListenNetwork == "unix"`
+			// check would fail, falling through to a plain net.Listen
+			// with network "pipe", which is not a network Go's net
+			// package knows how to dial/listen and would fail the
+			// rebind. On real unix-domain sockets (any platform),
+			// addr.Network() already reports "unix", so preserving it
+			// here is a no-op.
+			if cfg.ListenNetwork != "unix" {
+				cfg.ListenNetwork = addr.Network()
+			}
 			// The rebind happens moments after this exact address's
 			// previous listener was closed; SO_REUSEADDR maximizes the
 			// chance that succeeds immediately rather than racing the

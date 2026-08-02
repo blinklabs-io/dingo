@@ -115,6 +115,7 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = Restore(
 		context.Background(), newRestoreInternalTestHost(t), nil, snapshotDir, targetDir,
+		RestoreStorageConfig{},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, injectedErr)
@@ -156,6 +157,7 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 
 	_, err = Restore(
 		context.Background(), newRestoreInternalTestHost(t), nil, snapshotDir, targetDir,
+		RestoreStorageConfig{},
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, injectedErr)

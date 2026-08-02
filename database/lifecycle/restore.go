@@ -30,6 +30,35 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
+// checkNoDataDirOverride rejects a provider config carrying a non-empty
+// "dataDir" override (the yaml key every storage provider currently uses
+// for this, e.g. database/plugin/blob/badger's and .../metadata/sqlite's
+// own Config.DataDir, which always wins over ProviderDependencies.DataDir
+// when set -- see those packages' provider.go). See RestoreStorageConfig's
+// doc comment for why this specific setting cannot simply be propagated
+// like any other provider config: restore writes into a sibling staging
+// directory it derives from targetDataDir, and a provider redirected
+// elsewhere by its own config would write outside that staging directory
+// entirely, silently losing the atomic-rename interruption safety
+// RestoreValidated otherwise guarantees.
+func checkNoDataDirOverride(pluginKind string, cfg map[string]any) error {
+	raw, ok := cfg["dataDir"]
+	if !ok {
+		return nil
+	}
+	override, _ := raw.(string)
+	if override == "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"restore does not support a configured %s provider dataDir override (%q): "+
+			"restore always writes under the given targetDataDir's own staging "+
+			"directory, and honoring a separate override would bypass its "+
+			"atomic-rename interruption safety",
+		pluginKind, override,
+	)
+}
+
 // syncDir is fsyncdir.Sync by default; a package-level var (not a direct
 // call) so tests can inject a failure and verify RestoreValidated actually
 // surfaces it, instead of silently activating (or reporting success for) a
@@ -55,6 +84,29 @@ func syncDirTree(root string) error {
 		}
 		return syncDir(path)
 	})
+}
+
+// RestoreStorageConfig carries the caller's configured provider-owned
+// settings (plugin.Selection.Config, e.g. Badger/SQLite tuning options) for
+// the blob/metadata plugins Restore resolves, mirroring what a normal
+// dingo startup (internal/plugins.ResolveStorage) already passes instead
+// of the nil config every resolve here used before this existed. The zero
+// value (both nil) preserves the original behavior exactly.
+//
+// A per-plugin "dataDir" override specifically is deliberately rejected
+// (see checkNoDataDirOverride) rather than honored: restoreMetadataStore/
+// restoreBlobStore write into a sibling staging directory, never
+// targetDataDir directly, so the atomic-rename interruption-safety
+// RestoreValidated's own doc comment describes holds; a provider
+// redirected by its own config to some other directory entirely would
+// write outside that staging directory, bypassing the same guarantee.
+// Refusing the restore outright when this is configured is safer than
+// either silently writing to the wrong place (the original gap this type
+// exists to close) or silently ignoring the override (a different,
+// equally silent divergence from what a real subsequent startup would do).
+type RestoreStorageConfig struct {
+	Blob     map[string]any
+	Metadata map[string]any
 }
 
 // Restore populates targetDataDir (which must not already exist, or must
@@ -89,6 +141,11 @@ func syncDirTree(root string) error {
 // providers or owning a plugin host of its own would split provider
 // ownership away from the application's composition root.
 //
+// storageConfig propagates the caller's actual configured provider
+// settings into the plugins this resolves — see RestoreStorageConfig's
+// doc comment. Pass the zero value if the caller has no such
+// configuration to propagate.
+//
 // This is an offline operation: targetDataDir must not be concurrently
 // held open by another *database.Database (e.g. a running node), since it
 // restores the metadata store before starting it (metadata.Restorer) and
@@ -101,8 +158,11 @@ func Restore(
 	registry *DestinationRegistry,
 	snapshotDir string,
 	targetDataDir string,
+	storageConfig RestoreStorageConfig,
 ) (Manifest, error) {
-	return RestoreValidated(ctx, host, registry, snapshotDir, targetDataDir, nil)
+	return RestoreValidated(
+		ctx, host, registry, snapshotDir, targetDataDir, nil, storageConfig,
+	)
 }
 
 // RestoreValidated is Restore, but — when validate is non-nil — calls
@@ -152,6 +212,7 @@ func RestoreValidated(
 	snapshotDir string,
 	targetDataDir string,
 	validate func(Manifest) error,
+	storageConfig RestoreStorageConfig,
 ) (m Manifest, err error) {
 	manifest, snapshotDir, cleanup, err := resolveManifest(ctx, registry, snapshotDir)
 	if cleanup != nil {
@@ -164,6 +225,12 @@ func RestoreValidated(
 		if err := validate(manifest); err != nil {
 			return Manifest{}, err
 		}
+	}
+	if err := checkNoDataDirOverride("blob", storageConfig.Blob); err != nil {
+		return Manifest{}, err
+	}
+	if err := checkNoDataDirOverride("metadata", storageConfig.Metadata); err != nil {
+		return Manifest{}, err
 	}
 
 	if err := requireEmptyOrAbsent(targetDataDir); err != nil {
@@ -207,13 +274,19 @@ func RestoreValidated(
 		}
 	}()
 
-	if err := restoreMetadataStore(ctx, host, manifest, snapshotDir, stagingDir); err != nil {
+	if err := restoreMetadataStore(
+		ctx, host, manifest, snapshotDir, stagingDir, storageConfig.Metadata,
+	); err != nil {
 		return Manifest{}, err
 	}
-	if err := restoreBlobStore(ctx, host, manifest, snapshotDir, stagingDir); err != nil {
+	if err := restoreBlobStore(
+		ctx, host, manifest, snapshotDir, stagingDir, storageConfig.Blob,
+	); err != nil {
 		return Manifest{}, err
 	}
-	if err := validateRestoredDatabase(ctx, host, manifest, stagingDir); err != nil {
+	if err := validateRestoredDatabase(
+		ctx, host, manifest, stagingDir, storageConfig,
+	); err != nil {
 		return Manifest{}, err
 	}
 
@@ -360,13 +433,14 @@ func restoreMetadataStore(
 	manifest Manifest,
 	snapshotDir string,
 	targetDataDir string,
+	providerConfig map[string]any,
 ) error {
 	store, err := plugin.Resolve[metadata.MetadataStore](
 		ctx,
 		host,
 		plugin.CapabilityStorageMetadata,
 		manifest.MetadataPlugin,
-		nil,
+		providerConfig,
 		metadata.ProviderDependencies{
 			DataDir:     targetDataDir,
 			StorageMode: manifest.StorageMode,
@@ -412,20 +486,28 @@ func restoreMetadataStore(
 
 // restoreBlobStore starts the blob plugin against an empty targetDataDir
 // and loads the backup into it, per blob.Restorer's contract.
+//
+// RunMode is set to "load" so providers that run a periodic background
+// GC (e.g. Badger's value-log GC ticker) skip starting it. Badger's own
+// docs require Load to be the only thing operating on the DB -- no
+// concurrent reads, writes, or GC -- and a large restore can run for
+// long enough that a normally-scheduled GC tick would otherwise land
+// mid-Load.
 func restoreBlobStore(
 	ctx context.Context,
 	host *plugin.Host,
 	manifest Manifest,
 	snapshotDir string,
 	targetDataDir string,
+	providerConfig map[string]any,
 ) error {
 	store, err := plugin.Resolve[blob.BlobStore](
 		ctx,
 		host,
 		plugin.CapabilityStorageBlob,
 		manifest.BlobPlugin,
-		nil,
-		blob.ProviderDependencies{DataDir: targetDataDir},
+		providerConfig,
+		blob.ProviderDependencies{DataDir: targetDataDir, RunMode: "load"},
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -473,13 +555,14 @@ func validateRestoredDatabase(
 	host *plugin.Host,
 	manifest Manifest,
 	targetDataDir string,
+	storageConfig RestoreStorageConfig,
 ) error {
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		ctx,
 		host,
 		plugin.CapabilityStorageBlob,
 		manifest.BlobPlugin,
-		nil,
+		storageConfig.Blob,
 		blob.ProviderDependencies{DataDir: targetDataDir},
 	)
 	if err != nil {
@@ -497,7 +580,7 @@ func validateRestoredDatabase(
 		host,
 		plugin.CapabilityStorageMetadata,
 		manifest.MetadataPlugin,
-		nil,
+		storageConfig.Metadata,
 		metadata.ProviderDependencies{
 			DataDir:     targetDataDir,
 			StorageMode: manifest.StorageMode,

@@ -168,9 +168,7 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for id := uint64(2); id < concurrentCommits+2; id++ {
 			txn := db.Transaction(true)
 			if err := db.BlockCreate(testBlock(id, byte(id)), txn); err != nil {
@@ -189,7 +187,7 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
 
 	dir := filepath.Join(t.TempDir(), "snap-concurrent")
 	_, err := lifecycle.Snapshot(
@@ -199,7 +197,9 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	require.NoError(t, err)
 
 	restoredDir := filepath.Join(t.TempDir(), "restored")
-	_, err = lifecycle.Restore(context.Background(), newTestStorageHost(t), nil, dir, restoredDir)
+	_, err = lifecycle.Restore(context.Background(), newTestStorageHost(t), nil, dir, restoredDir,
+		lifecycle.RestoreStorageConfig{},
+	)
 	require.NoError(t, err)
 
 	_, err = dbtest.NewDatabase(t, &database.Config{DataDir: restoredDir})

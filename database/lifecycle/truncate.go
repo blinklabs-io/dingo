@@ -62,8 +62,50 @@ func GetPendingTruncate(db *database.Database) (*PendingTruncate, error) {
 	if err := json.Unmarshal([]byte(value), &pending); err != nil {
 		return nil, fmt.Errorf("decode pending truncate marker: %w", err)
 	}
+	// A genuine marker always names a real, already-resolved on-lineage
+	// block: TargetID/TipID are sequentially assigned block IDs starting
+	// at 1, and TargetHash is a real block hash. A partially corrupted
+	// marker (e.g. a truncated or bit-flipped sync-state value) can still
+	// decode as valid JSON with some fields simply absent -- those decode
+	// to Go's zero values (0, nil) rather than a decode error, and would
+	// otherwise silently pass the one check this used to have (TipID >=
+	// TargetID, trivially true when TargetID is the zero value). Resuming
+	// with TargetID=0 would make DeleteBlocksAfter/TruncateAfterSlot
+	// delete from the very first block -- a full, unintended chain wipe
+	// instead of the narrow range the marker was meant to record.
+	if pending.TargetID == 0 || pending.TipID == 0 || len(pending.TargetHash) == 0 {
+		return nil, errors.New(
+			"invalid pending truncate marker: missing required field",
+		)
+	}
 	if pending.TipID < pending.TargetID {
 		return nil, errors.New("invalid pending truncate marker")
+	}
+	// Beyond internally-consistent, non-zero fields, confirm the marker
+	// still describes reality: a corrupted-but-non-zero TargetID/
+	// TargetSlot/TargetHash combination, or a stale marker left over from
+	// before some other operation altered the chain, must not be resumed
+	// as if it still safely names the same block. Mirrors Truncate's own
+	// on-lineage check for a fresh (non-resumed) target.
+	onLineage, err := db.BlockByIndex(pending.TargetID, nil)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pending truncate marker: verify target is on the current chain: %w",
+			err,
+		)
+	}
+	if onLineage.Slot != pending.TargetSlot ||
+		!bytes.Equal(onLineage.Hash, pending.TargetHash) {
+		return nil, fmt.Errorf(
+			"invalid pending truncate marker: target at id=%d (slot=%d, "+
+				"hash=%x) does not match the block on the current chain at "+
+				"that id (slot=%d, hash=%x)",
+			pending.TargetID,
+			pending.TargetSlot,
+			pending.TargetHash,
+			onLineage.Slot,
+			onLineage.Hash,
+		)
 	}
 	return &pending, nil
 }
@@ -433,6 +475,22 @@ func Truncate(
 			target.Slot,
 			mithrilFloor,
 		)
+	}
+
+	// A context already cancelled before any mutation is attempted must be
+	// reported the same way every other pre-mutation validation failure
+	// above is: ErrTruncateNotStarted-wrapped. Without this check here,
+	// nothing above ever consults ctx, so a pre-cancelled caller would
+	// still get a durable pending marker recorded (setPendingTruncate
+	// below) and then fail inside finishPendingTruncate's first
+	// DeleteBlocksAfter call -- a path that deliberately does NOT wrap
+	// ErrTruncateNotStarted, since it can genuinely follow a partial
+	// delete. That would misreport "truncate may have partially run,
+	// resume it" for a call that in fact never touched the database at
+	// all, and leave an unnecessary durable marker forcing a resume of
+	// what was really a no-op.
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
 	}
 
 	pending := PendingTruncate{

@@ -49,23 +49,16 @@ func (d *Database) GetEpochsByEra(
 // rollback target is always at or before the already-committed tip, so
 // the epoch containing it has always already been persisted.
 func EpochBySlot(d *Database, slot uint64, txn *Txn) (models.Epoch, error) {
-	epochs, err := d.GetEpochs(txn)
+	epoch, err := d.GetEpochBySlot(slot, txn)
 	if err != nil {
-		return models.Epoch{}, fmt.Errorf("get epochs: %w", err)
+		return models.Epoch{}, fmt.Errorf("get epoch by slot: %w", err)
 	}
-	var best *models.Epoch
-	for i := range epochs {
-		e := &epochs[i]
-		if e.StartSlot <= slot && (best == nil || e.StartSlot > best.StartSlot) {
-			best = e
-		}
-	}
-	if best == nil {
+	if epoch == nil {
 		return models.Epoch{}, fmt.Errorf(
 			"slot %d is outside the known epoch range", slot,
 		)
 	}
-	return *best, nil
+	return *epoch, nil
 }
 
 func (d *Database) GetEpochs(txn *Txn) ([]models.Epoch, error) {

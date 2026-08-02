@@ -17,6 +17,7 @@ package bark
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -252,35 +253,215 @@ func TestDeleteSnapshotRejectsConcurrentOperation(t *testing.T) {
 	)
 }
 
-// TestTruncateRejectsInvalidTarget verifies that Truncate rejects both a
-// nil target and a request with more than one target field set.
+// TestRestoreClaimsBusyBeforeResolvingSource guards the reordering fix
+// for dingo#1651's finding that Restore used to resolve its snapshot
+// source before claiming the busy flag DeleteSnapshot also uses, leaving
+// a window where a concurrent DeleteSnapshot could remove the very
+// snapshot Restore was about to read. If Restore still resolved the
+// source first, this would return CodeNotFound (the snapshot ID doesn't
+// exist) instead of CodeFailedPrecondition (another operation already
+// holds the busy flag), since resolution would run before ever noticing
+// h.busy. Simulates the in-flight operation deterministically, the same
+// way TestDeleteSnapshotRejectsConcurrentOperation does.
+func TestRestoreClaimsBusyBeforeResolvingSource(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.busy = true
+
+	_, err := h.Restore(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.RestoreRequest{
+			SnapshotId: "does-not-exist",
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+}
+
+// TestVerifySnapshotClaimsBusyBeforeResolvingSource is
+// TestRestoreClaimsBusyBeforeResolvingSource's counterpart for
+// VerifySnapshot, which shares the same reordering fix.
+func TestVerifySnapshotClaimsBusyBeforeResolvingSource(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.busy = true
+
+	_, err := h.VerifySnapshot(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.VerifySnapshotRequest{
+			SnapshotId: "does-not-exist",
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+}
+
+// TestRestoreReleasesBusyWhenSourceResolutionFails verifies that a failed
+// source resolution (unknown snapshot ID) releases the busy flag it
+// claimed, rather than leaking it and permanently blocking every later
+// operation.
+func TestRestoreReleasesBusyWhenSourceResolutionFails(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+
+	_, err := h.Restore(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.RestoreRequest{
+			SnapshotId: "does-not-exist",
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	h.mu.Lock()
+	busy := h.busy
+	h.mu.Unlock()
+	require.False(t, busy, "a failed source resolution must release the busy flag")
+}
+
+// TestVerifySnapshotReleasesBusyWhenSourceResolutionFails is
+// TestRestoreReleasesBusyWhenSourceResolutionFails's counterpart for
+// VerifySnapshot, which shares the same reordering fix.
+func TestVerifySnapshotReleasesBusyWhenSourceResolutionFails(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+
+	_, err := h.VerifySnapshot(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.VerifySnapshotRequest{
+			SnapshotId: "does-not-exist",
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	h.mu.Lock()
+	busy := h.busy
+	h.mu.Unlock()
+	require.False(t, busy, "a failed source resolution must release the busy flag")
+}
+
+// TestTruncateRejectsInvalidTarget verifies that Truncate rejects a nil
+// target. See TestTruncateAcceptsConsistentCombinedFields/
+// TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation below for
+// the "more than one field set" cases this test used to also cover as a
+// synchronous RPC rejection, before blockRefToTarget started accepting any
+// combination of fields at the RPC level and deferring agreement-checking
+// to dblifecycle.ResolveTarget (dingo#1651 follow-up).
 func TestTruncateRejectsInvalidTarget(t *testing.T) {
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 
-	t.Run("nil target", func(t *testing.T) {
-		_, err := h.Truncate(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.TruncateRequest{}),
-		)
-		require.Error(t, err)
-		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
-	})
+	_, err := h.Truncate(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.TruncateRequest{}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
 
-	t.Run("multiple fields set", func(t *testing.T) {
-		slot := uint64(10)
-		blockNumber := uint64(1)
-		_, err := h.Truncate(
+// TestTruncateAcceptsConsistentCombinedFields verifies that Truncate
+// accepts (and successfully completes) a target with more than one of
+// slot/hash/block_number set, as long as they all identify the same
+// block — per the proto's documented BlockRef contract ("When multiple
+// fields are set, all must agree").
+func TestTruncateAcceptsConsistentCombinedFields(t *testing.T) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	var last models.Block
+	for id := uint64(1); id <= 3; id++ {
+		last = testBlock(id, byte(id))
+		require.NoError(t, db.BlockCreate(last, nil))
+	}
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
+		BlockNumber: last.Number,
+	}, nil))
+	dbtest.CloseDatabase(db) //nolint:errcheck
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+
+	target := testBlock(1, 1)
+	slot := target.Slot
+	blockNumber := target.Number
+	hash := hex.EncodeToString(target.Hash)
+	truncResp, err := h.Truncate(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.TruncateRequest{
+			Target: &databasev1alpha1.BlockRef{
+				Slot:        &slot,
+				BlockNumber: &blockNumber,
+				Hash:        &hash,
+			},
+		}),
+	)
+	require.NoError(t, err)
+
+	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
+		statusResp, err := h.GetTruncateStatus(
 			context.Background(),
-			connect.NewRequest(&databasev1alpha1.TruncateRequest{
-				Target: &databasev1alpha1.BlockRef{
-					Slot:        &slot,
-					BlockNumber: &blockNumber,
-				},
+			connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
+				OperationId: truncResp.Msg.GetOperationId(),
 			}),
 		)
-		require.Error(t, err)
-		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+		require.NoError(t, err)
+		return statusResp.Msg.GetProgress()
 	})
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
+		progress.GetStatus(),
+		"truncate message: %s", progress.GetMessage(),
+	)
+}
+
+// TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation verifies
+// that a target whose slot/hash/block_number fields disagree about which
+// block is meant is accepted by the Truncate RPC itself (bark's own
+// blockRefToTarget only requires at least one field) but fails
+// asynchronously once dblifecycle.ResolveTarget notices the mismatch,
+// rather than silently trusting whichever field is used for the actual
+// lookup.
+func TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation(t *testing.T) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	var last models.Block
+	for id := uint64(1); id <= 3; id++ {
+		last = testBlock(id, byte(id))
+		require.NoError(t, db.BlockCreate(last, nil))
+	}
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
+		BlockNumber: last.Number,
+	}, nil))
+	dbtest.CloseDatabase(db) //nolint:errcheck
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+
+	slot := testBlock(1, 1).Slot
+	mismatchedBlockNumber := uint64(2) // block 2's number, not block 1's
+	truncResp, err := h.Truncate(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.TruncateRequest{
+			Target: &databasev1alpha1.BlockRef{
+				Slot:        &slot,
+				BlockNumber: &mismatchedBlockNumber,
+			},
+		}),
+	)
+	require.NoError(t, err)
+
+	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
+		statusResp, err := h.GetTruncateStatus(
+			context.Background(),
+			connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
+				OperationId: truncResp.Msg.GetOperationId(),
+			}),
+		)
+		require.NoError(t, err)
+		return statusResp.Msg.GetProgress()
+	})
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_FAILED,
+		progress.GetStatus(),
+	)
+	require.Contains(t, progress.GetMessage(), "does not match")
 }
 
 // TestTruncateAndGetTruncateStatus verifies that Truncate completes and
@@ -449,6 +630,72 @@ func TestListSnapshotsPaginates(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page2.Msg.GetSnapshots(), 1)
 	require.Empty(t, page2.Msg.GetNextPageToken())
+}
+
+// TestListSnapshotsSkipsCorruptedEntryButReturnsOthers verifies that one
+// snapshot's corrupted manifest.json doesn't hide every other, otherwise-
+// valid snapshot from ListSnapshots (dingo#1651 follow-up): this RPC used
+// to fail the whole call whenever lifecycle.ListSnapshots reported ANY
+// per-entry problem, discarding the valid entries it had already
+// collected instead of using them.
+func TestListSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	dbtest.CloseDatabase(db) //nolint:errcheck
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	good := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{Name: "good"})
+
+	// A second snapshot directory whose manifest.json fails checksum
+	// validation -- present on disk, but unusable.
+	corruptDir := filepath.Join(h.bark.config.SnapshotDir, "corrupt-snapshot")
+	require.NoError(t, os.Mkdir(corruptDir, 0o755))
+	goodManifest := filepath.Join(h.bark.config.SnapshotDir, good.GetSnapshotId(), "manifest.json")
+	data, err := os.ReadFile(goodManifest)
+	require.NoError(t, err)
+	corruptManifest := filepath.Join(corruptDir, "manifest.json")
+	require.NoError(t, os.WriteFile(corruptManifest, data, 0o644))
+	tamperManifestChecksum(t, corruptManifest)
+
+	listResp, err := h.ListSnapshots(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, listResp.Msg.GetSnapshots(), 1)
+	require.Equal(t, good.GetSnapshotId(), listResp.Msg.GetSnapshots()[0].GetSnapshotId())
+}
+
+// TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers is
+// TestListSnapshotsSkipsCorruptedEntryButReturnsOthers's counterpart for
+// ListAvailableSnapshots, which scans the same local directory via its own
+// call to lifecycle.ListSnapshots.
+func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	dbtest.CloseDatabase(db) //nolint:errcheck
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	good := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{Name: "good"})
+
+	corruptDir := filepath.Join(h.bark.config.SnapshotDir, "corrupt-snapshot")
+	require.NoError(t, os.Mkdir(corruptDir, 0o755))
+	goodManifest := filepath.Join(h.bark.config.SnapshotDir, good.GetSnapshotId(), "manifest.json")
+	data, err := os.ReadFile(goodManifest)
+	require.NoError(t, err)
+	corruptManifest := filepath.Join(corruptDir, "manifest.json")
+	require.NoError(t, os.WriteFile(corruptManifest, data, 0o644))
+	tamperManifestChecksum(t, corruptManifest)
+
+	resp, err := h.ListAvailableSnapshots(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 1)
+	require.Equal(t, good.GetSnapshotId(), resp.Msg.GetSnapshots()[0].GetSnapshotId())
 }
 
 // TestListAvailableSnapshotsMirrorsListSnapshots covers the no-cloud-
@@ -738,6 +985,38 @@ func TestGetOperationHistoryReturnsPastOperations(t *testing.T) {
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
 		rec.GetStatus(),
+	)
+}
+
+// TestOperationsArePrunedOnceOverCap verifies that h.operations doesn't
+// grow without bound (dingo#1651 follow-up): once more than
+// maxRetainedOperations terminal operations have been registered, the
+// oldest ones are pruned so both the map's memory footprint and
+// GetOperationHistory's per-call sort over it stay bounded, rather than
+// growing for the entire life of the bark process. Drives
+// registerOperation/complete directly (no real Snapshot/Restore/Truncate
+// work) so the cap can be exercised without hundreds of real disk
+// operations.
+func TestOperationsArePrunedOnceOverCap(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+
+	const total = maxRetainedOperations + 50
+	var lastID string
+	for range total {
+		op, _ := h.registerOperation(databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT)
+		op.complete(nil, 0)
+		lastID = op.id
+	}
+
+	h.mu.Lock()
+	count := len(h.operations)
+	_, lastStillPresent := h.operations[lastID]
+	h.mu.Unlock()
+
+	require.LessOrEqual(t, count, maxRetainedOperations)
+	require.True(
+		t, lastStillPresent,
+		"the most recently completed operation must not be pruned",
 	)
 }
 

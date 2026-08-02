@@ -105,9 +105,11 @@ func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
 // the underlying read error instead of swallowing it as "no boundary
 // recorded" — for a caller that must fail closed (refuse the operation)
 // rather than fail open when the boundary can't be verified. A malformed
-// stored value is still treated as absent (0, nil), matching
-// MithrilTrustBoundarySlot: that's a corrupt-data case, not a transient
-// read failure, and the same either way for both callers.
+// stored value is also propagated as an error here (unlike
+// MithrilTrustBoundarySlot, which still treats it as absent): a corrupted
+// persisted boundary must not be indistinguishable from "no snapshot was
+// ever imported" for a caller enforcing a safety check, or the check is
+// defeated exactly when it matters most.
 func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
 	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
 	if err != nil {
@@ -118,12 +120,11 @@ func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
 	}
 	slot, err := strconv.ParseUint(val, 10, 64)
 	if err != nil {
-		d.logger.Warn(
-			"malformed mithril_ledger_slot sync state value, ignoring",
-			"value", val,
-			"error", err,
+		return 0, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			val,
+			err,
 		)
-		return 0, nil
 	}
 	return slot, nil
 }

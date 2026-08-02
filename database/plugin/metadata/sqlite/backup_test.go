@@ -174,18 +174,23 @@ func TestCopyReaderToFileRemovesPartialDestinationOnCancellation(t *testing.T) {
 
 // TestBackupToRemovesPartialDestinationOnFailure guards the same
 // leftover-file bug on BackupTo's own write path: VACUUM INTO can create
-// the destination file before failing partway through (a cancelled
-// context, a disk-full mid-write), and without cleanup a retried BackupTo
-// would fail at the pre-existing-destination check with a misleading
-// "already exists" instead of the real cause.
+// its output file before failing partway through (a cancelled context, a
+// disk-full mid-write), and without cleanup a retried BackupTo would fail
+// at the pre-existing-destination check with a misleading "already
+// exists" instead of the real cause. BackupTo targets a private,
+// operation-owned temp directory (removed via defer regardless of
+// success/failure) rather than dstPath itself, so this partial file never
+// even reaches dstPath in the first place -- see
+// TestBackupToDoesNotRemoveConcurrentDestinationOnFailure for the
+// TOCTOU-safety property that design gives on top of this.
 //
 // Fails runVacuumInto deterministically via its test-injectable seam,
-// simulating VACUUM INTO having already created dstPath before failing,
-// rather than racing a real VACUUM's completion against a timed context
-// cancellation -- an earlier version of this test did that and, even
-// though it passed repeatedly in practice, remained scheduler/storage-
-// speed dependent (and used time.Sleep for synchronization, which this
-// repository's testing rules prohibit).
+// simulating VACUUM INTO having already created its output file before
+// failing, rather than racing a real VACUUM's completion against a timed
+// context cancellation -- an earlier version of this test did that and,
+// even though it passed repeatedly in practice, remained
+// scheduler/storage-speed dependent (and used time.Sleep for
+// synchronization, which this repository's testing rules prohibit).
 func TestBackupToRemovesPartialDestinationOnFailure(t *testing.T) {
 	srcDir := t.TempDir()
 	src, err := New(srcDir, nil, nil)
@@ -210,6 +215,92 @@ func TestBackupToRemovesPartialDestinationOnFailure(t *testing.T) {
 		t, os.IsNotExist(statErr),
 		"partial destination file must be removed on backup failure",
 	)
+}
+
+// TestBackupToDoesNotRemoveConcurrentDestinationOnFailure guards a real
+// TOCTOU bug: BackupTo used to run VACUUM INTO directly against dstPath
+// and, on failure, unconditionally os.Remove(dstPath) to clean up any
+// partial file VACUUM INTO left behind. If some other writer created a
+// real file at that exact dstPath in the window between BackupTo's own
+// initial existence check and this failure, that unrelated file was
+// silently deleted too -- even though it had nothing to do with this
+// failed operation. BackupTo now stages VACUUM INTO's output in a private,
+// uniquely-named temp directory and only publishes it to dstPath via
+// os.Rename once the vacuum has fully succeeded, so a failure's cleanup
+// only ever removes that temp directory, never dstPath itself.
+//
+// Simulates the "concurrent creator" by having runVacuumInto's
+// test-injectable seam itself write the file at dstPath (standing in for
+// an unrelated writer) immediately before returning an error, rather than
+// racing a real second goroutine against BackupTo's own internal timing --
+// deterministic regardless of scheduler behavior.
+func TestBackupToDoesNotRemoveConcurrentDestinationOnFailure(t *testing.T) {
+	srcDir := t.TempDir()
+	src, err := New(srcDir, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, src.Start())
+	defer src.Close() //nolint:errcheck
+
+	dstPath := filepath.Join(t.TempDir(), "out.sqlite")
+
+	orig := runVacuumInto
+	t.Cleanup(func() { runVacuumInto = orig })
+	runVacuumInto = func(_ context.Context, _ *gorm.DB, _ string) error {
+		require.NoError(
+			t,
+			os.WriteFile(dstPath, []byte("concurrent"), 0o644),
+		)
+		return errors.New("simulated vacuum failure")
+	}
+
+	err = src.BackupTo(context.Background(), dstPath)
+	require.Error(t, err)
+
+	data, readErr := os.ReadFile(dstPath)
+	require.NoError(t, readErr)
+	require.Equal(
+		t, []byte("concurrent"), data,
+		"a failed backup must never remove or alter a destination file it did not create",
+	)
+}
+
+// TestBackupToBeforeStartReturnsErrorNotPanic guards a real bug: BackupTo
+// called against a store that was constructed (via New) but never
+// Start()-ed used to dereference the nil *gorm.DB handle d.DB() returns
+// in that state, panicking instead of returning a clean operation error --
+// the same open-state validation the Badger blob store's Backup/Restore
+// already do (see database/plugin/blob/badger/backup.go) was missing
+// here.
+func TestBackupToBeforeStartReturnsErrorNotPanic(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir, nil, nil)
+	require.NoError(t, err)
+	// Intentionally never call Start().
+
+	dstPath := filepath.Join(t.TempDir(), "out.sqlite")
+	require.NotPanics(t, func() {
+		err = db.BackupTo(context.Background(), dstPath)
+	})
+	require.Error(t, err)
+}
+
+// TestBackupToAfterCloseReturnsErrorNotPanic verifies the same open-state
+// guard also covers a store that was started and then Close()'d: d.db is
+// left non-nil by Close (only the underlying *sql.DB connection pool is
+// closed), so the nil-handle check alone would miss this case without
+// also consulting d.closed.
+func TestBackupToAfterCloseReturnsErrorNotPanic(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, db.Start())
+	require.NoError(t, db.Close())
+
+	dstPath := filepath.Join(t.TempDir(), "out.sqlite")
+	require.NotPanics(t, func() {
+		err = db.BackupTo(context.Background(), dstPath)
+	})
+	require.Error(t, err)
 }
 
 // TestCreateDirDurableCreatesNestedDirectories verifies createDirDurable

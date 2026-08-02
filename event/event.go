@@ -365,6 +365,7 @@ func (c *channelSubscriber) Close() {
 func (e *EventBus) subscribeInternal(
 	eventType EventType,
 	buffer int,
+	withDone bool,
 ) (EventSubscriberId, *channelSubscriber) {
 	if buffer <= 0 {
 		buffer = DefaultSubscriberBuffer
@@ -385,6 +386,25 @@ func (e *EventBus) subscribeInternal(
 				string(eventType), "in-memory",
 			).Inc()
 		}
+	}
+	if withDone {
+		// Initialize done before chSub is published into channelSubsById
+		// below, while still holding e.mu -- the same lock unsubscribe
+		// takes before it ever looks at channelSubsById or reads
+		// chSub.done. That ordering, under that lock, is what makes it
+		// impossible for a concurrent Unsubscribe/UnsubscribeAndWait call
+		// for this exact subId (e.g. the next sequential ID, requested
+		// pre-emptively by a caller that predicted it) to observe the
+		// subId as visible in channelSubsById while done is still nil.
+		// Setting done afterwards (previously done in
+		// SubscribeFuncWithBuffer, outside e.mu, right before returning
+		// to the caller) left exactly that window open: unsubscribe reads
+		// done == nil as "no dispatch goroutine exists for this
+		// subscriber" and both skips waiting and deletes the
+		// channelSubsById entry outright -- and the two unsynchronized
+		// accesses to the done field from different goroutines were
+		// themselves a data race.
+		chSub.done = make(chan struct{})
 	}
 	// Increment subscriber ID
 	subId := e.lastSubId + 1
@@ -426,7 +446,7 @@ func (e *EventBus) SubscribeWithBuffer(
 		e.stopMu.RUnlock()
 		return 0, nil
 	}
-	subId, chSub := e.subscribeInternal(eventType, buffer)
+	subId, chSub := e.subscribeInternal(eventType, buffer, false)
 	e.stopMu.RUnlock()
 	return subId, chSub.ch
 }
@@ -461,13 +481,14 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 		e.stopMu.RUnlock()
 		return 0
 	}
-	subId, chSub := e.subscribeInternal(eventType, buffer)
+	// subscribeInternal(..., withDone: true) sets chSub.done, still under
+	// e.mu, before publishing chSub into channelSubsById -- see its doc
+	// comment for why that ordering (and not doing it here, after
+	// subscribeInternal has already returned and released e.mu) is
+	// required for a concurrent Unsubscribe/UnsubscribeAndWait to always
+	// observe a non-nil done once the subId is visible at all.
+	subId, chSub := e.subscribeInternal(eventType, buffer, true)
 	e.subscriberWg.Add(1)
-	// Set before returning subId to the caller: nothing else can reach
-	// Unsubscribe(subId) -- and therefore waitDone -- until this call
-	// returns, so there is no window where a concurrent Unsubscribe could
-	// observe done as nil and skip waiting.
-	chSub.done = make(chan struct{})
 	e.stopMu.RUnlock()
 
 	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {

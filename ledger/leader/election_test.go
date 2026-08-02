@@ -316,6 +316,106 @@ func TestElectionStartStop(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestElectionStopPreventsStaleMonitorFromStoppingALaterStart guards a
+// real bug: the ctx-cancellation monitor goroutine Start launches used to
+// be untracked by e.wg, so a completed Stop() call could return while
+// that goroutine was still alive, watching the now-superseded ctx/stopCh
+// from that Start generation. A later Start() on the same *Election (a
+// supported, idempotent-per-Stop pattern per TestElectionStartStop above)
+// builds a fresh ctx/stopCh but does nothing about a stale monitor left
+// over from the previous generation -- if that stale monitor's own parent
+// context were ever cancelled afterward, it would call e.Stop() on the
+// new, currently-running generation it has no business touching.
+func TestElectionStopPreventsStaleMonitorFromStoppingALaterStart(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 10000
+	stakeProvider.poolStakes[string(poolId[:])] = 1000
+
+	epochProvider := newMockEpochProvider()
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	parentA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	require.NoError(t, election.Start(parentA))
+	require.NoError(t, election.Stop())
+
+	parentB := t.Context()
+	require.NoError(t, election.Start(parentB))
+
+	// Cancelling the FIRST generation's now-unrelated parent must never
+	// affect the second, currently-running generation -- if Stop above
+	// left generation 1's monitor goroutine alive, this would eventually
+	// call e.Stop() on generation 2.
+	cancelA()
+
+	require.Never(t, func() bool {
+		election.mu.RLock()
+		defer election.mu.RUnlock()
+		return !election.running
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	require.NoError(t, election.Stop())
+}
+
+// TestElectionStopDoesNotDeadlockOnMonitorSelectRace guards the sharper,
+// more severe consequence of the same gap: once the monitor goroutine is
+// tracked in e.wg (so Stop actually waits for it), a select that picks its
+// <-ctx.Done() case instead of <-stopCh purely by luck -- both channels
+// can be simultaneously ready by the time the goroutine is actually
+// scheduled, since Stop closes stopCh and cancels ctx back to back with
+// no yield point in between, and Go's select has no case-priority when
+// more than one is ready -- would call e.Stop() a second, concurrent
+// time. That second call's own e.wg.Wait() would then deadlock forever
+// waiting for this very goroutine to finish, which it never will: it is
+// itself blocked inside that same e.Stop() call. Repeats many Start/Stop
+// cycles (each call is independent, so a fresh *Election every time)
+// specifically to land in that narrow race window rather than relying on
+// a single attempt to happen to hit it.
+func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 10000
+	stakeProvider.poolStakes[string(poolId[:])] = 1000
+	epochProvider := newMockEpochProvider()
+
+	for i := range 200 {
+		eventBus := event.NewEventBus(nil, nil)
+		election := NewElection(
+			poolId,
+			electionTestVRFSeed,
+			stakeProvider,
+			epochProvider,
+			eventBus,
+			slog.Default(),
+		)
+		require.NoError(t, election.Start(context.Background()))
+
+		stopDone := make(chan struct{})
+		go func() {
+			defer close(stopDone)
+			_ = election.Stop()
+		}()
+
+		select {
+		case <-stopDone:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Stop() deadlocked on iteration %d", i)
+		}
+		eventBus.Stop()
+	}
+}
+
 // blockingStakeProvider wraps mockStakeProvider's GetPoolStake so a test can
 // deterministically pin a schedule computation in flight: the first call
 // signals started (closing it) and then blocks until release is closed,

@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -812,6 +813,55 @@ func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 	require.False(t, buffered)
 	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId2))
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.selectedBlockfetchConnId)
+}
+
+// TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders guards a
+// real data race: shouldBufferHeaderEvent used to determine the current
+// header pipeline owner (currentHeaderPipelineOwner, under
+// chainsyncBlockfetchMutex) and then write headerPipelineConnId in a
+// SEPARATE, unprotected step afterward, while discardBufferedPeerHeaders
+// (and every other mutator) correctly holds chainsyncBlockfetchMutex
+// around its own read/write of that same field -- so header admission and
+// a concurrent batch-completion/clear could genuinely race on
+// headerPipelineConnId. This runs both concurrently under go test -race,
+// which fails the test outright if that race still exists; there is
+// nothing else to assert; a clean run (no race detected) is the pass
+// condition.
+func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(t *testing.T) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			ls.shouldBufferHeaderEvent(ChainsyncEvent{
+				ConnectionId: connId1,
+				Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			ls.discardBufferedPeerHeaders(connId2)
+		}
+	}()
+	wg.Wait()
 }
 
 func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(

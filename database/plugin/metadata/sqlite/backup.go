@@ -48,6 +48,21 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 			"sqlite backup: in-memory database has nothing to back up",
 		)
 	}
+	// d.db is nil until Start() has run, and d.DB() returns it unchecked --
+	// calling BackupTo against a constructed-but-never-started (or already
+	// Close()'d) store would otherwise hand runVacuumInto a nil *gorm.DB
+	// and panic on the first method call against it, rather than the
+	// caller getting a clean error back. Mirrors the same open-state
+	// validation the Badger blob store's Backup does (see
+	// database/plugin/blob/badger/backup.go), using this store's own
+	// closed-flag pattern (see runVacuum above) since gorm.DB has no
+	// IsClosed method of its own.
+	d.timerMutex.Lock()
+	closed := d.closed
+	d.timerMutex.Unlock()
+	if d.db == nil || closed {
+		return errors.New("sqlite backup: store is not open")
+	}
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf(
 			"sqlite backup: destination %q already exists",
@@ -56,23 +71,57 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("sqlite backup: stat %q: %w", dstPath, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+	dstDir := filepath.Dir(dstPath)
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return fmt.Errorf(
 			"sqlite backup: create destination directory: %w",
 			err,
 		)
 	}
-	if err := runVacuumInto(ctx, d.DB(), dstPath); err != nil {
-		// VACUUM INTO can create dstPath before failing partway through
-		// (a cancelled context, a disk-full mid-write) -- remove it so a
-		// retry hits the real cause instead of the pre-existing-
-		// destination check above failing with a misleading "already
-		// exists", or a caller mistaking the partial file for a
-		// complete backup.
-		_ = os.Remove(dstPath)
+
+	// VACUUM INTO targets a private, operation-owned temporary directory,
+	// not dstPath directly, and is only published to dstPath via the
+	// os.Rename below once it has fully succeeded -- matching
+	// database/lifecycle/manifest.go's WriteManifest write-to-temp-then-
+	// rename pattern. VACUUM INTO targeting dstPath directly, cleaned up
+	// with an unconditional os.Remove(dstPath) on failure, is a TOCTOU
+	// race: a concurrent writer that creates a real file at dstPath in the
+	// window between the existence check above and this failure would
+	// have that file silently deleted too, even though it has nothing to
+	// do with this failed operation. os.MkdirTemp's uniquely-named
+	// directory can't collide with anything another goroutine/process is
+	// doing, so a failure here only ever removes this attempt's own temp
+	// directory -- dstPath itself is never touched unless this call
+	// actually succeeds.
+	tmpDir, err := os.MkdirTemp(dstDir, ".backup-tmp-*")
+	if err != nil {
+		return fmt.Errorf(
+			"sqlite backup: create temporary directory: %w",
+			err,
+		)
+	}
+	// Harmless once the success path below has already renamed the backup
+	// file out of tmpDir: RemoveAll on an empty (or, on failure,
+	// still-populated) directory either way only ever touches this
+	// attempt's own private directory, never dstPath.
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpPath := filepath.Join(tmpDir, filepath.Base(dstPath))
+
+	if err := runVacuumInto(ctx, d.DB(), tmpPath); err != nil {
 		return fmt.Errorf("sqlite backup: VACUUM INTO %q: %w", dstPath, err)
 	}
-	return nil
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		return fmt.Errorf(
+			"sqlite backup: publish %q: %w",
+			dstPath,
+			err,
+		)
+	}
+	// A file's own fsync (already done implicitly by VACUUM INTO closing
+	// the destination file) does not guarantee its directory entry is
+	// persisted -- sync dstDir so the rename above is durable too, not
+	// just atomic.
+	return fsyncdir.Sync(dstDir)
 }
 
 // RestoreFrom replaces this store's on-disk database file with the backup

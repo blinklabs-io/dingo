@@ -163,6 +163,16 @@ barkBaseUrl: ""
 # CLI: --bark-port
 barkPort: 0
 
+# Interface Bark binds to. Left empty (the default), Bark binds to all
+# interfaces UNLESS the database lifecycle service is also enabled (see
+# databaseLifecycle.snapshotDir below), in which case it defaults to
+# loopback-only (127.0.0.1) instead: that service's Restore/Truncate RPCs are
+# destructive and unauthenticated, so exposing them beyond the local host is
+# an explicit, deliberate choice an operator must opt into here.
+# Can be overridden with DINGO_BARK_HOST
+# CLI: --bark-host
+barkHost: ""
+
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
 # while retaining local indexes and metadata. Bark fallback is optional.
@@ -599,6 +609,15 @@ databaseLifecycle:
   # config here. Restore also accepts this same URI form as its source.
   # CLI: --db-snapshot-cloud-destination
   snapshotCloudDestination: ""
+  # Additional path segment appended after snapshotCloudDestination and
+  # before each snapshot's own ID (e.g. epoch-<N> for automatic snapshots).
+  # Automatic epoch-boundary snapshots use a deterministic name, so if
+  # multiple nodes share the same snapshotCloudDestination (e.g. a shared
+  # disaster-recovery bucket), set this to a distinct value per node —
+  # otherwise their uploads race each other at the same remote key and can
+  # corrupt each other's snapshots. Leave unset for a single node.
+  # CLI: --db-snapshot-cloud-destination-prefix
+  snapshotCloudDestinationPrefix: ""
   # Number of automatic snapshots to retain before pruning older ones
   # 0 keeps all of them
   # CLI: --db-snapshot-retention

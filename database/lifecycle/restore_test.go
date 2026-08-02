@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -44,6 +45,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	restoreMan, err := lifecycle.Restore(
 		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		lifecycle.RestoreStorageConfig{},
 	)
 	require.NoError(t, err)
 	require.Equal(t, snapMan.CommitTimestamp, restoreMan.CommitTimestamp)
@@ -82,8 +84,48 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 
 	_, err = lifecycle.Restore(
 		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		lifecycle.RestoreStorageConfig{},
 	)
 	require.Error(t, err)
+}
+
+// TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget guards a
+// real gap: restore always resolved its blob/metadata plugins with a nil
+// provider config, silently ignoring a caller's configured per-plugin
+// "dataDir" override (plugin.Selection.Config) -- meaning a restore could
+// write into targetDataDir's own staging directory while a real subsequent
+// startup, which does honor that override, opens a completely different
+// directory and sees the old or empty database there instead. Now that
+// storageConfig is propagated, such an override must be refused outright
+// (not silently honored either, since doing so would write outside the
+// staging directory this package's atomic-rename interruption safety
+// depends on) -- and, like every other RestoreValidated rejection, before
+// targetDataDir is touched at all.
+func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(t *testing.T) {
+	src := newTestDB(t)
+	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	_, err := lifecycle.Snapshot(
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+	)
+	require.NoError(t, err)
+
+	targetDir := filepath.Join(t.TempDir(), "restored")
+	_, err = lifecycle.Restore(
+		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		lifecycle.RestoreStorageConfig{
+			Blob: map[string]any{"dataDir": "/some/other/configured/path"},
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dataDir override")
+
+	_, statErr := os.Stat(targetDir)
+	require.True(
+		t, os.IsNotExist(statErr),
+		"targetDataDir must be untouched when a dataDir override is rejected",
+	)
 }
 
 // TestManifestCheckPluginMatch verifies Manifest.CheckPluginMatch itself:
@@ -132,6 +174,7 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T
 		func(m lifecycle.Manifest) error {
 			return m.CheckPluginMatch("gcs", "sqlite")
 		},
+		lifecycle.RestoreStorageConfig{},
 	)
 	require.Error(t, err)
 
@@ -167,6 +210,7 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = lifecycle.Restore(
 		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		lifecycle.RestoreStorageConfig{},
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not match manifest tip")
@@ -229,13 +273,58 @@ func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
 	require.Equal(t, manifestOnlyFixture, m)
 }
 
+// noManifestFetcherCloudDestination forwards to a real fakeCloudDestination
+// for UploadDir/DownloadDir but deliberately does not embed it or expose a
+// FetchManifest method of its own -- unlike this package's "faketest"
+// scheme, whose fakeCloudDestination DOES implement CloudManifestFetcher.
+// A test resolving a destination through THIS wrapper's scheme instead
+// therefore cannot silently take PeekManifest's lightweight
+// FetchCloudManifest path (see TestPeekManifestUsesLightweightCloudFetch
+// WithoutDownloading): the type assertion for CloudManifestFetcher
+// genuinely fails, forcing the full-download resolveManifest fallback the
+// test below claims to cover.
+type noManifestFetcherCloudDestination struct {
+	inner *fakeCloudDestination
+}
+
+func (d *noManifestFetcherCloudDestination) UploadDir(ctx context.Context, localDir string) error {
+	return d.inner.UploadDir(ctx, localDir)
+}
+
+func (d *noManifestFetcherCloudDestination) DownloadDir(ctx context.Context, localDir string) error {
+	return d.inner.DownloadDir(ctx, localDir)
+}
+
+var _ lifecycle.CloudDestination = &noManifestFetcherCloudDestination{}
+
+// Registered directly on the package's shared testDestinationRegistry, the
+// same way manifestOnlyCloudDestination's scheme is above -- resolved
+// under the same fakeCloudDir backing directory as "faketest" itself, so
+// setFakeCloudBackingDir still applies.
+func init() {
+	testDestinationRegistry.Register(
+		"faketest-nomanifestfetcher",
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			fakeCloudMu.Lock()
+			base := fakeCloudDir
+			fakeCloudMu.Unlock()
+			return &noManifestFetcherCloudDestination{
+				inner: &fakeCloudDestination{
+					dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+				},
+			}, nil
+		},
+	)
+}
+
 // TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 // verifies PeekManifest still works correctly against a cloud destination
-// type that does NOT implement CloudManifestFetcher (this package's own
-// "faketest" scheme has no such restriction, matching a real S3/GCS
-// destination, both of which do implement it — this covers the
-// interface-not-implemented fallback branch generically without needing
-// a destination type that deliberately omits it).
+// type that does NOT implement CloudManifestFetcher, using
+// "faketest-nomanifestfetcher" (a wrapper that deliberately omits
+// FetchManifest — see its doc comment) rather than this package's plain
+// "faketest" scheme, whose fakeCloudDestination DOES implement
+// CloudManifestFetcher and would therefore take the lightweight
+// FetchCloudManifest path instead of genuinely exercising this fallback.
 func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -246,13 +335,15 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 	snapshotDir := filepath.Join(t.TempDir(), "snap-peek")
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(), testDestinationRegistry, db, snapshotDir,
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite", "faketest://bucket/prefix",
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		"faketest-nomanifestfetcher://bucket/prefix",
 		"", "",
 	)
 	require.NoError(t, err)
 
 	peeked, err := lifecycle.PeekManifest(
-		context.Background(), testDestinationRegistry, "faketest://bucket/prefix/snap-peek",
+		context.Background(), testDestinationRegistry,
+		"faketest-nomanifestfetcher://bucket/prefix/snap-peek",
 	)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)

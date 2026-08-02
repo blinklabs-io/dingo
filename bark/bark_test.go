@@ -17,6 +17,7 @@ package bark
 import (
 	"context"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -230,4 +231,113 @@ func TestAddrClearsWhenStartContextIsCancelled(t *testing.T) {
 	testutil.WaitForCondition(t, func() bool {
 		return b.Addr() == ""
 	}, 5*time.Second, "Addr must clear once Start's ctx cancellation finishes shutting the server down")
+}
+
+// TestStopDoesNotDeadlockWithInFlightAcquire guards against a real
+// deadlock: Stop holds b.mu for the entire duration of its blocking
+// server.Shutdown call, which itself waits for in-flight requests to
+// finish. If Acquire also needed b.mu to read config.DB (as it used to),
+// a request whose handler calls Acquire — exactly the kind of in-flight
+// request Shutdown is waiting to drain — could never make progress: Stop
+// holds b.mu waiting for the handler to finish, while the handler's
+// Acquire call blocks waiting for b.mu that Stop won't release until the
+// handler finishes. Classic lock-ordering deadlock.
+//
+// This wires up a real http.Server (bypassing Start, which would use
+// Bark's own gRPC handlers) with a handler that blocks until signaled,
+// then calls Acquire. It uses b.mu.TryLock polling to deterministically
+// wait until Stop has actually taken b.mu (and is therefore blocked
+// inside Shutdown) before letting the handler proceed to call Acquire —
+// otherwise the handler could race ahead and acquire first, never
+// exercising the deadlock window at all. A bounded timeout on every wait
+// makes a regression fail loudly instead of hanging the test suite.
+func TestStopDoesNotDeadlockWithInFlightAcquire(t *testing.T) {
+	db := newTestDB(t)
+	b := newTestBark(t, db)
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	acquireDone := make(chan error, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-proceed
+		_, release, err := b.Acquire()
+		if release != nil {
+			release()
+		}
+		acquireDone <- err
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := &http.Server{Handler: mux} //nolint:gosec // test-only server, no real timeouts needed
+
+	b.mu.Lock()
+	b.server = server
+	b.listenerAddr = ln.Addr()
+	b.mu.Unlock()
+
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = server.Serve(ln)
+	}()
+
+	reqDone := make(chan struct{})
+	go func() {
+		defer close(reqDone)
+		resp, getErr := http.Get("http://" + ln.Addr().String() + "/") //nolint:noctx,gosec // test-only request to a loopback test server
+		if getErr == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	testutil.RequireReceive(
+		t, entered, 2*time.Second,
+		"handler should have been entered by the in-flight request",
+	)
+
+	stopDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stopDone <- b.Stop(ctx)
+	}()
+
+	// Wait until b.mu is actually held (presumably by the Stop goroutine
+	// above, blocked inside Shutdown waiting for our handler) before
+	// letting the handler proceed to call Acquire. Stop holds b.mu for
+	// its entire body, so once TryLock starts failing it stays failing
+	// until Stop returns.
+	testutil.WaitForCondition(t, func() bool {
+		if b.mu.TryLock() {
+			b.mu.Unlock()
+			return false
+		}
+		return true
+	}, 2*time.Second, "Stop should take b.mu before/while blocking in Shutdown")
+
+	close(proceed)
+
+	select {
+	case err := <-acquireDone:
+		require.NoError(t, err, "Acquire should succeed for the in-flight request")
+	case <-time.After(3 * time.Second):
+		t.Fatal(
+			"Acquire did not return -- deadlocked behind Stop's b.mu hold " +
+				"while Stop's Shutdown waited for this very request to finish",
+		)
+	}
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop did not return after the in-flight request completed")
+	}
+
+	testutil.RequireReceive(t, reqDone, 2*time.Second, "client request should complete")
+	testutil.RequireReceive(t, serveDone, 2*time.Second, "Serve should return once Shutdown completes")
 }

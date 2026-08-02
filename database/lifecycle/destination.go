@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 )
@@ -169,8 +170,15 @@ func NewDestinationRegistry() *DestinationRegistry {
 // Register adds factory as the constructor for CloudDestination URIs with
 // the given scheme (e.g. "s3", "gcs"). Panics on a duplicate scheme
 // registration within this registry, matching the fail-fast-at-
-// composition-time convention already used by plugin.Host.Register.
+// composition-time convention already used by plugin.Host.Register. r may
+// be nil (see DestinationRegistry's doc comment on nil-safety), in which
+// case this is a no-op: a nil registry has no map to register into and
+// behaves as if it will always have no schemes registered, the same as an
+// empty one.
 func (r *DestinationRegistry) Register(scheme string, factory CloudDestinationFactory) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.types[scheme]; exists {
@@ -227,6 +235,23 @@ func ParseCloudDestination(r *DestinationRegistry, uri string) (CloudDestination
 			u.Scheme,
 		)
 	}
+	if u.Path != "" {
+		// Canonicalize the path before any factory (destination_s3.go's,
+		// destination_gcs.go's) ever sees it. Both derive their upload
+		// prefix from this same field, but upload keys go through
+		// path.Join (which itself calls path.Clean) while list/download
+		// prefix-matching compares against the raw prefix string
+		// unmodified — so a noncanonical path (repeated slashes, "."/".."
+		// segments) would make UploadDir write under one (cleaned) key
+		// while ListSnapshots/DownloadDir/Delete search under a different,
+		// uncleaned one, silently splitting "upload" and "read" onto two
+		// different prefixes even though both came from the same
+		// configured URI. u.Path is always rooted ("/...") here since
+		// u.Host is non-empty (checked above), so path.Clean can never
+		// produce a leading ".." that escapes above the bucket root.
+		u.Path = path.Clean(u.Path)
+		u.RawPath = ""
+	}
 	return factory(u)
 }
 
@@ -277,14 +302,34 @@ func IsSafeCloudObjectFileName(fileName string) bool {
 }
 
 // JoinCloudURI appends sub as an additional path segment to base (e.g.
-// "s3://bucket/prefix" + "abc123" -> "s3://bucket/prefix/abc123"). Plain
-// string concatenation rather than filepath.Join: this operates on a URI,
-// which always uses "/" regardless of the host OS. Exported so callers
-// building a per-snapshot cloud location for display (e.g. bark's
+// "s3://bucket/prefix" + "abc123" -> "s3://bucket/prefix/abc123"). base is
+// parsed as a URI and sub is appended to its Path specifically (not
+// filepath.Join, which would use the host OS's separator, and not plain
+// string concatenation onto the whole URI, which would land sub after any
+// query string or fragment base carries instead of before it — turning
+// "s3://bucket/prefix?region=us-east-1" + "abc123" into
+// ".../prefix?region=us-east-1/abc123" rather than
+// ".../prefix/abc123?region=us-east-1", silently sending every snapshot to
+// the same base prefix regardless of sub). Exported so callers building a
+// per-snapshot cloud location for display (e.g. bark's
 // ListAvailableSnapshots) use the exact same join logic SnapshotToCloud
 // uses for the actual upload.
 func JoinCloudURI(base string, sub string) string {
-	return strings.TrimRight(base, "/") + "/" + sub
+	u, err := url.Parse(base)
+	if err != nil {
+		// base isn't a parseable URI at all (shouldn't happen for any real
+		// caller, which always passes a URI already validated by
+		// ParseCloudDestination) — fall back to the old plain
+		// concatenation rather than silently dropping sub.
+		return strings.TrimRight(base, "/") + "/" + sub
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + sub
+	// RawPath (the pre-escaped form url.Parse cached from the original
+	// string) no longer corresponds to the now-modified Path; clearing it
+	// makes u.String() re-escape from Path directly instead of reusing a
+	// stale RawPath or a mismatched escaping of it.
+	u.RawPath = ""
+	return u.String()
 }
 
 // ListCloudSnapshots lists the snapshots already stored at the base cloud

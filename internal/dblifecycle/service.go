@@ -25,6 +25,7 @@
 package dblifecycle
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -230,6 +231,10 @@ func (s *Service) Restore(
 			}
 			return nil
 		},
+		lifecycle.RestoreStorageConfig{
+			Blob:     s.cfg.Plugins.Storage.Blob.Config,
+			Metadata: s.cfg.Plugins.Storage.Metadata.Config,
+		},
 	)
 	if err != nil {
 		return lifecycle.Manifest{}, err
@@ -237,8 +242,9 @@ func (s *Service) Restore(
 	return manifest, nil
 }
 
-// TruncateTarget identifies a truncate target by exactly one of Slot,
-// Hash, or BlockNumber.
+// TruncateTarget identifies a truncate target by at least one of Slot,
+// Hash, or BlockNumber. When more than one is set, ResolveTarget requires
+// them to agree on the same block.
 type TruncateTarget struct {
 	Slot        *uint64
 	Hash        []byte
@@ -291,35 +297,66 @@ func (s *Service) Truncate(
 	)
 }
 
-// ResolveTarget resolves target against db to a single canonical block,
-// requiring exactly one of Slot, Hash, or BlockNumber to be set. Exported
-// so a live (in-process, already-open-node) truncate path can reuse the
-// same resolution logic the offline Service.Truncate uses.
+// ResolveTarget resolves target against db to a single canonical block. At
+// least one of Slot, Hash, or BlockNumber must be set; when more than one
+// is set, all supplied fields must agree on the same block. Exported so a
+// live (in-process, already-open-node) truncate path can reuse the same
+// resolution logic the offline Service.Truncate uses.
+//
+// Resolution itself always goes through exactly one lookup — hash if
+// present (the most specific identifier), else block number, else slot —
+// per Resolve*'s existing binary-search-style implementations. Any other
+// field the caller also supplied is then checked against the resolved
+// block's actual Hash/Slot/Number and rejected on a mismatch, mirroring
+// database/lifecycle.Truncate's own onLineage.Slot/Hash cross-check
+// (target.ID/Hash/Slot must all genuinely agree before a destructive
+// truncate proceeds) rather than silently trusting an unverified
+// combination or, at the other extreme, rejecting a caller-supplied,
+// mutually-consistent combination outright (e.g. an operator passing both
+// a slot and a hash it already resolved, for extra safety).
 func ResolveTarget(
 	db *database.Database,
 	target TruncateTarget,
 ) (models.Block, error) {
-	set := 0
-	if target.Slot != nil {
-		set++
-	}
-	if target.Hash != nil {
-		set++
-	}
-	if target.BlockNumber != nil {
-		set++
-	}
-	if set != 1 {
+	if target.Slot == nil && target.Hash == nil && target.BlockNumber == nil {
 		return models.Block{}, errors.New(
-			"exactly one of slot, hash, or block number must be given",
+			"at least one of slot, hash, or block number must be given",
 		)
 	}
+
+	var (
+		block models.Block
+		err   error
+	)
 	switch {
 	case target.Hash != nil:
-		return lifecycle.ResolveTargetByHash(db, target.Hash)
+		block, err = lifecycle.ResolveTargetByHash(db, target.Hash)
 	case target.BlockNumber != nil:
-		return lifecycle.ResolveTargetByNumber(db, *target.BlockNumber)
+		block, err = lifecycle.ResolveTargetByNumber(db, *target.BlockNumber)
 	default:
-		return lifecycle.ResolveTargetBySlot(db, *target.Slot)
+		block, err = lifecycle.ResolveTargetBySlot(db, *target.Slot)
 	}
+	if err != nil {
+		return models.Block{}, err
+	}
+
+	if target.Hash != nil && !bytes.Equal(block.Hash, target.Hash) {
+		return models.Block{}, fmt.Errorf(
+			"target hash %x does not match the resolved block (hash=%x)",
+			target.Hash, block.Hash,
+		)
+	}
+	if target.Slot != nil && block.Slot != *target.Slot {
+		return models.Block{}, fmt.Errorf(
+			"target slot %d does not match the resolved block (slot=%d)",
+			*target.Slot, block.Slot,
+		)
+	}
+	if target.BlockNumber != nil && block.Number != *target.BlockNumber {
+		return models.Block{}, fmt.Errorf(
+			"target block number %d does not match the resolved block (number=%d)",
+			*target.BlockNumber, block.Number,
+		)
+	}
+	return block, nil
 }

@@ -415,6 +415,7 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 	m, err := lifecycle.Restore(
 		context.Background(), newTestStorageHost(t), testDestinationRegistry,
 		"faketest://bucket/prefix/snap-src", restoredDir,
+		lifecycle.RestoreStorageConfig{},
 	)
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)

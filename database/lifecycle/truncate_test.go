@@ -17,6 +17,8 @@ package lifecycle_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -500,7 +502,14 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 // without needing to resolve the now-missing old tip first.
 func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
 	f := buildTestChain(t, 5)
-	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 2}
+	// n=3: Truncate's own pre-mutation ctx.Err() check (verifying a
+	// pre-cancelled caller never reaches setPendingTruncate) consumes the
+	// first free check, then DeleteBlocksAfter's outer-loop check and the
+	// first batch's one in-range item each consume one more -- three free
+	// checks land the cancellation right after the first block's delete
+	// commits, exactly like the two-check budget did before that
+	// pre-mutation check existed.
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
 
 	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
 	require.ErrorIs(t, err, context.Canceled)
@@ -540,4 +549,78 @@ func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
 		_, err := f.db.BlockByIndex(block.ID, nil)
 		require.ErrorIs(t, err, models.ErrBlockNotFound)
 	}
+}
+
+// pendingTruncateSyncKey mirrors the unexported constant of the same name
+// in truncate.go -- reproduced here the same way
+// TestTruncateRejectsTargetBeforeMithrilBoundary reproduces
+// "mithril_ledger_slot", so this external test package can write a raw
+// (possibly corrupted) marker value directly, the same way a bit-flipped
+// or truncated on-disk value could occur in practice.
+const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
+
+// TestGetPendingTruncateRejectsMarkerWithZeroTargetID guards a real gap: a
+// partially corrupted marker (e.g. only "tipId" survived) decodes as valid
+// JSON with TargetID at Go's zero value, which used to pass the only
+// check GetPendingTruncate had (TipID >= TargetID, trivially true against
+// zero). Resuming with TargetID=0 would delete from the very first block
+// -- a full, unintended chain wipe -- instead of failing loudly.
+func TestGetPendingTruncateRejectsMarkerWithZeroTargetID(t *testing.T) {
+	f := buildTestChain(t, 5)
+	require.NoError(t, f.db.SetSyncState(
+		pendingTruncateSyncKey, `{"tipId":5}`, nil,
+	))
+
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.Error(t, err)
+	require.Nil(t, pending)
+}
+
+// TestGetPendingTruncateRejectsMarkerNotMatchingActualBlock guards the
+// second half of the same gap: a marker whose fields are all individually
+// non-zero and internally consistent (TipID >= TargetID) but whose
+// TargetSlot/TargetHash no longer match what is actually stored at
+// TargetID on the current chain -- e.g. a corrupted (not merely absent)
+// field, or a stale marker left over from before some other operation
+// altered the chain. Resuming this would still diverge blob and metadata
+// deletion at the wrong point, the same way a fresh (non-resumed) target
+// with a forged slot/hash would (see TestTruncateRejectsTargetWith
+// MismatchedHash/Slot) -- this is that same on-lineage check, applied to
+// a resumed marker instead of a fresh target.
+func TestGetPendingTruncateRejectsMarkerNotMatchingActualBlock(t *testing.T) {
+	f := buildTestChain(t, 5)
+	target := f.blocks[1]
+	forgedHash := bytes.Repeat([]byte{0xFF}, 32)
+	marker := fmt.Sprintf(
+		`{"targetId":%d,"targetSlot":%d,"targetHash":%q,"tipId":%d}`,
+		target.ID, target.Slot, base64.StdEncoding.EncodeToString(forgedHash),
+		f.blocks[4].ID,
+	)
+	require.NoError(t, f.db.SetSyncState(pendingTruncateSyncKey, marker, nil))
+
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.Error(t, err)
+	require.Nil(t, pending)
+}
+
+// TestTruncateRejectsPreCancelledContextWithoutRecordingMarker verifies
+// that a context already cancelled before Truncate ever attempts a
+// mutation is reported the same way every other pre-mutation validation
+// failure is -- ErrTruncateNotStarted-wrapped -- and, critically, does
+// not leave a durable pending marker behind: without this, a caller would
+// be forced to "resume" an operation that in fact never touched the
+// database at all.
+func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(t *testing.T) {
+	f := buildTestChain(t, 5)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 0, false, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+	require.ErrorIs(t, err, context.Canceled)
+
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.Nil(t, pending, "a pre-cancelled Truncate must not record a pending marker")
 }

@@ -15,16 +15,20 @@
 package dblifecycle_test
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/plugin"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,7 +46,8 @@ func testConfig(dataDir string) *config.Config {
 	}
 }
 
-func uint64Ptr(v uint64) *uint64 { return &v }
+//go:fix inline
+func uint64Ptr(v uint64) *uint64 { return new(v) }
 
 // seedCommitTimestampMismatch opens dir's database, forces the metadata
 // store's commit timestamp out of sync with the blob store's, and closes it
@@ -117,9 +122,14 @@ func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 	require.NoDirExists(t, restoreCfg.DatabasePath)
 }
 
-// TestServiceTruncateRequiresExactlyOneTarget verifies that Truncate
-// rejects both no target set and more than one target field set at once.
-func TestServiceTruncateRequiresExactlyOneTarget(t *testing.T) {
+// TestServiceTruncateRequiresAtLeastOneTarget verifies that Truncate
+// rejects a target with none of Slot/Hash/BlockNumber set. See
+// TestResolveTargetAcceptsConsistentCombinedFields/
+// TestResolveTargetRejectsInconsistentCombinedFields below for the
+// "more than one field set" cases this test used to also cover, before
+// ResolveTarget started accepting a combination of fields as long as they
+// agree on the same block (dingo#1651 follow-up).
+func TestServiceTruncateRequiresAtLeastOneTarget(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
 	require.NoError(t, err)
@@ -129,12 +139,83 @@ func TestServiceTruncateRequiresExactlyOneTarget(t *testing.T) {
 
 	_, err = svc.Truncate(context.Background(), dblifecycle.TruncateTarget{})
 	require.Error(t, err)
+}
 
-	_, err = svc.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot:        uint64Ptr(1),
-		BlockNumber: uint64Ptr(1),
+// buildResolveTargetTestChain creates n blocks (IDs/numbers 1..n, slots
+// scaled by 10, one distinct hash byte each) against a real test database
+// and sets the tip to the last one, mirroring
+// database/lifecycle_test.buildTestChain -- used to exercise ResolveTarget
+// against real, resolvable blocks.
+func buildResolveTargetTestChain(t *testing.T, n uint64) (*database.Database, []models.Block) {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	blocks := make([]models.Block, 0, n)
+	for id := uint64(1); id <= n; id++ {
+		block := models.Block{
+			ID:     id,
+			Slot:   id * 10,
+			Hash:   bytes.Repeat([]byte{byte(id)}, 32),
+			Cbor:   []byte{0x80},
+			Number: id,
+			Type:   1,
+		}
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	last := blocks[len(blocks)-1]
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
+		BlockNumber: last.Number,
+	}, nil))
+	return db, blocks
+}
+
+// TestResolveTargetAcceptsConsistentCombinedFields verifies that
+// ResolveTarget accepts a target with more than one of Slot/Hash/
+// BlockNumber set, as long as they all identify the same block -- per the
+// bark proto's documented BlockRef contract ("When multiple fields are
+// set, all must agree"). Guards dingo#1651's finding that bark's own
+// Truncate handler used to reject any such combination outright, even a
+// mutually consistent one an operator might pass for extra safety (e.g.
+// a slot and a hash it already resolved).
+func TestResolveTargetAcceptsConsistentCombinedFields(t *testing.T) {
+	db, blocks := buildResolveTargetTestChain(t, 5)
+	target := blocks[1] // id=2, slot=20, number=2
+
+	resolved, err := dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
+		Slot:        &target.Slot,
+		Hash:        target.Hash,
+		BlockNumber: &target.Number,
+	})
+	require.NoError(t, err)
+	require.Equal(t, target.ID, resolved.ID)
+}
+
+// TestResolveTargetRejectsInconsistentCombinedFields verifies that
+// ResolveTarget rejects a target whose supplied fields disagree about
+// which block is meant, rather than silently trusting whichever field
+// happens to be authoritative for the actual lookup (hash, in both cases
+// below).
+func TestResolveTargetRejectsInconsistentCombinedFields(t *testing.T) {
+	db, blocks := buildResolveTargetTestChain(t, 5)
+	hashOfBlock2 := blocks[1].Hash
+
+	wrongSlot := blocks[2].Slot // slot of block 3, not block 2
+	_, err := dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
+		Hash: hashOfBlock2,
+		Slot: &wrongSlot,
 	})
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match")
+
+	wrongNumber := blocks[3].Number // number of block 4, not block 2
+	_, err = dblifecycle.ResolveTarget(db, dblifecycle.TruncateTarget{
+		Hash:        hashOfBlock2,
+		BlockNumber: &wrongNumber,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match")
 }
 
 // TestServiceSnapshotRefusesCommitTimestampMismatch verifies that the

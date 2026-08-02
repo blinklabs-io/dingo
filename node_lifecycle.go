@@ -240,8 +240,23 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	n.mempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
+			// errStorageDrainUnconfirmed, not a bare join: connManager.Stop
+			// returning an error means its own bounded wait (connection
+			// close, then goroutineWg) gave up before confirming every
+			// connection/listener goroutine actually exited -- exactly the
+			// precondition PauseLeiosPersistWriterForLiveLifecycleOp below
+			// depends on ("no more inbound Leios fetch traffic") to safely
+			// reset the persist writer's start-once guard. Escalating here,
+			// the same way an unconfirmed leios persist drain itself does,
+			// means Restore/Truncate call n.cancel() for a full supervised
+			// restart instead of reinitializeAndResume -- so a straggling
+			// connection's Leios fetch racing that reset (see
+			// PauseLeiosPersistWriterForLiveLifecycleOp's doc comment) can
+			// no longer happen: the node never reaches reinitializeAndResume
+			// in that case at all.
 			err = errors.Join(
 				err,
+				errStorageDrainUnconfirmed,
 				fmt.Errorf("connection manager shutdown: %w", stopErr),
 			)
 		}
@@ -307,12 +322,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// against the about-to-close database, exactly the same danger
 	// errStorageDrainUnconfirmed already makes Restore/Truncate fail
 	// closed on rather than attempt reinitializeAndResume.
-	if pauseErr := n.ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
-		err = errors.Join(
-			err,
-			errStorageDrainUnconfirmed,
-			fmt.Errorf("leios persist writer pause: %w", pauseErr),
-		)
+	if n.ouroboros != nil {
+		if pauseErr := n.ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp(); pauseErr != nil {
+			err = errors.Join(
+				err,
+				errStorageDrainUnconfirmed,
+				fmt.Errorf("leios persist writer pause: %w", pauseErr),
+			)
+		}
 	}
 
 	return err
@@ -1216,20 +1233,27 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 // Restore/Truncate, this does not quiesce anything — Database.PauseCommits
 // (see database/lifecycle.Snapshot) is enough to keep the blob and
 // metadata backups consistent while the node keeps forging/syncing/
-// serving normally. It still takes liveLifecycleMu, both to serialize
-// against a concurrent Restore/Truncate closing n.db out from under it,
-// and to match the bark DatabaseService's "only one operation at a time"
-// invariant. name/description label the snapshot (pass "" for either to
-// leave it unlabeled) — see lifecycle.SnapshotToCloud's doc comment for
-// why labeling must happen before any cloud mirroring.
+// serving normally. It takes snapshotMu, not liveLifecycleMu, both to
+// serialize against a concurrent Restore/Truncate closing n.db out from
+// under it (Restore/Truncate take snapshotMu too, alongside their own
+// liveLifecycleMu) and to match the bark DatabaseService's "only one
+// operation at a time" invariant — see snapshotMu's own doc comment
+// (node.go) for why a long-running Snapshot must not also hold
+// liveLifecycleMu: that would block background readers like the
+// chainsync recycler tick, which only need liveLifecycleMu to know
+// whether n.ledgerState/n.chainsyncState are mid-rebuild, for a Snapshot
+// that never touches either field. name/description label the snapshot
+// (pass "" for either to leave it unlabeled) — see
+// lifecycle.SnapshotToCloud's doc comment for why labeling must happen
+// before any cloud mirroring.
 func (n *Node) Snapshot(
 	ctx context.Context,
 	destDir string,
 	name string,
 	description string,
 ) (lifecycle.Manifest, error) {
-	n.liveLifecycleMu.Lock()
-	defer n.liveLifecycleMu.Unlock()
+	n.snapshotMu.Lock()
+	defer n.snapshotMu.Unlock()
 
 	if n.db == nil {
 		return lifecycle.Manifest{}, errors.New(
@@ -1273,6 +1297,11 @@ func (n *Node) Restore(
 ) (lifecycle.Manifest, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
+	// (node.go) for why Snapshot itself only takes this lock, not
+	// liveLifecycleMu.
+	n.snapshotMu.Lock()
+	defer n.snapshotMu.Unlock()
 
 	stagingDir := n.config.dataDir + restoreStagingSuffix
 	if err := os.RemoveAll(stagingDir); err != nil {
@@ -1297,6 +1326,10 @@ func (n *Node) Restore(
 
 	manifest, err := lifecycle.Restore(
 		ctx, restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
+		lifecycle.RestoreStorageConfig{
+			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
+			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+		},
 	)
 	if err != nil {
 		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
@@ -1714,6 +1747,11 @@ func (n *Node) Truncate(
 ) (uint64, error) {
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
+	// Excludes a concurrent Snapshot too -- see snapshotMu's doc comment
+	// (node.go) for why Snapshot itself only takes this lock, not
+	// liveLifecycleMu.
+	n.snapshotMu.Lock()
+	defer n.snapshotMu.Unlock()
 
 	// See Restore's identical handling for why a quiesce/close-storage
 	// failure must still attempt reinitializeAndResume rather than just

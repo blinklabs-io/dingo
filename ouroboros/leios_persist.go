@@ -256,7 +256,16 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 // traffic has actually stopped (connManager.Stop): enqueueLeiosPersist
 // doesn't take leiosPersistMu before touching leiosPersistOnce, so a
 // concurrent enqueue from still-live Leios fetch traffic could otherwise
-// race this reset.
+// race this reset. This is not merely a documented call-order convention:
+// node_lifecycle.go's quiesceForLiveLifecycleOp escalates a connManager.Stop
+// failure to errStorageDrainUnconfirmed (the same as this method's own
+// unconfirmed-drain error below), specifically because connManager.Stop
+// returning an error means it could not confirm every connection/listener
+// goroutine actually exited -- i.e. this method's precondition may not
+// hold. That escalation makes the caller take the full-supervised-restart
+// path (n.cancel()) instead of ever reaching reinitializeAndResume, so a
+// straggling connection's Leios fetch can no longer race this reset in
+// practice, not just "shouldn't" by convention.
 //
 // Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
 // the drain wait timed out: the old writer goroutine may still be running
