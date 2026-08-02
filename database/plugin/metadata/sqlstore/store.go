@@ -66,6 +66,7 @@ type Store struct {
 	maintenanceEvery  time.Duration
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
+	maintenanceMu     sync.Mutex
 	ready             atomic.Bool
 	closed            atomic.Bool
 	startMu           sync.Mutex
@@ -307,14 +308,18 @@ func (s *Store) startMaintenance() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// Cancellation and a tick can become ready at the same time.
-				// Prefer shutdown so a maintenance callback cannot be started
-				// again after Close has begun.
-				if ctx.Err() != nil {
+				// Serialize callback admission with shutdown. Close marks the
+				// store closed before cancelling this context, so a tick that
+				// races with shutdown is discarded under the same mutex instead
+				// of starting maintenance against closing pools.
+				s.maintenanceMu.Lock()
+				if ctx.Err() != nil || s.closed.Load() {
+					s.maintenanceMu.Unlock()
 					return
 				}
 				started := time.Now()
 				if err := s.maintenance(ctx); err != nil {
+					s.maintenanceMu.Unlock()
 					if ctx.Err() == nil {
 						s.logger.Error(
 							"metadata database maintenance failed",
@@ -327,6 +332,7 @@ func (s *Store) startMaintenance() {
 					}
 					continue
 				}
+				s.maintenanceMu.Unlock()
 				s.logger.Debug(
 					"metadata database maintenance complete",
 					"dialect", s.dialect.Name(),

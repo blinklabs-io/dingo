@@ -345,11 +345,14 @@ func TestStoreMaintenanceLifecycle(t *testing.T) {
 	)
 	require.NoError(t, err)
 	started := make(chan struct{})
+	var calls atomic.Uint32
 	store, err := New(Config{
 		WriteDB: db,
 		Dialect: SQLiteDialect(),
 		Maintenance: func(ctx context.Context) error {
-			close(started)
+			if calls.Add(1) == 1 {
+				close(started)
+			}
 			<-ctx.Done()
 			return ctx.Err()
 		},
@@ -363,6 +366,7 @@ func TestStoreMaintenanceLifecycle(t *testing.T) {
 		t.Fatal("maintenance did not start")
 	}
 	require.NoError(t, store.Close())
+	require.Equal(t, uint32(1), calls.Load())
 }
 
 func TestStoreStartsForPostgresDialect(t *testing.T) {
