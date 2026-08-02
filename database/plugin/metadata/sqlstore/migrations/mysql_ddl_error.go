@@ -29,7 +29,7 @@ import (
 var mysqlDDLObjectPattern = regexp.MustCompile(
 	"(?is)(?:INDEX|KEY)(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?|CONSTRAINT\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?",
 )
-var mysqlIndexDefinitionPattern = regexp.MustCompile("(?is)^CREATE\\s+(UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s+ON\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s*\\(([^)]*)\\)")
+var mysqlIndexDefinitionPattern = regexp.MustCompile("(?is)^CREATE\\s+(UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s+ON\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s*\\((.*)\\)$")
 
 // isMySQLDDLAlreadyApplied verifies that the duplicate object named by the
 // server error actually exists in the current schema. This prevents masking a
@@ -55,7 +55,9 @@ func isMySQLDDLAlreadyAppliedOnConn(ctx context.Context, conn *sql.Conn, stateme
 		return false
 	}
 	var exists int
-	if match := mysqlIndexDefinitionPattern.FindStringSubmatch(statement); len(match) == 5 {
+	indexMatch := mysqlIndexDefinitionPattern.FindStringSubmatch(statement)
+	if len(indexMatch) == 5 {
+		match := indexMatch
 		columns := strings.TrimSpace(match[4])
 		var actual string
 		if err := conn.QueryRowContext(ctx, `SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') FROM information_schema.statistics WHERE table_schema = ? AND table_name = ? AND index_name = ?`, schema, match[3], match[2]).Scan(&actual); err != nil {
@@ -65,7 +67,8 @@ func isMySQLDDLAlreadyAppliedOnConn(ctx context.Context, conn *sql.Conn, stateme
 		// definition. A same-named index on different columns must not be
 		// treated as a successful migration.
 		columns = strings.ReplaceAll(columns, "`", "")
-		columns = regexp.MustCompile(`\(\d+\)`).ReplaceAllString(columns, "")
+		columns = regexp.MustCompile(`\(\d+\)?`).ReplaceAllString(columns, "")
+		columns = regexp.MustCompile(`(?i)\s+(?:ASC|DESC)\b`).ReplaceAllString(columns, "")
 		actual = strings.ReplaceAll(actual, "`", "")
 		if strings.ReplaceAll(columns, " ", "") != strings.ReplaceAll(actual, " ", "") {
 			return false

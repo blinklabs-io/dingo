@@ -46,15 +46,16 @@ columns, relationships, indexes, or migrations. There is no ORM,
 
 The initial database schema release is `v1alpha1`, stored as integer version 1
 for migration ordering. A fresh database creates it from embedded DDL. An
-unversioned database is adopted only when it has the
-known final pre-cutover SQLite shape, including the required transaction, UTxO,
-account, pool, DRep, certificate, tip, settings, and commit-timestamp columns.
-Unknown or partial legacy layouts fail startup instead of being guessed at.
-The deployed v1alpha1 schema is created fresh for PostgreSQL/MySQL; automatic
-adoption is provided for the known pre-cutover SQLite shape. Adoption repairs
+unversioned database is adopted only when it has the required transaction,
+UTxO, account, pool, DRep, certificate, tip, settings, and commit-timestamp
+columns for the final pre-cutover shape. Unknown or partial legacy layouts fail
+startup instead of being guessed at. SQLite adoption additionally repairs
 legacy indexes and foreign keys, purges cascade orphans, deduplicates rows
 needed by new uniqueness constraints, and resumes the account `created_slot`
-backfill from its durable checkpoint. It also normalizes legacy NULL
+backfill from its durable checkpoint. PostgreSQL and MySQL adoption validates
+the complete table/column contract, repairs the reference-input association,
+and then applies idempotent v1alpha1 DDL, including any missing indexes. All
+three paths also normalize legacy NULL
 reward-delta hashes to the empty source hash, merges duplicate block-nonce rows
 only when their nonce values agree, and preserves checkpoint flags. Reference
 inputs are stored in the v1alpha1 `utxo_reference_input` association table so

@@ -78,17 +78,125 @@ func adoptionForDialect(dialect string) Adoption {
 	if dialect == "sqlite" {
 		return adoptSQLiteV1
 	}
-	return func(
-		context.Context,
-		*sql.Conn,
-		string,
-	) error {
-		return fmt.Errorf(
-			"%w: unversioned %s databases require an explicit export/import",
-			ErrLegacySchema,
-			dialect,
-		)
+	return adoptExistingV1
+}
+
+// adoptExistingV1 validates an unversioned PostgreSQL/MySQL database that was
+// created by the previous metadata implementation. Those backends already
+// enforce their table constraints through the provider's normal DDL; the
+// database/sql cutover must still refuse a partial or incompatible schema
+// rather than silently treating it as fresh. The subsequent v1 expand phase
+// is idempotent and fills in any missing non-destructive indexes.
+func adoptExistingV1(ctx context.Context, conn *sql.Conn, dialect string) error {
+	if dialect != "postgres" && dialect != "mysql" {
+		return fmt.Errorf("%w: unsupported adoption dialect %q", ErrLegacySchema, dialect)
 	}
+	if err := ensureExistingReferenceInputs(ctx, conn, dialect); err != nil {
+		return err
+	}
+	expected, err := sqliteV1Columns()
+	if err != nil {
+		return err
+	}
+	for table, columns := range expected {
+		found, err := existingDialectTableColumns(ctx, conn, dialect, table)
+		if err != nil {
+			return err
+		}
+		if len(found) == 0 {
+			return fmt.Errorf("%w: missing required table %q in %s database", ErrLegacySchema, table, dialect)
+		}
+		for column := range columns {
+			if _, ok := found[column]; !ok {
+				return fmt.Errorf(
+					"%w: table %q is missing column %q in %s database",
+					ErrLegacySchema,
+					table,
+					column,
+					dialect,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func ensureExistingReferenceInputs(ctx context.Context, conn *sql.Conn, dialect string) error {
+	utxoColumns, err := existingDialectTableColumns(ctx, conn, dialect, "utxo")
+	if err != nil {
+		return err
+	}
+	if len(utxoColumns) == 0 {
+		return nil
+	}
+	if _, ok := utxoColumns["referenced_by_tx_id"]; !ok {
+		// Let the complete contract validation report the missing legacy
+		// column instead of issuing a copy query that cannot run.
+		return nil
+	}
+	statements, err := loadSQL("v1/sqlite/expand.sql")
+	if err != nil {
+		return err
+	}
+	var create string
+	for _, statement := range statements {
+		if schemaTableName(statement) == "utxo_reference_input" {
+			create = translateSchemaSQL([]string{statement}, dialect)[0]
+			break
+		}
+	}
+	if create == "" {
+		return fmt.Errorf("%w: missing v1 reference-input DDL", ErrLegacySchema)
+	}
+	if _, err := conn.ExecContext(ctx, create); err != nil {
+		return fmt.Errorf("create reference-input association table: %w", err)
+	}
+	insert := `INSERT INTO utxo_reference_input (utxo_id, transaction_hash)
+SELECT id, referenced_by_tx_id FROM utxo
+WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`
+	if dialect == "mysql" {
+		insert = strings.Replace(insert, "INSERT INTO", "INSERT IGNORE INTO", 1)
+	} else {
+		insert += " ON CONFLICT DO NOTHING"
+	}
+	if dialect == "postgres" {
+		insert = strings.Replace(insert, "?", "$1", 1)
+	}
+	if _, err := conn.ExecContext(ctx, insert); err != nil {
+		return fmt.Errorf("adopt legacy reference inputs: %w", err)
+	}
+	return nil
+}
+
+func existingDialectTableColumns(
+	ctx context.Context,
+	conn *sql.Conn,
+	dialect, table string,
+) (map[string]struct{}, error) {
+	query := `SELECT column_name FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = ?`
+	if dialect == "postgres" {
+		query = `SELECT column_name FROM information_schema.columns
+WHERE table_schema = current_schema() AND table_name = ?`
+		query = strings.Replace(query, "?", "$1", 1)
+	}
+	rows, err := conn.QueryContext(ctx, query, table)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s table %q: %w", dialect, table, err)
+	}
+	defer rows.Close()
+	ret := make(map[string]struct{})
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return nil, fmt.Errorf("scan %s table %q columns: %w", dialect, table, err)
+		}
+		ret[column] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s table %q columns: %w", dialect, table, err)
+	}
+	return ret, nil
 }
 
 var (
