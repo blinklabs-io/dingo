@@ -181,6 +181,37 @@ func TestWALSequencesSurviveTruncationAndRestart(t *testing.T) {
 	assert.Greater(t, reopened.NextSeq(), highest)
 }
 
+func TestWALSequencesRemainMonotonicAfterPartialTruncation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	w := newTestWAL(t, dir, 1)
+	seqs := make([]uint64, 0, 8)
+	for i := range 8 {
+		seq, err := w.Begin(
+			Intent{Kind: IntentBlockAdd, Slot: uint64(i)},
+			int64(i),
+		)
+		require.NoError(t, err)
+		require.NoError(t, w.Commit(seq))
+		seqs = append(seqs, seq)
+	}
+	checkpointed := seqs[3]
+	require.NoError(t, func() error {
+		_, err := w.TruncateThrough(checkpointed)
+		return err
+	}())
+	require.NoError(t, w.Close())
+
+	reopened := newTestWAL(t, dir, 1)
+	assert.Greater(t, reopened.NextSeq(), seqs[len(seqs)-1])
+	next, err := reopened.Begin(
+		Intent{Kind: IntentBlockAdd, Slot: 99},
+		99,
+	)
+	require.NoError(t, err)
+	assert.Greater(t, next, seqs[len(seqs)-1])
+}
+
 func TestWALTruncateKeepsUncoveredSegments(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

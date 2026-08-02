@@ -57,7 +57,10 @@ func TestCheckpointVerifyDetectsFieldTampering(t *testing.T) {
 	// Every field is bound by the root, so changing any of them after
 	// sealing must be caught.
 	mutations := map[string]func(*Checkpoint){
-		"seq":              func(c *Checkpoint) { c.Seq++ },
+		"seq": func(c *Checkpoint) { c.Seq++ },
+		"created_unix_milli": func(c *Checkpoint) {
+			c.CreatedUnixMilli++
+		},
 		"commit_timestamp": func(c *Checkpoint) { c.CommitTimestamp++ },
 		"tip_slot":         func(c *Checkpoint) { c.TipSlot++ },
 		"tip_block_number": func(c *Checkpoint) { c.TipBlockNumber++ },

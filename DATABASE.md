@@ -622,11 +622,15 @@ does nothing.
 A checkpoint holds the journal sequence it covers, when it was taken, the commit
 timestamp both stores held, the metadata tip (slot, hash, block number), the blob
 tip, and a SHA-256 merkle root over those fields as domain-separated leaves
-(RFC 6962 leaf and interior prefixes). The root is verified on load, so a
-generation damaged in a way the frame CRC survives is skipped in favour of an
-older one. Checkpoints are written to a temporary file, fsynced, renamed, and the
-directory fsynced. A checkpoint never covers a still-open commit, so truncating
-segments it covers cannot discard an intent record recovery still needs.
+(RFC 6962 leaf and interior prefixes). `created_unix_milli` is operational
+metadata, but remains part of the Merkle binding for compatibility with the
+checkpoint wire format introduced here: changing it invalidates that generation
+instead of silently accepting a modified checkpoint. The root is verified on
+load, so a generation damaged in a way the frame CRC survives is skipped in
+favour of an older one. Checkpoints are written to a temporary file, fsynced,
+renamed, and the directory fsynced. A checkpoint never covers a still-open
+commit, so truncating segments it covers cannot discard an intent record recovery
+still needs.
 
 At startup `recovery.Manager.Recover` runs the consistency checks, loads the
 newest verified checkpoint, and replays the journal above it. The commit

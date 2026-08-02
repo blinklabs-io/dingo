@@ -915,7 +915,9 @@ runs after the chain manager and ledger are up, because both the diagnosis and
 the repairs need them: `nodeRecoverySource` wraps `Database.RecoveryStateSource`
 to add the chain manager's tip, and `nodeRecoveryRepairer` routes trims to
 `Database.TrimBlobAbove`, rollbacks to `LedgerState.RollbackToPoint`, and
-restamping to `Database.StampCommitTimestamp`. It runs after the existing
+restamping to `Database.ResetCommitFence`. That reset performs an empty
+combined commit, assigning a fresh timestamp to both stores rather than
+reusing either divergent timestamp. It runs after the existing
 `RecoverCommitTimestampConflict` path so it reports on whatever that left
 behind, then starts the checkpoint ticker, which `Database.Close` stops.
 
