@@ -199,6 +199,19 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	settings, err = store.GetNodeSettings()
 	require.NoError(t, err)
 	require.Equal(t, "legacy-fixed", settings.Network)
+	checkpoint := &models.BackfillCheckpoint{
+		Phase:      "integration",
+		LastSlot:   7,
+		TotalSlots: 11,
+		StartedAt:  time.UnixMilli(100),
+		UpdatedAt:  time.UnixMilli(200),
+	}
+	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
+	require.NotZero(t, checkpoint.ID)
+	loadedCheckpoint, err := store.GetBackfillCheckpoint("integration", nil)
+	require.NoError(t, err)
+	require.Equal(t, checkpoint.ID, loadedCheckpoint.ID)
+	require.Equal(t, checkpoint.LastSlot, loadedCheckpoint.LastSlot)
 
 	account := &models.Account{
 		StakingKey:    []byte{1, 2, 3},

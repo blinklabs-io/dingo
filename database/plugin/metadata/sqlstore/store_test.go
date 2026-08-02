@@ -123,6 +123,25 @@ CREATE TABLE network_donation (
 	require.Equal(t, uint64(123), total)
 }
 
+func TestCreateUtxoBindsEmptyNullableHashesAsSQLNull(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	utxo := &models.Utxo{
+		TxId:      []byte("nullable-utxo"),
+		Amount:    1,
+		AddedSlot: 1,
+	}
+	require.NoError(t, store.CreateUtxo(nil, utxo))
+	var spent, referenced, collateral any
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT spent_at_tx_id, referenced_by_tx_id, collateral_by_tx_id FROM utxo WHERE id = ?",
+		utxo.ID,
+	).Scan(&spent, &referenced, &collateral))
+	require.Nil(t, spent)
+	require.Nil(t, referenced)
+	require.Nil(t, collateral)
+}
+
 func TestGetStakeByPoolsUsesLiveCredentialAggregate(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
