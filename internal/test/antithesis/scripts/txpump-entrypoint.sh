@@ -5,7 +5,7 @@ set -eu
 # 0640 structured log readable through the shared volume.
 stake_key="/utxo-keys/stake/txpump.stake.vkey"
 pool_key="/configs/keys/cold.vkey"
-if [ -z "${stake_key}" ] || [ ! -f "${pool_key}" ]; then
+if [ ! -f "${stake_key}" ] || [ ! -f "${pool_key}" ]; then
   echo "txpump: delegation credentials are missing" >&2
   exit 1
 fi
