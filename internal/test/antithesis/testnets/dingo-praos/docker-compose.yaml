@@ -50,6 +50,15 @@ x-cardano-node-command: &cardano-node-command
   - "--port"
   - "3001"
 
+x-cardano-node-shell-command: &cardano-node-shell-command
+  - >-
+    umask 022; exec cardano-node run --config /configs/configs/config.json
+    --topology /configs/configs/topology.json --database-path /data/db
+    --socket-path /ipc/node.socket --shelley-kes-key /configs/keys/kes.skey
+    --shelley-vrf-key /configs/keys/vrf.skey
+    --shelley-operational-certificate /configs/keys/opcert.cert --port 3001
+    > "$$NODE_LOG_FILE" 2>&1
+
 x-cardano-node: &cardano-node
   image: ghcr.io/blinklabs-io/cardano-node:${CARDANO_NODE_VERSION:-11.0.1}
   init: true
@@ -137,9 +146,10 @@ services:
     <<: *cardano-node
     hostname: p2.example
     entrypoint: ["/bin/sh", "-c"]
-    command: ["umask 022; exec cardano-node run --config /configs/configs/config.json --topology /configs/configs/topology.json --database-path /data/db --socket-path /ipc/node.socket --shelley-kes-key /configs/keys/kes.skey --shelley-vrf-key /configs/keys/vrf.skey --shelley-operational-certificate /configs/keys/opcert.cert --port 3001 > /logs/p2.log 2>&1"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p2.log
     volumes:
       - p2-configs:/configs:ro
       - p2-data:/data/db
@@ -150,9 +160,10 @@ services:
     <<: *cardano-node
     hostname: p3.example
     entrypoint: ["/bin/sh", "-c"]
-    command: ["umask 022; exec cardano-node run --config /configs/configs/config.json --topology /configs/configs/topology.json --database-path /data/db --socket-path /ipc/node.socket --shelley-kes-key /configs/keys/kes.skey --shelley-vrf-key /configs/keys/vrf.skey --shelley-operational-certificate /configs/keys/opcert.cert --port 3001 > /logs/p3.log 2>&1"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p3.log
     volumes:
       - p3-configs:/configs:ro
       - p3-data:/data/db
@@ -163,9 +174,10 @@ services:
     <<: *cardano-node
     hostname: p4.example
     entrypoint: ["/bin/sh", "-c"]
-    command: ["umask 022; exec cardano-node run --config /configs/configs/config.json --topology /configs/configs/topology.json --database-path /data/db --socket-path /ipc/node.socket --shelley-kes-key /configs/keys/kes.skey --shelley-vrf-key /configs/keys/vrf.skey --shelley-operational-certificate /configs/keys/opcert.cert --port 3001 > /logs/p4.log 2>&1"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p4.log
     volumes:
       - p4-configs:/configs:ro
       - p4-data:/data/db
@@ -176,9 +188,10 @@ services:
     <<: *cardano-node
     hostname: p5.example
     entrypoint: ["/bin/sh", "-c"]
-    command: ["umask 022; exec cardano-node run --config /configs/configs/config.json --topology /configs/configs/topology.json --database-path /data/db --socket-path /ipc/node.socket --shelley-kes-key /configs/keys/kes.skey --shelley-vrf-key /configs/keys/vrf.skey --shelley-operational-certificate /configs/keys/opcert.cert --port 3001 > /logs/p5.log 2>&1"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p5.log
     volumes:
       - p5-configs:/configs:ro
       - p5-data:/data/db

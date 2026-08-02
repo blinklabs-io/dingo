@@ -230,10 +230,24 @@ cp /tmp/testnet/utxos/keys/genesis.*.vkey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.addr.info /configs/utxo-keys/
 
 # Keep generated stake material in a stable location. txpump derives the
-# delegation and pool hashes at startup, so no generated hash is hard-coded.
+# delegation and pool hashes at startup. Select the generator's first
+# lexically ordered stake verification key and expose only that key under a
+# stable name; an unconstrained find otherwise makes the selected credential
+# depend on filesystem traversal order.
 mkdir -p /configs/utxo-keys/stake
-find /tmp/testnet -type f -name '*stake*.vkey' -exec cp {} /configs/utxo-keys/stake/ \; 2>/dev/null || true
-find /tmp/testnet -type f -name '*stake*.skey' -exec cp {} /configs/utxo-keys/stake/ \; 2>/dev/null || true
+stake_vkey="$(find /tmp/testnet -type f -name '*stake*.vkey' -print 2>/dev/null | sort | head -n 1)"
+if [ -z "$stake_vkey" ]; then
+    echo "no generated delegation stake verification key found" >&2
+    exit 1
+fi
+cp "$stake_vkey" /configs/utxo-keys/stake/txpump.stake.vkey
+if ! cardano-cli stake-address key-hash \
+    --stake-verification-key-file /configs/utxo-keys/stake/txpump.stake.vkey \
+    >/tmp/txpump-stake-key-hash; then
+    echo "generated delegation stake verification key is invalid: $stake_vkey" >&2
+    exit 1
+fi
+test -s /tmp/txpump-stake-key-hash
 
 # Copy testnet.yaml to shared volume for analysis/txpump genesis config
 echo "copying testnet.yaml to /testnet-config/testnet.yaml"

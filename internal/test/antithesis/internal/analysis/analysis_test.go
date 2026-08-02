@@ -16,6 +16,7 @@ package analysis
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -103,6 +104,25 @@ func TestAnalyzerReadNewLines_DiscoversNestedRotatedAndIncompleteLogs(t *testing
 	analyzer.readNewLines()
 
 	snap = analyzer.metrics.Snapshot()
+	require.Equal(t, 2, snap.TotalBlocksForged)
+	require.Equal(t, 2, snap.BlocksByNode["p1"])
+}
+
+func TestAnalyzerReadNewLines_DoesNotReprocessRenamedLog(t *testing.T) {
+	logDir := t.TempDir()
+	active := filepath.Join(logDir, "p1.log")
+	record := func(slot int, hash string) []byte {
+		return []byte(fmt.Sprintf(`{"msg":"block produced","slot":%d,"block_hash":"%s"}`+"\n", slot, hash))
+	}
+	require.NoError(t, os.WriteFile(active, record(10, "h10"), 0o644))
+	analyzer := NewAnalyzer(&Config{LogDir: logDir}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	analyzer.readNewLines()
+
+	require.NoError(t, os.Rename(active, active+".1"))
+	require.NoError(t, os.WriteFile(active, record(11, "h11"), 0o644))
+	analyzer.readNewLines()
+
+	snap := analyzer.metrics.Snapshot()
 	require.Equal(t, 2, snap.TotalBlocksForged)
 	require.Equal(t, 2, snap.BlocksByNode["p1"])
 }

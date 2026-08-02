@@ -17,6 +17,7 @@ package txpump
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -90,6 +91,29 @@ func TestLoadConfig_RejectsInvalidStartupTimeout(t *testing.T) {
 
 	_, err := LoadConfig()
 	require.ErrorContains(t, err, "TXPUMP_STARTUP_TIMEOUT")
+}
+
+func TestParseStartupTimeoutBounds(t *testing.T) {
+	timeout, err := parseStartupTimeout(strconv.FormatInt(maxStartupTimeoutSeconds, 10))
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(maxStartupTimeoutSeconds)*time.Second, timeout)
+
+	_, err = parseStartupTimeout(strconv.FormatInt(maxStartupTimeoutSeconds+1, 10))
+	require.Error(t, err)
+	_, err = parseStartupTimeout("-1")
+	require.Error(t, err)
+}
+
+func TestStopStartupTimeoutRemainsDisabledPastDeadline(t *testing.T) {
+	timer := time.NewTimer(10 * time.Millisecond)
+	deadline := timer.C
+	stopStartupTimeout(&timer, &deadline)
+
+	select {
+	case <-deadline:
+		t.Fatal("startup deadline remained active after readiness")
+	case <-time.After(30 * time.Millisecond):
+	}
 }
 
 func clearTxpumpEnv(t *testing.T) {

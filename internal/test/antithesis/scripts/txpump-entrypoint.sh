@@ -3,7 +3,7 @@ set -eu
 
 # The analyzer image uses uid 1000. Running txpump with the same uid keeps its
 # 0640 structured log readable through the shared volume.
-stake_key="$(find /utxo-keys/stake -type f -name '*.vkey' -print -quit 2>/dev/null || true)"
+stake_key="/utxo-keys/stake/txpump.stake.vkey"
 pool_key="/configs/keys/cold.vkey"
 if [ -z "${stake_key}" ] || [ ! -f "${pool_key}" ]; then
   echo "txpump: delegation credentials are missing" >&2

@@ -23,7 +23,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -32,11 +34,12 @@ var nodeLogName = regexp.MustCompile(`^p([0-9]+)(?:[._-].*)?\.log(?:\.[0-9]+)?$`
 // fileState tracks the read position within a single log file so that
 // successive checks only process new lines.
 type fileState struct {
-	path    string
-	nodeID  string
-	offset  int64
-	modTime time.Time
-	warned  bool
+	path     string
+	nodeID   string
+	identity string
+	offset   int64
+	modTime  time.Time
+	warned   bool
 }
 
 type ingestionStats struct {
@@ -55,23 +58,24 @@ type Analyzer struct {
 	cfg                 *Config
 	metrics             *Metrics
 	files               map[string]*fileState // keyed by file path
+	filesByIdentity     map[string]*fileState
 	logger              *slog.Logger
 	setupDone           bool
 	setupComplete       func()
 	ingestion           ingestionStats
 	observabilityWarned bool
-	directoryWarned     bool
 	walkWarnings        map[string]struct{}
 }
 
 // NewAnalyzer creates an Analyzer with the given config and a fresh Metrics.
 func NewAnalyzer(cfg *Config, logger *slog.Logger) *Analyzer {
 	return &Analyzer{
-		cfg:           cfg,
-		metrics:       NewMetrics(),
-		files:         make(map[string]*fileState),
-		logger:        logger,
-		setupComplete: SetupComplete,
+		cfg:             cfg,
+		metrics:         NewMetrics(),
+		files:           make(map[string]*fileState),
+		filesByIdentity: make(map[string]*fileState),
+		logger:          logger,
+		setupComplete:   SetupComplete,
 		ingestion: ingestionStats{
 			nodeFiles:    make(map[string]struct{}),
 			nodeReadable: make(map[string]struct{}),
@@ -134,7 +138,7 @@ func (a *Analyzer) check() {
 }
 
 func (a *Analyzer) reportObservability(snap MetricsSnapshot) {
-	Always(a.ingestion.nodeEvents > 0, "node-log-observability", map[string]interface{}{
+	Always(len(a.ingestion.nodeReadable) > 0, "node-log-observability", map[string]interface{}{
 		"node_files":          len(a.ingestion.nodeFiles),
 		"readable_node_files": len(a.ingestion.nodeReadable),
 		"node_log_bytes":      a.ingestion.nodeBytes,
@@ -173,7 +177,10 @@ func (a *Analyzer) readNewLines() {
 	// numbered rotations behind. Walk the volume and select only known names.
 	currentNodeFiles := make(map[string]struct{})
 	currentReadable := make(map[string]struct{})
-	err := filepath.WalkDir(a.cfg.LogDir, func(path string, entry os.DirEntry, walkErr error) error {
+	a.ingestion.txpumpReadable = false
+	type logFile struct{ path, role, nodeID string }
+	var logFiles []logFile
+	_ = filepath.WalkDir(a.cfg.LogDir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if _, warned := a.walkWarnings[path]; !warned {
 				a.logger.Warn("cannot inspect log path", "path", path, "err", walkErr)
@@ -191,22 +198,27 @@ func (a *Analyzer) readNewLines() {
 		if role == "node" {
 			currentNodeFiles[path] = struct{}{}
 		}
-		if a.readFile(path, role, nodeID) {
-			if role == "node" {
-				currentReadable[path] = struct{}{}
+		logFiles = append(logFiles, logFile{path: path, role: role, nodeID: nodeID})
+		return nil
+	})
+	// Prefer active files over rotations so a renamed active file is not used
+	// as the canonical state when both paths refer to the same inode.
+	sort.Slice(logFiles, func(i, j int) bool {
+		iRotated := isRotatedLog(logFiles[i].path)
+		jRotated := isRotatedLog(logFiles[j].path)
+		if iRotated != jRotated {
+			return !iRotated
+		}
+		return logFiles[i].path < logFiles[j].path
+	})
+	for _, logFile := range logFiles {
+		if a.readFile(logFile.path, logFile.role, logFile.nodeID) {
+			if logFile.role == "node" {
+				currentReadable[logFile.path] = struct{}{}
 			} else {
 				a.ingestion.txpumpReadable = true
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		if !a.directoryWarned {
-			a.logger.Warn("cannot inspect log directory", "path", a.cfg.LogDir, "err", err)
-			a.directoryWarned = true
-		}
-	} else {
-		a.directoryWarned = false
 	}
 	a.ingestion.nodeFiles = currentNodeFiles
 	a.ingestion.nodeReadable = currentReadable
@@ -220,7 +232,6 @@ func (a *Analyzer) readFile(path, role, nodeID string) bool {
 		state = &fileState{path: path, nodeID: nodeID}
 		a.files[path] = state
 	}
-
 	//nolint:gosec // log file path derived from config, not user input
 	f, err := os.Open(path)
 	if err != nil {
@@ -232,13 +243,32 @@ func (a *Analyzer) readFile(path, role, nodeID string) bool {
 		return false
 	}
 	defer f.Close() //nolint:errcheck // read-only open
-	state.warned = false
-	if role == "node" {
-		a.ingestion.nodeReadable[path] = struct{}{}
-	}
-
-	// Fix 7: detect file truncation (e.g. log rotation) and reset.
 	info, err := f.Stat()
+	identity := fileIdentity(info)
+	if ok && state.identity != "" && state.identity != identity {
+		state = nil
+	}
+	if state == nil && identity != "" {
+		state = a.filesByIdentity[identity]
+	}
+	if state == nil {
+		state = &fileState{path: path, nodeID: nodeID}
+	}
+	if identity != "" {
+		if existing := a.filesByIdentity[identity]; existing != nil && existing != state {
+			// A rotated file is the same inode under a new path. It has already
+			// been consumed during this pass under the active path.
+			return true
+		}
+		state.identity = identity
+		a.filesByIdentity[identity] = state
+	}
+	state.path = path
+	state.nodeID = nodeID
+	a.files[path] = state
+	state.warned = false
+
+	// Detect file truncation (e.g. a logger restarting in place) and reset.
 	if err == nil && (info.Size() < state.offset ||
 		(!state.modTime.IsZero() && !info.ModTime().Equal(state.modTime) && info.Size() <= state.offset)) {
 		a.logger.Info("log file truncated, resetting offset", "path", path)
@@ -298,6 +328,22 @@ func (a *Analyzer) readFile(path, role, nodeID string) bool {
 		a.ingestion.nodeBytes += bytesRead
 	}
 	return true
+}
+
+func fileIdentity(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
+}
+
+func isRotatedLog(path string) bool {
+	base := filepath.Base(path)
+	return strings.Contains(base, ".log.")
 }
 
 // reportSafetyAssertions evaluates safety properties and fires assertions.

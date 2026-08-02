@@ -106,6 +106,7 @@ func (p *Pump) Run(ctx context.Context) error {
 		client.Close() //nolint:errcheck // best-effort close
 		if submitted > 0 && !ready {
 			ready = true
+			stopStartupTimeout(&startupTimer, &startup)
 			p.logger.Info(
 				"txpump ready",
 				"workload_types", p.cfg.Types,
@@ -127,6 +128,16 @@ func (p *Pump) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// stopStartupTimeout disables the readiness deadline after the first
+// successful submission. The deadline only protects the pre-ready phase.
+func stopStartupTimeout(timer **time.Timer, deadline *<-chan time.Time) {
+	if *timer != nil {
+		(*timer).Stop()
+		*timer = nil
+	}
+	*deadline = nil
 }
 
 // dialPrimary connects to the primary node address.

@@ -26,6 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/antithesis/internal/genesis"
 )
 
+const maxStartupTimeoutSeconds = int64(^uint64(0)>>1) / int64(time.Second)
+
 // Config holds all runtime configuration for txpump.
 // Values are read from environment variables; defaults apply when a variable
 // is absent or empty.
@@ -191,14 +193,11 @@ func LoadConfig() (*Config, error) {
 	}
 
 	if v := os.Getenv("TXPUMP_STARTUP_TIMEOUT"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			return nil, fmt.Errorf(
-				"TXPUMP_STARTUP_TIMEOUT: must be a non-negative integer (seconds), got %q",
-				v,
-			)
+		timeout, err := parseStartupTimeout(v)
+		if err != nil {
+			return nil, err
 		}
-		cfg.StartupTimeout = time.Duration(n) * time.Second
+		cfg.StartupTimeout = timeout
 	}
 
 	if v := os.Getenv("TXPUMP_TYPES"); v != "" {
@@ -229,6 +228,17 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseStartupTimeout(value string) (time.Duration, error) {
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || seconds < 0 || seconds > maxStartupTimeoutSeconds {
+		return 0, fmt.Errorf(
+			"TXPUMP_STARTUP_TIMEOUT: must be a non-negative integer (seconds) <= %d, got %q",
+			maxStartupTimeoutSeconds, value,
+		)
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 // validate checks that the config values are internally consistent.
