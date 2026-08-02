@@ -1646,12 +1646,14 @@ func splitSQL(content string) ([]string, error) {
 		}
 		if character == '-' && idx+1 < len(content) &&
 			content[idx+1] == '-' {
+			appendCommentSpace(&current)
 			lineComment = true
 			idx++
 			continue
 		}
 		if character == '/' && idx+1 < len(content) &&
 			content[idx+1] == '*' {
+			appendCommentSpace(&current)
 			blockComment = true
 			idx++
 			continue
@@ -1674,4 +1676,14 @@ func splitSQL(content string) ([]string, error) {
 	}
 	flush()
 	return statements, nil
+}
+
+func appendCommentSpace(current *[]byte) {
+	if len(*current) == 0 {
+		return
+	}
+	last := (*current)[len(*current)-1]
+	if last != ' ' && last != '\n' && last != '\r' && last != '\t' {
+		*current = append(*current, ' ')
+	}
 }

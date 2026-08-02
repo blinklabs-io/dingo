@@ -8,6 +8,8 @@ package sqlitequery
 import (
 	"context"
 	"database/sql"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 const addNetworkDonation = `-- name: AddNetworkDonation :exec
@@ -444,9 +446,9 @@ type CreateUtxoParams struct {
 	StakingKey              []byte
 	CredentialTag           int64
 	DatumHash               []byte
-	SpentAtTxID             []byte
-	ReferencedByTxID        []byte
-	CollateralByTxID        []byte
+	SpentAtTxID             types.NullableHash
+	ReferencedByTxID        types.NullableHash
+	CollateralByTxID        types.NullableHash
 	AddedSlot               sql.NullInt64
 	DeletedSlot             sql.NullInt64
 	Amount                  sql.NullString
@@ -496,9 +498,9 @@ type CreateUtxoIfAbsentParams struct {
 	StakingKey              []byte
 	CredentialTag           int64
 	DatumHash               []byte
-	SpentAtTxID             []byte
-	ReferencedByTxID        []byte
-	CollateralByTxID        []byte
+	SpentAtTxID             types.NullableHash
+	ReferencedByTxID        types.NullableHash
+	CollateralByTxID        types.NullableHash
 	AddedSlot               sql.NullInt64
 	DeletedSlot             sql.NullInt64
 	Amount                  sql.NullString
@@ -4666,7 +4668,7 @@ func (q *Queries) UpdateDRepActivity(ctx context.Context, arg UpdateDRepActivity
 	return result.RowsAffected()
 }
 
-const updateFallbackRewardSnapshot = `-- name: UpdateFallbackRewardSnapshot :exec
+const updateFallbackRewardSnapshot = `-- name: UpdateFallbackRewardSnapshot :execrows
 UPDATE reward_snapshot
 SET total_active_stake = ?,
     total_pool_count = ?,
@@ -4677,7 +4679,7 @@ SET total_active_stake = ?,
     protocol_version = ?,
     authoritative = FALSE,
     calculation_version = ?
-WHERE epoch = ? AND snapshot_type = ?
+WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE
 `
 
 type UpdateFallbackRewardSnapshotParams struct {
@@ -4693,8 +4695,8 @@ type UpdateFallbackRewardSnapshotParams struct {
 	SnapshotType       string
 }
 
-func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) error {
-	_, err := q.db.ExecContext(ctx, updateFallbackRewardSnapshot,
+func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateFallbackRewardSnapshot,
 		arg.TotalActiveStake,
 		arg.TotalPoolCount,
 		arg.TotalDelegators,
@@ -4706,7 +4708,10 @@ func (q *Queries) UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFa
 		arg.Epoch,
 		arg.SnapshotType,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const upsertMidnightAriadneParams = `-- name: UpsertMidnightAriadneParams :one

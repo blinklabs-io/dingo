@@ -431,7 +431,7 @@ INSERT INTO reward_snapshot (
 ON CONFLICT (epoch, snapshot_type) DO NOTHING
 RETURNING id;
 
--- name: UpdateFallbackRewardSnapshot :exec
+-- name: UpdateFallbackRewardSnapshot :execrows
 UPDATE reward_snapshot
 SET total_active_stake = ?,
     total_pool_count = ?,
@@ -442,7 +442,7 @@ SET total_active_stake = ?,
     protocol_version = ?,
     authoritative = FALSE,
     calculation_version = ?
-WHERE epoch = ? AND snapshot_type = ?;
+WHERE epoch = ? AND snapshot_type = ? AND authoritative = FALSE;
 
 -- name: GetRewardSnapshot :one
 SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,

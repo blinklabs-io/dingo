@@ -81,7 +81,7 @@ func TestSplitSQL(t *testing.T) {
 	t.Parallel()
 	statements, err := splitSQL(`
 		-- comment with ;
-		CREATE TABLE thing (value TEXT DEFAULT ';');
+		CREATE/* preserve token boundary */TABLE thing (value TEXT DEFAULT ';');
 		/* another ; */
 		INSERT INTO thing VALUES ('it''s;fine');
 	`)
@@ -89,6 +89,16 @@ func TestSplitSQL(t *testing.T) {
 	require.Equal(t, []string{
 		"CREATE TABLE thing (value TEXT DEFAULT ';')",
 		"INSERT INTO thing VALUES ('it''s;fine')",
+	}, statements)
+}
+
+func TestSplitSQLPreservesCommentTokenBoundaries(t *testing.T) {
+	t.Parallel()
+	statements, err := splitSQL("CREATE/*inline*/TABLE thing (id INTEGER); SELECT/*x*/1;")
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"CREATE TABLE thing (id INTEGER)",
+		"SELECT 1",
 	}, statements)
 }
 

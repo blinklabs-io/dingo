@@ -10,6 +10,19 @@ sql:
         sql_package: "database/sql"
         emit_interface: true
         emit_empty_slices: true
+        overrides:
+          - column: "utxo.spent_at_tx_id"
+            go_type:
+              import: "github.com/blinklabs-io/dingo/database/types"
+              type: "NullableHash"
+          - column: "utxo.referenced_by_tx_id"
+            go_type:
+              import: "github.com/blinklabs-io/dingo/database/types"
+              type: "NullableHash"
+          - column: "utxo.collateral_by_tx_id"
+            go_type:
+              import: "github.com/blinklabs-io/dingo/database/types"
+              type: "NullableHash"
   - engine: "postgresql"
     schema: "database/plugin/metadata/sqlstore/queries/postgres/schema.sql"
     queries: "database/plugin/metadata/sqlstore/queries/postgres"

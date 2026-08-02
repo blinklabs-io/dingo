@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,14 @@ func openTestDB(t *testing.T) *sql.DB {
 		require.NoError(t, db.Close())
 	})
 	return db
+}
+
+func TestMySQLLockTimeoutSeconds(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, int64(-1), mysqlLockTimeoutSeconds(0))
+	require.Equal(t, int64(-1), mysqlLockTimeoutSeconds(-time.Second))
+	require.Equal(t, int64(1), mysqlLockTimeoutSeconds(time.Millisecond))
+	require.Equal(t, int64(30), mysqlLockTimeoutSeconds(30*time.Second))
 }
 
 func testMigration(backfill Backfill) Migration {

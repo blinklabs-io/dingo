@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -70,20 +71,20 @@ func (l *fileLocker) Acquire(
 		case <-ticker.C:
 		}
 	}
-	var released bool
+	var once sync.Once
+	var releaseErr error
 	return func() error {
-		if released {
-			return nil
-		}
-		released = true
-		unlockErr := windows.UnlockFileEx(
-			windows.Handle(file.Fd()),
-			0,
-			1,
-			0,
-			&overlapped,
-		)
-		closeErr := file.Close()
-		return errors.Join(unlockErr, closeErr)
+		once.Do(func() {
+			unlockErr := windows.UnlockFileEx(
+				windows.Handle(file.Fd()),
+				0,
+				1,
+				0,
+				&overlapped,
+			)
+			closeErr := file.Close()
+			releaseErr = errors.Join(unlockErr, closeErr)
+		})
+		return releaseErr
 	}, nil
 }

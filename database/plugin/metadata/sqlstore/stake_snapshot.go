@@ -46,9 +46,9 @@ func (s *Store) SavePoolStakeSnapshot(
 	if err != nil {
 		return err
 	}
-	id, err := queries.CreatePoolStakeSnapshot(
+	id, err := queries.SavePoolStakeSnapshot(
 		context.Background(),
-		sqlitequery.CreatePoolStakeSnapshotParams(params),
+		sqlitequery.SavePoolStakeSnapshotParams(params),
 	)
 	if err != nil {
 		return fmt.Errorf("save pool stake snapshot: %w", err)

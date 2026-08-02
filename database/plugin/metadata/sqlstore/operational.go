@@ -303,9 +303,13 @@ func (s *Store) GetEpochsByEra(
 	if err != nil {
 		return nil, err
 	}
+	sqlEraID, err := checkedInt64(uint64(eraID))
+	if err != nil {
+		return nil, err
+	}
 	rows, err := queries.GetEpochsByEra(
 		context.Background(),
-		sql.NullInt64{Int64: int64(eraID), Valid: true},
+		sql.NullInt64{Int64: sqlEraID, Valid: true},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get epochs by era: %w", err)

@@ -102,7 +102,7 @@ func (s *Store) SetNodeSettings(settings *types.NodeSettings) error {
 	if err != nil {
 		return err
 	}
-	rows, err := queries.insertNodeSettings(
+	_, err = queries.insertNodeSettings(
 		context.Background(),
 		settings.StorageMode,
 		settings.Network,
@@ -110,7 +110,12 @@ func (s *Store) SetNodeSettings(settings *types.NodeSettings) error {
 	if err != nil {
 		return fmt.Errorf("set node settings: insert: %w", err)
 	}
-	if rows > 0 || settings.Network == "" {
+	// Do not use RowsAffected to decide whether the row was newly inserted.
+	// MySQL's CLIENT_FOUND_ROWS mode reports one affected row for a duplicate
+	// no-op upsert, which would skip the legacy empty-network backfill.  The
+	// conditional UPDATE is harmless for a newly inserted row and preserves the
+	// immutable storage mode for existing rows.
+	if settings.Network == "" {
 		return nil
 	}
 	if _, err := queries.backfillNodeSettingsNetwork(

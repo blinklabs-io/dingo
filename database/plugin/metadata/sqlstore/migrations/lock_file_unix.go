@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -63,14 +64,14 @@ func (l *fileLocker) Acquire(
 		case <-ticker.C:
 		}
 	}
-	var released bool
+	var once sync.Once
+	var releaseErr error
 	return func() error {
-		if released {
-			return nil
-		}
-		released = true
-		unlockErr := unix.Flock(int(file.Fd()), unix.LOCK_UN)
-		closeErr := file.Close()
-		return errors.Join(unlockErr, closeErr)
+		once.Do(func() {
+			unlockErr := unix.Flock(int(file.Fd()), unix.LOCK_UN)
+			closeErr := file.Close()
+			releaseErr = errors.Join(unlockErr, closeErr)
+		})
+		return releaseErr
 	}, nil
 }

@@ -1509,9 +1509,9 @@ func createUtxoParams(
 		StakingKey:              utxo.StakingKey,
 		CredentialTag:           int64(utxo.CredentialTag),
 		DatumHash:               utxo.DatumHash,
-		SpentAtTxID:             []byte(utxo.SpentAtTxId),
-		ReferencedByTxID:        []byte(utxo.ReferencedByTxId),
-		CollateralByTxID:        []byte(utxo.CollateralByTxId),
+		SpentAtTxID:             utxo.SpentAtTxId,
+		ReferencedByTxID:        utxo.ReferencedByTxId,
+		CollateralByTxID:        utxo.CollateralByTxId,
 		AddedSlot: sql.NullInt64{
 			Int64: addedSlot,
 			Valid: true,

@@ -557,6 +557,11 @@ WHERE credential_tag = ? AND staking_key = ?`,
 		drep = nil
 		drepType = 0
 	}
+	if !next.active {
+		pool = nil
+		drep = nil
+		drepType = 0
+	}
 	if next.pool != nil {
 		pool = next.pool
 	}

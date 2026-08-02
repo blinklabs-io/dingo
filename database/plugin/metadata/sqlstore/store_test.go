@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
@@ -202,6 +203,42 @@ func TestGetPoolsBatchesAssociations(t *testing.T) {
 		require.Len(t, pool.Registration, 1)
 		require.Empty(t, pool.Retirement)
 	}
+}
+
+func TestImportPoolRegistrationFirstWriteWins(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	poolKey := lcommon.PoolKeyHash{}
+	poolKey[0] = 0x70
+	firstPool := &models.Pool{
+		PoolKeyHash: poolKey.Bytes(),
+		Pledge:      1,
+	}
+	firstRegistration := &models.PoolRegistration{
+		PoolKeyHash: poolKey.Bytes(),
+		MetadataUrl: "first",
+		AddedSlot:   7,
+		Pledge:      1,
+	}
+	require.NoError(t, store.ImportPool(firstPool, firstRegistration, nil))
+	secondPool := &models.Pool{
+		PoolKeyHash: poolKey.Bytes(),
+		Pledge:      9,
+	}
+	secondRegistration := &models.PoolRegistration{
+		PoolKeyHash: poolKey.Bytes(),
+		MetadataUrl: "second",
+		AddedSlot:   firstRegistration.AddedSlot,
+		Pledge:      9,
+	}
+	require.NoError(t, store.ImportPool(secondPool, secondRegistration, nil))
+	require.Equal(t, firstRegistration.ID, secondRegistration.ID)
+	loaded, err := store.GetPools([]lcommon.PoolKeyHash{poolKey}, nil)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	require.Len(t, loaded[0].Registration, 1)
+	require.Equal(t, "first", loaded[0].Registration[0].MetadataUrl)
+	require.Equal(t, types.Uint64(1), loaded[0].Registration[0].Pledge)
 }
 
 func TestTransactionRejectsUnsafeSavepoint(t *testing.T) {

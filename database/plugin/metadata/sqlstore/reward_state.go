@@ -198,7 +198,7 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 			if existing.Authoritative {
 				return nil
 			}
-			err = queries.UpdateFallbackRewardSnapshot(
+			updated, err := queries.UpdateFallbackRewardSnapshot(
 				context.Background(),
 				sqlitequery.UpdateFallbackRewardSnapshotParams{
 					TotalActiveStake:   params.TotalActiveStake,
@@ -213,7 +213,7 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 					SnapshotType:       params.SnapshotType,
 				},
 			)
-			if err == nil {
+			if err == nil && updated == 1 {
 				snapshot.ID = uint(existing.ID)
 				proceed = true
 			}

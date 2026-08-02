@@ -20,8 +20,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,6 +52,31 @@ func newManagementTestStore(t *testing.T) *Store {
 		require.NoError(t, store.Close())
 	})
 	return store
+}
+
+func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	poolKey := make([]byte, 28)
+	poolKey[0] = 1
+	vrfKey := make([]byte, 32)
+	vrfKey[0] = 2
+	pool := &models.Pool{PoolKeyHash: poolKey, VrfKeyHash: vrfKey}
+	registration := &models.PoolRegistration{PoolKeyHash: poolKey, VrfKeyHash: vrfKey, AddedSlot: 10}
+	require.NoError(t, store.ImportPool(pool, registration, nil))
+
+	// The pool remains in historical metadata, but a retirement effective in
+	// the current epoch must no longer reserve its VRF key.
+	require.NoError(t, store.RetirePools(nil, [][]byte{poolKey}, 1, 20))
+	require.NoError(t, store.SetEpoch(0, 1, nil, nil, nil, nil, 0, 1, 100, nil))
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip")},
+		BlockNumber: 1,
+	}, nil))
+	got, err := store.GetPoolByVrfKeyHash(vrfKey, nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
+
 }
 
 func TestCommitTimestamp(t *testing.T) {

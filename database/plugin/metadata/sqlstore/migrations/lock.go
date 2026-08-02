@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 )
 
@@ -50,13 +51,9 @@ func (l *processLocker) Acquire(
 		return nil, ctx.Err()
 	case <-l.token:
 	}
-	var released bool
+	var once sync.Once
 	return func() error {
-		if released {
-			return nil
-		}
-		released = true
-		l.token <- struct{}{}
+		once.Do(func() { l.token <- struct{}{} })
 		return nil
 	}, nil
 }
@@ -114,10 +111,7 @@ func (l *advisoryLocker) Acquire(
 			return err
 		}, nil
 	case "mysql":
-		timeoutSeconds := int64(0)
-		if l.timeout > 0 {
-			timeoutSeconds = int64(math.Ceil(l.timeout.Seconds()))
-		}
+		timeoutSeconds := mysqlLockTimeoutSeconds(l.timeout)
 		var acquired sql.NullInt64
 		if err := conn.QueryRowContext(
 			ctx,
@@ -152,4 +146,14 @@ func (l *advisoryLocker) Acquire(
 			l.dialect,
 		)
 	}
+}
+
+func mysqlLockTimeoutSeconds(timeout time.Duration) int64 {
+	if timeout <= 0 {
+		// GET_LOCK interprets a negative timeout as wait indefinitely.  Zero
+		// means a non-blocking try-lock, which would make an omitted timeout
+		// fail startup spuriously while another node is migrating.
+		return -1
+	}
+	return int64(math.Ceil(timeout.Seconds()))
 }

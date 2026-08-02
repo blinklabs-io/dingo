@@ -603,6 +603,20 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			params.TxID,
 			params.OutputIdx,
 		).Scan(&id)
+		if err == nil {
+			// Snapshot imports can create an output before its producer
+			// transaction is replayed. Once that transaction is known, fill in
+			// the provenance without overwriting an already-linked output.
+			_, err = db.ExecContext(context.Background(), `
+UPDATE utxo
+SET transaction_id = COALESCE(transaction_id, ?),
+    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+WHERE id = ?`,
+				params.TransactionID,
+				params.CollateralReturnForTxID,
+				id,
+			)
+		}
 	}
 	if err != nil {
 		return err

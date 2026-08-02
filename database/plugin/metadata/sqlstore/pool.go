@@ -201,23 +201,8 @@ func (s *Store) GetPool(
 	if err := s.loadPoolAssociations(db, pool, true); err != nil {
 		return nil, err
 	}
-	if !includeInactive && len(pool.Registration) == 0 {
-		return nil, nil
-	}
-	if !includeInactive && len(pool.Retirement) > 0 {
-		currentEpoch, ok, err := currentEpoch(db)
-		if err != nil {
-			return nil, err
-		}
-		if ok && pool.Retirement[0].Epoch <= currentEpoch {
-			latestRetirement, err := latestPoolEventIsRetirement(db, s.dialect, pool.ID)
-			if err != nil {
-				return nil, err
-			}
-			if latestRetirement {
-				return nil, nil
-			}
-		}
+	if !includeInactive {
+		return s.activePoolOrNil(db, pool)
 	}
 	return pool, nil
 }
@@ -230,7 +215,42 @@ func (s *Store) GetPoolByVrfKeyHash(
 	if err != nil {
 		return nil, err
 	}
-	return queryPool(db, "vrf_key_hash = ?", vrfKeyHash)
+	pool, err := queryPool(db, "vrf_key_hash = ?", vrfKeyHash)
+	if err != nil || pool == nil {
+		return pool, err
+	}
+	if err := s.loadPoolAssociations(db, pool, true); err != nil {
+		return nil, err
+	}
+	// This method backs LedgerView.IsVrfKeyInUse, whose contract is to report
+	// only currently registered pools. Retired registrations remain in the
+	// history but must not reserve their old VRF key indefinitely.
+	return s.activePoolOrNil(db, pool)
+}
+
+// activePoolOrNil applies the same current-registration/retirement semantics
+// used by GetPool(..., false) to other lookups that expose active pools.
+func (s *Store) activePoolOrNil(db queryer, pool *models.Pool) (*models.Pool, error) {
+	if len(pool.Registration) == 0 {
+		return nil, nil
+	}
+	if len(pool.Retirement) == 0 {
+		return pool, nil
+	}
+	current, ok, err := currentEpoch(db)
+	if err != nil {
+		return nil, err
+	}
+	if ok && pool.Retirement[0].Epoch <= current {
+		retired, err := latestPoolEventIsRetirement(db, s.dialect, pool.ID)
+		if err != nil {
+			return nil, err
+		}
+		if retired {
+			return nil, nil
+		}
+	}
+	return pool, nil
 }
 
 func (s *Store) GetPools(

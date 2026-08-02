@@ -187,6 +187,18 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	settings, err := store.GetNodeSettings()
 	require.NoError(t, err)
 	require.Equal(t, "integration", settings.Network)
+	// Simulate a legacy singleton row whose network was left empty.  The
+	// MySQL duplicate no-op upsert must still run the conditional backfill even
+	// when CLIENT_FOUND_ROWS makes the insert report one affected row.
+	_, err = db.Exec(dialect.Rebind("UPDATE node_settings SET network = '' WHERE id = 1"))
+	require.NoError(t, err)
+	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
+		StorageMode: types.StorageModeCore,
+		Network:     "legacy-fixed",
+	}))
+	settings, err = store.GetNodeSettings()
+	require.NoError(t, err)
+	require.Equal(t, "legacy-fixed", settings.Network)
 
 	account := &models.Account{
 		StakingKey:    []byte{1, 2, 3},

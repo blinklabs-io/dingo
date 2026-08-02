@@ -6,6 +6,8 @@ package sqlitequery
 
 import (
 	"database/sql"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 type Account struct {
@@ -453,9 +455,9 @@ type Utxo struct {
 	StakingKey              []byte
 	CredentialTag           int64
 	DatumHash               []byte
-	SpentAtTxID             []byte
-	ReferencedByTxID        []byte
-	CollateralByTxID        []byte
+	SpentAtTxID             types.NullableHash
+	ReferencedByTxID        types.NullableHash
+	CollateralByTxID        types.NullableHash
 	ID                      int64
 	AddedSlot               sql.NullInt64
 	DeletedSlot             sql.NullInt64
