@@ -1431,6 +1431,13 @@ The `LedgerView` interface provides query access to ledger state:
 - Protocol parameter queries
 - Stake distribution queries
 - Account registration checks
+- `DRepDelegation` lookup for a full, tag-aware stake credential. The lookup
+  returns the account's current DRep delegate (including the non-credential
+  always-abstain and always-no-confidence DRep types), or nil when the account
+  is absent or has no DRep delegation. This implements the
+  `common.DRepDelegationState` capability used by Conway protocol versions 10
+  and 11 to reject reward withdrawals whose stake credential is not delegated
+  to a DRep.
 
 ### Local State Query
 
@@ -1442,6 +1449,14 @@ stake credentials, current DRep vote delegatees, and active governance
 proposals. The handlers read current account state and registration history
 from the database; proposal results reconstruct the on-wire proposal procedure
 from the persisted action CBOR, return address, deposit, anchor, and votes.
+Supported query leaves also include epoch number, current protocol parameters,
+Shelley genesis configuration, UTxO-by-address/transaction-input lookups,
+stake-delegation deposits, the ledger peer snapshot, stake pools, DRep state,
+and account state. `GetCBOR` is a query combinator: it re-runs the wrapped
+inner query through the same dispatch path and returns the result as a tag-24
+CBOR-in-CBOR `Serialised` value, matching cardano-node. `GetStakeSnapshots`
+returns the mark/set/go stake for each requested pool (or the union of pools
+in those snapshots) and the corresponding totals.
 
 ## Chain Management
 
@@ -3223,7 +3238,7 @@ Key configuration areas:
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point, before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point, before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
 
@@ -3234,16 +3249,18 @@ Epoch N-2        Epoch N-1        Epoch N (current)
    |                |                |
    v                v                v
 [Go Snapshot] <- [Set Snapshot] <- [Mark Snapshot]
-   |                                    |
-   Used for leader election             Captured at
-   in current epoch                     epoch boundary
+   |                |                   |
+   Used for delayed  Used for leader    Captured at
+   reward calculation election in       epoch boundary
+                    current epoch
 ```
 
 - Mark Snapshot: Captured at the end of epoch N, becomes Set at epoch N+1
 - Set Snapshot: Previous Mark, becomes Go at epoch N+1
-- Go Snapshot: Conceptual active snapshot used for leader election (the Mark snapshot from 2 epochs back)
+- Go Snapshot: The older rotation snapshot used for delayed reward
+  calculation
 
-dingo storage indexing: dingo stores one `mark` row per epoch, indexed by the epoch at whose boundary it is captured — `mark[K]` holds the stake distribution as of the end of epoch K-1 (`SnapshotSlot = boundary(K) - 1`). The active (Go) distribution for leader election in epoch E is therefore the `mark[E-1]` row, so `praos.StakeSnapshotEpoch(E) = E-1`. Retrieving `mark[E-2]` would use end-of-E-3 stake — one epoch stale — which is harmless on a stable pool set but spuriously rejects epoch-E blocks from pools that first delegated in E-2 on a churny chain; that off-by-one is why the lookup is E-1 rather than E-2.
+dingo storage indexing: dingo stores one `mark` row per epoch, indexed by the epoch at whose boundary it is captured — `mark[K]` holds the stake distribution as of the end of epoch K-1 (`SnapshotSlot = boundary(K) - 1`). The leader-election (Set) distribution for epoch E is therefore the `mark[E-1]` row, so `praos.StakeSnapshotEpoch(E) = E-1`; the reward-calculation (Go) distribution is `mark[E-2]`. Retrieving `mark[E-2]` for leader election would use end-of-E-3 stake — one epoch stale — which is harmless on a stable pool set but spuriously rejects epoch-E blocks from pools that first delegated in E-2 on a churny chain; that off-by-one is why the lookup is E-1 rather than E-2.
 
 ### Stake Snapshot Components
 
