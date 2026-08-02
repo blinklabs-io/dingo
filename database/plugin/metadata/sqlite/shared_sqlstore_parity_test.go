@@ -134,7 +134,25 @@ type operationalSnapshot struct {
 func TestSharedSQLStoreOperationalParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseOperationalStore(t, store)
+	snapshot := exerciseOperationalStore(t, store)
+	require.Equal(t, uint64(7), snapshot.tip.BlockNumber)
+	require.Equal(t, ^uint64(0), uint64(snapshot.network.Treasury))
+	require.Equal(t, "value", snapshot.syncValue)
+	require.Empty(t, snapshot.deletedSync)
+	require.NotNil(t, snapshot.epoch)
+	require.Len(t, snapshot.epochs, 2)
+	require.Len(t, snapshot.nonces, 3)
+	require.Equal(t, []byte("nonce-1-updated"), snapshot.nonce)
+	require.Equal(t, uint64(16), snapshot.donations)
+	require.NotNil(t, snapshot.datum)
+	require.Len(t, snapshot.pparams, 1)
+	require.Len(t, snapshot.pparamUpdates, 2)
+	require.Nil(t, snapshot.committeeQuorum)
+	require.Len(t, snapshot.committeeMembers, 1)
+	require.Len(t, snapshot.allCommitteeMembers, 2)
+	require.NotNil(t, snapshot.networkRollback)
+	require.Len(t, snapshot.epochsRollback, 1)
+	require.Equal(t, uint64(7), snapshot.donationsRollback)
 }
 
 func exerciseOperationalStore(
