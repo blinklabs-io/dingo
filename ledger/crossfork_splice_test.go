@@ -365,6 +365,41 @@ func TestContinuationAuditBudgetIsBounded(t *testing.T) {
 	assert.Equal(t, continuationAuditBlockBudget, window.blocksSeen)
 }
 
+// TestContinuationAuditIgnoresAbandonedFetchedBodies verifies that a body
+// delivered after a fork restart is not allowed to seed the producer window.
+// The body fails chain insertion, so the audit must not inspect it.
+func TestContinuationAuditIgnoresAbandonedFetchedBodies(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	var logBuf strings.Builder
+	ls.config.Logger = slog.New(slog.NewJSONHandler(&logBuf, nil))
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "test rollback")
+
+	missing := mustSpliceAuditInput(t, testHashBytes("stale-producer"), 0)
+	stale := &spliceAuditBlock{
+		slot: 30,
+		hash: lcommon.NewBlake2b256(testHashBytes("stale-body")),
+		prevHash: lcommon.NewBlake2b256(
+			testHashBytes("abandoned-parent"),
+		),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(t, testHashBytes("stale-spender"),
+				[]lcommon.TransactionInput{missing}),
+		},
+	}
+	ls.pendingBlockfetchEvents = []BlockfetchEvent{{
+		ConnectionId: fixture.connId,
+		Block:        stale,
+		Point:        ocommon.NewPoint(stale.slot, stale.hash.Bytes()),
+	}}
+
+	require.NoError(t, ls.flushPendingBlockfetchBlocks())
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	assert.Equal(t, 0, window.blocksSeen)
+	assert.NotContains(t, logBuf.String(), "no producer on the local applied chain")
+}
+
 // findLogRecord returns the first JSON log record whose message matches msg.
 func findLogRecord(
 	t *testing.T,

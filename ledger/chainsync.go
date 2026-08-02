@@ -2478,6 +2478,14 @@ func (ls *LedgerState) tryResolveFork(
 		// view or we have not yet seen enough of its ancestry to resolve
 		// the fork locally. Request a chainsync re-sync so the intersect
 		// protocol finds the common point with the peer.
+		// Keep the candidate rollback point across the reset/reconnect
+		// cycle; otherwise repeated stale-ancestor resyncs lose the only
+		// point-keyed evidence that the same divergence is recurring.
+		ls.reportUnrecoverableRollbackIfStuck(
+			e.Point,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			e.ConnectionId,
+		)
 		ls.config.Logger.Debug(
 			"common ancestor not found locally, triggering chainsync re-sync",
 			"component", "ledger",
@@ -2671,6 +2679,10 @@ func (ls *LedgerState) tryResolveFork(
 			)
 		}
 	}
+	// This fork rollback is genuine forward progress. Clear evidence from
+	// stale-ancestor / failed-rollback cycles so an unrelated later fork does
+	// not inherit the old divergence count.
+	ls.clearUnrecoverableRollbacks()
 
 	// Mark state as rollback so the next block header event logs
 	// "switched to fork" and increments the fork metric.
@@ -2800,9 +2812,6 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 			}
 		}
 	}
-	// Cross-fork splice diagnostic (#3005). No-op unless a recent local
-	// rollback armed it; see ledger/continuation_audit.go.
-	ls.auditContinuationBlock(e, validationEnabled)
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
@@ -3018,6 +3027,12 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 			nil,
 		)
 		if addBlockErr == nil {
+			// Audit only after the body has extended the queued chain. A body
+			// from an abandoned fetch may still be delivered after a fork
+			// restart; auditing it here would poison producedTxs with stale
+			// fork transactions.
+			validationEnabled, _ := ls.validationStateSnapshot()
+			ls.auditContinuationBlock(pendingEvent, validationEnabled)
 			ls.checkSlotBattle(pendingEvent, nil)
 			continue
 		}

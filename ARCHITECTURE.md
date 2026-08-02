@@ -2011,6 +2011,11 @@ paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
 the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
+The continuation audit is run only after a fetched body is accepted by the
+queued primary chain, so late bodies from an abandoned fetch cannot seed its
+producer window. Its diagnostic database probes are also capped per block
+while the blockfetch pipeline lock is held; this keeps the audit bounded and
+non-blocking for pathological transaction counts.
 The unresolved-producer fallback also tracks the applied ledger high-water
 mark across attempts. Different candidate continuations can move the failing
 block forward slightly while rebuilding to the same applied tip, so failure

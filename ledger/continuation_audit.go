@@ -54,6 +54,11 @@ const (
 	// continuationAuditMaxReportsPerBlock caps log volume for a body with
 	// many unresolvable inputs. The first few identify the fork just as well.
 	continuationAuditMaxReportsPerBlock = 4
+	// continuationAuditMaxInputsPerBlock bounds diagnostic database work while
+	// the chainsync/blockfetch pipeline mutex is held. The audit is diagnostic,
+	// so truncating a pathological block is preferable to delaying the
+	// blockfetch pipeline behind unbounded per-input probes.
+	continuationAuditMaxInputsPerBlock = 32
 )
 
 // continuationAuditWindow is the state of one armed audit run. It is published
@@ -144,8 +149,13 @@ func (ls *LedgerState) auditContinuationBlock(
 		window.producedTxs[string(tx.Hash().Bytes())] = struct{}{}
 	}
 	reports := 0
+	inputsAudited := 0
 	for _, tx := range txs {
 		for _, input := range collectReferencedInputs(tx) {
+			if inputsAudited >= continuationAuditMaxInputsPerBlock {
+				return
+			}
+			inputsAudited++
 			if reports >= continuationAuditMaxReportsPerBlock {
 				return
 			}
