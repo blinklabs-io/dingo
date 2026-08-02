@@ -246,3 +246,21 @@ INSERT INTO plutus_data (transaction_id,data) VALUES (999,X'01')`)
 	).Scan(&indexCount))
 	require.Zero(t, indexCount)
 }
+
+func TestAdoptSQLiteV1RejectsUnknownSchemaBeforeReferenceCopy(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	_, err := db.Exec("CREATE TABLE mystery (id INTEGER PRIMARY KEY)")
+	require.NoError(t, err)
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, conn.Close()) })
+
+	err = adoptSQLiteV1(context.Background(), conn, "sqlite")
+	require.ErrorIs(t, err, ErrLegacySchema)
+	var referenceTableCount int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'utxo_reference_input'",
+	).Scan(&referenceTableCount))
+	require.Zero(t, referenceTableCount)
+}

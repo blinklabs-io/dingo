@@ -383,27 +383,6 @@ func adoptSQLiteV1(
 	if dialect != "sqlite" {
 		return fmt.Errorf("SQLite version-1 adoption called for %q", dialect)
 	}
-	// Reference inputs used to be represented by the single
-	// utxo.referenced_by_tx_id column. Preserve that legacy edge while adding
-	// the many-to-many association required when multiple transactions reuse a
-	// reference UTxO.
-	if _, err := conn.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS utxo_reference_input (
-    utxo_id INTEGER NOT NULL,
-    transaction_hash BLOB NOT NULL,
-    PRIMARY KEY (utxo_id, transaction_hash),
-    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_utxo_reference_input_tx
-    ON utxo_reference_input(transaction_hash);`); err != nil {
-		return fmt.Errorf("create reference-input association table: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx, `
-INSERT OR IGNORE INTO utxo_reference_input (utxo_id, transaction_hash)
-SELECT id, referenced_by_tx_id FROM utxo
-WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`); err != nil {
-		return fmt.Errorf("adopt legacy reference inputs: %w", err)
-	}
 	// The GORM provider performed these repairs before AutoMigrate created
 	// v1's unique indexes and cascade foreign keys.  CREATE ... IF NOT EXISTS
 	// cannot repair an existing index or constraint, so keep the compatibility
@@ -488,6 +467,29 @@ WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`); err
 				strings.Join(missing, ", "),
 			)
 		}
+	}
+	// Reference inputs used to be represented by the single
+	// utxo.referenced_by_tx_id column. Preserve that legacy edge while adding
+	// the many-to-many association required when multiple transactions reuse a
+	// reference UTxO. Do this only after validating the full legacy contract so
+	// unsupported schemas report ErrLegacySchema instead of a misleading SQL
+	// "no such table/column" error.
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS utxo_reference_input (
+    utxo_id INTEGER NOT NULL,
+    transaction_hash BLOB NOT NULL,
+    PRIMARY KEY (utxo_id, transaction_hash),
+    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_utxo_reference_input_tx
+    ON utxo_reference_input(transaction_hash);`); err != nil {
+		return fmt.Errorf("create reference-input association table: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT OR IGNORE INTO utxo_reference_input (utxo_id, transaction_hash)
+SELECT id, referenced_by_tx_id FROM utxo
+WHERE referenced_by_tx_id IS NOT NULL AND length(referenced_by_tx_id) > 0`); err != nil {
+		return fmt.Errorf("adopt legacy reference inputs: %w", err)
 	}
 	if err := repairSQLiteV1Indexes(ctx, conn); err != nil {
 		return err
