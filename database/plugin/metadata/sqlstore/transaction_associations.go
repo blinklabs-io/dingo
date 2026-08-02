@@ -225,9 +225,13 @@ func (s *Store) transactionIDRows(db queryer, columns, table string, ids []any, 
 			return err
 		}
 		err = fn(rows)
+		rowsErr := rows.Err()
 		closeErr := rows.Close()
 		if err != nil {
 			return err
+		}
+		if rowsErr != nil {
+			return rowsErr
 		}
 		if closeErr != nil {
 			return closeErr

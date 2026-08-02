@@ -194,7 +194,7 @@ WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
 		ref := historicalRewardKey{tag: tag, key: string(key)}
 		if ^uint64(0)-total[ref] < value {
 			rows.Close()
-			return nil, fmt.Errorf("historical reward credit overflow")
+			return nil, errors.New("historical reward credit overflow")
 		}
 		total[ref] += value
 		withdrawal, hasWithdrawal := withdrawals[ref]
@@ -202,7 +202,7 @@ WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
 			(addedSlot == withdrawal.slot && id < withdrawal.id)) {
 			if ^uint64(0)-beforeWithdrawal[ref] < value {
 				rows.Close()
-				return nil, fmt.Errorf("historical reward credit overflow")
+				return nil, errors.New("historical reward credit overflow")
 			}
 			beforeWithdrawal[ref] += value
 		}
@@ -221,7 +221,7 @@ WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
 	}
 	for ref, withdrawal := range withdrawals {
 		if beforeWithdrawal[ref] > withdrawal.previous {
-			return nil, fmt.Errorf("historical reward underflow")
+			return nil, errors.New("historical reward underflow")
 		}
 		ret[ref] = withdrawal.previous - beforeWithdrawal[ref]
 	}
@@ -231,7 +231,7 @@ WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
 		}
 		reward := ret[ref]
 		if credits > reward {
-			return nil, fmt.Errorf("historical reward underflow")
+			return nil, errors.New("historical reward underflow")
 		}
 		ret[ref] = reward - credits
 	}
@@ -385,7 +385,7 @@ FROM active_delegator_stake`,
 				}
 				if ^uint64(0)-amounts[ref] < value {
 					rows.Close()
-					return nil, nil, fmt.Errorf("historical stake overflow")
+					return nil, nil, errors.New("historical stake overflow")
 				}
 				amounts[ref] += value
 			}
@@ -405,13 +405,13 @@ FROM active_delegator_stake`,
 			stake := amount
 			reward := rewardsByCredential[historicalRewardKey{tag: ref.tag, key: ref.key}]
 			if ^uint64(0)-stake < reward {
-				return nil, nil, fmt.Errorf("historical stake overflow")
+				return nil, nil, errors.New("historical stake overflow")
 			} else {
 				stake += reward
 			}
 			delegators[ref.pool]++
 			if ^uint64(0)-stakes[ref.pool] < stake {
-				return nil, nil, fmt.Errorf("historical stake overflow")
+				return nil, nil, errors.New("historical stake overflow")
 			}
 			stakes[ref.pool] += stake
 		}
@@ -482,7 +482,7 @@ FROM active_delegator_stake`,
 				}
 				if ^uint64(0)-amounts[ref] < value {
 					rows.Close()
-					return nil, fmt.Errorf("historical stake overflow")
+					return nil, errors.New("historical stake overflow")
 				}
 				amounts[ref] += value
 			}
@@ -501,7 +501,7 @@ FROM active_delegator_stake`,
 		for ref, amount := range amounts {
 			reward := rewardsByCredential[historicalRewardKey{tag: 0, key: ref.key}]
 			if ^uint64(0)-amount < reward {
-				return nil, fmt.Errorf("historical stake overflow")
+				return nil, errors.New("historical stake overflow")
 			}
 			stake := amount + reward
 			ret[types.PoolCredentialStakeKey([]byte(ref.pool), 0, []byte(ref.key))] = stake
@@ -593,7 +593,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 				}
 				if ^uint64(0)-amountByInput[ref] < value {
 					rows.Close()
-					return nil, fmt.Errorf("historical stake overflow")
+					return nil, errors.New("historical stake overflow")
 				}
 				amountByInput[ref] += value
 			}
@@ -613,7 +613,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 			stake := amount
 			reward := rewardsByCredential[historicalRewardKey{tag: ref.tag, key: ref.key}]
 			if ^uint64(0)-stake < reward {
-				return nil, fmt.Errorf("historical stake overflow")
+				return nil, errors.New("historical stake overflow")
 			}
 			stake += reward
 			if stake == 0 {

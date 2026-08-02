@@ -32,10 +32,19 @@ VALUES ('a', '61', 'p', 'f1', 1, 10, '18446744073709551615'),
 		"second": {{ID: 20}},
 	}
 	require.NoError(t, store.loadUtxoAssetsBatch(store.writeDB, utxos))
-	require.Len(t, utxos["first"][0].Assets, 1)
-	require.Equal(t, uint64(math.MaxUint64), uint64(utxos["first"][0].Assets[0].Amount))
-	require.Len(t, utxos["second"][0].Assets, 1)
-	require.Equal(t, uint64(7), uint64(utxos["second"][0].Assets[0].Amount))
+	first := utxos["first"]
+	second := utxos["second"]
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatal("expected hydrated UTxOs")
+	}
+	if len(first[0].Assets) == 0 {
+		t.Fatal("expected first asset")
+	}
+	require.Equal(t, uint64(math.MaxUint64), uint64(first[0].Assets[0].Amount))
+	if len(second[0].Assets) == 0 {
+		t.Fatal("expected second asset")
+	}
+	require.Equal(t, uint64(7), uint64(second[0].Assets[0].Amount))
 }
 
 func TestLoadUtxoAssetsDeduplicatesIDsAcrossChunks(t *testing.T) {

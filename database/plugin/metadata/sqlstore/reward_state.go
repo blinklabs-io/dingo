@@ -698,6 +698,7 @@ FROM reward_account_output WHERE `+strings.Join(predicates, " OR "), lookupArgs.
 	if err != nil {
 		return nil, fmt.Errorf("lookup reward account output batch IDs: %w", err)
 	}
+	defer rows.Close()
 	ids := make(map[rewardAccountOutputKey]int64, len(params))
 	for rows.Next() {
 		var id, epoch, credentialTag int64

@@ -153,7 +153,7 @@ graph TB
     subgraph Storage
         DB["Database<br/><i>database/</i>"]
         Blob["BlobStore<br/>badger / s3 / gcs"]
-        Meta["MetadataStore<br/>SQLite"]
+        Meta["MetadataStore<br/>SQLite / PostgreSQL / MySQL"]
     end
 
     subgraph "External Interfaces"

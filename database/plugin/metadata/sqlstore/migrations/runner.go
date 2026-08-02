@@ -619,10 +619,6 @@ func execDDL(
 	return nil
 }
 
-func isDDLAlreadyApplied(err error) bool {
-	return isMySQLDDLAlreadyApplied(context.Background(), nil, "", err)
-}
-
 func boundedCursor(cursor string) string {
 	const maxCursorLogBytes = 256
 	if len(cursor) <= maxCursorLogBytes {

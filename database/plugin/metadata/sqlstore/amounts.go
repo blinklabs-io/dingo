@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -48,7 +49,7 @@ func sumUint64Rows(db queryer, query string, args ...any) (uint64, error) {
 			return 0, err
 		}
 		if ^uint64(0)-total < value {
-			return 0, fmt.Errorf("amount sum overflow")
+			return 0, errors.New("amount sum overflow")
 		}
 		total += value
 	}

@@ -26,22 +26,9 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
-func isMySQLDDLAlreadyApplied(_ context.Context, _ *sql.Conn, _ string, err error) bool {
-	var mysqlErr *mysqldriver.MySQLError
-	if !errors.As(err, &mysqlErr) {
-		return false
-	}
-	switch mysqlErr.Number {
-	case 1061: // ER_DUP_KEYNAME
-		return true
-	case 1826: // ER_DUP_FKNAME
-		return true
-	default:
-		return false
-	}
-}
-
-var mysqlDDLObjectPattern = regexp.MustCompile("(?is)(?:INDEX|KEY)(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?|CONSTRAINT\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?")
+var mysqlDDLObjectPattern = regexp.MustCompile(
+	"(?is)(?:INDEX|KEY)(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?|CONSTRAINT\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?",
+)
 var mysqlIndexDefinitionPattern = regexp.MustCompile("(?is)^CREATE\\s+(UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s+ON\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s*\\(([^)]*)\\)")
 
 // isMySQLDDLAlreadyApplied verifies that the duplicate object named by the

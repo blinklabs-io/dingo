@@ -392,7 +392,7 @@ func (s *Store) RewardLiveStakeNeedsBackfill(
 		ref := credentialKey{tag: tag, key: string(key)}
 		if ^uint64(0)-utxoStakes[ref] < value {
 			utxoRows.Close()
-			return false, fmt.Errorf("reward live stake UTxO overflow")
+			return false, errors.New("reward live stake UTxO overflow")
 		}
 		utxoStakes[ref] += value
 	}
@@ -442,7 +442,7 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 			}
 		}
 		if ^uint64(0)-utxoStake < rewardStake {
-			return false, fmt.Errorf("reward live stake overflow")
+			return false, errors.New("reward live stake overflow")
 		}
 		total := utxoStake + rewardStake
 		if !id.Valid || !version.Valid || uint64(version.Int64) != uint64(models.RewardStakeCalculationVersion) || !storedUtxo.Valid || !storedReward.Valid || !storedTotal.Valid {

@@ -110,7 +110,7 @@ flowchart LR
     Txn[database.Txn]
     Metadata[metadata.MetadataStore]
     Blob[blob.BlobStore]
-    SQL[(SQLite metadata DB)]
+    SQL[(SQLite / PostgreSQL / MySQL metadata DB)]
     KV[(Badger / GCS / S3 blob store)]
 
     Node --> DB

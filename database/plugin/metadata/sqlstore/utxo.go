@@ -390,6 +390,7 @@ WHERE deleted_slot = 0 AND `+addressPredicate), args...)
 	if err != nil {
 		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
 	}
+	defer rows.Close()
 	for rows.Next() {
 		ret.UtxoCount++
 		var raw sql.NullString
@@ -1343,6 +1344,7 @@ func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
 		if err != nil {
 			return err
 		}
+		defer rows.Close()
 		for rows.Next() {
 			var name, nameHex, policyID, fingerprint []byte
 			var id int64
