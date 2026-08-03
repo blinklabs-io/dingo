@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -306,6 +307,17 @@ func (n *Node) initBlockForger(
 		leiosEBCaster = n.ouroboros
 		leiosMempool = mempoolAdapter
 	}
+	blockForged := n.ledgerState.RecordForgedBlock
+	if n.ouroboros != nil {
+		blockForged = func(block gledger.Block, blockCbor []byte, latency time.Duration) {
+			n.ledgerState.RecordForgedBlock(block, blockCbor, latency)
+			if header, ok := block.Header().(*gdijkstra.DijkstraBlockHeader); ok {
+				if _, _, announces := header.LeiosAnnouncement(); announces {
+					n.ouroboros.EnqueueLeiosBlockAnnouncement(header.Cbor())
+				}
+			}
+		}
+	}
 
 	// Wire self-validation when the operator opts in. The validator runs
 	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
@@ -324,7 +336,7 @@ func (n *Node) initBlockForger(
 		LeaderChecker:                   election,
 		BlockBuilder:                    builder,
 		BlockBroadcaster:                broadcaster,
-		BlockForged:                     n.ledgerState.RecordForgedBlock,
+		BlockForged:                     blockForged,
 		SlotClock:                       slotClock,
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,

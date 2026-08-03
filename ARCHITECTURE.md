@@ -1267,8 +1267,33 @@ ledger-state snapshot importer nevertheless recognizes the matching Dijkstra
 fields correctly; malformed key/proof lengths reject that pool state. The same
 prototype release also changes `MsgLeiosBlockAnnouncement` from a null
 placeholder to the full ranking-block header. The LeiosNotify client accepts
-that header and intentionally ignores it until ranking-header announcements
-feed a Dingo pipeline; chain-sync remains the source of ranking blocks.
+that header. In prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
+requires a valid `leios_announcement`, rejects future or more-than-ten-minute-
+old announcements, and rejects a repeated endorser-block hash whose size
+differs from an earlier observation. A valid announcement is relayed only
+while it is at most five minutes old; older-but-still-valid announcements are
+consumed without further propagation. Accepted headers retain their original
+CBOR; headers within the relay-age bound enter the same per-connection delivery
+log as locally forged announcements, so followers consume them and relays
+diffuse them without
+changing the block wire format. Duplicate observations and a third distinct
+announcement for one election are suppressed, and accepted traces log the
+observed slot and lateness. Before an announcement can affect the cross-peer
+EB-size invariant, the decoded ranking header is verified against the current
+ledger state, including VRF/KES and leader eligibility. Announcements are
+rejected when ledger state is unavailable, and slot/freshness and structural
+checks run before cryptographic validation. Header-only validation does not
+advance the shared epoch cache. If the required epoch data is not cached yet,
+the announcement is retained in a bounded pending set and retried after chain
+updates or epoch transitions; it is never relayed until validation succeeds.
+Deduplication state is
+pruned when its announced slot leaves the ten-minute acceptance window,
+including the EB-size and per-election indexes. The Go dependency has no
+separate Lookahead state type; its bounded pipelined request window is configured to the protocol
+maximum, providing the w31 request-window behavior while remaining compatible
+with w30 peers that accept and ignore the announcement payload. Full consensus
+validation of the announced endorser block remains outside LeiosNotify and is
+intentionally handled by the existing leios-fetch/ledger paths.
 Dijkstra blocks and transactions retain their original wire CBOR when
 re-encoded, avoiding the definite/indefinite-list rewrite that
 prototype-2026w30 exposed in the Haskell ledger bridge.

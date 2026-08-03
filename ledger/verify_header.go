@@ -60,6 +60,13 @@ var (
 	errLeaderStakeSnapshotUnavailable = errors.New("leader stake snapshot unavailable")
 )
 
+// IsHeaderVerificationDeferred reports whether header-only verification could
+// not proceed because required ledger state, epoch data, or stake snapshot
+// data is not available yet.
+func IsHeaderVerificationDeferred(err error) bool {
+	return errors.Is(err, errHeaderVerificationDeferred)
+}
+
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
 func (b headerOnlyBlock) Type() int                  { return 0 }
 func (b headerOnlyBlock) Transactions() []lcommon.Transaction {
@@ -84,6 +91,21 @@ func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) er
 		false,
 	)
 	return err
+}
+
+// ValidateBlockHeaderCrypto validates a header using the current ledger
+// state.  It is used by protocol handlers that receive a header without its
+// block body (for example LeiosNotify announcements) and must not let an
+// unauthenticated header influence shared state.
+func (ls *LedgerState) ValidateBlockHeaderCrypto(header ledger.BlockHeader) error {
+	if header == nil {
+		return errors.New("nil block header")
+	}
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+		headerOnlyBlock{header: header},
+		false,
+		false,
+	)
 }
 
 // verifyBlockHeader performs cryptographic verification of a block header.
