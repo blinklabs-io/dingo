@@ -927,3 +927,40 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unexpected signed entity kind")
 }
+
+// TestFindImmutableDirRefusesSymlinkedExtractDir covers the extraction
+// directory itself being a symlink.
+//
+// The per-candidate checks below it never see this: the fast path asks whether
+// the extraction directory holds chunk files directly, and following a symlink
+// there reports a cached snapshot that this node never extracted. Bootstrap
+// then skips extraction entirely and loads the chain from the link's target,
+// which is the outcome the symlink refusal exists to prevent.
+func TestFindImmutableDirRefusesSymlinkedExtractDir(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outside, "00000.chunk"), []byte("theirs"), 0o640,
+	))
+
+	extractDir := filepath.Join(root, "immutable-abc123")
+	requireSymlinkSupport(t, "outside", extractDir)
+
+	assert.Empty(t, findImmutableDir(extractDir),
+		"a symlinked extraction directory is not a cached snapshot")
+}
+
+// hasChunkFiles reports whether dir holds chunk files.
+//
+// Test-only. The production lookups resolve a candidate through a handle on
+// its parent, because there the directory is derived inside the download
+// directory and may have been tampered with. These assertions inspect a
+// directory the test itself created, so a plain read says what they mean.
+func hasChunkFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	return holdsChunkFile(entries)
+}

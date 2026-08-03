@@ -275,8 +275,12 @@ func bootstrapV2(
 			err,
 		)
 	}
+	// Both components are checked, not just the last one. hasChunkFiles vets
+	// the directory it is handed against its own parent, which here is the
+	// extraction directory — itself derived inside the download directory and
+	// no more trustworthy than what it contains.
 	immutableDir := filepath.Join(extractDir, "immutable")
-	if !hasChunkFiles(immutableDir) {
+	if !hasChunkFilesUnder(extractDir, "immutable") {
 		return nil, fmt.Errorf(
 			"immutable DB directory not found at %s after download",
 			immutableDir,

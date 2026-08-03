@@ -181,6 +181,19 @@ func openExtractRoot(parentRoot *os.Root, name string) (*os.Root, error) {
 	if err := mkdirExtracted(parentRoot, name); err != nil {
 		return nil, err
 	}
+	return openVerifiedRoot(parentRoot, name)
+}
+
+// openVerifiedRoot opens an existing name under parentRoot and confirms the
+// handle refers to the entry that name refers to.
+//
+// Opening cannot be made to reject a symlink outright — Root follows one whose
+// target stays inside the root, and Go offers no directory open keyed on
+// O_NOFOLLOW — so the handle is compared against the entry afterwards instead.
+// A writer who substitutes the name between the open and the comparison leaves
+// the two disagreeing, which is what this rejects; a symlink present
+// beforehand is caught by the same comparison.
+func openVerifiedRoot(parentRoot *os.Root, name string) (*os.Root, error) {
 	root, err := parentRoot.OpenRoot(name)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -211,6 +224,28 @@ func openExtractRoot(parentRoot *os.Root, name string) (*os.Root, error) {
 		)
 	}
 	return root, nil
+}
+
+// openVerifiedDir opens an existing directory through a handle on its parent,
+// refusing a symlink or a substituted entry at the final component.
+//
+// This is for the paths that decide whether a previous run already produced a
+// usable tree. Those directories are derived inside the download directory
+// rather than chosen by the operator, so a symlink at one of them is planted
+// content rather than a layout decision, and following it would hand back a
+// tree this node never extracted. Directories *above* the candidate are the
+// operator's and are resolved normally, matching where extraction draws the
+// same line.
+func openVerifiedDir(dir string) (*os.Root, error) {
+	clean := filepath.Clean(dir)
+	parentRoot, err := os.OpenRoot(filepath.Dir(clean))
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: opening %s: %w", ErrExtractUnsafePath, dir, err,
+		)
+	}
+	defer parentRoot.Close()
+	return openVerifiedRoot(parentRoot, filepath.Base(clean))
 }
 
 // dirIsEmpty reports whether dir exists and contains no entries. A missing

@@ -994,3 +994,55 @@ func TestExtractPublishSurvivesDestinationToFileSubstitution(t *testing.T) {
 	require.NoError(t, err, "the substituted file must not be unlinked")
 	assert.Equal(t, "theirs", string(data))
 }
+
+// TestOpenVerifiedDirRefusesSymlinkedDir covers the cache-reuse fast paths,
+// which decide whether a previous run already produced a usable tree.
+//
+// Those directories are derived inside the download directory rather than
+// chosen by the operator, so a symlink at one of them is planted content, not
+// a layout decision. Following it hands back a directory somebody else chose
+// and skips the extraction that would have replaced it.
+func TestOpenVerifiedDirRefusesSymlinkedDir(t *testing.T) {
+	parent := t.TempDir()
+	outside := filepath.Join(parent, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	candidate := filepath.Join(parent, "extracted")
+	requireSymlinkSupport(t, "outside", candidate)
+
+	_, err := openVerifiedDir(candidate)
+	require.ErrorIs(t, err, ErrExtractUnsafePath)
+}
+
+// TestOpenVerifiedDirOpensRealDir pins that an ordinary directory still opens,
+// and that the handle refers to it.
+func TestOpenVerifiedDirOpensRealDir(t *testing.T) {
+	parent := t.TempDir()
+	candidate := filepath.Join(parent, "extracted")
+	require.NoError(t, os.MkdirAll(candidate, 0o750))
+
+	root, err := openVerifiedDir(candidate)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	opened, err := root.Stat(".")
+	require.NoError(t, err)
+	want, err := os.Lstat(candidate)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(opened, want))
+}
+
+// TestOpenVerifiedDirAllowsSymlinkedAncestor keeps the boundary where the rest
+// of the package puts it: the directories above a candidate belong to the
+// operator, and rejecting them would break ordinary layouts rather than
+// attackers.
+func TestOpenVerifiedDirAllowsSymlinkedAncestor(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	require.NoError(t, os.MkdirAll(filepath.Join(real, "extracted"), 0o750))
+	linked := filepath.Join(root, "linked")
+	requireSymlinkSupport(t, real, linked)
+
+	opened, err := openVerifiedDir(filepath.Join(linked, "extracted"))
+	require.NoError(t, err)
+	_ = opened.Close()
+}

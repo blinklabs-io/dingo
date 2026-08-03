@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -749,16 +750,19 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 // absent instead re-extracts it from the verified archive, which discards the
 // tampered tree.
 func findImmutableDir(extractDir string) string {
-	// extractDir is the operator's own path, so it is used as given;
-	// everything below it is extracted content and is not.
-	if hasChunkFiles(extractDir) {
-		return extractDir
-	}
-	root, err := os.OpenRoot(extractDir)
+	// The extraction directory is checked before it is read, not after. It is
+	// derived inside the download directory rather than chosen by the
+	// operator, so a symlink there is planted content like anything else
+	// below it — and asking whether it holds chunk files by pathname would
+	// follow it and report a cached snapshot this node never extracted.
+	root, err := openVerifiedDir(extractDir)
 	if err != nil {
 		return ""
 	}
 	defer root.Close()
+	if hasChunkFilesIn(root, ".") {
+		return extractDir
+	}
 	chunkDir := func(rel string) string {
 		if err := assertNoSymlinkComponents(root, rel); err != nil {
 			return ""
@@ -1031,14 +1035,25 @@ func VerifyCertificateChainWithMode(
 	)
 }
 
-// hasChunkFiles checks if a directory contains ImmutableDB chunk
-// files (*.chunk).
-func hasChunkFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
+// hasChunkFilesUnder reports whether rel, beneath base, is a directory holding
+// chunk files, with both base and rel verified rather than only the last one.
+//
+// Verifying only the last component is enough when the one above it is the
+// operator's. Where that one is itself derived content — the extraction
+// directory holding `immutable`, say — it has to be vetted too, or a symlink
+// one level up carries the whole lookup.
+func hasChunkFilesUnder(base, rel string) bool {
+	baseRoot, err := openVerifiedDir(base)
 	if err != nil {
 		return false
 	}
-	return holdsChunkFile(entries)
+	defer baseRoot.Close()
+	root, err := openVerifiedRoot(baseRoot, rel)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	return hasChunkFilesIn(root, ".")
 }
 
 // hasChunkFilesIn reports whether rel, resolved through root, is a directory
@@ -1082,7 +1097,18 @@ func isFileComplete(path string, expectedSize int64) bool {
 // It looks for any file named "state" in subdirectories, which is
 // the UTxO-HD layout: ledger/<slot>/state.
 func hasLedgerFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
+	root, err := openVerifiedDir(dir)
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	return hasLedgerFilesIn(root)
+}
+
+// hasLedgerFilesIn is hasLedgerFiles resolved through an open handle on the
+// directory, so the tree that is read is the one that was vetted.
+func hasLedgerFilesIn(root *os.Root) bool {
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return false
 	}
@@ -1092,8 +1118,7 @@ func hasLedgerFiles(dir string) bool {
 		}
 		// Check for ledger/<subdir>/state or
 		// ledger/<subdir>/<slot>/state
-		sub := filepath.Join(dir, e.Name())
-		if hasFileInSubdirs(sub, "state") {
+		if hasFileInSubdirsIn(root, e.Name(), "state") {
 			return true
 		}
 	}
@@ -1109,14 +1134,17 @@ func truncateDigest(digest string) string {
 	return digest
 }
 
-// hasFileInSubdirs checks if a file with the given name exists in
-// dir or any of its immediate subdirectories (one level deep).
-func hasFileInSubdirs(dir string, name string) bool {
-	target := filepath.Join(dir, name)
-	if fi, err := os.Stat(target); err == nil && !fi.IsDir() {
+// hasFileInSubdirsIn is hasFileInSubdirs resolved through an open handle on an
+// ancestor, so every lookup stays inside the tree that was vetted.
+func hasFileInSubdirsIn(root *os.Root, dir, name string) bool {
+	isFile := func(rel string) bool {
+		fi, err := root.Stat(rel)
+		return err == nil && !fi.IsDir()
+	}
+	if isFile(path.Join(dir, name)) {
 		return true
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := fs.ReadDir(root.FS(), dir)
 	if err != nil {
 		return false
 	}
@@ -1124,9 +1152,7 @@ func hasFileInSubdirs(dir string, name string) bool {
 		if !e.IsDir() {
 			continue
 		}
-		target := filepath.Join(dir, e.Name(), name)
-		if fi, err := os.Stat(target); err == nil &&
-			!fi.IsDir() {
+		if isFile(path.Join(dir, e.Name(), name)) {
 			return true
 		}
 	}
