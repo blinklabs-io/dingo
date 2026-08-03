@@ -103,8 +103,8 @@ You do not need to `make build` Dingo locally — Compose builds the Dingo
 node images (`dingo-1`/`dingo-2`/`dingo-3`/`dingo-relay` in dingo mode,
 `dingo-producer` in conformance mode) directly from the repo by referencing
 the top-level `Dockerfile` (`build.context: ../../..` in
-`docker-compose.yml`). The build runs `make build` inside
-`ghcr.io/blinklabs-io/go:1.26.1-1` against your working tree, so any
+`docker-compose.yml`). The build runs `make build` inside the Go builder
+image pinned by that `Dockerfile` against your working tree, so any
 uncommitted local changes are included.
 
 Force a rebuild after editing Dingo source:
@@ -180,6 +180,8 @@ Open a shell inside a node:
 
 ```bash
 docker exec -it dingo-1 sh
+
+# conformance mode
 docker exec -it cardano-producer bash
 ```
 
@@ -350,7 +352,7 @@ Dingo mode:
 | `DEVNET_DINGO_RELAY_NTC_PORT` | `3023`  | docker-compose host port for `dingo-relay` NtC |
 | `DEVNET_DINGO{1,2,3}_ADDR`, `DEVNET_DINGO_RELAY_ADDR` | `localhost:<port above>` | `run-tests.sh`-derived NtN addresses for the Go harness |
 | `DEVNET_DINGO{1,2,3}_NTC_ADDR`, `DEVNET_DINGO_RELAY_NTC_ADDR` | `localhost:<port above>` | NtC addresses for `DingoNtcAddrs()` |
-| `TEST_TIMEOUT`                | `5m` (script default; `run-tests.sh` uses `20m`) | `go test -timeout` |
+| `TEST_TIMEOUT`                | `20m`   | `go test -timeout` in `run-tests.sh` |
 
 Conformance mode:
 

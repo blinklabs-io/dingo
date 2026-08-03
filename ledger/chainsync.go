@@ -2527,6 +2527,14 @@ func (ls *LedgerState) tryResolveFork(
 		// view or we have not yet seen enough of its ancestry to resolve
 		// the fork locally. Request a chainsync re-sync so the intersect
 		// protocol finds the common point with the peer.
+		// Keep the candidate rollback point across the reset/reconnect
+		// cycle; otherwise repeated stale-ancestor resyncs lose the only
+		// point-keyed evidence that the same divergence is recurring.
+		ls.reportUnrecoverableRollbackIfStuck(
+			e.Point,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			e.ConnectionId,
+		)
 		ls.config.Logger.Debug(
 			"common ancestor not found locally, triggering chainsync re-sync",
 			"component", "ledger",
@@ -2637,6 +2645,28 @@ func (ls *LedgerState) tryResolveFork(
 	)
 
 	if err := ls.rollbackChainAndState(rollbackPoint); err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			// The ancestor resolved but the chain no longer holds it at that
+			// index, so rolling back would splice a continuation onto a parent
+			// the chain does not have (issue #3005). Re-intersect instead of
+			// treating this as an internal failure.
+			ls.config.Logger.Warn(
+				"fork ancestor is no longer on the local chain, triggering chainsync re-sync",
+				"component", "ledger",
+				"error", err,
+				"ancestor_slot", ancestorBlock.Slot,
+				"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
+				"local_tip_slot", ls.chain.Tip().Point.Slot,
+				"connection_id", e.ConnectionId.String(),
+			)
+			ls.headerMismatchCount = 0
+			ls.rollbackHistory = nil
+			ls.requestChainsyncResync(
+				e.ConnectionId,
+				event.ChainsyncResyncReasonRollbackNotFound,
+			)
+			return true, nil
+		}
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
 			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
 				"fork resolution exceeds security parameter K",
@@ -2698,6 +2728,10 @@ func (ls *LedgerState) tryResolveFork(
 			)
 		}
 	}
+	// This fork rollback is genuine forward progress. Clear evidence from
+	// stale-ancestor / failed-rollback cycles so an unrelated later fork does
+	// not inherit the old divergence count.
+	ls.clearUnrecoverableRollbacks()
 
 	// Mark state as rollback so the next block header event logs
 	// "switched to fork" and increments the fork metric.
@@ -3042,6 +3076,12 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 			nil,
 		)
 		if addBlockErr == nil {
+			// Audit only after the body has extended the queued chain. A body
+			// from an abandoned fetch may still be delivered after a fork
+			// restart; auditing it here would poison producedTxs with stale
+			// fork transactions.
+			validationEnabled, _ := ls.validationStateSnapshot()
+			ls.auditContinuationBlock(pendingEvent, validationEnabled)
 			ls.checkSlotBattle(pendingEvent, nil)
 			continue
 		}

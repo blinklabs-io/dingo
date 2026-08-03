@@ -675,6 +675,9 @@ especially as there is functionality which has not yet been developed.
 
 This requires Go 1.26 or later. You also need `make`.
 
+The default target formats and builds. It does not run tests; use `make test`
+for those.
+
 ```bash
 # Format and build (default target)
 make
@@ -695,6 +698,7 @@ go run ./cmd/dingo/
 make test                                    # All tests with race detection
 go test -v -race -run TestName ./package/    # Single test
 make bench                                   # Benchmarks
+make docs-parity                             # Docs agree with go.mod, Makefile, compose
 ```
 
 ### Profiling
@@ -778,7 +782,7 @@ cd internal/test/devnet/
 docker compose -f docker-compose.yml logs -f
 
 # Watch a specific node
-docker compose -f docker-compose.yml logs -f dingo-producer
+docker compose -f docker-compose.yml logs -f dingo-1
 
 # Stop and clean up
 ./stop.sh

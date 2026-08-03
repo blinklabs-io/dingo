@@ -675,10 +675,14 @@ type LedgerState struct {
 	replayRecoveryHighWaterSlot   uint64
 	replayRecoveryNoProgressCount int
 	replayRecoveryHolding         bool
-	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
-	mithrilLedgerHash             []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
-	lastLocalRollbackSeq          uint64
-	lastLocalRollbackPoint        ocommon.Point
+	// Cross-fork continuation audit (issue #3005). Armed by a local
+	// rollback and consumed by the blockfetch handler; see
+	// ledger/continuation_audit.go for the cost and soundness argument.
+	continuationAudit      atomic.Pointer[continuationAuditWindow]
+	mithrilLedgerSlot      uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
+	lastLocalRollbackSeq   uint64
+	lastLocalRollbackPoint ocommon.Point
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -2412,6 +2416,10 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)
 	}
+	// Chain and ledger now sit at the same point, so every block above it
+	// arrives through blockfetch and the continuation audit can resolve
+	// producers without a chain scan.
+	ls.armContinuationAudit(point, "chainsync rollback")
 	return nil
 }
 

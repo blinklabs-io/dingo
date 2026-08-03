@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -239,9 +238,9 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 	return nil
 }
 
-// enableLeiosVoting enables vote emission for the block producer's pool.
-// The current prototype derives the temporary BLS key from the pool ID. A
-// configured key is accepted only when it matches that derivation.
+// enableLeiosVoting enables vote emission for the block producer's pool. A
+// configured BLS signing key is preferred; the pool-derived key remains as a
+// temporary prototype fallback when no key file is configured.
 func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if n.leiosVoteManager == nil {
 		return nil
@@ -252,25 +251,30 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	poolID := creds.GetPoolID()
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolID[:])
-	key, err := leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
-	if err != nil {
-		return fmt.Errorf("derive prototype leios vote signing key: %w", err)
-	}
+	var key *leios.VoteSigningKey
+	var err error
 	if n.config.leiosVoteSigningKeyFile != "" {
-		configured, loadErr := leios.LoadVoteSigningKeyFile(
+		key, err = leios.LoadVoteSigningKeyFile(
 			n.config.leiosVoteSigningKeyFile,
 		)
-		if loadErr != nil {
-			return fmt.Errorf("load leios vote signing key: %w", loadErr)
+		if err != nil {
+			return fmt.Errorf("load leios vote signing key: %w", err)
 		}
-		if !bytes.Equal(configured.PublicKeyBytes(), key.PublicKeyBytes()) {
-			return errors.New(
-				"configured leios vote signing key does not match " +
-					"the current prototype's pool-derived key",
+		if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
+			return fmt.Errorf(
+				"validate configured leios vote signing key: %w; register the matching public key in leios-voter-public-keys on every peer",
+				err,
 			)
 		}
+	} else {
+		key, err = leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
+		if err != nil {
+			return fmt.Errorf("derive prototype leios vote signing key: %w", err)
+		}
 	}
-	n.leiosVoteManager.EnableVoting(poolKeyHash, key)
+	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
+		return fmt.Errorf("enable leios voting: %w", err)
+	}
 	n.config.logger.Info(
 		"leios voting enabled",
 		"component", "node",

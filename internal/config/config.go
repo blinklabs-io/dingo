@@ -541,9 +541,10 @@ type Config struct {
 	DelegatorInactivity        uint64 `yaml:"delegatorInactivity"        envconfig:"DINGO_DELEGATOR_INACTIVITY"`
 
 	// Leios voting configuration (experimental, leios runMode only).
-	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381
-	// vote signing key. When set on a block producer whose pool is a
-	// committee member, the node emits Leios votes for endorser blocks.
+	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope
+	// BLS12-381 vote signing key (or a legacy raw hex scalar). When set on
+	// a block producer whose pool is a committee member, the node emits
+	// Leios votes for endorser blocks.
 	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
 	// LeiosVoterPublicKeys maps hex pool key hashes to hex-encoded
 	// BLS12-381 voter public keys for vote signature verification.

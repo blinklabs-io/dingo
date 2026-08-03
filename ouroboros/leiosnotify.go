@@ -23,9 +23,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -38,7 +42,35 @@ type leiosForgedEBEntry struct {
 	point *ocommon.Point
 	size  uint64
 	vote  *lcommon.LeiosPrototypeVote
+	// announcement is the raw Dijkstra ranking-block header sent in the
+	// w31 BlockAnnouncement message.
+	announcement []byte
 }
+
+// prototype-2026w31 accepts announcements for up to ten minutes, and only
+// relays them while they are at most five minutes old. The reference node
+// measures these bounds from the announced slot's wall-clock onset. Dingo
+// uses the ledger's era-aware slot-time conversion below.
+const (
+	leiosNotifyMaxAnnouncementAge   = 10 * time.Minute
+	leiosNotifyRelayAnnouncementAge = 5 * time.Minute
+)
+
+type leiosAnnouncement struct {
+	raw    []byte
+	ebHash lcommon.Blake2b256
+	ebSize uint64
+	slot   uint64
+	// electionKey lets pruning rebuild the bounded per-election index.
+	electionKey string
+}
+
+type leiosDeferredAnnouncement struct {
+	raw    []byte
+	source string
+}
+
+const leiosMaxDeferredAnnouncements = 128
 
 type leiosDeliveryReservation struct {
 	index int
@@ -349,6 +381,11 @@ func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOption
 				o.leiosnotifyClientNotification,
 			),
 		),
+		// Keep the bounded request window full. This is the gouroboros
+		// equivalent of the prototype's Lookahead server mode: the server can
+		// hold each request until a notification is available, while the client
+		// keeps several requests outstanding.
+		oleiosnotify.WithPipelineLimit(oleiosnotify.MaxPipelineLimit),
 		// Disable the Busy-state timeout. LeiosNotify is a push-based
 		// notification protocol where the server only sends when it has
 		// something to announce. Idle waits of arbitrary length are
@@ -445,10 +482,19 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	}
 	switch m := msg.(type) {
 	case *oleiosnotify.MsgBlockAnnouncement:
-		// prototype-2026w30 sends the full ranking-block header here instead of
-		// CBOR null. gouroboros retains that payload as raw CBOR; accept it but
-		// intentionally ignore it until dingo's announcement pipeline consumes
-		// ranking-block headers directly.
+		// w31 carries the full ranking-block header. Validate before accepting
+		// it into the relay log; invalid announcements are deliberately
+		// suppressed so a peer cannot tear down a shared connection with a
+		// malformed or stale experimental message.
+		if err := o.acceptLeiosAnnouncement(m.BlockHeaderRaw, connId); err != nil {
+			o.config.Logger.Debug(
+				"suppressing invalid leios announcement",
+				"component", "network",
+				"protocol", "leios-notify",
+				"connection_id", connId,
+				"error", err,
+			)
+		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
 		// While the ledger is deeply behind the head, do not prefetch this
@@ -1087,6 +1133,10 @@ func leiosCollectTxs(result []cbor.RawMessage) []cbor.RawMessage {
 // so the EB would never be offered, fetched, voted on, or certified.
 func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 	switch {
+	case entry.announcement != nil:
+		return oleiosnotify.NewMsgBlockAnnouncement(
+			cbor.RawMessage(entry.announcement),
+		)
 	case entry.vote != nil:
 		return oleiosnotify.NewMsgVotesOfferPrototype(
 			[]lcommon.LeiosPrototypeVote{*entry.vote},
@@ -1095,6 +1145,215 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 		return oleiosnotify.NewMsgBlockOffer(*entry.point, entry.size)
 	default:
 		return nil
+	}
+}
+
+// acceptLeiosAnnouncement validates and records one w31 announcement, then
+// queues it for diffusion to all connected LeiosNotify peers when it is within
+// the w31 relay-age bound. The raw header is retained so the relay preserves
+// the producer's signed bytes.
+func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
+	return o.acceptLeiosAnnouncementInternal(raw, source, true)
+}
+
+func (o *Ouroboros) acceptLeiosAnnouncementInternal(
+	raw []byte,
+	source string,
+	deferVerification bool,
+) error {
+	if o.LedgerState == nil {
+		return errors.New("cannot accept leios announcement without ledger state")
+	}
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+	if err != nil {
+		return fmt.Errorf("decode ranking-block header: %w", err)
+	}
+	ebHash, ebSize, ok := header.LeiosAnnouncement()
+	if !ok {
+		return errors.New("ranking-block header has no valid endorser-block announcement")
+	}
+	currentSlot, slotErr := o.LedgerState.CurrentSlot()
+	if slotErr != nil {
+		return fmt.Errorf("read current slot for announcement validation: %w", slotErr)
+	}
+	if header.SlotNumber() > currentSlot {
+		return fmt.Errorf("announcement slot %d is ahead of current slot %d", header.SlotNumber(), currentSlot)
+	}
+	announcementStart, timeErr := o.LedgerState.SlotToTime(header.SlotNumber())
+	if timeErr != nil {
+		return fmt.Errorf("read announcement slot time: %w", timeErr)
+	}
+	age := time.Since(announcementStart)
+	if age < 0 {
+		return fmt.Errorf("announcement slot %d is in the future", header.SlotNumber())
+	}
+	if age > leiosNotifyMaxAnnouncementAge {
+		return fmt.Errorf("announcement is stale by %s", age)
+	}
+	if err := o.LedgerState.ValidateBlockHeaderCrypto(header); err != nil {
+		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
+			o.deferLeiosAnnouncement(header, raw, source)
+		}
+		return fmt.Errorf("validate ranking-block header: %w", err)
+	}
+	// Drop announcements that can no longer affect the acceptance window
+	// before adding this one. This is deliberately done for local and peer
+	// announcements alike; otherwise a long-lived node retains every RB
+	// header it has ever seen.
+	o.pruneLeiosAnnouncements()
+	o.config.Logger.Debug(
+		"accepted leios announcement",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", source,
+		"slot", header.SlotNumber(),
+		"lateness", age,
+	)
+	if age > leiosNotifyRelayAnnouncementAge {
+		// The announcement is still valid for the receiver, but the w31
+		// relay bound prevents an old message from propagating indefinitely.
+		return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, false)
+	}
+	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
+}
+
+func (o *Ouroboros) deferLeiosAnnouncement(
+	header *gdijkstra.DijkstraBlockHeader,
+	raw []byte,
+	source string,
+) {
+	key := fmt.Sprintf("%s:%x", source, header.Hash().Bytes())
+	o.leiosDeferredMu.Lock()
+	defer o.leiosDeferredMu.Unlock()
+	if len(o.leiosDeferredAnnouncements) >= leiosMaxDeferredAnnouncements {
+		return
+	}
+	if _, exists := o.leiosDeferredAnnouncements[key]; !exists {
+		o.leiosDeferredAnnouncements[key] = leiosDeferredAnnouncement{
+			raw: append([]byte(nil), raw...), source: source,
+		}
+	}
+}
+
+// retryDeferredLeiosAnnouncements retries headers after ledger activity has
+// had an opportunity to populate the epoch cache. Deferred headers are never
+// relayed before this validation succeeds.
+func (o *Ouroboros) retryDeferredLeiosAnnouncements() {
+	o.leiosDeferredMu.Lock()
+	pending := make(map[string]leiosDeferredAnnouncement, len(o.leiosDeferredAnnouncements))
+	for key, announcement := range o.leiosDeferredAnnouncements {
+		pending[key] = announcement
+	}
+	o.leiosDeferredMu.Unlock()
+	for key, announcement := range pending {
+		err := o.acceptLeiosAnnouncementInternal(announcement.raw, announcement.source, false)
+		if err == nil || !ledger.IsHeaderVerificationDeferred(err) {
+			o.leiosDeferredMu.Lock()
+			delete(o.leiosDeferredAnnouncements, key)
+			o.leiosDeferredMu.Unlock()
+		}
+	}
+}
+
+func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
+	if !o.config.EnableLeios || o.EventBus == nil {
+		return
+	}
+	retry := func(event.Event) { o.retryDeferredLeiosAnnouncements() }
+	o.EventBus.SubscribeFunc(chain.ChainUpdateEventType, retry)
+	o.EventBus.SubscribeFunc(event.EpochTransitionEventType, retry)
+}
+
+// pruneLeiosAnnouncements bounds announcement deduplication state to the
+// same ten-minute window used by acceptLeiosAnnouncement. The size index is
+// rebuilt from the retained announcements so an old EB cannot keep its size
+// invariant alive after its announcements expire.
+func (o *Ouroboros) pruneLeiosAnnouncements() {
+	if o.LedgerState == nil {
+		return
+	}
+	now := time.Now()
+	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
+	for key, announcement := range o.leiosAnnouncements {
+		start, err := o.LedgerState.SlotToTime(announcement.slot)
+		if err != nil || now.Sub(start) > leiosNotifyMaxAnnouncementAge {
+			delete(o.leiosAnnouncements, key)
+		}
+	}
+	o.leiosAnnouncementSizes = make(map[string]uint64, len(o.leiosAnnouncements))
+	o.leiosAnnouncementElections = make(map[string]map[string]struct{})
+	for key, announcement := range o.leiosAnnouncements {
+		o.leiosAnnouncementSizes[string(announcement.ebHash.Bytes())] = announcement.ebSize
+		election := o.leiosAnnouncementElections[announcement.electionKey]
+		if election == nil {
+			election = make(map[string]struct{})
+			o.leiosAnnouncementElections[announcement.electionKey] = election
+		}
+		election[key] = struct{}{}
+	}
+}
+
+// recordLeiosAnnouncement performs the consistency checks shared by local
+// announcements and peer announcements, and optionally queues a valid
+// announcement for relay.
+func (o *Ouroboros) recordLeiosAnnouncement(
+	raw []byte,
+	ebHash lcommon.Blake2b256,
+	ebSize uint64,
+	header *gdijkstra.DijkstraBlockHeader,
+	source string,
+	relay bool,
+) error {
+	key := string(header.Hash().Bytes())
+	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
+	if o.leiosAnnouncements == nil {
+		o.leiosAnnouncements = make(map[string]leiosAnnouncement)
+	}
+	if o.leiosAnnouncementSizes == nil {
+		o.leiosAnnouncementSizes = make(map[string]uint64)
+	}
+	if o.leiosAnnouncementElections == nil {
+		o.leiosAnnouncementElections = make(map[string]map[string]struct{})
+	}
+	ebKey := string(ebHash.Bytes())
+	if previousSize, exists := o.leiosAnnouncementSizes[ebKey]; exists && previousSize != ebSize {
+		return errors.New("announcement size is inconsistent with a previously observed endorser block")
+	}
+	if previous, exists := o.leiosAnnouncements[key]; exists {
+		if previous.ebHash != ebHash || previous.ebSize != ebSize || string(previous.raw) != string(raw) {
+			return errors.New("announcement is inconsistent with a previously observed ranking block")
+		}
+		return nil
+	}
+	issuer := header.IssuerVkey()
+	electionKey := fmt.Sprintf("%s:%d:%x", source, header.SlotNumber(), issuer)
+	electionAnnouncements := o.leiosAnnouncementElections[electionKey]
+	if electionAnnouncements == nil {
+		electionAnnouncements = make(map[string]struct{})
+		o.leiosAnnouncementElections[electionKey] = electionAnnouncements
+	}
+	if len(electionAnnouncements) >= 2 {
+		return errors.New("announcement is the third distinct message for a previously observed election")
+	}
+	electionAnnouncements[key] = struct{}{}
+	o.leiosAnnouncements[key] = leiosAnnouncement{
+		raw: append([]byte(nil), raw...), ebHash: ebHash, ebSize: ebSize, slot: header.SlotNumber(),
+		electionKey: electionKey,
+	}
+	o.leiosAnnouncementSizes[ebKey] = ebSize
+	if relay {
+		o.leiosEBLog.append(leiosForgedEBEntry{announcement: append([]byte(nil), raw...)})
+	}
+	return nil
+}
+
+// EnqueueLeiosBlockAnnouncement validates and queues a locally forged
+// ranking-block header for LeiosNotify diffusion.
+func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
+	if err := o.acceptLeiosAnnouncement(raw, "local"); err != nil {
+		o.config.Logger.Debug("suppressing local leios announcement", "error", err)
 	}
 }
 

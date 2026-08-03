@@ -15,6 +15,10 @@ on:
         description: 'Disable fault injection'
         type: boolean
         default: false
+      poll_results:
+        description: 'Poll Antithesis until the test completes (default: submit and exit)'
+        type: boolean
+        default: false
       moog_tag:
         # The deployed MPFS at mpfs.plutimus.com runs the moog v0.5.x line, so
         # the requester CLI must match it (same pin as the cardano-foundation
@@ -30,8 +34,11 @@ on:
 concurrency:
   group: antithesis
   # Once submitted, an Antithesis test continues running outside GitHub.
-  # Keep its polling workflow alive so the result is not lost and the next
-  # test waits for the active run to finish.
+  # The default workflow exits after submission; callers can opt into polling
+  # with the poll_results dispatch input. Submit-only mode releases this
+  # GitHub Actions lock when submission finishes, so it cannot serialize
+  # external Antithesis runs; use poll_results=true when that serialization is
+  # required.
   cancel-in-progress: false
 
 env:
@@ -56,6 +63,8 @@ jobs:
         run: echo "tag=sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0 https://github.com/docker/setup-buildx-action/releases/tag/v4.2.0
+      - name: Validate Antithesis testnet wiring
+        run: internal/test/antithesis/scripts/validate-config.sh
       - name: Login to GHCR
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0 https://github.com/docker/login-action/releases/tag/v4.0.0
         with:
@@ -226,8 +235,8 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 600
-    # Shared Moog env for the submit + wait steps (the wait step polls
-    # MOOG_MPFS_HOST read-only, so it needs the same host/token/requester).
+    # Shared Moog env for the submit and optional wait steps. The default path
+    # submits the test and exits without querying its status.
     env:
       MOOG_WALLET_FILE: wallet.json
       MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
@@ -248,9 +257,6 @@ jobs:
             echo "::error::Duration must be at least one hour"
             exit 1
           fi
-          # The wait step allows one extra hour for Antithesis to publish the
-          # result. Leave another hour for this job's setup and cleanup within
-          # its 600-minute timeout.
           if ((HOURS > 8)); then
             echo "::error::Duration must be no more than 8 hours"
             exit 1
@@ -331,8 +337,11 @@ jobs:
           NO_FAULTS: ${{ inputs.no_faults || 'false' }}
           DURATION_HOURS: ${{ steps.duration.outputs.hours }}
 
-      - name: Wait for results
+      - name: Poll for results
+        if: inputs.poll_results == true
         run: |
+          # Polling is opt-in. The normal workflow path ends after the
+          # submission step, while Antithesis continues independently.
           timeout $(((DURATION_HOURS + 1) * 3600)) \
             ./internal/test/antithesis/scripts/wait-for-test.sh \
             "$ANTITHESIS_TEST_RUN_ID"

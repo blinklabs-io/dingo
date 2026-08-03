@@ -50,6 +50,15 @@ x-cardano-node-command: &cardano-node-command
   - "--port"
   - "3001"
 
+x-cardano-node-shell-command: &cardano-node-shell-command
+  - >-
+    umask 022; exec cardano-node run --config /configs/configs/config.json
+    --topology /configs/configs/topology.json --database-path /data/db
+    --socket-path /ipc/node.socket --shelley-kes-key /configs/keys/kes.skey
+    --shelley-vrf-key /configs/keys/vrf.skey
+    --shelley-operational-certificate /configs/keys/opcert.cert --port 3001
+    > "$$NODE_LOG_FILE" 2>&1
+
 x-cardano-node: &cardano-node
   image: ghcr.io/blinklabs-io/cardano-node:${CARDANO_NODE_VERSION:-11.0.1}
   init: true
@@ -88,6 +97,7 @@ services:
       - p5-configs:/configs/5
       - utxo-keys:/configs/utxo-keys
       - testnet-config:/testnet-config
+      - logs:/logs
     networks:
       - testnet
 
@@ -107,8 +117,10 @@ services:
       CARDANO_TOPOLOGY: /configs/configs/dingo-topology.json
       CARDANO_DATABASE_PATH: /data/db
       CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
-      DINGO_DEBUG: "1"
-      DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      DINGO_LOG_FILE: /logs/p1.log
+      DINGO_LOGGING_FORMAT: json
+      DINGO_LOGGING_LEVEL: info
       CARDANO_BLOCK_PRODUCER: "true"
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
@@ -133,8 +145,11 @@ services:
   p2:
     <<: *cardano-node
     hostname: p2.example
+    entrypoint: ["/bin/sh", "-c"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p2.log
     volumes:
       - p2-configs:/configs:ro
       - p2-data:/data/db
@@ -144,8 +159,11 @@ services:
   p3:
     <<: *cardano-node
     hostname: p3.example
+    entrypoint: ["/bin/sh", "-c"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p3.log
     volumes:
       - p3-configs:/configs:ro
       - p3-data:/data/db
@@ -155,8 +173,11 @@ services:
   p4:
     <<: *cardano-node
     hostname: p4.example
+    entrypoint: ["/bin/sh", "-c"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p4.log
     volumes:
       - p4-configs:/configs:ro
       - p4-data:/data/db
@@ -166,8 +187,11 @@ services:
   p5:
     <<: *cardano-node
     hostname: p5.example
+    entrypoint: ["/bin/sh", "-c"]
+    command: *cardano-node-shell-command
     environment:
       <<: *cn-env
+      NODE_LOG_FILE: /logs/p5.log
     volumes:
       - p5-configs:/configs:ro
       - p5-data:/data/db
@@ -195,10 +219,11 @@ services:
       TXPUMP_TX_COUNT_MAX: "50"
       TXPUMP_COOLDOWN_MIN: "5"
       TXPUMP_COOLDOWN_MAX: "15"
-      TXPUMP_TYPES: "payment"
+      TXPUMP_TYPES: "payment,delegation,governance,plutus"
+      TXPUMP_STARTUP_TIMEOUT: "60"
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_FILE: "/testnet-config/testnet.yaml"
-      TXPUMP_GENESIS_UTXO_FILE: "/configs/configs/shelley-genesis.json"
+      TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
       - logs:/logs
       - p1-configs:/configs:ro

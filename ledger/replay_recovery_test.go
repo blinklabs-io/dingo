@@ -1607,6 +1607,112 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	assert.Equal(t, ledgerTip.Point, freshResync.Point)
 }
 
+// newReplayRecoveryAuditLedger builds the fallback topology with an
+// unresolved producer. When primaryAhead is false, the primary chain is
+// already below the ledger tip, matching the held-recovery path.
+func newReplayRecoveryAuditLedger(
+	t *testing.T,
+	primaryAhead bool,
+) *LedgerState {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	parentBlock := testRawBlock("audit-parent", 100, 1, nil)
+	replayBlock := testRawBlock("audit-replay", 120, 2, parentBlock.Hash)
+	ledgerTipBlock := testRawBlock("audit-ledger-tip", 140, 3, replayBlock.Hash)
+	failingBlock := testRawBlock("audit-failing", 160, 4, ledgerTipBlock.Hash)
+	blocks := []chain.RawBlock{parentBlock, replayBlock}
+	if primaryAhead {
+		blocks = append(blocks, ledgerTipBlock, failingBlock)
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(blocks))
+	if !primaryAhead {
+		for _, block := range []chain.RawBlock{ledgerTipBlock, failingBlock} {
+			require.NoError(t, db.BlockCreate(models.Block{
+				Hash: block.Hash, PrevHash: block.PrevHash, Cbor: block.Cbor,
+				Slot: block.Slot, Number: block.BlockNumber, Type: block.Type,
+			}, nil))
+		}
+	}
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().SecurityParam = 2
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: nodeConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.validationEnabled = true
+
+	ledgerTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(ledgerTipBlock.Slot, ledgerTipBlock.Hash),
+		BlockNumber: ledgerTipBlock.BlockNumber,
+	}
+	for _, tip := range []ochainsync.Tip{
+		{Point: ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash), BlockNumber: parentBlock.BlockNumber},
+		ledgerTip,
+	} {
+		require.NoError(t, db.SetBlockNonce(tip.Point.Hash, tip.Point.Slot, []byte("nonce"), false, nil))
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.currentTipBlockNonce = []byte("nonce")
+	ls.reachedTip.Store(false)
+	ls.publishSnapshotsLocked()
+
+	if !primaryAhead {
+		require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
+		require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
+		require.True(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
+	}
+	return ls
+}
+
+func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("audit-failing-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("missing-audit-producer")},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	assert.Equal(t, ls.Tip().Point, window.forkPoint)
+}
+
+func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, false)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("audit-held-failing-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("missing-held-audit-producer")},
+		},
+		Cause: errors.New("bad input"),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+	assert.Less(t, ls.chain.Tip().Point.Slot, ls.Tip().Point.Slot)
+	assert.Equal(t, ocommon.Point{Slot: 140, Hash: testHashBytes("audit-ledger-tip")}, ls.Tip().Point)
+	assert.Nil(t, ls.continuationAudit.Load())
+}
+
 func TestResetReplayRecoveryNonProgressRequiresNewHighWater(t *testing.T) {
 	ls := &LedgerState{}
 	require.False(t, ls.observeReplayRecoveryTip(140))

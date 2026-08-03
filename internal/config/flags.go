@@ -182,7 +182,7 @@ var flagSpecs = []flagSpec{
 	uintFlag("PledgeLeverage", "pledge-leverage", "CIP-50 max pledge leverage L in [1,10000] (used when pledge-leverage-enabled)"),
 
 	// Leios voting (experimental)
-	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to hex-encoded BLS12-381 Leios vote signing key"),
+	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar"),
 	stringToStringFlag("LeiosVoterPublicKeys", "leios-voter-public-keys", "Leios voter public key registry: pool key hash hex=public key hex"),
 
 	// Mithril

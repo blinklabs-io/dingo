@@ -513,10 +513,11 @@ func (ls *LedgerState) queryShelleyCbor(
 // when the query carries no pool filter) plus the mark/set/go totals.
 //
 // In Ouroboros the current epoch's boundary snapshot is "mark"; "set" is the
-// previous epoch's snapshot and "go" the one before that (the active stake
-// used for the current epoch's rewards/leader election). dingo persists each
-// boundary snapshot under type "mark" keyed by its epoch, so set/go for the
-// current epoch are read from the mark snapshots at epoch-1 and epoch-2.
+// previous epoch's snapshot and "go" the one before that. Set is the active
+// stake used for the current epoch's leader election; go is the snapshot used
+// for delayed reward calculation. dingo persists each boundary snapshot under
+// type "mark" keyed by its epoch, so set/go for the current epoch are read
+// from the mark snapshots at epoch-1 and epoch-2.
 func (ls *LedgerState) queryShelleyStakeSnapshots(
 	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
 ) (any, error) {
