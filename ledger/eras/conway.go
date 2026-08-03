@@ -1114,7 +1114,7 @@ func buildConwayScriptPurpose(
 			ok = false
 		}
 	}()
-	purpose = script.BuildScriptPurpose(
+	purpose, _ = script.BuildScriptPurpose(
 		redeemerKey,
 		resolvedInputs,
 		inputs,

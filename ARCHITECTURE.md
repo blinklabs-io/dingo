@@ -289,6 +289,7 @@ sequenceDiagram
     OB->>EB: publish BlockfetchEvent(block)
     EB->>LS: handleEventBlockfetchBlock()
     LS->>LS: decode CBOR, match to queued header
+    LS->>LS: defer future-slot stateful overlay checks until ledger apply
 
     Note over Peer,DB: Stage 3 — Block Processing
     OB->>EB: publish BlockfetchEvent(batchDone)

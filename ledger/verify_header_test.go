@@ -1242,6 +1242,13 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reserved for the genesis overlay schedule")
 	assert.Contains(t, err.Error(), "not active")
+
+	// Header verification can run ahead of ledger apply. In that path the
+	// current epoch's protocol parameters may still be in memory, so defer a
+	// state-dependent overlay rejection until the epoch rollover is committed.
+	err = ls.verifyBlockHeaderState(tb.block, 5, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
@@ -1267,6 +1274,13 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+
+	// A stale decentralized parameter set can classify this future slot as
+	// genesisOverlayNone. Header verification must defer before that
+	// classification can bypass the apply-time state recheck.
+	err = ls.verifyBlockHeaderState(tb.block, 5, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
