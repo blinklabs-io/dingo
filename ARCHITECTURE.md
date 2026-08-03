@@ -2510,12 +2510,17 @@ to be restored explicitly on an exclusive extraction: staging is created `0700`
 so a partial extraction is never group-readable, and rename preserves the source
 mode, so publication widens the mode through the staging handle first.
 
-A destination that already exists keeps whatever mode it has. `MkdirAll` does
-not alter an existing directory, and a merge extraction writes into the
+A **merge** destination that already exists keeps whatever mode it has.
+`MkdirAll` does not alter an existing directory, and merging writes into the
 destination rather than replacing it, so a pre-existing `0700` directory stays
 `0700`. That is deliberate: the mode of a directory the operator created is
 theirs to choose, and silently widening it would be the extractor overriding a
 decision it has no standing to make.
+
+An **exclusive** destination always ends up `0750`, however it started, because
+publication does not write into it — it renames the staging tree over it, and
+the mode arrives with that tree. An empty destination cleared out of the way
+and one replaced via `WithReplaceDestination` both end that way.
 
 Destinations come in two shapes, selected by the caller:
 
@@ -2544,13 +2549,20 @@ Destinations come in two shapes, selected by the caller:
   an existing directory even an empty one, so a failed rename there does not on
   its own mean the destination holds anything. Clearing an empty directory and
   retrying is what keeps the behaviour uniform. A file or symlink is refused
-  untouched, and the removal is directory-only — `unlinkat` with
-  `AT_REMOVEDIR`, addressed through the parent handle — so a writer who swaps
-  the directory for a file after it is identified as a directory has the
+  untouched, and the removal is directory-only, so a writer who swaps the
+  directory for a file after it has been identified as a directory has the
   removal fail rather than their file unlinked. `os.Root.Remove` would not do:
-  it unlinks a regular file as readily as it removes a directory. Windows has
-  no handle-relative removal to address the entry through, so the type check is
-  where the guarantee rests there rather than the removal.
+  it unlinks a regular file as readily as it removes a directory, which is
+  exactly the behaviour that made such a swap costly.
+
+  Both platforms have a directory-only primitive, reached differently. Unix
+  uses `unlinkat` with `AT_REMOVEDIR`, addressed through the parent handle, so
+  neither the entry nor the parent can be redirected. Windows uses
+  `RemoveDirectory`, which fails on a file and on a populated directory but
+  addresses the entry by name, because Windows has no handle-relative removal;
+  a substituted parent could redirect it, which Windows makes hard by refusing
+  to move a directory while handles are open beneath it, and the parent is held
+  open for the whole extraction.
 
   `WithReplaceDestination` remains the only path that removes a destination
   holding content, which is what that option exists to authorise.
