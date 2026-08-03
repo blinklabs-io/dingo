@@ -16,11 +16,14 @@ package ledger
 
 import (
 	"bytes"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 
@@ -42,6 +45,28 @@ func chainDepStateQuery() *olocalstatequery.BlockQuery {
 	}
 }
 
+// newChainDepStateLedger builds the ledger state these tests query.
+//
+// Recomputing the evolving and candidate nonces logs through config.Logger and
+// takes the randomness-stability window from the Shelley genesis. A real node
+// gets both from NewLedgerState, which defaults a nil logger; these tests
+// construct LedgerState directly and so have to supply them.
+func newChainDepStateLedger(
+	t *testing.T,
+	db *database.Database,
+) *LedgerState {
+	t.Helper()
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	return ls
+}
+
 // TestQueryShelleyDebugChainDepState_Dispatches is the regression for #2997.
 //
 // The query was absent from the dispatch table, so it fell through to the
@@ -51,8 +76,7 @@ func chainDepStateQuery() *olocalstatequery.BlockQuery {
 // leadership-schedule` hits, since it reads the epoch nonce from this state.
 func TestQueryShelleyDebugChainDepState_Dispatches(t *testing.T) {
 	db := newTestDB(t)
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err,
@@ -111,8 +135,7 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 		nil,                 // txn
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)
@@ -163,6 +186,117 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 		"counters must be a map even when no pool has minted")
 }
 
+// TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint covers
+// the evolving and candidate nonces mid-epoch.
+//
+// The epoch row's copies are checkpoints: they hold what the two nonces were
+// when the epoch opened, and nothing rewrites them as blocks land. Both move
+// with every block -- the evolving nonce folds in each block's VRF output, and
+// the candidate tracks it until the randomness-stabilisation cutoff, then
+// freezes. Serving the row's values therefore describes the chain as it stood
+// at the boundary, not at the tip the reply reports.
+//
+// The fixture separates all three: the epoch opens with one pair of values, a
+// block before the cutoff moves them to a second, and a block after the cutoff
+// moves the evolving nonce alone to a third. A reply built from the checkpoint
+// shows neither of the later two, and one that ignores the cutoff reports the
+// tip's nonce as the candidate.
+func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	// Conway's window is 4k/f = 4*6/0.4 = 60 slots, so with the epoch running
+	// [1000, 2000) the candidate freezes at slot 1940.
+	const (
+		epochStart    uint64 = 1000
+		epochLength   uint64 = 1000
+		preCutoffSlot uint64 = 1100
+		tipSlot       uint64 = 1950
+	)
+
+	checkpointEvolving := bytes.Repeat([]byte{0x71}, 32)
+	checkpointCandidate := bytes.Repeat([]byte{0x72}, 32)
+	preCutoffNonce := bytes.Repeat([]byte{0x73}, 32)
+	tipNonce := bytes.Repeat([]byte{0x74}, 32)
+
+	preCutoffHash := bytes.Repeat([]byte{0x75}, 32)
+	tipHash := bytes.Repeat([]byte{0x76}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot:     preCutoffSlot,
+			Hash:     preCutoffHash,
+			PrevHash: bytes.Repeat([]byte{0x77}, 32),
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     tipSlot,
+			Hash:     tipHash,
+			PrevHash: preCutoffHash,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		// The evolving nonce as of each block, which is what the ledger
+		// records per block and what consensus folds forward.
+		if err := db.SetBlockNonce(
+			preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			tipHash, tipSlot, tipNonce, false, txn,
+		)
+	}))
+
+	require.NoError(t, db.Metadata().SetEpoch(
+		epochStart,                  // slot
+		1,                           // epoch
+		bytes.Repeat([]byte{2}, 32), // nonce
+		checkpointEvolving,          // evolvingNonce
+		checkpointCandidate,         // candidateNonce
+		bytes.Repeat([]byte{3}, 32), // lastEpochBlockNonce
+		eras.ConwayEraDesc.Id,       // era
+		1,                           // slotLength
+		uint(epochLength),           // lengthInSlots
+		nil,                         // txn
+	))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, tipHash)},
+		nil,
+	))
+
+	ls := newChainDepStateLedger(t, db)
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(tipNonce),
+	}, decoded.EvolvingNonce,
+		"the evolving nonce is the tip's, not the value the epoch opened with")
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(preCutoffNonce),
+	}, decoded.CandidateNonce,
+		"the candidate froze at the cutoff, so it is the last pre-cutoff "+
+			"block's nonce -- neither the checkpoint nor the tip's")
+}
+
 // TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent covers the lab
 // nonce, which is the only field of the record that moves with every block
 // rather than only at an epoch boundary.
@@ -194,14 +328,27 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 		}, txn); err != nil {
 			return err
 		}
-		return db.BlockCreate(models.Block{
+		if err := db.BlockCreate(models.Block{
 			Slot:     1200,
 			Hash:     tipHash,
 			PrevHash: parentHash,
 			Cbor:     []byte{0x80},
 			Number:   2,
 			Type:     conway.BlockTypeConway,
-		}, txn)
+		}, txn); err != nil {
+			return err
+		}
+		// A synced node records each block's evolving nonce as it applies it.
+		// Without the rows the nonce fold falls back to re-decoding block
+		// CBOR, which these placeholder bodies cannot satisfy.
+		if err := db.SetBlockNonce(
+			parentHash, 1100, bytes.Repeat([]byte{0x35}, 32), false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			tipHash, 1200, bytes.Repeat([]byte{0x36}, 32), false, txn,
+		)
 	}))
 	require.NoError(t, db.Metadata().SetEpoch(
 		1000,       // slot
@@ -220,8 +367,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)
@@ -268,14 +414,19 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 	tipHash := bytes.Repeat([]byte{0x53}, 32)
 
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return db.BlockCreate(models.Block{
+		if err := db.BlockCreate(models.Block{
 			Slot:     1200,
 			Hash:     tipHash,
 			PrevHash: parentHash,
 			Cbor:     []byte{0x80},
 			Number:   1,
 			Type:     conway.BlockTypeConway,
-		}, txn)
+		}, txn); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			tipHash, 1200, bytes.Repeat([]byte{0x37}, 32), false, txn,
+		)
 	}))
 	// Drop the hash-index entry, leaving the block blob in place: the state a
 	// block written before the index existed is in.
@@ -300,8 +451,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)
@@ -332,8 +482,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(t *testing.
 		0, 0, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)
@@ -374,8 +523,7 @@ func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(t *testing.T
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err,
@@ -445,8 +593,7 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(t *testing.T) 
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)
@@ -520,8 +667,7 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 	))
 	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 1, nil))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)
@@ -570,8 +716,7 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(t *testing.T
 	gonePkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(gone))
 	require.NoError(t, db.UpdatePoolOpCertSequence(gonePkh, 7, 1, nil))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)
@@ -617,8 +762,7 @@ func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
 	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 9, 20, nil))
 	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 4, 30, nil))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newChainDepStateLedger(t, db)
 
 	result, err := ls.Query(chainDepStateQuery())
 	require.NoError(t, err)

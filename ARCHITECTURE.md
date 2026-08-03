@@ -1680,6 +1680,18 @@ dependency across two points in the pipeline:
 - Candidate nonce: frozen at the stability window cutoff
 - Epoch nonce: derived from candidate nonce and previous epoch's last block hash
 
+The `epoch` row's evolving and candidate values are the pair the epoch opened
+with; nothing rewrites them as blocks land, so they are checkpoints rather than
+current state. A reader that needs the pair part-way through an epoch — the
+`GetChainDepState` local-state query, at its acquired tip — calls
+`computeCandidateNonceAsOf`, which folds the same blocks the boundary
+computation would but stops early. `computeCandidateNonce` is that function
+stopped at the epoch's end, so the freeze rule and both the stored-nonce and
+CBOR-decode lookup paths are shared and cannot drift between the query and
+consensus. The candidate's freeze cutoff comes from the full epoch length in
+both cases: where the epoch ends is what fixes it, not how far a given call
+folds.
+
 The previous epoch's last-block hash is resolved through the active chain index
 (`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
 retain synthetic endorser/genesis blobs and fork blobs that are useful for other

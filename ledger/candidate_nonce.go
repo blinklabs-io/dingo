@@ -102,6 +102,40 @@ func (ls *LedgerState) computeCandidateNonce(
 	epochStartSlot uint64,
 	epochLengthInSlots uint64,
 ) ([]byte, []byte, error) {
+	return ls.computeCandidateNonceAsOf(
+		txn,
+		eraId,
+		prevEvolvingNonce,
+		prevCandidateNonce,
+		epochStartSlot,
+		epochLengthInSlots,
+		epochStartSlot+epochLengthInSlots,
+	)
+}
+
+// computeCandidateNonceAsOf is computeCandidateNonce stopped early: it folds
+// only the blocks before foldEndSlot, giving the two nonces as they stood at
+// that point rather than at the epoch's end.
+//
+// Both move with every block, so a caller reporting consensus state part-way
+// through an epoch — the GetChainDepState query, at its acquired tip — cannot
+// use the epoch's end-state or the checkpoint the epoch opened with. Only the
+// stopping point differs, so the freeze rule and both lookup paths stay shared
+// with the boundary computation and cannot drift from it.
+//
+// The candidate's freeze cutoff is still derived from the FULL epoch length:
+// where the epoch ends is what fixes it, not how far this call folds. Folding
+// short of the cutoff simply means the candidate has not frozen yet and still
+// tracks the evolving nonce.
+func (ls *LedgerState) computeCandidateNonceAsOf(
+	txn *database.Txn,
+	eraId uint,
+	prevEvolvingNonce []byte,
+	prevCandidateNonce []byte,
+	epochStartSlot uint64,
+	epochLengthInSlots uint64,
+	foldEndSlot uint64,
+) ([]byte, []byte, error) {
 	stabilityWindow := ls.nonceStabilityWindow(eraId)
 	epochEndSlot := epochStartSlot + epochLengthInSlots
 
@@ -115,6 +149,18 @@ func (ls *LedgerState) computeCandidateNonce(
 			stabilityWindow
 	}
 
+	if foldEndSlot > epochEndSlot {
+		foldEndSlot = epochEndSlot
+	}
+	// Blocks the fold has not reached cannot have moved the candidate, so the
+	// bound below is the earlier of the freeze cutoff and the fold's end.
+	// Folding to the epoch's end leaves this at the cutoff, which is what the
+	// boundary computation has always used.
+	candidateBound := cutoffSlot
+	if foldEndSlot < candidateBound {
+		candidateBound = foldEndSlot
+	}
+
 	// Fast path: look up pre-stored evolving nonces from the
 	// block_nonce table. Each block's evolving nonce is stored
 	// during normal block processing (SetBlockNonce), so we can
@@ -125,8 +171,8 @@ func (ls *LedgerState) computeCandidateNonce(
 		prevEvolvingNonce,
 		prevCandidateNonce,
 		epochStartSlot,
-		epochEndSlot,
-		cutoffSlot,
+		foldEndSlot,
+		candidateBound,
 	)
 	if err == nil {
 		return candidateNonce, evolvingNonce, nil
@@ -147,8 +193,8 @@ func (ls *LedgerState) computeCandidateNonce(
 		prevEvolvingNonce,
 		prevCandidateNonce,
 		epochStartSlot,
-		epochEndSlot,
-		cutoffSlot,
+		foldEndSlot,
+		candidateBound,
 		stabilityWindow,
 	)
 }

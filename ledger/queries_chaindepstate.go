@@ -126,8 +126,30 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	var carriedLabNonce []byte
 	if current != nil {
 		carriedLabNonce = current.LastEpochBlockNonce
-		state.EvolvingNonce = nonceFromBytes(current.EvolvingNonce)
-		state.CandidateNonce = nonceFromBytes(current.CandidateNonce)
+		// The epoch row's evolving and candidate nonces are the values the
+		// epoch OPENED with, and nothing rewrites them as blocks land. Both
+		// move with every block, so serving them directly would describe the
+		// chain as it stood at the boundary while the rest of this reply
+		// describes it at the tip. Recomputed here through the same function
+		// the consensus path uses at a boundary, stopped at the tip.
+		candidateNonce, evolvingNonce, err := ls.computeCandidateNonceAsOf(
+			txn,
+			current.EraId,
+			current.EvolvingNonce,
+			current.CandidateNonce,
+			current.StartSlot,
+			uint64(current.LengthInSlots),
+			foldEndSlotForTip(tip.Point.Slot),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"compute chain dep state nonces at slot %d: %w",
+				tip.Point.Slot,
+				err,
+			)
+		}
+		state.EvolvingNonce = nonceFromBytes(evolvingNonce)
+		state.CandidateNonce = nonceFromBytes(candidateNonce)
 		state.EpochNonce = nonceFromBytes(current.Nonce)
 		// The lab carried into this epoch: the parent hash of the last block
 		// of the previous one.
@@ -157,6 +179,17 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 			Inner:   state,
 		},
 	}, nil
+}
+
+// foldEndSlotForTip converts a tip slot into the exclusive end bound that
+// includes the tip's own block. It saturates rather than wrapping, since a
+// wrap to zero would fold no blocks at all and report the epoch's opening
+// values as though they were current.
+func foldEndSlotForTip(tipSlot uint64) uint64 {
+	if tipSlot == ^uint64(0) {
+		return tipSlot
+	}
+	return tipSlot + 1
 }
 
 // chainDepStateLabNonce derives the nonce of the last block applied.
