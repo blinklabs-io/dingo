@@ -3156,6 +3156,25 @@ When an architecture review approves a new dependency, update the rule list in
 change. Keep each rule's `reason` field explicit so future failures explain the
 ownership boundary being protected.
 
+### Documentation Parity Check
+
+`internal/docsparity/` holds test-only checks that keep contributor-facing
+documentation in agreement with the configuration it describes. Every rule
+derives its expectation from a source of truth in the tree rather than
+restating a value: the minimum Go release comes from the `go` directive in
+`go.mod`, the build contract from the Makefile's rule graph and `##` help
+text, and the DevNet topology from `internal/test/devnet/docker-compose.yml`,
+its `.env` profile default, and the wrapper scripts. Run the focused check
+with:
+
+```shell
+make docs-parity
+```
+
+The package has no build tag, so `go test ./...` runs it on every platform in
+CI as well. Adding a documented value that a file in the tree already owns
+belongs in a rule here, not in a second hard-coded copy.
+
 ## Design Patterns
 
 ### Dependency Injection

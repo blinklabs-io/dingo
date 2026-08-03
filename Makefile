@@ -32,7 +32,7 @@ GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' 
 BUILD_TAGS ?= dingo_extra_plugins
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 
-.PHONY: all build help mod-tidy clean format golines lint import-boundaries proto test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -41,15 +41,15 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # Build target
-build: $(BINARIES) ## Build the dingo binary
+build: $(BINARIES) ## Run mod-tidy, then build every command binary
 
 # Builds and installs binary in ~/.local/bin
-install: build ## Install binary to ~/.local/bin
+install: build ## Run build, then install the binaries to ~/.local/bin
 	mkdir -p $(HOME)/.local/bin
 	mv $(BINARIES) $(HOME)/.local/bin
 
-uninstall: ## Remove installed binary from ~/.local/bin
-	rm -f $(HOME)/.local/bin/$(BINARIES)
+uninstall: ## Remove installed binaries from ~/.local/bin
+	rm -f $(addprefix $(HOME)/.local/bin/,$(BINARIES))
 
 mod-tidy: ## Run go mod tidy
 	# Needed to fetch new dependencies and add them to go.mod
@@ -58,20 +58,23 @@ mod-tidy: ## Run go mod tidy
 clean: ## Remove compiled binaries
 	rm -f $(BINARIES)
 
-format: mod-tidy ## Format code and tidy go.mod
+format: mod-tidy ## Run mod-tidy, then format code
 	go fmt ./...
 	gofmt -s -w $(GO_FILES)
 
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
-lint: import-boundaries ## Run linters (golangci-lint + nilaway + modernize)
+lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
 	golangci-lint run ./...
 	nilaway $(GO_TAG_FLAGS) ./...
 	modernize $(GO_TAG_FLAGS) ./...
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
+
+docs-parity: ## Check docs against go.mod, the Makefile, and the DevNet compose file
+	go test ./internal/docsparity
 
 proto: $(PROTOC) ## Generate Go code from protobuf definitions
 	go build -o $(TOOLS_BIN)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
@@ -97,10 +100,10 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
-test: mod-tidy ## Run tests with race detection
+test: mod-tidy ## Run mod-tidy, then all tests with race detection
 	go test $(GO_TAG_FLAGS) -v -race ./...
 
-bench: mod-tidy ## Run benchmarks
+bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
 
 bench-mempool-revalidation: ## Benchmark FIFO admission during normal and degenerate rebuilds
@@ -115,20 +118,20 @@ bench-mempool-normal: ## Compare FIFO and DAG under the normal load matrix
 bench-mempool-degenerate: ## Compare FIFO and DAG under degenerate workloads
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=^BenchmarkMempoolPluginsDegenerate$$ -benchmem ./mempool
 
-test-load: build ## Load test data into a fresh database
+test-load: build ## Run build, then load test data into a fresh database
 	rm -rf .dingo
 	./dingo load database/immutable/testdata
 
-test-load-log: build ## Load test data and capture log output
+test-load-log: build ## Run build, then load test data and capture log output
 	rm -rf .dingo dingo.log
 	./dingo load database/immutable/testdata 2>&1 | tee dingo.log
 
-test-load-profile: build ## Load test data with CPU/memory profiling
+test-load-profile: build ## Run build, then load test data with CPU/memory profiling
 	rm -rf .dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
 
-test-devnet: ## Run devnet integration tests
+test-devnet: ## Run the default all-Dingo DevNet integration tests
 	./internal/test/devnet/run-tests.sh
 
 # Build our program binaries
