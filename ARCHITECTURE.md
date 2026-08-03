@@ -2595,12 +2595,24 @@ and a failed trio is removed through that handle. Removing
 to the file, so a symlink there would make a failed download unlink somebody
 else's files.
 
-`findImmutableDir` refuses a candidate reached through a symlink and reports
-the snapshot as absent instead. Extraction never creates a symlink, so one in
-an extracted tree is evidence of tampering rather than something this node
-produced; treating the tree as absent re-extracts it from the verified archive,
-which discards it. Accepting it would skip extraction entirely and load the
-chain from a directory somebody else chose.
+The same rule governs the cache-reuse fast paths — `findImmutableDir` and the
+ancillary "already extracted, skipping" checks — which decide whether a
+previous run left a usable tree and, when they say yes, skip extraction
+entirely. A candidate reached through a symlink is refused and the snapshot
+reported absent. Extraction never creates a symlink, so one in an extracted
+tree is evidence of tampering rather than something this node produced;
+treating the tree as absent re-extracts it from the verified archive, which
+discards it. Accepting it would load the chain from a directory somebody else
+chose.
+
+The directory being inspected is checked, not just the candidates below it.
+`immutable-<digest>` and `ancillary-<digest>` are derived inside the download
+directory rather than chosen by the operator, so a symlink at one of them is
+planted content like anything under it — and asking whether it holds chunk or
+ledger files by pathname would follow it. Each is opened through a handle on
+its parent and read through that handle. Directories *above* a candidate are
+the operator's and resolve normally, which is where extraction draws the same
+line.
 
 ### Catch-up vs bootstrap dispatch
 
