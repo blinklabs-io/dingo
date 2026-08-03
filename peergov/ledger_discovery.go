@@ -293,7 +293,16 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 
 	// Check if the governor is running (stopCh is set by Start)
 	// and outbound connections are enabled before spawning.
+	//
+	// Spawning must happen inside this same critical section: see
+	// AddPeer's identical comment in peers.go for why calling
+	// spawnOutboundConnection after unlocking races Stop's
+	// stopCh-clearing + p.wg.Wait() and can let Stop return before this
+	// dial is ever registered with that WaitGroup.
 	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound
+	if shouldConnect {
+		p.spawnOutboundConnectionLocked(newPeer)
+	}
 	evt = &pendingEvent{
 		PeerAddedEventType,
 		PeerStateChangeEvent{Address: address, Reason: "ledger"},
@@ -303,13 +312,6 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 
 	// Publish event outside of lock to avoid deadlock
 	p.publishEvent(evt.eventType, evt.data)
-
-	// Spawn an outbound connection goroutine for the new peer.
-	// Without this, ledger peers stay cold indefinitely since
-	// startOutboundConnections only runs once at startup.
-	if shouldConnect {
-		go p.createOutboundConnection(newPeer)
-	}
 
 	return added
 }

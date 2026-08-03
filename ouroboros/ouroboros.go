@@ -121,6 +121,10 @@ type Ouroboros struct {
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
+	// leiosVoteEnqueueCount counts EnqueueLeiosPrototypeVote calls -- see
+	// LeiosVoteEnqueueCount's doc comment for why this, not a queue-depth
+	// check, is what tests must use.
+	leiosVoteEnqueueCount atomic.Uint64
 	// LeiosNotify ranking-block announcements observed on this node. The map
 	// is keyed by announcing ranking-block hash and prevents an inconsistent
 	// second description of the same ranking block from being relayed.

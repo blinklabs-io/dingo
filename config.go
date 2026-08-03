@@ -144,6 +144,8 @@ type Config struct {
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
+	barkHost                                                                            string
+	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
@@ -509,6 +511,8 @@ func (c *Config) syncCompatFields() {
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
+	c.barkHost = c.cfg.BarkHost
+	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
@@ -909,6 +913,17 @@ func WithDatabaseWorkerPoolConfig(
 	}
 }
 
+// WithDatabaseLifecycle specifies configuration for automatic
+// epoch-boundary database snapshots (see dblifecycle.Manager).
+func WithDatabaseLifecycle(
+	cfg internalconfig.DatabaseLifecycleConfig,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.DatabaseLifecycle = cfg
+		c.databaseLifecycle = cfg
+	}
+}
+
 // WithPeerTargets specifies the target number of peers in each state.
 // Use 0 to use the default target, or -1 for unlimited.
 // Default targets: known=150, established=50, active=20
@@ -1174,6 +1189,16 @@ func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 func WithBarkPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkPort = port
+	}
+}
+
+// WithBarkHost sets the interface Bark binds to. Empty leaves it to node.go's
+// own safe-default logic (loopback-only when the database lifecycle service
+// is mounted, all interfaces otherwise) rather than forcing a value here.
+func WithBarkHost(host string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkHost = host
+		c.barkHost = host
 	}
 }
 

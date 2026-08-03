@@ -15,12 +15,16 @@
 package utxorpc
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -143,6 +147,125 @@ func TestUtxorpc_StartStop(t *testing.T) {
 	defer cancel()
 	err = u.Stop(ctx)
 	require.NoError(t, err, "failed to stop utxorpc")
+}
+
+// TestUtxorpc_StopForcesCloseOnUnboundedStream covers Stop's escalation to
+// a hard Close when a client keeps a connection open, standing in for a
+// WatchTx/WatchMempool stream that never returns. Before this fix, Stop was
+// exactly http.Server.Shutdown(ctx) with no fallback, so such a client
+// (with a ctx carrying no deadline, as node_lifecycle.go's live
+// restore/truncate path passes) could hang the whole quiesce sequence
+// indefinitely.
+func TestUtxorpc_StopForcesCloseOnUnboundedStream(t *testing.T) {
+	var logBuf bytes.Buffer
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:          slog.New(slog.NewJSONHandler(&logBuf, nil)),
+		EventBus:        event.NewEventBus(nil, nil),
+		ShutdownTimeout: 50 * time.Millisecond,
+	})
+
+	requestReceived := make(chan struct{})
+	blockHandler := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		close(requestReceived)
+		<-blockHandler
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := &http.Server{Handler: mux}
+	u.server = server
+	go server.Serve(ln)
+	t.Cleanup(func() { close(blockHandler) })
+
+	client := &http.Client{}
+	go func() {
+		resp, getErr := client.Get("http://" + ln.Addr().String() + "/") //nolint:noctx
+		if getErr == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-requestReceived
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- u.Stop(context.Background()) }()
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"Stop did not return shortly after ShutdownTimeout elapsed -- " +
+				"did not force-close the server",
+		)
+	}
+	assert.Contains(t, logBuf.String(), "forcing close")
+}
+
+// TestUtxorpc_StopObservesCtxCancellation covers the ctx.Done() case added
+// alongside the ShutdownTimeout timer: a cancellation-only ctx (no
+// deadline) must force-close promptly instead of waiting out the full
+// ShutdownTimeout, since a live database restore/truncate quiesce may want
+// to abandon a slow shutdown well before that fixed timeout elapses.
+func TestUtxorpc_StopObservesCtxCancellation(t *testing.T) {
+	var logBuf bytes.Buffer
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:   slog.New(slog.NewJSONHandler(&logBuf, nil)),
+		EventBus: event.NewEventBus(nil, nil),
+		// Deliberately long relative to the ctx cancellation below -- if
+		// Stop ever regresses to ignoring ctx.Done(), it will block for
+		// this entire duration instead of returning promptly.
+		ShutdownTimeout: 30 * time.Second,
+	})
+
+	requestReceived := make(chan struct{})
+	blockHandler := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		close(requestReceived)
+		<-blockHandler
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := &http.Server{Handler: mux}
+	u.server = server
+	go server.Serve(ln)
+	t.Cleanup(func() { close(blockHandler) })
+
+	client := &http.Client{}
+	go func() {
+		resp, getErr := client.Get("http://" + ln.Addr().String() + "/") //nolint:noctx
+		if getErr == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-requestReceived
+
+	// A ctx that is already cancelled by the time Stop's select runs --
+	// standing in for a quiesce caller that wants to give up immediately,
+	// well before ShutdownTimeout would fire, and carries no deadline of
+	// its own for the existing ctx.Deadline()-based min() logic to catch.
+	stopCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- u.Stop(stopCtx) }()
+
+	// Bounded overall wait: far shorter than ShutdownTimeout, so a
+	// regression (Stop still blocking on the timer) fails this test
+	// quickly instead of costing 30+ seconds per run.
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"Stop did not return promptly after ctx was cancelled -- " +
+				"it appears to be ignoring ctx.Done() and waiting out " +
+				"the full ShutdownTimeout instead",
+		)
+	}
+	assert.Contains(t, logBuf.String(), "forcing close")
+	assert.Contains(t, logBuf.String(), "cancelled by caller context")
 }
 
 // TestAnyChainBlockNativeBytes_NonNil ensures that AnyChainBlock.NativeBytes

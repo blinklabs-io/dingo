@@ -100,7 +100,7 @@ func TestCreateOutboundConnection_DropsNeverConnectedGossipPeer(t *testing.T) {
 	pg := newReconnectGateTestGovernor(t, 0)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, false, true)
 
-	go pg.createOutboundConnection(target)
+	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()
@@ -117,7 +117,7 @@ func TestCreateOutboundConnection_DropsNeverConnectedPublicRootPeer(t *testing.T
 	pg := newReconnectGateTestGovernor(t, 0)
 	target := setupReconnectGateTest(pg, PeerSourceTopologyPublicRoot, false, true)
 
-	go pg.createOutboundConnection(target)
+	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()
@@ -134,7 +134,7 @@ func TestCreateOutboundConnection_RetainsNeverConnectedLocalRootPeer(t *testing.
 	pg := newReconnectGateTestGovernor(t, 0)
 	target := setupReconnectGateTest(pg, PeerSourceTopologyLocalRoot, false, true)
 
-	go pg.createOutboundConnection(target)
+	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()
@@ -156,7 +156,7 @@ func TestCreateOutboundConnection_RetainsEverConnectedGossipPeer(t *testing.T) {
 	pg := newReconnectGateTestGovernor(t, 1000)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, true, true)
 
-	go pg.createOutboundConnection(target)
+	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()
@@ -178,7 +178,7 @@ func TestCreateOutboundConnection_RetainsNeverConnectedGossipPeerWhenNoUpstream(
 	pg := newReconnectGateTestGovernor(t, 1000)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, false, false)
 
-	go pg.createOutboundConnection(target)
+	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()

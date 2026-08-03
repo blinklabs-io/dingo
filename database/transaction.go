@@ -73,7 +73,7 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 	return nil
 }
 
-// mithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
+// MithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
 // or 0 if none is recorded (genesis sync, or a non-genesis chainsync
 // intersect point with no snapshot import). A failure to read the sync
 // state is logged and also treated as 0 (the caller cannot distinguish it
@@ -81,8 +81,15 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 // operator tell a transient storage problem apart from a genuinely
 // unrecoverable UTxO when StrictUtxoValidation turns the latter into an
 // ingest error.
-func (d *Database) mithrilTrustBoundarySlot(txn *Txn) uint64 {
-	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+//
+// This fail-open behavior is intentional for that caller (a best-effort
+// recovery heuristic), but wrong for a caller enforcing a safety check —
+// see MithrilTrustBoundarySlotStrict, used by database/lifecycle.Truncate,
+// where treating a failed read as "no boundary recorded" would silently
+// let a truncate proceed past a boundary that could not actually be
+// verified, rather than merely under-informing a heuristic.
+func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
+	slot, err := d.MithrilTrustBoundarySlotStrict(txn)
 	if err != nil {
 		d.logger.Warn(
 			"failed to read Mithril trust boundary from sync state; "+
@@ -91,19 +98,35 @@ func (d *Database) mithrilTrustBoundarySlot(txn *Txn) uint64 {
 		)
 		return 0
 	}
+	return slot
+}
+
+// MithrilTrustBoundarySlotStrict is MithrilTrustBoundarySlot, but returns
+// the underlying read error instead of swallowing it as "no boundary
+// recorded" — for a caller that must fail closed (refuse the operation)
+// rather than fail open when the boundary can't be verified. A malformed
+// stored value is also propagated as an error here (unlike
+// MithrilTrustBoundarySlot, which still treats it as absent): a corrupted
+// persisted boundary must not be indistinguishable from "no snapshot was
+// ever imported" for a caller enforcing a safety check, or the check is
+// defeated exactly when it matters most.
+func (d *Database) MithrilTrustBoundarySlotStrict(txn *Txn) (uint64, error) {
+	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		return 0, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
 	if val == "" {
-		return 0
+		return 0, nil
 	}
 	slot, err := strconv.ParseUint(val, 10, 64)
 	if err != nil {
-		d.logger.Warn(
-			"malformed mithril_ledger_slot sync state value, ignoring",
-			"value", val,
-			"error", err,
+		return 0, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			val,
+			err,
 		)
-		return 0
 	}
-	return slot
+	return slot, nil
 }
 
 func ledgerHashBytes(hash lcommon.Blake2b256) []byte {
@@ -478,7 +501,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	// Read the Mithril trust boundary once: below it, absent producer rows are
 	// legitimately expected (the snapshot does not carry pre-boundary history);
 	// past it the node should hold complete producer history.
-	mithrilBoundarySlot := d.mithrilTrustBoundarySlot(txn)
+	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
 		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())

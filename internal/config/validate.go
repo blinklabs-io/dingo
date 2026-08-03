@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -216,8 +217,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for most, privateBindAddr for the private
-	// listener, midnight.host for Midnight, and all interfaces for bark
-	// (which is started without a host).
+	// listener, midnight.host for Midnight, and BarkHost for bark.
 	ports := []struct {
 		setting  string
 		host     string
@@ -229,7 +229,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
 		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
-		{"barkPort", "", c.BarkPort, serving, false},
+		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{"plugins.api.utxorpc.config.port", c.BindAddr, utxorpcPort, apiListeners, false},
 		{"plugins.api.blockfrost.config.port", c.BindAddr, blockfrostPort, apiListeners, false},
 		{"plugins.api.mesh.config.port", c.BindAddr, meshPort, apiListeners, false},
@@ -475,6 +475,50 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"delegatorInactivity (%d) must be in [1, 10000] when delegatorInactivityEnabled",
 			c.DelegatorInactivity,
 		))
+	}
+
+	if c.DatabaseLifecycle.SnapshotEnabled &&
+		c.DatabaseLifecycle.SnapshotDir == "" {
+		errs = append(errs, errors.New(
+			"databaseLifecycle.snapshotDir is required when databaseLifecycle.snapshotEnabled is true",
+		))
+	}
+	if c.DatabaseLifecycle.SnapshotRetention < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid databaseLifecycle.snapshotRetention: %d (must not be negative)",
+			c.DatabaseLifecycle.SnapshotRetention,
+		))
+	}
+	if c.DatabaseLifecycle.SnapshotEveryNEpochs < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid databaseLifecycle.snapshotEveryNEpochs: %d (must not be negative)",
+			c.DatabaseLifecycle.SnapshotEveryNEpochs,
+		))
+	}
+	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {
+		u, err := url.Parse(dest)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			errs = append(errs, fmt.Errorf(
+				"invalid databaseLifecycle.snapshotCloudDestination %q: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
+				dest,
+			))
+		} else if !snapshotCloudSchemeSupported(u.Scheme) {
+			errs = append(errs, fmt.Errorf(
+				"invalid databaseLifecycle.snapshotCloudDestination %q: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
+				dest,
+				u.Scheme,
+			))
+		}
+	}
+	if prefix := c.DatabaseLifecycle.SnapshotCloudDestinationPrefix; prefix != "" {
+		if prefix == "." || prefix == ".." ||
+			strings.ContainsAny(prefix, `/\`) {
+			errs = append(errs, fmt.Errorf(
+				"invalid databaseLifecycle.snapshotCloudDestinationPrefix %q: "+
+					"must be one path segment, not '.' or '..', and contain no '/' or '\\'",
+				prefix,
+			))
+		}
 	}
 
 	return errors.Join(errs...)

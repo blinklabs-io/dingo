@@ -30,8 +30,7 @@ func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
 	if err := reg.Register(c); err != nil {
 		// Ignore AlreadyRegisteredError — a second blob store instance
 		// (e.g. chain-manager store) shares the same default registry.
-		var are prometheus.AlreadyRegisteredError
-		if !errors.As(err, &are) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(err)
 		}
 	}

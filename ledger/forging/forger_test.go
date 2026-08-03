@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -111,11 +112,12 @@ func (b *forgerTestBroadcaster) AddBlock(
 }
 
 type forgerTestBlock struct {
-	hash        lcommon.Blake2b256
-	prevHash    lcommon.Blake2b256
-	slot        uint64
-	blockNumber uint64
-	cbor        []byte
+	hash         lcommon.Blake2b256
+	prevHash     lcommon.Blake2b256
+	slot         uint64
+	blockNumber  uint64
+	cbor         []byte
+	transactions []lcommon.Transaction
 }
 
 func newForgerTestBlock(slot, blockNumber uint64) *forgerTestBlock {
@@ -131,7 +133,7 @@ func newForgerTestBlock(slot, blockNumber uint64) *forgerTestBlock {
 func (b *forgerTestBlock) Header() lcommon.BlockHeader { return b }
 func (b *forgerTestBlock) Type() int                   { return int(babbage.BlockTypeBabbage) }
 func (b *forgerTestBlock) Transactions() []lcommon.Transaction {
-	return nil
+	return b.transactions
 }
 func (b *forgerTestBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
 	return nil, nil
@@ -151,6 +153,43 @@ type forgerTestLeiosChecker struct {
 	allowed bool
 	reason  string
 	err     error
+}
+
+type forgerTestConfirmedTxRemover struct {
+	hashes []string
+}
+
+func (r *forgerTestConfirmedTxRemover) RemoveTxsByHash(hashes []string) {
+	r.hashes = append(r.hashes, hashes...)
+}
+
+func TestCheckAndForgeProductionRemovesConfirmedTransactions(t *testing.T) {
+	creds := setupTestCredentials(t)
+	tx, err := conway.NewConwayTransactionFromCbor(makeMinimalTxCbor(t, 0x42, 0))
+	require.NoError(t, err)
+	block := newForgerTestBlock(10, 2)
+	block.transactions = []lcommon.Transaction{tx}
+	remover := &forgerTestConfirmedTxRemover{}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{block: block, cbor: block.cbor},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		ConfirmedTxs:     remover,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(t, []string{tx.Hash().String()}, remover.hashes)
 }
 
 func (c *forgerTestLeiosChecker) MayProduceEndorserBlock(
