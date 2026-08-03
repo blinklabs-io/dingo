@@ -595,6 +595,14 @@ Plugins whose writes are already durable on commit implement `Sync` as a no-op:
 an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
 its writer closes successfully.
 
+GCS and S3 blob transactions stage object mutations in memory until `Commit`;
+`Rollback` discards all staged writes and deletes. Commit applies changes in a
+stable key order and restores prior object values when a later cloud operation
+fails, so callers do not expose writes from an abandoned transaction. Cloud
+object reads are capped at 256 MiB. Forward cloud iterators page keys directly;
+reverse iterators spool only their key records to a temporary file so bucket
+size does not determine iterator heap usage.
+
 S3 has two prefix input forms with deliberately different compatibility contracts. `New` normalizes a non-empty prefix parsed from `s3://<bucket>/<prefix>` to end in `/`, so `s3://bucket/foo` produces object names such as `foo/<hex-key>`. `WithPrefix`, used by the `plugins.storage` config `prefix` field, preserves the configured value verbatim: `foo` produces `foo<hex-key>`, while `foo/` produces `foo/<hex-key>`. An empty prefix in either form adds nothing. Keeping the option form literal preserves the object-key layout of existing deployments.
 
 ```mermaid
