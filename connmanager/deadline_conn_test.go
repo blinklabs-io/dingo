@@ -31,50 +31,39 @@ func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
 }
 
 func TestDeadlineConnRefreshesReadAndWriteDeadlines(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr == nil {
-			accepted <- conn
-		}
-	}()
-	client, err := net.Dial("tcp", listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	server := <-accepted
-	defer server.Close()
-
-	wrapped := withSocketDeadlines(client)
-	if _, ok := wrapped.(*deadlineConn); !ok {
-		t.Fatal("TCP connection should be wrapped")
-	}
-
-	before := time.Now().Add(socketIdleTimeout)
+	base := &recordingConn{}
+	wrapped := &deadlineConn{Conn: base, timeout: socketIdleTimeout}
+	before := time.Now()
 	if _, err := wrapped.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	var buf [1]byte
-	if _, err := server.Read(buf[:]); err != nil {
+	if _, err := wrapped.Read(make([]byte, 1)); err != nil {
 		t.Fatal(err)
 	}
-	after := time.Now().Add(socketIdleTimeout)
-
-	deadline, ok := wrapped.(*deadlineConn)
-	if !ok {
-		t.Fatal("TCP connection should be wrapped")
-	}
-	if err := deadline.Conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if deadline.timeout <= 0 || !after.After(before) {
-		t.Fatal("deadline refresh should use a future idle timeout")
+	if !base.writeDeadline.After(before) || !base.readDeadline.After(before) {
+		t.Fatal("read and write deadlines should be refreshed")
 	}
 }
+
+type recordingConn struct {
+	readDeadline  time.Time
+	writeDeadline time.Time
+}
+
+func (c *recordingConn) Read(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (c *recordingConn) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (*recordingConn) Close() error         { return nil }
+func (*recordingConn) LocalAddr() net.Addr  { return nil }
+func (*recordingConn) RemoteAddr() net.Addr { return nil }
+func (c *recordingConn) SetDeadline(t time.Time) error {
+	c.readDeadline, c.writeDeadline = t, t
+	return nil
+}
+func (c *recordingConn) SetReadDeadline(t time.Time) error  { c.readDeadline = t; return nil }
+func (c *recordingConn) SetWriteDeadline(t time.Time) error { c.writeDeadline = t; return nil }
