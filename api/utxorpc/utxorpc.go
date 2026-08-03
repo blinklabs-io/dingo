@@ -385,12 +385,21 @@ func betaVersionedQueryHandler(
 		),
 		connect.WithHandlerOptions(options),
 	)
+	// Build the rewrite handler once and reuse it across requests, matching
+	// the beta submit/sync/watch handlers. rewriteVersionHandler is a pure
+	// function of its arguments, so hoisting it out of the request closure is
+	// behavior-preserving and avoids a per-request allocation.
+	rewrittenQueryHandler := rewriteVersionHandler(
+		alphaHandler,
+		betaPath,
+		alphaPath,
+	)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == betaqueryconnect.QueryServiceReadStateProcedure {
 			readStateHandler.ServeHTTP(w, r)
 			return
 		}
-		rewriteVersionHandler(alphaHandler, betaPath, alphaPath).ServeHTTP(w, r)
+		rewrittenQueryHandler.ServeHTTP(w, r)
 	})
 }
 
