@@ -1276,8 +1276,12 @@ log as locally forged announcements, so followers consume them and relays
 diffuse them without
 changing the block wire format. Duplicate observations and a third distinct
 announcement for one election are suppressed, and accepted traces log the
-observed slot and lateness. The Go dependency has no separate Lookahead state
-type; its bounded pipelined request window is configured to the protocol
+observed slot and lateness. Before an announcement can affect the cross-peer
+EB-size invariant, the decoded ranking header is verified against the current
+ledger state, including VRF/KES and leader eligibility. Deduplication state is
+pruned when its announced slot leaves the ten-minute acceptance window,
+including the EB-size and per-election indexes. The Go dependency has no
+separate Lookahead state type; its bounded pipelined request window is configured to the protocol
 maximum, providing the w31 request-window behavior while remaining compatible
 with w30 peers that accept and ignore the announcement payload. Full consensus
 validation of the announced endorser block remains outside LeiosNotify and is

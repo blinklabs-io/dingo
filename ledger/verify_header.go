@@ -86,6 +86,21 @@ func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) er
 	return err
 }
 
+// ValidateBlockHeaderCrypto validates a header using the current ledger
+// state.  It is used by protocol handlers that receive a header without its
+// block body (for example LeiosNotify announcements) and must not let an
+// unauthenticated header influence shared state.
+func (ls *LedgerState) ValidateBlockHeaderCrypto(header ledger.BlockHeader) error {
+	if header == nil {
+		return errors.New("nil block header")
+	}
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+		headerOnlyBlock{header: header},
+		true,
+		false,
+	)
+}
+
 // verifyBlockHeader performs cryptographic verification of a block header.
 // This includes VRF proof verification and KES signature verification.
 // Byron-era blocks are skipped because they use a different consensus

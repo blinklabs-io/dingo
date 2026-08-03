@@ -58,6 +58,8 @@ type leiosAnnouncement struct {
 	ebHash lcommon.Blake2b256
 	ebSize uint64
 	slot   uint64
+	// electionKey lets pruning rebuild the bounded per-election index.
+	electionKey string
 }
 
 type leiosDeliveryReservation struct {
@@ -1145,6 +1147,11 @@ func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
 	if err != nil {
 		return fmt.Errorf("decode ranking-block header: %w", err)
 	}
+	if o.LedgerState != nil {
+		if err := o.LedgerState.ValidateBlockHeaderCrypto(header); err != nil {
+			return fmt.Errorf("validate ranking-block header: %w", err)
+		}
+	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()
 	if !ok {
 		return errors.New("ranking-block header has no valid endorser-block announcement")
@@ -1170,6 +1177,11 @@ func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
 		if age > leiosNotifyMaxAnnouncementAge {
 			return fmt.Errorf("announcement is stale by %s", age)
 		}
+		// Drop announcements that can no longer affect the acceptance window
+		// before adding this one. This is deliberately done for local and peer
+		// announcements alike; otherwise a long-lived node retains every RB
+		// header it has ever seen.
+		o.pruneLeiosAnnouncements()
 		o.config.Logger.Debug(
 			"accepted leios announcement",
 			"component", "network",
@@ -1178,13 +1190,43 @@ func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
 			"slot", header.SlotNumber(),
 			"lateness", age,
 		)
-		if source != "local" && age > leiosNotifyRelayAnnouncementAge {
+		if age > leiosNotifyRelayAnnouncementAge {
 			// The announcement is still valid for the receiver, but the w31
 			// relay bound prevents an old message from propagating indefinitely.
 			return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, false)
 		}
 	}
 	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
+}
+
+// pruneLeiosAnnouncements bounds announcement deduplication state to the
+// same ten-minute window used by acceptLeiosAnnouncement. The size index is
+// rebuilt from the retained announcements so an old EB cannot keep its size
+// invariant alive after its announcements expire.
+func (o *Ouroboros) pruneLeiosAnnouncements() {
+	if o.LedgerState == nil {
+		return
+	}
+	now := time.Now()
+	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
+	for key, announcement := range o.leiosAnnouncements {
+		start, err := o.LedgerState.SlotToTime(announcement.slot)
+		if err != nil || now.Sub(start) > leiosNotifyMaxAnnouncementAge {
+			delete(o.leiosAnnouncements, key)
+		}
+	}
+	o.leiosAnnouncementSizes = make(map[string]uint64, len(o.leiosAnnouncements))
+	o.leiosAnnouncementElections = make(map[string]map[string]struct{})
+	for key, announcement := range o.leiosAnnouncements {
+		o.leiosAnnouncementSizes[string(announcement.ebHash.Bytes())] = announcement.ebSize
+		election := o.leiosAnnouncementElections[announcement.electionKey]
+		if election == nil {
+			election = make(map[string]struct{})
+			o.leiosAnnouncementElections[announcement.electionKey] = election
+		}
+		election[key] = struct{}{}
+	}
 }
 
 // recordLeiosAnnouncement performs the consistency checks shared by local
@@ -1236,6 +1278,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	electionAnnouncements[key] = struct{}{}
 	o.leiosAnnouncements[key] = leiosAnnouncement{
 		raw: append([]byte(nil), raw...), ebHash: ebHash, ebSize: ebSize, slot: header.SlotNumber(),
+		electionKey: electionKey,
 	}
 	o.leiosAnnouncementSizes[ebKey] = ebSize
 	o.leiosAnnouncementsMu.Unlock()
