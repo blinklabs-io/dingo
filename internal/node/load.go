@@ -76,10 +76,9 @@ var installEpochBoundarySnapshotHookForLoad = func(
 // wedged. During normal operation the event-driven fallback re-captures the
 // snapshot; during load there is no fallback, so a suppressed capture error
 // would silently drop that epoch's mark/reward snapshot and load would still
-// report success. A post-hoc fallback cannot substitute either: the reward
-// inputs are copied from the live reward aggregate, which only matches the
-// boundary during the in-transaction capture. This tracker lets load fail
-// loudly instead, so the operator knows the resulting database is incomplete.
+// report success if both capture phases fail. The persist phase has a
+// boundary-aware historical fallback; this tracker surfaces a failure of that
+// complete capture so load cannot finish with an incomplete DB.
 type loadCaptureFailureTracker struct {
 	mu     sync.Mutex
 	first  error
@@ -478,6 +477,15 @@ func LoadWithDB(
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	captureFailures := &loadCaptureFailureTracker{}
+	// SNAP-point stake read: runs after MIR and before POOLREAP/enactment so the
+	// mark snapshot includes pre-SNAP credits but excludes post-SNAP credits. If
+	// that read fails, the persist hook uses boundary-aware historical
+	// reconstruction; the tracker reports only failure of the complete capture.
+	ls.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	)
 	if err := installEpochBoundarySnapshotHookForLoad(
 		ls,
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {

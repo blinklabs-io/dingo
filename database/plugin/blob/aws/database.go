@@ -858,6 +858,10 @@ func (t *s3Txn) Rollback() error {
 	return nil
 }
 
+func (t *s3Txn) RollbackIsNoop() bool {
+	return true
+}
+
 type s3Iterator struct {
 	store   *BlobStoreS3
 	keys    []string

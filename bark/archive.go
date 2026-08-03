@@ -40,6 +40,12 @@ func (a *archiveServiceHandler) FetchBlock(
 ) (*connect.Response[archive.FetchBlockResponse], error) {
 	resp := &archive.FetchBlockResponse{}
 
+	db, release, err := a.bark.Acquire()
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	defer release()
+
 	for _, b := range req.Msg.GetBlocks() {
 		hash, err := hex.DecodeString(b.GetHash())
 		if err != nil {
@@ -52,7 +58,7 @@ func (a *archiveServiceHandler) FetchBlock(
 		}
 
 		point := common.NewPoint(b.GetSlot(), hash)
-		signedURL, metadata, err := database.BlockURL(ctx, a.bark.config.DB, point)
+		signedURL, metadata, err := database.BlockURL(ctx, db, point)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting signed url for block [%d, %s]: %w", point.Slot, point.Hash, err)
 		}

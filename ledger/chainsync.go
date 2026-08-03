@@ -1212,29 +1212,6 @@ func (ls *LedgerState) requestChainsyncResync(
 	)
 }
 
-func (ls *LedgerState) currentHeaderPipelineOwner() ouroboros.ConnectionId {
-	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	if ls.chainsyncBlockfetchReadyChan != nil {
-		if connIdKey(ls.headerPipelineConnId) != "" {
-			return ls.headerPipelineConnId
-		}
-		if connIdKey(ls.activeBlockfetchConnId) != "" {
-			return ls.activeBlockfetchConnId
-		}
-		return ouroboros.ConnectionId{}
-	}
-	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
-		return ls.headerPipelineConnId
-	}
-	// Once the shared header queue drains, there is no live pipeline owner.
-	// A stale selected blockfetch peer must not monopolize future headers while
-	// the pipeline is idle; whichever peer delivers the next usable header gets
-	// to seed the next batch.
-	ls.headerPipelineConnId = ouroboros.ConnectionId{}
-	return ouroboros.ConnectionId{}
-}
-
 func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
 	e ChainsyncEvent,
 ) bool {
@@ -1261,25 +1238,70 @@ func (ls *LedgerState) clearIdleSelectedOwner() {
 	}
 }
 
-func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+// claimHeaderPipelineOwnership atomically determines the current header
+// pipeline owner for e and, for every outcome that changes
+// headerPipelineConnId (and selectedBlockfetchConnId, for the
+// compatible-fork case), writes it under the same chainsyncBlockfetchMutex
+// hold as the read that decided it. Every other mutator of
+// headerPipelineConnId (discardBufferedPeerHeaders, clearQueuedHeaders,
+// handleEventBlockfetch's batch-done path, etc.) already holds this same
+// mutex around its own reads/writes; splitting "decide the owner" from
+// "write the decision" into two separate lock/unlock cycles (as this used
+// to do, via the now-inlined currentHeaderPipelineOwner) left a window
+// where one of those other mutators could run in between and have its
+// change silently overwritten by this function's own, now-stale decision.
+func (ls *LedgerState) claimHeaderPipelineOwnership(
+	e ChainsyncEvent,
+) (ownerConnId ouroboros.ConnectionId, shouldBuffer bool, acceptedDifferentConnection bool) {
 	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+
 	if ls.staleSelectedOwnerWouldBufferHeader(e) {
 		ls.logIdleSelectedOwnerRelease(e)
 		ls.clearIdleSelectedOwner()
 	}
-	ls.chainsyncBlockfetchMutex.Unlock()
-	ownerConnId := ls.currentHeaderPipelineOwner()
-	if ownerConnId == (ouroboros.ConnectionId{}) {
-		ls.headerPipelineConnId = e.ConnectionId
-		return false
+
+	var owner ouroboros.ConnectionId
+	switch {
+	case ls.chainsyncBlockfetchReadyChan != nil:
+		if connIdKey(ls.headerPipelineConnId) != "" {
+			owner = ls.headerPipelineConnId
+		} else if connIdKey(ls.activeBlockfetchConnId) != "" {
+			owner = ls.activeBlockfetchConnId
+		} else {
+			owner = ouroboros.ConnectionId{}
+		}
+	case ls.chain != nil && ls.chain.HeaderCount() > 0:
+		owner = ls.headerPipelineConnId
+	default:
+		// Once the shared header queue drains, there is no live pipeline
+		// owner. A stale selected blockfetch peer must not monopolize
+		// future headers while the pipeline is idle; whichever peer
+		// delivers the next usable header gets to seed the next batch.
+		ls.headerPipelineConnId = ouroboros.ConnectionId{}
+		owner = ouroboros.ConnectionId{}
 	}
-	if sameConnectionId(ownerConnId, e.ConnectionId) {
+
+	if owner == (ouroboros.ConnectionId{}) {
 		ls.headerPipelineConnId = e.ConnectionId
-		return false
+		return owner, false, false
+	}
+	if sameConnectionId(owner, e.ConnectionId) {
+		ls.headerPipelineConnId = e.ConnectionId
+		return owner, false, false
 	}
 	if ls.headerFitsCurrentPipeline(e) {
 		ls.headerPipelineConnId = e.ConnectionId
 		ls.selectedBlockfetchConnId = e.ConnectionId
+		return owner, false, true
+	}
+	ls.headerPipelineConnId = owner
+	return owner, true, false
+}
+
+func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+	ownerConnId, shouldBuffer, acceptedDifferentConnection := ls.claimHeaderPipelineOwnership(e)
+	if acceptedDifferentConnection {
 		ls.config.Logger.Debug(
 			"accepting compatible header from different connection",
 			"component", "ledger",
@@ -1287,9 +1309,10 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 			"previous_owner_connection_id", ownerConnId.String(),
 			"slot", e.Point.Slot,
 		)
+	}
+	if !shouldBuffer {
 		return false
 	}
-	ls.headerPipelineConnId = ownerConnId
 	ls.bufferHeaderEvent(e)
 	ls.config.Logger.Debug(
 		"buffering header from non-owner connection",
@@ -1401,10 +1424,19 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	return nil
 }
 
+// discardBufferedPeerHeaders is called from handleEventChainsync's dispatch
+// goroutine, which holds only chainsyncMutex -- clearQueuedHeaders mutates
+// headerPipelineConnId, which every other mutator (handleChainSwitchEvent,
+// handleEventBlockfetch's batch-done path, etc.) guards with
+// chainsyncBlockfetchMutex. Taking it here too, self-contained, closes that
+// gap without widening handleEventBlockfetch's own critical section to
+// cover chainsyncMutex as well.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
 ) {
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
@@ -1825,8 +1857,12 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.headerMismatchCount = 0
 	ls.bufferedHeaderEvents = nil
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
-	ls.clearQueuedHeaders()
 	ls.chainsyncBlockfetchMutex.Lock()
+	// clearQueuedHeaders mutates headerPipelineConnId, which every other
+	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
+	// lock (rather than called before it, as this used to) to close that
+	// gap.
+	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
@@ -1985,8 +2021,13 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				continue
 			}
 			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
+				// clearQueuedHeaders (and the headerPipelineConnId write
+				// below) mutate a field every other mutator guards with
+				// chainsyncBlockfetchMutex -- take it here too, scoped
+				// tightly around just these writes.
+				ls.chainsyncBlockfetchMutex.Lock()
 				ls.clearQueuedHeaders()
-				ls.headerPipelineConnId = ouroboros.ConnectionId{}
+				ls.chainsyncBlockfetchMutex.Unlock()
 				return 0, err
 			}
 			added++
@@ -1994,7 +2035,9 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if added == 0 {
 			continue
 		}
+		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
+		ls.chainsyncBlockfetchMutex.Unlock()
 		ls.selectedBlockfetchConnId = connId
 		return ls.chain.HeaderCount(), nil
 	}
@@ -2258,7 +2301,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
+			//
+			// clearQueuedHeaders mutates headerPipelineConnId, which
+			// every other mutator guards with chainsyncBlockfetchMutex
+			// -- take it here too, scoped tightly around just this call.
+			ls.chainsyncBlockfetchMutex.Lock()
 			ls.clearQueuedHeaders()
+			ls.chainsyncBlockfetchMutex.Unlock()
 			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
 				"block header does not fit chain tip",
@@ -4104,41 +4153,50 @@ func (ls *LedgerState) processEpochRollover(
 	// is selected from the new pparams' major version — a HARDFORK rule that ran
 	// before enactment would observe stale pparams and pick the wrong branch.
 	//
-	// The order, asserted by TestProcessEpochRollover_OrderingInvariant and
-	// TestProcessEpochRollover_RewardOrdering in chainsync_ordering_test.go, is:
+	// The order, asserted by TestProcessEpochRollover_OrderingInvariant,
+	// TestProcessEpochRollover_RewardOrdering and
+	// TestProcessEpochRollover_SnapStakeReadOrdering in
+	// chainsync_ordering_test.go and chainsync_snap_ordering_test.go, is:
 	//
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
 	//      rewards and move undistributed→reserves, unspendable→treasury
-	//      before governance reads the treasury.
-	//   2. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
-	//      voting path; produces newPParams from on-chain pparam-update
-	//      proposals.
-	//   3. applyPoolRetirements          — embedded Shelley POOLREAP: refund
-	//      deposits of pools whose retirement epoch is the new epoch. Runs
-	//      before enactment so any deposit landing in the treasury is visible
-	//      to the treasury withdrawals checked in governance.ProcessEpoch.
-	//   4. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//      before governance reads the treasury. Reference: applyRUpd, the
+	//      first step of NEWEPOCH.
+	//   2. applyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
-	//   5. activateDelegatorInactivityIfNeeded — one-time CIP-0163 activation
+	//      Reference: the MIR rule, which Shelley's NEWEPOCH embeds between
+	//      applyRUpd and EPOCH — so before SNAP, and before POOLREAP.
+	//   3. captureEpochBoundarySnapshotStake — SNAP: read the mark snapshot's
+	//      stake. Reference: the first sub-rule of EPOCH.
+	//   4. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//      voting path; produces newPParams from on-chain pparam-update
+	//      proposals.
+	//   5. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//      deposits of pools whose retirement epoch is the new epoch. Runs
+	//      after SNAP and before enactment, so its deposits are outside the
+	//      mark snapshot but any deposit landing in the treasury is visible
+	//      to the treasury withdrawals checked in governance.ProcessEpoch.
+	//   6. activateDelegatorInactivityIfNeeded — one-time CIP-0163 activation
 	//      before any inactivity-gated boundary calculation.
-	//   6. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   7. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   7. SetPParams                    — persist the enacted pparams.
-	//   8. IsHardForkTransition check    — detect inter-era boundary from
+	//   8. SetPParams                    — persist the enacted pparams.
+	//   9. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   9. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//  10. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
-	//  10. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//  11. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
 	//      (reserves/treasury/fees) after all boundary pot mutations so the
 	//      next delayed reward calculation has its pot inputs.
 	//
-	// The authoritative Mark snapshot is captured separately at the end of the
-	// rollover (captureEpochBoundarySnapshot), after the new epoch record and
-	// its nonce exist.
+	// The mark snapshot ROW is written separately at the end of the rollover
+	// (captureEpochBoundarySnapshot), after the new epoch record and its nonce
+	// exist; step 3 is only the stake read. Splitting them is what lets the read
+	// sit at the reference SNAP point while the write still sees the new epoch.
 	//
-	// Steps 6 and 7 must observe the post-enactment major version. Step 8 must
+	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if err := ls.applyStakeRewards(
@@ -4146,6 +4204,37 @@ func (ls *LedgerState) processEpochRollover(
 	); err != nil {
 		return nil, fmt.Errorf("apply stake rewards: %w", err)
 	}
+
+	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
+	// accumulated during the ended epoch to registered reward accounts, and
+	// apply pot-to-pot transfers between treasury and reserves. This is a
+	// no-op for Conway+ epochs because MIR certs are not valid there and no
+	// DB rows exist for those slots.
+	//
+	// Shelley's NEWEPOCH rule embeds MIR between applyRUpd and EPOCH, so MIR
+	// precedes both SNAP and POOLREAP: its credits are part of the mark snapshot
+	// and its pot movements are visible to POOLREAP, governance and the ADA-pot
+	// capture below.
+	if err := ls.applyMIRCerts(
+		txn, currentEpoch.StartSlot, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply MIR certs: %w", err)
+	}
+
+	// SNAP read point. Everything below this line is a rule cardano-ledger runs
+	// after SNAP, and several of them credit reward accounts at epochStartSlot
+	// (POOLREAP deposit refunds, enacted treasury withdrawals,
+	// proposal-deposit refunds). The mark snapshot's stake is therefore read
+	// here — after the delayed reward update and MIR, which precede SNAP, and
+	// before any of them — while the snapshot row is written at the end of the
+	// rollover where the new epoch record and the post-enactment protocol
+	// version exist.
+	if err := ls.captureEpochBoundarySnapshotStake(
+		txn, currentEpoch, epochStartSlot,
+	); err != nil {
+		return nil, err
+	}
+
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -4165,25 +4254,16 @@ func (ls *LedgerState) processEpochRollover(
 	}
 
 	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
-	// pools whose retirement epoch is the new epoch. Per the Conway EPOCH rule
-	// this runs before governance enactment and treasury accounting, so any
-	// deposit that lands in the treasury (unregistered/inactive reward account)
-	// is visible to the withdrawals checked in governance.ProcessEpoch below.
+	// pools whose retirement epoch is the new epoch. The EPOCH rule runs it
+	// after SNAP, so these deposits are deliberately outside the mark snapshot
+	// read above, and before governance enactment and treasury accounting, so
+	// any deposit that lands in the treasury (unregistered/inactive reward
+	// account) is visible to the withdrawals checked in
+	// governance.ProcessEpoch below.
 	if err := ls.applyPoolRetirements(
 		txn, currentEpoch.EpochId+1, epochStartSlot,
 	); err != nil {
 		return nil, fmt.Errorf("apply pool retirements: %w", err)
-	}
-
-	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
-	// accumulated during the ended epoch to registered reward accounts, and
-	// apply pot-to-pot transfers between treasury and reserves. This is a
-	// no-op for Conway+ epochs because MIR certs are not valid there and no
-	// DB rows exist for those slots.
-	if err := ls.applyMIRCerts(
-		txn, currentEpoch.StartSlot, epochStartSlot,
-	); err != nil {
-		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
 	// CIP-0163: one-time activation stamp. It must precede governance's
@@ -4408,6 +4488,79 @@ func (ls *LedgerState) processEpochRollover(
 	return result, nil
 }
 
+// epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot
+// of the ended epoch, i.e. one before the boundary.
+func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
+	if boundarySlot == 0 {
+		return 0
+	}
+	return boundarySlot - 1
+}
+
+// captureEpochBoundarySnapshotStake invokes the optional SNAP-point stake hook
+// at the correct place in the boundary sequence: after the two boundary rules
+// cardano-ledger applies before SNAP (the delayed reward update and MIR) and
+// before POOLREAP and governance enactment, which credit reward accounts at the
+// boundary slot after it.
+//
+// It only reads, so it needs nothing from the not-yet-written new epoch record;
+// the boundary identity is fully determined here (the new epoch is
+// prevEpoch.EpochId+1 starting at boundarySlot) and matches the event the
+// persist half builds from that record.
+//
+// A failure is isolated with a savepoint so it cannot poison the rollover
+// transaction on backends that abort a transaction on SQL error. The persist
+// half then uses the boundary-aware historical reconstruction; load mode also
+// records the failure so an incomplete capture is surfaced to the operator.
+func (ls *LedgerState) captureEpochBoundarySnapshotStake(
+	txn *database.Txn,
+	prevEpoch models.Epoch,
+	boundarySlot uint64,
+) error {
+	hook := ls.epochBoundarySnapshotStakeHook()
+	if hook == nil {
+		return nil
+	}
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch.EpochId,
+		NewEpoch:      prevEpoch.EpochId + 1,
+		BoundarySlot:  boundarySlot,
+		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
+	}
+	const savepoint = "epoch_boundary_snapshot_stake"
+	if err := txn.SavePoint(savepoint); err != nil {
+		ls.config.Logger.Warn(
+			"snap-point stake savepoint unavailable; deferring stake read to snapshot persist",
+			"error", err,
+			"epoch", evt.NewEpoch,
+			"component", "ledger",
+		)
+		return nil
+	}
+	if err := hook(txn, evt); err != nil {
+		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
+			ls.config.Logger.Error(
+				"failed to roll back snap-point stake savepoint",
+				"error", rbErr,
+				"read_error", err,
+				"epoch", evt.NewEpoch,
+				"component", "ledger",
+			)
+			return fmt.Errorf(
+				"roll back snap-point stake savepoint (read error: %w): %w",
+				err, rbErr,
+			)
+		}
+		ls.config.Logger.Warn(
+			"snap-point stake read failed; deferring stake read to snapshot persist",
+			"error", err,
+			"epoch", evt.NewEpoch,
+			"component", "ledger",
+		)
+	}
+	return nil
+}
+
 // captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook
 // inside the epoch-rollover write transaction so the mark snapshot commits
 // atomically with the epoch it describes (and the event-driven fallback then
@@ -4425,10 +4578,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 		return nil
 	}
 	newEpoch := result.NewCurrentEpoch
-	snapshotSlot := newEpoch.StartSlot
-	if snapshotSlot > 0 {
-		snapshotSlot--
-	}
+	snapshotSlot := epochBoundarySnapshotSlot(newEpoch.StartSlot)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch: prevEpoch.EpochId,
 		NewEpoch:      newEpoch.EpochId,

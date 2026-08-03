@@ -206,7 +206,7 @@ func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(t *test
 	}
 	pg.mu.Unlock()
 
-	go pg.createOutboundConnection(target)
+	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()
@@ -305,7 +305,7 @@ func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityChecked
 	pg.peers = []*Peer{target}
 	pg.mu.Unlock()
 
-	go pg.createOutboundConnection(target)
+	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		return strings.Contains(

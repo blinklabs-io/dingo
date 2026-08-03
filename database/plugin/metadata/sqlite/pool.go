@@ -1331,6 +1331,37 @@ func (d *MetadataStoreSqlite) GetStakeByPoolsAtSlot(
 	return stakes, delegators, nil
 }
 
+// GetEpochBoundaryStakeByPools returns delegated stake for multiple pools at an
+// epoch boundary, with SNAP reward semantics.
+func (d *MetadataStoreSqlite) GetEpochBoundaryStakeByPools(
+	poolKeyHashes [][]byte,
+	snapshotSlot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"GetEpochBoundaryStakeByPools: resolve db: %w",
+			err,
+		)
+	}
+	stakes, delegators, err := stakequery.GetStakeByPoolsAtBoundary(
+		db,
+		poolKeyHashes,
+		snapshotSlot,
+		boundarySlot,
+		expiryEpoch,
+		inactivityPeriod,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("GetEpochBoundaryStakeByPools: %w", err)
+	}
+	return stakes, delegators, nil
+}
+
 func (d *MetadataStoreSqlite) GetPoolOwnerStakeAtSlot(
 	ownerKeyHashes [][]byte,
 	slot uint64,
