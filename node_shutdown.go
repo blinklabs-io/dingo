@@ -141,6 +141,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.dbLifecycleMgr != nil {
+		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))

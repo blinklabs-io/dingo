@@ -1394,7 +1394,21 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 // EnqueueLeiosPrototypeVote queues a locally emitted vote for diffusion over
 // the same LeiosNotify stream used by the reference implementation.
 func (o *Ouroboros) EnqueueLeiosPrototypeVote(vote lcommon.LeiosPrototypeVote) {
+	o.leiosVoteEnqueueCount.Add(1)
 	copyVote := vote
 	copyVote.VoteSignature = slices.Clone(vote.VoteSignature)
 	o.leiosEBLog.append(leiosForgedEBEntry{vote: &copyVote})
+}
+
+// LeiosVoteEnqueueCount reports how many times EnqueueLeiosPrototypeVote has
+// been called. A queue-depth check on the underlying log doesn't work for
+// this: with no peer connections registered (leiosForgedEBLog.pruneLocked
+// treats every entry as immediately prunable when no cursor holds it), an
+// entry is pruned again within the same append call that added it. This
+// counter is unaffected by that pruning, so it can actually distinguish
+// "one call per emitted vote" from "one call per accumulated stale
+// EventBus subscription" -- see node_leios_test.go's
+// repeated-live-lifecycle-cycle regression.
+func (o *Ouroboros) LeiosVoteEnqueueCount() uint64 {
+	return o.leiosVoteEnqueueCount.Load()
 }

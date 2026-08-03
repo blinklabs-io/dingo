@@ -162,7 +162,22 @@ type PeerGovernor struct {
 	dialFamilyHasV4     bool
 	dialFamilyHasV6     bool
 	dialFamilyCheckedAt time.Time
+	inboundConnSubId    event.EventSubscriberId
+	connClosedSubId     event.EventSubscriberId
 	mu                  sync.Mutex
+
+	// wg tracks every background goroutine Start spawns, so Stop can
+	// actually wait for all of them to exit before returning instead of
+	// merely signaling them to stop. This matters beyond a clean process
+	// shutdown (where a leaked goroutine is harmless, since the process
+	// exits moments later): the live database restore/truncate path
+	// quiesces and then closes/reopens the node's *database.Database and
+	// *ledger.LedgerState while the process keeps running, and these
+	// goroutines read SyncProgressProvider/LedgerPeerProvider, both
+	// backed by that same soon-to-be-closed state. Without waiting here,
+	// a goroutine still in flight when Stop returns can dereference the
+	// old, closed state after reinitialization has already replaced it.
+	wg sync.WaitGroup
 }
 
 type PeerGovernorConfig struct {
@@ -411,14 +426,18 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 func (p *PeerGovernor) Start(ctx context.Context) error {
 	// Setup connmanager event listeners
 	if p.config.EventBus != nil {
-		p.config.EventBus.SubscribeFunc(
+		inboundConnSubId := p.config.EventBus.SubscribeFunc(
 			connmanager.InboundConnectionEventType,
 			p.handleInboundConnectionEvent,
 		)
-		p.config.EventBus.SubscribeFunc(
+		connClosedSubId := p.config.EventBus.SubscribeFunc(
 			connmanager.ConnectionClosedEventType,
 			p.handleConnectionClosedEvent,
 		)
+		p.mu.Lock()
+		p.inboundConnSubId = inboundConnSubId
+		p.connClosedSubId = connClosedSubId
+		p.mu.Unlock()
 	}
 	// Start reconcile loop
 	ticker := time.NewTicker(p.config.ReconcileInterval)
@@ -437,7 +456,9 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	p.mu.Unlock()
 
 	// Reconcile loop
+	p.wg.Add(1)
 	go func(t *time.Ticker, stop <-chan struct{}) {
+		defer p.wg.Done()
 		defer t.Stop()
 		for {
 			select {
@@ -452,7 +473,9 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	}(ticker, stopCh)
 
 	// Gossip churn loop
+	p.wg.Add(1)
 	go func(t *time.Ticker, stop <-chan struct{}) {
+		defer p.wg.Done()
 		defer t.Stop()
 		for {
 			select {
@@ -467,7 +490,9 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	}(gossipChurnTicker, stopCh)
 
 	// Public root churn loop
+	p.wg.Add(1)
 	go func(t *time.Ticker, stop <-chan struct{}) {
+		defer p.wg.Done()
 		defer t.Stop()
 		for {
 			select {
@@ -489,7 +514,9 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	emergencyDiscoveryTicker := time.NewTicker(
 		p.config.EmergencyDiscoveryCheckInterval,
 	)
+	p.wg.Add(1)
 	go func(t *time.Ticker, stop <-chan struct{}) {
+		defer p.wg.Done()
 		defer t.Stop()
 		for {
 			select {
@@ -511,7 +538,9 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	// Run initial reconcile shortly after startup so gossip and
 	// ledger peer discovery happen promptly rather than waiting
 	// for the first full reconcile interval.
+	p.wg.Add(1)
 	go func(stop <-chan struct{}) {
+		defer p.wg.Done()
 		select {
 		case <-time.After(initialReconnectDelay):
 			p.reconcile(ctx)
@@ -528,7 +557,6 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 // Stop gracefully shuts down the peer governor
 func (p *PeerGovernor) Stop() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	// Stop all tickers
 	if p.reconcileTicker != nil {
@@ -548,4 +576,35 @@ func (p *PeerGovernor) Stop() {
 		close(p.stopCh)
 		p.stopCh = nil
 	}
+	inboundConnSubId := p.inboundConnSubId
+	connClosedSubId := p.connClosedSubId
+	p.inboundConnSubId = 0
+	p.connClosedSubId = 0
+	p.mu.Unlock()
+
+	// PeerGovernor instances are replaced during a live database
+	// restore/truncate while the EventBus remains running. Remove the
+	// old instance's handlers before its replacement starts so a delayed
+	// connection event cannot mutate stale peer state and publish a
+	// conflicting chain-selection update after reconnection.
+	if p.config.EventBus != nil {
+		if inboundConnSubId != 0 {
+			p.config.EventBus.UnsubscribeAndWait(
+				connmanager.InboundConnectionEventType,
+				inboundConnSubId,
+			)
+		}
+		if connClosedSubId != 0 {
+			p.config.EventBus.UnsubscribeAndWait(
+				connmanager.ConnectionClosedEventType,
+				connClosedSubId,
+			)
+		}
+	}
+
+	// Must run with p.mu released: the goroutines being waited for here
+	// take p.mu themselves, so waiting while still holding it would
+	// deadlock. See the wg field's doc comment for why this wait matters
+	// beyond a clean process shutdown.
+	p.wg.Wait()
 }

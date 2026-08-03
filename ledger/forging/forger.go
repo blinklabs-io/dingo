@@ -73,6 +73,7 @@ type BlockForger struct {
 	leaderChecker    LeaderChecker
 	blockBuilder     BlockBuilder
 	blockBroadcaster BlockBroadcaster
+	confirmedTxs     ConfirmedTxRemover
 	blockForged      BlockForgedObserver
 	slotClock        SlotClockProvider
 	slotDuration     time.Duration
@@ -134,6 +135,12 @@ type LeiosBlockBuilder interface {
 type BlockBroadcaster interface {
 	// AddBlock adds a block to the local chain and propagates to peers.
 	AddBlock(block ledger.Block, cbor []byte) error
+}
+
+// ConfirmedTxRemover removes transactions after the block containing them has
+// been adopted locally.
+type ConfirmedTxRemover interface {
+	RemoveTxsByHash(hashes []string)
 }
 
 // BlockForgedObserver observes blocks after they are successfully built,
@@ -248,6 +255,7 @@ type ForgerConfig struct {
 	LeaderChecker    LeaderChecker
 	BlockBuilder     BlockBuilder
 	BlockBroadcaster BlockBroadcaster
+	ConfirmedTxs     ConfirmedTxRemover
 	BlockForged      BlockForgedObserver
 	SlotClock        SlotClockProvider
 
@@ -300,6 +308,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leaderChecker:    cfg.LeaderChecker,
 		blockBuilder:     cfg.BlockBuilder,
 		blockBroadcaster: cfg.BlockBroadcaster,
+		confirmedTxs:     cfg.ConfirmedTxs,
 		blockForged:      cfg.BlockForged,
 		slotClock:        cfg.SlotClock,
 		slotTracker:      NewSlotTracker(),
@@ -758,6 +767,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	); err != nil {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to add block: %w", err)
+	}
+
+	// AddBlock accepted the block, so its transactions are confirmed. Remove
+	// them synchronously instead of depending on an asynchronous full-pool
+	// revalidation that can be invalidated by the next ledger generation.
+	if f.confirmedTxs != nil {
+		transactions := block.Transactions()
+		hashes := make([]string, 0, len(transactions))
+		for _, tx := range transactions {
+			hashes = append(hashes, tx.Hash().String())
+		}
+		if len(hashes) > 0 {
+			f.confirmedTxs.RemoveTxsByHash(hashes)
+		}
 	}
 
 	// Block adopted onto chain

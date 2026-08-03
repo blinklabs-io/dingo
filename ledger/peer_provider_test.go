@@ -501,3 +501,24 @@ func TestCopyPoolRelaysFull(t *testing.T) {
 	(*result[0].IPv4)[0] = 0xFF
 	require.Equal(t, byte(10), (*original[0].IPv4)[0])
 }
+
+// TestPoolRelayProviderCloseUnsubscribes pins that Close removes the
+// cache-invalidation handler NewPoolRelayProvider registers. Without this, a
+// live database restore/truncate -- which constructs a fresh
+// PoolRelayProvider on every cycle (node_lifecycle.go) but previously had no
+// way to unsubscribe the old one -- leaks one more permanently-active
+// EventBus subscription per cycle.
+func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
+	db := newTestDB(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	adapter := newTestAdapter(t, db, bus, defaultRelayCacheTTL)
+	require.True(t, bus.HasSubscribers(PoolStateRestoredEventType))
+
+	adapter.Close()
+	require.False(t, bus.HasSubscribers(PoolStateRestoredEventType))
+
+	// Safe to call more than once.
+	require.NotPanics(t, adapter.Close)
+}

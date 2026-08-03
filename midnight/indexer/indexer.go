@@ -509,9 +509,17 @@ func (idx *Indexer) updateCheckpoint(slot uint64) error {
 	return nil
 }
 
-// Stop unsubscribes from block events.
+// Stop unsubscribes from block events, waiting for any in-flight handler
+// call to finish before returning. A plain Unsubscribe only stops future
+// deliveries, so a handler goroutine that already dequeued a block event
+// could still be executing (writing to the database) when Stop returns --
+// the live database restore/truncate path (node_lifecycle.go) calls Stop
+// and then closes/reopens the node's storage while the process keeps
+// running, so an in-flight write finishing after that point is a real
+// use-after-close risk, not just a benign leak during a normal process
+// shutdown.
 func (idx *Indexer) Stop() {
-	idx.config.EventBus.Unsubscribe(ledger.BlockEventType, idx.subID)
+	idx.config.EventBus.UnsubscribeAndWait(ledger.BlockEventType, idx.subID)
 }
 
 // fatal logs err and forwards it to FatalErrorFunc (typically node cancel).

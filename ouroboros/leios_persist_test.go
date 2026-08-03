@@ -83,8 +83,9 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 	o.leiosPersistDone = make(chan struct{}) // deliberately never closed
 
 	returned := make(chan struct{})
+	var drained bool
 	go func() {
-		o.stopLeiosPersistWriter(50 * time.Millisecond)
+		drained = o.stopLeiosPersistWriter(50 * time.Millisecond)
 		close(returned)
 	}()
 
@@ -93,6 +94,7 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stopLeiosPersistWriter hung past the bounded drain timeout")
 	}
+	require.False(t, drained, "drain must be reported unconfirmed on timeout")
 
 	// The stop channel must still be closed so the writer goroutine can observe
 	// the stop and exit once the blob store unblocks.
@@ -132,5 +134,110 @@ func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
 		t,
 		pending,
 		"enqueue after stop must not strand a job in the pending map",
+	)
+}
+
+// TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB
+// guards the gap a live Restore/Truncate used to leave open: unlike
+// StopLeiosPersistWriter (a genuine, permanent shutdown --
+// TestLeiosPersistEnqueueAfterStopIsRejected above documents that a
+// post-stop enqueue is rejected forever), PauseLeiosPersistWriterForLive
+// LifecycleOp must (1) flush whatever was already queued against the
+// CURRENT database before anything reassigns LedgerState -- so a
+// pre-operation write never lands after the database has moved on -- and
+// (2) still accept and eventually persist a job enqueued afterward, once
+// LedgerState has been reassigned to a new database, mirroring
+// node_lifecycle.go's live restore/truncate reinit reassigning
+// n.ouroboros.LedgerState.
+func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(t *testing.T) {
+	o := newTestOuroborosWithLeiosDB(t)
+	oldDB := o.leiosDatabase()
+	require.NotNil(t, oldDB)
+
+	point1, blockRaw1 := testLeiosEndorserBlockRawWithRefs(t, 20, 1)
+	o.enqueueLeiosPersist(point1, blockRaw1, nil)
+
+	// Pause immediately -- this must drain the just-queued job against
+	// oldDB before returning, exactly like a live Restore/Truncate's
+	// quiesce step pausing right before the database closes.
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+
+	_, manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw1), manifest1)
+
+	// Simulate reinitializeAndResume reassigning LedgerState to a freshly
+	// built database, the way node_lifecycle.go's reinit does.
+	newOuroboros := newTestOuroborosWithLeiosDB(t)
+	newDB := newOuroboros.leiosDatabase()
+	require.NotNil(t, newDB)
+	o.LedgerState = newOuroboros.LedgerState
+
+	// A job enqueued after the pause must actually be accepted (not
+	// silently dropped, unlike a plain post-Stop enqueue) and land in the
+	// NEW database, proving the writer actually restarted rather than
+	// staying permanently paused.
+	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
+	o.enqueueLeiosPersist(point2, blockRaw2, nil)
+	o.StopLeiosPersistWriter()
+
+	_, manifest2, err := newDB.GetLeiosEBManifest(point2.Hash)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw2), manifest2)
+
+	// And it must not have leaked into the old database.
+	_, _, err = oldDB.GetLeiosEBManifest(point2.Hash)
+	require.Error(t, err)
+}
+
+// TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain guards
+// the use-after-close/stolen-job race a timed-out pause used to leave open:
+// if the writer's drain cannot be confirmed, PauseLeiosPersistWriterForLive
+// LifecycleOp must return ErrLeiosPersistDrainUnconfirmed and leave
+// leiosPersistOnce/leiosPersistStopOnce/leiosPersistStarted untouched --
+// resetting them here, with the old writer goroutine still potentially
+// running drainLeiosPersist against the old database, would let the very
+// next enqueue start a second writer against a freshly reset pending map
+// while the old one is still reading and deleting from that same map
+// (now repointed) under the shared mutex.
+func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(t *testing.T) {
+	origTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = origTimeout })
+
+	o := newTestOuroborosWithLeiosDB(t)
+	// Simulate an already-started writer whose drain never completes, with
+	// no real goroutine involved (mirroring TestLeiosPersistStopDrainTimesOut)
+	// so there's nothing else touching these fields concurrently.
+	o.leiosPersistStarted.Store(true)
+	o.leiosPersistStop = make(chan struct{})
+	o.leiosPersistDone = make(chan struct{}) // deliberately never closed
+	o.leiosPersistPending = map[string]*leiosPersistJob{"stuck": {slot: 1}}
+	// Mark leiosPersistOnce as already used, matching a real prior start.
+	o.leiosPersistOnce.Do(func() {})
+
+	pauseErr := o.PauseLeiosPersistWriterForLiveLifecycleOp()
+	require.ErrorIs(t, pauseErr, ErrLeiosPersistDrainUnconfirmed)
+	require.True(
+		t, o.leiosPersistStarted.Load(),
+		"started flag must not be reset on unconfirmed drain",
+	)
+
+	// The real regression: a later enqueue must not start a second writer
+	// against a freshly reset pending map. leiosPersistStop is still
+	// closed (stopLeiosPersistWriter always closes it) and leiosPersistOnce
+	// was not reset, so this enqueue is correctly rejected rather than
+	// replacing the still-referenced pending map out from under whatever
+	// (real, in production) writer might still be draining it.
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 31, 1)
+	o.enqueueLeiosPersist(point, blockRaw, nil)
+	// A fresh map from a second startLeiosPersistWriter call would be
+	// empty (make(map[string]*leiosPersistJob)); the sentinel "stuck"
+	// entry surviving proves leiosPersistPending was never replaced.
+	_, stillPresent := o.leiosPersistPending["stuck"]
+	require.True(
+		t, stillPresent,
+		"a second writer must not start against a fresh pending map "+
+			"while the old drain is unconfirmed",
 	)
 }
