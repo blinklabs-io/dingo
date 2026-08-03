@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,11 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
+	betaquery "github.com/utxorpc/go-codegen/utxorpc/v1beta/query"
+	betaqueryconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/query/queryconnect"
+	betasubmitconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/submit/submitconnect"
+	betasyncconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/sync/syncconnect"
+	betawatchconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/watch/watchconnect"
 )
 
 // Default request size limits to prevent denial-of-service via
@@ -164,17 +170,54 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 		&watchServiceServer{utxorpc: u},
 		compress1KB,
 	)
+	// v1beta uses the same wire-compatible messages as v1alpha, but with
+	// versioned protobuf descriptors. Reuse the handlers after rewriting only
+	// the service path so both API versions can share this listener. This also
+	// preserves streaming behavior without duplicating every service method.
+	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
+	betaQueryHandler := betaVersionedQueryHandler(
+		queryPath,
+		queryHandler,
+		betaQueryPath,
+		compress1KB,
+	)
+	betaSubmitPath := "/" + betasubmitconnect.SubmitServiceName + "/"
+	betaSubmitHandler := rewriteVersionHandler(
+		submitHandler,
+		betaSubmitPath,
+		submitPath,
+	)
+	betaSyncPath := "/" + betasyncconnect.SyncServiceName + "/"
+	betaSyncHandler := rewriteVersionHandler(
+		syncHandler,
+		betaSyncPath,
+		syncPath,
+	)
+	betaWatchPath := "/" + betawatchconnect.WatchServiceName + "/"
+	betaWatchHandler := rewriteVersionHandler(
+		watchHandler,
+		betaWatchPath,
+		watchPath,
+	)
 	mux.Handle(queryPath, queryHandler)
 	mux.Handle(submitPath, submitHandler)
 	mux.Handle(syncPath, syncHandler)
 	mux.Handle(watchPath, watchHandler)
+	mux.Handle(betaQueryPath, betaQueryHandler)
+	mux.Handle(betaSubmitPath, betaSubmitHandler)
+	mux.Handle(betaSyncPath, betaSyncHandler)
+	mux.Handle(betaWatchPath, betaWatchHandler)
 	mux.Handle(
 		grpchealth.NewHandler(
 			grpchealth.NewStaticChecker(
 				queryconnect.QueryServiceName,
+				betaqueryconnect.QueryServiceName,
 				submitconnect.SubmitServiceName,
+				betasubmitconnect.SubmitServiceName,
 				syncconnect.SyncServiceName,
+				betasyncconnect.SyncServiceName,
 				watchconnect.WatchServiceName,
+				betawatchconnect.WatchServiceName,
 			),
 			compress1KB,
 		),
@@ -183,9 +226,13 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 		grpcreflect.NewHandlerV1(
 			grpcreflect.NewStaticReflector(
 				queryconnect.QueryServiceName,
+				betaqueryconnect.QueryServiceName,
 				submitconnect.SubmitServiceName,
+				betasubmitconnect.SubmitServiceName,
 				syncconnect.SyncServiceName,
+				betasyncconnect.SyncServiceName,
 				watchconnect.WatchServiceName,
+				betawatchconnect.WatchServiceName,
 			),
 			compress1KB,
 		),
@@ -288,6 +335,63 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// rewriteVersionHandler adapts a v1beta service path to the corresponding
+// v1alpha handler. The alpha and beta protobuf messages have identical wire
+// fields for the implemented methods, so Connect, gRPC, gRPC-Web, and streaming
+// requests can all be handled by the existing implementation.
+func rewriteVersionHandler(
+	httpHandler http.Handler,
+	fromPrefix, toPrefix string,
+) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clone := r.Clone(r.Context())
+		urlCopy := *r.URL
+		urlCopy.Path = strings.Replace(
+			urlCopy.Path,
+			fromPrefix,
+			toPrefix,
+			1,
+		)
+		urlCopy.RawPath = ""
+		clone.URL = &urlCopy
+		httpHandler.ServeHTTP(w, clone)
+	})
+}
+
+// betaVersionedQueryHandler handles the v1beta-only ReadState method while
+// routing the methods implemented by Dingo through the alpha handler.
+func betaVersionedQueryHandler(
+	alphaPath string,
+	alphaHandler http.Handler,
+	betaPath string,
+	options connect.HandlerOption,
+) http.Handler {
+	readStateHandler := connect.NewUnaryHandler(
+		betaqueryconnect.QueryServiceReadStateProcedure,
+		func(
+			context.Context,
+			*connect.Request[betaquery.ReadStateRequest],
+		) (*connect.Response[betaquery.ReadStateResponse], error) {
+			return nil, connect.NewError(
+				connect.CodeUnimplemented,
+				errors.New("utxorpc.v1beta.query.QueryService.ReadState is not implemented"),
+			)
+		},
+		connect.WithSchema(
+			betaquery.File_utxorpc_v1beta_query_query_proto.Services().
+				ByName("QueryService").Methods().ByName("ReadState"),
+		),
+		connect.WithHandlerOptions(options),
+	)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == betaqueryconnect.QueryServiceReadStateProcedure {
+			readStateHandler.ServeHTTP(w, r)
+			return
+		}
+		rewriteVersionHandler(alphaHandler, betaPath, alphaPath).ServeHTTP(w, r)
+	})
 }
 
 func unencryptedHTTP2Protocols() *http.Protocols {

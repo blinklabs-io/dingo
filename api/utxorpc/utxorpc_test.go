@@ -18,6 +18,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -63,6 +65,22 @@ func TestNewUtxorpc_DefaultLimits(t *testing.T) {
 		u.config.ServerTimeout,
 		"ServerTimeout should default",
 	)
+}
+
+func TestRewriteVersionHandler(t *testing.T) {
+	alphaPath := "/utxorpc.v1alpha.query.QueryService/ReadParams"
+	betaPath := "/utxorpc.v1beta.query.QueryService/ReadParams"
+	calledPath := ""
+	alphaHandler := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		calledPath = r.URL.Path
+	})
+	handler := rewriteVersionHandler(alphaHandler, betaPath, alphaPath)
+
+	req := httptest.NewRequest(http.MethodPost, betaPath, nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	require.Equal(t, alphaPath, calledPath)
 }
 
 func TestNewUtxorpc_CustomLimits(t *testing.T) {
