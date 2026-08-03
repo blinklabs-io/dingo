@@ -17,6 +17,8 @@ package chain
 import (
 	"errors"
 	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/models"
 )
 
 // DefaultMaxQueuedHeaders is the minimum header queue capacity (floor).
@@ -42,6 +44,19 @@ var (
 	)
 	ErrRollbackExceedsSecurityParam = errors.New(
 		"rollback depth exceeds security parameter K",
+	)
+	// ErrRollbackPointNotOnChain is returned when a rollback target resolves
+	// to a block that this chain no longer holds at that block index.
+	// Rolled-back blocks stay resolvable through the manager's retained block
+	// cache with their original index, so a point another fork has since
+	// overwritten still looks valid; rolling back to it truncates to a stale
+	// index and moves the tip to a block the chain does not have, splicing a
+	// continuation onto a parent that is absent from the chain (issue #3005).
+	// It wraps models.ErrBlockNotFound so existing callers keep treating an
+	// unusable rollback target as "point not found" and re-intersect.
+	ErrRollbackPointNotOnChain = fmt.Errorf(
+		"%w: rollback point is not on this chain",
+		models.ErrBlockNotFound,
 	)
 	ErrIteratorChainTip = errors.New(
 		"chain iterator is at chain tip",

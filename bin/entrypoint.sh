@@ -28,6 +28,7 @@
 #   CARDANO_DATABASE_PATH - Database storage location (default: /data/db)
 #   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
 #   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
+#   DINGO_LOG_FILE        - Optional file receiving dingo stdout/stderr
 #   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
 
 set -euo pipefail
@@ -244,8 +245,16 @@ fi
 
 log "Starting dingo ${DINGO_ARGS[*]}"
 
-# Start dingo in the background so we can forward signals
-dingo "${DINGO_ARGS[@]}" &
+# Persist structured output for test harnesses when requested, while keeping
+# stdout as the default for normal deployments.
+if [[ -n "${DINGO_LOG_FILE:-}" ]]; then
+  mkdir -p "$(dirname "${DINGO_LOG_FILE}")"
+  touch "${DINGO_LOG_FILE}"
+  chmod 0644 "${DINGO_LOG_FILE}"
+  dingo "${DINGO_ARGS[@]}" >>"${DINGO_LOG_FILE}" 2>&1 &
+else
+  dingo "${DINGO_ARGS[@]}" &
+fi
 DINGO_PID=$!
 trap cleanup SIGTERM SIGINT
 

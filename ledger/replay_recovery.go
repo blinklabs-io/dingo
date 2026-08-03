@@ -285,6 +285,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		// cannot suppress the fresh ChainSync intersection.
 		ls.publishReplayRecoveryNonConvergingResync(rewindPoint)
 	}
+	primaryChainRewound := false
 	if rewindPrimaryChain && !primaryChainAlreadyHeld {
 		if err := ls.rollbackPrimaryChainInSecurityParamWindows(
 			rewindPoint,
@@ -294,6 +295,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 				err,
 			)
 		}
+		primaryChainRewound = true
 	}
 	// The chain moves first while the rollback anchor is guaranteed to remain
 	// available. If metadata synchronization fails, the primary chain is still
@@ -304,6 +306,15 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			"rollback ledger state for replay recovery: %w",
 			err,
 		)
+	}
+	// Arm only when the corrective primary-chain rewind actually happened and
+	// metadata now sits at that same point. A replay target ahead of the
+	// applied tip would otherwise make the audit treat an unapplied gap as a
+	// cross-fork continuation and produce false diagnostics.
+	if primaryChainRewound &&
+		pointMatches(ls.chain.Tip().Point, rewindPoint) &&
+		pointMatches(ls.Tip().Point, rewindPoint) {
+		ls.armContinuationAudit(rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
 }

@@ -287,6 +287,7 @@ sequenceDiagram
     OB->>EB: publish BlockfetchEvent(block)
     EB->>LS: handleEventBlockfetchBlock()
     LS->>LS: decode CBOR, match to queued header
+    LS->>LS: defer future-slot stateful overlay checks until ledger apply
 
     Note over Peer,DB: Stage 3 — Block Processing
     OB->>EB: publish BlockfetchEvent(batchDone)
@@ -1257,9 +1258,11 @@ Prototype-2026w30 adds an optional Leios BLS key to Dijkstra stake-pool
 registration certificates, between the VRF key hash and pledge. The shared
 gouroboros certificate decoder accepts both the legacy 10-field registration
 and the new 11-field form, validates the 96-byte public key and 48-byte proof
-of possession, and preserves the original CBOR. Dingo does not yet use this key
-for voting or add it to the pool metadata schema. The ledger-state snapshot
-importer nevertheless recognizes the matching Dijkstra `StakePoolState` field
+of possession, and preserves the original CBOR. Dingo does not yet import this
+on-chain key into its voting registry or pool metadata schema; operators must
+currently configure the matching public key in `leiosVoterPublicKeys`. The
+ledger-state snapshot importer nevertheless recognizes the matching Dijkstra
+`StakePoolState` field
 (both a valid key and explicit null) so it locates pledge and all later pool
 fields correctly; malformed key/proof lengths reject that pool state. The same
 prototype release also changes `MsgLeiosBlockAnnouncement` from a null
@@ -1431,6 +1434,13 @@ The `LedgerView` interface provides query access to ledger state:
 - Protocol parameter queries
 - Stake distribution queries
 - Account registration checks
+- `DRepDelegation` lookup for a full, tag-aware stake credential. The lookup
+  returns the account's current DRep delegate (including the non-credential
+  always-abstain and always-no-confidence DRep types), or nil when the account
+  is absent or has no DRep delegation. This implements the
+  `common.DRepDelegationState` capability used by Conway protocol versions 10
+  and 11 to reject reward withdrawals whose stake credential is not delegated
+  to a DRep.
 
 ### Local State Query
 
@@ -1442,6 +1452,17 @@ stake credentials, current DRep vote delegatees, and active governance
 proposals. The handlers read current account state and registration history
 from the database; proposal results reconstruct the on-wire proposal procedure
 from the persisted action CBOR, return address, deposit, anchor, and votes.
+Supported query leaves also include epoch number, current protocol parameters,
+Shelley genesis configuration, UTxO-by-address/transaction-input lookups,
+stake-delegation deposits, the ledger peer snapshot, stake pools, DRep state,
+and account state. `GetCBOR` is a query combinator: it re-runs the wrapped
+inner query through the same dispatch path and returns the result as a tag-24
+CBOR-in-CBOR `Serialised` value, matching cardano-node. `GetStakeSnapshots`
+returns the mark/set/go stake for each requested pool and the corresponding
+totals. For protocol version 11 and later, requested pools whose mark, set,
+and go stake are all zero are omitted; without a pool filter, the result
+contains the union of pools present in those snapshots and the corresponding
+totals.
 
 ## Chain Management
 
@@ -1465,6 +1486,52 @@ The `ChainManager` (`chain/manager.go`) manages multiple chains:
     |   account/pool/DRep state                      |
     -------------------------------------------------
 ```
+
+#### Retained block cache and the rollback-target invariant
+
+`ChainManager.removeBlockByIndex` deletes a rolled-back block's row but first
+puts the block into the manager's LRU block cache, because ephemeral fork
+chains reconcile against the primary chain by walking prev-hash links
+(`Chain.reconcile`) and must still be able to resolve blocks the primary chain
+has abandoned. `ChainManager.blockByPoint` and `blockByHash` therefore answer
+from that cache *before* the database, so an abandoned block stays resolvable
+by point and by hash and still reports the block index it used to occupy.
+
+That retention is deliberate, but it means "resolvable" does not imply "on the
+chain". Rolling the primary chain back to such a point truncated the chain to a
+stale index that a competing fork had already taken over, leaving `currentTip`
+naming a block the chain no longer stores while the block physically at
+`tipBlockIndex` belonged to the other fork. Every block appended afterwards was
+then spliced onto a parent absent from the chain, which is how a spender reached
+the ledger whose producing block was never applied — unresolvable by
+`UtxoByRef`, by transaction metadata, and by the backward chain scan, and
+therefore not fixable by replaying (issue #3005).
+
+`Chain.rollbackPointBlock` closes this: both `Rollback` and `ValidateRollback`
+resolve the target through it, and it rejects any target the chain does not
+currently hold at the resolved index, returning
+`chain.ErrRollbackPointNotOnChain` (which wraps `models.ErrBlockNotFound`).
+Callers already treat "point not found" as a signal to re-intersect, so a peer
+offering a continuation from a fork the node abandoned gets a fresh chainsync
+intersection instead of a spliced chain. Each rejection logs `cross-fork splice
+prevented: rejecting rollback to a point this chain no longer holds` and
+increments `dingo_chain_rollback_point_not_on_chain_total`. The invariant this
+establishes is that `currentTip` always names the block stored at
+`tipBlockIndex`, which is what makes the prev-hash check in `addBlockLocked` /
+`addRawBlockLocked` meaningful.
+
+Two shapes are rejected. A resolved index at or below the tip that holds a
+*different* block is the splice above. A resolved index *ahead* of the tip is
+the issue #3035/#3040 shape: no chain block occupies it, so adopting the point
+raised `tipBlockIndex` past the last stored block and punched a hole that chain
+iteration stops at. Both are refused as not-on-chain, deliberately **not** as
+`ErrRollbackExceedsSecurityParam`: #3035 was a node permanently denying every
+peer because the ahead-of-tip case was misclassified as over-K, and an over-K
+rejection is unrecoverable where a not-found rejection re-intersects.
+`rollbackForkDepth` keeps the saturating arithmetic that fixed the underlying
+uint64 underflow — it is no longer reached with an above-tip index from either
+rollback entry point, and is unit-tested directly so the underflow cannot return
+through a future caller.
 
 ### Chain Selection (Ouroboros Praos)
 
@@ -1965,6 +2032,11 @@ paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
 the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
+The continuation audit is run only after a fetched body is accepted by the
+queued primary chain, so late bodies from an abandoned fetch cannot seed its
+producer window. Its diagnostic database probes are also capped per block
+while the blockfetch pipeline lock is held; this keeps the audit bounded and
+non-blocking for pathological transaction counts.
 The unresolved-producer fallback also tracks the applied ledger high-water
 mark across attempts. Different candidate continuations can move the failing
 block forward slightly while rebuilding to the same applied tip, so failure
@@ -1981,6 +2053,31 @@ step has already pruned the primary chain below the applied ledger tip, the
 primary-chain rewind is an already-held no-op while ChainSync refills it.
 Successful block application beyond the recorded high-water mark clears the
 hold and restores the normal fallback budget.
+
+That hold bounds the damage but cannot explain where an unresolvable producer
+came from, so a bounded diagnostic attributes it
+(`ledger/continuation_audit.go`). A local rollback — chainsync rollback via
+`rollbackChainAndState`, or a replay-recovery rewind — arms a
+`continuationAuditWindow` at the rollback point. While armed, every body
+delivered by blockfetch above that point is checked input by input: an input
+resolves when its producing transaction was created by a block already seen in
+the window (fetched and on the chain, not yet applied), when the ledger still
+holds the UTxO, or when transaction metadata records the producer. Anything
+left over logs `continuation block spends an input with no producer on the
+local applied chain` with the delivering peer, the block, the offending input,
+and the fork point the node had rolled back to, and increments
+`dingo_ledger_continuation_input_unresolved_total`. The audit never rejects a
+block; the splice it detects is prevented upstream in the chain layer, and
+bodies that still fail reach the ordinary validation and recovery guards
+unchanged. Arming on rollback is both the cost gate — a healthy node never runs
+the per-input probes on the steady-state blockfetch path — and what makes the
+check sound, since a rollback leaves the chain and the ledger at the same point
+so every later block arrives through the window. Each arming inspects at most
+`continuationAuditBlockBudget` bodies and retains at most
+`continuationAuditMaxProducedTxs` in-window producers. The audit is also skipped
+while block validation is off, which is how historical catch-up runs: the splice
+it diagnoses is a live tip-band failure, and bulk sync fetches far too many
+bodies per second to pay for the probes.
 
 When a block fails per-tx validation at tip,
 the node rewinds the primary chain and rolls the ledger back so ChainSelection
@@ -2181,9 +2278,9 @@ VRF signing keys, KES signing keys, and operational certificates are loaded from
 Experimental CIP-0164 stake-truncated committee voting, active only under the Dijkstra/Leios gate. `VoteManager` collects, validates, serves, and emits Leios votes:
 
 - **Committee selection**: the voting committee for an epoch is a pure function of the Praos stake snapshot. In current prototype mode every non-zero-stake pool votes, ordered by stake ascending (pool key hash ascending on ties), matching Musashi's `mkCommitteeEveryoneVotes`; the 0-based position is `voter_id`. The stake-truncated sigma-c committee implementation remains available for the post-prototype protocol. Committees are memoized in memory and recomputed on demand — there is no database table.
-- **Vote validation**: current prototype votes identify the announcing ranking block. The selected-chain block event maps that hash to the announcement slot and EB after adoption, before window, committee, membership, deduplication, and BLS checks run; early votes wait in a bounded TTL queue instead of being rejected with a synthetic slot zero. The queue retains bounded alternate candidates per voter and verifies them on resolution, preventing a forged first signature from occupying that voter's deduplication slot. Exact per-connection accounting makes its global capacity fair: when full, an underrepresented connection replaces the oldest candidate from the most represented connection, while a lone healthy relay may still use the entire queue. Prototype public keys are deterministically derived from pool cold-key hashes exactly as on Musashi. The static `leiosVoterPublicKeys` registry remains only for the transitional four-field vote path.
-- **Stake quorum and certificates**: per endorser block and signing context, the manager tracks observed stake (all membership-valid votes) and verified stake (signature-verified votes). When verified stake reaches the `QuorumStakeThreshold` (tau) fraction of *total active stake* (exact rational arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers bitfield over the committee plus one aggregated BLS12-381 MinSig signature — from verified votes only, and publishes `leios.eb_quorum` with the announcing ranking-block hash that every prototype vote signed. The tau < sigma_c invariant is revalidated whenever parameters are read, and a violation disables committee computation. The Dijkstra genesis is immutable and the current cardano-ledger DijkstraGenesis carries no Leios committee fields (Musashi's genesis defines only the refScript parameters), so when `CommitteeStakeCoverage` (sigma_c) and/or `QuorumStakeThreshold` (tau) are absent the node falls back to the CIP-0164 defaults (sigma_c = 0.99, tau = 0.75), mirroring the reference implementation, so committee formation and certification proceed without modifying the hash-pinned genesis; the tau < sigma_c invariant is re-checked after defaulting (issue #2836). Legacy certificate validation uses the slot-plus-EB message, while `ValidatePrototypeEbCertificate` verifies the aggregate against the announcing-RB message and Musashi-derived voter keys. The pipeline preserves that context, and the forge loop only adapts the certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when its announcing RB is the actual parent CertRB.
-- **Vote emission**: after an acquired EB is announced by a selected ranking block, a block producer signs that announcing ranking-block hash once with the prototype BLS POP domain and publishes `leios.vote_emitted`. The signed preimage is the hash's CBOR byte-string encoding (34 bytes: `0x58 0x20` then the 32 hash bytes), matching the reference's `SignableRepresentation` for `RbHash`; signing the bare 32 bytes hashes a different preimage to the curve and every pairing check fails (issue #3034). Before committing either a local or resolved peer vote, the manager revalidates the exact announcement under its state lock; local commit and publication are additionally serialized with rollback, so an in-flight signature cannot resurrect a rolled-back announcement. Node composition enqueues the three-field vote on LeiosNotify. The temporary prototype signing key is the pool cold-key hash right-padded to 32 bytes and reduced modulo the BLS12-381 scalar field order, matching the reference's `rawDeserialiseSignKeyDSIGN` (blst's `blst_scalar_from_be_bytes` reduces mod r and fails only on zero). Reduction is required, not cosmetic: r's leading byte is `0x73`, so roughly 55% of pool key hashes pad to a scalar of at least r, and rejecting those left their votes unverifiable (issue #3034). The strict `ParseVoteSigningKey` path used for operator key files still rejects out-of-range scalars rather than reducing them. A configured `leiosVoteSigningKeyFile`, when present, must match that derived key so a pool cannot silently emit unverifiable votes.
+- **Vote validation**: current prototype votes identify the announcing ranking block. The selected-chain block event maps that hash to the announcement slot and EB after adoption, before window, committee, membership, deduplication, and BLS checks run; early votes wait in a bounded TTL queue instead of being rejected with a synthetic slot zero. The queue retains bounded alternate candidates per voter and verifies them on resolution, preventing a forged first signature from occupying that voter's deduplication slot. Exact per-connection accounting makes its global capacity fair: when full, an underrepresented connection replaces the oldest candidate from the most represented connection, while a lone healthy relay may still use the entire queue. Both transitional four-field and prototype votes use the static `leiosVoterPublicKeys` registry when an entry exists; prototype votes otherwise fall back to the deterministic pool cold-key derivation used by Musashi. A configured local signing key is accepted only when its public key matches the registry entry for that pool, and operators must install that matching entry on every peer.
+- **Stake quorum and certificates**: per endorser block and signing context, the manager tracks observed stake (all membership-valid votes) and verified stake (signature-verified votes). When verified stake reaches the `QuorumStakeThreshold` (tau) fraction of *total active stake* (exact rational arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers bitfield over the committee plus one aggregated BLS12-381 MinSig signature — from verified votes only, and publishes `leios.eb_quorum` with the announcing ranking-block hash that every prototype vote signed. The tau < sigma_c invariant is revalidated whenever parameters are read, and a violation disables committee computation. The Dijkstra genesis is immutable and the current cardano-ledger DijkstraGenesis carries no Leios committee fields (Musashi's genesis defines only the refScript parameters), so when `CommitteeStakeCoverage` (sigma_c) and/or `QuorumStakeThreshold` (tau) are absent the node falls back to the CIP-0164 defaults (sigma_c = 0.99, tau = 0.75), mirroring the reference implementation, so committee formation and certification proceed without modifying the hash-pinned genesis; the tau < sigma_c invariant is re-checked after defaulting (issue #2836). Legacy certificate validation uses the slot-plus-EB message, while `ValidatePrototypeEbCertificate` resolves each registered voter key first and uses the deterministic pool-derived key only when no registration exists. The pipeline preserves that context, and the forge loop only adapts the certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when its announcing RB is the actual parent CertRB.
+- **Vote emission**: after an acquired EB is announced by a selected ranking block, a block producer signs that announcing ranking-block hash once with the prototype BLS POP domain and publishes `leios.vote_emitted`. The signed preimage is the hash's CBOR byte-string encoding (34 bytes: `0x58 0x20` then the 32 hash bytes), matching the reference's `SignableRepresentation` for `RbHash`; signing the bare 32 bytes hashes a different preimage to the curve and every pairing check fails (issue #3034). Before committing either a local or resolved peer vote, the manager revalidates the exact announcement under its state lock; local commit and publication are additionally serialized with rollback, so an in-flight signature cannot resurrect a rolled-back announcement. Node composition enqueues the three-field vote on LeiosNotify. When `leiosVoteSigningKeyFile` is configured, Dingo loads the Cardano text-envelope BLS12-381 signing key and uses it for vote signatures; legacy raw hex scalar files remain accepted. With no configured key, the temporary prototype signing key is the pool cold-key hash right-padded to 32 bytes and reduced modulo the BLS12-381 scalar field order, matching the reference's `rawDeserialiseSignKeyDSIGN` (blst's `blst_scalar_from_be_bytes` reduces mod r and fails only on zero). Reduction is required, not cosmetic: r's leading byte is `0x73`, so roughly 55% of pool key hashes pad to a scalar of at least r, and rejecting those left their votes unverifiable (issue #3034). The strict `ParseVoteSigningKey` path used for operator-supplied key files still rejects out-of-range scalars rather than reducing them. The static `leiosVoterPublicKeys` registry remains the verification trust root until on-chain Leios-key registration is wired through Dijkstra pool parameters.
 - **State lifecycle**: all state is in-memory, split across two stores. Raw votes live in a TTL- and size-bounded *serving store* (10 minutes, 8192 entries, oldest evicted) used only for relaying to peers. Dedup and tally accounting live in a separate *record ledger* (one record per accepted `(slot, voter_id)`, including the vote's signing-context reference, admission-capped at 4x the serving store with reject-new semantics — the cap gates only unverified peer votes; verified and locally emitted votes bypass it, being unforgeable and dedup-bounded to one record per slot and registered voter) that is never size-evicted: records are pruned only in lockstep with their endorser-block/signing-context tally, so a vote whose tally is still accumulating can never be re-counted after its serving entry is evicted, and first-wins equivocation detection stays durable. The record cap also transitively bounds the tally map. Acquired EBs retain their slot and epoch, and epoch transitions or chain rollbacks prune stale acquisitions, announcements, corresponding pending candidates, and their exact global/per-connection counts together; rollbacks also drop votes, tallies, and records past the rollback point and clear the committee memo.
 
 The manager implements the `ouroboros.LeiosVoteHandler` interface and is assigned to the Ouroboros component post-construction. The LeiosVotes server callback must return exactly the requested number of votes, so it blocks (with a per-connection cursor over the append-ordered vote log, never echoing a vote back to its origin) until enough votes arrive or the protocol shuts down; dingo's LeiosVotes client requests one vote at a time with pipelining for streaming delivery.
@@ -3223,7 +3320,7 @@ Key configuration areas:
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
 
@@ -3234,16 +3331,18 @@ Epoch N-2        Epoch N-1        Epoch N (current)
    |                |                |
    v                v                v
 [Go Snapshot] <- [Set Snapshot] <- [Mark Snapshot]
-   |                                    |
-   Used for leader election             Captured at
-   in current epoch                     epoch boundary
+   |                |                   |
+   Used for delayed  Used for leader    Captured at
+   reward calculation election in       epoch boundary
+                    current epoch
 ```
 
 - Mark Snapshot: Captured at the end of epoch N, becomes Set at epoch N+1
 - Set Snapshot: Previous Mark, becomes Go at epoch N+1
-- Go Snapshot: Conceptual active snapshot used for leader election (the Mark snapshot from 2 epochs back)
+- Go Snapshot: The older rotation snapshot used for delayed reward
+  calculation
 
-dingo storage indexing: dingo stores one `mark` row per epoch, indexed by the epoch at whose boundary it is captured — `mark[K]` holds the stake distribution as of the end of epoch K-1 (`SnapshotSlot = boundary(K) - 1`). The active (Go) distribution for leader election in epoch E is therefore the `mark[E-1]` row, so `praos.StakeSnapshotEpoch(E) = E-1`. Retrieving `mark[E-2]` would use end-of-E-3 stake — one epoch stale — which is harmless on a stable pool set but spuriously rejects epoch-E blocks from pools that first delegated in E-2 on a churny chain; that off-by-one is why the lookup is E-1 rather than E-2.
+dingo storage indexing: dingo stores one `mark` row per epoch, indexed by the epoch at whose boundary it is captured — `mark[K]` holds the stake distribution as of the end of epoch K-1 (`SnapshotSlot = boundary(K) - 1`). The leader-election (Set) distribution for epoch E is therefore the `mark[E-1]` row, so `praos.StakeSnapshotEpoch(E) = E-1`; the reward-calculation (Go) distribution is `mark[E-2]`. Retrieving `mark[E-2]` for leader election would use end-of-E-3 stake — one epoch stale — which is harmless on a stable pool set but spuriously rejects epoch-E blocks from pools that first delegated in E-2 on a churny chain; that off-by-one is why the lookup is E-1 rather than E-2.
 
 ### Stake Snapshot Components
 

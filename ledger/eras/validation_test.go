@@ -820,7 +820,7 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 func TestBuildIndexedUtxoValidationRulesPanicsForStaleSkipIndex(t *testing.T) {
 	require.PanicsWithValue(
 		t,
-		"test.UtxoValidatePlutusScripts hardcoded rule index 25 no longer resolves to the expected function",
+		"test.UtxoValidatePlutusScripts hardcoded rule index 26 no longer resolves to the expected function",
 		func() {
 			buildIndexedUtxoValidationRules(
 				alonzo.UtxoValidationRules,
