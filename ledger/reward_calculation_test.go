@@ -3523,6 +3523,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		seedOutputs(t, db)
 
 		txn := db.Transaction(false)
+		defer func() { _ = txn.Rollback() }()
 		app, ok, err := ls.precomputedStakeRewardApplication(
 			txn,
 			newEpoch,

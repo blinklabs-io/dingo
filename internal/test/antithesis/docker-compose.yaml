@@ -91,7 +91,9 @@ services:
       CARDANO_TOPOLOGY: /configs/configs/dingo-topology.json
       CARDANO_DATABASE_PATH: /data/db
       CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
-      DINGO_DEBUG: "1"
+      CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      DINGO_LOGGING_FORMAT: json
+      DINGO_LOGGING_LEVEL: info
       # Block production credentials (pool 1)
       CARDANO_BLOCK_PRODUCER: "true"
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
@@ -215,9 +217,10 @@ services:
       TXPUMP_TX_COUNT_MAX: "50"
       TXPUMP_COOLDOWN_MIN: "5"
       TXPUMP_COOLDOWN_MAX: "15"
-      TXPUMP_TYPES: "payment"
+      TXPUMP_TYPES: "payment,delegation,governance,plutus"
+      TXPUMP_STARTUP_TIMEOUT: "60"
       TXPUMP_GENESIS_FILE: "/testnet/testnet.yaml"
-      TXPUMP_GENESIS_UTXO_FILE: "/configs/configs/shelley-genesis.json"
+      TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
       - ./testnet.yaml:/testnet/testnet.yaml:ro
       - p1-configs:/configs:ro

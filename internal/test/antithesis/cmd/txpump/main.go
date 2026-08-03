@@ -147,6 +147,7 @@ func main() {
 		"tx_count_min", cfg.TxCountMin,
 		"tx_count_max", cfg.TxCountMax,
 		"types", cfg.Types,
+		"startup_timeout", cfg.StartupTimeout,
 	)
 
 	runErr := pump.Run(ctx)

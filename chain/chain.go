@@ -700,6 +700,12 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 // deeper than the security parameter K, which rejected and denied every peer
 // permanently (issue #3035).
 //
+// rollbackPointBlock now refuses a point above the tip before either rollback
+// entry point reaches this function, so the saturating branch is not exercised
+// from Rollback or ValidateRollback any more. It is kept, and unit-tested
+// directly by TestRollbackForkDepthSaturates, so the underflow cannot creep
+// back in through a future caller.
+//
 // Callers must hold c.mutex.
 func (c *Chain) rollbackForkDepth(
 	point ocommon.Point,
@@ -716,6 +722,73 @@ func (c *Chain) rollbackForkDepth(
 		"tip_block_index", c.tipBlockIndex,
 	)
 	return 0
+}
+
+// rollbackPointBlock resolves a rollback target to the block this chain must
+// truncate to, rejecting any target the chain does not currently hold.
+//
+// The lookup itself goes through ChainManager.blockByPoint, which answers from
+// the retained block cache before the database. That cache deliberately keeps
+// blocks the primary chain rolled back so ephemeral fork chains can still
+// reconcile against them (see removeBlockByIndex and Chain.reconcile), which
+// means an abandoned block stays resolvable by point and still reports the
+// block index it used to occupy. Another fork has usually taken that index over
+// by the time a peer offers the abandoned point again.
+//
+// Truncating to that stale index leaves the chain claiming a tip it does not
+// store: the block physically at tipBlockIndex belongs to the competing fork,
+// while currentTip names the abandoned one. Every block appended afterwards is
+// then spliced onto a parent that is absent from the chain, so a spender can
+// reach the ledger whose producing block was never applied and cannot be found
+// by UtxoByRef, by transaction metadata, or by the backward chain scan. That is
+// the non-converging tip-band wedge in issue #3005.
+//
+// A target whose retained index sits ahead of the tip is refused here too. That
+// is the issue #3035/#3040 shape: no chain block occupies the index, so obeying
+// it raised tipBlockIndex above the last block the chain actually stores and
+// left currentTip naming an absent block, punching a hole that chain iteration
+// stops at. It must be refused as not-on-chain rather than as an over-K
+// rollback: #3035 was a node permanently denying every peer because that case
+// was misclassified as exceeding the security parameter, whereas a not-found
+// rollback makes callers re-intersect and recover. rollbackForkDepth keeps its
+// saturating arithmetic so no future caller can reintroduce the uint64
+// underflow that caused the misclassification.
+//
+// Callers must hold c.mutex and c.manager.mutex.
+func (c *Chain) rollbackPointBlock(
+	point ocommon.Point,
+) (models.Block, error) {
+	tmpBlock, err := c.manager.blockByPoint(point, nil)
+	if err != nil {
+		return models.Block{}, fmt.Errorf("lookup rollback point: %w", err)
+	}
+	if c.holdsBlockAtIndexLocked(tmpBlock.ID, tmpBlock.Hash) {
+		return tmpBlock, nil
+	}
+	occupantHash := []byte(nil)
+	if occupant, occErr := c.blockByIndexLocked(tmpBlock.ID); occErr == nil {
+		occupantHash = occupant.Hash
+	}
+	c.manager.recordRollbackPointNotOnChain()
+	slog.Default().Error(
+		"cross-fork splice prevented: rejecting rollback to a point this chain no longer holds",
+		"component", "chain",
+		"chain_id", c.id,
+		"rollback_slot", point.Slot,
+		"rollback_hash", hex.EncodeToString(point.Hash),
+		"retained_block_index", tmpBlock.ID,
+		"block_hash_at_index", hex.EncodeToString(occupantHash),
+		"tip_block_index", c.tipBlockIndex,
+		"tip_slot", c.currentTip.Point.Slot,
+		"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
+	)
+	return models.Block{}, fmt.Errorf(
+		"%w: slot %d hash %s resolved to block index %d, which this chain no longer holds",
+		ErrRollbackPointNotOnChain,
+		point.Slot,
+		hex.EncodeToString(point.Hash),
+		tmpBlock.ID,
+	)
 }
 
 // ValidateRollback verifies that Rollback(point) would be accepted without
@@ -756,9 +829,9 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
 	if point.Slot > 0 {
-		tmpBlock, err := c.manager.blockByPoint(point, nil)
+		tmpBlock, err := c.rollbackPointBlock(point)
 		if err != nil {
-			return fmt.Errorf("lookup rollback point: %w", err)
+			return err
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
@@ -827,11 +900,9 @@ func (c *Chain) rollbackLocked(
 	var tmpBlock models.Block
 	if point.Slot > 0 {
 		var err error
-		tmpBlock, err = c.manager.blockByPoint(point, nil)
+		tmpBlock, err = c.rollbackPointBlock(point)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"lookup rollback point: %w", err,
-			)
+			return nil, err
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
@@ -1319,6 +1390,15 @@ func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
 	}
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
 	defer unlockBlockIndexReadLocks()
+	return c.holdsBlockAtIndexLocked(blockIndex, blockHash)
+}
+
+// holdsBlockAtIndexLocked is the lock-preserving form used by rollback paths
+// that already hold c.mutex and c.manager.mutex.
+func (c *Chain) holdsBlockAtIndexLocked(blockIndex uint64, blockHash []byte) bool {
+	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
+		return false
+	}
 	lookupChain := c
 	if !c.persistent && blockIndex <= c.lastCommonBlockIndex {
 		// Ephemeral chains keep their common prefix on the primary chain.

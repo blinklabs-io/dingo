@@ -60,6 +60,13 @@ var (
 	errLeaderStakeSnapshotUnavailable = errors.New("leader stake snapshot unavailable")
 )
 
+// IsHeaderVerificationDeferred reports whether header-only verification could
+// not proceed because required ledger state, epoch data, or stake snapshot
+// data is not available yet.
+func IsHeaderVerificationDeferred(err error) bool {
+	return errors.Is(err, errHeaderVerificationDeferred)
+}
+
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
 func (b headerOnlyBlock) Type() int                  { return 0 }
 func (b headerOnlyBlock) Transactions() []lcommon.Transaction {
@@ -84,6 +91,21 @@ func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) er
 		false,
 	)
 	return err
+}
+
+// ValidateBlockHeaderCrypto validates a header using the current ledger
+// state.  It is used by protocol handlers that receive a header without its
+// block body (for example LeiosNotify announcements) and must not let an
+// unauthenticated header influence shared state.
+func (ls *LedgerState) ValidateBlockHeaderCrypto(header ledger.BlockHeader) error {
+	if header == nil {
+		return errors.New("nil block header")
+	}
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+		headerOnlyBlock{header: header},
+		false,
+		false,
+	)
 }
 
 // verifyBlockHeader performs cryptographic verification of a block header.
@@ -360,7 +382,10 @@ func (ls *LedgerState) verifyBlockHeaderState(
 	epochId uint64,
 	allowStateDefer bool,
 ) error {
-	if handled, err := ls.verifyGenesisDelegateHeader(block); handled || err != nil {
+	if handled, err := ls.verifyGenesisDelegateHeader(
+		block,
+		allowStateDefer,
+	); handled || err != nil {
 		return err
 	}
 
@@ -400,9 +425,9 @@ func (ls *LedgerState) verifyBlockHeaderState(
 
 func (ls *LedgerState) verifyGenesisDelegateHeader(
 	block ledger.Block,
+	allowStateDefer bool,
 ) (bool, error) {
-	if block.Era().Id == byron.EraIdByron ||
-		!ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
+	if block.Era().Id == byron.EraIdByron {
 		return false, nil
 	}
 	if ls.config.CardanoNodeConfig == nil {
@@ -410,6 +435,23 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 	}
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil || len(shelleyGenesis.GenDelegs) == 0 {
+		return false, nil
+	}
+	// The overlay decision uses protocol parameters for the block's epoch.
+	// Blockfetch can verify a header ahead of ledger apply, while the
+	// in-memory parameters still describe the previous epoch. Defer any
+	// state-dependent overlay decision until the rollover has installed the
+	// target epoch's parameters. This must precede genesisDelegationActiveForSlot
+	// and genesisOverlayDelegationForSlot because stale parameters can otherwise
+	// classify a future slot as having no overlay and return early.
+	if allowStateDefer && ls.ledgerTipBehindSlot(block.SlotNumber()) {
+		return true, fmt.Errorf(
+			"%w: genesis overlay state for slot %d is not yet authoritative",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+		)
+	}
+	if !ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
 		return false, nil
 	}
 

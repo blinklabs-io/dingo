@@ -760,6 +760,32 @@ func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
 		"past-horizon rejection must happen before forecast cache mutation")
 }
 
+func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
+	const futureSlot = uint64(1001)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("tip"))},
+		epochCache: []models.Epoch{{
+			EpochId:       500,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 1_000,
+			EraId:         eras.ConwayEraDesc.Id,
+			Nonce:         []byte{0x01},
+		}},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateBlockHeaderCrypto(&mockBabbageBlock{slot: futureSlot})
+	require.Error(t, err)
+	assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+		"header-only validation must not advance the shared epoch cache")
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce verifies that a block
 // in an epoch that has no nonce (e.g., epoch rollover not yet processed)
 // is rejected.
@@ -905,6 +931,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.True(t, IsHeaderVerificationDeferred(err))
 
 	err = ls.verifyBlockHeaderCrypto(tb.block)
 	require.Error(t, err)
@@ -1242,6 +1269,13 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reserved for the genesis overlay schedule")
 	assert.Contains(t, err.Error(), "not active")
+
+	// Header verification can run ahead of ledger apply. In that path the
+	// current epoch's protocol parameters may still be in memory, so defer a
+	// state-dependent overlay rejection until the epoch rollover is committed.
+	err = ls.verifyBlockHeaderState(tb.block, 5, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
@@ -1267,6 +1301,13 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+
+	// A stale decentralized parameter set can classify this future slot as
+	// genesisOverlayNone. Header verification must defer before that
+	// classification can bypass the apply-time state recheck.
+	err = ls.verifyBlockHeaderState(tb.block, 5, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
