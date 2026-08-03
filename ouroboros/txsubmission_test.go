@@ -420,7 +420,11 @@ func newTxSubmissionTestOuroboros(
 	require.NoError(t, err)
 	require.NoError(t, m.Start(t.Context()))
 	t.Cleanup(func() {
-		require.NoError(t, m.Stop(t.Context()))
+		// context.Background, not t.Context: the latter is already
+		// cancelled by the time Cleanup funcs run, which used to be masked
+		// by Stop's ctx-deadline path always returning nil regardless of
+		// whether workers actually drained.
+		require.NoError(t, m.Stop(context.Background()))
 	})
 
 	o := NewOuroboros(OuroborosConfig{Logger: logger})

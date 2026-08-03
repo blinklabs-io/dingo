@@ -46,7 +46,9 @@ type Scheduler struct {
 	updateIntervalChan chan time.Duration
 	tasks              []*ScheduledTask
 	interval           time.Duration
-	startOnce          sync.Once
+	lifecycleMutex     sync.Mutex
+	started            bool
+	stopped            bool
 	mutex              sync.Mutex
 	// Worker pool fields
 	workerPoolSize int
@@ -84,11 +86,15 @@ func NewSchedulerWithConfig(
 
 // Start the timer (run goroutine once)
 func (st *Scheduler) Start() {
-	st.startOnce.Do(func() {
-		st.ticker = time.NewTicker(st.interval)
-		st.startWorkerPool()
-		go st.run()
-	})
+	st.lifecycleMutex.Lock()
+	defer st.lifecycleMutex.Unlock()
+	if st.started || st.stopped {
+		return
+	}
+	st.ticker = time.NewTicker(st.interval)
+	st.startWorkerPool()
+	st.started = true
+	go st.run()
 }
 
 // startWorkerPool initializes the worker pool
@@ -208,11 +214,29 @@ func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 	return nil
 }
 
-// Stop the timer (terminates)
+// Stop terminates the scheduler. Start and Stop share lifecycleMutex so a
+// shutdown racing startup either prevents startup or tears down everything
+// Start created before returning.
 func (st *Scheduler) Stop() {
+	st.lifecycleMutex.Lock()
+	defer st.lifecycleMutex.Unlock()
+	if st.stopped {
+		return
+	}
+	st.stopped = true
+	if !st.started {
+		return
+	}
 	close(st.quit)
-	if st.ticker != nil {
-		st.ticker.Stop()
+	// st.ticker is reassigned under st.mutex by run's interval-update
+	// case (ChangeInterval, called at era/epoch boundaries in a real
+	// running node) -- read it under the same lock rather than racing
+	// that write.
+	st.mutex.Lock()
+	ticker := st.ticker
+	st.mutex.Unlock()
+	if ticker != nil {
+		ticker.Stop()
 	}
 	st.stopWorkerPool()
 }
