@@ -50,6 +50,26 @@ type BlobStoreGCS struct {
 	timeout       time.Duration
 }
 
+const maxBlobReadBytes int64 = 256 << 20
+
+func readBlobObject(r io.Reader) ([]byte, error) {
+	return readBlobObjectWithLimit(r, maxBlobReadBytes)
+}
+
+func readBlobObjectWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
+	return data, nil
+}
+
 // gcsTxn wraps GCS operations to satisfy types.Txn and types.BlobTx
 // Operations are not atomic but respect the transaction interface used by the
 // database layer.
@@ -201,7 +221,7 @@ func (d *BlobStoreGCS) Get(txn types.Txn, key []byte) ([]byte, error) {
 	}
 	defer r.Close()
 
-	ciphertext, err := io.ReadAll(r)
+	ciphertext, err := readBlobObject(r)
 	if err != nil {
 		wrappedErr := fmt.Errorf(
 			"read object %q from bucket %q: %w",
@@ -456,7 +476,7 @@ func (d *BlobStoreGCS) GetBlock(
 		return nil, types.BlockMetadata{}, wrappedErr
 	}
 	defer r.Close()
-	cborData, err := io.ReadAll(r)
+	cborData, err := readBlobObject(r)
 	if err != nil {
 		wrappedErr := fmt.Errorf(
 			"read object %q from bucket %q: %w",
@@ -493,7 +513,7 @@ func (d *BlobStoreGCS) GetBlock(
 		return nil, types.BlockMetadata{}, wrappedErr
 	}
 	defer r.Close()
-	metadataBytes, err := io.ReadAll(r)
+	metadataBytes, err := readBlobObject(r)
 	if err != nil {
 		wrappedErr := fmt.Errorf(
 			"read object %q from bucket %q: %w",
@@ -672,7 +692,7 @@ func (d *BlobStoreGCS) GetUtxo(
 		return nil, wrappedErr
 	}
 	defer r.Close()
-	ciphertext, err := io.ReadAll(r)
+	ciphertext, err := readBlobObject(r)
 	if err != nil {
 		wrappedErr := fmt.Errorf(
 			"read object %q from bucket %q: %w",
@@ -762,7 +782,7 @@ func (d *BlobStoreGCS) GetTx(
 		return nil, wrappedErr
 	}
 	defer r.Close()
-	ciphertext, err := io.ReadAll(r)
+	ciphertext, err := readBlobObject(r)
 	if err != nil {
 		wrappedErr := fmt.Errorf("gcs read body %q failed: %w", string(key), err)
 		d.logger.Errorf("%v", wrappedErr)
@@ -1076,7 +1096,7 @@ func (d *BlobStoreGCS) GetBlockURL(
 		return types.SignedURL{}, types.BlockMetadata{}, wrappedErr
 	}
 	defer r.Close()
-	metadataBytes, err := io.ReadAll(r)
+	metadataBytes, err := readBlobObject(r)
 	if err != nil {
 		wrappedErr := fmt.Errorf(
 			"read object %q from bucket %q: %w",

@@ -54,6 +54,26 @@ type BlobStoreS3 struct {
 	timeout       time.Duration
 }
 
+const maxBlobReadBytes int64 = 256 << 20
+
+func readBlobBody(r io.Reader) ([]byte, error) {
+	return readBlobBodyWithLimit(r, maxBlobReadBytes)
+}
+
+func readBlobBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
+	return data, nil
+}
+
 // s3Txn wraps S3 operations to satisfy types.Txn and types.BlobTx
 // Operations are not atomic but respect the transaction interface used by the
 // database layer.
@@ -803,7 +823,7 @@ func (d *BlobStoreS3) getInternal(
 	}
 	defer out.Body.Close()
 
-	data, err := io.ReadAll(out.Body)
+	data, err := readBlobBody(out.Body)
 	if err != nil {
 		d.logger.Errorf("s3 read %q failed: %v", key, err)
 		return nil, err
