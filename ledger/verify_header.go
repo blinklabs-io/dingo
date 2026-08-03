@@ -96,7 +96,7 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(header ledger.BlockHeader) erro
 	}
 	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		headerOnlyBlock{header: header},
-		true,
+		false,
 		false,
 	)
 }

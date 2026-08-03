@@ -760,6 +760,32 @@ func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
 		"past-horizon rejection must happen before forecast cache mutation")
 }
 
+func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
+	const futureSlot = uint64(1001)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("tip"))},
+		epochCache: []models.Epoch{{
+			EpochId:       500,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 1_000,
+			EraId:         eras.ConwayEraDesc.Id,
+			Nonce:         []byte{0x01},
+		}},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateBlockHeaderCrypto(&mockBabbageBlock{slot: futureSlot})
+	require.Error(t, err)
+	assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+		"header-only validation must not advance the shared epoch cache")
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce verifies that a block
 // in an epoch that has no nonce (e.g., epoch rollover not yet processed)
 // is rejected.

@@ -1278,7 +1278,10 @@ changing the block wire format. Duplicate observations and a third distinct
 announcement for one election are suppressed, and accepted traces log the
 observed slot and lateness. Before an announcement can affect the cross-peer
 EB-size invariant, the decoded ranking header is verified against the current
-ledger state, including VRF/KES and leader eligibility. Deduplication state is
+ledger state, including VRF/KES and leader eligibility. Announcements are
+rejected when ledger state is unavailable, and slot/freshness and structural
+checks run before cryptographic validation. Header-only validation does not
+advance the shared epoch cache. Deduplication state is
 pruned when its announced slot leaves the ten-minute acceptance window,
 including the EB-size and per-election indexes. The Go dependency has no
 separate Lookahead state type; its bounded pipelined request window is configured to the protocol

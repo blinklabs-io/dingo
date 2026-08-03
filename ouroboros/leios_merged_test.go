@@ -292,6 +292,22 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	)
 	require.NoError(t, err)
 	entry, _ := o.leiosEBLog.next("test")
+	require.Nil(t, entry)
+
+	record := func(raw []byte) error {
+		header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+		if err != nil {
+			return err
+		}
+		ebHash, ebSize, ok := header.LeiosAnnouncement()
+		if !ok {
+			return errors.New("missing announcement")
+		}
+		return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, "test", true)
+	}
+	require.NoError(t, record(headerRaw))
+	require.NoError(t, record(headerRaw))
+	entry, _ = o.leiosEBLog.next("test")
 	require.NotNil(t, entry)
 	require.Equal(t, headerRaw, entry.announcement)
 	o.leiosEBLog.complete("test", true)
@@ -305,7 +321,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	require.NoError(t, err)
 	headerRaw, err = cbor.Encode(headerTop)
 	require.NoError(t, err)
-	require.ErrorContains(t, o.acceptLeiosAnnouncement(headerRaw, "test"), "inconsistent")
+	require.ErrorContains(t, record(headerRaw), "inconsistent")
 
 	// A peer may announce at most two distinct ranking blocks for one
 	// slot/issuer election. The third distinct message is suppressed even when
@@ -316,19 +332,20 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	require.NoError(t, err)
 	headerRaw, err = cbor.Encode(headerTop)
 	require.NoError(t, err)
-	require.NoError(t, o.acceptLeiosAnnouncement(headerRaw, "test"))
+	require.NoError(t, record(headerRaw))
 	headerBody[0] = mustCbor(t, uint64(3))
 	headerTop[0], err = cbor.Encode(headerBody)
 	require.NoError(t, err)
 	headerRaw, err = cbor.Encode(headerTop)
 	require.NoError(t, err)
-	require.NoError(t, o.acceptLeiosAnnouncement(headerRaw, "test"))
-	headerBody[0] = mustCbor(t, uint64(4))
-	headerTop[0], err = cbor.Encode(headerBody)
-	require.NoError(t, err)
-	headerRaw, err = cbor.Encode(headerTop)
-	require.NoError(t, err)
-	require.ErrorContains(t, o.acceptLeiosAnnouncement(headerRaw, "test"), "third distinct")
+	require.ErrorContains(t, record(headerRaw), "third distinct")
+}
+
+func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.ErrorContains(t, o.acceptLeiosAnnouncement([]byte("not cbor"), "test"), "without ledger state")
+	require.Empty(t, o.leiosAnnouncements)
+	require.Empty(t, o.leiosEBLog.items)
 }
 
 var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")

@@ -1143,58 +1143,55 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 // the w31 relay-age bound. The raw header is retained so the relay preserves
 // the producer's signed bytes.
 func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
+	if o.LedgerState == nil {
+		return errors.New("cannot accept leios announcement without ledger state")
+	}
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
 	if err != nil {
 		return fmt.Errorf("decode ranking-block header: %w", err)
-	}
-	if o.LedgerState != nil {
-		if err := o.LedgerState.ValidateBlockHeaderCrypto(header); err != nil {
-			return fmt.Errorf("validate ranking-block header: %w", err)
-		}
 	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()
 	if !ok {
 		return errors.New("ranking-block header has no valid endorser-block announcement")
 	}
-	if o.LedgerState != nil {
-		currentSlot, slotErr := o.LedgerState.CurrentSlot()
-		if slotErr != nil {
-			return fmt.Errorf("read current slot for announcement validation: %w", slotErr)
-		}
-		if header.SlotNumber() > currentSlot {
-			return fmt.Errorf("announcement slot %d is ahead of current slot %d", header.SlotNumber(), currentSlot)
-		}
-		announcementStart, timeErr := o.LedgerState.SlotToTime(
-			header.SlotNumber(),
-		)
-		if timeErr != nil {
-			return fmt.Errorf("read announcement slot time: %w", timeErr)
-		}
-		age := time.Since(announcementStart)
-		if age < 0 {
-			return fmt.Errorf("announcement slot %d is in the future", header.SlotNumber())
-		}
-		if age > leiosNotifyMaxAnnouncementAge {
-			return fmt.Errorf("announcement is stale by %s", age)
-		}
-		// Drop announcements that can no longer affect the acceptance window
-		// before adding this one. This is deliberately done for local and peer
-		// announcements alike; otherwise a long-lived node retains every RB
-		// header it has ever seen.
-		o.pruneLeiosAnnouncements()
-		o.config.Logger.Debug(
-			"accepted leios announcement",
-			"component", "network",
-			"protocol", "leios-notify",
-			"connection_id", source,
-			"slot", header.SlotNumber(),
-			"lateness", age,
-		)
-		if age > leiosNotifyRelayAnnouncementAge {
-			// The announcement is still valid for the receiver, but the w31
-			// relay bound prevents an old message from propagating indefinitely.
-			return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, false)
-		}
+	currentSlot, slotErr := o.LedgerState.CurrentSlot()
+	if slotErr != nil {
+		return fmt.Errorf("read current slot for announcement validation: %w", slotErr)
+	}
+	if header.SlotNumber() > currentSlot {
+		return fmt.Errorf("announcement slot %d is ahead of current slot %d", header.SlotNumber(), currentSlot)
+	}
+	announcementStart, timeErr := o.LedgerState.SlotToTime(header.SlotNumber())
+	if timeErr != nil {
+		return fmt.Errorf("read announcement slot time: %w", timeErr)
+	}
+	age := time.Since(announcementStart)
+	if age < 0 {
+		return fmt.Errorf("announcement slot %d is in the future", header.SlotNumber())
+	}
+	if age > leiosNotifyMaxAnnouncementAge {
+		return fmt.Errorf("announcement is stale by %s", age)
+	}
+	if err := o.LedgerState.ValidateBlockHeaderCrypto(header); err != nil {
+		return fmt.Errorf("validate ranking-block header: %w", err)
+	}
+	// Drop announcements that can no longer affect the acceptance window
+	// before adding this one. This is deliberately done for local and peer
+	// announcements alike; otherwise a long-lived node retains every RB
+	// header it has ever seen.
+	o.pruneLeiosAnnouncements()
+	o.config.Logger.Debug(
+		"accepted leios announcement",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", source,
+		"slot", header.SlotNumber(),
+		"lateness", age,
+	)
+	if age > leiosNotifyRelayAnnouncementAge {
+		// The announcement is still valid for the receiver, but the w31
+		// relay bound prevents an old message from propagating indefinitely.
+		return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, false)
 	}
 	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
 }
@@ -1242,6 +1239,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 ) error {
 	key := string(header.Hash().Bytes())
 	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
 	if o.leiosAnnouncements == nil {
 		o.leiosAnnouncements = make(map[string]leiosAnnouncement)
 	}
@@ -1253,15 +1251,12 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	}
 	ebKey := string(ebHash.Bytes())
 	if previousSize, exists := o.leiosAnnouncementSizes[ebKey]; exists && previousSize != ebSize {
-		o.leiosAnnouncementsMu.Unlock()
 		return errors.New("announcement size is inconsistent with a previously observed endorser block")
 	}
 	if previous, exists := o.leiosAnnouncements[key]; exists {
 		if previous.ebHash != ebHash || previous.ebSize != ebSize || string(previous.raw) != string(raw) {
-			o.leiosAnnouncementsMu.Unlock()
 			return errors.New("announcement is inconsistent with a previously observed ranking block")
 		}
-		o.leiosAnnouncementsMu.Unlock()
 		return nil
 	}
 	issuer := header.IssuerVkey()
@@ -1272,7 +1267,6 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		o.leiosAnnouncementElections[electionKey] = electionAnnouncements
 	}
 	if len(electionAnnouncements) >= 2 {
-		o.leiosAnnouncementsMu.Unlock()
 		return errors.New("announcement is the third distinct message for a previously observed election")
 	}
 	electionAnnouncements[key] = struct{}{}
@@ -1281,7 +1275,6 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		electionKey: electionKey,
 	}
 	o.leiosAnnouncementSizes[ebKey] = ebSize
-	o.leiosAnnouncementsMu.Unlock()
 	if relay {
 		o.leiosEBLog.append(leiosForgedEBEntry{announcement: append([]byte(nil), raw...)})
 	}
