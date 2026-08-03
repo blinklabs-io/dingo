@@ -3257,7 +3257,7 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 			"the HTTP layer maps this sentinel to 400")
 		// Which diagnostic comes back depends on the first check in the
 		// decoder that rejects the input, and that moves as the decoder
-		// gains validation: gouroboros v0.191.0 began rejecting the bad
+		// gains validation: gouroboros v0.191.x began rejecting the bad
 		// network ID before the round-trip check could run. What has to
 		// hold is that some diagnostic survives rather than being
 		// flattened into the bare sentinel, so assert that instead of

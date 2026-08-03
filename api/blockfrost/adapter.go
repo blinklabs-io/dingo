@@ -4595,7 +4595,7 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 				err,
 			)
 		}
-		// Unreachable against gouroboros v0.191.0, which returns an error on
+		// Unreachable against gouroboros v0.191.2, which returns an error on
 		// every path that yields no purpose. Kept deliberately: a nil purpose
 		// reaching the caller would be a silent wrong answer, and this
 		// package was already broken once by an upstream change to exactly
