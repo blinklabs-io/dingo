@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -441,6 +442,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 	ls := &LedgerState{
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId1,
+		batchBlocksReceived:          1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -498,6 +500,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	ls := &LedgerState{
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId,
+		batchBlocksReceived:          1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -810,6 +813,55 @@ func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 	require.False(t, buffered)
 	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId2))
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.selectedBlockfetchConnId)
+}
+
+// TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders guards a
+// real data race: shouldBufferHeaderEvent used to determine the current
+// header pipeline owner (currentHeaderPipelineOwner, under
+// chainsyncBlockfetchMutex) and then write headerPipelineConnId in a
+// SEPARATE, unprotected step afterward, while discardBufferedPeerHeaders
+// (and every other mutator) correctly holds chainsyncBlockfetchMutex
+// around its own read/write of that same field -- so header admission and
+// a concurrent batch-completion/clear could genuinely race on
+// headerPipelineConnId. This runs both concurrently under go test -race,
+// which fails the test outright if that race still exists; there is
+// nothing else to assert; a clean run (no race detected) is the pass
+// condition.
+func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(t *testing.T) {
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			ls.shouldBufferHeaderEvent(ChainsyncEvent{
+				ConnectionId: connId1,
+				Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			ls.discardBufferedPeerHeaders(connId2)
+		}
+	}()
+	wg.Wait()
 }
 
 func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
@@ -1729,6 +1781,55 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	require.Equal(t, []ouroboros.ConnectionId{connId2}, requestedConnIds)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
+
+	ls.blockfetchRequestRangeCleanup()
+}
+
+func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
+	t *testing.T,
+) {
+	testChain := &chain.Chain{}
+	err := testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("near-tip-header")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        4,
+	})
+	require.NoError(t, err)
+
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	requestCount := 0
+	ls := &LedgerState{
+		chain:                        testChain,
+		activeBlockfetchConnId:       connId,
+		selectedBlockfetchConnId:     connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				_ ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ ocommon.Point,
+			) error {
+				requestCount++
+				return nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+		ConnectionId: connId,
+		BatchDone:    true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, requestCount)
+	assert.Equal(t, 1, testChain.HeaderCount())
+	assert.Equal(t, connId, ls.activeBlockfetchConnId)
+	assert.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 
 	ls.blockfetchRequestRangeCleanup()
 }

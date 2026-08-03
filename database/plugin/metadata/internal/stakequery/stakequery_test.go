@@ -43,7 +43,7 @@ func TestPoolQueryChunkSizeDefault(t *testing.T) {
 func TestHistoricalDelegatorStakeCTEExpiryGate(t *testing.T) {
 	const predicate = "active_delegation.pool_key_hash IN ?"
 
-	offQuery, offArgs, err := historicalDelegatorStakeCTE(nil, 42, 0, 0, predicate)
+	offQuery, offArgs, err := historicalDelegatorStakeCTE(nil, 42, 0, 0, 0, predicate)
 	require.NoError(t, err)
 	// Gate off: byte-identical to today. No expiry artifacts.
 	require.NotContains(t, offQuery, "expiry_acct")
@@ -59,7 +59,7 @@ func TestHistoricalDelegatorStakeCTEExpiryGate(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&models.SyncState{}))
-	onQuery, onArgs, err := historicalDelegatorStakeCTE(db, 42, 7, 90, predicate)
+	onQuery, onArgs, err := historicalDelegatorStakeCTE(db, 42, 0, 7, 90, predicate)
 	require.NoError(t, err)
 	require.Contains(t, onQuery, "expiry_acct")
 	require.Contains(t, onQuery, "expiration_epoch >= ?")
@@ -310,4 +310,66 @@ func insertPoolCertPosition(
 		"INSERT INTO certs (id, transaction_id, cert_index) VALUES (?, ?, ?)",
 		certID, txID, certID,
 	).Error, fmt.Sprintf("insert certificate %d", certID))
+}
+
+// TestHistoricalDelegatorStakeCTEBoundaryRewardCut verifies the epoch-boundary
+// (SNAP) reward cut on the shared aggregation query builder. Like the expiry
+// gate it is hand-written positional-arg SQL, so its extra placeholder must keep
+// #? == len(args)+1, and a zero boundary slot must generate the plain
+// stake-at-slot query with no boundary artifacts and no extra arg.
+func TestHistoricalDelegatorStakeCTEBoundaryRewardCut(t *testing.T) {
+	const predicate = "active_delegation.pool_key_hash IN ?"
+
+	offQuery, offArgs, err := historicalDelegatorStakeCTE(
+		nil, 199, 0, 0, 0, predicate,
+	)
+	require.NoError(t, err)
+	require.NotContains(t, offQuery, "post_snapshot")
+	require.Equal(
+		t,
+		strings.Count(offQuery, "?"),
+		len(offArgs)+1,
+		"boundary-off placeholder/arg alignment",
+	)
+
+	onQuery, onArgs, err := historicalDelegatorStakeCTE(
+		nil, 199, 200, 0, 0, predicate,
+	)
+	require.NoError(t, err)
+	require.Contains(t, onQuery, "credit.post_snapshot = FALSE")
+	require.Equal(
+		t,
+		strings.Count(onQuery, "?"),
+		len(onArgs)+1,
+		"boundary-on placeholder/arg alignment",
+	)
+	require.Len(t, onArgs, len(offArgs)+1,
+		"the boundary cut binds exactly one extra arg")
+	require.Contains(t, onArgs, uint64(200),
+		"the boundary slot must be bound, not inlined")
+
+	// The boundary cut and the expiry gate must compose: both add a placeholder,
+	// and the boundary's sits ahead of the expiry's.
+	bothQuery, bothArgs, err := historicalDelegatorStakeCTE(
+		newSyncStateDB(t), 199, 200, 7, 90, predicate,
+	)
+	require.NoError(t, err)
+	require.Contains(t, bothQuery, "credit.post_snapshot = FALSE")
+	require.Contains(t, bothQuery, "expiration_epoch >= ?")
+	require.Equal(
+		t,
+		strings.Count(bothQuery, "?"),
+		len(bothArgs)+1,
+		"boundary-plus-expiry placeholder/arg alignment",
+	)
+}
+
+// newSyncStateDB is an in-memory database with just the sync_state table the
+// CIP-0163 activation lookup reads.
+func newSyncStateDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.SyncState{}))
+	return db
 }

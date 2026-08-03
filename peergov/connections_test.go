@@ -454,7 +454,7 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 
 	done := make(chan struct{})
 	go func() {
-		pg.createOutboundConnection(topologyPeer)
+		pg.createOutboundConnection(topologyPeer, false)
 		close(done)
 	}()
 	select {
@@ -489,7 +489,7 @@ func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
 	pg.stopCh = nil
 	pg.mu.Unlock()
 
-	pg.createOutboundConnection(peer)
+	pg.createOutboundConnection(peer, false)
 
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
@@ -501,6 +501,140 @@ func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
 	}
 	if peer.ReconnectDelay != time.Nanosecond {
 		t.Fatalf("reconnect delay changed unexpectedly: %s", peer.ReconnectDelay)
+	}
+}
+
+// TestSpawnOutboundConnectionLockedReservesBeforeScheduling verifies duplicate
+// close events cannot schedule parallel reconnect workers for the same peer.
+func TestSpawnOutboundConnectionLockedReservesBeforeScheduling(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	peer := &Peer{
+		Address:           "127.0.0.1:1",
+		NormalizedAddress: "127.0.0.1:1",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+	}
+	stopCh := make(chan struct{})
+	close(stopCh)
+
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.stopCh = stopCh
+	pg.spawnOutboundConnectionLocked(peer)
+	if !peer.Reconnecting {
+		pg.mu.Unlock()
+		t.Fatal("first spawn should reserve the peer before scheduling")
+	}
+	pg.spawnOutboundConnectionLocked(peer)
+	pg.mu.Unlock()
+
+	pg.wg.Wait()
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if peer.Reconnecting {
+		t.Fatal("reconnect reservation should clear when the worker exits")
+	}
+}
+
+// TestStop_WaitsForInFlightOutboundDial reproduces a dial launched via
+// startOutboundConnections (the same path Start uses) that is still in
+// flight when Stop is called, and asserts Stop's p.wg.Wait() actually
+// blocks until that dial goroutine exits rather than returning while it is
+// still running.
+//
+// This matters beyond a clean shutdown: the live database restore/truncate
+// quiesce path (node_lifecycle.go's quiesceForLiveLifecycleOp) calls
+// PeerGovernor.Stop() expecting every background goroutine -- including
+// in-flight outbound dials -- to have exited before it tears down and
+// replaces the node's ConnectionManager. A dial goroutine not tracked by
+// p.wg could finish its handshake after Stop returns and attach to (or
+// publish events against) a connection manager that no longer belongs to
+// this PeerGovernor incarnation.
+//
+// The fake TCP server below accepts the dial's TCP connection but never
+// writes a handshake response, so createOutboundConnection blocks inside
+// ouroboros.NewConnection's handshake -- a real "dial in flight" state --
+// until the test closes the server-side socket.
+func TestStop_WaitsForInFlightOutboundDial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start fake server: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+
+	connMgr := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		// A valid network magic is required for the client to proceed
+		// past local validation into the actual on-wire handshake, which
+		// is what leaves the dial blocked (in flight) against a fake
+		// server that never answers.
+		OutboundConnOpts: []ouroboros.ConnectionOptionFunc{
+			ouroboros.WithNetworkMagic(764824073),
+		},
+	})
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ConnManager: connMgr,
+	})
+	peer := &Peer{
+		Address:           ln.Addr().String(),
+		NormalizedAddress: ln.Addr().String(),
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.stopCh = make(chan struct{})
+	pg.ctx = context.Background()
+	pg.mu.Unlock()
+
+	// Launch the outbound dial exactly as Start does.
+	pg.startOutboundConnections()
+
+	// Wait for the dial to reach the fake server. At that point the
+	// tracked goroutine is blocked inside the ouroboros handshake --
+	// genuinely "in flight" -- since the server never responds.
+	var serverConn net.Conn
+	select {
+	case serverConn = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outbound dial never reached the fake server")
+	}
+	defer serverConn.Close()
+
+	stopped := make(chan struct{})
+	go func() {
+		pg.Stop()
+		close(stopped)
+	}()
+
+	// Stop must not return while the dial goroutine is still blocked in
+	// the handshake.
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an outbound dial was still in flight")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Unblock the in-flight dial: closing the server side fails the
+	// handshake, and createOutboundConnection's loop observes the
+	// already-closed stopCh and returns.
+	serverConn.Close()
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight dial finished")
 	}
 }
 

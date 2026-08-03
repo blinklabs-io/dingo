@@ -762,11 +762,11 @@ func (c *Chain) rollbackPointBlock(
 	if err != nil {
 		return models.Block{}, fmt.Errorf("lookup rollback point: %w", err)
 	}
-	if c.holdsBlockAtIndex(tmpBlock.ID, tmpBlock.Hash) {
+	if c.holdsBlockAtIndexLocked(tmpBlock.ID, tmpBlock.Hash) {
 		return tmpBlock, nil
 	}
 	occupantHash := []byte(nil)
-	if occupant, occErr := c.blockByIndex(tmpBlock.ID); occErr == nil {
+	if occupant, occErr := c.blockByIndexLocked(tmpBlock.ID); occErr == nil {
 		occupantHash = occupant.Hash
 	}
 	c.manager.recordRollbackPointNotOnChain()
@@ -945,7 +945,7 @@ func (c *Chain) rollbackLocked(
 		} else {
 			// Collect block for event emission before deletion
 			if c.eventBus != nil {
-				block, err := c.blockByIndex(i)
+				block, err := c.blockByIndexLocked(i)
 				if err != nil {
 					slog.Default().Warn(
 						"failed to get block for rollback event",
@@ -1074,6 +1074,8 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
 	// If the chain has no blocks yet, return nothing
 	if c.tipBlockIndex < initialBlockIndex {
 		return nil
@@ -1089,7 +1091,7 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 	}
 	// Walk backwards through block indices to gather more points
 	for idx := c.tipBlockIndex - 1; idx >= initialBlockIndex && len(points) < count; idx-- {
-		blk, err := c.blockByIndex(idx)
+		blk, err := c.blockByIndexLocked(idx)
 		if err != nil {
 			break
 		}
@@ -1111,6 +1113,8 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
 	if c.tipBlockIndex < initialBlockIndex {
 		return nil
 	}
@@ -1131,7 +1135,7 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 		if len(points) >= count {
 			return
 		}
-		blk, err := c.blockByIndex(blockIndex)
+		blk, err := c.blockByIndexLocked(blockIndex)
 		if err != nil {
 			return
 		}
@@ -1327,8 +1331,8 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	c.manager.mutex.RLock()
-	defer c.manager.mutex.RUnlock()
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
 	if err := c.reconcile(); err != nil {
 		return models.Block{}, err
 	}
@@ -1351,7 +1355,7 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	)
 	for lo <= hi {
 		mid := lo + (hi-lo)/2
-		block, err := c.blockByIndex(mid)
+		block, err := c.blockByIndexLocked(mid)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -1381,19 +1385,73 @@ func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
 	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
 		return false
 	}
-	tmpBlock, err := c.blockByIndex(blockIndex)
+	if c.manager == nil {
+		return false
+	}
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
+	return c.holdsBlockAtIndexLocked(blockIndex, blockHash)
+}
+
+// holdsBlockAtIndexLocked is the lock-preserving form used by rollback paths
+// that already hold c.mutex and c.manager.mutex.
+func (c *Chain) holdsBlockAtIndexLocked(blockIndex uint64, blockHash []byte) bool {
+	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
+		return false
+	}
+	lookupChain := c
+	if !c.persistent && blockIndex <= c.lastCommonBlockIndex {
+		// Ephemeral chains keep their common prefix on the primary chain.
+		// In-memory managers do not have an index-backed manager lookup, but
+		// the primary chain can resolve that prefix through its own in-memory
+		// points and the manager's block cache. Use the primary chain here so
+		// a valid common point is not mistaken for a rolled-back point.
+		// The primary pointer is immutable after manager initialization and is
+		// the chain whose active index owns the common prefix.
+		lookupChain = c.manager.primary
+		if lookupChain == nil {
+			return false
+		}
+	}
+	tmpBlock, err := lookupChain.blockByIndexLocked(blockIndex)
 	if err != nil {
 		return false
 	}
 	return bytes.Equal(tmpBlock.Hash, blockHash)
 }
 
-func (c *Chain) blockByIndex(
+// lockBlockIndexReadLocks acquires the locks required by a chain-index read.
+// The caller must already hold c.mutex and must not hold manager.mutex. The
+// primary pointer is immutable after manager initialization, so it can be
+// read before taking the primary lock. This establishes the chain -> primary
+// -> manager order used by chain creation and avoids a lock cycle with a
+// creator that already holds the primary-chain write lock.
+func (c *Chain) lockBlockIndexReadLocks() func() {
+	primaryChain := c.manager.primary
+	primaryLocked := primaryChain != nil &&
+		primaryChain != c &&
+		!primaryChain.persistent
+	if primaryLocked {
+		primaryChain.mutex.RLock()
+	}
+	c.manager.mutex.RLock()
+	return func() {
+		c.manager.mutex.RUnlock()
+		if primaryLocked {
+			primaryChain.mutex.RUnlock()
+		}
+	}
+}
+
+// blockByIndexLocked resolves a block from this chain's active index. The
+// caller must hold c.mutex and c.manager.mutex; in-memory common-prefix reads
+// additionally hold the primary-chain read lock when c is a fork.
+func (c *Chain) blockByIndexLocked(
 	blockIndex uint64,
 ) (models.Block, error) {
 	if c.persistent || blockIndex <= c.lastCommonBlockIndex {
 		// Query via manager for common blocks
-		tmpBlock, err := c.manager.blockByIndex(blockIndex, nil)
+		tmpBlock, err := c.manager.blockByIndexLocked(blockIndex, nil)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -1519,7 +1577,7 @@ func (c *Chain) iterNext(
 		}
 		ret := &ChainIteratorResult{}
 		// Lookup next block in metadata DB
-		tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
+		tmpBlock, err := c.blockByIndexLocked(iter.nextBlockIndex)
 		if errors.Is(err, models.ErrBlockNotFound) && !iter.reverse {
 			recoveredBlock, recovered, recoverErr := c.nextPersistentBlockAfterSparseIndex(
 				iter,
@@ -1622,7 +1680,7 @@ func (c *Chain) reconcile() error {
 	}
 	blockIndex := c.tipBlockIndex
 	for i, v := range slices.Backward(c.blocks) {
-		tmpBlock, err := primaryChain.blockByIndex(blockIndex)
+		tmpBlock, err := primaryChain.blockByIndexLocked(blockIndex)
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}
@@ -1677,7 +1735,7 @@ func (c *Chain) reconcile() error {
 		// has rolled back past tmpBlock's old index the lookup misses;
 		// treat tmpBlock as non-common and keep walking back via its
 		// PrevHash rather than aborting reconcile.
-		primaryBlock, err := primaryChain.blockByIndex(tmpBlock.ID)
+		primaryBlock, err := primaryChain.blockByIndexLocked(tmpBlock.ID)
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}

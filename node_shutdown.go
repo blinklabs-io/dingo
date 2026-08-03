@@ -76,8 +76,12 @@ func (n *Node) closeWithShutdownTimeout(
 }
 
 func (n *Node) configuredShutdownTimeout() time.Duration {
-	if n.config.shutdownTimeout > 0 {
-		return n.config.shutdownTimeout
+	if d, err := n.config.ShutdownTimeoutDuration(); err == nil {
+		if d > 0 {
+			return d
+		}
+	} else {
+		n.config.logger.Warn("invalid shutdown timeout, using default", "value", n.config.ShutdownTimeout(), "error", err)
 	}
 	return 30 * time.Second
 }
@@ -133,6 +137,15 @@ func (n *Node) shutdown() error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("snapshot manager shutdown: %w", stopErr),
+			)
+		}
+	}
+
+	if n.dbLifecycleMgr != nil {
+		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
 			)
 		}
 	}

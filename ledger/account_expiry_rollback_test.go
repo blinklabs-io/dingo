@@ -30,11 +30,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// expiryRollbackTestEpochCount covers every slot any test in this file
+// seeds a rollback/witness/activation point at (the highest currently is
+// 50550, epoch 505), with headroom for new cases.
+const expiryRollbackTestEpochCount = 600
+
 // newExpiryRollbackTestLedger builds a DB-backed LedgerState with the CIP-0163
 // delegator-inactivity gate configured and a fixed epoch schedule so
-// SlotToEpoch resolves the seeded witness slots. Epochs are 100 slots long:
-// E0 = [0,100), E1 = [100,200), E2 = [200,300), ... Epochs after E2 are
-// projected from the current era, as SlotToEpoch documents.
+// SlotToEpoch resolves the seeded witness slots. Epochs are 100 slots
+// long: E0 = [0,100), E1 = [100,200), ... up to
+// expiryRollbackTestEpochCount, all persisted (not just cached in
+// memory): database.RecomputeAccountExpirationsAfterTruncate resolves
+// rollback and witness slots via database.EpochBySlot, which reads the
+// persisted epoch table directly with no live-LedgerState projection
+// capability at all (unlike ls.SlotToEpoch) -- required for the
+// offline/live truncate path, which has no LedgerState to project from.
+// In real usage this is never a gap: by the time the chain has actually
+// reached a given slot, normal forward processing has already persisted
+// that slot's epoch row, the same one this recompute reads.
 func newExpiryRollbackTestLedger(
 	t *testing.T,
 	enabled bool,
@@ -45,6 +58,17 @@ func newExpiryRollbackTestLedger(
 		DataDir: "",
 	})
 	require.NoError(t, err)
+
+	epochCache := make([]models.Epoch, expiryRollbackTestEpochCount)
+	for i := range epochCache {
+		epochCache[i] = models.Epoch{
+			EpochId:       uint64(i),
+			StartSlot:     uint64(i) * 100,
+			SlotLength:    1000,
+			LengthInSlots: 100,
+			EraId:         1,
+		}
+	}
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -53,13 +77,20 @@ func newExpiryRollbackTestLedger(
 			DelegatorInactivity:        inactivity,
 		},
 		currentEra: eras.ShelleyEraDesc,
-		epochCache: []models.Epoch{
-			{EpochId: 0, StartSlot: 0, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
-			{EpochId: 1, StartSlot: 100, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
-			{EpochId: 2, StartSlot: 200, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
-		},
+		epochCache: epochCache,
 	}
 	ls.publishSnapshotsLocked()
+	for _, e := range epochCache {
+		require.NoError(t, db.SetEpoch(
+			e.StartSlot,
+			e.EpochId,
+			nil, nil, nil, nil,
+			e.EraId,
+			e.SlotLength,
+			e.LengthInSlots,
+			nil,
+		))
+	}
 	return ls, db
 }
 
@@ -453,7 +484,7 @@ func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(t *testing.T) 
 	acct, err := db.GetAccountByCredential(0, cred, true, nil)
 	require.NoError(t, err)
 	require.Zero(t, acct.ExpirationEpoch)
-	marker, err := db.GetSyncState(delegatorInactivityActivatedSyncKey, nil)
+	marker, err := db.GetSyncState(database.DelegatorInactivityActivatedSyncKey, nil)
 	require.NoError(t, err)
 	require.Empty(t, marker)
 }

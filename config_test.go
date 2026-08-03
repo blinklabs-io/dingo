@@ -77,12 +77,12 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 		},
 		{
 			name:     "serve",
-			runMode:  runModeServe,
+			runMode:  string(internalconfig.RunModeServe),
 			expected: int64(internalconfig.DefaultMempoolCapacityPraos),
 		},
 		{
 			name:     "leios",
-			runMode:  runModeLeios,
+			runMode:  string(internalconfig.RunModeLeios),
 			expected: int64(internalconfig.DefaultMempoolCapacityLeios),
 		},
 	}
@@ -98,7 +98,7 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
 	const capacity = int64(42)
 	cfg := NewConfig(
-		WithRunMode(runModeLeios),
+		WithRunMode(string(internalconfig.RunModeLeios)),
 		WithPluginSelection(plugin.CapabilityMempool, plugin.Selection{
 			Provider: "default",
 			Config:   map[string]any{"capacity": capacity},
@@ -128,7 +128,7 @@ func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 
 func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 	cfg := NewConfig(
-		WithRunMode(runModeLeios),
+		WithRunMode(string(internalconfig.RunModeLeios)),
 		WithPluginSelection(plugin.CapabilityMempool, plugin.Selection{
 			Provider: "custom",
 			Config:   map[string]any{},
@@ -359,20 +359,25 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 	}{
 		{name: "default", cfg: Config{}, expected: false},
 		{
-			name:     "leios run mode",
-			cfg:      Config{runMode: runModeLeios},
+			name: "leios run mode",
+			cfg: Config{cfg: &internalconfig.Config{
+				RunMode: internalconfig.RunModeLeios,
+			}},
 			expected: true,
 		},
 		{
-			name:     "dijkstra start era",
-			cfg:      Config{startEra: internalconfig.StartEraDijkstra},
+			name: "dijkstra start era",
+			cfg: Config{cfg: &internalconfig.Config{
+				StartEra: internalconfig.StartEraDijkstra,
+			}},
 			expected: true,
 		},
 		{
 			name: "leios and dijkstra",
-			cfg: Config{
-				runMode:  runModeLeios,
-				startEra: internalconfig.StartEraDijkstra,
+			cfg: Config{cfg: &internalconfig.Config{
+				RunMode:  internalconfig.RunModeLeios,
+				StartEra: internalconfig.StartEraDijkstra,
+			},
 			},
 			expected: true,
 		},
@@ -380,20 +385,27 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 			// `dingo -n musashi` sets the network name but leaves run
 			// mode at its default; the Musashi testnet still requires the
 			// Dijkstra era table to follow the chain.
-			name:     "musashi network by name",
-			cfg:      Config{network: "musashi"},
+			name: "musashi network by name",
+			cfg: Config{cfg: &internalconfig.Config{
+				Network: "musashi",
+			}},
 			expected: true,
 		},
 		{
 			// Same network selected via its magic (e.g. --network-magic
 			// 164) with no network name.
-			name:     "musashi network by magic",
-			cfg:      Config{networkMagic: 164},
+			name: "musashi network by magic",
+			cfg: Config{cfg: &internalconfig.Config{
+				NetworkMagic: 164,
+			}},
 			expected: true,
 		},
 		{
-			name:     "non-musashi network stays disabled",
-			cfg:      Config{network: "preview", networkMagic: 2},
+			name: "non-musashi network stays disabled",
+			cfg: Config{cfg: &internalconfig.Config{
+				Network:      "preview",
+				NetworkMagic: 2,
+			}},
 			expected: false,
 		},
 	}
@@ -427,15 +439,18 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 			expectDijkstraEra: false,
 		},
 		{
-			name:              "leios run mode enables both",
-			cfg:               Config{runMode: runModeLeios},
+			name: "leios run mode enables both",
+			cfg: Config{cfg: &internalconfig.Config{
+				RunMode: internalconfig.RunModeLeios,
+			}},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
 		{
 			name: "dijkstra start era enables both",
-			cfg: Config{
-				startEra: internalconfig.StartEraDijkstra,
+			cfg: Config{cfg: &internalconfig.Config{
+				StartEra: internalconfig.StartEraDijkstra,
+			},
 			},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
@@ -444,14 +459,18 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 			// `dingo -n musashi`: the Musashi testnet enables both the
 			// Dijkstra era and the Leios mini-protocols (leios-notify /
 			// leios-fetch).
-			name:              "musashi network enables both",
-			cfg:               Config{network: "musashi"},
+			name: "musashi network enables both",
+			cfg: Config{cfg: &internalconfig.Config{
+				Network: "musashi",
+			}},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
 		{
-			name:              "musashi network by magic enables both",
-			cfg:               Config{networkMagic: 164},
+			name: "musashi network by magic enables both",
+			cfg: Config{cfg: &internalconfig.Config{
+				NetworkMagic: 164,
+			}},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
@@ -475,7 +494,7 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 }
 
 func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{cfg: &internalconfig.Config{}}
 
 	WithMinHotPeers(-1)(cfg)
 	WithReconcileInterval(-1 * time.Minute)(cfg)
@@ -483,15 +502,15 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	WithMaxConnectionsPerIP(-2)(cfg)
 	WithMaxInboundConns(0)(cfg)
 
-	assert.Zero(t, cfg.minHotPeers)
-	assert.Zero(t, cfg.reconcileInterval)
-	assert.Zero(t, cfg.inactivityTimeout)
-	assert.Zero(t, cfg.maxConnectionsPerIP)
-	assert.Zero(t, cfg.maxInboundConns)
+	assert.Zero(t, cfg.cfg.MinHotPeers)
+	assert.Zero(t, cfg.cfg.ReconcileInterval)
+	assert.Zero(t, cfg.cfg.InactivityTimeout)
+	assert.Zero(t, cfg.cfg.MaxConnectionsPerIP)
+	assert.Zero(t, cfg.cfg.MaxInboundConns)
 }
 
 func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{cfg: &internalconfig.Config{}}
 
 	WithMinHotPeers(3)(cfg)
 	WithReconcileInterval(30 * time.Second)(cfg)
@@ -499,11 +518,11 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	WithMaxConnectionsPerIP(4)(cfg)
 	WithMaxInboundConns(25)(cfg)
 
-	assert.Equal(t, 3, cfg.minHotPeers)
-	assert.Equal(t, 30*time.Second, cfg.reconcileInterval)
-	assert.Equal(t, 2*time.Minute, cfg.inactivityTimeout)
-	assert.Equal(t, 4, cfg.maxConnectionsPerIP)
-	assert.Equal(t, 25, cfg.maxInboundConns)
+	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
+	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
+	assert.Equal(t, 2*time.Minute, cfg.cfg.InactivityTimeout)
+	assert.Equal(t, 4, cfg.cfg.MaxConnectionsPerIP)
+	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
 }
 
 // TestWithGenesisCorroborationPeers covers the public programmatic API path for
@@ -513,15 +532,15 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 // TestGenesisNegativeCorroborationFailsClosed. node.go passes this field to
 // ChainSelectorConfig.MinCorroboratingPeers.
 func TestWithGenesisCorroborationPeers(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{cfg: &internalconfig.Config{}}
 	WithGenesisCorroborationPeers(3)(cfg)
-	assert.Equal(t, 3, cfg.genesisCorroborationPeers)
+	assert.Equal(t, 3, cfg.cfg.GenesisBootstrap.CorroborationPeers)
 
 	WithGenesisCorroborationPeers(0)(cfg)
-	assert.Zero(t, cfg.genesisCorroborationPeers)
+	assert.Zero(t, cfg.cfg.GenesisBootstrap.CorroborationPeers)
 
 	WithGenesisCorroborationPeers(-1)(cfg)
-	assert.Equal(t, -1, cfg.genesisCorroborationPeers)
+	assert.Equal(t, -1, cfg.cfg.GenesisBootstrap.CorroborationPeers)
 }
 
 // TestUpdateRTSMetrics verifies the pure-function mapping from
@@ -598,24 +617,24 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 }
 
 func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
-	cfg := &Config{}
-	assert.Equal(t, "", cfg.leiosVoteSigningKeyFile)
+	cfg := &Config{cfg: &internalconfig.Config{}}
+	assert.Equal(t, "", cfg.cfg.LeiosVoteSigningKeyFile)
 	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
-	assert.Equal(t, "/keys/leios-vote.skey", cfg.leiosVoteSigningKeyFile)
+	assert.Equal(t, "/keys/leios-vote.skey", cfg.cfg.LeiosVoteSigningKeyFile)
 }
 
 func TestWithLeiosVoterPublicKeys(t *testing.T) {
-	cfg := &Config{}
-	assert.Nil(t, cfg.leiosVoterPublicKeys)
+	cfg := &Config{cfg: &internalconfig.Config{}}
+	assert.Nil(t, cfg.cfg.LeiosVoterPublicKeys)
 	keys := map[string]string{"aabbcc": "ddeeff"}
 	WithLeiosVoterPublicKeys(keys)(cfg)
 	assert.Equal(
 		t,
 		map[string]string{"aabbcc": "ddeeff"},
-		cfg.leiosVoterPublicKeys,
+		cfg.cfg.LeiosVoterPublicKeys,
 	)
 	// The option copies the map: later caller mutations must not
 	// change live config
 	keys["aabbcc"] = "mutated"
-	assert.Equal(t, "ddeeff", cfg.leiosVoterPublicKeys["aabbcc"])
+	assert.Equal(t, "ddeeff", cfg.cfg.LeiosVoterPublicKeys["aabbcc"])
 }

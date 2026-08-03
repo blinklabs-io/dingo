@@ -333,11 +333,11 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 	})
 
 	// Attempt to reconnect to bootstrap peers (only if ConnManager is available)
-	if p.config.ConnManager != nil {
+	if p.config.ConnManager != nil && !p.config.DisableOutbound {
 		for _, peer := range p.peers {
 			if peer != nil && peer.Source == PeerSourceTopologyBootstrapPeer &&
 				peer.State == PeerStateCold && peer.Connection == nil {
-				go p.createOutboundConnection(peer)
+				p.spawnOutboundConnectionLocked(peer)
 			}
 		}
 	}

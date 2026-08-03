@@ -46,6 +46,42 @@ const (
 	delegatorInactivityActivatedSyncKey = "delegator_inactivity_activated"
 )
 
+// accountEvidenceSlotExpr is the slot at which the live account row becomes
+// evidence of the credential's registration/delegation state for the
+// account-derived fallback branches of activeDelegationCTE.
+//
+// It must NOT be account.added_slot. added_slot is the account row's
+// last-modified slot and is bumped by certificates that are neither a stake
+// delegation nor a registration — a DRep-only VoteDelegation certificate
+// (see the VoteDelegationCertificate case in each plugin's transaction.go),
+// ClearDanglingDRepDelegations, and RestoreAccountStateAtSlot all move it.
+// Using it as the synthetic event slot broke both halves of the fallback for
+// exactly the credentials that need it — every Mithril-imported and every
+// Shelley-genesis-staked account, none of which has a local registration
+// certificate:
+//
+//   - Ordering: a credential with a real stake-delegation certificate but no
+//     registration certificate took its delegation event from the certificate
+//     and its registration event from the account row. A later DRep-only vote
+//     delegation pushed the synthetic registration past the delegation, so
+//     active_delegation's "delegation at or after registration" predicate went
+//     false and the credential — with all of its stake — vanished.
+//   - Visibility: `added_slot <= slot` hid any credential whose account row was
+//     touched after the reconstruction slot, which is the normal state for the
+//     epoch-boundary fallback capture (it reconstructs the boundary once live
+//     state has already advanced past it).
+//
+// created_slot is immutable after insert (see Account.CreatedSlot), so it is
+// the correct evidence slot. It is clamped with added_slot rather than used
+// alone so a row that somehow retains the AccountCreatedSlotUnset sentinel, or
+// predates the created_slot backfill, degrades to the previous behavior instead
+// of disappearing.
+const accountEvidenceSlotExpr = `(CASE
+		WHEN account.created_slot < account.added_slot
+			THEN account.created_slot
+		ELSE account.added_slot
+	END)`
+
 // GetStakeByPoolsAtSlot returns delegated stake and delegator counts at a
 // historical slot. It uses certificate history to find each credential's latest
 // stake delegation and registration state, and account rows as synthetic state
@@ -54,6 +90,22 @@ func GetStakeByPoolsAtSlot(
 	db *gorm.DB,
 	poolKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+) (map[string]uint64, map[string]uint64, error) {
+	return GetStakeByPoolsAtBoundary(
+		db, poolKeyHashes, slot, 0, expiryEpoch, inactivityPeriod,
+	)
+}
+
+// GetStakeByPoolsAtBoundary is GetStakeByPoolsAtSlot with epoch-boundary
+// (SNAP) reward semantics. See historicalDelegatorStakeCTE for what a nonzero
+// boundarySlot changes; boundarySlot == 0 is the plain "stake at slot" query.
+func GetStakeByPoolsAtBoundary(
+	db *gorm.DB,
+	poolKeyHashes [][]byte,
+	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) (map[string]uint64, map[string]uint64, error) {
@@ -68,7 +120,7 @@ func GetStakeByPoolsAtSlot(
 	}
 
 	query, args, err := historicalDelegatorStakeCTE(
-		db, slot, expiryEpoch, inactivityPeriod,
+		db, slot, boundarySlot, expiryEpoch, inactivityPeriod,
 		"active_delegation.pool_key_hash IN ?",
 	)
 	if err != nil {
@@ -109,22 +161,21 @@ GROUP BY pool_key_hash`
 	return stakeMap, delegatorMap, nil
 }
 
-// GetRewardStakeInputsByPoolsAtSlot returns positive per-credential delegated
-// stake for the requested pools reconstructed at slot, from the same
-// active_delegator_stake CTE that GetStakeByPoolsAtSlot aggregates for
-// leader-election pool totals. Sourcing both halves of the epoch-boundary
-// snapshot from one CTE makes the reward-basis inputs agree with the
-// leader-election stake by construction: identical credential membership,
-// identical slot-accurate stake values, and the identical CIP-0163 historical
-// expiry filter (expiration reconstructed at slot, not read from the mutable
-// live account.expiration_epoch column). It is used only when the
-// delegator-inactivity gate is active (expiryEpoch > 0); the gate-off reward
-// path stays on the live aggregate (StakeInputsForPools) to remain
-// byte-identical to the pre-CIP query.
-func GetRewardStakeInputsByPoolsAtSlot(
+// GetRewardStakeInputsByPoolsAtBoundary returns positive per-credential
+// delegated stake for the requested pools reconstructed at slot, from the same
+// active_delegator_stake CTE that GetStakeByPoolsAtBoundary aggregates for
+// leader-election pool totals. Pairing the two for the same
+// (slot, boundarySlot) keeps the per-credential reward basis and the pool totals
+// in exact agreement: identical credential membership, identical slot-accurate
+// stake values, and the identical CIP-0163 historical expiry filter (expiration
+// reconstructed at slot, not read from the mutable live
+// account.expiration_epoch column). See historicalDelegatorStakeCTE for what a
+// nonzero boundarySlot changes.
+func GetRewardStakeInputsByPoolsAtBoundary(
 	db *gorm.DB,
 	poolKeyHashes [][]byte,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) ([]*models.RewardStakeInput, error) {
@@ -134,7 +185,7 @@ func GetRewardStakeInputsByPoolsAtSlot(
 	poolKeyHashes = rewardstate.DedupePoolKeyHashes(poolKeyHashes)
 
 	query, args, err := historicalDelegatorStakeCTE(
-		db, slot, expiryEpoch, inactivityPeriod,
+		db, slot, boundarySlot, expiryEpoch, inactivityPeriod,
 		"active_delegation.pool_key_hash IN ?",
 	)
 	if err != nil {
@@ -188,19 +239,50 @@ ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC`
 // while credentials with no account row (LEFT JOIN NULL) or expiration_epoch 0
 // stay active. When expiryEpoch == 0 the gate is off and the generated SQL and
 // args are byte-identical to the pre-CIP query (no join, no clause, no arg).
+//
+// boundarySlot switches the reward component from "stake at slot" to
+// epoch-boundary SNAP semantics, and must be 0 for any query that is not
+// reconstructing an epoch-boundary mark snapshot.
+//
+// At an epoch boundary, cardano-ledger applies the delayed reward update
+// (applyRUpd) BEFORE the SNAP rule, so the mark snapshot observes that epoch's
+// rewards in every delegator's reward account. dingo records that update at the
+// boundary slot, one past the snapshot slot, so the plain
+// "subtract everything after slot" reconstruction removes a whole epoch of
+// rewards from the reward basis — the same one-sided direction as dingo #2798,
+// roughly 0.2-0.3% of mainnet active stake, and a full epoch of divergence from
+// the authoritative SNAP-point capture, which includes them.
+//
+// A nonzero boundarySlot therefore retains credits recorded at exactly that slot
+// that are not marked post-snapshot: the delayed reward update and the
+// Shelley-era MIR rule, both of which NEWEPOCH applies before EPOCH/SNAP.
+// Everything cardano-ledger applies after SNAP (POOLREAP deposit refunds,
+// enacted treasury withdrawals, proposal-deposit refunds) is stamped
+// AccountRewardDelta.PostSnapshot by
+// governance.CreditRegisteredRewardAccountAfterSnapshot and stays subtracted, so
+// the reconstruction reproduces exactly what the live aggregate holds at the
+// SNAP point. Withdrawals are not filtered: a withdrawal at the boundary slot comes
+// from a transaction in the boundary block, which is applied after the rollover,
+// so the existing "first future withdrawal" branch already treats it as
+// post-boundary and its previous_reward already includes the reward update.
 func historicalDelegatorStakeCTE(
 	db *gorm.DB,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	predicate string,
 ) (string, []any, error) {
 	cte, args := activeDelegationCTE(db, slot)
-	// The expiry gate is hand-written positional-arg SQL. Its "?" sits in the
-	// WHERE clause ahead of the caller-supplied predicate's `IN ?`, so the
-	// expiryEpoch bind arg is appended right after the four slot args below and
-	// before the caller appends the pool chunk. Keeping the clause ahead of the
-	// predicate preserves the "caller appends last" contract of both callers.
+	var boundaryRewardClause string
+	if boundarySlot > 0 {
+		boundaryRewardClause = `
+		AND NOT (credit.added_slot = ? AND credit.post_snapshot = FALSE)`
+	}
+	// The historical-expiration CTE's bind args are appended here, immediately
+	// after the active-delegation CTE's args. The final expiry predicate is bound
+	// below, after the historical reward and UTxO slot predicates; callers then
+	// append the pool chunk to match the final IN placeholder.
 	var expiryCTE, expiryJoin, expiryPredicate string
 	if expiryEpoch > 0 {
 		if inactivityPeriod == 0 {
@@ -266,19 +348,39 @@ future_credit AS (
 		ON first_future_withdrawal.credential_tag = credit.credential_tag
 		AND first_future_withdrawal.staking_key = credit.staking_key
 	WHERE credit.withdrawal = FALSE
-		AND credit.added_slot > ?
+		AND credit.added_slot > ?%[5]s
 	GROUP BY credit.credential_tag,
 		credit.staking_key
 ),
 historical_reward AS (
 	SELECT active_delegation.credential_tag,
 		active_delegation.staking_key,
+		-- Floored at zero, by guarding each subtraction rather than clamping its
+		-- result. Reconstruction subtracts every later journal event from the
+		-- live balance, so an incomplete journal (pruned history, or an imported
+		-- account whose pre-import credits were never journaled) can make the
+		-- intermediate go below zero. total_stake is scanned into a uint64, where
+		-- a negative value either fails the scan outright or wraps that
+		-- credential's stake to near 2^64. The guard has to precede the
+		-- subtraction because the cast type is the backend's native integer
+		-- type, which is UNSIGNED on mysql: there the subtraction itself raises
+		-- "BIGINT UNSIGNED value is out of range" on underflow, so a clamp
+		-- applied to its result would never be reached.
 		CASE
 			WHEN first_future_withdrawal.id IS NOT NULL THEN
-				first_future_withdrawal.previous_reward
-					- COALESCE(future_credit.before_first_withdrawal, 0)
-			ELSE COALESCE(CAST(account.reward AS %[1]s), 0)
-				- COALESCE(future_credit.total, 0)
+				CASE WHEN first_future_withdrawal.previous_reward
+						>= COALESCE(future_credit.before_first_withdrawal, 0)
+					THEN first_future_withdrawal.previous_reward
+						- COALESCE(future_credit.before_first_withdrawal, 0)
+					ELSE 0
+				END
+			ELSE
+				CASE WHEN COALESCE(CAST(account.reward AS %[1]s), 0)
+						>= COALESCE(future_credit.total, 0)
+					THEN COALESCE(CAST(account.reward AS %[1]s), 0)
+						- COALESCE(future_credit.total, 0)
+					ELSE 0
+				END
 		END AS reward
 	FROM active_delegation
 	LEFT JOIN account
@@ -310,8 +412,17 @@ active_delegator_stake AS (
 	GROUP BY active_delegation.pool_key_hash,
 		active_delegation.credential_tag,
 		active_delegation.staking_key
-)`, utxoAmountCastType(db), predicate, expiryJoin, expiryPredicate)
-	args = append(args, slot, slot, slot, slot)
+)`, utxoAmountCastType(db), predicate, expiryJoin, expiryPredicate,
+		boundaryRewardClause)
+	// Bind order must match the "?" order in the generated SQL:
+	// ranked_future_withdrawal, future_credit (+ optional boundary slot),
+	// then the two UTxO slot bounds, the final expiry predicate (when enabled),
+	// and finally the caller-supplied pool chunk.
+	args = append(args, slot, slot)
+	if boundarySlot > 0 {
+		args = append(args, boundarySlot)
+	}
+	args = append(args, slot, slot)
 	if expiryEpoch > 0 {
 		args = append(args, expiryEpoch)
 	}
@@ -334,7 +445,7 @@ func GetPoolOwnerStakeAtSlot(
 		return out, nil
 	}
 	query, args, err := historicalDelegatorStakeCTE(
-		db, slot, expiryEpoch, inactivityPeriod,
+		db, slot, 0, expiryEpoch, inactivityPeriod,
 		"active_delegation.credential_tag = 0 "+
 			"AND active_delegation.staking_key IN ?",
 	)
@@ -551,23 +662,23 @@ WHERE %[1]s.added_slot <= ?`, source.table, txTable))
 		delegationSrcs,
 		registrationSrcs,
 	)
-	delegationParts = append(delegationParts, `
+	delegationParts = append(delegationParts, fmt.Sprintf(`
 SELECT account.credential_tag,
 	account.staking_key,
 	account.pool AS pool_key_hash,
-	account.added_slot,
+	%[1]s AS added_slot,
 	0 AS block_index,
 	0 AS cert_index
 FROM account
-WHERE account.added_slot <= ?
+WHERE %[1]s <= ?
 	AND account.active = TRUE
 	AND account.pool IS NOT NULL
 	AND length(account.pool) > 0
-`+noCredentialHistoryPredicate("account", delegationFallbackTables))
+%[2]s`,
+		accountEvidenceSlotExpr,
+		noCredentialHistoryPredicate("account", delegationFallbackTables),
+	))
 	args = append(args, slot)
-	for range delegationFallbackTables {
-		args = append(args, slot)
-	}
 
 	registrationParts := make([]string, 0, len(registrationSrcs)+1)
 	for _, source := range registrationSrcs {
@@ -595,20 +706,20 @@ WHERE %[1]s.added_slot <= ?`, source.table, txTable, source.registered))
 	registrationFallbackTables := registrationFallbackBlockTables(
 		registrationSrcs,
 	)
-	registrationParts = append(registrationParts, `
+	registrationParts = append(registrationParts, fmt.Sprintf(`
 SELECT account.credential_tag,
 	account.staking_key,
 	CASE WHEN account.active THEN 1 ELSE 0 END AS registered,
-	account.added_slot,
+	%[1]s AS added_slot,
 	0 AS block_index,
 0 AS cert_index
 FROM account
-WHERE account.added_slot <= ?
-`+noCredentialHistoryPredicate("account", registrationFallbackTables))
+WHERE %[1]s <= ?
+%[2]s`,
+		accountEvidenceSlotExpr,
+		noCredentialHistoryPredicate("account", registrationFallbackTables),
+	))
 	args = append(args, slot)
-	for range registrationFallbackTables {
-		args = append(args, slot)
-	}
 
 	return fmt.Sprintf(`
 WITH delegation_events AS (
@@ -726,6 +837,23 @@ func registrationFallbackBlockTables(
 	return tables
 }
 
+// noCredentialHistoryPredicate restricts the account-derived fallback branches to
+// credentials with NO certificate history at all in the named tables, at any
+// slot — not merely none at or before the requested slot.
+//
+// The fallback exists as synthetic state for imported/bootstrap credentials whose
+// real certificate history is simply absent (Mithril import writes the live
+// account row and no certificates; Shelley-genesis delegation likewise). A
+// credential that does have a certificate, just a later one, is not such a
+// credential: its state before that certificate is genuinely unknown, and
+// answering from the live account row would project today's delegation backwards
+// past the certificate that established it.
+//
+// A slot-bounded predicate did exactly that whenever the row's own visibility
+// gate let it through, so the two clauses were load-bearing for each other. That
+// coupling is what made account.added_slot — a mutable last-modified slot — do
+// double duty as a historical visibility gate, which is the defect
+// accountEvidenceSlotExpr fixes.
 func noCredentialHistoryPredicate(
 	accountAlias string,
 	tableNames []string,
@@ -738,7 +866,6 @@ func noCredentialHistoryPredicate(
 		FROM %s history
 		WHERE history.credential_tag = %s.credential_tag
 			AND history.staking_key = %s.staking_key
-			AND history.added_slot <= ?
 	)`, tableName, accountAlias, accountAlias)
 	}
 	return out.String()

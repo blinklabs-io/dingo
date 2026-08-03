@@ -15,14 +15,17 @@
 package utxorpc
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -161,6 +164,100 @@ func TestUtxorpc_StartStop(t *testing.T) {
 	defer cancel()
 	err = u.Stop(ctx)
 	require.NoError(t, err, "failed to stop utxorpc")
+}
+
+// TestUtxorpc_StopForcesCloseOnUnboundedStream covers Stop's escalation to
+// a hard Close when a client keeps a connection open, standing in for a
+// WatchTx/WatchMempool stream that never returns.
+func TestUtxorpc_StopForcesCloseOnUnboundedStream(t *testing.T) {
+	var logBuf bytes.Buffer
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:          slog.New(slog.NewJSONHandler(&logBuf, nil)),
+		EventBus:        event.NewEventBus(nil, nil),
+		ShutdownTimeout: 50 * time.Millisecond,
+	})
+
+	requestReceived := make(chan struct{})
+	blockHandler := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		close(requestReceived)
+		<-blockHandler
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := &http.Server{Handler: mux}
+	u.server = server
+	go server.Serve(ln)
+	t.Cleanup(func() { close(blockHandler) })
+
+	client := &http.Client{}
+	go func() {
+		resp, getErr := client.Get("http://" + ln.Addr().String() + "/") //nolint:noctx
+		if getErr == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-requestReceived
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- u.Stop(context.Background()) }()
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not force-close the server after ShutdownTimeout")
+	}
+	assert.Contains(t, logBuf.String(), "forcing close")
+}
+
+// TestUtxorpc_StopObservesCtxCancellation ensures cancellation interrupts a
+// slow shutdown instead of waiting for the configured shutdown timeout.
+func TestUtxorpc_StopObservesCtxCancellation(t *testing.T) {
+	var logBuf bytes.Buffer
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:          slog.New(slog.NewJSONHandler(&logBuf, nil)),
+		EventBus:        event.NewEventBus(nil, nil),
+		ShutdownTimeout: 30 * time.Second,
+	})
+
+	requestReceived := make(chan struct{})
+	blockHandler := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		close(requestReceived)
+		<-blockHandler
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := &http.Server{Handler: mux}
+	u.server = server
+	go server.Serve(ln)
+	t.Cleanup(func() { close(blockHandler) })
+
+	client := &http.Client{}
+	go func() {
+		resp, getErr := client.Get("http://" + ln.Addr().String() + "/") //nolint:noctx
+		if getErr == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-requestReceived
+
+	stopCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- u.Stop(stopCtx) }()
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return promptly after ctx cancellation")
+	}
+	assert.Contains(t, logBuf.String(), "forcing close")
+	assert.Contains(t, logBuf.String(), "cancelled by caller context")
 }
 
 // TestAnyChainBlockNativeBytes_NonNil ensures that AnyChainBlock.NativeBytes

@@ -814,6 +814,10 @@ func (t *gcsTxn) Rollback() error {
 	return nil
 }
 
+func (t *gcsTxn) RollbackIsNoop() bool {
+	return true
+}
+
 type gcsIterator struct {
 	store   *BlobStoreGCS
 	txn     types.Txn

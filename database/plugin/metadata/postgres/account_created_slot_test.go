@@ -30,6 +30,34 @@ func TestPostgresBackfillAccountCreatedSlotCaseUpdate(t *testing.T) {
 	require.NoError(t, db.Where("1 = 1").Delete(&models.Account{}).Error)
 	require.NoError(t, db.Where("phase = ?", "account_created_slot").
 		Delete(&models.BackfillCheckpoint{}).Error)
+	// Symmetric cleanup. The certificate rows this test seeds share a database
+	// with every other test in the package, and the historical stake CTE treats
+	// ANY certificate row for a credential — at any slot — as proof that the
+	// credential is not a history-less imported/bootstrap account eligible for
+	// the account-row fallback. Leaving them behind therefore silently
+	// disqualified a later test's fallback-only account that reuses the same
+	// staking key.
+	//
+	// Registered as a plain defer, not t.Cleanup: this function opens the store
+	// with `defer store.Close()`, and every plain defer runs before any
+	// t.Cleanup callback, so a t.Cleanup here would run against a closed
+	// connection and delete nothing (dingo #3025). A defer registered after the
+	// Close defer runs before it.
+	defer func() {
+		for _, history := range []any{
+			&models.StakeRegistration{},
+			&models.StakeRegistrationDelegation{},
+			&models.StakeVoteRegistrationDelegation{},
+			&models.VoteRegistrationDelegation{},
+			&models.Registration{},
+			&models.StakeDelegation{},
+			&models.StakeVoteDelegation{},
+			&models.VoteDelegation{},
+		} {
+			_ = db.Where("1 = 1").Delete(history).Error
+		}
+		_ = db.Where("1 = 1").Delete(&models.Account{}).Error
+	}()
 
 	registered := bytes.Repeat([]byte{0x71}, 28)
 	genesis := bytes.Repeat([]byte{0x72}, 28)

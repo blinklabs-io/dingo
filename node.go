@@ -33,9 +33,12 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
@@ -57,17 +60,25 @@ import (
 )
 
 type Node struct {
-	connManager                      *connmanager.ConnectionManager
-	peerGov                          *peergov.PeerGovernor
+	connManager *connmanager.ConnectionManager
+	peerGov     *peergov.PeerGovernor
+	// poolRelayProvider backs peerGov's LedgerPeerProvider. Tracked here (not
+	// a throwaway local) so quiesceForLiveLifecycleOp can Close it -- it has
+	// no Stop of its own otherwise, so a live database restore/truncate,
+	// which constructs a fresh one on every cycle, would leak its EventBus
+	// subscription every time (node_lifecycle.go).
+	poolRelayProvider                *ledger.PoolRelayProvider
 	chainsyncState                   *chainsync.State
 	chainSelector                    *chainselection.ChainSelector
 	eventBus                         *event.EventBus
 	pluginHost                       *plugin.Host
+	destinationRegistry              *lifecycle.DestinationRegistry
 	mempool                          mempool.Service
 	chainManager                     *chain.ChainManager
 	db                               *database.Database
 	ledgerState                      *ledger.LedgerState
 	snapshotMgr                      *snapshot.Manager
+	dbLifecycleMgr                   *dblifecycle.Manager
 	leiosVoteManager                 *leios.VoteManager
 	leiosPipelineManager             *leios.PipelineManager
 	bark                             *bark.Bark
@@ -89,6 +100,48 @@ type Node struct {
 	chainsyncStallRecyclerWG         sync.WaitGroup
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
+
+	// EventBus subscriber IDs for handlers bound to components that a live
+	// database restore/truncate rebuilds from scratch (node_lifecycle.go).
+	// Every other Run()-registered handler is either a closure over n itself
+	// (self-healing — reads the current field value at call time) or bound
+	// to a component that lifecycle rebuild leaves untouched, so it needs no
+	// tracked ID. Captured here (rather than discarded, as Run() otherwise
+	// would) purely so node_lifecycle.go can unsubscribe the stale handler
+	// before rebuilding its component; Run()'s own behavior is unchanged.
+	chainManagerBlockProposedSubId event.EventSubscriberId
+	chainsyncClientRemoveSubId     event.EventSubscriberId
+	connManagerRecycleSubId        event.EventSubscriberId
+	leiosVoteEmittedSubId          event.EventSubscriberId
+
+	// liveLifecycleMu serializes live database Restore/Truncate calls
+	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
+	// Deliberately NOT held by Snapshot (see snapshotMu): Snapshot never
+	// nils/rebuilds n.ledgerState or n.chainsyncState the way Restore/
+	// Truncate do, so a background reader like the chainsync recycler
+	// tick only needs to know whether a REBUILD is in flight -- not
+	// whether an unrelated, non-rebuilding Snapshot happens to be
+	// running, which this mutex would otherwise make indistinguishable.
+	liveLifecycleMu sync.Mutex
+
+	// snapshotMu serializes Snapshot calls against each other and against
+	// a concurrent Restore/Truncate (which closes n.db out from under an
+	// in-progress Snapshot if not excluded), and is what enforces bark
+	// DatabaseService's "one operation at a time" invariant for Snapshot
+	// specifically. Restore/Truncate take both this and liveLifecycleMu;
+	// Snapshot takes only this one -- so a long-running Snapshot (a full
+	// local copy plus cloud upload) never blocks a background reader that
+	// only cares about liveLifecycleMu, such as the chainsync recycler
+	// tick's stall-detection/plateau-recovery check, matching Snapshot's
+	// own documented "keeps syncing normally" behavior.
+	snapshotMu sync.Mutex
+
+	// rebuildableMetrics tracks every Prometheus collector registered by a
+	// component a live database restore/truncate rebuilds, so
+	// closeStorageForLiveLifecycleOp can unregister them before the
+	// rebuild re-registers fresh ones under the same names. See
+	// metrics_registerer.go.
+	rebuildableMetrics *rebuildableRegisterer
 }
 
 func New(cfg Config) (*Node, error) {
@@ -96,9 +149,17 @@ func New(cfg Config) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create plugin host: %w", err)
 	}
+	// Cloud destination schemes (s3, gcs) are registered explicitly here,
+	// at composition time, rather than via a process-global registry each
+	// scheme's own package would otherwise populate through an init() —
+	// see database/lifecycle/destination.go's DestinationRegistry doc
+	// comment.
+	destinationRegistry := lifecycle.NewDestinationRegistry()
+	lifecycle.RegisterBuiltinDestinations(destinationRegistry)
 	n := &Node{
-		config:     cfg,
-		pluginHost: pluginHost,
+		config:              cfg,
+		pluginHost:          pluginHost,
+		destinationRegistry: destinationRegistry,
 	}
 	for capability, selection := range cfg.pluginSelections {
 		if err := pluginHost.ValidateSelection(
@@ -124,6 +185,17 @@ func New(cfg Config) (*Node, error) {
 	// validation failure would return a nil Node while leaving those goroutines
 	// running, with no handle for the caller to Stop() them.
 	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
+	// Everything registered above (build info, RTS gauges, the EventBus)
+	// lives for the node's entire lifetime and is never rebuilt, so it's
+	// registered directly against the pre-wrap registerer. Everything
+	// that reads n.config.promRegistry from here on — in Run() and in
+	// every node_lifecycle.go reinitialize call — goes through this
+	// wrapper instead, so a live restore/truncate can unregister and
+	// re-register it without a duplicate-collector panic.
+	if n.config.promRegistry != nil {
+		n.rebuildableMetrics = newRebuildableRegisterer(n.config.promRegistry)
+		n.config.promRegistry = n.rebuildableMetrics
+	}
 	return n, nil
 }
 
@@ -184,6 +256,25 @@ func (n *Node) apiPluginSelection(
 		)
 	}
 	return selection, uint(port), nil
+}
+
+// effectiveBarkHost decides the interface Bark actually binds to.
+// configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when
+// set -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
+// database lifecycle service's destructive, unauthenticated Restore/Truncate
+// RPCs will be mounted), this defaults to loopback-only rather than letting
+// bark.go's own empty-Host default ("0.0.0.0") expose them on every
+// interface; with no lifecycle service mounted, "" is returned unchanged so
+// bark's own existing default behavior (all interfaces) is preserved for
+// deployments only using it for the read-only Archive service.
+func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
+	if configuredHost != "" {
+		return configuredHost
+	}
+	if lifecycleEnabled {
+		return "127.0.0.1"
+	}
+	return ""
 }
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
@@ -258,6 +349,16 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	})
 
+	// Reconcile a live Restore's directory swap (node_lifecycle.go's
+	// swapInRestoredDataDir) that was interrupted by a crash, process
+	// kill, or power failure before it could be confirmed and cleaned up
+	// -- must run before anything else below opens n.config.dataDir.
+	if err := n.reconcileInterruptedLiveRestoreSwap(); err != nil {
+		return fmt.Errorf(
+			"reconcile interrupted live restore swap: %w", err,
+		)
+	}
+
 	// Resolve provider-owned storage before constructing the database that uses
 	// it. The startup cleanup stack stops any provider that started before a
 	// later storage resolution failure.
@@ -326,6 +427,15 @@ func (n *Node) Run(ctx context.Context) error {
 		)
 		dbNeedsRecovery = true
 	}
+	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
+		return fmt.Errorf("check for interrupted database truncate: %w", pendingErr)
+	} else if pending != nil {
+		return fmt.Errorf(
+			"database truncate was interrupted after it started (target slot %d, target id %d); rerun the truncate operation before starting the node",
+			pending.TargetSlot,
+			pending.TargetID,
+		)
+	}
 	// Load chain manager
 	cm, err := chain.NewManager(
 		n.db,
@@ -337,7 +447,10 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	n.chainManager = cm
 	primaryChain := n.chainManager.PrimaryChain()
-	n.eventBus.SubscribeFunc(
+	// Subscriber ID captured (rather than discarded) so a live database
+	// restore/truncate can unsubscribe this handler before rebuilding
+	// n.chainManager — see node_lifecycle.go.
+	n.chainManagerBlockProposedSubId = n.eventBus.SubscribeFunc(
 		chain.BlockProposedEventType,
 		primaryChain.HandleBlockProposedEvent,
 	)
@@ -386,7 +499,7 @@ func (n *Node) Run(ctx context.Context) error {
 		PeerSharing:           n.config.peerSharing,
 		IntersectTip:          n.config.intersectTip,
 		IntersectPoints:       n.config.intersectPoints,
-		PromRegistry:          n.config.promRegistry,
+		PromRegistry:          n.retainedComponentPromRegistry(),
 		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
 		EnableLeios:           enableLeiosNetworking,
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
@@ -752,6 +865,15 @@ func (n *Node) Run(ctx context.Context) error {
 	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
 	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
 	// only the event-driven fallback capture.
+	// The stake read runs at the SNAP point (after MIR and before POOLREAP/
+	// enactment) and
+	// the row write at the end of the rollover, both inside the same
+	// transaction.
+	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 	n.ledgerState.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
@@ -767,6 +889,25 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
+	// Initialize and start automatic database-snapshot manager (distinct
+	// from the stake/reward snapshot manager above — see
+	// internal/dblifecycle.Manager doc comment).
+	n.dbLifecycleMgr = dblifecycle.NewManager(
+		n.db,
+		n.eventBus,
+		n.config.databaseLifecycle,
+		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
+		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
+		n.destinationRegistry,
+		n.config.logger,
+	)
+	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf(
+			"failed to start database lifecycle manager: %w",
+			err,
+		)
+	}
+	started = append(started, func() { _ = n.dbLifecycleMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
 	if enableDijkstra {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context
@@ -859,7 +1000,9 @@ func (n *Node) Run(ctx context.Context) error {
 		peergov.PeerEligibilityChangedEventType,
 		n.ouroboros.HandlePeerEligibilityChangedEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.chainsyncState is rebuilt during a live database restore/truncate.
+	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
 		chainsync.ClientRemoveRequestedEventType,
 		n.chainsyncState.HandleClientRemoveRequestedEvent,
 	)
@@ -1018,7 +1161,9 @@ func (n *Node) Run(ctx context.Context) error {
 			MaxInboundConns:     n.config.maxInboundConns,
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.connManager is rebuilt during a live database restore/truncate.
+	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
 		connmanager.ConnectionRecycleRequestedEventType,
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
@@ -1086,7 +1231,7 @@ func (n *Node) Run(ctx context.Context) error {
 	// Configure peer governor before opening listeners so topology-driven
 	// outbound connections start first and do not lose the race to inbounds.
 	// Create ledger relay provider for discovering peers from stake pool relays.
-	ledgerRelayProvider, err := ledger.NewPoolRelayProvider(
+	n.poolRelayProvider, err = ledger.NewPoolRelayProvider(
 		n.ledgerState,
 		n.db,
 		n.eventBus,
@@ -1094,7 +1239,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create ledger relay provider: %w", err)
 	}
-	ledgerPeerProvider := ledgerpeers.NewProvider(ledgerRelayProvider)
+	ledgerPeerProvider := ledgerpeers.NewProvider(n.poolRelayProvider)
 
 	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled).
 	var useLedgerAfterSlot int64 = -1
@@ -1179,6 +1324,16 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
 		return err
 	}
+	// A caller-supplied net.Listener (e.g. a test harness binding an
+	// OS-assigned port up front) is single-use: Stop always closes every
+	// listener it owns, including one it didn't create, so the exact
+	// object can never be reused after a live Restore/Truncate's
+	// quiesce-then-reinit cycle. Recording the concrete address it
+	// actually resolved to now lets reinitializeNetworkingCore rebind a
+	// fresh listener at that same address later, instead of trying (and
+	// silently failing) to reuse the original, by-then-permanently-closed
+	// object. See ConnectionManager.ResolvedListeners's doc comment.
+	n.config.listeners = n.connManager.ResolvedListeners()
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.connManager.Stop(context.Background()); err != nil {
 			n.config.logger.Error(
@@ -1240,17 +1395,44 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.barkPort > 0 {
+		lifecycleEnabled := n.config.databaseLifecycle.SnapshotDir != ""
+		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
+		if barkHost != n.config.barkHost {
+			n.config.logger.Warn(
+				"bark database lifecycle service (Restore/Truncate) defaults to a loopback-only bind since no --bark-host was set; these RPCs are unauthenticated, so widen this only behind your own trusted network/auth controls",
+				"component", "bark",
+			)
+		}
+		barkConfig := bark.BarkConfig{
+			Logger:              n.config.logger,
+			DB:                  db,
+			TlsCertFilePath:     n.config.tlsCertFilePath,
+			TlsKeyFilePath:      n.config.tlsKeyFilePath,
+			Host:                barkHost,
+			Port:                n.config.barkPort,
+			CORSAllowedOrigins:  n.config.corsAllowedOrigins,
+			DestinationRegistry: n.destinationRegistry,
+		}
+		// Mount the DatabaseService only when a snapshot directory is
+		// configured — bark.NewBark requires one alongside Lifecycle, and
+		// an operator who enabled bark only for its Archive service
+		// shouldn't get a DatabaseService that fails on first call.
+		if lifecycleEnabled {
+			// cfg is never read: SetLiveNode below makes every Service
+			// method delegate straight to n's own Restore/Truncate/
+			// Snapshot rather than the offline path that would use it.
+			dbLifecycleService := dblifecycle.NewService(
+				&internalconfig.Config{},
+				n.destinationRegistry,
+				n.config.logger,
+			)
+			dbLifecycleService.SetLiveNode(n)
+			barkConfig.Lifecycle = dbLifecycleService
+			barkConfig.SnapshotDir = n.config.databaseLifecycle.SnapshotDir
+			barkConfig.SnapshotCloudDestination = n.config.databaseLifecycle.SnapshotCloudDestination
+		}
 		var err error
-		n.bark, err = bark.NewBark(
-			bark.BarkConfig{
-				Logger:             n.config.logger,
-				DB:                 db,
-				TlsCertFilePath:    n.config.tlsCertFilePath,
-				TlsKeyFilePath:     n.config.tlsKeyFilePath,
-				Port:               n.config.barkPort,
-				CORSAllowedOrigins: n.config.corsAllowedOrigins,
-			},
-		)
+		n.bark, err = bark.NewBark(barkConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create bark server: %w", err)
 		}
@@ -1484,6 +1666,13 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// All components started successfully
 	success = true
+
+	// Only now -- every component above has actually started against
+	// n.config.dataDir -- is a pre-restore backup left over from an
+	// interrupted live restore swap (reconcileInterruptedLiveRestoreSwap,
+	// above) confirmed unneeded; see swapInRestoredDataDir's doc comment
+	// on why it must not be removed any earlier than this.
+	n.removeConfirmedRestoreBackup()
 
 	// Wait for shutdown signal
 	<-n.ctx.Done()

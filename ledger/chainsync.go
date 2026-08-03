@@ -64,6 +64,30 @@ const (
 	blockfetchMaxBatchHeadersWhenBehind = 500
 	blockfetchMinBatchGapSlots          = 64
 
+	// Maximum number of definitive failures to obtain one queued header range
+	// before the queue is dropped. Both failure shapes count against the same
+	// range, because a peer that rolled the queued block back can produce
+	// either one: a NoBlocks reply (surfacing synchronously as a
+	// GetBlockRange error) when its range server rejects the start point,
+	// or a StartBatch/BatchDone pair carrying no blocks. Transport, shutdown,
+	// and wiring errors from GetBlockRange do not count: they do not establish
+	// that the peer cannot serve the range.
+	//
+	// The count is keyed to the range start point rather than being a
+	// global consecutive streak, and it deliberately survives both
+	// deliveries for other ranges and header-queue churn. Failures against
+	// one unfetchable range are minutes apart, and in between the node
+	// fetches normally from other peers while forks, connection switches
+	// and header mismatches repeatedly clear and refill the queue with the
+	// same header. A global streak is reset by all of that, so it fires
+	// only when failures happen to land back to back: two identical DevNet
+	// runs produced 1 firing against 169 wedge events and 9 against 81.
+	// Keying by range makes the same bound deterministic. A miss on a
+	// different range starts its own count, so a peer that is briefly
+	// behind is not punished, and a delivered block for the stuck range
+	// discards its record entirely.
+	blockfetchMaxSameRangeFailures = 3
+
 	// Number of received blockfetch blocks to buffer before committing them.
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
@@ -869,6 +893,11 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 
 func (ls *LedgerState) clearQueuedHeaders() {
 	ls.chain.ClearHeaders()
+	// The blockfetch range-failure record is deliberately NOT cleared here.
+	// Fork resolution, connection switches and header mismatches clear the
+	// queue constantly, and the peer then re-offers the same unfetchable
+	// header; forgetting the record on every clear is what stopped the
+	// bound from ever being reached.
 	ls.headerPipelineConnId = ouroboros.ConnectionId{}
 	// Purge the header dedup cache for slots beyond the current
 	// block tip. Queued headers that were recorded in the dedup
@@ -1183,29 +1212,6 @@ func (ls *LedgerState) requestChainsyncResync(
 	)
 }
 
-func (ls *LedgerState) currentHeaderPipelineOwner() ouroboros.ConnectionId {
-	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	if ls.chainsyncBlockfetchReadyChan != nil {
-		if connIdKey(ls.headerPipelineConnId) != "" {
-			return ls.headerPipelineConnId
-		}
-		if connIdKey(ls.activeBlockfetchConnId) != "" {
-			return ls.activeBlockfetchConnId
-		}
-		return ouroboros.ConnectionId{}
-	}
-	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
-		return ls.headerPipelineConnId
-	}
-	// Once the shared header queue drains, there is no live pipeline owner.
-	// A stale selected blockfetch peer must not monopolize future headers while
-	// the pipeline is idle; whichever peer delivers the next usable header gets
-	// to seed the next batch.
-	ls.headerPipelineConnId = ouroboros.ConnectionId{}
-	return ouroboros.ConnectionId{}
-}
-
 func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
 	e ChainsyncEvent,
 ) bool {
@@ -1232,25 +1238,70 @@ func (ls *LedgerState) clearIdleSelectedOwner() {
 	}
 }
 
-func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+// claimHeaderPipelineOwnership atomically determines the current header
+// pipeline owner for e and, for every outcome that changes
+// headerPipelineConnId (and selectedBlockfetchConnId, for the
+// compatible-fork case), writes it under the same chainsyncBlockfetchMutex
+// hold as the read that decided it. Every other mutator of
+// headerPipelineConnId (discardBufferedPeerHeaders, clearQueuedHeaders,
+// handleEventBlockfetch's batch-done path, etc.) already holds this same
+// mutex around its own reads/writes; splitting "decide the owner" from
+// "write the decision" into two separate lock/unlock cycles (as this used
+// to do, via the now-inlined currentHeaderPipelineOwner) left a window
+// where one of those other mutators could run in between and have its
+// change silently overwritten by this function's own, now-stale decision.
+func (ls *LedgerState) claimHeaderPipelineOwnership(
+	e ChainsyncEvent,
+) (ownerConnId ouroboros.ConnectionId, shouldBuffer bool, acceptedDifferentConnection bool) {
 	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+
 	if ls.staleSelectedOwnerWouldBufferHeader(e) {
 		ls.logIdleSelectedOwnerRelease(e)
 		ls.clearIdleSelectedOwner()
 	}
-	ls.chainsyncBlockfetchMutex.Unlock()
-	ownerConnId := ls.currentHeaderPipelineOwner()
-	if ownerConnId == (ouroboros.ConnectionId{}) {
-		ls.headerPipelineConnId = e.ConnectionId
-		return false
+
+	var owner ouroboros.ConnectionId
+	switch {
+	case ls.chainsyncBlockfetchReadyChan != nil:
+		if connIdKey(ls.headerPipelineConnId) != "" {
+			owner = ls.headerPipelineConnId
+		} else if connIdKey(ls.activeBlockfetchConnId) != "" {
+			owner = ls.activeBlockfetchConnId
+		} else {
+			owner = ouroboros.ConnectionId{}
+		}
+	case ls.chain != nil && ls.chain.HeaderCount() > 0:
+		owner = ls.headerPipelineConnId
+	default:
+		// Once the shared header queue drains, there is no live pipeline
+		// owner. A stale selected blockfetch peer must not monopolize
+		// future headers while the pipeline is idle; whichever peer
+		// delivers the next usable header gets to seed the next batch.
+		ls.headerPipelineConnId = ouroboros.ConnectionId{}
+		owner = ouroboros.ConnectionId{}
 	}
-	if sameConnectionId(ownerConnId, e.ConnectionId) {
+
+	if owner == (ouroboros.ConnectionId{}) {
 		ls.headerPipelineConnId = e.ConnectionId
-		return false
+		return owner, false, false
+	}
+	if sameConnectionId(owner, e.ConnectionId) {
+		ls.headerPipelineConnId = e.ConnectionId
+		return owner, false, false
 	}
 	if ls.headerFitsCurrentPipeline(e) {
 		ls.headerPipelineConnId = e.ConnectionId
 		ls.selectedBlockfetchConnId = e.ConnectionId
+		return owner, false, true
+	}
+	ls.headerPipelineConnId = owner
+	return owner, true, false
+}
+
+func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+	ownerConnId, shouldBuffer, acceptedDifferentConnection := ls.claimHeaderPipelineOwnership(e)
+	if acceptedDifferentConnection {
 		ls.config.Logger.Debug(
 			"accepting compatible header from different connection",
 			"component", "ledger",
@@ -1258,9 +1309,10 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 			"previous_owner_connection_id", ownerConnId.String(),
 			"slot", e.Point.Slot,
 		)
+	}
+	if !shouldBuffer {
 		return false
 	}
-	ls.headerPipelineConnId = ownerConnId
 	ls.bufferHeaderEvent(e)
 	ls.config.Logger.Debug(
 		"buffering header from non-owner connection",
@@ -1372,10 +1424,19 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	return nil
 }
 
+// discardBufferedPeerHeaders is called from handleEventChainsync's dispatch
+// goroutine, which holds only chainsyncMutex -- clearQueuedHeaders mutates
+// headerPipelineConnId, which every other mutator (handleChainSwitchEvent,
+// handleEventBlockfetch's batch-done path, etc.) guards with
+// chainsyncBlockfetchMutex. Taking it here too, self-contained, closes that
+// gap without widening handleEventBlockfetch's own critical section to
+// cover chainsyncMutex as well.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
 ) {
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
@@ -1796,8 +1857,12 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.headerMismatchCount = 0
 	ls.bufferedHeaderEvents = nil
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
-	ls.clearQueuedHeaders()
 	ls.chainsyncBlockfetchMutex.Lock()
+	// clearQueuedHeaders mutates headerPipelineConnId, which every other
+	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
+	// lock (rather than called before it, as this used to) to close that
+	// gap.
+	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
@@ -1956,8 +2021,13 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				continue
 			}
 			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
+				// clearQueuedHeaders (and the headerPipelineConnId write
+				// below) mutate a field every other mutator guards with
+				// chainsyncBlockfetchMutex -- take it here too, scoped
+				// tightly around just these writes.
+				ls.chainsyncBlockfetchMutex.Lock()
 				ls.clearQueuedHeaders()
-				ls.headerPipelineConnId = ouroboros.ConnectionId{}
+				ls.chainsyncBlockfetchMutex.Unlock()
 				return 0, err
 			}
 			added++
@@ -1965,7 +2035,9 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if added == 0 {
 			continue
 		}
+		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
+		ls.chainsyncBlockfetchMutex.Unlock()
 		ls.selectedBlockfetchConnId = connId
 		return ls.chain.HeaderCount(), nil
 	}
@@ -2229,7 +2301,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
+			//
+			// clearQueuedHeaders mutates headerPipelineConnId, which
+			// every other mutator guards with chainsyncBlockfetchMutex
+			// -- take it here too, scoped tightly around just this call.
+			ls.chainsyncBlockfetchMutex.Lock()
 			ls.clearQueuedHeaders()
+			ls.chainsyncBlockfetchMutex.Unlock()
 			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
 				"block header does not fit chain tip",
@@ -2814,6 +2892,9 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
+	// If this block is the one a tracked range was failing to obtain, that
+	// range is fetchable after all and its failure record is stale.
+	ls.noteBlockfetchRangeProgress(e.Point)
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
 			return err
@@ -2879,6 +2960,107 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	return ls.startQueuedBlockfetchLocked(connId)
 }
 
+// blockfetchNoBlocksErrorText is the error text emitted by the gouroboros
+// blockfetch client for MsgNoBlocks. That client currently exposes NoBlocks
+// as a plain error rather than a sentinel, so keep the classification at this
+// adapter boundary and do not treat every synchronous request error as a
+// range-unavailable result.
+const blockfetchNoBlocksErrorText = "block(s) not found"
+
+func isBlockfetchNoBlocksError(err error) bool {
+	return err != nil && strings.HasSuffix(
+		strings.TrimSpace(err.Error()),
+		blockfetchNoBlocksErrorText,
+	)
+}
+
+// blockfetchRangeFailureState counts definitive failures to obtain one
+// specific queued range, identified by its start point. Keying by point is
+// what lets the count survive the unrelated traffic that separates real
+// failures.
+type blockfetchRangeFailureState struct {
+	slot  uint64
+	hash  string
+	count int
+}
+
+func (s blockfetchRangeFailureState) matches(point ocommon.Point) bool {
+	return s.count > 0 &&
+		s.slot == point.Slot &&
+		s.hash == string(point.Hash)
+}
+
+// noteBlockfetchRangeProgress discards the failure record when the range it
+// was tracking has now been delivered. Earlier misses against a range that
+// turned out to be fetchable must not combine with a later unrelated miss, so
+// a peer that was only briefly behind is never punished. Deliveries for any
+// other range leave the record alone: they say nothing about whether the stuck
+// range can be obtained.
+func (ls *LedgerState) noteBlockfetchRangeProgress(point ocommon.Point) {
+	if ls.blockfetchRangeFailure.matches(point) {
+		ls.blockfetchRangeFailure = blockfetchRangeFailureState{}
+	}
+}
+
+// noteBlockfetchRangeUnavailable records one definitive failed attempt to
+// obtain the queued header range starting at start and, once that same range
+// has failed blockfetchMaxSameRangeFailures times, drops the queue and asks
+// for a fresh intersect. It reports whether it dropped the queue.
+//
+// Dropping the headers is the purpose rather than a side effect: while a
+// header sits at the head of the queue, Chain.AddBlock rejects every locally
+// forged block as not matching the first pending header, so a header whose
+// body no peer can serve halts block production until it is cleared. This
+// happens routinely after a tip slot battle, where two producers each roll
+// their own block back in favour of the other's and neither can then serve
+// the body the other queued.
+func (ls *LedgerState) noteBlockfetchRangeUnavailable(
+	connId ouroboros.ConnectionId,
+	start ocommon.Point,
+	reason string,
+) bool {
+	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
+		return false
+	}
+	if start.Slot == 0 && len(start.Hash) == 0 {
+		start, _ = ls.chain.HeaderRange(blockfetchBatchSize)
+	}
+	if ls.blockfetchRangeFailure.matches(start) {
+		ls.blockfetchRangeFailure.count++
+	} else {
+		ls.blockfetchRangeFailure = blockfetchRangeFailureState{
+			slot:  start.Slot,
+			hash:  string(start.Hash),
+			count: 1,
+		}
+	}
+	if ls.blockfetchRangeFailure.count < blockfetchMaxSameRangeFailures {
+		return false
+	}
+	ls.config.Logger.Warn(
+		"blockfetch could not obtain queued range, dropping queued headers and requesting chainsync re-sync",
+		"component", "ledger",
+		"connection_id", connId.String(),
+		"remaining_headers", ls.chain.HeaderCount(),
+		"range_start_slot", start.Slot,
+		"range_start_hash", hex.EncodeToString(start.Hash),
+		"range_failures", ls.blockfetchRangeFailure.count,
+		"reason", reason,
+	)
+	// Start a fresh count: the peer may re-offer the same header, and it
+	// must earn another full set of failures before the queue is dropped
+	// again rather than being dropped on every later miss.
+	ls.blockfetchRangeFailure = blockfetchRangeFailureState{}
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.clearQueuedHeaders()
+	ls.requestChainsyncResync(
+		connId,
+		event.ChainsyncResyncReasonBlockfetchRangeUnavailable,
+	)
+	return true
+}
+
 func (ls *LedgerState) startQueuedBlockfetchLocked(
 	connId ouroboros.ConnectionId,
 ) error {
@@ -2907,6 +3089,21 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	); err != nil {
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		// A peer whose range server rejects the start point answers
+		// NoBlocks, which gouroboros resolves into this synchronous error
+		// rather than a BatchDone event. Several callers only log what we
+		// return (notably the fork-resolution restarts), so genuine NoBlocks
+		// must be recorded here, at the single point every queued-range
+		// request passes through. Other synchronous errors are transport,
+		// shutdown, or wiring failures and must not poison this range's
+		// unavailable count.
+		if isBlockfetchNoBlocksError(err) {
+			ls.noteBlockfetchRangeUnavailable(
+				connId,
+				headerStart,
+				fmt.Sprintf("blockfetch request returned NoBlocks: %v", err),
+			)
+		}
 		return err
 	}
 	// Near tip: dispatch the same range to one shadow peer if any
@@ -3956,41 +4153,50 @@ func (ls *LedgerState) processEpochRollover(
 	// is selected from the new pparams' major version — a HARDFORK rule that ran
 	// before enactment would observe stale pparams and pick the wrong branch.
 	//
-	// The order, asserted by TestProcessEpochRollover_OrderingInvariant and
-	// TestProcessEpochRollover_RewardOrdering in chainsync_ordering_test.go, is:
+	// The order, asserted by TestProcessEpochRollover_OrderingInvariant,
+	// TestProcessEpochRollover_RewardOrdering and
+	// TestProcessEpochRollover_SnapStakeReadOrdering in
+	// chainsync_ordering_test.go and chainsync_snap_ordering_test.go, is:
 	//
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
 	//      rewards and move undistributed→reserves, unspendable→treasury
-	//      before governance reads the treasury.
-	//   2. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
-	//      voting path; produces newPParams from on-chain pparam-update
-	//      proposals.
-	//   3. applyPoolRetirements          — embedded Shelley POOLREAP: refund
-	//      deposits of pools whose retirement epoch is the new epoch. Runs
-	//      before enactment so any deposit landing in the treasury is visible
-	//      to the treasury withdrawals checked in governance.ProcessEpoch.
-	//   4. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//      before governance reads the treasury. Reference: applyRUpd, the
+	//      first step of NEWEPOCH.
+	//   2. applyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
-	//   5. activateDelegatorInactivityIfNeeded — one-time CIP-0163 activation
+	//      Reference: the MIR rule, which Shelley's NEWEPOCH embeds between
+	//      applyRUpd and EPOCH — so before SNAP, and before POOLREAP.
+	//   3. captureEpochBoundarySnapshotStake — SNAP: read the mark snapshot's
+	//      stake. Reference: the first sub-rule of EPOCH.
+	//   4. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//      voting path; produces newPParams from on-chain pparam-update
+	//      proposals.
+	//   5. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//      deposits of pools whose retirement epoch is the new epoch. Runs
+	//      after SNAP and before enactment, so its deposits are outside the
+	//      mark snapshot but any deposit landing in the treasury is visible
+	//      to the treasury withdrawals checked in governance.ProcessEpoch.
+	//   6. activateDelegatorInactivityIfNeeded — one-time CIP-0163 activation
 	//      before any inactivity-gated boundary calculation.
-	//   6. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   7. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   7. SetPParams                    — persist the enacted pparams.
-	//   8. IsHardForkTransition check    — detect inter-era boundary from
+	//   8. SetPParams                    — persist the enacted pparams.
+	//   9. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   9. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//  10. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
-	//  10. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//  11. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
 	//      (reserves/treasury/fees) after all boundary pot mutations so the
 	//      next delayed reward calculation has its pot inputs.
 	//
-	// The authoritative Mark snapshot is captured separately at the end of the
-	// rollover (captureEpochBoundarySnapshot), after the new epoch record and
-	// its nonce exist.
+	// The mark snapshot ROW is written separately at the end of the rollover
+	// (captureEpochBoundarySnapshot), after the new epoch record and its nonce
+	// exist; step 3 is only the stake read. Splitting them is what lets the read
+	// sit at the reference SNAP point while the write still sees the new epoch.
 	//
-	// Steps 6 and 7 must observe the post-enactment major version. Step 8 must
+	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if err := ls.applyStakeRewards(
@@ -3998,6 +4204,37 @@ func (ls *LedgerState) processEpochRollover(
 	); err != nil {
 		return nil, fmt.Errorf("apply stake rewards: %w", err)
 	}
+
+	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
+	// accumulated during the ended epoch to registered reward accounts, and
+	// apply pot-to-pot transfers between treasury and reserves. This is a
+	// no-op for Conway+ epochs because MIR certs are not valid there and no
+	// DB rows exist for those slots.
+	//
+	// Shelley's NEWEPOCH rule embeds MIR between applyRUpd and EPOCH, so MIR
+	// precedes both SNAP and POOLREAP: its credits are part of the mark snapshot
+	// and its pot movements are visible to POOLREAP, governance and the ADA-pot
+	// capture below.
+	if err := ls.applyMIRCerts(
+		txn, currentEpoch.StartSlot, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply MIR certs: %w", err)
+	}
+
+	// SNAP read point. Everything below this line is a rule cardano-ledger runs
+	// after SNAP, and several of them credit reward accounts at epochStartSlot
+	// (POOLREAP deposit refunds, enacted treasury withdrawals,
+	// proposal-deposit refunds). The mark snapshot's stake is therefore read
+	// here — after the delayed reward update and MIR, which precede SNAP, and
+	// before any of them — while the snapshot row is written at the end of the
+	// rollover where the new epoch record and the post-enactment protocol
+	// version exist.
+	if err := ls.captureEpochBoundarySnapshotStake(
+		txn, currentEpoch, epochStartSlot,
+	); err != nil {
+		return nil, err
+	}
+
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -4017,25 +4254,16 @@ func (ls *LedgerState) processEpochRollover(
 	}
 
 	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
-	// pools whose retirement epoch is the new epoch. Per the Conway EPOCH rule
-	// this runs before governance enactment and treasury accounting, so any
-	// deposit that lands in the treasury (unregistered/inactive reward account)
-	// is visible to the withdrawals checked in governance.ProcessEpoch below.
+	// pools whose retirement epoch is the new epoch. The EPOCH rule runs it
+	// after SNAP, so these deposits are deliberately outside the mark snapshot
+	// read above, and before governance enactment and treasury accounting, so
+	// any deposit that lands in the treasury (unregistered/inactive reward
+	// account) is visible to the withdrawals checked in
+	// governance.ProcessEpoch below.
 	if err := ls.applyPoolRetirements(
 		txn, currentEpoch.EpochId+1, epochStartSlot,
 	); err != nil {
 		return nil, fmt.Errorf("apply pool retirements: %w", err)
-	}
-
-	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
-	// accumulated during the ended epoch to registered reward accounts, and
-	// apply pot-to-pot transfers between treasury and reserves. This is a
-	// no-op for Conway+ epochs because MIR certs are not valid there and no
-	// DB rows exist for those slots.
-	if err := ls.applyMIRCerts(
-		txn, currentEpoch.StartSlot, epochStartSlot,
-	); err != nil {
-		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
 	// CIP-0163: one-time activation stamp. It must precede governance's
@@ -4260,6 +4488,79 @@ func (ls *LedgerState) processEpochRollover(
 	return result, nil
 }
 
+// epochBoundarySnapshotSlot is the slot a mark snapshot describes: the last slot
+// of the ended epoch, i.e. one before the boundary.
+func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
+	if boundarySlot == 0 {
+		return 0
+	}
+	return boundarySlot - 1
+}
+
+// captureEpochBoundarySnapshotStake invokes the optional SNAP-point stake hook
+// at the correct place in the boundary sequence: after the two boundary rules
+// cardano-ledger applies before SNAP (the delayed reward update and MIR) and
+// before POOLREAP and governance enactment, which credit reward accounts at the
+// boundary slot after it.
+//
+// It only reads, so it needs nothing from the not-yet-written new epoch record;
+// the boundary identity is fully determined here (the new epoch is
+// prevEpoch.EpochId+1 starting at boundarySlot) and matches the event the
+// persist half builds from that record.
+//
+// A failure is isolated with a savepoint so it cannot poison the rollover
+// transaction on backends that abort a transaction on SQL error. The persist
+// half then uses the boundary-aware historical reconstruction; load mode also
+// records the failure so an incomplete capture is surfaced to the operator.
+func (ls *LedgerState) captureEpochBoundarySnapshotStake(
+	txn *database.Txn,
+	prevEpoch models.Epoch,
+	boundarySlot uint64,
+) error {
+	hook := ls.epochBoundarySnapshotStakeHook()
+	if hook == nil {
+		return nil
+	}
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch.EpochId,
+		NewEpoch:      prevEpoch.EpochId + 1,
+		BoundarySlot:  boundarySlot,
+		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
+	}
+	const savepoint = "epoch_boundary_snapshot_stake"
+	if err := txn.SavePoint(savepoint); err != nil {
+		ls.config.Logger.Warn(
+			"snap-point stake savepoint unavailable; deferring stake read to snapshot persist",
+			"error", err,
+			"epoch", evt.NewEpoch,
+			"component", "ledger",
+		)
+		return nil
+	}
+	if err := hook(txn, evt); err != nil {
+		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
+			ls.config.Logger.Error(
+				"failed to roll back snap-point stake savepoint",
+				"error", rbErr,
+				"read_error", err,
+				"epoch", evt.NewEpoch,
+				"component", "ledger",
+			)
+			return fmt.Errorf(
+				"roll back snap-point stake savepoint (read error: %w): %w",
+				err, rbErr,
+			)
+		}
+		ls.config.Logger.Warn(
+			"snap-point stake read failed; deferring stake read to snapshot persist",
+			"error", err,
+			"epoch", evt.NewEpoch,
+			"component", "ledger",
+		)
+	}
+	return nil
+}
+
 // captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook
 // inside the epoch-rollover write transaction so the mark snapshot commits
 // atomically with the epoch it describes (and the event-driven fallback then
@@ -4277,10 +4578,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 		return nil
 	}
 	newEpoch := result.NewCurrentEpoch
-	snapshotSlot := newEpoch.StartSlot
-	if snapshotSlot > 0 {
-		snapshotSlot--
-	}
+	snapshotSlot := epochBoundarySnapshotSlot(newEpoch.StartSlot)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch: prevEpoch.EpochId,
 		NewEpoch:      newEpoch.EpochId,
@@ -4616,6 +4914,20 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 			"component", "ledger",
 			"remaining_headers", remainingHeaders,
 		)
+	}
+	// A batch that completed without delivering a block while headers stayed
+	// queued is one of the two shapes of "could not obtain the queued range"
+	// (the other is a NoBlocks reply, recorded in
+	// startQueuedBlockfetchLocked). Both feed the same streak.
+	if receivedBlockCount == 0 && remainingHeaders > 0 {
+		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
+		if ls.noteBlockfetchRangeUnavailable(
+			e.ConnectionId,
+			batchStart,
+			"batch completed without delivering a block",
+		) {
+			return nil
+		}
 	}
 	upstreamTipSlot := ls.UpstreamTipSlot()
 	if receivedBlockCount == 0 &&

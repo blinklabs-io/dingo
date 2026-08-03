@@ -114,10 +114,17 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	// In source order, the calls that must appear inside processEpochRollover.
 	// Each entry is the trailing identifier of a SelectorExpr (or a bare
 	// Ident for unqualified calls).
+	//
+	// applyMIRCerts precedes applyPoolRetirements because that is the reference
+	// sequence: Shelley's NEWEPOCH rule embeds MIR between applyRUpd and EPOCH,
+	// and EPOCH's own sub-rules are SNAP then POOLREAP. MIR is therefore both
+	// pre-SNAP (its credits belong in the mark snapshot) and pre-POOLREAP (its
+	// pot movements are visible to the deposit refunds). dingo ran POOLREAP
+	// before MIR until the epoch-boundary snapshot semantics were corrected.
 	wantOrder := []string{
-		"ComputeAndApplyPParamUpdates",        // (1) Shelley-style pparam updates
-		"applyPoolRetirements",                // (2) embedded POOLREAP deposit refunds
-		"applyMIRCerts",                       // (3) Shelley-era INSTANT rule
+		"applyMIRCerts",                       // (1) Shelley-era INSTANT rule, pre-SNAP
+		"ComputeAndApplyPParamUpdates",        // (2) Shelley-style pparam updates
+		"applyPoolRetirements",                // (3) embedded POOLREAP deposit refunds
 		"activateDelegatorInactivityIfNeeded", // (4) CIP-0163 activation
 		"ProcessEpoch",                        // (5) Conway-style governance enact
 		"SetPParams",                          // (6) persist enacted pparams
