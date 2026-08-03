@@ -124,9 +124,11 @@ type Ouroboros struct {
 	// LeiosNotify ranking-block announcements observed on this node. The map
 	// is keyed by announcing ranking-block hash and prevents an inconsistent
 	// second description of the same ranking block from being relayed.
-	leiosAnnouncementsMu   sync.Mutex
-	leiosAnnouncements     map[string]leiosAnnouncement
-	leiosAnnouncementSizes map[string]uint64
+	leiosAnnouncementsMu       sync.Mutex
+	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosDeferredMu            sync.Mutex
+	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
+	leiosAnnouncementSizes     map[string]uint64
 	// LeiosNotify permits at most two distinct announcements for one election
 	// (slot plus issuer) from each peer. Keep that bound per source so one
 	// equivocating peer cannot inject an unbounded stream without suppressing
@@ -287,6 +289,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosClosureWaiters:        make(map[string][]chan struct{}),
 		leiosEBLog:                 newLeiosForgedEBLog(),
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
@@ -305,6 +308,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initProtocolMetrics()
 		o.initLeiosMetrics()
 	}
+	o.subscribeLeiosAnnouncementRetries()
 	return o
 }
 

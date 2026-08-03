@@ -60,6 +60,12 @@ var (
 	errLeaderStakeSnapshotUnavailable = errors.New("leader stake snapshot unavailable")
 )
 
+// IsHeaderVerificationDeferred reports whether header-only verification could
+// not proceed because the epoch data is not in the cache yet.
+func IsHeaderVerificationDeferred(err error) bool {
+	return errors.Is(err, errHeaderVerificationDeferred)
+}
+
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
 func (b headerOnlyBlock) Type() int                  { return 0 }
 func (b headerOnlyBlock) Transactions() []lcommon.Transaction {

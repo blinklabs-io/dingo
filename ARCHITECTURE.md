@@ -1281,7 +1281,10 @@ EB-size invariant, the decoded ranking header is verified against the current
 ledger state, including VRF/KES and leader eligibility. Announcements are
 rejected when ledger state is unavailable, and slot/freshness and structural
 checks run before cryptographic validation. Header-only validation does not
-advance the shared epoch cache. Deduplication state is
+advance the shared epoch cache. If the required epoch data is not cached yet,
+the announcement is retained in a bounded pending set and retried after chain
+updates or epoch transitions; it is never relayed until validation succeeds.
+Deduplication state is
 pruned when its announced slot leaves the ten-minute acceptance window,
 including the EB-size and per-election indexes. The Go dependency has no
 separate Lookahead state type; its bounded pipelined request window is configured to the protocol

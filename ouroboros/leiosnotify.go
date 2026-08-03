@@ -23,6 +23,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -61,6 +64,13 @@ type leiosAnnouncement struct {
 	// electionKey lets pruning rebuild the bounded per-election index.
 	electionKey string
 }
+
+type leiosDeferredAnnouncement struct {
+	raw    []byte
+	source string
+}
+
+const leiosMaxDeferredAnnouncements = 128
 
 type leiosDeliveryReservation struct {
 	index int
@@ -1143,6 +1153,15 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 // the w31 relay-age bound. The raw header is retained so the relay preserves
 // the producer's signed bytes.
 func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
+	o.retryDeferredLeiosAnnouncements()
+	return o.acceptLeiosAnnouncementInternal(raw, source, true)
+}
+
+func (o *Ouroboros) acceptLeiosAnnouncementInternal(
+	raw []byte,
+	source string,
+	deferVerification bool,
+) error {
 	if o.LedgerState == nil {
 		return errors.New("cannot accept leios announcement without ledger state")
 	}
@@ -1173,6 +1192,9 @@ func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
 		return fmt.Errorf("announcement is stale by %s", age)
 	}
 	if err := o.LedgerState.ValidateBlockHeaderCrypto(header); err != nil {
+		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
+			o.deferLeiosAnnouncement(header, raw, source)
+		}
 		return fmt.Errorf("validate ranking-block header: %w", err)
 	}
 	// Drop announcements that can no longer affect the acceptance window
@@ -1194,6 +1216,53 @@ func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
 		return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, false)
 	}
 	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
+}
+
+func (o *Ouroboros) deferLeiosAnnouncement(
+	header *gdijkstra.DijkstraBlockHeader,
+	raw []byte,
+	source string,
+) {
+	key := fmt.Sprintf("%s:%x", source, header.Hash().Bytes())
+	o.leiosDeferredMu.Lock()
+	defer o.leiosDeferredMu.Unlock()
+	if len(o.leiosDeferredAnnouncements) >= leiosMaxDeferredAnnouncements {
+		return
+	}
+	if _, exists := o.leiosDeferredAnnouncements[key]; !exists {
+		o.leiosDeferredAnnouncements[key] = leiosDeferredAnnouncement{
+			raw: append([]byte(nil), raw...), source: source,
+		}
+	}
+}
+
+// retryDeferredLeiosAnnouncements retries headers after ledger activity has
+// had an opportunity to populate the epoch cache. Deferred headers are never
+// relayed before this validation succeeds.
+func (o *Ouroboros) retryDeferredLeiosAnnouncements() {
+	o.leiosDeferredMu.Lock()
+	pending := make(map[string]leiosDeferredAnnouncement, len(o.leiosDeferredAnnouncements))
+	for key, announcement := range o.leiosDeferredAnnouncements {
+		pending[key] = announcement
+	}
+	o.leiosDeferredMu.Unlock()
+	for key, announcement := range pending {
+		err := o.acceptLeiosAnnouncementInternal(announcement.raw, announcement.source, false)
+		if err == nil || !ledger.IsHeaderVerificationDeferred(err) {
+			o.leiosDeferredMu.Lock()
+			delete(o.leiosDeferredAnnouncements, key)
+			o.leiosDeferredMu.Unlock()
+		}
+	}
+}
+
+func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
+	if !o.config.EnableLeios || o.EventBus == nil {
+		return
+	}
+	retry := func(event.Event) { o.retryDeferredLeiosAnnouncements() }
+	o.EventBus.SubscribeFunc(chain.ChainUpdateEventType, retry)
+	o.EventBus.SubscribeFunc(event.EpochTransitionEventType, retry)
 }
 
 // pruneLeiosAnnouncements bounds announcement deduplication state to the

@@ -931,6 +931,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.True(t, IsHeaderVerificationDeferred(err))
 
 	err = ls.verifyBlockHeaderCrypto(tb.block)
 	require.Error(t, err)
