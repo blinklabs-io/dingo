@@ -278,6 +278,7 @@ func (c *ConnectionManager) startListener(
 					)
 				}
 			}
+			conn = withSocketDeadlines(conn)
 
 			// N2N path: reserve an inbound slot before further processing
 			if !c.tryReserveInboundSlot() {

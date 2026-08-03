@@ -60,6 +60,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 	if err != nil {
 		return nil, err
 	}
+	tmpConn = withSocketDeadlines(tmpConn)
 	// When source-port reuse is in use, force RST on close so the
 	// 4-tuple does not get stuck in TIME_WAIT and block a subsequent
 	// dial to the same peer with EADDRNOTAVAIL.
