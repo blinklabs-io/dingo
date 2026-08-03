@@ -327,6 +327,30 @@ the underlying gouroboros protocol send queue to drain. This keeps large Leios
 catch-up ranges from filling the mux pending-message queue and turning a slow
 consumer into a connection-level protocol violation.
 
+Opening that iterator is also what decides whether the range is servable at
+all, so `chain`'s forward and reverse iterator constructors require the start
+point to be a block the chain still holds at that block index, not merely one
+that resolves by point. The distinction matters because a rolled-back block
+stays resolvable: `ChainManager.removeBlockByIndex` deletes the block row but
+retains the block in the manager's LRU cache so non-primary chains can
+reconcile against it, and `blockByPoint` answers from that cache. Without the
+index check the server opened an iterator positioned outside its own chain,
+promised a batch with `StartBatch`, found nothing to stream, and closed it with
+`BatchDone` — a response the requesting peer cannot distinguish from a served
+range, so it re-requested the same range indefinitely instead of failing over.
+Rejecting the point instead makes the request take the existing
+start-point-not-found branch: the server answers `NoBlocks` (which surfaces on
+the client as a `GetBlockRange` error, driving peer failover) and repeated
+NoBlocks for the same point closes the stuck peer. This condition is normal
+during a tip slot battle, where two nodes each roll back their own block in
+favor of the other's and are then asked for a body neither still has.
+For an in-memory ephemeral fork, the common-prefix portion of that index
+check and iterator lookup is resolved against the primary chain's active
+in-memory points and cache; the fork's divergent tail is resolved from its own
+in-memory points. If the primary has since rolled the common point back, it is
+not considered held even though the retained cache can still resolve it by
+point.
+
 ### Peer-to-Peer Networking
 
 Connection lifecycle, protocol multiplexing, and peer governance.
@@ -1492,6 +1516,14 @@ rolled the applied chain back to its common ancestor, so permitted epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
 
+Genesis-overlay activity is resolved separately from the forward protocol-
+parameter forecast: header validation first uses the epoch containing the
+slot and reads that epoch's effective parameter row, so an epoch-boundary
+decentralization update cannot be mistaken for the prior epoch's overlay
+schedule. If the target epoch is not authoritative yet, blockfetch defers the
+stateful overlay decision until ledger apply; full historical validation and
+the normal leader checks remain enabled.
+
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
 already materialized epoch directly from the immutable epoch cache before
@@ -1616,6 +1648,14 @@ The `ChainManager` (`chain/manager.go`) manages multiple chains:
     -------------------------------------------------
 ```
 
+Chain index reads use the selected chain's read lock and the manager read lock.
+For an in-memory fork, reads that resolve the common prefix also take the
+primary chain's read lock before the manager lock; this protects both the
+primary block buffer and the manager's chain map while avoiding the primary
+chain/manager lock cycle used by chain creation. Iterator and reconciliation
+paths already hold the manager lock, so they call the locked index helper
+directly rather than re-entering the manager lock.
+
 #### Retained block cache and the rollback-target invariant
 
 `ChainManager.removeBlockByIndex` deletes a rolled-back block's row but first
@@ -1684,6 +1724,60 @@ bridge the gap, the ledger emits `chainsync.resync` with reason
 `chain switch cursor ahead of local tip`; Ouroboros then closes that connection
 for a fresh intersect from the current local tip instead of waiting for a cursor
 that has already moved past the missing blocks.
+
+A queued header range that no peer will serve is bounded by a failure count,
+`blockfetchRangeFailure`, capped at `blockfetchMaxSameRangeFailures`. Failing
+to obtain the range has two shapes and both count against the same range,
+because one peer can produce either: a `NoBlocks` reply, which gouroboros
+resolves into a synchronous `GetBlockRange` error and so never reaches
+`BatchDone`; and a `StartBatch`/`BatchDone` pair carrying no blocks, seen in
+`handleEventBlockfetchBatchDone`. Counting them separately would let the two
+alternate while each stayed under its own bound. Other synchronous
+`GetBlockRange` errors — including transport resets, protocol shutdown,
+send-queue failures, and missing callback wiring — do not count, because they
+do not establish that the peer cannot serve the range.
+
+The count is keyed to the range's start point, not kept as a global
+consecutive streak, and this is what makes it able to fire at all. Failures
+against one unfetchable range are minutes apart; in between, the node fetches
+and applies blocks normally from other peers, and fork resolution, connection
+switches and header mismatches call `clearQueuedHeaders` repeatedly, after
+which the peer re-offers the same unfetchable header. A global streak is reset
+by all of that, so it reaches its bound only when failures happen to land back
+to back — timing-dependent enough that two identical DevNet runs differed by
+almost an order of magnitude in how often the recovery fired. The record
+therefore survives both interleaved deliveries for other ranges and
+header-queue churn;
+`clearQueuedHeaders` deliberately leaves it alone. It is discarded only when
+the tracked range itself is delivered (`noteBlockfetchRangeProgress` in
+`handleEventBlockfetchBlock`, matching on the block's point), so a peer that
+was briefly behind is never punished, and a miss against a different range
+starts its own count. After the bound fires the record restarts from zero, so
+a re-offered header must earn a fresh set of failures rather than being
+dropped on every later miss.
+
+The accounting lives in `startQueuedBlockfetchLocked`, the single point every
+queued-range request passes through, not in the callers. That placement is
+load-bearing: every caller treats the error differently and several treat it
+as advisory — the two fork-resolution restarts in `tryResolveFork` log
+"failed to start blockfetch after fork rollback" (or "...after fork
+extension") and then report the fork resolved, the local-rollback recovery
+logs "failed to start blockfetch after local rollback recovery", and the
+await-reply path logs "failed to start blockfetch after await reply" at ERROR
+and publishes a `LedgerErrorEvent`. With the request already cleaned up and
+the header still queued, none of them retried and the pipeline sat idle. The
+shadow-blockfetch dispatch calls `BlockfetchRequestRangeFunc` directly and is
+intentionally excluded: it is a duplicate request whose failure says nothing
+about the primary still in flight. On reaching the bound the ledger drops the queued headers, clears the
+active blockfetch connection, and emits `chainsync.resync` with reason
+`blockfetch could not obtain the queued header range`. Dropping the headers is
+the purpose rather than a side effect: while a header sits at the head of the
+queue, `Chain.AddBlock` rejects every locally forged block with
+`BlockNotMatchHeaderError`, so a header whose body no peer can serve halts
+block production for as long as it stays queued. The earlier far-behind
+variant of this recovery (gated on a `blockfetchMinBatchGapSlots` tip gap,
+which never applied at tip) still runs for its own case before the bound is
+reached.
 
 Bootstrap topology peers remain chain-selection eligible after bootstrap exit
 as a fallback ingress source, but peer governance lowers their priority to zero.

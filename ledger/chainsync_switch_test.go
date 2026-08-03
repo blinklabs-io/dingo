@@ -1785,7 +1785,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	ls.blockfetchRequestRangeCleanup()
 }
 
-func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRequestsResync(
+func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 	t *testing.T,
 ) {
 	testChain := &chain.Chain{}
@@ -1826,10 +1826,12 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRequestsResync(
 		BatchDone:    true,
 	})
 	require.NoError(t, err)
-	assert.Zero(t, requestCount)
-	assert.Zero(t, testChain.HeaderCount())
-	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
-	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
+	assert.Equal(t, 1, requestCount)
+	assert.Equal(t, 1, testChain.HeaderCount())
+	assert.Equal(t, connId, ls.activeBlockfetchConnId)
+	assert.NotNil(t, ls.chainsyncBlockfetchReadyChan)
+
+	ls.blockfetchRequestRangeCleanup()
 }
 
 func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(

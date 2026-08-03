@@ -650,11 +650,20 @@ type LedgerState struct {
 	firstBlockReceived            bool                // true after latency sample recorded for this batch
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
-	deferredHeaderValidation      map[string]struct{} // block points whose stateful header checks wait for ledger apply
-	checkpointWrittenForEpoch     bool
-	closed                        atomic.Bool
-	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery             *atTipRecoveryAttempt
+	// Failures to obtain one specific queued header range, keyed by its
+	// start point and counting both a NoBlocks reply (a synchronous
+	// GetBlockRange error) and a batch that completed without delivering a
+	// block. Bounded by blockfetchMaxSameRangeFailures so an unfetchable
+	// queued range cannot be retried indefinitely (which also latches the
+	// header that blocks local forging). Deliberately survives interleaved
+	// deliveries for other ranges and header-queue churn; discarded when
+	// the tracked range itself is delivered.
+	blockfetchRangeFailure    blockfetchRangeFailureState
+	deferredHeaderValidation  map[string]struct{} // block points whose stateful header checks wait for ledger apply
+	checkpointWrittenForEpoch bool
+	closed                    atomic.Bool
+	inRecovery                bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery         *atTipRecoveryAttempt
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in

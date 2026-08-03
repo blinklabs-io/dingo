@@ -42,6 +42,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1242,6 +1243,84 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveAtDZero(
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+}
+
+func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
+	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
+		t,
+		strings.Repeat("00", lcommon.Blake2b224Size),
+		strings.Repeat("00", lcommon.Blake2b256Size),
+		"0.05",
+	)
+	initialPParams := &alonzo.AlonzoProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	ls := &LedgerState{
+		db: db,
+		currentEpoch: models.Epoch{
+			EpochId:       1,
+			StartSlot:     86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.AlonzoEraDesc.Id,
+		},
+		currentEra:     eras.AlonzoEraDesc,
+		currentPParams: initialPParams,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       1,
+				StartSlot:     86_400,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.AlonzoEraDesc.Id,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     172_800,
+				LengthInSlots: 86_400,
+				SlotLength:    1,
+				EraId:         eras.AlonzoEraDesc.Id,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: genesisCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	// The epoch-2 update is already part of historical metadata even though
+	// the in-memory current epoch is still epoch 1. This is the state observed
+	// while a boundary block is being checked.
+	nextPParams := &alonzo.AlonzoProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	nextPParamsCbor, err := cbor.Encode(nextPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		nextPParamsCbor,
+		172_800,
+		2,
+		eras.AlonzoEraDesc.Id,
+		nil,
+	))
+
+	// The preceding epoch remains genesis-overlay active, while canonical
+	// epoch-2 slots use decentralisationParam=0 and must fall through to the
+	// normal pool path. A current-epoch-only lookup regresses here by reading
+	// epoch-1's d=1 and returning genesisOverlayNonActive.
+	require.True(t, ls.genesisDelegationActiveForSlot(172_780))
+	require.False(t, ls.genesisDelegationActiveForSlot(172_836))
+	_, status, err := ls.genesisOverlayDelegationForSlot(
+		172_836,
+		genesisCfg.ShelleyGenesis(),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, genesisOverlayNone, status)
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(

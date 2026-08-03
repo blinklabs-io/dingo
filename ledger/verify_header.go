@@ -694,7 +694,7 @@ func activeSlotCoeffInverse(activeSlotsCoeff *big.Rat) uint64 {
 }
 
 func (ls *LedgerState) genesisDelegationActiveForSlot(slot uint64) bool {
-	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
+	if pparams := ls.genesisOverlayProtocolParamsForSlot(slot); pparams != nil {
 		return decentralizedParamActive(pparams)
 	}
 	if ls.config.CardanoNodeConfig == nil {
@@ -709,7 +709,7 @@ func (ls *LedgerState) genesisDelegationActiveForSlot(slot uint64) bool {
 }
 
 func (ls *LedgerState) decentralizationParamRatForSlot(slot uint64) *big.Rat {
-	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
+	if pparams := ls.genesisOverlayProtocolParamsForSlot(slot); pparams != nil {
 		return decentralizationParamRat(pparams)
 	}
 	if ls.config.CardanoNodeConfig == nil {
@@ -721,6 +721,38 @@ func (ls *LedgerState) decentralizationParamRatForSlot(slot uint64) *big.Rat {
 		return nil
 	}
 	return shelleyGenesis.ProtocolParameters.Decentralization.Rat
+}
+
+// genesisOverlayProtocolParamsForSlot resolves the protocol parameters that
+// govern the slot's epoch. ProtocolParamsForSlot intentionally forecasts from
+// the current state for forging, but that is not a historical lookup: at an
+// epoch boundary it can return the previous epoch's decentralization value.
+// Prefer the epoch-specific metadata row, falling back to the current/forecast
+// value only when the target epoch is not persisted yet. Header callers defer
+// that not-yet-authoritative case before making an overlay decision.
+func (ls *LedgerState) genesisOverlayProtocolParamsForSlot(
+	slot uint64,
+) lcommon.ProtocolParameters {
+	if epoch, err := ls.epochForSlot(slot); err == nil {
+		snapshot := ls.loadConsensusSnapshot()
+		if epoch.EpochId == snapshot.currentEpoch.EpochId {
+			return snapshot.currentPParams
+		}
+		if ls.db != nil {
+			era, ok := ls.eraById(epoch.EraId)
+			if ok && era != nil && era.DecodePParamsFunc != nil {
+				if pparams, pparamsErr := ls.db.GetPParams(
+					epoch.EpochId,
+					era.Id,
+					era.DecodePParamsFunc,
+					nil,
+				); pparamsErr == nil && pparams != nil {
+					return pparams
+				}
+			}
+		}
+	}
+	return ls.ProtocolParamsForSlot(slot)
 }
 
 func decentralizedParamActive(
