@@ -194,6 +194,14 @@ func (n *Node) configPopulateNetworkMagic() error {
 			return fmt.Errorf("unknown network name: %s", n.config.cfg.Network)
 		}
 		n.config.cfg.NetworkMagic = tmpNetwork.NetworkMagic
+		// Refresh the compat mirror fields from the now-resolved canonical
+		// config. syncCompatFields ran at construction time, before the magic
+		// was derived from the network name, leaving Config.networkMagic at 0.
+		// The ouroboros handshake reads Config.networkMagic (see node.go), and
+		// gouroboros refuses every connection whose configured magic is 0
+		// ("invalid network magic value provided: 0"), so it must be synced
+		// here after resolution or a network started by name never connects.
+		n.config.syncCompatFields()
 	}
 	return nil
 }
