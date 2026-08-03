@@ -173,19 +173,11 @@ func (p *PeerGovernor) spawnOutboundConnectionLocked(peer *Peer) {
 	reconnectPeer := p.peers[idx]
 	reconnectPeer.Reconnecting = true
 	p.wg.Go(func() {
-		p.createReservedOutboundConnection(reconnectPeer)
+		p.createOutboundConnection(reconnectPeer, true)
 	})
 }
 
-func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
-	p.createOutboundConnectionWithReservation(peer, false)
-}
-
-func (p *PeerGovernor) createReservedOutboundConnection(peer *Peer) {
-	p.createOutboundConnectionWithReservation(peer, true)
-}
-
-func (p *PeerGovernor) createOutboundConnectionWithReservation(
+func (p *PeerGovernor) createOutboundConnection(
 	peer *Peer,
 	reserved bool,
 ) {

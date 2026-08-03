@@ -258,7 +258,7 @@ func (b *Bark) Start(ctx context.Context) error {
 	var server *http.Server
 	if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
 		b.config.Logger.Info(
-			fmt.Sprintf("starting bark gRPC TLS listener on %s", listenAddr),
+			"starting bark gRPC TLS listener on " + listenAddr,
 		)
 
 		server = &http.Server{
@@ -270,7 +270,7 @@ func (b *Bark) Start(ctx context.Context) error {
 		}
 	} else {
 		b.config.Logger.Info(
-			fmt.Sprintf("starting bark gRPC listener on %s", listenAddr),
+			"starting bark gRPC listener on " + listenAddr,
 		)
 		server = &http.Server{
 			Addr:              listenAddr,

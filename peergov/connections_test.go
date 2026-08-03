@@ -454,7 +454,7 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 
 	done := make(chan struct{})
 	go func() {
-		pg.createOutboundConnection(topologyPeer)
+		pg.createOutboundConnection(topologyPeer, false)
 		close(done)
 	}()
 	select {
@@ -489,7 +489,7 @@ func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
 	pg.stopCh = nil
 	pg.mu.Unlock()
 
-	pg.createOutboundConnection(peer)
+	pg.createOutboundConnection(peer, false)
 
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
