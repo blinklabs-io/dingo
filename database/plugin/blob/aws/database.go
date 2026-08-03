@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"sort"
@@ -984,10 +985,10 @@ func (d *BlobStoreS3) listKeysToFile(
 	if err != nil {
 		return nil, err
 	}
-	cleanup := func(err error) (*reverseKeyFile, error) {
+	cleanup := func(err error) error {
 		_ = file.Close()
 		_ = os.Remove(file.Name())
-		return nil, err
+		return err
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
@@ -1004,16 +1005,16 @@ func (d *BlobStoreS3) listKeysToFile(
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return cleanup(err)
+			return nil, cleanup(err)
 		}
 		for _, obj := range page.Contents {
 			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
 			externalKey, err := hex.DecodeString(key)
 			if err != nil {
-				return cleanup(fmt.Errorf("error decoding s3 key: %w", err))
+				return nil, cleanup(fmt.Errorf("error decoding s3 key: %w", err))
 			}
 			if err := writeReverseKey(file, string(externalKey)); err != nil {
-				return cleanup(err)
+				return nil, cleanup(err)
 			}
 		}
 	}
@@ -1027,7 +1028,11 @@ type reverseKeyFile struct {
 }
 
 func writeReverseKey(file *os.File, key string) error {
+	if len(key) > math.MaxUint32 {
+		return fmt.Errorf("key length %d exceeds uint32 maximum", len(key))
+	}
 	length := make([]byte, 4)
+	// #nosec G115 -- length is bounds-checked against math.MaxUint32 above.
 	binary.BigEndian.PutUint32(length, uint32(len(key)))
 	if _, err := file.Write(length); err != nil {
 		return err

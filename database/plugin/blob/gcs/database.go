@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -575,31 +576,6 @@ func (d *BlobStoreGCS) SetBlock(
 	return nil
 }
 
-// cleanupObjects deletes the specified objects from GCS, logging any failures
-// but not treating them as fatal since cleanup is best-effort
-func (d *BlobStoreGCS) cleanupObjects(
-	ctx context.Context,
-	objectNames []string,
-) {
-	for _, objName := range objectNames {
-		if err := d.object([]byte(objName)).Delete(ctx); err != nil {
-			if !errors.Is(err, storage.ErrObjectNotExist) {
-				d.logger.Warningf(
-					"failed to cleanup orphaned object during SetBlock failure: object=%s error=%v",
-					objName,
-					err,
-				)
-			}
-			// Ignore ErrObjectNotExist as the object may have been deleted already
-		} else {
-			d.logger.Debugf(
-				"cleaned up orphaned object during SetBlock failure: object=%s",
-				objName,
-			)
-		}
-	}
-}
-
 // GetBlock retrieves a block's CBOR data and metadata
 func (d *BlobStoreGCS) GetBlock(
 	txn types.Txn,
@@ -1091,10 +1067,10 @@ func (d *BlobStoreGCS) listKeysToFile(
 	if err != nil {
 		return nil, err
 	}
-	cleanup := func(err error) (*reverseKeyFile, error) {
+	cleanup := func(err error) error {
 		_ = file.Close()
 		_ = os.Remove(file.Name())
-		return nil, err
+		return err
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
@@ -1105,15 +1081,15 @@ func (d *BlobStoreGCS) listKeysToFile(
 			break
 		}
 		if err != nil {
-			return cleanup(err)
+			return nil, cleanup(err)
 		}
 
 		externalKey, err := d.externalKey(objAttrs.Name)
 		if err != nil {
-			return cleanup(err)
+			return nil, cleanup(err)
 		}
 		if err := writeReverseKey(file, externalKey); err != nil {
-			return cleanup(err)
+			return nil, cleanup(err)
 		}
 	}
 	return &reverseKeyFile{file: file}, nil
@@ -1126,7 +1102,11 @@ type reverseKeyFile struct {
 }
 
 func writeReverseKey(file *os.File, key string) error {
+	if len(key) > math.MaxUint32 {
+		return fmt.Errorf("key length %d exceeds uint32 maximum", len(key))
+	}
 	length := make([]byte, 4)
+	// #nosec G115 -- length is bounds-checked against math.MaxUint32 above.
 	binary.BigEndian.PutUint32(length, uint32(len(key)))
 	if _, err := file.Write(length); err != nil {
 		return err

@@ -597,9 +597,10 @@ its writer closes successfully.
 
 GCS and S3 blob transactions stage object mutations in memory until `Commit`;
 `Rollback` discards all staged writes and deletes. Commit applies changes in a
-stable key order and restores prior object values when a later cloud operation
-fails, so callers do not expose writes from an abandoned transaction. Cloud
-object reads are capped at 256 MiB. Forward cloud iterators page keys directly;
+stable key order and makes a best-effort attempt to restore prior object values
+when a later cloud operation fails. Compensation failures are logged but not
+retried, so a failed restore can leave the bucket in a partially applied state.
+Cloud object reads are capped at 256 MiB. Forward cloud iterators page keys directly;
 reverse iterators spool only their key records to a temporary file so bucket
 size does not determine iterator heap usage.
 

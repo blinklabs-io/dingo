@@ -30,14 +30,14 @@ type deadlineConn struct {
 }
 
 func (c *deadlineConn) Read(p []byte) (int, error) {
-	if err := c.Conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(p)
 }
 
 func (c *deadlineConn) Write(p []byte) (int, error) {
-	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Write(p)
