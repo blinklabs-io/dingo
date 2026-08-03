@@ -343,9 +343,14 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 
 func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o.leiosDeferredAnnouncements["pending"] = leiosDeferredAnnouncement{
+		raw: []byte("deferred"), source: "peer",
+	}
 	require.ErrorContains(t, o.acceptLeiosAnnouncement([]byte("not cbor"), "test"), "without ledger state")
 	require.Empty(t, o.leiosAnnouncements)
 	require.Empty(t, o.leiosEBLog.items)
+	_, stillDeferred := o.leiosDeferredAnnouncements["pending"]
+	require.True(t, stillDeferred)
 }
 
 var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")

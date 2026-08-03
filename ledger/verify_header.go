@@ -61,7 +61,8 @@ var (
 )
 
 // IsHeaderVerificationDeferred reports whether header-only verification could
-// not proceed because the epoch data is not in the cache yet.
+// not proceed because required ledger state, epoch data, or stake snapshot
+// data is not available yet.
 func IsHeaderVerificationDeferred(err error) bool {
 	return errors.Is(err, errHeaderVerificationDeferred)
 }

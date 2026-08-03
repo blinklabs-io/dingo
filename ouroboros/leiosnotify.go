@@ -1153,7 +1153,6 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 // the w31 relay-age bound. The raw header is retained so the relay preserves
 // the producer's signed bytes.
 func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
-	o.retryDeferredLeiosAnnouncements()
 	return o.acceptLeiosAnnouncementInternal(raw, source, true)
 }
 
