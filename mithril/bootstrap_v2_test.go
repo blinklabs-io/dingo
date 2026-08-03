@@ -1033,3 +1033,28 @@ func TestRemoveImmutableTrioStaysInsideRoot(t *testing.T) {
 			"the failed trio must be removed from the real directory")
 	}
 }
+
+// TestOpenImmutableRootRefusesSymlinkedExtractDir covers the extraction
+// directory itself being a symlink.
+//
+// Extraction refuses a symlinked destination, but the v2 download creates and
+// opens the immutable directory before ExtractArchive is ever called, so
+// nothing had checked the extraction directory by that point — the accumulation
+// root was created through the symlink first, and only the later extraction
+// noticed.
+func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+
+	extractDir := filepath.Join(root, "extract")
+	requireSymlinkSupport(t, outside, extractDir)
+
+	_, _, err := openImmutableRoot(extractDir)
+	require.ErrorIs(t, err, ErrExtractUnsafePath)
+
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries,
+		"nothing may be created through a symlinked extraction directory")
+}

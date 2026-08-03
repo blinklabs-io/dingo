@@ -1044,23 +1044,39 @@ func checkImmutableTrio(
 // symlink planted later: it refers to the directory rather than to a name that
 // can be repointed once the download is under way.
 func openImmutableRoot(extractDir string) (string, *os.Root, error) {
-	if err := os.MkdirAll(extractDir, extractDirMode); err != nil {
+	cleanDir := filepath.Clean(extractDir)
+	// The same check ExtractArchive applies to its own destination. This runs
+	// first, so without it the accumulation root would be created through a
+	// symlinked extraction directory and only the later extraction would
+	// notice — after the fact, and after creating a directory in whatever the
+	// link pointed at.
+	if err := assertSafeExtractRoot(cleanDir); err != nil {
+		return "", nil, err
+	}
+	parent := filepath.Dir(cleanDir)
+	if err := os.MkdirAll(parent, extractDirMode); err != nil {
 		return "", nil, fmt.Errorf("creating extraction directory: %w", err)
 	}
-	// extractDir is the operator's chosen path; everything below it is
-	// content this node extracts and is not trusted the same way.
-	extractRoot, err := os.OpenRoot(extractDir)
+	// Both directories are created and opened through the handle above them,
+	// so neither is resolved by a pathname a writer could repoint between the
+	// check and the open.
+	parentRoot, err := os.OpenRoot(parent)
 	if err != nil {
 		return "", nil, fmt.Errorf(
-			"opening extraction directory %s: %w", extractDir, err,
+			"opening extraction parent %s: %w", parent, err,
 		)
+	}
+	defer parentRoot.Close()
+	extractRoot, err := openExtractRoot(parentRoot, filepath.Base(cleanDir))
+	if err != nil {
+		return "", nil, fmt.Errorf("creating extraction directory: %w", err)
 	}
 	defer extractRoot.Close()
 	immutableRoot, err := openExtractRoot(extractRoot, "immutable")
 	if err != nil {
 		return "", nil, fmt.Errorf("creating immutable directory: %w", err)
 	}
-	return filepath.Join(extractDir, "immutable"), immutableRoot, nil
+	return filepath.Join(cleanDir, "immutable"), immutableRoot, nil
 }
 
 // removeImmutableTrio deletes the three files of an immutable file
