@@ -48,12 +48,18 @@ const (
 	// Maximum tip slot delta (slots) before score reaches minimum. Peers this far
 	// behind get a very low score for the tip delta component.
 	maxTipSlotDelta = 1000
+	// Stale observations lose half their influence over this period. This keeps
+	// a long-good-history peer responsive to a new run of bad observations.
+	scoreDecayHalfLife = 5 * time.Minute
+	// Avoid perturbing closely spaced observations with sub-second clock drift.
+	scoreDecayMinInterval = time.Second
 )
 
 // UpdateBlockFetchObservation updates the peer's block fetch metrics using an
 // observed latency (in milliseconds) and success (0 or 1). Uses an exponential
 // moving average for smoothing.
 func (p *Peer) UpdateBlockFetchObservation(latencyMs float64, success bool) {
+	p.decayScoreMetrics(time.Now())
 	if latencyMs <= 0 {
 		latencyMs = minLatencyMs
 	}
@@ -86,6 +92,7 @@ func (p *Peer) UpdateBlockFetchObservation(latencyMs float64, success bool) {
 // UpdateConnectionStability updates the connection stability observation. The
 // value should be in [0..1]. Uses EMA smoothing as well.
 func (p *Peer) UpdateConnectionStability(observed float64) {
+	p.decayScoreMetrics(time.Now())
 	observed = clamp01(observed)
 	alpha := p.getEMAAlpha()
 	if !p.ConnectionStabilityInit {
@@ -102,6 +109,7 @@ func (p *Peer) UpdateConnectionStability(observed float64) {
 // TipSlotDelta = ourTip - peerTip (negative = peer ahead, positive = we are ahead).
 // Uses EMA smoothing for header rate.
 func (p *Peer) UpdateChainSyncObservation(headerRate float64, tipDelta int64) {
+	p.decayScoreMetrics(time.Now())
 	// Clamp header rate to reasonable bounds
 	if headerRate < 0 {
 		headerRate = 0
@@ -196,6 +204,42 @@ func (p *Peer) UpdatePeerScore() {
 		score = 0.0
 	}
 	p.PerformanceScore = score
+}
+
+// decayScoreMetrics moves stale EMA values toward their neutral baselines.
+// Unlike resetting the metrics outright, this preserves some recent history
+// while ensuring an old run of good observations cannot dominate indefinitely.
+func (p *Peer) decayScoreMetrics(now time.Time) {
+	if p.ScoreLastUpdate.IsZero() {
+		p.ScoreLastUpdate = now
+		return
+	}
+	elapsed := now.Sub(p.ScoreLastUpdate)
+	if elapsed <= 0 {
+		return
+	}
+	if elapsed < scoreDecayMinInterval {
+		p.ScoreLastUpdate = now
+		return
+	}
+	factor := math.Exp(-math.Ln2 * elapsed.Seconds() / scoreDecayHalfLife.Seconds())
+	if p.BlockFetchLatencyInit {
+		p.BlockFetchLatencyMs = 1000 +
+			(p.BlockFetchLatencyMs-1000)*factor
+	}
+	if p.BlockFetchSuccessInit {
+		p.BlockFetchSuccessRate = 0.5 +
+			(p.BlockFetchSuccessRate-0.5)*factor
+	}
+	if p.ConnectionStabilityInit {
+		p.ConnectionStability = 0.5 +
+			(p.ConnectionStability-0.5)*factor
+	}
+	if p.HeaderArrivalRateInit {
+		p.HeaderArrivalRate = referenceHeaderRate +
+			(p.HeaderArrivalRate-referenceHeaderRate)*factor
+	}
+	p.ScoreLastUpdate = now
 }
 
 func ema(prev, observed, alpha float64) float64 {

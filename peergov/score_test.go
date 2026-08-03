@@ -302,6 +302,35 @@ func TestConfigurableEMAAlpha(t *testing.T) {
 	}
 }
 
+func TestScoreMetricsDecayAfterInactivity(t *testing.T) {
+	peer := &Peer{
+		BlockFetchLatencyMs:     minLatencyMs,
+		BlockFetchSuccessRate:   1,
+		ConnectionStability:     1,
+		HeaderArrivalRate:       10,
+		BlockFetchLatencyInit:   true,
+		BlockFetchSuccessInit:   true,
+		ConnectionStabilityInit: true,
+		HeaderArrivalRateInit:   true,
+		ScoreLastUpdate:         time.Now().Add(-2 * scoreDecayHalfLife),
+	}
+
+	peer.UpdateBlockFetchObservation(100, false)
+
+	if peer.BlockFetchSuccessRate >= 0.7 {
+		t.Fatalf(
+			"stale success history should decay before a failure, got %v",
+			peer.BlockFetchSuccessRate,
+		)
+	}
+	if peer.ConnectionStability <= 0.5 {
+		t.Fatalf(
+			"unrelated stale metrics should move toward neutral, got %v",
+			peer.ConnectionStability,
+		)
+	}
+}
+
 func TestGetEMAAlpha(t *testing.T) {
 	// Zero EMAAlpha should return default
 	p1 := &Peer{EMAAlpha: 0}
