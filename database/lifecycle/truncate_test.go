@@ -637,6 +637,48 @@ func TestGetPendingTruncateRejectsMarkerWithCorruptedTipID(t *testing.T) {
 	}
 }
 
+// TestTruncateRejectsPendingMarkerAfterBlobTipAdvance verifies that a valid
+// marker cannot resume against blobs appended after its authenticated tip.
+func TestTruncateRejectsPendingMarkerAfterBlobTipAdvance(t *testing.T) {
+	f := buildTestChain(t, 5)
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	require.Equal(t, f.blocks[4].ID, pending.TipID)
+
+	advancedTip := testBlock(6, 0x06)
+	require.NoError(t, f.db.BlockCreate(advancedTip, nil))
+
+	_, err = lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		models.Block{},
+		1,
+		false,
+		0,
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "does not match newer current blob tip")
+
+	// Recovery must fail before deleting any additional blobs or truncating
+	// metadata. The already-committed first batch remains the only mutation.
+	for _, block := range []models.Block{
+		f.blocks[3],
+		f.blocks[4],
+		advancedTip,
+	} {
+		_, err := f.db.BlockByIndex(block.ID, nil)
+		require.NoError(t, err)
+	}
+	tip, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[4].Slot, tip.Point.Slot)
+}
+
 // TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip verifies that marker
 // validation does not confuse the latest downloaded blob with the applied
 // metadata tip. BlockFetch is allowed to persist such a speculative tail.

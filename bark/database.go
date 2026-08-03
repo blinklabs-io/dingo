@@ -119,6 +119,7 @@ type operation struct {
 	id        string
 	opType    databasev1alpha1.OperationType
 	startedAt time.Time
+	ctx       context.Context
 	cancel    context.CancelFunc
 
 	mu              sync.Mutex
@@ -141,10 +142,11 @@ func (o *operation) setRunning() {
 }
 
 // complete records the terminal outcome of the operation. An error that
-// is context.Canceled *and* followed a CancelOperation call is reported
-// as OPERATION_STATUS_CANCELLED rather than FAILED; a context deadline or
-// cancellation the operation hit on its own (no CancelOperation call) is
-// still reported as FAILED, since nothing asked for it.
+// follows a CancelOperation call and completes after the operation context
+// is cancelled is reported as OPERATION_STATUS_CANCELLED rather than FAILED.
+// Some storage drivers translate cancellation into their own error (for
+// example, SQLite returns "interrupted") instead of wrapping context.Canceled,
+// so the operation context is the authoritative cancellation signal.
 func (o *operation) complete(err error, blocksRemoved uint64) {
 	o.mu.Lock()
 	now := time.Now()
@@ -156,7 +158,7 @@ func (o *operation) complete(err error, blocksRemoved uint64) {
 	case err == nil:
 		o.status = databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED
 		o.message = "completed"
-	case o.cancelRequested && errors.Is(err, context.Canceled):
+	case o.cancelRequested && errors.Is(o.ctx.Err(), context.Canceled):
 		o.status = databasev1alpha1.OperationStatus_OPERATION_STATUS_CANCELLED
 		o.message = "cancelled"
 	default:
@@ -278,6 +280,7 @@ func (h *databaseServiceHandler) registerOperation(
 		id:        uuid.NewString(),
 		opType:    opType,
 		startedAt: time.Now(),
+		ctx:       ctx,
 		cancel:    cancel,
 		status:    databasev1alpha1.OperationStatus_OPERATION_STATUS_PENDING,
 		message:   "pending",

@@ -41,8 +41,9 @@ const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
 // PendingTruncate records enough information to resume a truncate whose
 // batched blob deletion was interrupted before metadata was truncated.
 // Checksum protects every field that controls the resumed delete range. The
-// blob tip may already have been deleted when a truncate resumes, so it cannot
-// safely be re-read from the blob store for validation.
+// recorded blob tip may already have been deleted when a truncate resumes, so
+// a lower current tip is valid partial progress; an equal or newer current tip
+// must still agree with the marker.
 type PendingTruncate struct {
 	TargetID     uint64 `json:"targetId"`
 	TargetSlot   uint64 `json:"targetSlot"`
@@ -138,6 +139,55 @@ func GetPendingTruncate(db *database.Database) (*PendingTruncate, error) {
 			pending.TargetHash,
 			onLineage.Slot,
 			onLineage.Hash,
+		)
+	}
+
+	// The old tip can disappear during a partially completed batched delete,
+	// so a current blob tip below pending.TipID is expected recovery state.
+	// It must never be above the authenticated upper bound, however: that
+	// means blocks were appended after the marker was written. Resuming with
+	// pending.TipID would delete only the old range while metadata truncation
+	// removes state through the newer tip, orphaning those newer blobs.
+	recentBlocks, err := database.BlocksRecent(db, 1)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pending truncate marker: get current blob tip: %w",
+			err,
+		)
+	}
+	if len(recentBlocks) == 0 {
+		return nil, fmt.Errorf(
+			"pending truncate marker: get current blob tip: %w",
+			models.ErrBlockNotFound,
+		)
+	}
+	currentTip := recentBlocks[0]
+	if currentTip.ID > pending.TipID {
+		return nil, fmt.Errorf(
+			"invalid pending truncate marker: recorded blob tip "+
+				"(id=%d, slot=%d, hash=%x) does not match newer current "+
+				"blob tip (id=%d, slot=%d, hash=%x)",
+			pending.TipID,
+			pending.TipSlot,
+			pending.TipHash,
+			currentTip.ID,
+			currentTip.Slot,
+			currentTip.Hash,
+		)
+	}
+	if currentTip.ID == pending.TipID &&
+		(currentTip.Slot != pending.TipSlot ||
+			!bytes.Equal(currentTip.Hash, pending.TipHash)) {
+		return nil, fmt.Errorf(
+			"invalid pending truncate marker: recorded blob tip "+
+				"(id=%d, slot=%d, hash=%x) does not match current blob "+
+				"tip (id=%d, slot=%d, hash=%x)",
+			pending.TipID,
+			pending.TipSlot,
+			pending.TipHash,
+			currentTip.ID,
+			currentTip.Slot,
+			currentTip.Hash,
 		)
 	}
 	return &pending, nil
