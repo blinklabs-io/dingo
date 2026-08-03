@@ -2504,11 +2504,18 @@ of this threat, and walking higher would reject ordinary layouts, since on
 macOS every temporary path resolves through `/var`, itself a symlink to
 `/private/var`.
 
-Extracted directories carry `0750`. Group traversal is part of the contract for
-deployments that separate the downloader from the node, and it has to be
-restored explicitly on an exclusive extraction: staging is created `0700` so a
-partial extraction is never group-readable, and rename preserves the source
+Directories the extractor creates carry `0750`. Group traversal is part of the
+contract for deployments that separate the downloader from the node, and it has
+to be restored explicitly on an exclusive extraction: staging is created `0700`
+so a partial extraction is never group-readable, and rename preserves the source
 mode, so publication widens the mode through the staging handle first.
+
+A destination that already exists keeps whatever mode it has. `MkdirAll` does
+not alter an existing directory, and a merge extraction writes into the
+destination rather than replacing it, so a pre-existing `0700` directory stays
+`0700`. That is deliberate: the mode of a directory the operator created is
+theirs to choose, and silently widening it would be the extractor overriding a
+decision it has no standing to make.
 
 Destinations come in two shapes, selected by the caller:
 
@@ -2523,23 +2530,30 @@ Destinations come in two shapes, selected by the caller:
 
   Without `WithReplaceDestination` the destination must be empty, which is not
   the same as absent: an operator creating the directory ahead of time, or a
-  previous run cleaning up after itself, both leave one behind. An empty
-  directory is cleared out of the way with `rmdir` rather than refused. That is
-  what makes clearing it safe — the emptiness test and the removal are one
-  step, so a writer who populated the destination first makes it fail rather
-  than lose their content. Testing separately and then removing could offer no
-  such guarantee, however narrow the gap between the two. Removing the
-  directory also keeps behaviour uniform across platforms that differ on
-  whether a rename may replace an existing one.
+  previous run cleaning up after itself, both leave one behind.
 
-  Only a directory is removed. A file or symlink at the destination is refused
-  untouched, since unlinking it would destroy something the caller never asked
-  to replace, and `rmdir`'s protection does not extend to it. One race remains
-  that the removal cannot close, where a writer swaps the empty directory for a
-  file after it is identified as a directory and before it is removed; the file
-  is then unlinked. Closing it needs a directory-only removal that `os.Root`
-  does not expose. `WithReplaceDestination` remains the only path that removes
-  a destination holding content, which is what that option exists to authorise.
+  Publication attempts the rename before inspecting the destination at all,
+  because on a POSIX filesystem that single call already is the whole contract:
+  renaming over an absent or empty destination succeeds, over a populated one
+  fails with `ENOTEMPTY`, and over a file fails with `ENOTDIR` leaving the file
+  exactly as it was. One syscall has no interior, so there is no interleaving
+  for a concurrent writer to lose content to. Inspecting first and then acting
+  can only be worse than that, however narrow the gap is made.
+
+  The inspect-and-clear path exists for Windows, which refuses to rename over
+  an existing directory even an empty one, so a failed rename there does not on
+  its own mean the destination holds anything. Clearing an empty directory and
+  retrying is what keeps the behaviour uniform. A file or symlink is refused
+  untouched, and the removal is directory-only — `unlinkat` with
+  `AT_REMOVEDIR`, addressed through the parent handle — so a writer who swaps
+  the directory for a file after it is identified as a directory has the
+  removal fail rather than their file unlinked. `os.Root.Remove` would not do:
+  it unlinks a regular file as readily as it removes a directory. Windows has
+  no handle-relative removal to address the entry through, so the type check is
+  where the guarantee rests there rather than the removal.
+
+  `WithReplaceDestination` remains the only path that removes a destination
+  holding content, which is what that option exists to authorise.
 
   Renaming names its source, so it moves whatever occupies the staging name at
   the instant it runs rather than the directory extraction wrote into, and Go
@@ -2557,6 +2571,10 @@ Destinations come in two shapes, selected by the caller:
   into it directly and accumulates. Staging is unavailable here, so the
   destination itself is what gets created and opened through the parent handle,
   and the per-component symlink checks carry the rest of the guarantee.
+
+The two are mutually exclusive and passing both is an error. They describe
+incompatible things, and merge silently winning would leave a caller that meant
+to replace quietly keeping the old tree.
 
 The v2 download applies the same rule to the directory it accumulates into:
 `<extract>/immutable` is created and opened through a handle on `<extract>`,
