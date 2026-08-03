@@ -3075,7 +3075,10 @@ started, would otherwise run to completion regardless of cancellation;
 `contextReader` that re-checks `ctx.Err()` on every internal Write/Read
 call Badger makes, so cancellation takes effect within a chunk or two of
 being requested rather than only once the whole transfer already
-finished. `StreamOperationProgress` is a plain poll loop over the
+finished. The operation's cancelled context is also the authoritative
+terminal-status signal because storage drivers such as SQLite may return
+their own interruption error without wrapping `context.Canceled`.
+`StreamOperationProgress` is a plain poll loop over the
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
 hours, far coarser than the poll interval.
