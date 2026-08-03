@@ -117,7 +117,7 @@ func TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake(t *testing.T) {
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
 	})
 
-	poolHash := []byte("poolFALLBACK_1234567890123456")
+	poolHash := []byte("poolFALLBACK_123456789012345")
 	stakingKey := bytes.Repeat([]byte{0x5d}, 28)
 	seedPoolAndDelegations(t, db, poolHash, []struct {
 		stakingKey  []byte
@@ -181,7 +181,6 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	}{
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{40_000_000}},
 	}, 500)
-
 	// Commit a post-SNAP credit before the abandoned transaction. The live
 	// aggregate is now 55M, while boundary-aware reconstruction must subtract
 	// the credit and recover the 40M SNAP value.
@@ -219,7 +218,7 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	require.NoError(t, txn.Commit())
 
 	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
-		2, "mark", poolHash, nil,
+		1, "mark", poolHash, nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, poolSnapshot)

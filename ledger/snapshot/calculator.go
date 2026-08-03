@@ -174,7 +174,6 @@ func (c *Calculator) calculateHistoricalBoundaryStakeDistributionInTxn(
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 ) (*StakeDistribution, error) {
-
 	rewardSlot := boundaryRewardSlot(slot, boundarySlot)
 	dist, err := c.calculateHistoricalStakeDistributionInTxn(
 		ctx, txn, slot, rewardSlot, expiryEpoch, inactivityPeriod,
