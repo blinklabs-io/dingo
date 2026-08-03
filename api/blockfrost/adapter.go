@@ -2946,7 +2946,10 @@ func parseAddressOrPaymentCred(
 	}
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
-		return lcommon.Address{}, false, err
+		return lcommon.Address{}, false, fmt.Errorf(
+			"address does not round-trip: %w",
+			err,
+		)
 	}
 	// NewAddress falls back to base58 and accepts arbitrary bytes without
 	// structural validation, so require the parsed address to round-trip
@@ -4517,7 +4520,7 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 			Tag:   lcommon.RedeemerTag(redeemer.Tag),
 			Index: redeemer.Index,
 		}
-		purpose := gscript.BuildScriptPurpose(
+		purpose, err := gscript.BuildScriptPurpose(
 			key,
 			resolvedInputs,
 			decodedTx.Inputs(),
@@ -4528,6 +4531,15 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 			decodedTx.ProposalProcedures(),
 			witnessDatums,
 		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"build script purpose for transaction %x tag=%d index=%d: %w",
+				hash,
+				redeemer.Tag,
+				redeemer.Index,
+				err,
+			)
+		}
 		if purpose == nil {
 			return nil, fmt.Errorf(
 				"build script purpose for transaction %x tag=%d index=%d",

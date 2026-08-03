@@ -28,6 +28,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type ChainId uint64
@@ -40,13 +41,23 @@ const (
 )
 
 type ChainManager struct {
-	db                  *database.Database
-	eventBus            *event.EventBus
-	securityParam       int
-	chains              map[ChainId]*Chain
+	db            *database.Database
+	eventBus      *event.EventBus
+	securityParam int
+	chains        map[ChainId]*Chain
+	// primary is immutable after loadPrimaryChain. Keeping the pointer
+	// separately lets callers establish the chain -> primary -> manager lock
+	// order without first reading cm.chains while a chain-creation writer may
+	// already hold the primary-chain lock.
+	primary             *Chain
 	chainRollbackEvents map[ChainId][]uint64
 	blockCache          *blockCache
-	mutex               sync.RWMutex
+	// rollbackPointNotOnChain counts rollback targets rejected because the
+	// chain no longer holds the resolved block at its retained index. A
+	// non-zero value means a peer (or local recovery) tried to splice a
+	// continuation onto an abandoned fork; see Chain.rollbackPointBlock.
+	rollbackPointNotOnChain prometheus.Counter
+	mutex                   sync.RWMutex
 }
 
 func NewManager(
@@ -70,10 +81,27 @@ func NewManager(
 			registry,
 		),
 	}
+	if registry != nil {
+		cm.rollbackPointNotOnChain = promauto.With(registry).NewCounter(
+			prometheus.CounterOpts{
+				Name: "dingo_chain_rollback_point_not_on_chain_total",
+				Help: "rollback targets rejected because the chain no longer holds the resolved block at its retained index",
+			},
+		)
+	}
 	if err := cm.loadPrimaryChain(); err != nil {
 		return nil, err
 	}
 	return cm, nil
+}
+
+// recordRollbackPointNotOnChain increments the rejected-rollback-target
+// counter when metrics are registered.
+func (cm *ChainManager) recordRollbackPointNotOnChain() {
+	if cm == nil || cm.rollbackPointNotOnChain == nil {
+		return
+	}
+	cm.rollbackPointNotOnChain.Inc()
 }
 
 // SetLedger configures the Ouroboros security parameter K from the ledger.
@@ -309,11 +337,15 @@ func (cm *ChainManager) blockByHash(
 	return models.Block{}, models.ErrBlockNotFound
 }
 
-func (cm *ChainManager) blockByIndex(
+// blockByIndexLocked resolves a block by index while preserving the manager's
+// lock contract. The caller must hold cm.mutex. In-memory primary-chain
+// storage is protected by the manager lock here, and callers that need a
+// chain-level read lock acquire it before entering this helper.
+func (cm *ChainManager) blockByIndexLocked(
 	blockIndex uint64,
 	txn *database.Txn,
 ) (models.Block, error) {
-	// Query database
+	// Query database when available.
 	if cm.db != nil {
 		tmpBlock, err := cm.db.BlockByIndex(blockIndex, txn)
 		if err != nil {
@@ -323,6 +355,16 @@ func (cm *ChainManager) blockByIndex(
 			return models.Block{}, err
 		}
 		return tmpBlock, nil
+	}
+	// An in-memory manager has no index-backed store. Common blocks of an
+	// ephemeral chain are still held by the primary chain, whose point buffer
+	// resolves them through the manager's block cache. Callers of this helper
+	// already hold the manager read/write lock when chain state must be
+	// consistent, so use the lock-free primary lookup here just as the other
+	// internal chain reconciliation paths do.
+	if primaryChain := cm.primaryChainLocked(); primaryChain != nil &&
+		!primaryChain.persistent {
+		return primaryChain.blockByIndexLocked(blockIndex)
 	}
 	return models.Block{}, models.ErrBlockNotFound
 }
@@ -366,6 +408,7 @@ func (cm *ChainManager) loadPrimaryChain() error {
 		}
 	}
 	cm.chains[primaryChainId] = chain
+	cm.primary = chain
 	return nil
 }
 

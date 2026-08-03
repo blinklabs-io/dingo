@@ -180,6 +180,24 @@ type AccountRewardDelta struct {
 	ID             uint
 	AddedSlot      uint64
 	Withdrawal     bool
+	// PostSnapshot marks a credit that cardano-ledger applies AFTER the
+	// epoch-boundary stake snapshot (the SNAP rule): POOLREAP deposit refunds,
+	// enacted treasury withdrawals and governance proposal-deposit refunds.
+	// Two boundary credits precede SNAP and leave this false: the delayed reward
+	// update (applyRUpd / applyStakeRewards) and the Shelley-era MIR rule, which
+	// NEWEPOCH embeds between applyRUpd and EPOCH.
+	//
+	// Every boundary credit lands at the same added_slot (the boundary slot), so
+	// slot alone cannot separate the pre-SNAP reward update from the post-SNAP
+	// credits. The epoch-boundary stake reconstruction
+	// (stakequery.historicalDelegatorStakeCTE with a nonzero boundary slot)
+	// needs exactly that separation to reproduce the authoritative SNAP-point
+	// capture, which observes the reward update and none of the rest.
+	//
+	// Not indexed: it is only ever read alongside added_slot for a single
+	// boundary slot, which idx_account_reward_delta_credential/added_slot
+	// already narrow.
+	PostSnapshot bool
 }
 
 // AccountWithdrawalWitness records every valid reward-withdrawal map entry,

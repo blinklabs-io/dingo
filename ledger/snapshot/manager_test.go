@@ -661,6 +661,7 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 		context.Background(),
 		evt.SnapshotSlot,
 		0,
+		0,
 	)
 	require.NoError(t, err)
 	saved, err := mgr.saveSnapshot(
@@ -1538,11 +1539,15 @@ func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
 	require.Equal(t, []byte{0x04, 0x05, 0x06}, rewardSnapshot.EpochNonce)
-	require.Equal(
-		t,
-		uint64(75_000_000),
-		uint64(rewardSnapshot.TotalActiveStake),
-	)
+	// Was 75_000_000: the reward basis used to come from the live reward
+	// aggregate, which has no slot predicate, so it picked up the 25_000_000
+	// UTxO added at the boundary slot while the leader-election total below
+	// stayed slot-accurate at 50_000_000 — one mark snapshot with two different
+	// stake answers for the same boundary. The fallback now reconstructs both
+	// halves from the same (snapshot slot, boundary slot) and cross-checks them,
+	// so the reward basis matches the leader-election total.
+	require.Equal(t, uint64(50_000_000), uint64(rewardSnapshot.TotalActiveStake),
+		"the reward basis must agree with the leader-election Mark aggregate")
 
 	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
 		1, "mark", poolHash, nil,
@@ -2017,6 +2022,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 			context.Background(),
 			fallbackEvt.SnapshotSlot,
 			0,
+			0,
 		)
 		require.NoError(t, err)
 		for poolKey := range fallbackDistribution.PoolStakes {
@@ -2124,6 +2130,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
 			context.Background(),
 			fallbackEvt.SnapshotSlot,
+			0,
 			0,
 		)
 		require.NoError(t, err)

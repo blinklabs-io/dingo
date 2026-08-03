@@ -8,6 +8,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
   - `WaitForCondition` / `require.Eventually` — 2–5s timeout, 5–10ms interval, lock shared state inside the condition fn
   - `RequireReceive` / `RequireNoReceive` for channel assertions
   - `context.WithTimeout` for graceful shutdown
+- The default `make` target formats and builds; tests are a separate target.
 - `make test` runs with `-race`.
 - Integration tests in `internal/integration/` load real blocks from `database/immutable/testdata/`.
 - Mock fixtures come from `github.com/blinklabs-io/ouroboros-mock` (`fixtures/`, `ledger/`, `conformance/`). Never add local ledger/consensus/network mocks — extend the shared library.
@@ -27,6 +28,7 @@ golangci-lint run ./...
 nilaway ./...
 modernize ./...   # --fix to auto-apply
 make import-boundaries
+make docs-parity
 ```
 
 ## Non-obvious invariants

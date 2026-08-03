@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -1343,6 +1344,61 @@ func TestRecentPointsNoDatabase(t *testing.T) {
 	}
 }
 
+func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	primary := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := primary.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding test block: %s", err)
+		}
+	}
+
+	point := blockPoint(testBlocks[2])
+	fork, err := cm.NewChain(point)
+	if err != nil {
+		t.Fatalf("unexpected error creating fork: %s", err)
+	}
+
+	const iterations = 250
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		defer errMu.Unlock()
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_ = fork.RecentPoints(8)
+			_ = fork.IntersectPoints(8)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			_, err := cm.NewChain(point)
+			recordErr(err)
+		}
+	}()
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("unexpected concurrent fork creation error: %s", firstErr)
+	}
+}
+
 func TestRecentPointsWithDatabase(t *testing.T) {
 	// Create a chain manager with a real database. RecentPoints
 	// should still return the correct in-memory tip even though
@@ -1612,6 +1668,15 @@ func TestChainRollbackWithinSecurityParam(t *testing.T) {
 // can hand the chain a rollback point above the current tip. Subtracting that
 // index from the tip wrapped around uint64, making every such rollback look
 // deeper than K, which permanently denied every peer.
+//
+// The rollback is now refused outright (issue #3005): adopting a point the
+// chain does not hold set tipBlockIndex above the last stored block and left
+// currentTip naming an absent block. What #3035 requires is unchanged and is
+// still asserted here — the refusal must NOT be an over-K rejection, because
+// that is the classification that denied every peer permanently. It is instead
+// ErrRollbackPointNotOnChain, which wraps models.ErrBlockNotFound so callers
+// re-intersect and recover. The saturating fork-depth arithmetic that fixed the
+// underflow is retained and covered directly by TestRollbackForkDepthSaturates.
 func TestChainRollbackPointAheadOfTipIsNotDeepFork(t *testing.T) {
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
@@ -1644,25 +1709,59 @@ func TestChainRollbackPointAheadOfTipIsNotDeepFork(t *testing.T) {
 		Slot: aheadBlock.SlotNumber(),
 		Hash: aheadBlock.Hash().Bytes(),
 	}
-	if err := c.ValidateRollback(aheadPoint); err != nil {
-		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
-			t.Fatalf(
-				"rollback point ahead of tip must not be reported as "+
-					"exceeding security param K: %s",
-				err,
-			)
-		}
-		t.Fatalf("unexpected error validating rollback: %s", err)
+	validateErr := c.ValidateRollback(aheadPoint)
+	if validateErr == nil {
+		t.Fatal(
+			"rollback point ahead of tip must be rejected: the chain does " +
+				"not hold a block at that index",
+		)
 	}
-	if err := c.Rollback(aheadPoint); err != nil {
-		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
-			t.Fatalf(
-				"rollback point ahead of tip must not be rejected for "+
-					"exceeding security param K: %s",
-				err,
-			)
-		}
-		t.Fatalf("unexpected error rolling back chain: %s", err)
+	if errors.Is(validateErr, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf(
+			"rollback point ahead of tip must not be reported as "+
+				"exceeding security param K: %s",
+			validateErr,
+		)
+	}
+	if !errors.Is(validateErr, chain.ErrRollbackPointNotOnChain) {
+		t.Fatalf(
+			"expected ErrRollbackPointNotOnChain validating rollback, got: %s",
+			validateErr,
+		)
+	}
+	if !errors.Is(validateErr, models.ErrBlockNotFound) {
+		t.Fatalf(
+			"rejection must wrap ErrBlockNotFound so callers re-intersect, "+
+				"got: %s",
+			validateErr,
+		)
+	}
+	rollbackErr := c.Rollback(aheadPoint)
+	if rollbackErr == nil {
+		t.Fatal(
+			"rollback to a point ahead of tip must be rejected: the chain " +
+				"does not hold a block at that index",
+		)
+	}
+	if errors.Is(rollbackErr, chain.ErrRollbackExceedsSecurityParam) {
+		t.Fatalf(
+			"rollback point ahead of tip must not be rejected for "+
+				"exceeding security param K: %s",
+			rollbackErr,
+		)
+	}
+	if !errors.Is(rollbackErr, chain.ErrRollbackPointNotOnChain) {
+		t.Fatalf(
+			"expected ErrRollbackPointNotOnChain rolling back, got: %s",
+			rollbackErr,
+		)
+	}
+	if !errors.Is(rollbackErr, models.ErrBlockNotFound) {
+		t.Fatalf(
+			"rejection must wrap ErrBlockNotFound so callers re-intersect, "+
+				"got: %s",
+			rollbackErr,
+		)
 	}
 }
 

@@ -14,7 +14,7 @@ CREATE INDEX IF NOT EXISTS `idx_account_drep_active_staking_key` ON `account`(`d
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_account_credential` ON `account`(`credential_tag`,`staking_key`);
 CREATE TABLE IF NOT EXISTS `account_inactivity_activation` (`credential_tag` integer,`staking_key` blob,PRIMARY KEY (`credential_tag`,`staking_key`));
 CREATE INDEX IF NOT EXISTS `idx_account_inactivity_activation_staking_key` ON `account_inactivity_activation`(`staking_key`);
-CREATE TABLE IF NOT EXISTS `account_reward_delta` (`staking_key` blob NOT NULL,`credential_tag` integer NOT NULL DEFAULT 0,`tx_hash` blob NOT NULL,`amount` text NOT NULL,`previous_reward` text,`id` integer PRIMARY KEY AUTOINCREMENT,`added_slot` integer NOT NULL,`withdrawal` numeric NOT NULL DEFAULT false);
+CREATE TABLE IF NOT EXISTS `account_reward_delta` (`staking_key` blob NOT NULL,`credential_tag` integer NOT NULL DEFAULT 0,`tx_hash` blob NOT NULL,`amount` text NOT NULL,`previous_reward` text,`id` integer PRIMARY KEY AUTOINCREMENT,`added_slot` integer NOT NULL,`withdrawal` numeric NOT NULL DEFAULT false,`post_snapshot` numeric NOT NULL DEFAULT false);
 CREATE INDEX IF NOT EXISTS `idx_account_reward_delta_withdrawal` ON `account_reward_delta`(`withdrawal`);
 CREATE INDEX IF NOT EXISTS `idx_account_reward_delta_added_slot` ON `account_reward_delta`(`added_slot`);
 CREATE INDEX IF NOT EXISTS `idx_account_reward_delta_tx_hash` ON `account_reward_delta`(`tx_hash`);

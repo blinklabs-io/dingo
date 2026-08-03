@@ -247,7 +247,7 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestLeiosNotifyBlockAnnouncementWithHeaderIsIgnored(t *testing.T) {
+func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
 	conn, err := gouroboros.New()
 	require.NoError(t, err)
@@ -262,12 +262,96 @@ func TestLeiosNotifyBlockAnnouncementWithHeaderIsIgnored(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, components, 2)
 
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xaa
+	var headerTop []cbor.RawMessage
+	_, err = cbor.Decode(components[0], &headerTop)
+	require.NoError(t, err)
+	require.Len(t, headerTop, 2)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	headerBody = append(headerBody,
+		mustCbor(t, false),
+		mustCbor(t, []any{ebHash.Bytes(), uint64(1234)}),
+	)
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err := cbor.Encode(headerTop)
+	require.NoError(t, err)
+
 	o := NewOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
+	o.leiosEBLog.registerConn("test")
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
-		oleiosnotify.NewMsgBlockAnnouncement(components[0]),
+		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
 	)
 	require.NoError(t, err)
+	err = o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
+	)
+	require.NoError(t, err)
+	entry, _ := o.leiosEBLog.next("test")
+	require.Nil(t, entry)
+
+	record := func(raw []byte) error {
+		header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+		if err != nil {
+			return err
+		}
+		ebHash, ebSize, ok := header.LeiosAnnouncement()
+		if !ok {
+			return errors.New("missing announcement")
+		}
+		return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, "test", true)
+	}
+	require.NoError(t, record(headerRaw))
+	require.NoError(t, record(headerRaw))
+	entry, _ = o.leiosEBLog.next("test")
+	require.NotNil(t, entry)
+	require.Equal(t, headerRaw, entry.announcement)
+	o.leiosEBLog.complete("test", true)
+	entry, _ = o.leiosEBLog.next("test")
+	require.Nil(t, entry)
+
+	// A different ranking block may not change the established size for the
+	// same endorser-block hash.
+	headerBody[len(headerBody)-1] = mustCbor(t, []any{ebHash.Bytes(), uint64(4321)})
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.ErrorContains(t, record(headerRaw), "inconsistent")
+
+	// A peer may announce at most two distinct ranking blocks for one
+	// slot/issuer election. The third distinct message is suppressed even when
+	// its endorser-block size is otherwise consistent.
+	headerBody[len(headerBody)-1] = mustCbor(t, []any{ebHash.Bytes(), uint64(1234)})
+	headerBody[0] = mustCbor(t, uint64(2))
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.NoError(t, record(headerRaw))
+	headerBody[0] = mustCbor(t, uint64(3))
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerRaw, err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	require.ErrorContains(t, record(headerRaw), "third distinct")
+}
+
+func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o.leiosDeferredAnnouncements["pending"] = leiosDeferredAnnouncement{
+		raw: []byte("deferred"), source: "peer",
+	}
+	require.ErrorContains(t, o.acceptLeiosAnnouncement([]byte("not cbor"), "test"), "without ledger state")
+	require.Empty(t, o.leiosAnnouncements)
+	require.Empty(t, o.leiosEBLog.items)
+	_, stillDeferred := o.leiosDeferredAnnouncements["pending"]
+	require.True(t, stillDeferred)
 }
 
 var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")

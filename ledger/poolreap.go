@@ -69,7 +69,7 @@ func (ls *LedgerState) applyPoolRetirements(
 		deposit := uint64(refund.DepositAmount)
 		// The reward account on a pool registration is the 28-byte stake
 		// credential hash, the same form AddAccountReward looks up.
-		credited, err := governance.CreditRegisteredRewardAccount(
+		credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
 			ls.db,
 			txn,
 			refund.RewardAccountCredentialTag,

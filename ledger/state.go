@@ -621,6 +621,7 @@ type LedgerState struct {
 	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
 	cachedShape                        atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	epochSnapshotHook                  atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
+	epochSnapshotStakeHook             atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
 	reachedTip                         atomic.Bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -645,11 +646,20 @@ type LedgerState struct {
 	firstBlockReceived            bool                // true after latency sample recorded for this batch
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
-	deferredHeaderValidation      map[string]struct{} // block points whose stateful header checks wait for ledger apply
-	checkpointWrittenForEpoch     bool
-	closed                        atomic.Bool
-	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery             *atTipRecoveryAttempt
+	// Failures to obtain one specific queued header range, keyed by its
+	// start point and counting both a NoBlocks reply (a synchronous
+	// GetBlockRange error) and a batch that completed without delivering a
+	// block. Bounded by blockfetchMaxSameRangeFailures so an unfetchable
+	// queued range cannot be retried indefinitely (which also latches the
+	// header that blocks local forging). Deliberately survives interleaved
+	// deliveries for other ranges and header-queue churn; discarded when
+	// the tracked range itself is delivered.
+	blockfetchRangeFailure    blockfetchRangeFailureState
+	deferredHeaderValidation  map[string]struct{} // block points whose stateful header checks wait for ledger apply
+	checkpointWrittenForEpoch bool
+	closed                    atomic.Bool
+	inRecovery                bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery         *atTipRecoveryAttempt
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in
@@ -670,10 +680,14 @@ type LedgerState struct {
 	replayRecoveryHighWaterSlot   uint64
 	replayRecoveryNoProgressCount int
 	replayRecoveryHolding         bool
-	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
-	mithrilLedgerHash             []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
-	lastLocalRollbackSeq          uint64
-	lastLocalRollbackPoint        ocommon.Point
+	// Cross-fork continuation audit (issue #3005). Armed by a local
+	// rollback and consumed by the blockfetch handler; see
+	// ledger/continuation_audit.go for the cost and soundness argument.
+	continuationAudit      atomic.Pointer[continuationAuditWindow]
+	mithrilLedgerSlot      uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
+	lastLocalRollbackSeq   uint64
+	lastLocalRollbackPoint ocommon.Point
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -1844,6 +1858,38 @@ func (ls *LedgerState) epochBoundarySnapshotHook() func(*database.Txn, event.Epo
 	return nil
 }
 
+// SetEpochBoundarySnapshotStakeHook installs (or clears, with a nil fn) the
+// SNAP-point stake read of the authoritative epoch-boundary capture. It is wired
+// at node startup to the snapshot manager's ComputeEpochBoundarySnapshot,
+// alongside SetEpochBoundarySnapshotHook.
+//
+// cardano-ledger runs SNAP before POOLREAP and before governance enactment, so
+// the mark snapshot's stake must be read immediately after the delayed reward
+// update and MIR — the boundary rules that precede SNAP — while the snapshot row
+// itself can only be written at the end of the rollover, where the new epoch's
+// nonce and the post-enactment protocol version exist. This hook is the read
+// half; epochSnapshotHook is the write half. Both run in the same rollover
+// transaction. With no stake hook installed the write half reads the stake
+// itself using boundary-aware historical reconstruction.
+func (ls *LedgerState) SetEpochBoundarySnapshotStakeHook(
+	fn func(*database.Txn, event.EpochTransitionEvent) error,
+) {
+	if fn == nil {
+		ls.epochSnapshotStakeHook.Store(nil)
+		return
+	}
+	ls.epochSnapshotStakeHook.Store(&epochBoundarySnapshotHookHolder{fn: fn})
+}
+
+// epochBoundarySnapshotStakeHook returns the installed SNAP-point stake hook, or
+// nil when none is set.
+func (ls *LedgerState) epochBoundarySnapshotStakeHook() func(*database.Txn, event.EpochTransitionEvent) error {
+	if h := ls.epochSnapshotStakeHook.Load(); h != nil {
+		return h.fn
+	}
+	return nil
+}
+
 func (ls *LedgerState) protocolMajorForEvent(
 	pparams lcommon.ProtocolParameters,
 	era eras.EraDesc,
@@ -2486,6 +2532,10 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)
 	}
+	// Chain and ledger now sit at the same point, so every block above it
+	// arrives through blockfetch and the continuation audit can resolve
+	// producers without a chain scan.
+	ls.armContinuationAudit(point, "chainsync rollback")
 	return nil
 }
 

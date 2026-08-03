@@ -577,6 +577,7 @@ func ensureSQLiteAdoptionColumns(ctx context.Context, conn *sql.Conn) error {
 		{"account_reward_delta", "credential_tag", "INTEGER NOT NULL DEFAULT 0"},
 		{"account_reward_delta", "tx_hash", "BLOB NOT NULL DEFAULT X''"},
 		{"account_reward_delta", "previous_reward", "TEXT"},
+		{"account_reward_delta", "post_snapshot", "NUMERIC NOT NULL DEFAULT FALSE"},
 		{"drep", "credential_tag", "INTEGER NOT NULL DEFAULT 0"},
 		{"governance_vote", "voter_credential_tag", "INTEGER NOT NULL DEFAULT 0"},
 		{"utxo", "transaction_id", "INTEGER"},
@@ -836,6 +837,7 @@ func rewriteSQLiteRewardDeltaNotNull(ctx context.Context, conn *sql.Conn) error 
 	expected := map[string]struct{}{
 		"staking_key": {}, "credential_tag": {}, "tx_hash": {}, "amount": {},
 		"previous_reward": {}, "id": {}, "added_slot": {}, "withdrawal": {},
+		"post_snapshot": {},
 	}
 	for column := range columns {
 		if _, ok := expected[column]; !ok {
@@ -853,6 +855,10 @@ func rewriteSQLiteRewardDeltaNotNull(ctx context.Context, conn *sql.Conn) error 
 	txHashExpr := "X''"
 	if _, ok := columns["tx_hash"]; ok {
 		txHashExpr = "tx_hash"
+	}
+	postSnapshot := "0"
+	if _, ok := columns["post_snapshot"]; ok {
+		postSnapshot = "post_snapshot"
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -874,14 +880,15 @@ CREATE TABLE account_reward_delta_v1 (
  previous_reward TEXT,
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  added_slot INTEGER NOT NULL,
- withdrawal NUMERIC NOT NULL DEFAULT FALSE
+ withdrawal NUMERIC NOT NULL DEFAULT FALSE,
+ post_snapshot NUMERIC NOT NULL DEFAULT FALSE
 )`); err != nil {
 		return rollback(err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO account_reward_delta_v1
- (staking_key, credential_tag, tx_hash, amount, previous_reward, id, added_slot, withdrawal)
-SELECT staking_key, `+credentialTag+`, `+txHashExpr+`, amount, `+previousReward+`, id, added_slot, withdrawal
+ (staking_key, credential_tag, tx_hash, amount, previous_reward, id, added_slot, withdrawal, post_snapshot)
+SELECT staking_key, `+credentialTag+`, `+txHashExpr+`, amount, `+previousReward+`, id, added_slot, withdrawal, `+postSnapshot+`
 FROM account_reward_delta`,
 	); err != nil {
 		return rollback(err)

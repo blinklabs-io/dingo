@@ -25,14 +25,16 @@ import (
 
 // TxLog records the outcome of a single transaction submission attempt.
 type TxLog struct {
-	Timestamp string `json:"ts"`
-	TxID      string `json:"tx_id"`
-	TxType    string `json:"tx_type"` // "payment" | "delegation" | "governance" | "plutus"
-	EraID     uint16 `json:"era_id"`
-	Status    string `json:"status"` // "submitted" | "rejected" | "error"
-	ErrorMsg  string `json:"error,omitempty"`
-	NodeAddr  string `json:"node_addr"`
-	BatchSize int    `json:"batch_size"`
+	Timestamp     string   `json:"ts"`
+	Event         string   `json:"event,omitempty"` // "ready" for the startup contract signal
+	TxID          string   `json:"tx_id"`
+	TxType        string   `json:"tx_type"` // "payment" | "delegation" | "governance" | "plutus"
+	WorkloadTypes []string `json:"workload_types,omitempty"`
+	EraID         uint16   `json:"era_id"`
+	Status        string   `json:"status"` // "submitted" | "rejected" | "error" | "ready"
+	ErrorMsg      string   `json:"error,omitempty"`
+	NodeAddr      string   `json:"node_addr"`
+	BatchSize     int      `json:"batch_size"`
 }
 
 // TxLogger writes JSON-encoded TxLog entries to a file in a thread-safe

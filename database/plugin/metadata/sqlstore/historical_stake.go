@@ -49,6 +49,19 @@ func historicalRewards(
 	slot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
+	return historicalRewardsAtBoundary(db, slot, 0, selected)
+}
+
+// historicalRewardsAtBoundary reconstructs the reward balance observed at an
+// epoch SNAP boundary. Boundary credits marked PostSnapshot are still future
+// credits relative to SNAP and must be removed, while unmarked credits at the
+// boundary are already visible to the snapshot.
+func historicalRewardsAtBoundary(
+	db queryer,
+	slot uint64,
+	boundarySlot uint64,
+	selected map[historicalRewardKey]struct{},
+) (map[historicalRewardKey]uint64, error) {
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
 		keys = append(keys, key)
@@ -66,7 +79,7 @@ func historicalRewards(
 		for _, key := range keys[start:end] {
 			batchSelected[key] = struct{}{}
 		}
-		batch, err := historicalRewardsBatch(db, slot, batchSelected)
+		batch, err := historicalRewardsBatch(db, slot, boundarySlot, batchSelected)
 		if err != nil {
 			return nil, err
 		}
@@ -81,6 +94,7 @@ func historicalRewards(
 func historicalRewardsBatch(
 	db queryer,
 	slot uint64,
+	boundarySlot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
 	slotValue, err := checkedInt64(slot)
@@ -122,11 +136,22 @@ func historicalRewardsBatch(
 	}
 
 	withdrawals := make(map[historicalRewardKey]historicalWithdrawal)
-	withdrawalArgs := append([]any{slotValue}, predicateArgs...)
+	withdrawalValue := slotValue
+	if boundarySlot > 0 {
+		withdrawalValue, err = checkedInt64(boundarySlot)
+		if err != nil {
+			return nil, err
+		}
+	}
+	withdrawalOp := ">"
+	if boundarySlot > 0 {
+		withdrawalOp = ">="
+	}
+	withdrawalArgs := append([]any{withdrawalValue}, predicateArgs...)
 	rows, err = db.QueryContext(context.Background(), `
 SELECT credential_tag, staking_key, id, added_slot, previous_reward
 FROM account_reward_delta
-WHERE withdrawal = TRUE AND added_slot > ? AND (`+predicate+`)
+WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
 	ORDER BY credential_tag, staking_key, added_slot, id`, withdrawalArgs...)
 	if err != nil {
 		return nil, err
@@ -164,11 +189,22 @@ WHERE withdrawal = TRUE AND added_slot > ? AND (`+predicate+`)
 
 	total := make(map[historicalRewardKey]uint64)
 	beforeWithdrawal := make(map[historicalRewardKey]uint64)
-	creditArgs := append([]any{slotValue}, predicateArgs...)
+	futureRewardPredicate := "added_slot > ?"
+	creditArgs := make([]any, 0, 1+len(predicateArgs))
+	creditArgs = append(creditArgs, slotValue)
+	if boundarySlot > 0 {
+		boundaryValue, boundaryErr := checkedInt64(boundarySlot)
+		if boundaryErr != nil {
+			return nil, boundaryErr
+		}
+		futureRewardPredicate = "(added_slot > ? OR (added_slot = ? AND post_snapshot = TRUE))"
+		creditArgs = []any{boundaryValue, boundaryValue}
+	}
+	creditArgs = append(creditArgs, predicateArgs...)
 	rows, err = db.QueryContext(context.Background(), `
 SELECT credential_tag, staking_key, id, added_slot, amount
 FROM account_reward_delta
-WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
+WHERE withdrawal = FALSE AND `+futureRewardPredicate+` AND (`+predicate+`)
 	ORDER BY credential_tag, staking_key, added_slot, id`, creditArgs...)
 	if err != nil {
 		return nil, err
@@ -228,7 +264,11 @@ WHERE withdrawal = FALSE AND added_slot > ? AND (`+predicate+`)
 		}
 		reward := ret[ref]
 		if credits > reward {
-			return nil, errors.New("historical reward underflow")
+			// Imported/pruned journals can retain more credit than the live
+			// balance. Historical stake is unsigned; floor the reconstructed
+			// reward instead of wrapping or rejecting the whole pool query.
+			ret[ref] = 0
+			continue
 		}
 		ret[ref] = reward - credits
 	}
@@ -317,6 +357,36 @@ func (s *Store) GetStakeByPoolsAtSlot(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
+	return s.getStakeByPoolsAtSlot(
+		poolKeyHashes, slot, 0, expiryEpoch, inactivityPeriod, txn,
+	)
+}
+
+func (s *Store) GetEpochBoundaryStakeByPools(
+	poolKeyHashes [][]byte,
+	snapshotSlot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	if boundarySlot <= snapshotSlot {
+		boundarySlot = 0
+	}
+	return s.getStakeByPoolsAtSlot(
+		poolKeyHashes, snapshotSlot, boundarySlot,
+		expiryEpoch, inactivityPeriod, txn,
+	)
+}
+
+func (s *Store) getStakeByPoolsAtSlot(
+	poolKeyHashes [][]byte,
+	slot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
 	stakes := make(map[string]uint64, len(poolKeyHashes))
 	delegators := make(map[string]uint64, len(poolKeyHashes))
 	for _, hash := range poolKeyHashes {
@@ -394,7 +464,9 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, nil, err
 		}
-		rewardsByCredential, err := historicalRewards(db, slot, selected)
+		rewardsByCredential, err := historicalRewardsAtBoundary(
+			db, slot, boundarySlot, selected,
+		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("calculate historical rewards: %w", err)
 		}
@@ -514,7 +586,38 @@ func (s *Store) GetRewardStakeInputsForPools(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if expiryEpoch == 0 {
+	return s.getRewardStakeInputsForPools(
+		poolKeyHashes, slot, 0, false, expiryEpoch, inactivityPeriod, txn,
+	)
+}
+
+func (s *Store) GetEpochBoundaryRewardStakeInputsForPools(
+	poolKeyHashes [][]byte,
+	snapshotSlot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	if boundarySlot <= snapshotSlot {
+		boundarySlot = 0
+	}
+	return s.getRewardStakeInputsForPools(
+		poolKeyHashes, snapshotSlot, boundarySlot, true,
+		expiryEpoch, inactivityPeriod, txn,
+	)
+}
+
+func (s *Store) getRewardStakeInputsForPools(
+	poolKeyHashes [][]byte,
+	slot uint64,
+	boundarySlot uint64,
+	boundaryAware bool,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	if expiryEpoch == 0 && boundarySlot == 0 && !boundaryAware {
 		inputs, err := s.GetLiveStakeInputsForPools(poolKeyHashes, 0, txn)
 		if err != nil {
 			return nil, err
@@ -602,7 +705,9 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewards(db, slot, selected)
+		rewardsByCredential, err := historicalRewardsAtBoundary(
+			db, slot, boundarySlot, selected,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("calculate historical rewards: %w", err)
 		}
@@ -752,9 +857,9 @@ WHERE event.added_slot <= ?`,
 	registrationParts = append(registrationParts, `
 SELECT account.credential_tag, account.staking_key,
        CASE WHEN account.active THEN 1 ELSE 0 END,
-       account.added_slot, 0, 0
+       account.created_slot, 0, 0
 FROM account
-WHERE account.added_slot <= ?`+
+WHERE account.created_slot <= ?`+
 		noHistorySQL("account", registrationTables))
 	args = append(args, slot)
 	for range registrationTables {

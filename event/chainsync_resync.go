@@ -40,6 +40,7 @@ const (
 	ChainsyncResyncReasonReplayRecoveryNonConverging  = "replay tx validation recovery not converging"
 	ChainsyncResyncReasonChainSwitchCursorAhead       = "chain switch cursor ahead of local tip"
 	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed = "blockfetch timeout retry failed on all available connections"
+	ChainsyncResyncReasonBlockfetchRangeUnavailable   = "blockfetch could not obtain the queued header range"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

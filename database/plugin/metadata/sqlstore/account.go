@@ -848,6 +848,45 @@ UPDATE account SET reward = ? WHERE id = ?`,
 	)
 }
 
+func (s *Store) AddPostSnapshotAccountRewardByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	sourceHash []byte,
+	txn types.Txn,
+) error {
+	if err := s.AddAccountRewardByCredential(
+		credentialTag, stakeKey, amount, slot, sourceHash, txn,
+	); err != nil {
+		return err
+	}
+	if amount == 0 {
+		return nil
+	}
+	if sourceHash == nil {
+		sourceHash = []byte{}
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	return s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			_, err := db.ExecContext(context.Background(), `
+UPDATE account_reward_delta
+SET post_snapshot = TRUE
+WHERE withdrawal = FALSE AND tx_hash = ?
+  AND credential_tag = ? AND staking_key = ? AND added_slot = ?`,
+				sourceHash, credentialTag, stakeKey, slotValue,
+			)
+			return err
+		},
+	)
+}
+
 func (s *Store) ApplyAccountRewardWithdrawal(
 	credentialTag uint8,
 	stakeKey []byte,
