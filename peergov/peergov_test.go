@@ -191,6 +191,115 @@ func TestNewPeerGovernor(t *testing.T) {
 	}
 }
 
+// blockingLedgerPeerProvider wraps mockLedgerPeerProvider's GetPoolRelays,
+// blocking until release is closed, signaling started once entered --
+// used to deterministically pin a reconcile/discoverLedgerPeers call in
+// flight, rather than racing a real call's completion against a timed
+// Stop call.
+type blockingLedgerPeerProvider struct {
+	mockLedgerPeerProvider
+	started   chan struct{}
+	startOnce sync.Once
+	release   chan struct{}
+}
+
+func (m *blockingLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+	m.startOnce.Do(func() { close(m.started) })
+	<-m.release
+	return m.mockLedgerPeerProvider.GetPoolRelays()
+}
+
+// TestPeerGovernorStopWaitsForInFlightGoroutines guards a real bug: Stop
+// used to signal its 5 background goroutines to exit (closing stopCh,
+// stopping tickers) and return immediately, without waiting for any of
+// them to actually finish. The live database restore/truncate path
+// (node_lifecycle.go) calls Stop and then closes/reopens the node's
+// storage while the process keeps running, so a goroutine still in
+// flight when Stop returns -- reading LedgerPeerProvider/
+// SyncProgressProvider, both backed by that same soon-to-be-closed state
+// -- is a real use-after-close risk, not just a benign leak. Start's own
+// "initial reconcile" goroutine reaches discoverLedgerPeers, and through
+// it GetPoolRelays, shortly after Start returns; blockingLedgerPeerProvider
+// pins that call in flight so this needs no timing assumptions about a
+// real call's speed.
+func TestPeerGovernorStopWaitsForInFlightGoroutines(t *testing.T) {
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
+
+	blocking := &blockingLedgerPeerProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           eventBus,
+		DisableOutbound:    true,
+		LedgerPeerProvider: blocking,
+	})
+	require.NoError(t, pg.Start(context.Background()))
+
+	select {
+	case <-blocking.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		pg.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop returned before the in-flight goroutine finished")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight goroutine finished")
+	}
+}
+
+func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:        eventBus,
+		DisableOutbound: true,
+	})
+	require.NoError(t, pg.Start(context.Background()))
+
+	require.True(
+		t,
+		eventBus.HasSubscribers(connmanager.InboundConnectionEventType),
+	)
+	require.True(
+		t,
+		eventBus.HasSubscribers(connmanager.ConnectionClosedEventType),
+	)
+
+	pg.Stop()
+
+	require.False(
+		t,
+		eventBus.HasSubscribers(connmanager.InboundConnectionEventType),
+		"stopped peer governor must not retain an inbound-connection handler",
+	)
+	require.False(
+		t,
+		eventBus.HasSubscribers(connmanager.ConnectionClosedEventType),
+		"stopped peer governor must not retain a connection-closed handler",
+	)
+}
+
 func TestPeerGovernor_AddPeer(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()

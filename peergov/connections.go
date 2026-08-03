@@ -145,12 +145,42 @@ func (p *PeerGovernor) startOutboundConnections() {
 
 	for _, tmpPeer := range peers {
 		if tmpPeer != nil {
-			go p.createOutboundConnection(tmpPeer)
+			p.spawnOutboundConnection(tmpPeer)
 		}
 	}
 }
 
-func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
+// spawnOutboundConnection serializes work registration with Stop. Callers
+// already holding p.mu use spawnOutboundConnectionLocked instead.
+func (p *PeerGovernor) spawnOutboundConnection(peer *Peer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spawnOutboundConnectionLocked(peer)
+}
+
+func (p *PeerGovernor) spawnOutboundConnectionLocked(peer *Peer) {
+	if peer == nil || p.stopCh == nil {
+		return
+	}
+	idx := p.peerIndexByAddress(peer.NormalizedAddress)
+	if idx == -1 || p.peers[idx] == nil || p.peers[idx].Reconnecting {
+		return
+	}
+	// Reserve the reconnect slot while still holding p.mu. Connection-close
+	// events can arrive more quickly than the new goroutine is scheduled; if
+	// the goroutine sets Reconnecting itself, every queued duplicate event can
+	// launch another dial before the first one runs.
+	reconnectPeer := p.peers[idx]
+	reconnectPeer.Reconnecting = true
+	p.wg.Go(func() {
+		p.createOutboundConnection(reconnectPeer, true)
+	})
+}
+
+func (p *PeerGovernor) createOutboundConnection(
+	peer *Peer,
+	reserved bool,
+) {
 	if peer == nil {
 		return
 	}
@@ -164,7 +194,14 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		return
 	}
 	currentPeer := p.peers[idx]
+	if reserved && currentPeer != peer {
+		p.mu.Unlock()
+		return
+	}
 	if p.isPeerDeniedLocked(currentPeer) {
+		if reserved {
+			currentPeer.Reconnecting = false
+		}
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: peer denied, skipping connection attempts",
@@ -172,7 +209,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		)
 		return
 	}
-	if currentPeer.Reconnecting {
+	if currentPeer.Reconnecting && !reserved {
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: reconnect goroutine already active, skipping",
@@ -186,6 +223,9 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	// the close signal.
 	stopCh := p.stopCh
 	if stopCh == nil {
+		if reserved {
+			currentPeer.Reconnecting = false
+		}
 		p.mu.Unlock()
 		p.config.Logger.Debug(
 			"outbound: peer governor stopped, skipping connection attempts",
@@ -901,7 +941,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// here would cause the goroutine to see it as already
 			// active and immediately return.
 			if !peer.Reconnecting {
-				go p.createOutboundConnection(peer)
+				p.spawnOutboundConnectionLocked(peer)
 			}
 		}
 	}

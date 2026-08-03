@@ -165,6 +165,17 @@ func (m *Manager) SetDelegatorInactivity(
 	return nil
 }
 
+// DelegatorInactivityConfig returns the CIP-0163 reward-account inactivity
+// gate and window currently configured on this manager, as last set by
+// SetDelegatorInactivity (mirrors LedgerState.DelegatorInactivityConfig's
+// identical pattern) — used to verify a live restore/truncate's rebuilt
+// snapshot manager actually picked up the operator's configured value.
+func (m *Manager) DelegatorInactivityConfig() (enabled bool, period uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.delegatorInactivityEnabled, m.delegatorInactivityPeriod
+}
+
 // lockConfiguration freezes consensus-affecting options before snapshot
 // capture can observe them. The lock is permanent for the manager's lifetime:
 // stopping and restarting must not permit snapshots produced by one manager to
@@ -397,7 +408,30 @@ func (m *Manager) handleEpochTransition(
 	)
 
 	// 1. Capture new Mark snapshot (current stake distribution)
-	exists, err := m.authoritativeMarkRewardSnapshotExists(evt, nil)
+	//
+	// The pre-check runs inside a short read-only transaction rather than
+	// passing a nil txn directly. GORM's prepared-statement cache is
+	// shared across every *gorm.DB derived from the same connection pool,
+	// keyed only by SQL text: a query prepared outside any transaction
+	// requires a brand-new connection from the pool to run
+	// PrepareContext, while the identical query prepared inside a
+	// transaction reuses that transaction's own already-checked-out
+	// connection. When the read pool is saturated by other concurrent
+	// read transactions racing to prepare this same cold query, the
+	// nil-txn caller can never obtain the extra connection it needs,
+	// while every transactional caller blocks waiting on the shared
+	// cache entry only the nil-txn caller can complete -- an unbounded
+	// deadlock. Wrapping this call in its own read transaction gives it
+	// the same connection-reuse path as every other caller, closing that
+	// window, while still reading a fresh, uncommitted-write-independent
+	// view (WAL snapshot isolation applies the moment the transaction
+	// begins either way).
+	preCheckTxn := m.db.Transaction(false)
+	exists, err := m.authoritativeMarkRewardSnapshotExists(
+		evt,
+		preCheckTxn.Metadata(),
+	)
+	_ = preCheckTxn.Commit()
 	if err != nil {
 		return fmt.Errorf("check existing mark snapshot: %w", err)
 	}

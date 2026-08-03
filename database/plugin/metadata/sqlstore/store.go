@@ -48,6 +48,11 @@ type Config struct {
 	// migration readiness gate succeeds. SQLite uses it for periodic VACUUM.
 	Maintenance         func(context.Context) error
 	MaintenanceInterval time.Duration
+	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.
+	// SQLite supplies them for its file-backed store; other dialects may leave
+	// them unset until a native snapshot mechanism is available.
+	BackupTo    func(context.Context, string) error
+	RestoreFrom func(context.Context, string) error
 }
 
 // Store owns the shared database/sql pools. Provider packages own DSN and
@@ -64,6 +69,8 @@ type Store struct {
 	diskSize          func() (int64, error)
 	maintenance       func(context.Context) error
 	maintenanceEvery  time.Duration
+	backupTo          func(context.Context, string) error
+	restoreFrom       func(context.Context, string) error
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceState  atomic.Uint32
@@ -118,7 +125,29 @@ func New(config Config) (*Store, error) {
 		diskSize:         config.DiskSize,
 		maintenance:      config.Maintenance,
 		maintenanceEvery: config.MaintenanceInterval,
+		backupTo:         config.BackupTo,
+		restoreFrom:      config.RestoreFrom,
 	}, nil
+}
+
+func (s *Store) BackupTo(ctx context.Context, dstPath string) error {
+	if s.backupTo == nil {
+		return errors.New("metadata backup is not supported by this provider")
+	}
+	if s.closed.Load() {
+		return errors.New("metadata backup: store is closed")
+	}
+	if !s.ready.Load() {
+		return errors.New("metadata backup: store is not ready")
+	}
+	return s.backupTo(ctx, dstPath)
+}
+
+func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
+	if s.restoreFrom == nil {
+		return errors.New("metadata restore is not supported by this provider")
+	}
+	return s.restoreFrom(ctx, srcPath)
 }
 
 // DiskSize returns backend storage usage when the provider supplies it.

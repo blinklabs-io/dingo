@@ -3648,3 +3648,24 @@ func TestNewConsumerReturnsUntypedNilAfterStop(t *testing.T) {
 		t.Fatalf("NewConsumer after Stop = %#v, want untyped nil", consumer)
 	}
 }
+
+// TestStopReturnsErrorWhenCtxFiresBeforeWorkersDrain pins that Stop reports
+// failure -- rather than silently returning nil -- when the caller's ctx
+// fires before workerWG drains. This matters for a live database
+// restore/truncate: its quiesce sequence proceeds straight to closing
+// storage right after Stop returns, treating nil as "safe to close" even
+// though a background worker (which reads the ledger-state-backed
+// validator via rebuildOverlay) could still be running.
+func TestStopReturnsErrorWhenCtxFiresBeforeWorkersDrain(t *testing.T) {
+	m := newTestMempool(t)
+	// Simulate an in-flight background worker that outlives the ctx.
+	m.workerWG.Add(1)
+	t.Cleanup(m.workerWG.Done)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	err := m.Stop(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "before background workers drained")
+}

@@ -159,6 +159,61 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 3
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		<-start
+		for i := range 100 {
+			ls.Lock()
+			if i%2 == 0 {
+				ls.currentEra = eras.BabbageEraDesc
+			} else {
+				ls.currentEra = eras.ConwayEraDesc
+			}
+			ls.Unlock()
+		}
+		close(done)
+	})
+
+	for range 8 {
+		wg.Go(func() {
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					_ = ls.SecurityParam()
+				}
+			}
+		})
+	}
+
+	close(start)
+	wg.Wait()
+}
+
 func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
 	const securityParam uint64 = 37
 	cfg := newTestShelleyGenesisCfg(t)
@@ -4126,5 +4181,131 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 				assert.NotContains(t, logs, notWant)
 			}
 		})
+	}
+}
+
+// TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime covers Close()'s
+// rollback-goroutine wait: previously this only logged a Warn on timeout and
+// let Close() return nil regardless, which live restore/truncate's caller
+// (closeStorageForLiveLifecycleOp) took as a green light to proceed to
+// physically close/reopen the data directory even though a rollback
+// goroutine might still be running against it.
+func TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime(t *testing.T) {
+	origTimeout := CloseRollbackDrainTimeout
+	CloseRollbackDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseRollbackDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	// Simulate an in-flight rollback goroutine that outlives the timeout.
+	ls.rollbackWG.Add(1)
+	t.Cleanup(func() { ls.rollbackWG.Done() })
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rollback")
+}
+
+// TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime covers Close()'s
+// database-worker-pool wait, which had the same silent-timeout gap as the
+// rollback wait above.
+func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
+	origTimeout := CloseDBWorkerPoolShutdownTimeout
+	CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	pool := NewDatabaseWorkerPool(nil, DatabaseWorkerPoolConfig{
+		WorkerPoolSize: 1,
+		TaskQueueSize:  1,
+	})
+	release := make(chan struct{})
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			<-release
+			return nil
+		},
+	})
+	t.Cleanup(func() { close(release) })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		dbWorkerPool: pool,
+	}
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "database worker pool")
+}
+
+// TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime covers
+// the root cause of the "persistent chain index gap" liveness failure seen
+// under TestLiveTruncateUnderRealForgingAndNetworking (real forging +
+// networking, only reproducible under contention/slower hardware): Close
+// previously never waited for ledgerProcessBlocks (the goroutine Start
+// launches to apply incoming chainsync blocks) at all, since Start ran it
+// against ctx directly rather than a child context Close could cancel. A
+// block landing mid-write exactly as Close proceeded to shut down
+// dbWorkerPool left the persisted block-ID index permanently inconsistent
+// with the in-memory tip already advanced for it -- a corruption no retry
+// recovers from, unlike a transient timing issue.
+func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(t *testing.T) {
+	origTimeout := CloseProcessBlocksDrainTimeout
+	CloseProcessBlocksDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.processBlocksCancel = func() {}
+	// Simulate an in-flight ledgerProcessBlocks goroutine that outlives the
+	// timeout -- e.g. mid-write on a block when Close is called.
+	ls.processBlocksWG.Add(1)
+	t.Cleanup(ls.processBlocksWG.Done)
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "block-processing pipeline")
+}
+
+// TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive
+// counterpart: a real Start/Close cycle (ledgerProcessBlocks genuinely
+// running, not simulated) must not report a timeout, and Close must
+// actually block until the goroutine has exited -- proving
+// processBlocksCancel's child context, not ctx directly, is what Start
+// wires ledgerProcessBlocks to run against.
+func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+
+	processCtx, processCancel := context.WithCancel(t.Context())
+	ls.processBlocksCancel = processCancel
+	ls.processBlocksWG.Add(1)
+	stopped := make(chan struct{})
+	go func() {
+		defer ls.processBlocksWG.Done()
+		<-processCtx.Done()
+		close(stopped)
+	}()
+
+	err := ls.Close()
+	require.NoError(t, err)
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("Close returned without processCtx actually being cancelled")
 	}
 }

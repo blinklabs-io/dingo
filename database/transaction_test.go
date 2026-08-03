@@ -211,6 +211,67 @@ func (m *mockBlobTxn) Rollback() error {
 	return nil
 }
 
+// TestMithrilTrustBoundarySlotStrictPropagatesReadError guards against
+// a real bug: database/lifecycle.Truncate's safety check
+// against the Mithril trust boundary used MithrilTrustBoundarySlot, which
+// silently treats a failed sync-state read the same as "no boundary
+// recorded" (returns 0) — bypassing the safety check entirely on a
+// transient storage error instead of refusing the truncate. The strict
+// variant must instead propagate the read error so a caller enforcing a
+// safety check can fail closed.
+func TestMithrilTrustBoundarySlotStrictPropagatesReadError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(t, closeTestDatabase(db))
+
+	_, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.Error(t, err)
+}
+
+// TestMithrilTrustBoundarySlotSwallowsReadError confirms
+// MithrilTrustBoundarySlot's existing fail-open contract is unchanged for
+// its other caller (the consumed-UTxO recovery heuristic in this same
+// file): a failed read still returns 0, not an error.
+func TestMithrilTrustBoundarySlotSwallowsReadError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(t, closeTestDatabase(db))
+
+	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
+}
+
+// TestMithrilTrustBoundarySlotStrictPropagatesParseError guards against a
+// corrupted persisted boundary being silently treated as "no Mithril
+// snapshot was ever imported": database/lifecycle.Truncate relies on
+// MithrilTrustBoundarySlotStrict to fail closed, so a malformed stored
+// value (not just a read error) must also come back as an error rather
+// than (0, nil), or a truncate could proceed past a boundary that is
+// actually corrupt/unreadable.
+func TestMithrilTrustBoundarySlotStrictPropagatesParseError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(
+		t,
+		db.SetSyncState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
+	)
+
+	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.Error(t, err)
+	require.Zero(t, slot)
+}
+
+// TestMithrilTrustBoundarySlotSwallowsParseError confirms
+// MithrilTrustBoundarySlot's existing fail-open contract is unchanged for a
+// malformed persisted boundary: it must still return 0 with no error, only
+// via its logged fail-open path now that the strict variant propagates the
+// parse error.
+func TestMithrilTrustBoundarySlotSwallowsParseError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(
+		t,
+		db.SetSyncState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
+	)
+
+	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
+}
+
 func TestDeleteTxBlobsUsesCallerBlobTxn(t *testing.T) {
 	t.Parallel()
 

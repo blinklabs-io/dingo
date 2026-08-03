@@ -317,6 +317,14 @@ type Txn interface {
 	Rollback() error
 }
 
+// IrreversibleTxn identifies a transaction whose Rollback cannot undo writes
+// already issued to its backing store. Cloud object stores implement this
+// because each mutation is applied immediately.
+type IrreversibleTxn interface {
+	Txn
+	RollbackIsNoop() bool
+}
+
 // MetadataBatchAccumulator is an opaque plugin-owned accumulator used by
 // metadata stores that support batched transaction ingestion.
 type MetadataBatchAccumulator interface {

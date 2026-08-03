@@ -305,3 +305,115 @@ func TestConnectionManager_Stop_WithConnections(t *testing.T) {
 
 	// goleak.VerifyNone will catch any leaked goroutines
 }
+
+// pipeLikeAddr mimics the net.Addr implementation of a Windows named-pipe
+// listener (github.com/Microsoft/go-winio's pipeAddress): its Network()
+// reports "pipe", not "unix", even though the ListenerConfig representing
+// it uses "unix" as a cross-platform sentinel telling startListener to
+// dispatch to createPipeListener. This is a plain fake so the scenario is
+// reproducible on any OS/CI runner, not just Windows.
+type pipeLikeAddr struct {
+	path string
+}
+
+func (a pipeLikeAddr) Network() string { return "pipe" }
+func (a pipeLikeAddr) String() string  { return a.path }
+
+// pipeLikeListener is a net.Listener whose Addr() returns a pipeLikeAddr,
+// standing in for a Windows named-pipe listener without requiring
+// go-winio or GOOS=windows.
+type pipeLikeListener struct {
+	addr    pipeLikeAddr
+	closeCh chan struct{}
+	closed  sync.Once
+}
+
+func newPipeLikeListener(path string) *pipeLikeListener {
+	return &pipeLikeListener{
+		addr:    pipeLikeAddr{path: path},
+		closeCh: make(chan struct{}),
+	}
+}
+
+func (l *pipeLikeListener) Accept() (net.Conn, error) {
+	<-l.closeCh
+	return nil, net.ErrClosed
+}
+
+func (l *pipeLikeListener) Close() error {
+	l.closed.Do(func() { close(l.closeCh) })
+	return nil
+}
+
+func (l *pipeLikeListener) Addr() net.Addr { return l.addr }
+
+// TestResolvedListeners_PreservesUnixSentinelForPipeListener is a
+// regression test for a P2 review finding: ResolvedListeners, when
+// rewriting a caller-supplied listener's config to point at its resolved
+// address, must not blindly overwrite ListenNetwork with
+// listener.Addr().Network(). On Windows, a caller-supplied named-pipe
+// listener (created via createPipeListener, backed by
+// github.com/Microsoft/go-winio) is represented in ListenerConfig with
+// ListenNetwork == "unix" -- the sentinel startListener checks
+// (`runtime.GOOS == "windows" && ListenNetwork == "unix"`) to decide to
+// rebuild it via createPipeListener rather than net.Listen. But that
+// listener's Addr().Network() reports "pipe", not "unix". Naively copying
+// addr.Network() into ListenNetwork here would corrupt that sentinel, so
+// the next live Restore/Truncate reinit would fail the windows-pipe check
+// and fall through to a plain net.Listen with network "pipe" (which Go's
+// net package does not support), breaking the rebind.
+//
+// This test reproduces the scenario with a portable fake listener (see
+// pipeLikeListener above) instead of a real go-winio pipe, so it runs on
+// any OS/CI runner, not just Windows.
+func TestResolvedListeners_PreservesUnixSentinelForPipeListener(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	ln := newPipeLikeListener(`\\.\pipe\dingo-test`)
+
+	cfg := connmanager.ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []connmanager.ListenerConfig{
+			{
+				Listener:      ln,
+				ListenNetwork: "unix",
+				ListenAddress: `\\.\pipe\dingo-test`,
+				UseNtC:        true,
+			},
+		},
+	}
+	cm := connmanager.NewConnectionManager(cfg)
+	if err := cm.Start(context.Background()); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	resolved := cm.ResolvedListeners()
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved listener config, got %d", len(resolved))
+	}
+	if resolved[0].Listener != nil {
+		t.Fatalf("expected Listener to be cleared, got %v", resolved[0].Listener)
+	}
+	if resolved[0].ListenNetwork != "unix" {
+		t.Fatalf(
+			"ListenNetwork sentinel corrupted: expected %q, got %q (raw addr.Network() was %q)",
+			"unix",
+			resolved[0].ListenNetwork,
+			ln.Addr().Network(),
+		)
+	}
+	if resolved[0].ListenAddress != `\\.\pipe\dingo-test` {
+		t.Fatalf(
+			"expected ListenAddress %q, got %q",
+			`\\.\pipe\dingo-test`,
+			resolved[0].ListenAddress,
+		)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cm.Stop(ctx); err != nil {
+		t.Fatalf("stop failed: %v", err)
+	}
+}

@@ -335,6 +335,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
 			dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
 			dingo.WithBarkPort(cfg.BarkPort),
+			dingo.WithBarkHost(cfg.BarkHost),
 			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 				Enabled:   cfg.HistoryExpiry.Enabled,
 				Frequency: cfg.HistoryExpiry.Frequency,
@@ -464,6 +465,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.DelegatorInactivityEnabled,
 				cfg.DelegatorInactivity,
 			),
+			dingo.WithDatabaseLifecycle(cfg.DatabaseLifecycle),
 			// Leios voting (experimental)
 			dingo.WithLeiosVoteSigningKeyFile(
 				cfg.LeiosVoteSigningKeyFile,

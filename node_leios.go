@@ -174,13 +174,23 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	}
 	n.leiosVoteManager = mgr
 	n.ouroboros.LeiosVotes = mgr
-	n.eventBus.SubscribeFunc(leios.VoteEmittedEventType, func(evt event.Event) {
-		data, ok := evt.Data.(leios.VoteEmittedEvent)
-		if !ok {
-			return
-		}
-		n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
-	})
+	// Captured (not discarded) so quiesceForLiveLifecycleOp can unsubscribe
+	// this handler before a live database restore/truncate rebuilds
+	// leiosVoteManager and calls initLeiosVoteManager again -- the
+	// EventBus itself is retained across that cycle, so without this a
+	// stale subscription from every earlier cycle stays permanently
+	// active alongside the new one, and a single emitted vote gets
+	// enqueued (and diffused to peers) once per accumulated subscription.
+	n.leiosVoteEmittedSubId = n.eventBus.SubscribeFunc(
+		leios.VoteEmittedEventType,
+		func(evt event.Event) {
+			data, ok := evt.Data.(leios.VoteEmittedEvent)
+			if !ok {
+				return
+			}
+			n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
+		},
+	)
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",

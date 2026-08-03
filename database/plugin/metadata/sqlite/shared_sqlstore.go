@@ -72,6 +72,8 @@ func openSQLStore(
 		locker       migrations.Locker
 		diskSizeFunc func() (int64, error)
 		maintenance  func(context.Context) error
+		backupTo     func(context.Context, string) error
+		restoreFrom  func(context.Context, string) error
 	)
 	if dataDir == "" {
 		dsn := fmt.Sprintf(
@@ -140,6 +142,12 @@ func openSQLStore(
 			_, err := writeDB.ExecContext(ctx, "VACUUM")
 			return err
 		}
+		backupTo = func(ctx context.Context, dstPath string) error {
+			return backupSQLite(ctx, writeDB, dataDir, dstPath)
+		}
+		restoreFrom = func(ctx context.Context, srcPath string) error {
+			return restoreSQLite(ctx, dataDir, srcPath)
+		}
 	}
 
 	store, err := sqlstore.New(sqlstore.Config{
@@ -153,6 +161,8 @@ func openSQLStore(
 		DiskSize:            diskSizeFunc,
 		Maintenance:         maintenance,
 		MaintenanceInterval: 24 * time.Hour,
+		BackupTo:            backupTo,
+		RestoreFrom:         restoreFrom,
 	})
 	if err != nil {
 		if readDB != writeDB {
