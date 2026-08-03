@@ -167,6 +167,19 @@ func TestFromPointAcceptsCommonPointOnInMemoryFork(t *testing.T) {
 	if err := fork.AddBlock(testBlocks[2], nil); err != nil {
 		t.Fatalf("unexpected error extending fork: %s", err)
 	}
+	// The fork tail remains indexed in the fork itself; the membership guard
+	// must continue to accept it while resolving the common prefix via primary.
+	tailPoint := blockPoint(testBlocks[2])
+	tailIter, err := fork.FromPoint(tailPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating tail iterator: %s", err)
+	}
+	next, err := tailIter.Next(false)
+	tailIter.Cancel()
+	if err != nil || next == nil || next.Point.Slot != tailPoint.Slot ||
+		!bytes.Equal(next.Point.Hash, tailPoint.Hash) {
+		t.Fatalf("expected fork tail point, got result=%+v err=%v", next, err)
+	}
 
 	for _, test := range []struct {
 		name      string

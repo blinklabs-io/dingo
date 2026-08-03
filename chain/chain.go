@@ -1406,7 +1406,9 @@ func (c *Chain) holdsBlockAtIndexLocked(blockIndex uint64, blockHash []byte) boo
 		// the primary chain can resolve that prefix through its own in-memory
 		// points and the manager's block cache. Use the primary chain here so
 		// a valid common point is not mistaken for a rolled-back point.
-		lookupChain = c.manager.primaryChainLocked()
+		// The primary pointer is immutable after manager initialization and is
+		// the chain whose active index owns the common prefix.
+		lookupChain = c.manager.primary
 		if lookupChain == nil {
 			return false
 		}
