@@ -20,7 +20,7 @@ require (
 	github.com/blinklabs-io/gouroboros v0.191.2
 	github.com/blinklabs-io/ouroboros-mock v0.15.0
 	github.com/blinklabs-io/plutigo v0.2.0
-	github.com/blockfrost/blockfrost-go v0.4.0
+	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.20.1
 	github.com/dgraph-io/badger/v4 v4.9.4
