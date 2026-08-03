@@ -38,6 +38,11 @@ var (
 	ErrExtractUnsafePath = errors.New(
 		"mithril: unsafe extraction path",
 	)
+	// ErrExtractConflictingOptions reports a caller asking for both
+	// destination policies at once.
+	ErrExtractConflictingOptions = errors.New(
+		"mithril: WithMergeIntoDestination and WithReplaceDestination are mutually exclusive",
+	)
 )
 
 // extractConfig holds the resolved destination policy for one extraction.
@@ -240,6 +245,14 @@ func prepareExtractDestination(
 ) (root *os.Root, publish func() error, cleanup func(), err error) {
 	cleanDest := filepath.Clean(destDir)
 
+	// The two policies describe incompatible things — merge accumulates into
+	// the destination, replace swaps it wholesale — and merge used to win
+	// silently, so a caller meaning to replace would have quietly kept the old
+	// tree. Neither reading is safe to guess at.
+	if cfg.merge && cfg.replace {
+		return nil, nil, nil, ErrExtractConflictingOptions
+	}
+
 	// Checked before anything is created or read, so a destination that is
 	// itself a symlink never gets followed.
 	if err := assertSafeExtractRoot(cleanDest); err != nil {
@@ -370,52 +383,39 @@ func prepareExtractDestination(
 				)
 			}
 		}
-		// Without an explicit replacement request the destination must be
-		// empty, which is not the same as absent: an operator creating the
-		// directory ahead of time, or a previous run cleaning up after
-		// itself, both leave one behind. An empty directory is therefore
-		// cleared out of the way rather than refused.
+		// The rename goes first, before anything inspects or clears the
+		// destination, because on a POSIX filesystem it already is the whole
+		// contract in one atomic step. Renaming a directory over an absent or
+		// empty destination succeeds; over a populated one it fails with
+		// ENOTEMPTY; over a file it fails with ENOTDIR and leaves the file
+		// exactly as it was. There is no window in a single syscall, so
+		// nothing a concurrent writer does between two of our operations can
+		// cost them content.
 		//
-		// Remove is what makes clearing it safe. It is rmdir, so the
-		// emptiness test and the removal are one step: a writer who populated
-		// the destination first makes it fail rather than lose their content.
-		// Testing separately and then removing could offer no such guarantee,
-		// however narrow the gap between the two.
-		//
-		// Only a directory is removed. A file or a symlink at the destination
-		// is refused untouched, since unlinking it would destroy something
-		// this caller never asked to replace. That leaves one race the
-		// removal cannot close, where a writer swaps the empty directory for
-		// a file after it is identified as a directory and before it is
-		// removed; the file is then unlinked. Closing it needs a
-		// directory-only removal that Root does not expose.
-		if !cfg.replace {
-			info, err := parentRoot.Lstat(destName)
-			switch {
-			case err == nil && !info.IsDir():
-				return fmt.Errorf(
-					"%w: %s already exists",
-					ErrExtractDestinationNotEmpty, cleanDest,
-				)
-			case err == nil:
-				if err := parentRoot.Remove(destName); err != nil &&
-					!errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf(
-						"%w: %s: %w",
-						ErrExtractDestinationNotEmpty, cleanDest, err,
-					)
-				}
-			case !errors.Is(err, os.ErrNotExist):
-				return fmt.Errorf(
-					"inspecting extraction destination: %w", err,
-				)
+		// Inspecting the destination first and then acting on it — which is
+		// what this used to do — can only be worse than that, however narrow
+		// the gap is made.
+		renameErr := parentRoot.Rename(stagingName, destName)
+		if renameErr != nil && !cfg.replace {
+			// The destination is occupied. Windows will not rename over an
+			// existing directory even when it is empty, so reaching here does
+			// not by itself mean the destination holds anything; clearing an
+			// empty one and retrying is what keeps behaviour uniform across
+			// platforms.
+			//
+			// Which is safe only because the removal is directory-only. A
+			// writer can still swap the destination for a file after it is
+			// identified as a directory, and rmdir refuses a file where an
+			// unlink would have destroyed it.
+			if err := clearEmptyDestination(
+				parentRoot, destName, cleanDest, renameErr,
+			); err != nil {
+				return err
 			}
+			renameErr = parentRoot.Rename(stagingName, destName)
 		}
-		// The rename is the backstop the check cannot be: platforms differ on
-		// whether one may replace an existing directory, so relying on it
-		// alone would make the refusal above platform-dependent.
-		if err := parentRoot.Rename(stagingName, destName); err != nil {
-			return fmt.Errorf("publishing extraction: %w", err)
+		if renameErr != nil {
+			return fmt.Errorf("publishing extraction: %w", renameErr)
 		}
 		// Rename names its source, so it moves whatever occupies stagingName
 		// at that instant, not necessarily the directory extraction wrote
@@ -445,6 +445,43 @@ func prepareExtractDestination(
 		return nil
 	}
 	return stagingRoot, publish, cleanup, nil
+}
+
+// clearEmptyDestination removes an empty directory occupying the destination
+// so publication can retry the rename, and refuses anything else.
+//
+// The destination must be empty, which is not the same as absent: an operator
+// creating the directory ahead of time, or a previous run cleaning up after
+// itself, both leave one behind, and refusing those would turn a supported
+// arrangement into a failure. Anything holding content is refused untouched —
+// clearing it is what WithReplaceDestination exists to authorise.
+//
+// renameErr is the failure that led here. It is reported unchanged when the
+// destination turns out to be absent, since the rename failed for some reason
+// this cannot explain and reporting a destination problem would misdescribe it.
+func clearEmptyDestination(
+	parentRoot *os.Root,
+	destName, cleanDest string,
+	renameErr error,
+) error {
+	info, err := parentRoot.Lstat(destName)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("publishing extraction: %w", renameErr)
+	case err != nil:
+		return fmt.Errorf("inspecting extraction destination: %w", err)
+	case !info.IsDir():
+		return fmt.Errorf(
+			"%w: %s already exists",
+			ErrExtractDestinationNotEmpty, cleanDest,
+		)
+	}
+	if err := removeEmptyExtractDir(parentRoot, destName); err != nil {
+		return fmt.Errorf(
+			"%w: %s: %w", ErrExtractDestinationNotEmpty, cleanDest, err,
+		)
+	}
+	return nil
 }
 
 // createExtractedFile opens name for writing relative to the extraction root.

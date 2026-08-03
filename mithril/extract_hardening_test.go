@@ -868,3 +868,89 @@ func TestOpenExtractRootCreatesMissingDestination(t *testing.T) {
 	assert.True(t, os.SameFile(opened, created),
 		"the handle must refer to the directory at the destination name")
 }
+
+// TestRemoveEmptyExtractDirRefusesFile is what closes the last race in
+// publication.
+//
+// Publication clears an empty destination directory out of the way, and a
+// writer can swap that directory for a file after it has been identified as a
+// directory and before it is removed. There is no way to prevent the swap, so
+// the removal itself must be unable to act on a file: a directory-only removal
+// fails where a general one would unlink whatever it found.
+func TestRemoveEmptyExtractDirRefusesFile(t *testing.T) {
+	parent := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(parent, "theirs"), []byte("keep"), 0o640,
+	))
+
+	parentRoot, err := os.OpenRoot(parent)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parentRoot.Close() })
+
+	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs"),
+		"a directory-only removal must refuse a file")
+
+	data, err := os.ReadFile(filepath.Join(parent, "theirs"))
+	require.NoError(t, err, "the file must not have been unlinked")
+	assert.Equal(t, "keep", string(data))
+}
+
+// TestRemoveEmptyExtractDirRefusesPopulatedDir pins the other half: the
+// removal is the emptiness test, so a writer who populated the destination
+// first makes it fail rather than lose their content.
+func TestRemoveEmptyExtractDirRefusesPopulatedDir(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "theirs")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "keep.txt"), []byte("keep"), 0o640,
+	))
+
+	parentRoot, err := os.OpenRoot(parent)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parentRoot.Close() })
+
+	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs"))
+
+	data, err := os.ReadFile(filepath.Join(dir, "keep.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(data))
+}
+
+// TestRemoveEmptyExtractDirRemovesEmptyDir pins that it still does its job.
+func TestRemoveEmptyExtractDirRemovesEmptyDir(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "stale")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+
+	parentRoot, err := os.OpenRoot(parent)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parentRoot.Close() })
+
+	require.NoError(t, removeEmptyExtractDir(parentRoot, "stale"))
+	_, statErr := os.Stat(dir)
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+// TestExtractArchiveRefusesConflictingDestinationOptions covers a caller
+// passing both destination policies.
+//
+// They describe incompatible things — merge accumulates into the destination,
+// replace swaps it wholesale — and merge silently won, so a caller that meant
+// to replace would have quietly kept the old files instead.
+func TestExtractArchiveRefusesConflictingDestinationOptions(t *testing.T) {
+	archivePath := writeTestArchive(t, map[string]string{
+		"immutable/00000.chunk": "chunk0",
+	})
+	destDir := filepath.Join(t.TempDir(), "extracted")
+
+	_, err := ExtractArchive(
+		t.Context(), archivePath, destDir, nil,
+		WithMergeIntoDestination(), WithReplaceDestination(),
+	)
+	require.ErrorIs(t, err, ErrExtractConflictingOptions)
+
+	_, statErr := os.Stat(destDir)
+	assert.True(t, os.IsNotExist(statErr),
+		"a refused extraction must not create the destination")
+}
