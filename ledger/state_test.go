@@ -3994,6 +3994,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			block,
 			false,
 			false,
+			false,
 			nil,
 			envelopeParent{},
 			nil,
@@ -4051,6 +4052,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			block,
 			false,
 			false,
+			false,
 			nil,
 			envelopeParent{},
 			nil,
@@ -4061,6 +4063,65 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 		return err
 	})
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+}
+
+// TestStrictConsumedInputsEnabled pins the #3005 guard condition, including the
+// P1 transition-batch case: the first batch whose blocks cross the tip cutoff is
+// processed while reachedTip is still false (it is stored true only after that
+// batch commits), so the per-block reachesTip signal must enable the guard on
+// its own. Without it that transition batch could still recover an unapplied
+// producer from the blob store.
+func TestStrictConsumedInputsEnabled(t *testing.T) {
+	tests := []struct {
+		name           string
+		shouldValidate bool
+		reachedTip     bool
+		reachesTip     bool
+		want           bool
+	}{
+		{
+			name:           "unvalidated application is never strict",
+			shouldValidate: false,
+			reachedTip:     true,
+			reachesTip:     true,
+			want:           false,
+		},
+		{
+			name:           "validated at an established tip",
+			shouldValidate: true,
+			reachedTip:     true,
+			reachesTip:     false,
+			want:           true,
+		},
+		{
+			name:           "validated transition batch before reachedTip stored",
+			shouldValidate: true,
+			reachedTip:     false,
+			reachesTip:     true,
+			want:           true,
+		},
+		{
+			name:           "validated historical catch-up not yet at tip",
+			shouldValidate: true,
+			reachedTip:     false,
+			reachesTip:     false,
+			want:           false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := &LedgerState{}
+			ls.reachedTip.Store(tc.reachedTip)
+			require.Equal(
+				t,
+				tc.want,
+				ls.strictConsumedInputsEnabled(
+					tc.shouldValidate,
+					tc.reachesTip,
+				),
+			)
+		})
+	}
 }
 
 func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(

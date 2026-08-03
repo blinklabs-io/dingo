@@ -601,9 +601,10 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 
 // TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation covers
 // issue #3005: in the steady-state, at-tip, validated block-application path,
-// a consumed input whose producer row is absent from the metadata store must
-// NOT be recovered from the append-only blob store and persisted, even when
-// that recovery would succeed. The blob retains blocks from abandoned forks,
+// a consumed input whose produced utxo row is absent from the metadata store
+// (the producer transaction row may still be present) must NOT be recovered
+// from the append-only blob store and persisted, even when that recovery would
+// succeed. The blob retains blocks from abandoned forks,
 // so recovering the producer would import a UTxO the applied chain never
 // produced and bake an input-conservation violation into the persisted chain.
 // With StrictAppliedInputConservation the ingest errors instead, so the block's

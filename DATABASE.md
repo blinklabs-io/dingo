@@ -739,9 +739,11 @@ performing a clean metadata resync).
 toggle on the same consumed-input path. When set (only by the ledger delta apply
 for a validated block once the node has reached tip), and with the database's
 `StrictUtxoValidation` also on, `ensureTransactionConsumedUtxos` refuses to
-recover a consumed input whose producer row is absent from the metadata store
-past the `mithril_ledger_slot` boundary: it errors (`ErrUtxoNotFound`) before
-consulting the append-only blob store, instead of rebuilding the row. This
+recover a consumed input whose produced `utxo` row is absent from the metadata
+store past the `mithril_ledger_slot` boundary (the check keys on the produced
+UTxO row, not the producer `transaction` row, so it fires even when the producer
+transaction row is present): it errors (`ErrUtxoNotFound`) before consulting the
+append-only blob store, instead of rebuilding the row. This
 prevents a near-tip fork churn from importing a producer that lives only on an
 abandoned fork block the applied chain never followed, which would persist an
 input-conservation violation (a UTxO the applied chain never produced, and in

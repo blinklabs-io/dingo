@@ -2582,20 +2582,28 @@ pre-intersect UTxOs are intentionally absent. Gap-block ingestion
 and the chain tip) is unconditionally strict already, since that range is
 always expected to be fully recoverable from the snapshot import.
 
-That default recovery is deliberately one-sided: it only fires when the
-producer row is *absent* from the metadata store, and it rebuilds it from the
+That default recovery is deliberately one-sided: it only fires when the produced
+`utxo` row is *absent* from the metadata store, and it rebuilds it from the
 blob store, which is append-only and retains blocks from abandoned forks. In
 steady-state, at-tip, validated block application that recovery must never run:
 every consumed input's producer is already applied and live in the metadata
-store, so an absent row means the applied ledger has diverged from the header
-chain (issue #3005), and recovering the producer from a fork block the applied
-chain never followed would import a UTxO the chain never produced and persist an
+store. An absent metadata row alone does not prove divergence — it is also the
+normal state of an in-flight/intra-block producer whose row has not been flushed
+yet — but the guard runs only after the same-slot repair and the
+`HasInFlightProducer` intra-block check, so by the time it fires the row is
+absent *and* not in-flight/intra-block, which past the Mithril boundary means
+the applied ledger has diverged from the header chain (issue #3005). Recovering
+the producer from a fork block the applied chain never followed would then
+import a UTxO the chain never produced and persist an
 input-conservation violation — which, once it accumulates past the security
 parameter K, wedges the node behind the rollback-exceeds-K guard with no legal
 recovery. The ledger closes this by setting
 `BatchedTxIngestOpts.StrictAppliedInputConservation` on the delta apply whenever
-the block is validated and the node has already reached tip
-(`shouldValidate && reachedTip`, `ledgerProcessBlock`); with that flag and
+the block is validated and the node has reached tip
+(`shouldValidate && (reachedTip || reachesTip)`, `ledgerProcessBlock`, where
+`reachesTip` is the per-block at-tip signal that guards the transition batch —
+the first batch whose blocks cross the tip cutoff — since `reachedTip` is only
+stored true after that batch commits); with that flag and
 `StrictUtxoValidation` both set, `ensureTransactionConsumedUtxos` refuses to
 recover an absent producer past the Mithril boundary and instead errors, which
 aborts the block's transaction so the inconsistent state is never committed and
