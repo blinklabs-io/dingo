@@ -360,7 +360,10 @@ func (ls *LedgerState) verifyBlockHeaderState(
 	epochId uint64,
 	allowStateDefer bool,
 ) error {
-	if handled, err := ls.verifyGenesisDelegateHeader(block); handled || err != nil {
+	if handled, err := ls.verifyGenesisDelegateHeader(
+		block,
+		allowStateDefer,
+	); handled || err != nil {
 		return err
 	}
 
@@ -400,9 +403,9 @@ func (ls *LedgerState) verifyBlockHeaderState(
 
 func (ls *LedgerState) verifyGenesisDelegateHeader(
 	block ledger.Block,
+	allowStateDefer bool,
 ) (bool, error) {
-	if block.Era().Id == byron.EraIdByron ||
-		!ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
+	if block.Era().Id == byron.EraIdByron {
 		return false, nil
 	}
 	if ls.config.CardanoNodeConfig == nil {
@@ -410,6 +413,23 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 	}
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil || len(shelleyGenesis.GenDelegs) == 0 {
+		return false, nil
+	}
+	// The overlay decision uses protocol parameters for the block's epoch.
+	// Blockfetch can verify a header ahead of ledger apply, while the
+	// in-memory parameters still describe the previous epoch. Defer any
+	// state-dependent overlay decision until the rollover has installed the
+	// target epoch's parameters. This must precede genesisDelegationActiveForSlot
+	// and genesisOverlayDelegationForSlot because stale parameters can otherwise
+	// classify a future slot as having no overlay and return early.
+	if allowStateDefer && ls.ledgerTipBehindSlot(block.SlotNumber()) {
+		return true, fmt.Errorf(
+			"%w: genesis overlay state for slot %d is not yet authoritative",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+		)
+	}
+	if !ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
 		return false, nil
 	}
 

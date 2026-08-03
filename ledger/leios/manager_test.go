@@ -943,6 +943,7 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 		quorum.AnnouncingRbHash,
 		committee,
 		big.NewRat(7, 10),
+		fixture.mgr.registry,
 	))
 	wrongRbHash := lcommon.NewBlake2b256([]byte("different-rb"))
 	require.Error(t, ValidatePrototypeEbCertificate(
@@ -950,6 +951,7 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 		wrongRbHash,
 		committee,
 		big.NewRat(7, 10),
+		fixture.mgr.registry,
 	))
 }
 
@@ -1014,6 +1016,7 @@ func TestVoteManagerPrototypeVerifiesOverflowPoolHashVote(t *testing.T) {
 		quorum.AnnouncingRbHash,
 		committee,
 		big.NewRat(7, 10),
+		fixture.mgr.registry,
 	))
 }
 
@@ -1165,6 +1168,91 @@ func TestVoteManagerPrototypeCommitteeAndPoolDerivedKey(t *testing.T) {
 		SlotNo: 577, VoterId: member.VoterId,
 	}})
 	require.Len(t, raws, 1)
+}
+
+func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
+	require.NoError(t, err)
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PrototypeMode = true
+			registry, err := NewVoterRegistry(nil)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	poolMember := fixture.members[3]
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+	voterID, ok := committee.VoterIdFor(poolMember.PoolKeyHash)
+	require.True(t, ok)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], poolMember.PoolKeyHash)
+	require.NoError(t, fixture.mgr.registry.RegisterPublicKey(
+		poolKeyHash[:],
+		key.PublicKey(),
+	))
+	rbHash := lcommon.NewBlake2b256([]byte("registered-key-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("registered-key-eb"))
+	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	signature, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer",
+		lcommon.LeiosPrototypeVote{
+			AnnouncingRbHash: rbHash,
+			VoterId:          voterID,
+			VoteSignature:    signature,
+		},
+	))
+	voteID := lcommon.LeiosVoteId{
+		SlotNo: 577, VoterId: voterID,
+	}
+	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteID})
+	require.Len(t, raws, 1)
+	fixture.mgr.mu.Lock()
+	stored, ok := fixture.mgr.votesById[voteID]
+	if ok {
+		storedCopy := *stored
+		stored = &storedCopy
+	}
+	fixture.mgr.mu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, "peer", stored.originConn)
+	assert.True(t, stored.verified)
+
+	cert, err := BuildEbCertificate(577, ebHash, committee, []VerifiedVote{{
+		VoterId:   voterID,
+		Signature: signature,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, ValidatePrototypeEbCertificate(
+		cert,
+		rbHash,
+		committee,
+		big.NewRat(0, 1),
+		fixture.mgr.registry,
+	))
+}
+
+func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
+	fixture := newManagerFixture(t)
+	member := fixture.members[3]
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	require.NoError(t, fixture.mgr.ValidateVotingKey(poolKeyHash, fixture.keys[member.VoterId]))
+
+	wrongKey, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
+	require.NoError(t, err)
+	assert.Error(t, fixture.mgr.ValidateVotingKey(poolKeyHash, wrongKey))
+
+	var missingPool lcommon.PoolKeyHash
+	missingPool[0] = 0xff
+	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
 }
 
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {

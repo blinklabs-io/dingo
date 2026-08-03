@@ -15,7 +15,7 @@ FROM debian:bookworm-slim
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
-RUN useradd -m analysis
+RUN useradd --uid 1000 -m analysis
 COPY --from=build /code/analysis /bin/analysis
 USER analysis
 ENTRYPOINT ["/bin/analysis"]

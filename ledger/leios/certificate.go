@@ -173,12 +173,14 @@ func ValidateEbCertificate(
 // ValidatePrototypeEbCertificate validates a Musashi prototype certificate.
 // Prototype vote signatures cover the announcing ranking-block hash rather
 // than the legacy slot-plus-EB-hash message, and their public keys are
-// deterministically derived from committee pool ids.
+// deterministically derived from committee pool ids unless a registered key
+// is present in registry.
 func ValidatePrototypeEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	announcingRbHash lcommon.Blake2b256,
 	committee *Committee,
 	quorumStakeThreshold *big.Rat,
+	registry *VoterRegistry,
 ) error {
 	if cert == nil {
 		return errors.New("nil certificate")
@@ -196,11 +198,22 @@ func ValidatePrototypeEbCertificate(
 			continue
 		}
 		signerStake += member.Stake
-		key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
-		if err != nil {
-			return fmt.Errorf("derive prototype voter %d key: %w", member.VoterId, err)
+		var pub *bls12381.G2Affine
+		if registry != nil {
+			pub, _ = registry.PublicKeyFor(member.PoolKeyHash)
 		}
-		signerPubs = append(signerPubs, key.PublicKey())
+		if pub == nil {
+			key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+			if err != nil {
+				return fmt.Errorf(
+					"derive prototype voter %d key: %w",
+					member.VoterId,
+					err,
+				)
+			}
+			pub = key.PublicKey()
+		}
+		signerPubs = append(signerPubs, pub)
 	}
 	quorumMet, err := MeetsStakeQuorum(
 		signerStake,
