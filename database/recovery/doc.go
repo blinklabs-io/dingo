@@ -44,9 +44,10 @@
 //     gives recovery a verified anchor when the journal itself is unreadable.
 //     WAL segments fully covered by a durable checkpoint are removed.
 //
-//   - Checker runs the startup consistency checks: tip agreement across the
-//     stores, block continuity beneath the tip, UTxO integrity, and orphaned
-//     data beyond the tip.
+//   - Checker runs the startup consistency checks: the commit-timestamp fence,
+//     tip agreement across the stores, chain-versus-ledger tip agreement when
+//     the source reports a chain tip, block continuity beneath the tip, UTxO
+//     integrity, and orphaned data beyond the tip.
 //
 //   - Manager ties those together at startup: load the newest valid checkpoint,
 //     replay the journal above it, compare the intent record against what the

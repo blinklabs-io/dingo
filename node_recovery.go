@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -98,7 +99,7 @@ func (r nodeRecoveryRepairer) RollbackTo(point recovery.Point) error {
 
 func (r nodeRecoveryRepairer) RewindPrimaryChainTo(point recovery.Point) error {
 	if r.chain == nil {
-		return fmt.Errorf("primary chain manager is unavailable")
+		return errors.New("primary chain manager is unavailable")
 	}
 	return r.chain.RewindPrimaryChainToPoint(ocommon.Point{
 		Slot: point.Slot,

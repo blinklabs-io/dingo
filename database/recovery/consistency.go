@@ -261,6 +261,13 @@ func (r Report) Log(logger *slog.Logger) {
 				"check", res.Name,
 				"detail", res.Detail,
 			)
+		default:
+			logger.Warn(
+				"consistency check reported an unknown severity",
+				"check", res.Name,
+				"severity", res.Severity.String(),
+				"detail", res.Detail,
+			)
 		}
 	}
 }
