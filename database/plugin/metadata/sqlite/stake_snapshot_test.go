@@ -982,14 +982,14 @@ func TestGetStakeByPoolsAtSlotDoesNotFloorUnstampedAccount(t *testing.T) {
 	require.Zero(t, delegators[string(pool)])
 }
 
-// TestGetRewardStakeInputsForPoolsExcludesExpiredAccounts covers the CIP-0163
-// exclusion on the reward-basis path. With the gate off it reads the live
-// reward stake aggregate. With the gate on it reconstructs expiration at the
+// TestGetEpochBoundaryRewardStakeInputsExcludesExpiredAccounts covers the
+// CIP-0163 exclusion on the reward-basis path. It reconstructs expiration at the
 // requested slot from the same historical CTE as GetStakeByPoolsAtSlot, so a
 // post-slot witness that renewed a credential's live account.expiration_epoch
 // cannot revive stake that had already expired at the boundary — matching the
-// leader-election path rather than the mutable live column.
-func TestGetRewardStakeInputsForPoolsExcludesExpiredAccounts(t *testing.T) {
+// leader-election path rather than the mutable live column. With the gate off
+// nothing is excluded.
+func TestGetEpochBoundaryRewardStakeInputsExcludesExpiredAccounts(t *testing.T) {
 	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
@@ -1052,23 +1052,10 @@ func TestGetRewardStakeInputsForPoolsExcludesExpiredAccounts(t *testing.T) {
 		TxHash: bytes.Repeat([]byte{0x72}, 32),
 	}).Error)
 
-	// reward_live_stake rows back the gate-off (live-aggregate) path.
-	live := []models.RewardLiveStake{
-		{
-			PoolKeyHash: pool, StakingKey: active, CredentialTag: 0,
-			TotalStake: types.Uint64(100), Registered: true,
-		},
-		{
-			PoolKeyHash: pool, StakingKey: expired, CredentialTag: 0,
-			TotalStake: types.Uint64(40), Registered: true,
-		},
-	}
-	for i := range live {
-		require.NoError(t, db.Create(&live[i]).Error)
-	}
-
-	// Gate off: live aggregate returns both inputs (slot/inactivity ignored).
-	inputs, err := store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 0, 0, nil)
+	// Gate off: nothing is excluded, so both credentials contribute.
+	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
+		[][]byte{pool}, 250, 0, 0, 0, nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 2)
 
@@ -1076,7 +1063,9 @@ func TestGetRewardStakeInputsForPoolsExcludesExpiredAccounts(t *testing.T) {
 	// The expired credential's surviving witness is epoch 0 -> excluded; the
 	// active credential's is epoch 2 -> included. A live-column filter would
 	// have kept both (both have live ExpirationEpoch 7).
-	inputs, err = store.GetRewardStakeInputsForPools([][]byte{pool}, 250, 3, 2, nil)
+	inputs, err = store.GetEpochBoundaryRewardStakeInputsForPools(
+		[][]byte{pool}, 250, 0, 3, 2, nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1)
 	require.Equal(t, active, inputs[0].StakingKey)
@@ -1084,10 +1073,10 @@ func TestGetRewardStakeInputsForPoolsExcludesExpiredAccounts(t *testing.T) {
 		"historical reward input stake must match the leader-election basis")
 }
 
-// TestGetRewardStakeInputsForPoolsDeduplicatesPoolsAcrossChunks verifies that
-// repeated pool hashes cannot duplicate reward inputs when the historical
+// TestGetEpochBoundaryRewardStakeInputsDeduplicatesPoolsAcrossChunks verifies
+// that repeated pool hashes cannot duplicate reward inputs when the historical
 // CIP-0163 query splits the requested pools across multiple SQL queries.
-func TestGetRewardStakeInputsForPoolsDeduplicatesPoolsAcrossChunks(t *testing.T) {
+func TestGetEpochBoundaryRewardStakeInputsDeduplicatesPoolsAcrossChunks(t *testing.T) {
 	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
@@ -1126,8 +1115,8 @@ func TestGetRewardStakeInputsForPoolsDeduplicatesPoolsAcrossChunks(t *testing.T)
 	}
 	pools = append(pools, pool)
 
-	inputs, err := store.GetRewardStakeInputsForPools(
-		pools, 250, 3, 2, nil,
+	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
+		pools, 250, 0, 3, 2, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1)
@@ -1136,13 +1125,13 @@ func TestGetRewardStakeInputsForPoolsDeduplicatesPoolsAcrossChunks(t *testing.T)
 	require.Equal(t, uint64(100), uint64(inputs[0].Stake))
 }
 
-// TestGetRewardStakeInputsForPoolsAgreesWithLeaderStakeAtSlot pins the Option A
-// invariant: with the CIP-0163 gate on, reward-basis inputs are sourced from
-// the same historical CTE as the leader-election pool totals, so the
+// TestGetEpochBoundaryRewardStakeInputsAgreeWithLeaderStakeAtSlot pins the
+// Option A invariant: with the CIP-0163 gate on, reward-basis inputs are sourced
+// from the same historical CTE as the leader-election pool totals, so the
 // per-credential input stakes sum to exactly the leader pool total and cover
 // the same active delegator set at the requested slot — never the mutable live
 // account state.
-func TestGetRewardStakeInputsForPoolsAgreesWithLeaderStakeAtSlot(t *testing.T) {
+func TestGetEpochBoundaryRewardStakeInputsAgreeWithLeaderStakeAtSlot(t *testing.T) {
 	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
@@ -1198,8 +1187,8 @@ func TestGetRewardStakeInputsForPoolsAgreesWithLeaderStakeAtSlot(t *testing.T) {
 		[][]byte{pool}, slot, expiry, window, nil,
 	)
 	require.NoError(t, err)
-	inputs, err := store.GetRewardStakeInputsForPools(
-		[][]byte{pool}, slot, expiry, window, nil,
+	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
+		[][]byte{pool}, slot, 0, expiry, window, nil,
 	)
 	require.NoError(t, err)
 

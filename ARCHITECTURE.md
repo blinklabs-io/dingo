@@ -3458,7 +3458,7 @@ Key configuration areas:
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point, before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
 
@@ -3516,10 +3516,11 @@ aggregate through `account.expiration_epoch`; the activation/renewal writes
 that establish those values precede capture in the same rollover transaction.
 The same live rows produce leader-election totals, delegator counts, and reward
 inputs in one pass. A fallback whose transaction tip is already after the
-snapshot slot instead passes the slot, epoch (as `expiryEpoch`), and period into
-the shared historical stake-aggregation chokepoint (`GetStakeByPoolsAtSlot` and
-`GetRewardStakeInputsForPools`), which reconstructs stake and expiration at the
-requested slot. Together these filters exclude expired
+snapshot slot instead passes the snapshot slot, the boundary slot, the epoch (as
+`expiryEpoch`), and the period into the shared historical stake-aggregation
+chokepoint (`GetEpochBoundaryStakeByPools` and
+`GetEpochBoundaryRewardStakeInputsForPools`), which reconstructs stake and
+expiration at the requested slot for both halves of the snapshot. Together these filters exclude expired
 credentials from leader-election Mark stake, the per-pool reward basis, and SPO
 governance vote power. The gate and period must match the ledger config that
 stamps account expirations, and both are consensus-affecting. The public
@@ -3639,9 +3640,10 @@ the primitive). Phase-2-invalid transactions apply no certificates or
 withdrawals, so they witness nothing and are skipped. With the gate off the hook
 computes and writes nothing. `expiration_epoch` enforcement lives in two
 separate read paths plus one application-time guard, all gated by the same flag:
-the stake-aggregation chokepoint (`GetStakeByPoolsAtSlot`/`GetRewardStakeInputsForPools`,
-see the snapshot-manager paragraph above) for leader-election Mark stake, the
-per-pool reward basis, and SPO governance vote power; the DRep voting-power queries
+the stake-aggregation chokepoint (`GetStakeByPoolsAtSlot` and its
+`GetEpochBoundary*` boundary forms, see the snapshot-manager paragraph above) for
+leader-election Mark stake, the per-pool reward basis, and SPO governance vote
+power; the DRep voting-power queries
 (`GetDRepVotingPower`/`GetDRepVotingPowerBatch`/`GetDRepVotingPowerByType`, see
 "Epoch Boundary State Transitions" step 5) for the DRep governance tally; and the
 reward-crediting guard in `applyStakeRewardApplication` (`ledger/reward_calculation.go`).
@@ -3808,15 +3810,51 @@ their transaction view. Because no new-epoch block has been applied at this
 point, it derives pool totals, delegator counts, and reward inputs directly from
 the maintained `reward_live_stake` rows. This makes capture proportional to the
 current credential set rather than all certificate and tombstoned-UTxO history.
-The hook runs at the end of the rollover, after the new
-epoch row exists, because the capture needs that epoch's nonce and boundary slot.
-In dingo's rollover ordering this is after POOLREAP/MIR/governance/donations
-rather than the cardano-ledger "before POOLREAP" SNAP point; for Conway (MIR is a
-no-op) and the current capture-only feature scope this matches the tested
-post-rollover state. A cardano-exact pre-POOLREAP capture would require splitting
-the rollover to compute the stake distribution early and write the rows once the
-new epoch nonce is known. This wiring is consensus-affecting and must be
-DevNet-validated before merge (see the note at the end of this section).
+The capture is split across two points in the rollover, because its read and its
+write belong at different places in the sequence:
+
+- `Manager.ComputeEpochBoundarySnapshot`, installed via
+  `LedgerState.SetEpochBoundarySnapshotStakeHook`, reads the stake distribution at
+  the SNAP point — immediately after `applyStakeRewards` and `applyMIRCerts`, and
+  before POOLREAP and governance enactment. It writes nothing and holds the distribution in the
+  manager, keyed to the exact boundary (new epoch, boundary slot, snapshot slot,
+  CIP-0163 gate argument).
+- `Manager.CaptureEpochBoundarySnapshot`, installed via
+  `LedgerState.SetEpochBoundarySnapshotHook`, runs at the end of the rollover,
+  after the new epoch row exists, because the row it writes needs that epoch's
+  nonce and boundary slot and the post-enactment protocol version. It persists the
+  distribution the SNAP-point read produced.
+
+Both run in the one rollover transaction, so the capture still commits atomically
+with the boundary state changes and a rollback or replay of the boundary
+re-executes the same deterministic read and reproduces the same snapshot.
+
+The split is what makes the capture reference-ordered. cardano-ledger runs SNAP
+before POOLREAP and before governance enactment, and the live `reward_live_stake`
+aggregate has no slot predicate, so capturing at the end of the rollover made the
+mark snapshot absorb every credit cardano-ledger applies after SNAP: POOLREAP
+deposit refunds, enacted treasury withdrawals and proposal-deposit refunds, all
+recorded at the boundary slot. Reading at the SNAP point excludes them by
+construction, with no subtraction after the fact.
+
+The reference sequence the read point is placed against is `NEWEPOCH` =
+`applyRUpd`, MIR, `EPOCH`; `EPOCH` = SNAP, POOLREAP, ratification/enactment.
+Exactly two boundary rules therefore precede SNAP — the delayed reward update and
+the Shelley-era MIR rule — and their credits belong in the mark snapshot.
+Aligning with that required swapping dingo's POOLREAP and MIR, which had run in
+the opposite order; MIR is now also pre-POOLREAP, matching the reference, so its
+pot movements are visible to the deposit refunds.
+
+A failed SNAP-point read is isolated with a savepoint (so a read error cannot
+poison the rollover transaction on a backend that aborts on SQL error). The
+persist half then performs the same boundary-aware historical reconstruction;
+if that also fails, capture returns the error rather than silently reverting to
+the live aggregate. A distribution left behind by a rollover that never reached
+its persist phase is discarded rather than attached to a different boundary,
+because the persist half requires an exact match on the boundary identity.
+
+This wiring is consensus-affecting and must be DevNet-validated before merge (see
+the note at the end of this section).
 
 The capture is wrapped in a metadata savepoint: if it fails, only its own writes
 roll back and the rollover proceeds, deferring to the event-driven fallback
@@ -3871,6 +3909,28 @@ slot clock only emits proactive epoch transitions when the ledger tip is within
 the current era's stability window of the upstream tip; while farther behind,
 block processing owns historical epoch transitions during catch-up.
 
+The fallback capture runs outside the rollover transaction, so when its
+transaction tip has already passed the snapshot slot it must reconstruct the
+boundary historically instead of reading the live aggregate
+(`Calculator.calculateBoundaryStakeDistributionInTxn`). It passes the boundary
+slot alongside the snapshot slot so the reconstruction retains the delayed reward
+update the authoritative SNAP-point read observes and excludes the post-SNAP
+boundary credits it does not; see `GetEpochBoundaryStakeByPools` in DATABASE.md.
+
+Both halves of that reconstruction come from one CTE, with or without the
+CIP-0163 gate: the leader-election pool totals via `GetEpochBoundaryStakeByPools`
+and the per-credential reward basis via
+`GetEpochBoundaryRewardStakeInputsForPools`, for the same (snapshot slot, boundary
+slot). They are then cross-checked with `validateRewardStakeInputTotals`, which
+catches a pool total and reward basis that genuinely disagree — the corruption
+class that later surfaces as a "reward stake input total mismatch" during reward
+application.
+
+The gate-off path used to read the per-credential half from the live
+`reward_live_stake` aggregate, which has no slot predicate, so one mark snapshot
+carried a boundary-accurate pool total against post-boundary per-credential stake
+and nothing compared the two.
+
 Authoritative-vs-fallback ordering is enforced by the
 `reward_snapshot.authoritative` marker (see DATABASE.md). The authoritative
 capture writes the marker with `authoritative = true` and always overwrites a
@@ -3918,19 +3978,33 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    and treasury tax synchronously with an empty Go distribution and returns the
    post-tax amount to reserves. It is not precomputed because zero output rows
    cannot provide rollback-safe precompute provenance.
-2. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
-3. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
-   whose retirement epoch is the new epoch. Each deposit is credited to the
-   pool's registered, active reward account, or added to the treasury when that
-   account is missing or inactive. Active pool membership itself is query-derived
-   (`GetActivePoolKeyHashesAtSlot`), so no separate pool-state delete is needed;
-   the retirement certificate rows remain for rollback safety.
-4. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
+2. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
    move-instantaneous-rewards certificates accumulated during the ended epoch —
    credit their rewards to registered reward accounts and apply the pot-to-pot
    transfers between treasury and reserves. It is a no-op for Conway+ epochs,
    where MIR certificates are not valid and no rows exist for those slots.
-5. CIP-0163 one-time activation stamp (`activateDelegatorInactivityIfNeeded`):
+   Shelley's `NEWEPOCH` embeds MIR between `applyRUpd` and `EPOCH`, so it runs
+   before both the stake snapshot and POOLREAP: its credits are part of the mark
+   snapshot and its pot movements are visible to POOLREAP, governance and the
+   ADA-pot capture.
+3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
+   `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
+   installed): read the mark snapshot's stake distribution here, after the two
+   boundary rules that precede SNAP in cardano-ledger and before every rule below
+   that credits reward accounts at the boundary slot. Read-only and
+   savepoint-wrapped; see "Boundary Capture And Events" for the deferral
+   behavior. Locked in by
+   `TestProcessEpochRollover_SnapStakeReadOrdering`.
+4. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
+5. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
+   whose retirement epoch is the new epoch. Each deposit is credited to the
+   pool's registered, active reward account, or added to the treasury when that
+   account is missing or inactive. The `EPOCH` rule runs it after SNAP, so these
+   deposits are deliberately outside the mark snapshot read at step 3. Active
+   pool membership itself is query-derived (`GetActivePoolKeyHashesAtSlot`), so no
+   separate pool-state delete is needed; the retirement certificate rows remain
+   for rollback safety.
+6. CIP-0163 one-time activation stamp (`activateDelegatorInactivityIfNeeded`):
    no-op unless the delegator-inactivity gate is on and the durable
    `delegator_inactivity_activated` `sync_state` marker is unset; otherwise
    stamps every active account to the new epoch's
@@ -3938,7 +4012,7 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    transaction. It precedes governance so the first inactivity-gated DRep tally
    observes the same full activation window as the Mark snapshot. See
    "CIP-0163 activation" above.
-6. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
+7. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
    proposal-deposit returns, which observe the post-POOLREAP treasury. The
    proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
@@ -3964,27 +4038,28 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    used by standalone/test callers. The mid-epoch HardForkInitiation stability
    check snapshots and threads this gate through `StabilityCheckInputs` as well,
    keeping its advertised transition tally aligned with boundary ratification.
-7. Treasury donations (`applyEpochDonations`), added after withdrawals.
-8. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
+8. Treasury donations (`applyEpochDonations`), added after withdrawals.
+9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
    above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal
    reserves top-up). This `reward_ada_pots` row seeds the delayed reward
    calculation for a later epoch.
-9. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
-10. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
+10. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
+11. Authoritative Mark snapshot write (`captureEpochBoundarySnapshot` →
     `snapshot.Manager.CaptureEpochBoundarySnapshot`, when a hook is installed),
     run last so the new epoch's nonce and boundary slot are available, inside a
     metadata savepoint so a capture failure defers to the event-driven fallback
-    instead of aborting the rollover. See "Boundary Capture And Events" for the
-    SNAP-point placement caveat and the DevNet gate.
+    instead of aborting the rollover. It persists the distribution read at step 3.
+    See "Boundary Capture And Events" for the split and the DevNet gate.
 
 POOLREAP runs before governance so any deposit that lands in the treasury is
-visible to the withdrawals checked in step 6. MIR certificate effects are applied
-in the same pre-governance window, so their treasury/reserves movements are also
-visible to governance and to the ADA-pot capture. Stake rewards are applied first
-so their reserves/treasury movement is visible to governance and to the ADA-pot
-capture. The governance/pparams/HARDFORK order is locked in by
-`TestProcessEpochRollover_OrderingInvariant`, and the reward bookends (stake
+visible to the withdrawals checked in step 7. MIR certificate effects are applied
+earlier still, so their treasury/reserves movements are visible to POOLREAP,
+governance and the ADA-pot capture. Stake rewards are applied first so their
+reserves/treasury movement is visible to everything that follows. The
+MIR/pparams/POOLREAP/governance/HARDFORK order is locked in by
+`TestProcessEpochRollover_OrderingInvariant`, the SNAP read point by
+`TestProcessEpochRollover_SnapStakeReadOrdering`, and the reward bookends (stake
 reward application first, ADA-pot capture last) by
 `TestProcessEpochRollover_RewardOrdering`.
 

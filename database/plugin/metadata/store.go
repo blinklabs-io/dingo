@@ -542,6 +542,39 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// GetEpochBoundaryStakeByPools is GetStakeByPoolsAtSlot with epoch-boundary
+	// (SNAP) reward semantics: reward credits recorded at boundarySlot (which is
+	// snapshotSlot+1) are retained unless they are marked
+	// AccountRewardDelta.PostSnapshot. That reproduces what the authoritative
+	// SNAP-point capture observes — the delayed reward update applied at the
+	// boundary, and none of the POOLREAP/MIR/enactment credits that follow it.
+	// Only the epoch-boundary mark-snapshot fallback may use this; use
+	// GetStakeByPoolsAtSlot for a plain "stake at slot" query.
+	GetEpochBoundaryStakeByPools(
+		[][]byte, // poolKeyHashes
+		uint64, // snapshotSlot
+		uint64, // boundarySlot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
+		types.Txn,
+	) (map[string]uint64, map[string]uint64, error)
+
+	// GetEpochBoundaryRewardStakeInputsForPools returns the positive
+	// per-credential reward basis for the same epoch boundary as
+	// GetEpochBoundaryStakeByPools, aggregated from the identical CTE. Pairing
+	// the two keeps the reward basis and the leader-election pool totals in exact
+	// agreement — same credential set, same slot-accurate values — regardless of
+	// the CIP-0163 gate, instead of mixing a historical leader total with a live
+	// reward aggregate.
+	GetEpochBoundaryRewardStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // snapshotSlot
+		uint64, // boundarySlot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
 	// GetPoolOwnerStakeAtSlot returns historical stake for the requested pool
 	// owner key hashes, keyed by pool plus credential. An owner is included only
 	// when that credential was delegated to the pool at the requested slot.
@@ -554,23 +587,6 @@ type MetadataStore interface {
 		uint64, // inactivityPeriod
 		types.Txn,
 	) (map[string]uint64, error)
-
-	// GetRewardStakeInputsForPools returns positive per-account delegated stake
-	// for pools. When the CIP-0163 inactivity gate is off (expiryEpoch == 0) it
-	// reads the live reward stake aggregate (slot and inactivityPeriod are
-	// ignored). When the gate is on
-	// (expiryEpoch > 0) it reconstructs per-credential stake and expiration at
-	// slot from the same historical CTE as GetStakeByPoolsAtSlot, so the
-	// reward-basis inputs agree with leader-election pool totals by construction
-	// rather than reading the mutable live account.expiration_epoch column
-	// (which can reflect a post-slot renewal on a fallback capture).
-	GetRewardStakeInputsForPools(
-		[][]byte, // poolKeyHashes
-		uint64, // slot
-		uint64, // expiryEpoch (0 = gate off)
-		uint64, // inactivityPeriod
-		types.Txn,
-	) ([]*models.RewardStakeInput, error)
 
 	// GetLiveStakeInputsForPools returns every registered credential (including
 	// zero-stake credentials) from the transactionally maintained live reward
@@ -661,6 +677,23 @@ type MetadataStore interface {
 	// idempotently instead of colliding on the unique index. Pass nil for
 	// callers without a natural per-event discriminator.
 	AddAccountRewardByCredential(
+		uint8, // credentialTag
+		[]byte, // stakeKey
+		uint64, // amount
+		uint64, // slot
+		[]byte, // sourceHash
+		types.Txn,
+	) error
+
+	// AddPostSnapshotAccountRewardByCredential is AddAccountRewardByCredential
+	// for a boundary credit that cardano-ledger applies after the epoch-boundary
+	// stake snapshot (SNAP): POOLREAP deposit refunds, enacted treasury
+	// withdrawals and proposal-deposit refunds. It is identical except that the
+	// journal row is stamped AccountRewardDelta.PostSnapshot, which is what lets
+	// the epoch-boundary stake reconstruction exclude these credits from a mark
+	// snapshot while retaining the pre-SNAP credits — the delayed reward update
+	// and MIR — recorded at the same boundary slot.
+	AddPostSnapshotAccountRewardByCredential(
 		uint8, // credentialTag
 		[]byte, // stakeKey
 		uint64, // amount

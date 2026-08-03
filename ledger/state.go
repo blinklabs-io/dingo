@@ -625,6 +625,7 @@ type LedgerState struct {
 	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
 	cachedShape                        atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	epochSnapshotHook                  atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
+	epochSnapshotStakeHook             atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
 	reachedTip                         atomic.Bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -1853,6 +1854,38 @@ func (ls *LedgerState) SetEpochBoundarySnapshotHook(
 // nil when none is set.
 func (ls *LedgerState) epochBoundarySnapshotHook() func(*database.Txn, event.EpochTransitionEvent) error {
 	if h := ls.epochSnapshotHook.Load(); h != nil {
+		return h.fn
+	}
+	return nil
+}
+
+// SetEpochBoundarySnapshotStakeHook installs (or clears, with a nil fn) the
+// SNAP-point stake read of the authoritative epoch-boundary capture. It is wired
+// at node startup to the snapshot manager's ComputeEpochBoundarySnapshot,
+// alongside SetEpochBoundarySnapshotHook.
+//
+// cardano-ledger runs SNAP before POOLREAP and before governance enactment, so
+// the mark snapshot's stake must be read immediately after the delayed reward
+// update and MIR — the boundary rules that precede SNAP — while the snapshot row
+// itself can only be written at the end of the rollover, where the new epoch's
+// nonce and the post-enactment protocol version exist. This hook is the read
+// half; epochSnapshotHook is the write half. Both run in the same rollover
+// transaction. With no stake hook installed the write half reads the stake
+// itself using boundary-aware historical reconstruction.
+func (ls *LedgerState) SetEpochBoundarySnapshotStakeHook(
+	fn func(*database.Txn, event.EpochTransitionEvent) error,
+) {
+	if fn == nil {
+		ls.epochSnapshotStakeHook.Store(nil)
+		return
+	}
+	ls.epochSnapshotStakeHook.Store(&epochBoundarySnapshotHookHolder{fn: fn})
+}
+
+// epochBoundarySnapshotStakeHook returns the installed SNAP-point stake hook, or
+// nil when none is set.
+func (ls *LedgerState) epochBoundarySnapshotStakeHook() func(*database.Txn, event.EpochTransitionEvent) error {
+	if h := ls.epochSnapshotStakeHook.Load(); h != nil {
 		return h.fn
 	}
 	return nil

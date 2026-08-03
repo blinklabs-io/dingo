@@ -51,7 +51,7 @@ func TestGetActivePoolKeyHashesOrderedMysql(t *testing.T) {
 	// in this function body has already executed, so a plain
 	// "defer store.Close()" here would close the connection before any
 	// later-registered t.Cleanup data cleanup runs against it (that exact
-	// ordering bug previously made TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationMysql's
+	// ordering bug previously made TestGetEpochBoundaryRewardStakeInputsUseHistoricalExpirationMysql's
 	// own epoch cleanup silently never execute; fixed in dingo #3025 -- see
 	// the epoch_id <= 5 delete below, which stays as a defensive measure).
 	t.Cleanup(func() { _ = store.Close() })
@@ -65,7 +65,7 @@ func TestGetActivePoolKeyHashesOrderedMysql(t *testing.T) {
 		Where("id = ?", 1).
 		Attrs(models.Tip{Slot: 1_000_000}).
 		FirstOrCreate(&models.Tip{ID: 1}).Error)
-	// epoch_id 0-5 is TestGetRewardStakeInputsForPoolsUsesHistoricalExpirationMysql's
+	// epoch_id 0-5 is TestGetEpochBoundaryRewardStakeInputsUseHistoricalExpirationMysql's
 	// fixture range (pool_atslot_test.go). That test's own cleanup now runs
 	// (dingo #3025 fixed the plain-defer-before-t.Cleanup ordering bug
 	// described above, which is why it used to leave epoch_id 0 behind with

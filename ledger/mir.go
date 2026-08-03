@@ -76,7 +76,7 @@ func (ls *LedgerState) applyMIRCerts(
 		}
 		var totalDebited uint64
 		for _, reward := range effect.Rewards {
-			credited, err := governance.CreditRegisteredRewardAccount(
+			credited, err := governance.CreditRegisteredRewardAccountBeforeSnapshot(
 				ls.db,
 				txn,
 				reward.CredentialTag,

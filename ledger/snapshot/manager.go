@@ -57,6 +57,63 @@ type Manager struct {
 	subscriptionId event.EventSubscriberId
 	loopWg         sync.WaitGroup
 	metrics        *managerMetrics
+
+	// pendingBoundary holds the stake distribution computed at the SNAP point of
+	// an in-flight epoch rollover, waiting for the same rollover transaction to
+	// persist it once the new epoch row (nonce, boundary slot, protocol version)
+	// exists. See ComputeEpochBoundarySnapshot.
+	pendingBoundary *pendingBoundarySnapshot
+}
+
+// pendingBoundarySnapshot is a SNAP-point stake distribution plus the exact
+// boundary identity it was computed for. Persisting it requires an exact match
+// on that identity, so a distribution left behind by an aborted rollover can
+// never be attached to a different boundary.
+type pendingBoundarySnapshot struct {
+	distribution *StakeDistribution
+	// txn binds the read half to the exact rollover transaction that produced
+	// it. A transaction can roll back after ComputeEpochBoundarySnapshot and
+	// before CaptureEpochBoundarySnapshot; allowing a later retry with the same
+	// boundary identity to consume that stale distribution would persist state
+	// from the abandoned transaction instead of recomputing SNAP.
+	txn          *database.Txn
+	newEpoch     uint64
+	boundarySlot uint64
+	snapshotSlot uint64
+	expiryEpoch  uint64
+}
+
+func (m *Manager) stashBoundaryDistribution(
+	pending *pendingBoundarySnapshot,
+) {
+	m.mu.Lock()
+	m.pendingBoundary = pending
+	m.mu.Unlock()
+}
+
+// takeBoundaryDistribution returns the SNAP-point distribution computed for
+// exactly this boundary, clearing it. Any stashed distribution is dropped even
+// when it does not match, because a non-matching one can only be the residue of
+// a rollover that never reached its persist phase.
+func (m *Manager) takeBoundaryDistribution(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+	expiryEpoch uint64,
+) *StakeDistribution {
+	m.mu.Lock()
+	pending := m.pendingBoundary
+	m.pendingBoundary = nil
+	m.mu.Unlock()
+	if pending == nil || pending.txn != txn {
+		return nil
+	}
+	if pending.newEpoch != evt.NewEpoch ||
+		pending.boundarySlot != evt.BoundarySlot ||
+		pending.snapshotSlot != evt.SnapshotSlot ||
+		pending.expiryEpoch != expiryEpoch {
+		return nil
+	}
+	return pending.distribution
 }
 
 // NewManager creates a new snapshot manager.
@@ -417,10 +474,77 @@ func (m *Manager) authoritativeMarkRewardSnapshotExists(
 	return true, nil
 }
 
-// CaptureEpochBoundarySnapshot captures the Mark snapshot using the caller's
-// open epoch-boundary transaction. Ledger invokes this hook last in the current
-// rollover ordering, after POOLREAP, governance enactment, donation accounting,
-// and the new epoch row have been applied.
+// ComputeEpochBoundarySnapshot computes the Mark snapshot's stake distribution
+// at the SNAP point of the caller's open epoch-boundary transaction and holds it
+// for the matching CaptureEpochBoundarySnapshot call later in the same rollover.
+// It writes nothing.
+//
+// cardano-ledger runs SNAP before POOLREAP and before governance enactment, so a
+// mark snapshot must reflect stake as of the boundary with only the pre-SNAP
+// boundary rules applied (applyRUpd and MIR). dingo's authoritative capture reads
+// the live reward aggregate, which has no slot predicate, and used to run at the
+// very end of the rollover — so the mark snapshot also absorbed every credit
+// cardano-ledger applies after SNAP: POOLREAP deposit refunds, enacted treasury
+// withdrawals and proposal-deposit refunds, all recorded at the boundary slot.
+//
+// Splitting the capture is what fixes that without subtracting those credits
+// back out: the stake read happens at the reference SNAP point (after
+// applyStakeRewards and applyMIRCerts, before applyPoolRetirements), while the
+// write stays at the end where the new epoch row, its nonce and the
+// post-enactment protocol version exist. Both phases run in the one rollover
+// transaction, so a rollback or replay of the boundary re-executes the same
+// deterministic read and reproduces the same snapshot.
+func (m *Manager) ComputeEpochBoundarySnapshot(
+	ctx context.Context,
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) error {
+	m.lockConfiguration()
+	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
+	calculator := NewCalculator(m.db)
+	distribution, err := calculator.calculateStakeDistributionInTxn(
+		ctx,
+		txn,
+		evt.SnapshotSlot,
+		expiryEpoch,
+	)
+	if err != nil {
+		// Leave nothing stashed: the persist phase recomputes with the
+		// boundary-aware historical fallback and returns any failure.
+		m.stashBoundaryDistribution(nil)
+		return fmt.Errorf("calculate snap-point stake distribution: %w", err)
+	}
+	m.stashBoundaryDistribution(&pendingBoundarySnapshot{
+		distribution: distribution,
+		txn:          txn,
+		newEpoch:     evt.NewEpoch,
+		boundarySlot: evt.BoundarySlot,
+		snapshotSlot: evt.SnapshotSlot,
+		expiryEpoch:  expiryEpoch,
+	})
+	m.logger.Debug(
+		"computed snap-point stake distribution",
+		"component", "snapshot",
+		"epoch", evt.NewEpoch,
+		"pools", len(distribution.PoolStakes),
+		"total_stake", distribution.TotalStake,
+		"slot", evt.SnapshotSlot,
+	)
+	return nil
+}
+
+// CaptureEpochBoundarySnapshot persists the Mark snapshot using the caller's
+// open epoch-boundary transaction. Ledger invokes this hook last in the rollover
+// ordering, after POOLREAP, governance enactment, donation accounting, and the
+// new epoch row have been applied, because the row it writes needs the new
+// epoch's nonce and the post-enactment protocol version.
+//
+// The stake distribution it persists is the one ComputeEpochBoundarySnapshot
+// read at the SNAP point earlier in this same transaction. When no matching
+// SNAP-point distribution exists — the compute hook is not installed, or its
+// read failed — it reconstructs the exact boundary with slot-aware reward
+// semantics. It never falls back to the live aggregate, whose post-SNAP
+// credits would corrupt the Mark snapshot.
 func (m *Manager) CaptureEpochBoundarySnapshot(
 	ctx context.Context,
 	txn *database.Txn,
@@ -428,20 +552,37 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 ) error {
 	m.lockConfiguration()
 	start := time.Now()
-	calculator := NewCalculator(m.db)
+	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
 
-	distribution, err := calculator.calculateStakeDistributionInTxn(
-		ctx,
-		txn,
-		evt.SnapshotSlot,
-		m.expiryEpoch(evt.NewEpoch),
-	)
-	if err != nil {
-		if m.metrics != nil {
-			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+	distribution := m.takeBoundaryDistribution(txn, evt, expiryEpoch)
+	if distribution == nil {
+		m.logger.Debug(
+			"no snap-point stake distribution for boundary; reading at persist time",
+			"component", "snapshot",
+			"epoch", evt.NewEpoch,
+			"boundary_slot", evt.BoundarySlot,
+		)
+		calculator := NewCalculator(m.db)
+		var err error
+		// Persist runs after POOLREAP/governance. Force historical
+		// reconstruction: the normal boundary helper may use the live fast path
+		// when the tip is <= SnapshotSlot, but live state already has post-SNAP
+		// credits at this point.
+		distribution, err = calculator.calculateHistoricalBoundaryStakeDistributionInTxn(
+			ctx,
+			txn,
+			evt.SnapshotSlot,
+			evt.BoundarySlot,
+			expiryEpoch,
+			m.inactivityPeriod(),
+		)
+		if err != nil {
+			if m.metrics != nil {
+				m.metrics.captureFailureTotal.Inc()
+				m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+			}
+			return fmt.Errorf("calculate stake distribution: %w", err)
 		}
-		return fmt.Errorf("calculate stake distribution: %w", err)
 	}
 
 	if err := m.saveSnapshotInTxn(
@@ -500,16 +641,21 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	return nil
 }
 
+// calculateSnapshotDistribution computes a snapshot distribution outside the
+// rollover transaction. boundarySlot is the epoch boundary the snapshot belongs
+// to (0 when the caller is not reconstructing one, e.g. genesis and
+// post-Mithril seeding); see boundaryRewardSlot for how it is validated.
 func (m *Manager) calculateSnapshotDistribution(
 	ctx context.Context,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
 	calculator := NewCalculator(m.db)
 	txn := m.db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
 	return calculator.calculateBoundaryStakeDistributionInTxn(
-		ctx, txn, slot, expiryEpoch, m.inactivityPeriod(),
+		ctx, txn, slot, boundarySlot, expiryEpoch, m.inactivityPeriod(),
 	)
 }
 
@@ -526,6 +672,7 @@ func (m *Manager) captureMarkSnapshot(
 	distribution, err := m.calculateSnapshotDistribution(
 		ctx,
 		evt.SnapshotSlot,
+		evt.BoundarySlot,
 		m.expiryEpoch(evt.NewEpoch),
 	)
 	if err != nil {
@@ -642,7 +789,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 
 	// Fresh sync seeds epoch 0, where no account can be expired, so the gate
 	// argument is 0 regardless of the enabled flag.
-	distribution, err := m.calculateSnapshotDistribution(ctx, 0, m.expiryEpoch(0))
+	distribution, err := m.calculateSnapshotDistribution(
+		ctx, 0, 0, m.expiryEpoch(0),
+	)
 	if err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
@@ -676,7 +825,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 				"total_pools", distribution.TotalPools,
 			)
 			dist2, err2 := m.calculateSnapshotDistribution(
-				ctx, lastEpoch.StartSlot, m.expiryEpoch(currentEpochId),
+				ctx, lastEpoch.StartSlot, 0, m.expiryEpoch(currentEpochId),
 			)
 			if err2 != nil {
 				m.logger.Warn(
