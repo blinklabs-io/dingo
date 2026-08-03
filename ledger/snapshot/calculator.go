@@ -156,6 +156,24 @@ func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 			ctx, txn, slot, expiryEpoch,
 		)
 	}
+	return c.calculateHistoricalBoundaryStakeDistributionInTxn(
+		ctx, txn, slot, boundarySlot, expiryEpoch, inactivityPeriod,
+	)
+}
+
+// calculateHistoricalBoundaryStakeDistributionInTxn always reconstructs the
+// requested boundary from historical metadata. The persist half of
+// authoritative epoch capture runs after POOLREAP and governance enactment;
+// its live aggregate already includes those post-SNAP credits even when the
+// transaction tip is still at or before the snapshot slot.
+func (c *Calculator) calculateHistoricalBoundaryStakeDistributionInTxn(
+	ctx context.Context,
+	txn *database.Txn,
+	slot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
+) (*StakeDistribution, error) {
 
 	rewardSlot := boundaryRewardSlot(slot, boundarySlot)
 	dist, err := c.calculateHistoricalStakeDistributionInTxn(

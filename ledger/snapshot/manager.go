@@ -71,6 +71,12 @@ type Manager struct {
 // never be attached to a different boundary.
 type pendingBoundarySnapshot struct {
 	distribution *StakeDistribution
+	// txn binds the read half to the exact rollover transaction that produced
+	// it. A transaction can roll back after ComputeEpochBoundarySnapshot and
+	// before CaptureEpochBoundarySnapshot; allowing a later retry with the same
+	// boundary identity to consume that stale distribution would persist state
+	// from the abandoned transaction instead of recomputing SNAP.
+	txn          *database.Txn
 	newEpoch     uint64
 	boundarySlot uint64
 	snapshotSlot uint64
@@ -90,6 +96,7 @@ func (m *Manager) stashBoundaryDistribution(
 // when it does not match, because a non-matching one can only be the residue of
 // a rollover that never reached its persist phase.
 func (m *Manager) takeBoundaryDistribution(
+	txn *database.Txn,
 	evt event.EpochTransitionEvent,
 	expiryEpoch uint64,
 ) *StakeDistribution {
@@ -97,7 +104,7 @@ func (m *Manager) takeBoundaryDistribution(
 	pending := m.pendingBoundary
 	m.pendingBoundary = nil
 	m.mu.Unlock()
-	if pending == nil {
+	if pending == nil || pending.txn != txn {
 		return nil
 	}
 	if pending.newEpoch != evt.NewEpoch ||
@@ -509,6 +516,7 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 	}
 	m.stashBoundaryDistribution(&pendingBoundarySnapshot{
 		distribution: distribution,
+		txn:          txn,
 		newEpoch:     evt.NewEpoch,
 		boundarySlot: evt.BoundarySlot,
 		snapshotSlot: evt.SnapshotSlot,
@@ -546,7 +554,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	start := time.Now()
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
 
-	distribution := m.takeBoundaryDistribution(evt, expiryEpoch)
+	distribution := m.takeBoundaryDistribution(txn, evt, expiryEpoch)
 	if distribution == nil {
 		m.logger.Debug(
 			"no snap-point stake distribution for boundary; reading at persist time",
@@ -556,7 +564,11 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		)
 		calculator := NewCalculator(m.db)
 		var err error
-		distribution, err = calculator.calculateBoundaryStakeDistributionInTxn(
+		// Persist runs after POOLREAP/governance. Force historical
+		// reconstruction: the normal boundary helper may use the live fast path
+		// when the tip is <= SnapshotSlot, but live state already has post-SNAP
+		// credits at this point.
+		distribution, err = calculator.calculateHistoricalBoundaryStakeDistributionInTxn(
 			ctx,
 			txn,
 			evt.SnapshotSlot,

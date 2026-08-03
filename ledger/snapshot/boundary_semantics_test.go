@@ -107,11 +107,65 @@ func TestCaptureEpochBoundaryUsesSnapPointStake(t *testing.T) {
 	require.Equal(t, uint64(40_000_000), uint64(inputs[0].Stake))
 }
 
+// TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake proves that the
+// persist fallback cannot use the live aggregate merely because the database
+// tip is still at/before the snapshot slot. A missing SNAP hook is exactly the
+// failure mode where the fallback runs after a post-SNAP boundary credit.
+func TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake(t *testing.T) {
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+	})
+
+	poolHash := []byte("poolFALLBACK_1234567890123456")
+	stakingKey := bytes.Repeat([]byte{0x5d}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{40_000_000}},
+	}, 500)
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        1,
+		BoundarySlot:    432_000,
+		EpochNonce:      []byte{0x0c, 0x0d},
+		ProtocolVersion: 8,
+		SnapshotSlot:    431_999,
+	}
+
+	txn := db.Transaction(true)
+	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
+		0,
+		stakingKey,
+		1_000_000,
+		evt.BoundarySlot,
+		bytes.Repeat([]byte{0xc3}, 32),
+		txn,
+	))
+	// Do not call ComputeEpochBoundarySnapshot: this simulates a missing or
+	// failed SNAP read. The fallback runs after the credit in this transaction.
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(), txn, evt,
+	))
+	require.NoError(t, txn.Commit())
+
+	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		1, "mark", poolHash, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, poolSnapshot)
+	require.Equal(t, uint64(40_000_000), uint64(poolSnapshot.TotalStake),
+		"missing SNAP hook must reconstruct pre-credit stake, not read live aggregate")
+}
+
 // TestCaptureEpochBoundaryIgnoresStaleSnapPointStake proves the SNAP-point
-// handoff is keyed to one exact boundary: a distribution left behind by a
-// rollover that never reached its persist phase is discarded, and the capture
-// reads the stake itself rather than attaching the stale value to a different
-// boundary.
+// handoff is bound to the transaction that produced it: a distribution left
+// behind by a rolled-back rollover is discarded even when the retry has the
+// same boundary identity, and the capture reconstructs the historical SNAP
+// value rather than attaching the stale live aggregate.
 func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
@@ -128,6 +182,20 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{40_000_000}},
 	}, 500)
 
+	// Commit a post-SNAP credit before the abandoned transaction. The live
+	// aggregate is now 55M, while boundary-aware reconstruction must subtract
+	// the credit and recover the 40M SNAP value.
+	creditTxn := db.Transaction(true)
+	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
+		0,
+		stakingKey,
+		15_000_000,
+		432_000,
+		bytes.Repeat([]byte{0xc2}, 32),
+		creditTxn,
+	))
+	require.NoError(t, creditTxn.Commit())
+
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	abandoned := event.EpochTransitionEvent{
 		PreviousEpoch: 0,
@@ -141,23 +209,9 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	))
 	require.NoError(t, txn.Rollback())
 
-	require.NoError(t, snapshotGormDB(t, db).
-		Model(&models.RewardLiveStake{}).
-		Where("staking_key = ?", stakingKey).
-		Update("total_stake", types.Uint64(55_000_000)).Error)
-	require.NoError(t, snapshotGormDB(t, db).
-		Model(&models.Account{}).
-		Where("staking_key = ?", stakingKey).
-		Update("reward", types.Uint64(15_000_000)).Error)
-
-	// A different boundary: the stashed distribution must not be reused.
-	next := event.EpochTransitionEvent{
-		PreviousEpoch:   1,
-		NewEpoch:        2,
-		BoundarySlot:    864_000,
-		ProtocolVersion: 8,
-		SnapshotSlot:    863_999,
-	}
+	// Retry the exact same boundary. Matching only the event fields would
+	// incorrectly reuse the abandoned 55M live read here.
+	next := abandoned
 	txn = db.Transaction(true)
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(), txn, next,
@@ -169,8 +223,8 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(55_000_000), uint64(poolSnapshot.TotalStake),
-		"fallback must reconstruct the next boundary rather than reuse stale SNAP-point stake")
+	require.Equal(t, uint64(40_000_000), uint64(poolSnapshot.TotalStake),
+		"fallback must reconstruct the boundary rather than reuse a rolled-back SNAP read")
 }
 
 // TestCalculateStakeDistributionDedupesCredentialAcrossPools proves the
