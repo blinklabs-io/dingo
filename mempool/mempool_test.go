@@ -1199,6 +1199,32 @@ func TestMempoolConsumer_Cache(t *testing.T) {
 	assert.Equal(t, txs[0].Hash, mempoolTx.Hash)
 }
 
+func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1024 * 1024,
+		ConsumerCacheSize: 2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop(context.Background())
+
+	txs := addMockTransactions(t, m, 3)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	require.NotNil(t, consumer)
+	for range txs {
+		require.NotNil(t, consumer.NextTx(false))
+	}
+
+	assert.Nil(t, consumer.GetTxFromCache(txs[0].Hash))
+	assert.NotNil(t, consumer.GetTxFromCache(txs[1].Hash))
+	assert.NotNil(t, consumer.GetTxFromCache(txs[2].Hash))
+	assert.Len(t, consumer.cache, 2)
+}
+
 func TestMempoolConsumer_ClearCache(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())

@@ -21,15 +21,21 @@ import (
 type MempoolConsumer struct {
 	mempool     *Mempool
 	cache       map[string]*MempoolTransaction
+	cacheOrder  []string
+	cacheLimit  int
 	nextTxIdx   int
 	cacheMutex  sync.Mutex
 	nextTxIdxMu sync.Mutex
 }
 
-func newConsumer(mempool *Mempool) *MempoolConsumer {
+func newConsumer(mempool *Mempool, cacheLimit int) *MempoolConsumer {
+	if cacheLimit <= 0 {
+		cacheLimit = DefaultConsumerCacheSize
+	}
 	return &MempoolConsumer{
-		mempool: mempool,
-		cache:   make(map[string]*MempoolTransaction),
+		mempool:    mempool,
+		cache:      make(map[string]*MempoolTransaction),
+		cacheLimit: cacheLimit,
 	}
 }
 
@@ -57,7 +63,15 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 
 				// Add transaction to cache (outside of locks)
 				m.cacheMutex.Lock()
+				if _, exists := m.cache[cachedTx.Hash]; !exists {
+					m.cacheOrder = append(m.cacheOrder, cachedTx.Hash)
+				}
 				m.cache[cachedTx.Hash] = cachedTx
+				for len(m.cacheOrder) > m.cacheLimit {
+					evictHash := m.cacheOrder[0]
+					m.cacheOrder = m.cacheOrder[1:]
+					delete(m.cache, evictHash)
+				}
 				m.cacheMutex.Unlock()
 
 				return nextTx
@@ -118,6 +132,7 @@ func (m *MempoolConsumer) ClearCache() {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
 		m.cache = make(map[string]*MempoolTransaction)
+		m.cacheOrder = nil
 	}
 }
 
@@ -126,5 +141,11 @@ func (m *MempoolConsumer) RemoveTxFromCache(hash string) {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
 		delete(m.cache, hash)
+		for i, cachedHash := range m.cacheOrder {
+			if cachedHash == hash {
+				m.cacheOrder = append(m.cacheOrder[:i], m.cacheOrder[i+1:]...)
+				break
+			}
+		}
 	}
 }
