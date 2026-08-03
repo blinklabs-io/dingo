@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -762,11 +763,13 @@ func findImmutableDir(extractDir string) string {
 		if err := assertNoSymlinkComponents(root, rel); err != nil {
 			return ""
 		}
-		full := filepath.Join(extractDir, rel)
-		if !hasChunkFiles(full) {
+		// Read through the same handle the check used. Re-opening by pathname
+		// would resolve the candidate a second time, which is a fresh chance
+		// for it to be something other than what was just vetted.
+		if !hasChunkFilesIn(root, rel) {
 			return ""
 		}
-		return full
+		return filepath.Join(extractDir, rel)
 	}
 
 	// Check common subdirectory layouts
@@ -1035,6 +1038,25 @@ func hasChunkFiles(dir string) bool {
 	if err != nil {
 		return false
 	}
+	return holdsChunkFile(entries)
+}
+
+// hasChunkFilesIn reports whether rel, resolved through root, is a directory
+// holding chunk files.
+//
+// The root handle is what makes this different from hasChunkFiles: the
+// candidate is reached relative to a directory already open rather than walked
+// again as a string, so a path vetted a moment ago cannot be something else by
+// the time it is read.
+func hasChunkFilesIn(root *os.Root, rel string) bool {
+	entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(rel))
+	if err != nil {
+		return false
+	}
+	return holdsChunkFile(entries)
+}
+
+func holdsChunkFile[E fs.DirEntry](entries []E) bool {
 	for _, e := range entries {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".chunk" {
 			return true
