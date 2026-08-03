@@ -215,7 +215,14 @@ services:
       dingo-1:
         condition: service_healthy
     environment:
-      TXPUMP_NODE_ADDR: "/ipc/dingo.socket"
+      # Connect over the node-to-client TCP port (3002) rather than the
+      # in-container unix socket. The dingo node creates /ipc/dingo.socket
+      # as 0755 owned by its own uid (100); txpump runs as uid 1000 and
+      # cannot connect() to that socket (needs the write bit), so the socket
+      # path fails with EACCES. TCP N2C is also the proven path used by the
+      # antithesis dingo-praos testnet. dingo-1 binds N2C on 0.0.0.0:3002
+      # via DINGO_PRIVATE_BIND_ADDR.
+      TXPUMP_NODE_ADDR: "dingo-1:3002"
       TXPUMP_NETWORK_MAGIC: "42"
       TXPUMP_TX_COUNT_MIN: "10"
       TXPUMP_TX_COUNT_MAX: "50"
@@ -225,7 +232,6 @@ services:
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
-      - dingo-1-ipc:/ipc:ro
       - logs:/logs
       - utxo-keys:/utxo-keys:ro
     networks:
@@ -252,6 +258,11 @@ services:
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+      # Expose node-to-client over TCP (private port 3002) on all interfaces
+      # so the in-network txpump can submit transactions without a cross-uid
+      # unix-socket mount (the socket is owned by uid 100; txpump is uid 1000).
+      DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
     volumes:
       - p1-configs:/configs:ro
       - ./topology/dingo-producer.json:/topology/topology.json:ro
@@ -328,7 +339,13 @@ services:
       dingo-producer:
         condition: service_healthy
     environment:
-      TXPUMP_NODE_ADDR: "/ipc/dingo.socket"
+      # Connect over the node-to-client TCP port (3002) rather than the
+      # in-container unix socket. The dingo node creates the socket 0755
+      # owned by its own uid (100); txpump runs as uid 1000 and cannot
+      # connect() to it (EACCES). dingo-producer binds N2C on 0.0.0.0:3002
+      # via DINGO_PRIVATE_BIND_ADDR. Mirrors txpump-dingo and the proven
+      # antithesis dingo-praos TCP N2C path.
+      TXPUMP_NODE_ADDR: "dingo-producer:3002"
       TXPUMP_NETWORK_MAGIC: "42"
       TXPUMP_TX_COUNT_MIN: "10"
       TXPUMP_TX_COUNT_MAX: "50"
@@ -338,7 +355,6 @@ services:
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
     volumes:
-      - dingo-producer-ipc:/ipc:ro
       - logs:/logs
       - utxo-keys:/utxo-keys:ro
     networks:
