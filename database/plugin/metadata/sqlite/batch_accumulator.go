@@ -16,7 +16,6 @@ package sqlite
 
 import (
 	"fmt"
-	"maps"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -54,8 +53,8 @@ type BatchAccumulator struct {
 	// producedByRef indexes produced outputs and collateral returns by their
 	// "%x:%d" tx-id/output-index ref so a later transaction in the same batch
 	// can resolve provenance and address keys for an output that has not yet
-	// been flushed to the database. Eagerly allocated so the Add/lookup
-	// methods never need a nil check.
+	// been flushed to the database. Mutating paths allocate it lazily so a
+	// zero-valued BatchAccumulator remains usable.
 	producedByRef map[string]models.Utxo
 }
 
@@ -70,6 +69,17 @@ func NewBatchAccumulator() *BatchAccumulator {
 	return &BatchAccumulator{
 		producedByRef: make(map[string]models.Utxo),
 	}
+}
+
+func (b *BatchAccumulator) ensureProducedIndex() {
+	if b.producedByRef == nil {
+		b.producedByRef = make(map[string]models.Utxo)
+	}
+}
+
+func (b *BatchAccumulator) indexProducedUtxo(u models.Utxo) {
+	b.ensureProducedIndex()
+	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
 }
 
 // NewBatchAccumulator creates an accumulator for this metadata store.
@@ -110,7 +120,7 @@ func (b *BatchAccumulator) AddAddressTx(at models.AddressTransaction) {
 // AddUtxoOutput appends a produced UTxO record to the batch.
 func (b *BatchAccumulator) AddUtxoOutput(u models.Utxo) {
 	b.UtxoOutputs = append(b.UtxoOutputs, u)
-	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
+	b.indexProducedUtxo(u)
 }
 
 // AddUtxoSpend appends a consumed UTxO record to the batch.
@@ -121,7 +131,7 @@ func (b *BatchAccumulator) AddUtxoSpend(s utxoSpend) {
 // AddCollateralReturn appends a collateral return UTxO to the batch.
 func (b *BatchAccumulator) AddCollateralReturn(u models.Utxo) {
 	b.CollateralRets = append(b.CollateralRets, u)
-	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
+	b.indexProducedUtxo(u)
 }
 
 // InFlightAddressKeys returns the address-key projection for an output
@@ -147,6 +157,21 @@ func (b *BatchAccumulator) HasInFlightProducer(
 ) bool {
 	_, ok := b.producedByRef[utxoRefKey(txId, outputIdx)]
 	return ok
+}
+
+// InFlightProducerAmount returns the lovelace amount of an output produced
+// earlier in the current batch (and not yet flushed), so collateral-fee
+// computation for a later invalid transaction can resolve it without the
+// database row existing yet.
+func (b *BatchAccumulator) InFlightProducerAmount(
+	txId []byte,
+	outputIdx uint32,
+) (uint64, bool) {
+	u, ok := b.producedByRef[utxoRefKey(txId, outputIdx)]
+	if !ok {
+		return 0, false
+	}
+	return uint64(u.Amount), true
 }
 
 // AddDeleteTxID appends a transaction ID scheduled for idempotent
@@ -215,7 +240,12 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
 	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
 	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
-	maps.Copy(b.producedByRef, other.producedByRef)
+	for _, u := range other.UtxoOutputs {
+		b.indexProducedUtxo(u)
+	}
+	for _, u := range other.CollateralRets {
+		b.indexProducedUtxo(u)
+	}
 }
 
 // addPendingCountsToStats reports rows buffered for the next batch flush.
@@ -302,6 +332,27 @@ func (d *MetadataStoreSqlite) FlushBatch(
 		}
 		if err := batchSpendUtxos(db, batch.UtxoSpends); err != nil {
 			return fmt.Errorf("flush batch: spend utxos: %w", err)
+		}
+		rewardRefs := rewardStakeRefsFromUtxos(batch.UtxoOutputs)
+		addRewardStakeRefsFromUtxos(rewardRefs, batch.CollateralRets)
+		spendRefs, err := rewardStakeRefsFromUtxoSpends(
+			db,
+			batch.UtxoSpends,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"flush batch: query reward stake spend refs: %w",
+				err,
+			)
+		}
+		for _, item := range spendRefs {
+			addRewardStakeRef(rewardRefs, item.ref, item.slot)
+		}
+		if err := refreshRewardLiveStakeAggregates(
+			db,
+			rewardRefs,
+		); err != nil {
+			return fmt.Errorf("flush batch: refresh reward live stake: %w", err)
 		}
 
 		if err := insertKeyWitnesses(db, batch.KeyWitnesses); err != nil {

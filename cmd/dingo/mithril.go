@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -67,21 +68,21 @@ func resolveAggregatorURL(
 }
 
 // resolveMithrilBackend normalizes the configured Mithril artifact
-// backend, applying the node default (v2) when unset.
+// backend, applying the node default (v2) when unset. The accepted set
+// comes from mithril.AcceptedBackends so a backend added there is
+// recognized here without a manual update.
 func resolveMithrilBackend(backend string) (string, error) {
-	switch backend {
-	case "":
+	if backend == "" {
 		return mithril.BackendV2, nil
-	case mithril.BackendV1, mithril.BackendV2:
-		return backend, nil
-	default:
-		return "", fmt.Errorf(
-			"unsupported Mithril backend %q (expected %q or %q)",
-			backend,
-			mithril.BackendV1,
-			mithril.BackendV2,
-		)
 	}
+	if slices.Contains(mithril.AcceptedBackends(), backend) {
+		return backend, nil
+	}
+	return "", fmt.Errorf(
+		"unsupported Mithril backend %q (expected one of %q)",
+		backend,
+		mithril.AcceptedBackends(),
+	)
 }
 
 func mithrilListCommand() *cobra.Command {
@@ -358,12 +359,36 @@ func mithrilSyncRunE(
 	if cfg == nil {
 		return errors.New("no config found in context")
 	}
+	// CIP-0163: a Mithril bootstrap cannot carry reward-account expiration
+	// state (see errMithrilInactivityIncompatible), so refuse before touching
+	// the network or the database.
+	if cfg.DelegatorInactivityEnabled {
+		return errMithrilInactivityIncompatible()
+	}
 	logger := commonRun(cfg)
 	network := cfg.Network
 	if network == "" {
 		network = "preview"
 	}
 	return runMithrilSync(cmd.Context(), cfg, logger, network)
+}
+
+// errMithrilInactivityIncompatible reports why Mithril bootstrap and the
+// CIP-0163 delegator-inactivity gate cannot be combined on the same node.
+// Account.ExpirationEpoch is dingo-only ledger state with no representation in
+// the cardano-ledger Mithril snapshot dingo imports, and it cannot be
+// reconstructed from post-import witness history (a long-inactive account --
+// exactly what CIP-0163 targets -- may have last witnessed before the import
+// point). A Mithril-bootstrapped node would therefore compute different
+// expiry-dependent stake, rewards, and governance than a genesis-synced node.
+func errMithrilInactivityIncompatible() error {
+	return errors.New(
+		"cannot use Mithril bootstrap when delegatorInactivityEnabled " +
+			"(CIP-0163) is set: reward-account expiration state is absent from " +
+			"the cardano-ledger Mithril snapshot and cannot be reconstructed " +
+			"after import, so a Mithril-bootstrapped node would diverge from a " +
+			"genesis-synced one; sync from genesis instead",
+	)
 }
 
 func runMithrilSync(
@@ -535,13 +560,15 @@ func runMithrilSync(
 		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
 		VerifyCertChain:        cfg.Mithril.VerifyCertificates,
 		CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
-		BlobPlugin:             cfg.BlobPlugin,
-		MetadataPlugin:         cfg.MetadataPlugin,
-		RunMode:                string(config.RunModeLoad),
-		BackfillBatchSize:      cfg.BackfillBatchSize,
-		DatabaseWorkers:        cfg.DatabaseWorkers,
-		Logger:                 logger,
-		OnProgress:             onProgress,
+		StoragePlugins: mithril.StoragePlugins{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		RunMode:           string(config.RunModeLoad),
+		BackfillBatchSize: cfg.BackfillBatchSize,
+		DatabaseWorkers:   cfg.DatabaseWorkers,
+		Logger:            logger,
+		OnProgress:        onProgress,
 	})
 	if err != nil {
 		return err

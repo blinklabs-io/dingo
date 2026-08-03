@@ -16,9 +16,7 @@ package blob
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -92,24 +90,25 @@ type BlobStore interface {
 	// DiskSize returns the on-disk size of the blob store in bytes.
 	// Returns 0 for cloud-backed stores where local size is not meaningful.
 	DiskSize() (int64, error)
-}
 
-// New returns the started blob plugin selected by name
-func New(pluginName string) (BlobStore, error) {
-	// Get and start the plugin
-	p, err := plugin.StartPlugin(plugin.PluginTypeBlob, pluginName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Type assert to BlobStore interface
-	blobStore, ok := p.(BlobStore)
-	if !ok {
-		return nil, fmt.Errorf(
-			"plugin '%s' does not implement BlobStore interface",
-			pluginName,
-		)
-	}
-
-	return blobStore, nil
+	// Sync flushes everything committed so far to durable storage, so it
+	// survives an unclean shutdown of the process or host.
+	//
+	// This exists because committing a blob transaction is not the same as
+	// making it durable. The combined blob+metadata commit in database.Txn
+	// deliberately commits blob first so the blob store can only ever be ahead
+	// of the metadata tip, never behind -- startup reconciliation knows how to
+	// trim a blob store that is ahead (cleanupOrphanedBlobs) but cannot
+	// reconstruct blocks the metadata tip already references. That ordering
+	// only holds on disk if the blob commit is durable before the metadata
+	// commit is, so Txn.Commit calls Sync between the two. Skipping it inverts
+	// the invariant on an unclean host shutdown, because the two stores flush on
+	// very different schedules: SQLite reaches disk at WAL checkpoints (every
+	// 1000 pages by default) while Badger can hold committed writes in a 128MiB
+	// memtable for hours at chain tip. The metadata tip then survives while the
+	// blocks it references are silently discarded.
+	//
+	// Implementations whose writes are already durable on commit (remote
+	// object stores) may return nil.
+	Sync() error
 }

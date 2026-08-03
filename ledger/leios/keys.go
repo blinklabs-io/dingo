@@ -16,14 +16,17 @@ package leios
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/keystore"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
@@ -38,12 +41,56 @@ var ErrInvalidPublicKey = errors.New("invalid voter public key")
 
 const voteSigningKeySize = 32
 
-// voteSigningKeyFileMaxSize bounds reads of the signing key file: a hex
-// scalar plus surrounding whitespace fits comfortably in 1 KiB.
+// voteSigningKeyFileMaxSize bounds reads of the signing key file: a Cardano
+// text envelope plus surrounding whitespace fits comfortably in 1 KiB.
 const voteSigningKeyFileMaxSize = 1024
 
 // voterPoolKeyHashSize is the Blake2b-224 pool key hash length.
 const voterPoolKeyHashSize = 28
+
+// DerivePrototypeVoteSigningKey reproduces the current Leios prototype's
+// temporary key derivation: the 28-byte pool cold-key hash is right-padded
+// with four zero bytes and interpreted as a BLS12-381 secret scalar.
+//
+// The padded value is reduced modulo the scalar field order, matching the
+// reference's rawDeserialiseSignKeyDSIGN, which decodes via blst's
+// blst_scalar_from_be_bytes: that reduces mod r and fails only on zero.
+// Reduction is not optional. r's leading byte is 0x73 while the padded
+// scalar's leading byte is the hash's, so roughly 55% of pools produce a
+// scalar of at least r; rejecting those would leave their votes
+// unverifiable. Reduction is a no-op for the rest, so derived keys for
+// pools below r are unchanged.
+//
+// This stands in for real voting-key registration (CIP-0164), which the
+// reference itself marks "FIXME: REMOVE THIS". It deliberately does not go
+// through ParseVoteSigningKey: that parses operator-supplied key files,
+// where silently reducing an out-of-range scalar would be wrong.
+func DerivePrototypeVoteSigningKey(
+	poolKeyHash []byte,
+) (*VoteSigningKey, error) {
+	if len(poolKeyHash) != voterPoolKeyHashSize {
+		return nil, fmt.Errorf(
+			"%w: pool key hash must be %d bytes, got %d",
+			ErrInvalidSigningKey,
+			voterPoolKeyHashSize,
+			len(poolKeyHash),
+		)
+	}
+	raw := make([]byte, voteSigningKeySize)
+	copy(raw, poolKeyHash)
+	sk := new(big.Int).SetBytes(raw)
+	sk.Mod(sk, fr.Modulus())
+	if sk.Sign() == 0 {
+		return nil, fmt.Errorf(
+			"%w: pool key hash %x reduces to a zero scalar",
+			ErrInvalidSigningKey,
+			poolKeyHash,
+		)
+	}
+	key := &VoteSigningKey{sk: sk}
+	key.pub.ScalarMultiplicationBase(sk)
+	return key, nil
+}
 
 // VoteSigningKey is a BLS12-381 MinSig signing key for Leios votes: a
 // scalar secret key with its G2 public key.
@@ -91,7 +138,10 @@ func ParseVoteSigningKey(hexStr string) (*VoteSigningKey, error) {
 	return key, nil
 }
 
-// LoadVoteSigningKeyFile reads a hex-encoded vote signing key from a file.
+// LoadVoteSigningKeyFile reads a Leios BLS signing key from a file. Cardano
+// text-envelope files are accepted in addition to the legacy raw hex scalar
+// format. The envelope's cborHex value is the CBOR encoding of the 32-byte
+// big-endian scalar produced by cardano-cli dijkstra node key-gen-BLS.
 // The file must not be accessible beyond its owner (checked on the open
 // handle via keystore, which avoids TOCTOU races between check and read)
 // and must not exceed voteSigningKeyFileMaxSize.
@@ -117,11 +167,52 @@ func LoadVoteSigningKeyFile(path string) (*VoteSigningKey, error) {
 			voteSigningKeyFileMaxSize,
 		)
 	}
-	key, err := ParseVoteSigningKey(strings.TrimSpace(string(data)))
+	key, err := parseVoteSigningKeyFile(data)
 	if err != nil {
 		return nil, fmt.Errorf("vote signing key file %q: %w", path, err)
 	}
 	return key, nil
+}
+
+type voteSigningKeyEnvelope struct {
+	Type    string `json:"type"`
+	CborHex string `json:"cborHex"`
+}
+
+func parseVoteSigningKeyFile(data []byte) (*VoteSigningKey, error) {
+	trimmed := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(trimmed, "{") {
+		return ParseVoteSigningKey(trimmed)
+	}
+
+	var envelope voteSigningKeyEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+		return nil, fmt.Errorf("decode Cardano signing key envelope: %w", err)
+	}
+	keyType := strings.ToLower(envelope.Type)
+	if !strings.Contains(keyType, "bls") && !strings.Contains(keyType, "leios") {
+		return nil, fmt.Errorf(
+			"%w: unsupported Cardano signing key type %q",
+			ErrInvalidSigningKey,
+			envelope.Type,
+		)
+	}
+	cborBytes, err := hex.DecodeString(envelope.CborHex)
+	if err != nil {
+		return nil, fmt.Errorf("decode Cardano signing key cborHex: %w", err)
+	}
+	var scalar []byte
+	read, err := cbor.Decode(cborBytes, &scalar)
+	if err != nil {
+		return nil, fmt.Errorf("decode Cardano signing key cborHex: %w", err)
+	}
+	if read != len(cborBytes) {
+		return nil, fmt.Errorf(
+			"%w: trailing bytes after Cardano signing key CBOR value",
+			ErrInvalidSigningKey,
+		)
+	}
+	return ParseVoteSigningKey(hex.EncodeToString(scalar))
 }
 
 // ParseVoterPublicKey parses a hex-encoded 96-byte compressed G2 public
@@ -167,6 +258,7 @@ func ParseVoterPublicKey(hexStr string) (*bls12381.G2Affine, error) {
 // the registry, or aggregate certificate verification becomes forgeable
 // via rogue-key attacks.
 type VoterRegistry struct {
+	mu   sync.RWMutex
 	keys map[string]*bls12381.G2Affine // lowercase-hex pool key hash -> pubkey
 }
 
@@ -218,11 +310,52 @@ func NewVoterRegistry(entries map[string]string) (*VoterRegistry, error) {
 func (r *VoterRegistry) PublicKeyFor(
 	poolKeyHash []byte,
 ) (*bls12381.G2Affine, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	pub, ok := r.keys[hex.EncodeToString(poolKeyHash)]
 	return pub, ok
 }
 
+// RegisterPublicKey adds a locally configured public key to the registry.
+// Existing entries must agree so a local signing key cannot silently diverge
+// from the verification trust root shared with peers.
+func (r *VoterRegistry) RegisterPublicKey(
+	poolKeyHash []byte,
+	pub *bls12381.G2Affine,
+) error {
+	if len(poolKeyHash) != voterPoolKeyHashSize {
+		return fmt.Errorf(
+			"pool key hash must be %d bytes, got %d",
+			voterPoolKeyHashSize,
+			len(poolKeyHash),
+		)
+	}
+	if pub == nil || pub.IsInfinity() {
+		return errors.New("voter public key must not be nil or infinity")
+	}
+	canonical := hex.EncodeToString(poolKeyHash)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.keys == nil {
+		r.keys = make(map[string]*bls12381.G2Affine)
+	}
+	if existing, ok := r.keys[canonical]; ok {
+		if !existing.Equal(pub) {
+			return fmt.Errorf(
+				"registered voter public key for pool %s conflicts with local signing key",
+				canonical,
+			)
+		}
+		return nil
+	}
+	pubCopy := *pub
+	r.keys[canonical] = &pubCopy
+	return nil
+}
+
 // Size returns the number of registered voter public keys.
 func (r *VoterRegistry) Size() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return len(r.keys)
 }

@@ -101,6 +101,9 @@ type mockEpochProvider struct {
 	// division so tests can model variable epoch lengths or simulate
 	// past-horizon errors.
 	epochForSlot func(slot uint64) (uint64, error)
+	// epochSlotRange, when set, overrides EpochSlotRange's default fixed
+	// range so tests can model Byron-era offsets or variable epoch lengths.
+	epochSlotRange func(epoch uint64) (EpochSlotRange, error)
 }
 
 func newMockEpochProvider() *mockEpochProvider {
@@ -138,6 +141,21 @@ func (m *mockEpochProvider) NextEpochNonceReadyEpoch() (uint64, bool) {
 
 func (m *mockEpochProvider) SlotsPerEpoch() uint64 {
 	return m.slotsPerEpoch
+}
+
+func (m *mockEpochProvider) EpochSlotRange(
+	epoch uint64,
+) (EpochSlotRange, error) {
+	if m.epochSlotRange != nil {
+		return m.epochSlotRange(epoch)
+	}
+	if m.slotsPerEpoch == 0 {
+		return EpochSlotRange{}, errors.New("slotsPerEpoch unset")
+	}
+	return EpochSlotRange{
+		StartSlot: epoch * m.slotsPerEpoch,
+		SlotCount: m.slotsPerEpoch,
+	}, nil
 }
 
 func (m *mockEpochProvider) EpochForSlot(slot uint64) (uint64, error) {
@@ -326,6 +344,62 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 	// Schedule is computed asynchronously; wait for it.
 	schedule := waitForSchedule(t, election, 30*time.Second)
 	assert.Equal(t, uint64(1), schedule.Epoch)
+}
+
+func TestElectionUsesEpochSlotRangeForSchedule(t *testing.T) {
+	const (
+		epoch              = uint64(299)
+		preprodEpochStart  = uint64(127_526_400)
+		testEpochSlotCount = uint64(4)
+	)
+
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
+
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(epoch)
+	epochProvider.activeSlotCoeff = 1.0
+	epochProvider.SetEpochNonceForEpoch(epoch, electionTestNonce)
+	epochProvider.epochSlotRange = func(gotEpoch uint64) (EpochSlotRange, error) {
+		if gotEpoch != epoch {
+			return EpochSlotRange{}, fmt.Errorf(
+				"got epoch slot range request for epoch %d, want %d",
+				gotEpoch,
+				epoch,
+			)
+		}
+		return EpochSlotRange{
+			StartSlot: preprodEpochStart,
+			SlotCount: testEpochSlotCount,
+		}, nil
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	err := election.Start(context.Background())
+	require.NoError(t, err)
+	defer func() { _ = election.Stop() }()
+
+	schedule := waitForSchedule(t, election, 30*time.Second)
+	require.Equal(t, epoch, schedule.Epoch)
+	slots := schedule.LeaderSlotsSnapshot()
+	require.NotEmpty(t, slots)
+	for _, slot := range slots {
+		assert.GreaterOrEqual(t, slot, preprodEpochStart)
+		assert.Less(t, slot, preprodEpochStart+testEpochSlotCount)
+	}
 }
 
 func TestElectionLoadsPersistedSchedule(t *testing.T) {

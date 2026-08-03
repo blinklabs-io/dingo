@@ -172,9 +172,13 @@ func (d *Database) InsertDrepIfAbsent(
 // the current stake of all delegated accounts, approximated from live
 // UTxO balance plus reward-account balance. credentialTag distinguishes
 // key (0) from script (1) DRep credentials sharing the same 28-byte hash.
+// expiryEpoch is the CIP-0163 reward-account inactivity gate: 0 = off
+// (byte-identical to the pre-CIP query), >0 = exclude accounts whose
+// expiration_epoch is nonzero and less than expiryEpoch.
 func (d *Database) GetDRepVotingPower(
 	credentialTag uint8,
 	drepCredential []byte,
+	expiryEpoch uint64,
 	txn *Txn,
 ) (uint64, error) {
 	if txn == nil {
@@ -184,6 +188,7 @@ func (d *Database) GetDRepVotingPower(
 	return d.metadata.GetDRepVotingPower(
 		credentialTag,
 		drepCredential,
+		expiryEpoch,
 		txn.Metadata(),
 	)
 }
@@ -209,9 +214,11 @@ func (d *Database) GetDRepDelegators(
 }
 
 // GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower; see
-// the metadata-store interface for the contract.
+// the metadata-store interface for the contract. expiryEpoch is the
+// CIP-0163 gate; see GetDRepVotingPower.
 func (d *Database) GetDRepVotingPowerBatch(
 	drepCredentials []models.StakeCredentialRef,
+	expiryEpoch uint64,
 	txn *Txn,
 ) (map[string]uint64, error) {
 	if txn == nil {
@@ -220,6 +227,7 @@ func (d *Database) GetDRepVotingPowerBatch(
 	}
 	result, err := d.metadata.GetDRepVotingPowerBatch(
 		drepCredentials,
+		expiryEpoch,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -234,9 +242,11 @@ func (d *Database) GetDRepVotingPowerBatch(
 }
 
 // GetDRepVotingPowerByType returns voting power grouped by DRep
-// delegation type.
+// delegation type. expiryEpoch is the CIP-0163 gate; see
+// GetDRepVotingPower.
 func (d *Database) GetDRepVotingPowerByType(
 	drepTypes []uint64,
+	expiryEpoch uint64,
 	txn *Txn,
 ) (map[uint64]uint64, error) {
 	if txn == nil {
@@ -245,6 +255,7 @@ func (d *Database) GetDRepVotingPowerByType(
 	}
 	result, err := d.metadata.GetDRepVotingPowerByType(
 		drepTypes,
+		expiryEpoch,
 		txn.Metadata(),
 	)
 	if err != nil {

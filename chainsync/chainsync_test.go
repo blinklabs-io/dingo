@@ -1537,6 +1537,67 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestObservedHeaderLimitFollowsSelectionState(t *testing.T) {
+	limit := 3
+	cfg := chainsync.DefaultConfig()
+	cfg.ObservedHeaderLimitFunc = func() int {
+		return limit
+	}
+	s := newTestState(t, newTestEventBus(t), cfg)
+	conn := newTestConnId(43)
+
+	var (
+		prevHash  []byte
+		firstHash []byte
+	)
+	for i := 1; i <= 4; i++ {
+		hash := lcommon.NewBlake2b256(
+			[]byte(fmt.Sprintf("observed-header-%d", i)),
+		).Bytes()
+		if i == 1 {
+			firstHash = append([]byte(nil), hash...)
+		}
+		header := testBlockHeader{
+			hash:        lcommon.NewBlake2b256(hash),
+			prevHash:    lcommon.NewBlake2b256(prevHash),
+			blockNumber: uint64(i),
+			slot:        uint64(i),
+		}
+		s.RecordObservedHeader(chainsync.ObservedHeader{
+			ConnectionId: conn,
+			BlockHeader:  header,
+			Point:        ocommon.NewPoint(uint64(i), hash),
+			BlockNumber:  uint64(i),
+			Type:         1,
+		})
+		prevHash = hash
+	}
+
+	_, _, ok := s.LookupObservedHeader(conn, firstHash)
+	require.False(t, ok, "the dynamic three-header limit should evict the oldest")
+
+	limit = 2
+	fifthHash := lcommon.NewBlake2b256([]byte("observed-header-5")).Bytes()
+	s.RecordObservedHeader(chainsync.ObservedHeader{
+		ConnectionId: conn,
+		BlockHeader: testBlockHeader{
+			hash:        lcommon.NewBlake2b256(fifthHash),
+			prevHash:    lcommon.NewBlake2b256(prevHash),
+			blockNumber: 5,
+			slot:        5,
+		},
+		Point:       ocommon.NewPoint(5, fifthHash),
+		BlockNumber: 5,
+		Type:        1,
+	})
+
+	thirdHash := lcommon.NewBlake2b256([]byte("observed-header-3")).Bytes()
+	_, _, ok = s.LookupObservedHeader(conn, thirdHash)
+	require.False(t, ok, "lowering the limit should trim the retained ancestry")
+	_, _, ok = s.LookupObservedHeader(conn, fifthHash)
+	require.True(t, ok)
+}
+
 // --- Blockfetch latency metric tests ---
 
 const blockfetchLatencyMetricName = "dingo_chainsync_blockfetch_latency_seconds"

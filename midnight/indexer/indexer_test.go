@@ -21,10 +21,14 @@ import (
 	"os"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
@@ -558,6 +562,59 @@ func TestDeregistration_Rollback(t *testing.T) {
 	assert.NotEmpty(t, reg.FullDatum)
 }
 
+// TestRollback_NoRecordedEvents verifies that rolling back a block that
+// recorded no Midnight-relevant rows is a clean no-op: it returns without
+// error, leaves the in-memory tracked sets unchanged, and does not touch rows
+// belonging to other blocks. Deleting by a block number that matched nothing
+// must not disturb earlier, non-rolled-back state.
+func TestRollback_NoRecordedEvents(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	// Block 1: a real cNIGHT create that must survive the rollback below.
+	keepTxHash := pad32("a1000001")
+	block1 := testBlock(1, 100, 0x01)
+	require.NoError(t, idx.processBlock(block1,
+		[]lcommon.Transaction{buildTx(t, keepTxHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("a1000000"), 0)},
+			[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 500)})},
+		1_000))
+
+	// Block 2: only a non-relevant plain transfer, so nothing is recorded.
+	plainTx := buildTx(t, pad32("b2000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("b2000000"), 0)},
+		[]lcommon.TransactionOutput{anyOutput(t)})
+	block2 := testBlock(2, 200, 0x02)
+	require.NoError(t, idx.processBlock(block2, []lcommon.Transaction{plainTx}, 2_000))
+
+	// Precondition: block 2 wrote no rows; only block 1's create exists.
+	var creates []models.MidnightAssetCreate
+	require.NoError(t, store.DB().Find(&creates).Error)
+	require.Len(t, creates, 1, "only block 1 should have recorded a create")
+
+	idx.mu.RLock()
+	utxoCountBefore := len(idx.cNightUTxOs)
+	idx.mu.RUnlock()
+
+	// Roll back block 2, which recorded no events. Must be a clean no-op.
+	idx.rollbackBlock(block2)
+
+	// Block 1's create row must be untouched by the rollback of an empty block.
+	require.NoError(t, store.DB().Find(&creates).Error)
+	assert.Len(t, creates, 1,
+		"rolling back a block with no recorded events must not delete other blocks' rows")
+
+	idx.mu.RLock()
+	_, kept := idx.cNightUTxOs[utxoKey{TxHash: keepTxHash, Index: 0}]
+	utxoCountAfter := len(idx.cNightUTxOs)
+	idx.mu.RUnlock()
+	assert.True(t, kept,
+		"block 1's tracked UTxO must remain after rolling back an unrelated empty block")
+	assert.Equal(t, utxoCountBefore, utxoCountAfter,
+		"tracked UTxO set must be unchanged by a no-op rollback")
+}
+
 // TestNew_PolicyIDLengthValidation verifies that New rejects policy IDs that
 // are not exactly 28 bytes (56 hex characters).
 func TestNew_PolicyIDLengthValidation(t *testing.T) {
@@ -1014,7 +1071,7 @@ func TestCandidateAddRemove(t *testing.T) {
 
 	// Epoch transition: snapshot must contain the one remaining candidate.
 	idx.mu.Lock()
-	idx.advanceEpochLocked(2, 2)
+	idx.advanceEpochLocked(2, 2, nil)
 	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
@@ -1022,9 +1079,170 @@ func TestCandidateAddRemove(t *testing.T) {
 	require.Len(t, snapshots, 1, "epoch transition must write a candidate snapshot")
 	assert.Equal(t, uint64(1), snapshots[0].Epoch)
 
-	var entries []candidateEntry
+	var entries []CandidateEntry
 	require.NoError(t, fxcbor.Unmarshal(snapshots[0].CandidatesCbor, &entries))
 	require.Len(t, entries, 1)
+}
+
+// TestCandidateRegistrationProvenance_PersistedAndDecodable verifies that
+// creating a candidate UTxO durably records its block/slot/tx-index and the
+// creating transaction's inputs, and that the CBOR round-trips through
+// DecodeCandidateInputsCbor exactly as written.
+func TestCandidateRegistrationProvenance_PersistedAndDecodable(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	txHash := pad32("cafe0001")
+	in1Hash := pad32("cafe0000")
+	in2Hash := pad32("cafe0002")
+	createTx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{
+			buildInput(t, in1Hash, 0),
+			buildInput(t, in2Hash, 3),
+		},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
+	)
+	// A leading, unrelated tx so the candidate-creating tx lands at index 1,
+	// proving TxIndex is the tx's position and not just hardcoded to 0.
+	otherTx := buildTx(
+		t,
+		pad32("cafe0003"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("cafe0004"), 0)},
+		[]lcommon.TransactionOutput{anyOutput(t)},
+	)
+	block := testBlock(7, 777, 0xF7)
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{otherTx, createTx}, 1_000))
+
+	txHashBytes, err := hex.DecodeString(txHash)
+	require.NoError(t, err)
+
+	var rows []models.MidnightCommitteeCandidateRegistration
+	require.NoError(t, store.DB().Find(&rows).Error)
+	require.Len(t, rows, 1)
+	row := rows[0]
+	assert.Equal(t, txHashBytes, row.TxHash)
+	assert.Equal(t, uint32(0), row.OutputIndex)
+	assert.Equal(t, block.Number, row.BlockNumber)
+	assert.Equal(t, block.Slot, row.SlotNumber)
+	assert.Equal(t, uint32(1), row.TxIndex, "candidate tx is the second tx in the block")
+
+	refs, err := DecodeCandidateInputsCbor(row.TxInputsCbor)
+	require.NoError(t, err)
+	require.Len(t, refs, 2)
+	in1HashBytes, err := hex.DecodeString(in1Hash)
+	require.NoError(t, err)
+	in2HashBytes, err := hex.DecodeString(in2Hash)
+	require.NoError(t, err)
+	assert.Equal(t, in1HashBytes, refs[0].TxHash)
+	assert.Equal(t, uint32(0), refs[0].Index)
+	assert.Equal(t, in2HashBytes, refs[1].TxHash)
+	assert.Equal(t, uint32(3), refs[1].Index)
+}
+
+// decodableBlockCbor returns the CBOR and block type of a real, decodable
+// block from the shared immutable test fixtures. Used where a rollback test
+// needs block.Decode() to succeed (testBlock produces CBOR-less blocks that
+// fail to decode).
+func decodableBlockCbor(t *testing.T) ([]byte, uint) {
+	t.Helper()
+	imm, err := immutable.New("../../database/immutable/testdata")
+	require.NoError(t, err)
+	it, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer it.Close()
+	b, err := it.Next()
+	require.NoError(t, err)
+	require.NotNil(t, b)
+	// Sanity: the fixture block must actually decode.
+	_, err = ledger.NewBlockFromCbor(b.Type, b.Cbor)
+	require.NoError(t, err)
+	return b.Cbor, b.Type
+}
+
+// TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess verifies
+// that rolling back a decodable block deletes the committee-candidate
+// registration rows it wrote, so a re-applied block at the same height
+// doesn't see stale provenance.
+func TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	txHash := pad32("cafe1001")
+	createTx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{buildInput(t, pad32("cafe1000"), 0)},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
+	)
+	// Process the candidate under a block whose CBOR/type make block.Decode()
+	// succeed, so rollbackBlock takes the create-removal + provenance-delete
+	// path. The fixture block's own transactions are unrelated to our
+	// candidate; the registration delete is keyed by block number, and the
+	// in-memory create removal simply finds nothing matching to remove.
+	cborData, blockType := decodableBlockCbor(t)
+	block := testBlock(1, 100, 0xC7)
+	block.Cbor = cborData
+	block.Type = blockType
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
+
+	var before []models.MidnightCommitteeCandidateRegistration
+	require.NoError(t, store.DB().Find(&before).Error)
+	require.Len(t, before, 1, "registration row must exist before rollback")
+
+	idx.rollbackBlock(block)
+
+	var after []models.MidnightCommitteeCandidateRegistration
+	require.NoError(t, store.DB().Find(&after).Error)
+	assert.Empty(t, after, "registration row must be deleted after a decode-success rollback")
+}
+
+// TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure guards
+// the fix for the decode-failure inconsistency: when a rolled-back block
+// cannot be decoded, its created candidates cannot be removed from the
+// in-memory set, so their registration provenance rows must be RETAINED.
+// Deleting them would let a later epoch snapshot emit those candidates with
+// missing tx_inputs/slot_number/tx_index/block_number.
+func TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	txHash := pad32("cafe2001")
+	createTx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{buildInput(t, pad32("cafe2000"), 0)},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
+	)
+	// testBlock carries no CBOR, so block.Decode() fails inside rollbackBlock.
+	block := testBlock(1, 100, 0xC8)
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
+
+	key := candidateTestKey(t, txHash, 0)
+	idx.mu.RLock()
+	_, trackedBefore := idx.candidates[key]
+	idx.mu.RUnlock()
+	require.True(t, trackedBefore, "candidate must be in memory before rollback")
+
+	idx.rollbackBlock(block)
+
+	// The in-memory candidate remains (decode failure can't remove it)...
+	idx.mu.RLock()
+	_, trackedAfter := idx.candidates[key]
+	idx.mu.RUnlock()
+	assert.True(t, trackedAfter, "decode failure leaves the created candidate in memory")
+
+	// ...so its provenance row must remain too, keeping the two consistent.
+	var after []models.MidnightCommitteeCandidateRegistration
+	require.NoError(t, store.DB().Find(&after).Error)
+	require.Len(t, after, 1, "registration row must be retained when the candidate can't be removed from memory")
 }
 
 // TestCandidateRollbackRestoresSpentAndRemovesCreated verifies candidate
@@ -1150,8 +1368,8 @@ func TestCandidateEmptySnapshot(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(0, 0) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
-	idx.advanceEpochLocked(1, 1) // advance to epoch 1, snapshots epoch 0
+	idx.advanceEpochLocked(0, 0, nil) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
+	idx.advanceEpochLocked(1, 1, nil) // advance to epoch 1, snapshots epoch 0
 	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
@@ -1168,12 +1386,131 @@ func TestEpochTransitionIdempotent(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(3, 0)  // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
-	idx.advanceEpochLocked(4, 42) // advance to epoch 4, snapshots epoch 3
-	idx.advanceEpochLocked(4, 42) // no-op: same epoch, guard prevents a second snapshot
+	idx.advanceEpochLocked(3, 0, nil)  // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
+	idx.advanceEpochLocked(4, 42, nil) // advance to epoch 4, snapshots epoch 3
+	idx.advanceEpochLocked(4, 42, nil) // no-op: same epoch, guard prevents a second snapshot
 	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
 	require.NoError(t, store.DB().Find(&snapshots).Error)
 	require.Len(t, snapshots, 1, "advancing to the same epoch twice must not write a second snapshot row")
+}
+
+// failingAfterNCreatesStore wraps a real store and fails the (n+1)th call to
+// CreateMidnightAssetCreate, so a test can force processBlock to fail
+// partway through a block that would otherwise write more than one row.
+type failingAfterNCreatesStore struct {
+	*sqlite.MetadataStoreSqlite
+	remaining int
+}
+
+func (s *failingAfterNCreatesStore) CreateMidnightAssetCreate(
+	txn types.Txn,
+	row *models.MidnightAssetCreate,
+) error {
+	if s.remaining <= 0 {
+		return errors.New("injected failure")
+	}
+	s.remaining--
+	return s.MetadataStoreSqlite.CreateMidnightAssetCreate(txn, row)
+}
+
+// TestProcessBlock_PartialFailureRollsBackWholeBlock verifies that when one
+// transaction's write fails partway through a block, an earlier
+// transaction's already-successful write in the SAME block is rolled back
+// too, rather than left durably committed on its own. All of a block's
+// midnight_* rows share one write transaction specifically so that readers
+// paginating by (block_number, tx_index) never observe part of a block's
+// rows without the rest. It also verifies the in-memory tracked-UTxO set is
+// restored to its pre-block state, not left ahead of the rolled-back DB —
+// the first tx's create adds a UTxO to idx.cNightUTxOs before the second
+// tx's create fails, so without a restore that entry would linger in memory
+// even though the DB never durably recorded it.
+func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	wrapped := &failingAfterNCreatesStore{MetadataStoreSqlite: store, remaining: 1}
+	idx, err := New(Config{
+		Metadata:        wrapped,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CNightPolicyID:  testPolicyID,
+		CNightAssetName: testAssetNameHex,
+	})
+	require.NoError(t, err)
+
+	tx1 := buildTx(t, pad32("aa000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 100)})
+	tx2 := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 200)})
+
+	block := testBlock(1, 100, 0xAA)
+	err = idx.processBlock(block, []lcommon.Transaction{tx1, tx2}, 1_000_000)
+	require.Error(t, err, "the second tx's create must fail and abort the whole block")
+
+	var rows []models.MidnightAssetCreate
+	require.NoError(t, store.DB().Find(&rows).Error)
+	require.Empty(
+		t,
+		rows,
+		"the first tx's successful write must be rolled back along with the second tx's failure",
+	)
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	require.Empty(
+		t,
+		idx.cNightUTxOs,
+		"the first tx's in-memory UTxO must be undone along with its rolled-back DB row",
+	)
+}
+
+// TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact verifies that
+// undoing a failed block's mutations touches only the keys that block
+// itself wrote, not the whole tracked-UTxO map. A prior, already-committed
+// block's entry must survive a later block's rollback untouched — the
+// journal records per-key pre-block values instead of cloning and
+// restoring the entire live map, so this also demonstrates the undo cost
+// scales with what the failed block changed, not with total tracked state.
+func TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	wrapped := &failingAfterNCreatesStore{MetadataStoreSqlite: store, remaining: 2}
+	idx, err := New(Config{
+		Metadata:        wrapped,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CNightPolicyID:  testPolicyID,
+		CNightAssetName: testAssetNameHex,
+	})
+	require.NoError(t, err)
+
+	// Block 1 succeeds outright and leaves a durably tracked UTxO.
+	seedTx := buildTx(t, pad32("11000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("11000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 50)})
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x11), []lcommon.Transaction{seedTx}, 1_000))
+
+	idx.mu.RLock()
+	require.Len(t, idx.cNightUTxOs, 1, "block 1's create must be tracked")
+	idx.mu.RUnlock()
+
+	// Block 2's first tx succeeds, its second fails, aborting the block.
+	tx1 := buildTx(t, pad32("aa000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 100)})
+	tx2 := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 200)})
+	err = idx.processBlock(testBlock(2, 200, 0x22), []lcommon.Transaction{tx1, tx2}, 2_000)
+	require.Error(t, err, "block 2's second tx must fail and abort the block")
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	require.Len(
+		t,
+		idx.cNightUTxOs,
+		1,
+		"block 1's unrelated, already-committed UTxO must survive block 2's rollback untouched",
+	)
 }

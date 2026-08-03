@@ -134,6 +134,7 @@ func (d *MetadataStoreMysql) DeleteCertificatesAfterSlot(
 			&models.AuthCommitteeHot{},
 			&models.ResignCommitteeCold{},
 			&models.MoveInstantaneousRewards{},
+			&models.GenesisDelegation{},
 		}
 
 		for _, table := range certTables {

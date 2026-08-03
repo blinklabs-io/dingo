@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/stretchr/testify/require"
@@ -149,12 +150,12 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 
 	// Open a temporary database
 	dbDir := t.TempDir()
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: dbDir,
 		Logger:  logger,
 	})
 	require.NoError(t, err, "creating database")
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Import the ledger state
 	var lastProgress ledgerstate.ImportProgress

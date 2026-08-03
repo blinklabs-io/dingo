@@ -25,6 +25,11 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,15 +38,116 @@ import (
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "", // in-memory
 		Logger:  logger,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		db.Close() //nolint:errcheck
+		dbtest.CloseDatabase(db) //nolint:errcheck
 	})
 	return db
+}
+
+func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+
+	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        credentialBytes,
+		AddedSlot:         10,
+		LastActivityEpoch: 5,
+		ExpiryEpoch:       25,
+		Active:            true,
+	}))
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.UpdateDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeUpdateDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparams.DRepInactivityPeriod = 20
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return backfill.processBlockGovernance(
+			tx,
+			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			100,
+			&pparams,
+			txn,
+		)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+
+	credentialBytes := bytes.Repeat([]byte{0xBC}, 28)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], credentialBytes)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag:     0,
+		Credential:        credentialBytes,
+		AddedSlot:         10,
+		LastActivityEpoch: 5,
+		ExpiryEpoch:       25,
+		Active:            true,
+	}))
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithCertificates(&lcommon.UpdateDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeUpdateDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: credentialHash,
+		},
+	})
+	tx.WithValid(true)
+	conwayPParams := mockledger.NewMockConwayProtocolParams()
+	conwayPParams.DRepInactivityPeriod = 20
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conwayPParams,
+	}
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return backfill.processBlockGovernance(
+			tx,
+			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
+			100,
+			pparams,
+			txn,
+		)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+}
+
+func closeTestDB(db *database.Database) error {
+	return dbtest.CloseDatabase(db)
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
@@ -239,6 +345,50 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, uint64(1), got.LastSlot)
+}
+
+func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
+	db := newTestDB(t)
+
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 2,
+			StartedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+			Completed:  false,
+		},
+		nil,
+	))
+	for _, slot := range []uint64{0, 1, 2} {
+		hash := make([]byte, 32)
+		hash[0] = byte(slot + 1)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot: slot,
+			Hash: hash,
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		}, nil))
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	bf := NewBackfill(db, nil, logger)
+	bf.SetEndSlot(1)
+
+	require.NoError(t, bf.Run(context.Background()))
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, checkpoint.Completed)
+	require.Equal(t, uint64(1), checkpoint.LastSlot)
+	require.Equal(t, uint64(1), checkpoint.TotalSlots)
+	require.Contains(t, logs.String(), `"slot":0`)
+	require.Contains(t, logs.String(), `"slot":1`)
+	require.NotContains(t, logs.String(), `"slot":2`)
 }
 
 // TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are

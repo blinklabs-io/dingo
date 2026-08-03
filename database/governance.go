@@ -156,6 +156,29 @@ func (d *Database) GetExpiringGovernanceProposals(
 	return proposals, nil
 }
 
+// GetExpiredGovernanceProposalsAt returns proposals expired at the exact
+// epoch-boundary slot. Used by epoch replay to restore deposit-return effects.
+func (d *Database) GetExpiredGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.metadata.GetExpiredGovernanceProposalsAt(
+		epoch, slot, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get boundary-expired governance proposals: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
 // GetRatifiedGovernanceProposals returns proposals ratified but not yet
 // enacted, ordered by (ratified_epoch, ratified_slot, id). Used at epoch
 // start for enactment.
@@ -170,6 +193,29 @@ func (d *Database) GetRatifiedGovernanceProposals(
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to get ratified governance proposals: %w", err,
+		)
+	}
+	return proposals, nil
+}
+
+// GetEnactedGovernanceProposalsAt returns proposals enacted at the exact
+// epoch-boundary slot. Used by epoch replay to restore enactment effects.
+func (d *Database) GetEnactedGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.metadata.GetEnactedGovernanceProposalsAt(
+		epoch, slot, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get boundary-enacted governance proposals: %w",
+			err,
 		)
 	}
 	return proposals, nil

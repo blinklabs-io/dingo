@@ -1,0 +1,361 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package docsparity holds checks that keep contributor-facing documentation
+// in agreement with the repository configuration it describes. Every rule
+// here derives its expectation from a source of truth in the tree (go.mod,
+// the Makefile, docker-compose.yml, the DevNet scripts) rather than
+// duplicating a value, so a change to the real thing fails the check until
+// the prose is updated with it.
+package docsparity_test
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// contributorDocs are the documents that describe how to build, test, and run
+// this repository. They are the files the parity rules police.
+var contributorDocs = []string{
+	"README.md",
+	"AGENTS.md",
+	"CLAUDE.md",
+	"ARCHITECTURE.md",
+	"DATABASE.md",
+	"GENESIS_SYNC.md",
+	filepath.Join("internal", "test", "devnet", "README.md"),
+}
+
+// historicalDocs record past measurements or shipped releases. They describe
+// the state of the tree at some earlier point, so present-tense parity rules
+// do not apply to them.
+var historicalDocs = map[string]bool{
+	"RELEASE_NOTES.md":                  true,
+	"benchmark_results.md":              true,
+	"benchmark_results_api_backfill.md": true,
+	"benchmark_results_bp_pi.md":        true,
+	"benchmark_results_targeted.md":     true,
+}
+
+// skippedDirs never contain documentation this package owns.
+var skippedDirs = map[string]bool{
+	".git":         true,
+	".worktrees":   true,
+	".tools":       true,
+	"node_modules": true,
+}
+
+// repoRoot walks up from the working directory until it finds the module
+// root, mirroring internal/architecture so both checks locate the tree the
+// same way.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repository root")
+		}
+		dir = parent
+	}
+}
+
+// readRepoFile reads a file relative to the repository root and normalises
+// line endings, so a Windows checkout with autocrlf enabled parses the same
+// as a Linux one.
+func readRepoFile(t *testing.T, root, rel string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(root, rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
+}
+
+// filesMatching returns repository-relative paths of every file under root
+// for which match reports true.
+func filesMatching(
+	t *testing.T,
+	root string,
+	match func(name string) bool,
+) []string {
+	t.Helper()
+
+	var found []string
+	err := filepath.WalkDir(
+		root,
+		func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if skippedDirs[entry.Name()] {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !match(entry.Name()) {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			found = append(found, rel)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return found
+}
+
+// markdownFiles returns every non-historical markdown document in the tree.
+func markdownFiles(t *testing.T, root string) []string {
+	t.Helper()
+
+	all := filesMatching(t, root, func(name string) bool {
+		return strings.HasSuffix(name, ".md")
+	})
+	kept := make([]string, 0, len(all))
+	for _, rel := range all {
+		if historicalDocs[filepath.Base(rel)] {
+			continue
+		}
+		kept = append(kept, rel)
+	}
+	return kept
+}
+
+// dockerfiles returns every Dockerfile in the tree.
+func dockerfiles(t *testing.T, root string) []string {
+	t.Helper()
+
+	return filesMatching(t, root, func(name string) bool {
+		return name == "Dockerfile" || strings.HasPrefix(name, "Dockerfile.")
+	})
+}
+
+// workflowFiles returns every GitHub Actions workflow.
+func workflowFiles(t *testing.T, root string) []string {
+	t.Helper()
+
+	dir := filepath.Join(root, ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var found []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(name, ".yml") &&
+			!strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		found = append(found, filepath.Join(".github", "workflows", name))
+	}
+	return found
+}
+
+// markdownBlock is one logical chunk of a markdown document: a paragraph, a
+// list, a table, or a fenced code block. Blank lines separate blocks except
+// inside a fence, where they are content.
+type markdownBlock struct {
+	startLine int
+	text      string
+	fenced    bool
+}
+
+var fenceRe = regexp.MustCompile("^\\s*(`{3,}|~{3,})(.*)$")
+
+// fenceTracker follows fenced code blocks through a document. It records the
+// character and length of the opening marker so a longer fence can contain a
+// shorter one, which is how a markdown document quotes a fenced example.
+type fenceTracker struct {
+	open   bool
+	marker byte
+	length int
+}
+
+// step feeds one line to the tracker and reports whether that line is a fence
+// marker and whether the line sits inside a fence once it has been applied.
+func (f *fenceTracker) step(line string) (isMarker, inside bool) {
+	match := fenceRe.FindStringSubmatch(line)
+	if match == nil {
+		return false, f.open
+	}
+	marker := match[1]
+	if !f.open {
+		f.open = true
+		f.marker = marker[0]
+		f.length = len(marker)
+		return true, true
+	}
+	// A closing marker uses the same character, is at least as long as the
+	// opening one, and carries no info string.
+	if marker[0] != f.marker || len(marker) < f.length ||
+		strings.TrimSpace(match[2]) != "" {
+		return false, true
+	}
+	f.open = false
+	return true, true
+}
+
+// markdownBlocks splits a markdown document into blocks.
+func markdownBlocks(doc string) []markdownBlock {
+	var (
+		blocks  []markdownBlock
+		current []string
+		start   int
+		fenced  bool
+		tracker fenceTracker
+	)
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		blocks = append(blocks, markdownBlock{
+			startLine: start,
+			text:      strings.Join(current, "\n"),
+			fenced:    fenced,
+		})
+		current = nil
+		fenced = false
+	}
+	for i, line := range strings.Split(doc, "\n") {
+		wasOpen := tracker.open
+		isMarker, _ := tracker.step(line)
+		switch {
+		case isMarker && !wasOpen:
+			flush()
+			fenced = true
+			start = i + 1
+			current = append(current, line)
+			continue
+		case isMarker && wasOpen:
+			current = append(current, line)
+			flush()
+			continue
+		case tracker.open:
+			current = append(current, line)
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		if len(current) == 0 {
+			start = i + 1
+		}
+		current = append(current, line)
+	}
+	flush()
+	return blocks
+}
+
+// markdownTableRow is one parsed row of a markdown table.
+type markdownTableRow struct {
+	line  int
+	cells []string
+}
+
+// tableDividerRe matches the alignment row under a table header. The
+// closing pipe is optional because GFM allows it to be omitted, and a
+// table this failed to recognise would be skipped by every rule below.
+// tableDividerRe matches the alignment row under a table header. Both outer
+// pipes are optional because GFM allows either to be omitted, and a table this
+// failed to recognise would be skipped by every rule built on top of it.
+var tableDividerRe = regexp.MustCompile(`^\s*\|?[\s:|-]*-[\s:|-]*$`)
+
+// splitTableCells splits one table line into trimmed cells, tolerating a
+// missing leading or trailing pipe.
+func splitTableCells(line string) []string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimPrefix(trimmed, "|")
+	trimmed = strings.TrimSuffix(trimmed, "|")
+	parts := strings.Split(trimmed, "|")
+	cells := make([]string, 0, len(parts))
+	for _, part := range parts {
+		cells = append(cells, strings.TrimSpace(part))
+	}
+	return cells
+}
+
+// markdownTableRows returns the body rows of every markdown table in doc,
+// skipping header and divider lines.
+func markdownTableRows(doc string) []markdownTableRow {
+	var (
+		rows      []markdownTableRow
+		afterRule bool
+		prev      string
+		tracker   fenceTracker
+	)
+	for i, line := range strings.Split(doc, "\n") {
+		if isMarker, inside := tracker.step(line); isMarker || inside {
+			afterRule = false
+			prev = ""
+			continue
+		}
+		if !strings.Contains(line, "|") {
+			afterRule = false
+			prev = line
+			continue
+		}
+		// A divider only counts when it sits under a header with the same
+		// number of columns. Without that, a row of dashes and pipes in
+		// unfenced prose would open a table that is not there.
+		if !afterRule && tableDividerRe.MatchString(line) &&
+			strings.Contains(prev, "|") &&
+			len(splitTableCells(prev)) == len(splitTableCells(line)) {
+			afterRule = true
+			prev = line
+			continue
+		}
+		prev = line
+		if !afterRule {
+			continue
+		}
+		rows = append(rows, markdownTableRow{
+			line:  i + 1,
+			cells: splitTableCells(line),
+		})
+	}
+	return rows
+}
+
+// unquote strips markdown code spans from a table cell.
+func unquote(cell string) string {
+	return strings.Trim(strings.TrimSpace(cell), "`")
+}
+
+// docLocation renders a file and line for failure messages.
+func docLocation(rel string, line int) string {
+	return fmt.Sprintf("%s:%d", filepath.ToSlash(rel), line)
+}

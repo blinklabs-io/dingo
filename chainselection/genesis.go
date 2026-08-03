@@ -59,3 +59,35 @@ func GenesisWindowSlotsForParams(
 	}
 	return uint64(window)
 }
+
+// DensityFromIntersection counts candidate blocks in the Genesis window that
+// starts immediately after the common intersection and ends at
+// intersectionSlot+window, inclusive. The intersection block itself belongs
+// to both candidates and is therefore excluded.
+//
+// Slots must describe one candidate path in ascending order. Values outside
+// the window are ignored so callers may pass the complete fetched fragment.
+func DensityFromIntersection(
+	intersectionSlot uint64,
+	window uint64,
+	slots []uint64,
+) uint64 {
+	if window == 0 || len(slots) == 0 {
+		return 0
+	}
+	windowEnd := intersectionSlot + window
+	if windowEnd < intersectionSlot {
+		windowEnd = math.MaxUint64
+	}
+	var density uint64
+	for _, slot := range slots {
+		if slot <= intersectionSlot {
+			continue
+		}
+		if slot > windowEnd {
+			break
+		}
+		density++
+	}
+	return density
+}

@@ -124,6 +124,48 @@ func TestFindLedgerStateFileUTxOHDHighestSlot(t *testing.T) {
 	require.Equal(t, expectedPath, found)
 }
 
+func TestFindLedgerStateFileAtOrBefore(t *testing.T) {
+	dir := t.TempDir()
+
+	for _, slot := range []string{"100", "200", "300"} {
+		slotDir := filepath.Join(dir, "ledger", slot)
+		require.NoError(t, os.MkdirAll(slotDir, 0o750))
+		require.NoError(
+			t,
+			os.WriteFile(
+				filepath.Join(slotDir, "state"),
+				[]byte("data"),
+				0o640,
+			),
+		)
+	}
+
+	found, err := FindLedgerStateFileAtOrBefore(dir, 250)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		filepath.Join(dir, "ledger", "200", "state"),
+		found,
+	)
+}
+
+func TestFindLedgerStateFileAtOrBeforeRejectsVolatileOnlyState(t *testing.T) {
+	dir := t.TempDir()
+	slotDir := filepath.Join(dir, "ledger", "300")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(slotDir, "state"),
+			[]byte("data"),
+			0o640,
+		),
+	)
+
+	_, err := FindLedgerStateFileAtOrBefore(dir, 250)
+	require.ErrorContains(t, err, "at or before slot 250")
+}
+
 func TestFindLedgerStateFileNotFound(t *testing.T) {
 	dir := t.TempDir()
 	_, err := FindLedgerStateFile(dir)
@@ -142,6 +184,24 @@ func TestFindUTxOTableFile(t *testing.T) {
 
 	found := FindUTxOTableFile(dir)
 	require.Equal(t, tvarPath, found)
+}
+
+func TestFindUTxOTableFileForState(t *testing.T) {
+	dir := t.TempDir()
+	slotDir := filepath.Join(dir, "ledger", "99999")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	statePath := filepath.Join(slotDir, "state")
+	require.NoError(t, os.WriteFile(statePath, []byte("state"), 0o640))
+	tablesPath := filepath.Join(slotDir, "tables")
+	require.NoError(t, os.WriteFile(tablesPath, []byte("table"), 0o640))
+
+	require.Equal(t, tablesPath, FindUTxOTableFileForState(statePath))
+	require.Empty(
+		t,
+		FindUTxOTableFileForState(
+			filepath.Join(dir, "ledger", "99999.lstate"),
+		),
+	)
 }
 
 func TestFindUTxOTableFileCurrentTablesFile(t *testing.T) {

@@ -683,7 +683,7 @@ func TestCompatAccountRegistrationHistoryResponse(
 
 	// bfgo.AccountRegistrationHistory has no Deposit field; assert via raw
 	// JSON so a serialization regression on the "deposit" key is caught.
-	var rawItems []map[string]interface{}
+	var rawItems []map[string]any
 	require.NoError(t, json.Unmarshal(data, &rawItems))
 	require.Len(t, rawItems, 2)
 	assert.Equal(t, ours[0].Deposit, rawItems[0]["deposit"])

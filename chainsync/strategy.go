@@ -16,6 +16,7 @@ package chainsync
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -62,24 +63,42 @@ func (h HeaderSyncStrategy) String() string {
 	}
 }
 
+// headerSyncStrategyNames maps every accepted strategy name (in
+// normalized form: lower-case, no surrounding whitespace) to its
+// strategy. It is the single source of truth for both
+// ParseHeaderSyncStrategy and AcceptedHeaderSyncStrategyNames, so the
+// two cannot drift apart.
+var headerSyncStrategyNames = map[string]HeaderSyncStrategy{
+	"":            HeaderSyncStrategyPrimary,
+	"primary":     HeaderSyncStrategyPrimary,
+	"parallel":    HeaderSyncStrategyParallel,
+	"round-robin": HeaderSyncStrategyRoundRobin,
+	"roundrobin":  HeaderSyncStrategyRoundRobin,
+	"round_robin": HeaderSyncStrategyRoundRobin,
+}
+
+// AcceptedHeaderSyncStrategyNames returns every strategy name accepted
+// by ParseHeaderSyncStrategy in normalized form, including the empty
+// string (which selects the default). Callers that must duplicate the
+// accepted set — internal/config's validation whitelist cannot import
+// this package — verify parity against this list.
+func AcceptedHeaderSyncStrategyNames() []string {
+	return slices.Sorted(maps.Keys(headerSyncStrategyNames))
+}
+
 // ParseHeaderSyncStrategy parses a header-sync strategy name. An empty string
 // returns the default (primary). Names are case-insensitive and ignore
 // surrounding whitespace; "round-robin", "roundrobin", and "round_robin" are
 // all accepted.
 func ParseHeaderSyncStrategy(s string) (HeaderSyncStrategy, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "primary":
-		return HeaderSyncStrategyPrimary, nil
-	case "parallel":
-		return HeaderSyncStrategyParallel, nil
-	case "round-robin", "roundrobin", "round_robin":
-		return HeaderSyncStrategyRoundRobin, nil
-	default:
+	strategy, ok := headerSyncStrategyNames[strings.ToLower(strings.TrimSpace(s))]
+	if !ok {
 		return HeaderSyncStrategyPrimary, fmt.Errorf(
 			"invalid header sync strategy %q (want primary, parallel, or round-robin)",
 			s,
 		)
 	}
+	return strategy, nil
 }
 
 // HeaderSyncStrategy returns the configured header-sync strategy.

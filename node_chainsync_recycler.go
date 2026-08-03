@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"context"
 	"runtime/debug"
 	"time"
 
@@ -28,6 +29,76 @@ import (
 
 func plateauThreshold(stallTimeout time.Duration) time.Duration {
 	return max(2*stallTimeout, 4*time.Minute)
+}
+
+// chainsyncObservePeerTip synchronously feeds a peer tip update into chain
+// selection (and peergov) when the Genesis corroboration gate is active, so the
+// ChainsyncApplyEligible check that immediately follows in the roll-forward
+// handler reflects the header currently being admitted. This closes the race
+// where the apply gate would otherwise read corroboration state that predates
+// this header (the tip update is normally delivered asynchronously). It returns
+// true when it handled the observation synchronously, so the ouroboros layer
+// skips the async PeerTipUpdateEvent publish to avoid a double update.
+//
+// When corroboration is inactive the async path is used unchanged (returns
+// false), so normal high-throughput sync keeps its parallelism.
+func (n *Node) chainsyncObservePeerTip(
+	e chainselection.PeerTipUpdateEvent,
+) bool {
+	if n.chainSelector == nil ||
+		!n.chainSelector.GenesisCorroborationActive() {
+		return false
+	}
+	n.chainSelector.HandlePeerTipUpdateEvent(
+		event.NewEvent(chainselection.PeerTipUpdateEventType, e),
+	)
+	if n.peerGov != nil {
+		n.peerGov.TouchPeerByConnId(e.ConnectionId)
+	}
+	return true
+}
+
+// chainsyncObservePeerRollback synchronously applies a peer rollback into chain
+// selection when the Genesis corroboration gate is active, so the
+// ChainsyncApplyEligible check that immediately follows in the roll-backward
+// handler reflects the post-rollback corroboration state. A rollback trims the
+// peer's observed frontier (ApplyRollback), which can change its corroboration
+// status; delivering that observation asynchronously would let the apply gate
+// read pre-trim state and forward a rollback for a peer that the rollback has
+// just made uncorroborated (issue #2928). It returns true when handled
+// synchronously, so the ouroboros layer skips the async PeerRollbackEvent
+// publish to avoid a double update. Unlike chainsyncObservePeerTip there is no
+// peergov touch: only the chain selector subscribes to PeerRollbackEvent.
+//
+// When corroboration is inactive the async path is used unchanged (returns
+// false).
+func (n *Node) chainsyncObservePeerRollback(
+	e chainselection.PeerRollbackEvent,
+) bool {
+	if n.chainSelector == nil ||
+		!n.chainSelector.GenesisCorroborationActive() {
+		return false
+	}
+	n.chainSelector.HandlePeerRollbackEvent(
+		event.NewEvent(chainselection.PeerRollbackEventType, e),
+	)
+	return true
+}
+
+// chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
+// the ledger, on top of ingress eligibility. It defers to the chain selector's
+// corroboration decision so an uncorroborated Genesis fast source is observed
+// (its tips still feed corroboration) but its blocks are withheld — the real
+// enforcement of the corroboration stall, since ingress is otherwise independent
+// of the selected best peer. Returns true (apply) when no chain selector is
+// wired yet or outside Genesis corroboration.
+func (n *Node) chainsyncApplyEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	if n.chainSelector == nil {
+		return true
+	}
+	return n.chainSelector.ShouldApplyIngress(connId)
 }
 
 func (n *Node) isChainsyncIngressEligible(
@@ -133,6 +204,100 @@ func isLedgerApplicationBacklog(
 	}
 	applyBacklog := primaryChainTipSlot - appliedTipSlot
 	return applyBacklog >= headerGap
+}
+
+func (n *Node) startChainsyncStallRecycler(
+	ctx context.Context,
+	chainsyncCfg chainsync.Config,
+	interval time.Duration,
+	grace time.Duration,
+	cooldown time.Duration,
+) context.CancelFunc {
+	recyclerCtx, recyclerCancel := context.WithCancel(ctx)
+	// Track the recycler as a node-owned background worker so shutdown can
+	// wait for it before closing the dependencies it reads or publishes to.
+	n.chainsyncStallRecyclerWG.Go(func() {
+		// Mark the worker complete no matter whether it exits by cancellation
+		// or after a recovered panic stops the outer loop.
+		n.runChainsyncStallRecycler(
+			recyclerCtx,
+			chainsyncCfg,
+			interval,
+			grace,
+			cooldown,
+		)
+	})
+	return recyclerCancel
+}
+
+func (n *Node) runChainsyncStallRecycler(
+	ctx context.Context,
+	chainsyncCfg chainsync.Config,
+	interval time.Duration,
+	grace time.Duration,
+	cooldown time.Duration,
+) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		// Keep the existing panic-recovery behavior: a panic in the loop is
+		// logged and the recycler restarts unless shutdown was requested.
+		if !n.runStallCheckerLoop(func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			recycleAt := make(map[string]time.Time)
+			lastRecycled := make(map[string]time.Time)
+			lastProgressSlot := n.ledgerState.Tip().Point.Slot
+			lastProgressAt := time.Now()
+			plateauRecoveryThreshold := plateauThreshold(
+				chainsyncCfg.StallTimeout,
+			)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					n.runStallCheckerTick(func() {
+						now := time.Now()
+						localTip := n.ledgerState.Tip()
+						localTipSlot := localTip.Point.Slot
+						if n.chainSelector != nil {
+							n.chainSelector.SetLocalTip(localTip)
+							if k := n.ledgerState.SecurityParam(); k > 0 {
+								n.chainSelector.SetSecurityParam(uint64(k)) //nolint:gosec
+							}
+						}
+						n.processChainsyncRecyclerTick(
+							now,
+							localTipSlot,
+							chainsyncCfg,
+							recycleAt,
+							lastRecycled,
+							&lastProgressSlot,
+							&lastProgressAt,
+							plateauRecoveryThreshold,
+							grace,
+							cooldown,
+						)
+					})
+				}
+			}
+		}) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (n *Node) waitChainsyncStallRecycler() {
+	// This wait is intentionally not bounded by the shutdown timeout: advancing
+	// while the recycler is still active can race dependency teardown.
+	n.chainsyncStallRecyclerWG.Wait()
 }
 
 func (n *Node) processChainsyncRecyclerTick(
@@ -551,6 +716,27 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	// the ledger. Restarting chainsync here re-enters FindIntersect and can
 	// race the protocol state machine under load.
 	n.chainsyncState.SetClientConnId(e.NewConnectionId)
+}
+
+// handleChainSelectedNoneEvent logs a selected-to-none transition. Chain
+// selection has stalled with no eligible/corroborated peer; under Genesis
+// corroboration the stalled source's blocks are already withheld from the ledger
+// by the ChainsyncApplyEligible gate, so this is observability only.
+func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
+	e, ok := evt.Data.(chainselection.ChainSelectedNoneEvent)
+	if !ok {
+		return
+	}
+	prevConn := "(none)"
+	if e.PreviousConnectionId.LocalAddr != nil &&
+		e.PreviousConnectionId.RemoteAddr != nil {
+		prevConn = e.PreviousConnectionId.String()
+	}
+	n.config.logger.Info(
+		"chain selection stalled: no selectable peer",
+		"previous_connection", prevConn,
+		"genesis_corroboration", e.GenesisCorroboration,
+	)
 }
 
 func (n *Node) runStallCheckerTick(fn func()) {

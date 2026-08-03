@@ -65,6 +65,7 @@ func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
@@ -133,6 +134,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(t *testing.T)
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	eraList := result.(cbor.IndefLengthList)
@@ -209,6 +211,7 @@ func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(t *testing.T) 
 	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	require.Equal(t, override, ls.transitionInfo.KnownEpoch)
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
@@ -269,6 +272,7 @@ func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)

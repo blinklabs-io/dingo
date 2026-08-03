@@ -19,6 +19,7 @@ package postgres
 import (
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -103,5 +104,29 @@ func WithDSN(dsn string) PostgresOptionFunc {
 func WithStorageMode(mode string) PostgresOptionFunc {
 	return func(m *MetadataStorePostgres) {
 		m.storageMode = strings.ToLower(mode)
+	}
+}
+
+// WithPoolMaxOpenConns specifies the maximum number of open connections to
+// the database. A value of 0 selects the provider default.
+func WithPoolMaxOpenConns(maxOpenConns int) PostgresOptionFunc {
+	return func(m *MetadataStorePostgres) {
+		m.poolMaxOpen = maxOpenConns
+	}
+}
+
+// WithPoolMaxIdleConns specifies the maximum number of idle connections
+// retained in the pool. A value of 0 selects the provider default.
+func WithPoolMaxIdleConns(maxIdleConns int) PostgresOptionFunc {
+	return func(m *MetadataStorePostgres) {
+		m.poolMaxIdle = maxIdleConns
+	}
+}
+
+// WithPoolConnMaxLifetime specifies the maximum amount of time a connection
+// may be reused. A value of 0 selects the provider default.
+func WithPoolConnMaxLifetime(connMaxLifetime time.Duration) PostgresOptionFunc {
+	return func(m *MetadataStorePostgres) {
+		m.poolConnMaxLifetime = connMaxLifetime
 	}
 }

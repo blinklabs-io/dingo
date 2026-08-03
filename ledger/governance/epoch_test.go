@@ -100,6 +100,35 @@ func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
 		proposalRewardSourceHash(first),
 		proposalRewardSourceHash(second),
 	)
+	// Pin the caller contract: refundProposalDeposit must journal each refund
+	// under its own per-proposal source hash, so two refunds sharing a tx hash
+	// stay distinct replay-idempotent rows. Rows are matched by their stored
+	// discriminator rather than by query order.
+	bySourceHash := make(map[string]models.AccountRewardDelta, len(deltas))
+	for _, delta := range deltas {
+		bySourceHash[string(delta.TxHash)] = delta
+	}
+	require.Len(t, bySourceHash, 2, "journaled TxHash values must be distinct")
+	for _, tc := range []struct {
+		name     string
+		proposal *models.GovernanceProposal
+		amount   uint64
+	}{
+		{name: "first", proposal: first, amount: 7},
+		{name: "second", proposal: second, amount: 11},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantHash := proposalRewardSourceHash(tc.proposal)
+			delta, ok := bySourceHash[string(wantHash)]
+			require.True(
+				t,
+				ok,
+				"no reward delta journaled with proposalRewardSourceHash",
+			)
+			assert.Equal(t, wantHash, delta.TxHash)
+			assert.Equal(t, tc.amount, uint64(delta.Amount))
+		})
+	}
 }
 
 func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
@@ -165,6 +194,70 @@ func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 	require.NotNil(t, proposal.ExpiredSlot)
 	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
 	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
+}
+
+func TestProcessEpochReplaysBoundaryExpiredProposalAfterStakeRewardReset(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 0x20)
+	rewardAddrBytes := buildRewardAddr(t, stakeCred)
+	txHash := testBytes(32, 0x21)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 1,
+		ExpiresEpoch:  4,
+		AnchorURL:     "https://example.invalid/replay-expired",
+		AnchorHash:    testBytes(32, 0x22),
+		Deposit:       25,
+		ReturnAddress: rewardAddrBytes,
+		AddedSlot:     100,
+	}, nil))
+	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
+
+	runEpoch := func() *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    4,
+			NewEpoch:     5,
+			BoundarySlot: 500,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+		return out
+	}
+
+	out := runEpoch()
+	assert.Equal(t, 1, out.ExpiredCount)
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(125), uint64(state.Treasury))
+
+	// Crash replay re-applies stake rewards first, which resets the same
+	// boundary NetworkState row before governance is run again.
+	require.NoError(t, store.SetNetworkState(100, 20, 500, nil))
+
+	out = runEpoch()
+	assert.Equal(t, 0, out.ExpiredCount)
+	state, err = store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(125), uint64(state.Treasury))
+	assert.Equal(t, uint64(20), uint64(state.Reserves))
 }
 
 func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
@@ -234,6 +327,101 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	require.NotNil(t, proposal.ExpiredSlot)
 	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
 	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
+}
+
+func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 0x30)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	rewardAddrBytes, err := rewardAddr.Bytes()
+	require.NoError(t, err)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+	withdrawalCbor, err := cbor.Encode(
+		&lcommon.TreasuryWithdrawalGovAction{
+			Type:        2,
+			Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
+		},
+	)
+	require.NoError(t, err)
+	ratifiedEpoch := uint64(4)
+	ratifiedSlot := uint64(400)
+	txHash := testBytes(32, 0x31)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		ProposedEpoch: 3,
+		ExpiresEpoch:  10,
+		RatifiedEpoch: &ratifiedEpoch,
+		RatifiedSlot:  &ratifiedSlot,
+		AnchorURL:     "https://example.invalid/replay-withdrawal",
+		AnchorHash:    testBytes(32, 0x32),
+		Deposit:       0,
+		ReturnAddress: rewardAddrBytes,
+		GovActionCbor: withdrawalCbor,
+		AddedSlot:     100,
+	}, nil))
+	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
+
+	runEpoch := func() *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    4,
+			NewEpoch:     5,
+			BoundarySlot: 500,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+		return out
+	}
+
+	out := runEpoch()
+	assert.Equal(t, 1, out.EnactedCount)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(7), uint64(account.Reward))
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(93), uint64(state.Treasury))
+
+	require.NoError(t, store.SetNetworkState(100, 20, 500, nil))
+
+	out = runEpoch()
+	assert.Equal(t, 0, out.EnactedCount)
+	account, err = store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(7), uint64(account.Reward))
+	state, err = store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(93), uint64(state.Treasury))
+	assert.Equal(t, uint64(20), uint64(state.Reserves))
 }
 
 func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(

@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -522,4 +523,123 @@ func TestResolveFetchURLRejectsBroadcastIPv4(t *testing.T) {
 	)
 
 	require.ErrorContains(t, err, "not allowed")
+}
+
+// newFetchTestServerDoc starts a test server that serves body for every
+// request and returns a Fetcher wired to that server plus an OffchainMetadata
+// document for sourceType whose Hash is body's blake2b digest, so the fetch
+// passes hash verification and only per-source handling is under test. The
+// server is closed on test cleanup.
+func newFetchTestServerDoc(
+	t *testing.T,
+	sourceType string,
+	body []byte,
+) (*Fetcher, models.OffchainMetadata) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(body)
+		},
+	))
+	t.Cleanup(server.Close)
+
+	fetcher, err := New(Config{
+		Store:                 fakeStore{},
+		HTTPClient:            server.Client(),
+		AllowPrivateAddresses: true,
+	})
+	require.NoError(t, err)
+
+	hash := blake2b.Sum256(body)
+	return fetcher, models.OffchainMetadata{
+		SourceType: sourceType,
+		URL:        server.URL,
+		Hash:       hash[:],
+	}
+}
+
+// TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit verifies that a pool
+// document is capped at 512 bytes at fetch time even though the fetcher's
+// generic max bytes (here left at the default 1 MiB) is far larger: pool
+// sources get the stake-pool-specific limit, not the generic one.
+func TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit(t *testing.T) {
+	padding := strings.Repeat("a", 500)
+	body := []byte(
+		`{"name":"` + padding + `","description":"d","ticker":"TEST",` +
+			`"homepage":"https://example.com"}`,
+	)
+	require.Greater(t, len(body), poolMetadataMaxBytes)
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourcePool,
+		body,
+	)
+	fetcher.fetchOne(context.Background(), &doc)
+
+	require.Equal(t, models.OffchainMetadataStatusFailed, doc.Status)
+	require.Contains(
+		t, doc.LastError, models.OffchainFetchErrBodyTooLargePrefix,
+	)
+	require.Empty(t, doc.Content)
+}
+
+// TestFetchOneDoesNotReducePoolLimitForOtherSources verifies the per-source
+// limit does not leak into non-pool sources: a 600-byte body (over the pool
+// limit but well under the generic limit) fetches successfully for a DRep
+// source, since only pool sources are capped at 512 bytes.
+func TestFetchOneDoesNotReducePoolLimitForOtherSources(t *testing.T) {
+	body := []byte(
+		`{"abstract":"` + strings.Repeat("a", 600) + `"}`,
+	)
+	require.Greater(t, len(body), poolMetadataMaxBytes)
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourceDrep,
+		body,
+	)
+	fetcher.fetchOne(context.Background(), &doc)
+
+	require.Equal(t, models.OffchainMetadataStatusFetched, doc.Status)
+	require.Equal(t, body, doc.Content)
+	require.Empty(t, doc.LastError)
+}
+
+// TestFetchOneRejectsInvalidPoolMetadataContent verifies that a hash-valid
+// pool document failing stake-pool schema validation (here, a bare "{}",
+// missing every required field) is marked failed with the decode-error
+// classification rather than stored as a successful fetch.
+func TestFetchOneRejectsInvalidPoolMetadataContent(t *testing.T) {
+	body := []byte(`{}`)
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourcePool,
+		body,
+	)
+	fetcher.fetchOne(context.Background(), &doc)
+
+	require.Equal(t, models.OffchainMetadataStatusFailed, doc.Status)
+	require.Contains(
+		t, doc.LastError, models.OffchainFetchErrDecodeErrorPrefix,
+	)
+	require.Empty(t, doc.Content)
+}
+
+// TestFetchOneAcceptsValidPoolMetadataContent verifies that a hash-valid,
+// schema-valid pool document is stored as a successful fetch, unaffected by
+// the new per-source validation.
+func TestFetchOneAcceptsValidPoolMetadataContent(t *testing.T) {
+	body := []byte(
+		`{"name":"Test Pool","description":"A pool used for testing.",` +
+			`"ticker":"TEST","homepage":"https://example.com"}`,
+	)
+	fetcher, doc := newFetchTestServerDoc(
+		t,
+		models.OffchainMetadataSourcePool,
+		body,
+	)
+	fetcher.fetchOne(context.Background(), &doc)
+
+	require.Equal(t, models.OffchainMetadataStatusFetched, doc.Status)
+	require.Equal(t, body, doc.Content)
+	require.Empty(t, doc.LastError)
 }

@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,15 +34,18 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/require"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
@@ -67,6 +71,54 @@ func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
 		10*time.Minute,
 		effectiveChainsyncBlockTimeout(10*time.Minute),
 	)
+}
+
+func TestChainsyncByronEbbHeaderRoundTrip(t *testing.T) {
+	ebbCbor := byronEbbFixtureCbor(t)
+
+	msg, err := ochainsync.NewMsgRollForwardNtN(
+		gledger.BlockHeaderTypeByron,
+		gledger.BlockTypeByronEbb,
+		ebbCbor,
+		ochainsync.Tip{},
+	)
+	require.NoError(t, err)
+	wire, err := gcbor.Encode(msg)
+	require.NoError(t, err)
+	var received ochainsync.MsgRollForwardNtN
+	_, err = gcbor.Decode(wire, &received)
+	require.NoError(t, err)
+	_, err = gledger.NewBlockHeaderFromCbor(
+		received.WrappedHeader.ByronType(),
+		received.WrappedHeader.HeaderCbor(),
+	)
+	require.NoError(t, err)
+}
+
+func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
+	ebbCbor := byronEbbFixtureCbor(t)
+	expected, err := gledger.NewBlockFromCbor(gledger.BlockTypeByronEbb, ebbCbor)
+	require.NoError(t, err)
+
+	o := NewOuroboros(OuroborosConfig{})
+	header, err := o.decodeChainsyncHeader(gledger.BlockTypeByronEbb, ebbCbor)
+	require.NoError(t, err)
+	require.Equal(t, expected.Header().Hash(), header.Hash())
+}
+
+func byronEbbFixtureCbor(t *testing.T) []byte {
+	t.Helper()
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	require.NoError(t, err)
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Block_Byron_EBB",
+	)
+	require.NoError(t, err)
+	data, err := fixture.ConsensusLedgerBlockBytes()
+	require.NoError(t, err)
+	return data
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
@@ -190,13 +242,11 @@ func (l testSecurityParamLedger) SecurityParam() int {
 func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 	t.Helper()
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -211,6 +261,15 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 	})
 	require.NoError(t, err)
 	return ls
+}
+
+func setTestLedgerTip(
+	t *testing.T,
+	o *Ouroboros,
+	tip ochainsync.Tip,
+) {
+	t.Helper()
+	o.LedgerState.SetTipForTesting(tip)
 }
 
 func snapshotChainsyncNtNTimeouts() map[string]struct {
@@ -488,6 +547,656 @@ func TestChainsyncServerRequestNext_AsyncRollBackwardErrorClosesConnection(
 	)
 }
 
+// TestCloseChainsyncServerConnTearsDownTransport verifies that the async
+// serving path's connection close actually tears down the bearer, not only the
+// connmanager conn_closed event. The earlier error-channel-only path published
+// conn_closed but left the transport open, so the NtC client stayed parked in
+// AwaitReply; this asserts the transport itself closes (the client end's
+// connection observes the bearer going away).
+func TestCloseChainsyncServerConnTearsDownTransport(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	serverPipe, clientPipe := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverPipe.Close()
+		_ = clientPipe.Close()
+	})
+
+	serverConnCh := make(chan *ouroboros.Connection, 1)
+	serverErrCh := make(chan error, 1)
+	go func() {
+		c, err := ouroboros.New(
+			ouroboros.WithConnection(serverPipe),
+			ouroboros.WithServer(true),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithDelayProtocolStart(true),
+			ouroboros.WithLogger(logger),
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		serverConnCh <- c
+	}()
+	clientConn, err := ouroboros.New(
+		ouroboros.WithConnection(clientPipe),
+		ouroboros.WithNetworkMagic(42),
+		ouroboros.WithDelayProtocolStart(true),
+		ouroboros.WithLogger(logger),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	var serverConn *ouroboros.Connection
+	select {
+	case err := <-serverErrCh:
+		t.Fatalf("server connection setup failed: %v", err)
+	case serverConn = <-serverConnCh:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for server connection setup")
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	o := NewOuroboros(OuroborosConfig{Logger: logger})
+	o.closeChainsyncServerConn(
+		serverConn,
+		serverConn.Id().String(),
+		errLeiosClosureUnresolved,
+	)
+
+	// The client end observes the transport tearing down (its connection
+	// ErrorChan fires) rather than staying connected. The earlier
+	// error-channel-only server path left the bearer open, parking the client
+	// in AwaitReply.
+	testutil.RequireReceive(
+		t,
+		clientConn.ErrorChan(),
+		2*time.Second,
+		"client should observe the server transport closing",
+	)
+}
+
+// TestChainsyncServerFindIntersect_MatchingPointRegistersClient verifies a
+// common point returns the server tip and registers downstream client state.
+func TestChainsyncServerFindIntersect_MatchingPointRegistersClient(
+	t *testing.T,
+) {
+	// Create a local chain with one known point and expose it as the ledger
+	// tip so FindIntersect takes the normal non-origin path.
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	block := &testBlock{
+		testBlockHeader: &testBlockHeader{
+			hash:        gledger.Blake2b256{0x01},
+			blockNumber: 1,
+			slotNumber:  1,
+		},
+		blockType: 1,
+		cbor:      []byte{0x80},
+	}
+	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
+	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+	setTestLedgerTip(t, o, ochainsync.Tip{
+		Point:       point,
+		BlockNumber: block.BlockNumber(),
+	})
+
+	// Ask the server to intersect at the point we know exists.
+	gotPoint, tip, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		[]ocommon.Point{point},
+	)
+
+	// The callback returns the match, reports the tip, and leaves downstream
+	// client state registered at the intersect point.
+	require.NoError(t, err)
+	require.Equal(t, point, gotPoint)
+	require.Equal(t, point, tip.Point)
+	require.Equal(t, block.BlockNumber(), tip.BlockNumber)
+
+	clientState, err := o.ChainsyncState.AddClient(connId, point)
+	require.NoError(t, err)
+	require.Equal(t, point, clientState.Cursor)
+	require.True(t, clientState.NeedsInitialRollback)
+}
+
+// TestChainsyncServerFindIntersect_MissingIntersection verifies that an
+// in-range but unknown point returns the protocol IntersectNotFound error.
+func TestChainsyncServerFindIntersect_MissingIntersection(
+	t *testing.T,
+) {
+	// Create a chain tip, then prepare an in-range point with a different
+	// hash so the lookup is valid but does not intersect.
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	block := &testBlock{
+		testBlockHeader: &testBlockHeader{
+			hash:        gledger.Blake2b256{0x01},
+			blockNumber: 1,
+			slotNumber:  10,
+		},
+		blockType: 1,
+		cbor:      []byte{0x80},
+	}
+	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
+	setTestLedgerTip(t, o, ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			block.SlotNumber(),
+			block.Hash().Bytes(),
+		),
+		BlockNumber: block.BlockNumber(),
+	})
+
+	// Submit the nonmatching point list to the server callback.
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		[]ocommon.Point{ocommon.NewPoint(10, gledger.Blake2b256{0xff}.Bytes())},
+	)
+
+	// The callback maps the missing intersection to the protocol
+	// ErrIntersectNotFound response.
+	require.ErrorIs(t, err, ochainsync.ErrIntersectNotFound)
+}
+
+// TestChainsyncServerFindIntersect_LedgerErrorPropagates verifies ledger
+// lookup failures are wrapped and returned to the protocol layer.
+func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
+	t *testing.T,
+) {
+	// Move the ledger past origin so malformed point data reaches the
+	// database-backed intersection lookup.
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	block := &testBlock{
+		testBlockHeader: &testBlockHeader{
+			hash:        gledger.Blake2b256{0x01},
+			blockNumber: 1,
+			slotNumber:  10,
+		},
+		blockType: 1,
+		cbor:      []byte{0x80},
+	}
+	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
+	setTestLedgerTip(t, o, ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			block.SlotNumber(),
+			block.Hash().Bytes(),
+		),
+		BlockNumber: block.BlockNumber(),
+	})
+
+	// Submit a malformed point hash that causes the ledger lookup to fail
+	// while resolving the candidate block.
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		[]ocommon.Point{ocommon.NewPoint(10, []byte{0xff})},
+	)
+
+	// The server wraps and returns the ledger error to the protocol layer
+	// instead of hiding it as an ordinary miss.
+	require.ErrorContains(t, err, "get intersect point")
+	require.ErrorContains(t, err, "parsing block key")
+}
+
+// TestChainsyncServerFindIntersect_ClientRegistrationFailure verifies
+// successful intersections still fail when server client state cannot register.
+func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
+	t *testing.T,
+) {
+	// Use a ledger that can intersect at origin, but a ChainsyncState without
+	// a chain provider so client registration must fail.
+	o := newFindIntersectTestOuroboros(t)
+	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+
+	// Perform FindIntersect with origin so registration is the first failing
+	// operation after a successful intersection.
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		[]ocommon.Point{ocommon.NewPointOrigin()},
+	)
+
+	// The registration error is surfaced to the caller.
+	require.ErrorContains(t, err, "add chainsync client")
+	require.ErrorContains(t, err, "no chain provider available")
+}
+
+// TestChainsyncServerRequestNext_AddClientFailure verifies RequestNext returns
+// registration errors before attempting any protocol response.
+func TestChainsyncServerRequestNext_AddClientFailure(
+	t *testing.T,
+) {
+	// Configure RequestNext with ChainsyncState that cannot build a
+	// server-side iterator for the downstream client.
+	o := newFindIntersectTestOuroboros(t)
+	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+
+	// Enter RequestNext before any protocol response can be sent.
+	err := o.chainsyncServerRequestNext(
+		ochainsync.CallbackContext{ConnectionId: connId},
+	)
+
+	// AddClient failure is returned directly from the callback.
+	require.ErrorContains(t, err, "add chainsync client")
+	require.ErrorContains(t, err, "no chain provider available")
+}
+
+// TestChainsyncServerRequestNext_InitialRollbackClearsFlag verifies the first
+// RequestNext sends the initial rollback and clears the one-shot flag.
+func TestChainsyncServerRequestNext_InitialRollbackClearsFlag(
+	t *testing.T,
+) {
+	// Start a real server protocol with a fresh downstream client that still
+	// needs its initial rollback response.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	ctx := ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	}
+
+	// Handle the first RequestNext for this connection.
+	require.NoError(t, h.o.chainsyncServerRequestNext(ctx))
+
+	// The one-shot initial rollback state has been consumed.
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	require.False(t, clientState.NeedsInitialRollback)
+}
+
+// TestChainsyncServerRequestNext_ImmediateForwardBlock verifies an available
+// iterator block is sent immediately instead of parking in AwaitReply.
+func TestChainsyncServerRequestNext_ImmediateForwardBlock(
+	t *testing.T,
+) {
+	// Register the downstream client and append a block that the iterator can
+	// return without entering AwaitReply.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+	block := &testBlock{
+		testBlockHeader: &testBlockHeader{
+			hash:        gledger.Blake2b256{0x01},
+			blockNumber: 1,
+			slotNumber:  1,
+		},
+		blockType: 1,
+		cbor:      []byte{0x80},
+	}
+	require.NoError(t, h.ledgerState.Chain().AddBlock(block, nil))
+
+	// Request the next item from the server-side ChainSync callback.
+	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	})
+
+	// The immediate block was consumed by the RollForward path.
+	require.NoError(t, err)
+	_, err = clientState.ChainIter.Next(false)
+	require.ErrorIs(t, err, chain.ErrIteratorChainTip)
+}
+
+// TestChainsyncServerRequestNext_ImmediateRollbackEvent verifies a pending
+// iterator rollback is sent immediately on the synchronous RequestNext path.
+func TestChainsyncServerRequestNext_ImmediateRollbackEvent(
+	t *testing.T,
+) {
+	// Move the iterator past a block, then roll the chain back so the next
+	// synchronous iterator result is a rollback event.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+	block := &testBlock{
+		testBlockHeader: &testBlockHeader{
+			hash:        gledger.Blake2b256{0x01},
+			blockNumber: 1,
+			slotNumber:  1,
+		},
+		blockType: 1,
+		cbor:      []byte{0x80},
+	}
+	require.NoError(t, h.ledgerState.Chain().AddBlock(block, nil))
+	next, err := clientState.ChainIter.Next(false)
+	require.NoError(t, err)
+	require.False(t, next.Rollback)
+	require.NoError(t, h.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()))
+
+	// Request the next item from the server-side ChainSync callback.
+	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	})
+
+	// The rollback was consumed by the RollBackward path.
+	require.NoError(t, err)
+	_, err = clientState.ChainIter.Next(false)
+	require.ErrorIs(t, err, chain.ErrIteratorChainTip)
+}
+
+// TestChainsyncServerRequestNext_AwaitReplyAtIteratorTip verifies the server
+// sends AwaitReply when the iterator has reached the current chain tip.
+func TestChainsyncServerRequestNext_AwaitReplyAtIteratorTip(
+	t *testing.T,
+) {
+	// Register a downstream client at origin with no block or rollback
+	// immediately available from the iterator.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+
+	// Request the next item while the iterator is at chain tip.
+	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	})
+
+	// AwaitReply is sent successfully and async waiting is armed.
+	require.NoError(t, err)
+}
+
+// TestChainsyncServerRequestNext_SyncIteratorErrorPropagates verifies real
+// iterator failures are returned instead of being treated as chain tip.
+func TestChainsyncServerRequestNext_SyncIteratorErrorPropagates(
+	t *testing.T,
+) {
+	// Register a client, skip initial rollback, and close the backing DB so
+	// the synchronous iterator returns a real lookup error.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+	require.NoError(
+		t,
+		dbtest.CloseDatabase(h.ledgerState.Database()),
+	)
+
+	// Request the next item from the now-broken iterator.
+	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	})
+
+	// The real iterator error propagates instead of being treated as the
+	// normal chain-tip sentinel.
+	require.Error(t, err)
+	require.NotErrorIs(t, err, chain.ErrIteratorChainTip)
+}
+
+// TestChainsyncServerRequestNext_AwaitReplyErrorPropagates verifies
+// AwaitReply send failures are returned from the callback.
+func TestChainsyncServerRequestNext_AwaitReplyErrorPropagates(
+	t *testing.T,
+) {
+	// Stop the protocol before RequestNext reaches the AwaitReply send path,
+	// causing the send to fail.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+	h.server.Stop()
+
+	// Request next while the iterator is at tip.
+	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	})
+
+	// The AwaitReply send failure is returned to the caller.
+	require.Error(t, err)
+}
+
+// TestChainsyncServerRequestNext_MissingConnectionAfterAwaitReply verifies
+// the async wait path fails when the connection was already recycled.
+func TestChainsyncServerRequestNext_MissingConnectionAfterAwaitReply(
+	t *testing.T,
+) {
+	// Register a client, then remove its connection before the callback
+	// reaches the post-AwaitReply connection lookup.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+	require.True(t, h.o.ConnManager.RemoveConnection(h.conn.Id(), h.conn))
+
+	// Request next while the iterator is at tip.
+	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	})
+
+	// The missing connection guard returns an explicit error.
+	require.ErrorContains(t, err, "not found")
+}
+
+// TestChainsyncServerRequestNext_AsyncIteratorCancelDoesNotCloseConnection
+// verifies expected iterator cancellation does not recycle the connection.
+func TestChainsyncServerRequestNext_AsyncIteratorCancelDoesNotCloseConnection(
+	t *testing.T,
+) {
+	// Park the server in AwaitReply so the async goroutine blocks in
+	// ChainIter.Next(true), then cancel that iterator.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	clientState, err := h.o.ChainsyncState.AddClient(
+		h.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+
+	require.NoError(t, h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	}))
+
+	// Cancel the iterator to simulate normal connection/iterator cleanup.
+	clientState.ChainIter.Cancel()
+
+	// Expected iterator cancellation is ignored and does not emit a
+	// connection-close lifecycle event.
+	testutil.RequireNoReceive(
+		t,
+		h.closedCh,
+		100*time.Millisecond,
+		"iterator cancellation should not close connection",
+	)
+}
+
+// TestRestartChainsyncClientAsync_TimeoutClosesConnection verifies a hung
+// restart is bounded by chainsyncRestartTimeout and recycles the connection.
+func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
+	t *testing.T,
+) {
+	// Replace the restart timer with a test channel and block the restart
+	// function so the timeout branch is deterministic.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	timeoutCh := make(chan time.Time)
+	timeoutArgCh := make(chan time.Duration, 1)
+	oldRestartAfter := chainsyncRestartAfter
+	chainsyncRestartAfter = func(timeout time.Duration) <-chan time.Time {
+		timeoutArgCh <- timeout
+		return timeoutCh
+	}
+	t.Cleanup(func() { chainsyncRestartAfter = oldRestartAfter })
+	restartStarted := make(chan struct{})
+	releaseRestart := make(chan struct{})
+
+	// Start restart, wait until it is running, then trigger timeout.
+	h.o.restartChainsyncClientAsync(
+		context.Background(),
+		h.conn.Id(),
+		"test-timeout",
+		func() error {
+			close(restartStarted)
+			<-releaseRestart
+			return nil
+		},
+	)
+	testutil.RequireReceive(
+		t,
+		restartStarted,
+		5*time.Second,
+		"restart function should start",
+	)
+	require.Equal(
+		t,
+		chainsyncRestartTimeout,
+		testutil.RequireReceive(
+			t,
+			timeoutArgCh,
+			5*time.Second,
+			"restart timeout duration should be requested",
+		),
+	)
+	timeoutCh <- time.Now()
+
+	// The timeout branch closes/recycles the connection.
+	evt := testutil.RequireReceive(
+		t,
+		h.closedCh,
+		5*time.Second,
+		"restart timeout should close the connection",
+	)
+	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	require.True(t, ok)
+	require.Equal(t, h.conn.Id(), closed.ConnectionId)
+	close(releaseRestart)
+}
+
+// TestRestartChainsyncClientAsync_ContextCancelClosesConnection verifies node
+// shutdown cancellation aborts restart and closes the connection.
+func TestRestartChainsyncClientAsync_ContextCancelClosesConnection(
+	t *testing.T,
+) {
+	// Start a restart under a cancellable context and block the restart
+	// function so ctx.Done can win the select.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	restartStarted := make(chan struct{})
+	releaseRestart := make(chan struct{})
+
+	// Start restart, wait until it is running, then cancel the context.
+	h.o.restartChainsyncClientAsync(
+		ctx,
+		h.conn.Id(),
+		"test-context-cancel",
+		func() error {
+			close(restartStarted)
+			<-releaseRestart
+			return nil
+		},
+	)
+	testutil.RequireReceive(
+		t,
+		restartStarted,
+		5*time.Second,
+		"restart function should start",
+	)
+	cancel()
+
+	// Cancellation closes/recycles the connection.
+	evt := testutil.RequireReceive(
+		t,
+		h.closedCh,
+		5*time.Second,
+		"context cancellation should close the connection",
+	)
+	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	require.True(t, ok)
+	require.Equal(t, h.conn.Id(), closed.ConnectionId)
+	close(releaseRestart)
+}
+
+// TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen verifies a
+// completed restart does not emit connection-close lifecycle events.
+func TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen(
+	t *testing.T,
+) {
+	// Prepare a restart function that completes normally and signals when the
+	// goroutine has run.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	restartDone := make(chan struct{})
+
+	// Run the restart path without returning an error.
+	h.o.restartChainsyncClientAsync(
+		context.Background(),
+		h.conn.Id(),
+		"test-success",
+		func() error {
+			close(restartDone)
+			return nil
+		},
+	)
+	testutil.RequireReceive(
+		t,
+		restartDone,
+		5*time.Second,
+		"restart function should complete",
+	)
+
+	// A successful restart does not close the connection.
+	testutil.RequireNoReceive(
+		t,
+		h.closedCh,
+		100*time.Millisecond,
+		"successful restart should leave connection open",
+	)
+}
+
+// TestRestartChainsyncClientAsync_RestartFailureClosesConnection verifies
+// restart function errors recycle the affected connection.
+func TestRestartChainsyncClientAsync_RestartFailureClosesConnection(
+	t *testing.T,
+) {
+	// Prepare a restart function that fails immediately.
+	h := newChainsyncAsyncSendFailureHarness(t)
+	expectedErr := errors.New("restart failed")
+
+	// Run the async restart path with a failing function.
+	h.o.restartChainsyncClientAsync(
+		context.Background(),
+		h.conn.Id(),
+		"test-failure",
+		func() error {
+			return expectedErr
+		},
+	)
+	evt := testutil.RequireReceive(
+		t,
+		h.closedCh,
+		5*time.Second,
+		"restart failure should close the connection",
+	)
+
+	// Restart failure closes/recycles the affected connection.
+	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	require.True(t, ok)
+	require.Equal(t, h.conn.Id(), closed.ConnectionId)
+}
+
 func TestNormalizeIntersectPoints(t *testing.T) {
 	points := []ocommon.Point{
 		ocommon.NewPoint(20, []byte("b")),
@@ -508,6 +1217,345 @@ func TestNormalizeIntersectPoints(t *testing.T) {
 		},
 		normalized,
 	)
+}
+
+// The apply gate (ChainsyncApplyEligible) withholds a peer's headers from the
+// ledger while still observing its tips for chain selection: an uncorroborated
+// Genesis fast source is seen but cannot steer the ledger (no post-denial
+// ingress). This is the ouroboros-layer enforcement of the corroboration stall.
+func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	require.True(t, state.AddClientConnId(conn))
+
+	applyEligible := false
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
+			return applyEligible
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	// Apply denied: the tip is observed for chain selection, but the header is
+	// NOT applied to the ledger.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case evt := <-tipCh:
+		_, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
+		require.True(t, ok, "tip must be observed even when apply is denied")
+	case <-time.After(time.Second):
+		t.Fatal("expected PeerTipUpdateEvent (observation) while apply denied")
+	}
+	select {
+	case <-ledgerCh:
+		t.Fatal("ledger ingress must be withheld while apply is denied")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Apply now allowed (peer corroborated): the same header is applied.
+	applyEligible = true
+	header2 := newTestBlockHeader(101, 2, 0xbb)
+	tip2 := ochainsync.Tip{
+		Point:       ocommon.NewPoint(101, header2.Hash().Bytes()),
+		BlockNumber: 2,
+	}
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header2,
+		tip2,
+	))
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, conn, data.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal("expected ledger ingress once apply is allowed")
+	}
+}
+
+// A header first seen from an uncorroborated (apply-denied) peer is withheld but
+// must NOT be permanently deduplicated: the point is recorded without a dedup
+// entry, so when a corroborated apply-eligible peer later delivers it the header
+// is still published — even under the parallel strategy, which never replays
+// duplicates.
+func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	cfg := dchainsync.DefaultConfig()
+	cfg.HeaderSyncStrategy = dchainsync.HeaderSyncStrategyParallel
+	state := dchainsync.NewStateWithConfig(bus, nil, cfg)
+	// Distinct remote hosts so the two peers count as independent corroborators.
+	connA := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(
+			e chainselection.PeerTipUpdateEvent,
+		) bool {
+			cs.HandlePeerTipUpdateEvent(
+				event.NewEvent(chainselection.PeerTipUpdateEventType, e),
+			)
+			return true
+		},
+		ChainsyncApplyEligible: cs.ShouldApplyIngress,
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	// connA delivers the header while uncorroborated: withheld, and NOT recorded
+	// in the cross-peer dedup cache.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connA},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case <-ledgerCh:
+		t.Fatal("connA header must be withheld while uncorroborated")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// connB delivers the same header. connA and connB now corroborate each
+	// other, so connB is apply-eligible. Because connA's delivery was not
+	// deduplicated, the header is still "new" and the parallel strategy
+	// publishes it — the point is not lost.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connB},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connB, data.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal(
+			"corroborated peer must be able to publish a point first seen " +
+				"from an uncorroborated (withheld) peer",
+		)
+	}
+}
+
+// With the synchronous observe hook wired (as the node does when Genesis
+// corroboration is active), a header's apply decision reflects that header:
+// the tip is folded into chain selection before the apply gate runs, so a
+// header that establishes corroboration is applied in the same roll-forward
+// rather than withheld until an asynchronous tip update is processed.
+// The roll-backward apply gate must reflect the rollback currently being
+// admitted: a rollback trims the peer's observed frontier (via ApplyRollback),
+// which can change its corroboration status, so the observation must be applied
+// to chain selection synchronously before the apply-eligibility check. Here a
+// peer corroborated on its pre-rollback frontier rolls back below that frontier
+// (trimming its observed points to empty), which makes it uncorroborated; the
+// rollback must therefore be withheld from the ledger — decided in the same
+// roll-backward call, with no async lag.
+func TestChainsyncClientRollBackwardSyncObservationOrdersApplyGate(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	state := dchainsync.NewState(bus, nil)
+	// Distinct remote hosts so the two peers count as independent corroborators.
+	connP := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	connW := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	require.True(t, state.AddClientConnId(connP))
+	require.True(t, state.AddClientConnId(connW))
+
+	mkTip := func(slot uint64, hash string, block uint64) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+			BlockNumber: block,
+		}
+	}
+	// P and W corroborate each other on slots 100 and 105.
+	for _, c := range []ouroboros.ConnectionId{connP, connW} {
+		cs.UpdatePeerTip(c, mkTip(100, "h100", 100), nil)
+		cs.UpdatePeerTip(c, mkTip(105, "h105", 105), nil)
+	}
+	require.True(t, cs.ShouldApplyIngress(connP),
+		"P must be apply-eligible (corroborated) before the rollback")
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		// Synchronous observation, exactly like node.chainsyncObservePeerRollback.
+		ChainsyncObservePeerRollback: func(
+			e chainselection.PeerRollbackEvent,
+		) bool {
+			cs.HandlePeerRollbackEvent(
+				event.NewEvent(chainselection.PeerRollbackEventType, e),
+			)
+			return true
+		},
+		ChainsyncApplyEligible: cs.ShouldApplyIngress,
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	// P rolls back to slot 99, below its entire corroborated frontier, trimming
+	// its observed points to empty. Its synchronous observation makes P
+	// uncorroborated before the apply gate, so the rollback is withheld.
+	rollbackPoint := ocommon.NewPoint(99, []byte("rb99"))
+	require.NoError(t, o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: connP},
+		rollbackPoint,
+		mkTip(99, "rb99", 99),
+	))
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		200*time.Millisecond,
+		"rollback must be withheld: the apply gate must reflect the "+
+			"post-rollback (trimmed) corroboration state",
+	)
+	require.False(t, cs.ShouldApplyIngress(connP),
+		"P must be uncorroborated after the rollback trims its frontier")
+}
+
+func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	state := dchainsync.NewState(bus, nil)
+	// Distinct remote hosts so the two peers count as independent corroborators.
+	connA := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+	// connA drives, so it may replay a duplicate header first seen from connB.
+	state.SetClientConnId(connA)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		// Synchronous observation, exactly like node.chainsyncObservePeerTip.
+		ChainsyncObservePeerTip: func(
+			e chainselection.PeerTipUpdateEvent,
+		) bool {
+			cs.HandlePeerTipUpdateEvent(
+				event.NewEvent(chainselection.PeerTipUpdateEventType, e),
+			)
+			return true
+		},
+		ChainsyncApplyEligible: cs.ShouldApplyIngress,
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	// connB delivers the header first. It is observed but uncorroborated (no
+	// witness yet), so it is withheld from the ledger.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connB},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case <-ledgerCh:
+		t.Fatal("connB header must be withheld while uncorroborated")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// connA (the driver) delivers the same header. Its synchronous observation
+	// makes connA and connB corroborate each other, so by the time the apply
+	// gate runs connA is corroborated and the header is applied — in the same
+	// roll-forward, with no async lag.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connA},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connA, data.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal(
+			"corroborating header must be applied in the same roll-forward",
+		)
+	}
 }
 
 func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
@@ -1779,6 +2827,12 @@ func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 		},
 		{
 			reason:         event.ChainsyncResyncReasonLiveTxValidationRecovery,
+			wantFresh:      true,
+			wantDeniesPeer: false,
+		},
+		{
+			reason: event.
+				ChainsyncResyncReasonReplayRecoveryNonConverging,
 			wantFresh:      true,
 			wantDeniesPeer: false,
 		},

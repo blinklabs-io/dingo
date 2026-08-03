@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -215,10 +217,9 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			),
 		)
 		server = &http.Server{
-			Addr: fmt.Sprintf(
-				"%s:%d",
+			Addr: net.JoinHostPort(
 				u.config.Host,
-				u.config.Port,
+				strconv.FormatUint(uint64(u.config.Port), 10),
 			),
 			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
@@ -236,10 +237,9 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			),
 		)
 		server = &http.Server{
-			Addr: fmt.Sprintf(
-				"%s:%d",
+			Addr: net.JoinHostPort(
 				u.config.Host,
-				u.config.Port,
+				strconv.FormatUint(uint64(u.config.Port), 10),
 			),
 			Handler:           handler,
 			Protocols:         unencryptedHTTP2Protocols(),
@@ -335,9 +335,7 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 				serverType, err,
 			)
 		}
-		if server.TLSConfig == nil {
-			server.TLSConfig = &tls.Config{}
-		}
+		server.TLSConfig = tlsutil.ServerConfig(server.TLSConfig)
 		server.TLSConfig.Certificates = append(
 			server.TLSConfig.Certificates,
 			cert,

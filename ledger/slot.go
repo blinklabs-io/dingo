@@ -16,8 +16,10 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -33,10 +35,8 @@ var ErrBeforeGenesis = errors.New("time is before genesis start")
 //
 // Slot 0 always maps to Shelley genesis SystemStart, regardless of whether
 // the epoch cache is populated. Other slots are resolved via the
-// hardfork.Summary built from the LedgerState's epoch cache; slots past the
-// last known epoch are projected using the current era's slot length (the
-// Summary's current era is unbounded, mirroring the legacy projection
-// behavior).
+// hardfork.Summary built from the LedgerState's epoch cache. The current era
+// can be projected only through its configured safe-zone horizon.
 func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot > math.MaxInt64 {
 		return time.Time{}, errors.New("slot is larger than time.Duration")
@@ -57,10 +57,10 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 
 // TimeToSlot returns the slot containing the given wall-clock time.
 //
-// Returns ErrBeforeGenesis when t is before SystemStart. When the epoch cache
-// is empty but t is within 5 seconds of now, falls back to a coarse
-// approximation using the Shelley genesis slot length — this is useful at
-// chain genesis before any epochs have been persisted.
+// Returns ErrBeforeGenesis when t is before SystemStart. Near-now calls used by
+// the operational slot clock retain current-era extrapolation when the ledger
+// is empty or behind the HFC forecast horizon; arbitrary time queries remain
+// bounded.
 func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
@@ -71,30 +71,33 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	}
 	sum, err := ls.HardForkSummary()
 	if err != nil {
-		// time.Since(t) == now - t, so it is negative for future times.
-		// Guard both directions so arbitrary future times don't match the
-		// "near now" fallback.
-		if d := time.Since(t); d >= -5*time.Second && d < 5*time.Second {
+		if isNearNow(t) {
 			return nearNowSlot(shelleyGenesis), nil
 		}
 		return 0, errors.New("time not found in known epochs")
 	}
 	slot, sumErr := sum.TimeToSlot(t)
 	if sumErr != nil {
-		// With an unbounded current era in HardForkSummary this is
-		// unreachable for t >= SystemStart, but we preserve the legacy
-		// error message for any future bounded-summary configuration.
-		return 0, errors.New("time not found in known epochs")
+		// CurrentSlot drives operational timing while a node catches up after
+		// downtime. Preserve its legacy current-era extrapolation without
+		// weakening the bounded Summary used by header validation and arbitrary
+		// time queries.
+		if errors.Is(sumErr, hardfork.ErrPastHorizon) && isNearNow(t) {
+			if currentSlot, ok := currentEraSlotAtTime(sum, t); ok {
+				return currentSlot, nil
+			}
+		}
+		return 0, fmt.Errorf("time not found in known epochs: %w", sumErr)
 	}
 	return slot, nil
 }
 
 // SlotToEpoch returns the epoch containing the given slot.
 //
-// Slots within the known epoch cache resolve to the cached epoch's
-// parameters; slots past the cache are projected using the current era's
-// parameters. Returns an error for an empty cache or for slots before the
-// first known epoch (matching legacy error messages).
+// Slots within the known epoch cache resolve to the cached epoch's parameters;
+// slots past the cache are projected using the current era's parameters only
+// through the configured safe-zone horizon. Returns an error for an empty
+// cache or for slots outside that range.
 func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	sum, err := ls.HardForkSummary()
 	if err != nil {
@@ -103,11 +106,9 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	info, err := sum.SlotToEpoch(slot)
 	if err != nil {
 		if errors.Is(err, hardfork.ErrPastHorizon) {
-			// ErrPastHorizon fires for slots outside every era's bounds —
-			// either below the first era's start or past the last bounded
-			// era's end. Don't claim a direction we don't know.
-			return models.Epoch{}, errors.New(
-				"slot is outside the known epoch range",
+			return models.Epoch{}, fmt.Errorf(
+				"slot is outside the known epoch range: %w",
+				err,
 			)
 		}
 		return models.Epoch{}, err
@@ -124,6 +125,87 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 		// Nonce stays nil: unknown for projected epochs, and callers must
 		// consult the DB for the persisted nonce of known epochs.
 	}, nil
+}
+
+// EpochInfo returns boundary information for the given epoch.
+//
+// Epochs within the known epoch cache resolve to cached-era parameters; epochs
+// past the cache are projected using the current era's parameters only through
+// the configured safe-zone horizon. Returns an error for an empty cache or for
+// epochs outside that range.
+func (ls *LedgerState) EpochInfo(epoch uint64) (models.Epoch, error) {
+	cache := ls.loadConsensusSnapshot().epochCache
+	for _, cachedEpoch := range slices.Backward(cache) {
+		if cachedEpoch.EpochId == epoch {
+			return epochBoundaryInfo(cachedEpoch), nil
+		}
+	}
+
+	sum, err := ls.HardForkSummary()
+	if err != nil {
+		return models.Epoch{}, errors.New("no epochs in cache")
+	}
+	info, err := sum.EpochInfo(epoch)
+	if err != nil {
+		if errors.Is(err, hardfork.ErrPastHorizon) {
+			return models.Epoch{}, fmt.Errorf(
+				"epoch is outside the known epoch range: %w",
+				err,
+			)
+		}
+		return models.Epoch{}, err
+	}
+	return models.Epoch{
+		EpochId:   info.Epoch,
+		StartSlot: info.StartSlot,
+		EraId:     info.EraID,
+		// info.SlotLength is a positive, protocol-bounded duration.
+		// #nosec G115
+		SlotLength: uint(info.SlotLength / time.Millisecond),
+		// info.LengthInSlots is protocol-bounded and persisted as uint.
+		// #nosec G115
+		LengthInSlots: uint(info.LengthInSlots),
+	}, nil
+}
+
+func epochBoundaryInfo(epoch models.Epoch) models.Epoch {
+	return models.Epoch{
+		EpochId:       epoch.EpochId,
+		StartSlot:     epoch.StartSlot,
+		EraId:         epoch.EraId,
+		SlotLength:    epoch.SlotLength,
+		LengthInSlots: epoch.LengthInSlots,
+	}
+}
+
+func isNearNow(t time.Time) bool {
+	// time.Since(t) == now - t, so it is negative for future times. Guard both
+	// directions so arbitrary future times do not match the operational fallback.
+	d := time.Since(t)
+	return d >= -5*time.Second && d < 5*time.Second
+}
+
+func currentEraSlotAtTime(
+	sum *hardfork.Summary,
+	t time.Time,
+) (uint64, bool) {
+	if sum == nil || len(sum.Eras) == 0 {
+		return 0, false
+	}
+	current := sum.Eras[len(sum.Eras)-1]
+	relativeTime := t.Sub(sum.SystemStart)
+	if relativeTime < current.Start.RelativeTime ||
+		current.Params.SlotLength <= 0 {
+		return 0, false
+	}
+	slotOffset := (relativeTime - current.Start.RelativeTime) /
+		current.Params.SlotLength
+	// slotOffset is non-negative and time.Duration-bounded.
+	slotsIntoEra := uint64(slotOffset) // #nosec G115
+	if slotsIntoEra > math.MaxUint64-current.Start.Slot {
+		return 0, false
+	}
+	return current.Start.Slot + slotsIntoEra, true
 }
 
 // shelleySlotLengthMs returns the Shelley genesis slot length in milliseconds,
@@ -154,6 +236,27 @@ func (ls *LedgerState) shelleySlotLength() time.Duration {
 	// slotLenMs is a small, protocol-bounded slot length in milliseconds.
 	// #nosec G115
 	return time.Duration(slotLenMs) * time.Millisecond
+}
+
+// EndorserBlockWaitDuration returns the wall-clock window to wait for a
+// referenced/certified endorser block's transaction closure to become
+// available, derived from the Leios pipeline timing (EndorserBlockWaitSlots,
+// the certify-by deadline) and the Shelley slot length. It returns 0 when the
+// wait is disabled or the slot length is unknown. This is the same window
+// ledger application uses to gate a ranking block on its endorser block (see
+// ensureReferencedEndorserBlocks), so NtC serving and ledger application wait
+// for the same healthy closure-delivery window.
+func (ls *LedgerState) EndorserBlockWaitDuration() time.Duration {
+	if ls.config.EndorserBlockWaitSlots == 0 {
+		return 0
+	}
+	slotLen := ls.shelleySlotLength()
+	if slotLen <= 0 {
+		return 0
+	}
+	// EndorserBlockWaitSlots is a small protocol window.
+	// #nosec G115
+	return time.Duration(ls.config.EndorserBlockWaitSlots) * slotLen
 }
 
 // nearNowSlot estimates the current slot from the Shelley genesis slot length,

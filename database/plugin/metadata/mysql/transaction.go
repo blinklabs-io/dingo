@@ -17,6 +17,7 @@
 package mysql
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -27,7 +28,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountsums"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountwitness"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/collateralfee"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/utxocond"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -82,28 +86,6 @@ func (d *MetadataStoreMysql) resolveReadDB(
 	return d.resolveDB(txn)
 }
 
-// ExistingTransactionHashes returns transaction hashes already recorded.
-func (d *MetadataStoreMysql) ExistingTransactionHashes(
-	hashes [][]byte,
-	txn types.Txn,
-) ([][]byte, error) {
-	if len(hashes) == 0 {
-		return nil, nil
-	}
-	db, err := d.resolveDB(txn)
-	if err != nil {
-		return nil, err
-	}
-	var existing [][]byte
-	result := db.Model(&models.Transaction{}).
-		Where("hash IN ?", hashes).
-		Pluck("hash", &existing)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	return existing, nil
-}
-
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreMysql) GetTransactionByHash(
 	hash []byte,
@@ -155,6 +137,29 @@ func (d *MetadataStoreMysql) GetTransactionSlotByHash(
 	return row.Slot, true, nil
 }
 
+// SumTransactionFeesInSlotRange sums the fee-pot contributions in an
+// inclusive slot range: declared fees of valid transactions plus consumed
+// collateral of phase-2-invalid transactions, per the Alonzo/Babbage UTXOS
+// rule.
+func (d *MetadataStoreMysql) SumTransactionFeesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	if err := db.Model(&models.Transaction{}).
+		Select("COALESCE(SUM(CASE WHEN valid THEN CAST(fee AS UNSIGNED) ELSE CAST(collateral_fee AS UNSIGNED) END), 0)").
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
+	}
+	return total, nil
+}
+
 // GetTransactionIDByHash returns the primary-key ID of the transaction
 // with the given hash without preloading any related rows. Returns
 // (0, false, nil) when no such transaction exists.
@@ -178,6 +183,31 @@ func (d *MetadataStoreMysql) GetTransactionIDByHash(
 		return 0, false, result.Error
 	}
 	return row.ID, true, nil
+}
+
+// GetTransactionMetadataByHash returns only the stored metadata blob for the
+// transaction with the given hash without preloading any related rows. Returns
+// (nil, nil) when no such transaction exists or it carries no metadata.
+func (d *MetadataStoreMysql) GetTransactionMetadataByHash(
+	hash []byte,
+	txn types.Txn,
+) ([]byte, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var row struct{ Metadata []byte }
+	result := db.Model(&models.Transaction{}).
+		Select("metadata").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return row.Metadata, nil
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -392,6 +422,36 @@ func (d *MetadataStoreMysql) CountTransactionsByAddress(
 	return int(count), nil
 }
 
+// CountTransactionsByPaymentCred returns the total number of distinct
+// transactions involving the given payment credential across every address
+// that carries it, regardless of staking part.
+func (d *MetadataStoreMysql) CountTransactionsByPaymentCred(
+	paymentKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(paymentKey) == 0 {
+		return 0, nil
+	}
+
+	var count int64
+	result := db.Model(&models.AddressTransaction{}).
+		Where("payment_key = ?", paymentKey).
+		Distinct("transaction_id").
+		Count(&count)
+	if result.Error != nil {
+		return 0, fmt.Errorf(
+			"count txs by payment cred: %w",
+			result.Error,
+		)
+	}
+	return int(count), nil
+}
+
 // GetAddressesByCredential returns distinct addresses mapped to a stake credential.
 func (d *MetadataStoreMysql) GetAddressesByCredential(
 	credentialTag uint8,
@@ -583,6 +643,130 @@ func (d *MetadataStoreMysql) CountAccountRegistrationHistoryByCredential(
 	return count, nil
 }
 
+func (d *MetadataStoreMysql) GetAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountWithdrawalHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for account withdrawal history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryWithdrawalHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account withdrawal history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+func (d *MetadataStoreMysql) CountAccountWithdrawalHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count account withdrawal history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountWithdrawalHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account withdrawal history: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
+func (d *MetadataStoreMysql) GetAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn types.Txn,
+) ([]models.AccountTransactionAssociationRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for address transactions by credential: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryAddressTransactionsByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		from,
+		to,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query address transactions by credential: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+func (d *MetadataStoreMysql) CountAddressTransactionsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count address transactions by credential: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountAddressTransactionsByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+		from,
+		to,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count address transactions by credential: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
 func (d *MetadataStoreMysql) GetAccountSumsByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -746,9 +930,13 @@ func (d *MetadataStoreMysql) getOrCreateAccount(
 		tmpAccount = &models.Account{
 			StakingKey:    stakeKey,
 			CredentialTag: credentialTag,
+			CreatedSlot:   models.AccountCreatedSlotUnset,
 		}
 	} else if !tmpAccount.Active {
 		tmpAccount.Active = true
+		tmpAccount.Pool = nil
+		tmpAccount.Drep = nil
+		tmpAccount.DrepType = 0
 	}
 	return tmpAccount, nil
 }
@@ -756,40 +944,169 @@ func (d *MetadataStoreMysql) getOrCreateAccount(
 // saveAccount persists the account to the database. It creates a new
 // record when `account.ID == 0` (with an upsert on credential tag + staking key) or saves
 // the existing record otherwise.
-func saveAccount(account *models.Account, db *gorm.DB) error {
+func saveAccount(
+	account *models.Account,
+	db *gorm.DB,
+	rewardRefs ...map[string]rewardCredentialSlotRef,
+) error {
+	// Resolve the create-helper sentinel to the account's creation slot. For a
+	// freshly built account CreatedSlot==AddedSlot; an existing row loaded from
+	// the DB carries its real (never-sentinel) CreatedSlot and is left as-is,
+	// and no upsert DoUpdates list includes created_slot, so it stays immutable.
+	if account.CreatedSlot == models.AccountCreatedSlotUnset {
+		account.CreatedSlot = account.AddedSlot
+	}
 	if account.ID == 0 {
+		updates := clause.AssignmentColumns(
+			[]string{
+				"added_slot",
+				"pool",
+				"drep",
+				"drep_type",
+				"active",
+				"certificate_id",
+			},
+		)
+		updates = append(updates, clause.Assignment{
+			Column: clause.Column{Name: "created_slot"},
+			Value: gorm.Expr(
+				"LEAST(created_slot, VALUES(created_slot))",
+			),
+		})
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "credential_tag"},
 				{Name: "staking_key"},
 			},
-			DoUpdates: clause.AssignmentColumns(
-				[]string{
-					"added_slot",
-					"pool",
-					"drep",
-					"drep_type",
-					"active",
-					"certificate_id",
-				},
-			),
+			DoUpdates: updates,
 		}).Create(account)
 		if result.Error != nil {
 			return result.Error
 		}
 	} else {
-		result := db.Save(account)
+		result := db.Model(&models.Account{}).
+			Where("id = ?", account.ID).
+			Updates(map[string]any{
+				"staking_key":    account.StakingKey,
+				"credential_tag": account.CredentialTag,
+				"pool":           account.Pool,
+				"drep":           account.Drep,
+				"added_slot":     account.AddedSlot,
+				"created_slot": gorm.Expr(
+					"LEAST(created_slot, ?)", account.CreatedSlot,
+				),
+				"certificate_id": account.CertificateID,
+				"reward":         account.Reward,
+				"drep_type":      account.DrepType,
+				"active":         account.Active,
+			})
 		if result.Error != nil {
 			return result.Error
 		}
 	}
+	ref := models.NewStakeCredentialRef(
+		account.CredentialTag,
+		account.StakingKey,
+	)
+	if len(rewardRefs) > 0 && rewardRefs[0] != nil {
+		addRewardStakeRef(rewardRefs[0], ref, account.AddedSlot)
+		return nil
+	}
+	return refreshRewardLiveStakeAggregate(db, ref, account.AddedSlot)
+}
+
+// insertMissingDeregistrationAccount creates the placeholder used when a
+// deregistration is observed before its account. A concurrent or repeated
+// deregistration must not replace any fields on an account that already exists.
+func insertMissingDeregistrationAccount(
+	account *models.Account,
+	db *gorm.DB,
+) error {
+	credentialTag := account.CredentialTag
+	stakingKey := account.StakingKey
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
+		DoNothing: true,
+	}).Create(account).Error; err != nil {
+		return err
+	}
+
+	// Create does not populate account when the conflict action is a no-op.
+	// Use a locking (current) read so this also sees a row committed after an
+	// earlier consistent read in a repeatable-read transaction. The subsequent
+	// deregistration can then update by ID without replacing delegation fields
+	// with the placeholder's zero values.
+	var persisted models.Account
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+		"credential_tag = ? AND staking_key = ?", credentialTag, stakingKey,
+	).First(&persisted).Error; err != nil {
+		return err
+	}
+	*account = persisted
 	return nil
 }
 
 // saveCertRecord saves a certificate record and returns any error
-func saveCertRecord(record any, db *gorm.DB) error {
+func saveCertRecord(
+	record any,
+	db *gorm.DB,
+	rewardRefs ...map[string]rewardCredentialSlotRef,
+) error {
 	result := db.Create(record)
-	return result.Error
+	if result.Error != nil {
+		return result.Error
+	}
+	ref, slot, ok := rewardLiveStakeRefFromCertRecord(record)
+	if !ok {
+		return nil
+	}
+	if len(rewardRefs) > 0 && rewardRefs[0] != nil {
+		addRewardStakeRef(rewardRefs[0], ref, slot)
+		return nil
+	}
+	return refreshRewardLiveStakeAggregate(db, ref, slot)
+}
+
+func rewardLiveStakeRefFromCertRecord(
+	record any,
+) (models.StakeCredentialRef, uint64, bool) {
+	switch r := record.(type) {
+	case *models.StakeRegistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeDeregistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.Registration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.Deregistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeVoteDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeVoteRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.VoteRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.VoteDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	default:
+		return models.StakeCredentialRef{}, 0, false
+	}
 }
 
 // SetGapBlockTransaction stores a transaction record and its produced
@@ -815,15 +1132,31 @@ func (d *MetadataStoreMysql) SetGapBlockTransaction(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	collateralReturn := tx.CollateralReturn()
 	for _, utxo := range tx.Produced() {
@@ -881,6 +1214,7 @@ func (d *MetadataStoreMysql) SetGapBlockTransaction(
 			)
 		}
 	}
+	rewardRefs := rewardStakeRefsFromUtxos(tmpTx.Outputs)
 	if tmpTx.CollateralReturn != nil {
 		tmpTx.CollateralReturn.ID = 0
 		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
@@ -893,6 +1227,62 @@ func (d *MetadataStoreMysql) SetGapBlockTransaction(
 				txHash, err,
 			)
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(
+				tmpTx.CollateralReturn.CredentialTag,
+				tmpTx.CollateralReturn.StakingKey,
+			),
+			tmpTx.CollateralReturn.AddedSlot,
+		)
+	}
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf("refresh reward live stake for gap tx %x: %w", txHash, err)
+	}
+	return nil
+}
+
+// RecomputeGapCollateralFee recomputes and persists the collateral fee for a
+// phase-2-invalid gap-block transaction after ensureGapConsumedUtxos has
+// materialized its consumed collateral inputs in the utxo table. See the
+// interface docs on metadata.MetadataStore.
+func (d *MetadataStoreMysql) RecomputeGapCollateralFee(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txn types.Txn,
+) error {
+	if tx.IsValid() {
+		return nil
+	}
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
+	if err := db.Model(&models.Transaction{}).
+		Where("hash = ?", txHash).
+		Update("collateral_fee", types.Uint64(collateralFee)).Error; err != nil {
+		return fmt.Errorf(
+			"update collateral fee for gap tx %x: %w", txHash, err,
+		)
 	}
 	return nil
 }
@@ -919,15 +1309,31 @@ func (d *MetadataStoreMysql) SetTransaction(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -959,7 +1365,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
+			[]string{"block_hash", "block_index", "slot", "collateral_fee"},
 		),
 	}).Create(tmpTx)
 	if result.Error != nil {
@@ -988,6 +1394,22 @@ func (d *MetadataStoreMysql) SetTransaction(
 			return fmt.Errorf("transaction not found after upsert: %x", txHash)
 		}
 		tmpTx.ID = existingTx.ID
+	}
+	// rewardRefs accumulates every stake-credential ref touched by this
+	// transaction (outputs, collateral return, spent UTxOs, and account/cert
+	// saves below) so the full reward_live_stake recompute for a credential
+	// runs exactly once at the end of SetTransaction, instead of once per
+	// trigger. See addRewardStakeRef / refreshRewardLiveStakeAggregates.
+	rewardRefs := rewardStakeRefsFromUtxos(tmpTx.Outputs)
+	if tmpTx.CollateralReturn != nil {
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(
+				tmpTx.CollateralReturn.CredentialTag,
+				tmpTx.CollateralReturn.StakingKey,
+			),
+			tmpTx.CollateralReturn.AddedSlot,
+		)
 	}
 	if tx.IsValid() {
 		if err := d.applyTransactionRewardWithdrawals(
@@ -1030,53 +1452,61 @@ func (d *MetadataStoreMysql) SetTransaction(
 			)
 		}
 	}
+
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
 	// Add Inputs to Transaction
-	for _, input := range tx.Inputs() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+	if len(tx.Inputs()) > 0 {
+		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
+		for _, input := range tx.Inputs() {
+			inputRefs = append(inputRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
 		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
-			)
+			return fmt.Errorf("failed to batch fetch input UTXOs: %w", err)
 		}
-		if utxo == nil {
-			d.logger.Warn(
-				"Skipping missing input UTxO",
-				"hash",
-				input.Id().String(),
-				"index",
-				inIdx,
-			)
-			continue
+		for _, input := range tx.Inputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := inputUtxos[key]
+			if utxo == nil {
+				d.logger.Warn(
+					"Skipping missing input UTxO",
+					"hash",
+					input.Id().String(),
+					"index",
+					inIdx,
+				)
+				continue
+			}
+			tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
 		}
-		tmpTx.Inputs = append(
-			tmpTx.Inputs,
-			*utxo,
-		)
 	}
 	// Add Collateral to Transaction
 	if len(tx.Collateral()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 
+		collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
+		for _, input := range tx.Collateral() {
+			collateralRefs = append(collateralRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
+		if err != nil {
+			return fmt.Errorf("failed to batch fetch collateral UTXOs: %w", err)
+		}
 		for _, input := range tx.Collateral() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
-			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to fetch input %x#%d: %w",
-					inTxId,
-					inIdx,
-					err,
-				)
-			}
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := collateralUtxos[key]
 			if utxo == nil {
 				d.logger.Warn(
 					"Skipping missing collateral UTxO",
@@ -1087,33 +1517,29 @@ func (d *MetadataStoreMysql) SetTransaction(
 				)
 				continue
 			}
-			// Found the Utxo, add it to the SQL UPDATE list
-			// First, add it to the CASE statement so it's selected
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			// Also add it to the WHERE clause in the SQL UPDATE
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			// Add it to the Transaction
 			tmpTx.Collateral = append(
 				tmpTx.Collateral,
 				*utxo,
 			)
 		}
-		// Update reference where this Utxo was used as collateral in a Transaction
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// Every matched row is set to the same txHash, so the CASE the
+		// old code built was redundant. A fixed-shape, power-of-two-padded
+		// OR-list keeps the statement text stable across input counts so
+		// the prepared-statement cache can reuse it (issue #2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET collateral_by_tx_id = ? WHERE " + chunk.Condition
 			result = db.Exec(sql, args...)
 			if result.Error != nil {
 				return fmt.Errorf("batch update collateral: %w", result.Error)
@@ -1122,23 +1548,27 @@ func (d *MetadataStoreMysql) SetTransaction(
 	}
 	// Add ReferenceInputs to Transaction
 	if len(tx.ReferenceInputs()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 
+		refInputRefs := make([]UtxoRef, 0, len(tx.ReferenceInputs()))
+		for _, input := range tx.ReferenceInputs() {
+			refInputRefs = append(refInputRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to batch fetch reference input UTXOs: %w",
+				err,
+			)
+		}
 		for _, input := range tx.ReferenceInputs() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
-			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to fetch input %x#%d: %w",
-					inTxId,
-					inIdx,
-					err,
-				)
-			}
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := refInputUtxos[key]
 			if utxo == nil {
 				d.logger.Warn(
 					"Skipping missing reference input UTxO",
@@ -1149,33 +1579,27 @@ func (d *MetadataStoreMysql) SetTransaction(
 				)
 				continue
 			}
-			// Found the Utxo, add it to the SQL UPDATE list
-			// First, add it to the CASE statement so it's selected
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			// Also add it to the WHERE clause in the SQL UPDATE
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			// Add it to the Transaction
 			tmpTx.ReferenceInputs = append(
 				tmpTx.ReferenceInputs,
 				*utxo,
 			)
 		}
-		// Update reference where this Utxo was used as a reference input in a Transaction
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// See the collateral update above: the per-row CASE was redundant
+		// (all rows set to txHash); use a fixed-shape padded OR-list (#2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET referenced_by_tx_id = ? WHERE " + chunk.Condition
 			result = db.Exec(sql, args...)
 			if result.Error != nil {
 				return fmt.Errorf(
@@ -1186,52 +1610,142 @@ func (d *MetadataStoreMysql) SetTransaction(
 		}
 	}
 
-	// Consume UTxOs
-	for _, input := range tx.Consumed() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
-			)
+	// Consume UTxOs using optimistic locking to prevent race conditions.
+	// The atomic update ensures only one transaction can successfully mark a UTXO as spent.
+	if len(tx.Consumed()) > 0 {
+		type consumedUtxoRef struct {
+			txID []byte
+			idx  uint32
+			hash string
 		}
-		if utxo == nil {
-			d.logger.Warn(
-				"input UTxO not found",
-				"hash",
-				input.Id().String(),
-				"index",
-				inIdx,
-			)
-			continue
-		}
-		// Update existing UTxOs
-		result = db.Model(&models.Utxo{}).
-			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", txHash).
-			Updates(map[string]any{
-				"deleted_slot":   point.Slot,
-				"spent_at_tx_id": txHash,
+		consumedRefs := make([]consumedUtxoRef, 0, len(tx.Consumed()))
+		for _, input := range tx.Consumed() {
+			inTxID := input.Id().Bytes()
+			inIdx := input.Index()
+			duplicate := false
+			for i := range consumedRefs {
+				if consumedRefs[i].idx == inIdx &&
+					bytes.Equal(consumedRefs[i].txID, inTxID) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			consumedRefs = append(consumedRefs, consumedUtxoRef{
+				txID: inTxID,
+				idx:  inIdx,
+				hash: input.Id().String(),
 			})
-		if result.Error != nil {
-			return result.Error
+		}
+		if len(consumedRefs) > 0 {
+			// Fixed-shape, power-of-two-padded OR-list so the
+			// prepared-statement cache can reuse statements across
+			// varying input counts (issue #2943).
+			refs := make([]utxocond.Ref, len(consumedRefs))
+			for i, ref := range consumedRefs {
+				refs[i] = utxocond.Ref{TxID: ref.txID, Idx: ref.idx}
+			}
+			var totalAffected int64
+			for _, chunk := range utxocond.Chunks(
+				refs,
+				utxocond.DefaultMaxTerms,
+			) {
+				updateArgs := make([]any, 0, 2+len(chunk.Args))
+				updateArgs = append(updateArgs, point.Slot, txHash)
+				updateArgs = append(updateArgs, chunk.Args...)
+				sql := "UPDATE utxo" +
+					" SET deleted_slot = ?, spent_at_tx_id = ? " +
+					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (" +
+					chunk.Condition + ")"
+				result = db.Exec(sql, updateArgs...)
+				if result.Error != nil {
+					return fmt.Errorf("batch consume utxos: %w", result.Error)
+				}
+				totalAffected += result.RowsAffected
+			}
+			if totalAffected != int64(len(consumedRefs)) {
+				for _, ref := range consumedRefs {
+					var existingUtxo models.Utxo
+					checkResult := db.Where(
+						"tx_id = ? AND output_idx = ?",
+						ref.txID,
+						ref.idx,
+					).First(&existingUtxo)
+					if checkResult.Error != nil {
+						if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
+							d.logger.Warn(
+								"input UTxO not found",
+								"hash",
+								ref.hash,
+								"index",
+								ref.idx,
+							)
+							continue
+						}
+						return fmt.Errorf(
+							"failed to check UTXO %x#%d: %w",
+							ref.txID,
+							ref.idx,
+							checkResult.Error,
+						)
+					}
+					if existingUtxo.SpentAtTxId != nil &&
+						bytes.Equal(existingUtxo.SpentAtTxId, txHash) {
+						continue
+					}
+					if existingUtxo.DeletedSlot == 0 &&
+						existingUtxo.SpentAtTxId == nil {
+						return fmt.Errorf(
+							"batch consume did not update UTXO %x#%d",
+							ref.txID,
+							ref.idx,
+						)
+					}
+					return fmt.Errorf(
+						"%w: %x:%d",
+						types.ErrUtxoConflict,
+						ref.txID,
+						ref.idx,
+					)
+				}
+			}
+			consumedUtxoIDs := make([]models.UtxoId, 0, len(consumedRefs))
+			for _, ref := range consumedRefs {
+				consumedUtxoIDs = append(consumedUtxoIDs, models.UtxoId{
+					Hash: ref.txID,
+					Idx:  ref.idx,
+				})
+			}
+			spendRefs, err := rewardStakeRefsFromUtxoIDs(
+				db,
+				consumedUtxoIDs,
+				point.Slot,
+			)
+			if err != nil {
+				return fmt.Errorf("query reward live stake spend refs: %w", err)
+			}
+			for _, item := range spendRefs {
+				addRewardStakeRef(rewardRefs, item.ref, item.slot)
+			}
 		}
 	}
 	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
 	if d.storageMode == types.StorageModeAPI {
 		// Index unique addresses participating in this transaction.
-		// Includes inputs, collateral inputs, outputs, and collateral return.
+		// Includes inputs, collateral inputs, reference inputs, outputs, and collateral return.
 		addressUtxos := make(
 			[]models.Utxo,
 			0,
-			len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(tmpTx.Outputs)+1,
+			len(tmpTx.Inputs)+
+				len(tmpTx.Collateral)+
+				len(tmpTx.ReferenceInputs)+
+				len(tmpTx.Outputs)+1,
 		)
 		addressUtxos = append(addressUtxos, tmpTx.Inputs...)
 		addressUtxos = append(addressUtxos, tmpTx.Collateral...)
+		addressUtxos = append(addressUtxos, tmpTx.ReferenceInputs...)
 		addressUtxos = append(addressUtxos, tmpTx.Outputs...)
 		if tmpTx.CollateralReturn != nil {
 			addressUtxos = append(addressUtxos, *tmpTx.CollateralReturn)
@@ -1447,6 +1961,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					"vote_delegation",
 					"vote_registration_delegation",
 					"move_instantaneous_rewards",
+					"genesis_delegation",
 				}
 				for _, table := range tables {
 					if result := db.Table(table).Where("certificate_id IN ?", unifiedIDs).Delete(nil); result.Error != nil {
@@ -1461,6 +1976,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 			// Create unified certificate records first (idempotent with ON CONFLICT DO NOTHING)
 			certIDMap := make(map[int]uint)
 			certIDUpdates := make(map[uint]uint) // unifiedID -> specializedID
+			// certRewardRefs aliases the same underlying map as rewardRefs
+			// (maps are reference types) so account/cert saves below merge
+			// into the single end-of-transaction refresh instead of
+			// triggering their own.
+			certRewardRefs := rewardRefs
 			for i, cert := range certs {
 				var certType uint
 				switch cert.(type) {
@@ -1500,6 +2020,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				case *lcommon.GenesisKeyDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeGenesisKeyDelegation)
 				default:
 					d.logger.Warn("unknown certificate type", "type", fmt.Sprintf("%T", cert))
 					continue
@@ -1739,16 +2261,32 @@ func (d *MetadataStoreMysql) SetTransaction(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					// Collect update for batch processing
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.GenesisKeyDelegationCertificate:
+					tmpItem := models.GenesisDelegation{
+						GenesisHash:         c.GenesisHash,
+						GenesisDelegateHash: c.GenesisDelegateHash,
+						VrfKeyHash:          c.VrfKeyHash[:],
+						AddedSlot:           point.Slot,
+						BlockIndex:          idx,
+						CertIndex:           uint(i), //nolint:gosec
+						CertificateID:       certIDMap[i],
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.PoolRetirementCertificate:
 					// Include inactive pools when retiring.
 					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.PoolKeyHash[:]), true, txn)
@@ -1775,7 +2313,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1787,7 +2325,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1796,16 +2334,10 @@ func (d *MetadataStoreMysql) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate: %w", err)
 						}
 					}
 
@@ -1819,11 +2351,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1835,7 +2367,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1844,16 +2376,10 @@ func (d *MetadataStoreMysql) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate: %w", err)
 						}
 					}
 
@@ -1868,11 +2394,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						Amount:        types.Uint64(deposit),
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1900,11 +2426,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1933,11 +2459,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1978,11 +2504,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2011,11 +2537,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2112,7 +2638,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpDereg, db); err != nil {
+					if err := saveCertRecord(&tmpDereg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2151,7 +2677,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpUpdate, db); err != nil {
+					if err := saveCertRecord(&tmpUpdate, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2193,11 +2719,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2237,11 +2763,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2280,11 +2806,11 @@ func (d *MetadataStoreMysql) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2301,7 +2827,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 						AddedSlot:      point.Slot,
 					}
 
-					if err := saveCertRecord(&tmpAuth, db); err != nil {
+					if err := saveCertRecord(&tmpAuth, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2320,7 +2846,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
 
-					if err := saveCertRecord(&tmpResign, db); err != nil {
+					if err := saveCertRecord(&tmpResign, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2365,6 +2891,9 @@ func (d *MetadataStoreMysql) SetTransaction(
 				}
 			}
 
+			// certRewardRefs merges into rewardRefs above; the combined set
+			// is refreshed exactly once at the end of SetTransaction.
+
 			// Batch update unified certificates with specialized record IDs
 			if len(certIDUpdates) > 0 {
 				// Build CASE statement for batch update
@@ -2401,6 +2930,17 @@ func (d *MetadataStoreMysql) SetTransaction(
 		}
 	}
 
+	// Single end-of-transaction refresh for every credential touched above
+	// (outputs, collateral return, spent UTxOs, account/cert saves), instead
+	// of once per trigger.
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for tx %x: %w",
+			txHash,
+			err,
+		)
+	}
+
 	return nil
 }
 
@@ -2411,7 +2951,7 @@ func (d *MetadataStoreMysql) applyTransactionRewardWithdrawals(
 	txn types.Txn,
 ) error {
 	for addr, amount := range withdrawals {
-		if addr == nil || amount == nil || amount.Sign() == 0 {
+		if addr == nil || amount == nil {
 			continue
 		}
 		if amount.Sign() < 0 || !amount.IsUint64() {
@@ -2428,6 +2968,16 @@ func (d *MetadataStoreMysql) applyTransactionRewardWithdrawals(
 		credentialTag, ok := models.StakeCredentialTagFromAddress(*addr)
 		if !ok {
 			return errors.New("derive reward withdrawal credential tag")
+		}
+		db, err := d.resolveDB(txn)
+		if err != nil {
+			return err
+		}
+		if err := accountwitness.RecordWithdrawal(db, models.NewStakeCredentialRef(credentialTag, stakeKeyHash.Bytes()), txHash, slot); err != nil {
+			return err
+		}
+		if amount.Sign() == 0 {
+			continue
 		}
 		if err := d.ApplyAccountRewardWithdrawal(
 			credentialTag,
@@ -2495,15 +3045,31 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, batch.InFlightProducerAmount,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -2544,7 +3110,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}},
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
+			[]string{"block_hash", "block_index", "slot", "collateral_fee"},
 		),
 	}).Create(tmpTx)
 	needsIdFetch := tmpTx.ID == 0
@@ -2621,6 +3187,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 		}
 	}
 
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
+
 	// ------------------------------------------------------------------ //
 	// 2. Accumulate UTxO outputs                                          //
 	// ------------------------------------------------------------------ //
@@ -2639,10 +3209,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	//    These update UTxOs that already exist from prior blocks.        //
 	// ------------------------------------------------------------------ //
 	if len(tx.Collateral()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 		for _, input := range tx.Collateral() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
@@ -2656,25 +3223,22 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			if utxo == nil {
 				continue
 			}
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			tmpTx.Collateral = append(tmpTx.Collateral, *utxo)
 		}
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// Redundant CASE removed; fixed-shape padded OR-list (issue #2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET collateral_by_tx_id = ? WHERE " + chunk.Condition
 			if r := db.Exec(sql, args...); r.Error != nil {
 				return fmt.Errorf(
 					"batch update collateral (batched): %w",
@@ -2685,10 +3249,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	}
 
 	if len(tx.ReferenceInputs()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 		for _, input := range tx.ReferenceInputs() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
@@ -2702,28 +3263,25 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			if utxo == nil {
 				continue
 			}
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			tmpTx.ReferenceInputs = append(
 				tmpTx.ReferenceInputs,
 				*utxo,
 			)
 		}
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// Redundant CASE removed; fixed-shape padded OR-list (issue #2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET referenced_by_tx_id = ? WHERE " + chunk.Condition
 			if r := db.Exec(sql, args...); r.Error != nil {
 				return fmt.Errorf(
 					"batch update reference inputs (batched): %w",
@@ -2957,6 +3515,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					"registration_drep", "deregistration_drep", "update_drep",
 					"vote_delegation", "vote_registration_delegation",
 					"move_instantaneous_rewards",
+					"genesis_delegation",
 				}
 				for _, table := range tables {
 					if result := db.Table(table).
@@ -2972,6 +3531,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			}
 			certIDMap := make(map[int]uint)
 			certIDUpdates := make(map[uint]uint)
+			certRewardRefs := make(map[string]rewardCredentialSlotRef)
 			for i, cert := range certs {
 				var certType uint
 				switch cert.(type) {
@@ -3011,6 +3571,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				case *lcommon.GenesisKeyDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeGenesisKeyDelegation)
 				default:
 					d.logger.Warn(
 						"unknown certificate type (batched)",
@@ -3246,13 +3808,27 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.GenesisKeyDelegationCertificate:
+					tmpItem := models.GenesisDelegation{
+						GenesisHash:         c.GenesisHash,
+						GenesisDelegateHash: c.GenesisDelegateHash,
+						VrfKeyHash:          c.VrfKeyHash[:],
+						AddedSlot:           point.Slot,
+						BlockIndex:          idx,
+						CertIndex:           uint(i), //nolint:gosec
+						CertificateID:       certIDMap[i],
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.PoolRetirementCertificate:
 					tmpPool, err := d.GetPool(
 						lcommon.PoolKeyHash(c.PoolKeyHash[:]),
@@ -3279,7 +3855,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						PoolID:        tmpPool.ID,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3289,7 +3865,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3297,16 +3873,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate (batched): %w", err)
 						}
 					}
 					tmpAccount.Active = false
@@ -3317,10 +3887,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3330,7 +3900,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3338,16 +3908,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate (batched): %w", err)
 						}
 					}
 					tmpAccount.Active = false
@@ -3359,10 +3923,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3385,10 +3949,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3412,10 +3976,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3451,10 +4015,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3479,10 +4043,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3564,7 +4128,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpDereg, db); err != nil {
+					if err := saveCertRecord(&tmpDereg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpDereg.ID
@@ -3600,7 +4164,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpUpdate, db); err != nil {
+					if err := saveCertRecord(&tmpUpdate, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
@@ -3637,10 +4201,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3675,10 +4239,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3712,10 +4276,10 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3728,7 +4292,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}
-					if err := saveCertRecord(&tmpAuth, db); err != nil {
+					if err := saveCertRecord(&tmpAuth, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpAuth.ID
@@ -3743,7 +4307,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						tmpResign.AnchorURL = c.Anchor.Url
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
-					if err := saveCertRecord(&tmpResign, db); err != nil {
+					if err := saveCertRecord(&tmpResign, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpResign.ID
@@ -3779,6 +4343,16 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						cert,
 					)
 				}
+			}
+
+			if err := refreshRewardLiveStakeAggregates(
+				db,
+				certRewardRefs,
+			); err != nil {
+				return fmt.Errorf(
+					"refresh reward live stake for certificates (batched): %w",
+					err,
+				)
 			}
 
 			if len(certIDUpdates) > 0 {
@@ -3869,6 +4443,15 @@ func (d *MetadataStoreMysql) SetGenesisTransaction(
 		if result.Error != nil {
 			return fmt.Errorf("create genesis utxos: %w", result.Error)
 		}
+		if err := refreshRewardLiveStakeAggregates(
+			db,
+			rewardStakeRefsFromUtxos(outputs),
+		); err != nil {
+			return fmt.Errorf(
+				"refresh reward live stake for genesis utxos: %w",
+				err,
+			)
+		}
 	}
 
 	return nil
@@ -3952,6 +4535,11 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.DeleteTransactionsAfterSlot(slot, newMysqlTxn(tx))
+		})
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
@@ -3967,8 +4555,48 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 
 	// NULL out UTXO references to transactions being deleted
 	// These fields reference transaction hashes, not IDs, so CASCADE doesn't handle them
+	rewardRefs := make(map[string]rewardCredentialSlotRef)
 	if len(txHashes) > 0 {
+		// Transaction deletion cascades outputs and collateral returns, so
+		// collect their stake refs before the rows disappear.
+		txIDQuery := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("slot > ?", slot)
+		collateralReturnTxIDQuery := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("slot > ?", slot)
+		var outputRows []models.Utxo
+		if result := db.Model(&models.Utxo{}).
+			Where(
+				"transaction_id IN (?) OR collateral_return_for_tx_id IN (?)",
+				txIDQuery,
+				collateralReturnTxIDQuery,
+			).
+			Select("credential_tag", "staking_key").
+			Find(&outputRows); result.Error != nil {
+			return fmt.Errorf(
+				"query reward stake refs for deleted transaction outputs: %w",
+				result.Error,
+			)
+		}
+		for _, item := range rewardStakeRefsFromUtxos(outputRows) {
+			addRewardStakeRef(rewardRefs, item.ref, slot)
+		}
+
 		// Clear spent_at_tx_id and reset deleted_slot to restore UTXO active state
+		var spentRows []models.Utxo
+		if result := db.Model(&models.Utxo{}).
+			Where("spent_at_tx_id IN ?", txHashes).
+			Select("credential_tag", "staking_key").
+			Find(&spentRows); result.Error != nil {
+			return fmt.Errorf(
+				"query reward stake refs for restored UTxOs: %w",
+				result.Error,
+			)
+		}
+		for _, item := range rewardStakeRefsFromUtxos(spentRows) {
+			addRewardStakeRef(rewardRefs, item.ref, slot)
+		}
 		if result := db.Model(&models.Utxo{}).
 			Where("spent_at_tx_id IN ?", txHashes).
 			Updates(map[string]any{
@@ -4009,8 +4637,24 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 		)
 	}
 
+	if result := db.Where("slot > ?", slot).
+		Delete(&models.AssetMintBurn{}); result.Error != nil {
+		return fmt.Errorf(
+			"delete asset mint/burn events after slot %d: %w",
+			slot,
+			result.Error,
+		)
+	}
+
 	if result := db.Where("slot > ?", slot).Delete(&models.Transaction{}); result.Error != nil {
 		return result.Error
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for rolled back transactions: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -4026,6 +4670,8 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 //     row, but a network's genesis file is immutable so this is intentional;
 //     callers must not re-bootstrap with a different genesis against an existing
 //     database.
+//   - Owner and relay rows are replaced after resolving the durable slot-0
+//     registration ID, so replay repairs an interrupted association write.
 //   - No synthetic slot-0 Registration / StakeDelegation history row is written
 //     for the stakeDelegations entries here, unlike SetGenesisGovernance. This
 //     leaves a known rollback hole: a later on-chain cert touching a
@@ -4045,6 +4691,11 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 	if err != nil {
 		return err
 	}
+
+	rewardRefs := make(
+		map[string]rewardCredentialSlotRef,
+		len(stakeDelegations),
+	)
 
 	// Batch fetch all existing pools to avoid N+1 queries
 	poolKeyHashes := make([][]byte, 0, len(pools))
@@ -4150,12 +4801,69 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 			tmpReg.Relays[i].PoolID = tmpPool.ID
 		}
 
-		result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&tmpReg)
+		result := db.Clauses(clause.OnConflict{DoNothing: true}).
+			Omit(clause.Associations).
+			Create(&tmpReg)
 		if result.Error != nil {
 			return fmt.Errorf(
 				"create genesis pool registration: %w",
 				result.Error,
 			)
+		}
+
+		// On a replay, the conflict above leaves tmpReg.ID unset. GORM would
+		// otherwise try to create owners and relays with registration ID 0,
+		// which violates their foreign keys. Load the durable parent ID, then
+		// replace its associations so a restart repairs any partially-written
+		// genesis registration.
+		var storedReg models.PoolRegistration
+		if result := db.Select("id").
+			Where("pool_id = ? AND added_slot = ?", tmpPool.ID, 0).
+			First(&storedReg); result.Error != nil {
+			return fmt.Errorf(
+				"fetch genesis pool registration: %w",
+				result.Error,
+			)
+		}
+		if result := db.Where(
+			"pool_registration_id = ?",
+			storedReg.ID,
+		).Delete(&models.PoolRegistrationOwner{}); result.Error != nil {
+			return fmt.Errorf(
+				"replace genesis pool registration owners: %w",
+				result.Error,
+			)
+		}
+		if result := db.Where(
+			"pool_registration_id = ?",
+			storedReg.ID,
+		).Delete(&models.PoolRegistrationRelay{}); result.Error != nil {
+			return fmt.Errorf(
+				"replace genesis pool registration relays: %w",
+				result.Error,
+			)
+		}
+		for i := range tmpReg.Owners {
+			tmpReg.Owners[i].PoolRegistrationID = storedReg.ID
+		}
+		if len(tmpReg.Owners) > 0 {
+			if result := db.Create(&tmpReg.Owners); result.Error != nil {
+				return fmt.Errorf(
+					"create genesis pool registration owners: %w",
+					result.Error,
+				)
+			}
+		}
+		for i := range tmpReg.Relays {
+			tmpReg.Relays[i].PoolRegistrationID = storedReg.ID
+		}
+		if len(tmpReg.Relays) > 0 {
+			if result := db.Create(&tmpReg.Relays); result.Error != nil {
+				return fmt.Errorf(
+					"create genesis pool registration relays: %w",
+					result.Error,
+				)
+			}
 		}
 	}
 
@@ -4205,6 +4913,18 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 				result.Error,
 			)
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(0, stakerBytes),
+			0,
+		)
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for genesis staking: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -4224,6 +4944,8 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 	if err != nil {
 		return err
 	}
+
+	rewardRefs := make(map[string]rewardCredentialSlotRef, len(delegs))
 
 	for cred, state := range initialDReps {
 		if cred == nil {
@@ -4350,7 +5072,7 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
 			account.Pool = delegatee.PoolId[:]
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis stake delegatee account: %w", err,
 				)
@@ -4373,7 +5095,7 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 		case conway.ConwayGenesisDelegateeTypeVote:
 			account.Drep = drepCredential
 			account.DrepType = drepType
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis vote delegatee account: %w", err,
 				)
@@ -4398,7 +5120,7 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 			account.Pool = delegatee.PoolId[:]
 			account.Drep = drepCredential
 			account.DrepType = drepType
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis stake/vote delegatee account: %w", err,
 				)
@@ -4426,6 +5148,13 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 				delegatee.Type,
 			)
 		}
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for genesis governance: %w",
+			err,
+		)
 	}
 
 	return nil

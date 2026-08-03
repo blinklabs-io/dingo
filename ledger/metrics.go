@@ -43,6 +43,22 @@ type stateMetrics struct {
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
 	// as a metric instead of only a WARN loop. See issue #2728.
 	unrecoverableRollbacks prometheus.Counter
+	// Incremented when at-tip validation recovery detects a non-converging,
+	// descending series of distinct failures and holds at the ledger tip
+	// instead of rewinding the primary chain ever deeper. A rising value
+	// means local ledger validation is diverging from the network (e.g. a
+	// false-positive validation rejection), not a peer/fork problem. See
+	// issue #2939.
+	atTipRecoveryNonConverging prometheus.Counter
+	// Incremented when unresolved-producer replay recovery repeatedly fails
+	// to move the applied ledger tip forward and holds at that tip instead of
+	// pruning another security-parameter window. See issue #3005.
+	replayRecoveryNonConverging prometheus.Counter
+	// Incremented when the cross-fork continuation audit finds a freshly
+	// fetched body spending an input whose producing transaction is not on
+	// the local applied chain. A rising value means a peer is feeding the
+	// node a continuation from a fork it never applied. See issue #3005.
+	continuationInputUnresolved prometheus.Counter
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -140,6 +156,24 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_chainsync_unrecoverable_rollback_total",
 			Help: "times a peer repeatedly requested a rollback we cannot cross to (local chain diverged, operator intervention required)",
+		},
+	)
+	m.atTipRecoveryNonConverging = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_attip_recovery_nonconverging_total",
+			Help: "times at-tip validation recovery held at the ledger tip instead of rewinding the primary chain deeper, because a descending series of distinct failures indicated local validation divergence (operator intervention required)",
+		},
+	)
+	m.replayRecoveryNonConverging = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_replay_recovery_nonconverging_total",
+			Help: "times unresolved-producer replay recovery held at the applied ledger tip because repeated recovery attempts made no forward progress",
+		},
+	)
+	m.continuationInputUnresolved = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_continuation_input_unresolved_total",
+			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
 		},
 	)
 }

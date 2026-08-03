@@ -17,6 +17,7 @@ package leios
 import (
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -54,12 +55,109 @@ func TestParseVoteSigningKeyRejectsMalformed(t *testing.T) {
 	for _, input := range []string{
 		"",
 		"zz",
-		"0102",                      // too short
+		"0102",                     // too short
 		fmt.Sprintf("%066x", 1234), // too long
 	} {
 		_, err := ParseVoteSigningKey(input)
 		assert.ErrorIs(t, err, ErrInvalidSigningKey, "input=%q", input)
 	}
+}
+
+func TestDerivePrototypeVoteSigningKey(t *testing.T) {
+	poolHash := make([]byte, voterPoolKeyHashSize)
+	poolHash[0] = 0x12
+	poolHash[len(poolHash)-1] = 0x34
+	derived, err := DerivePrototypeVoteSigningKey(poolHash)
+	require.NoError(t, err)
+
+	padded := make([]byte, voteSigningKeySize)
+	copy(padded, poolHash)
+	expected, err := ParseVoteSigningKey(hex.EncodeToString(padded))
+	require.NoError(t, err)
+	assert.Equal(t, expected.PublicKeyBytes(), derived.PublicKeyBytes())
+
+	_, err = DerivePrototypeVoteSigningKey(poolHash[:len(poolHash)-1])
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+}
+
+// TestDerivePrototypeVoteSigningKeyReducesOverflowScalar covers pool key
+// hashes whose zero-padded scalar is at least the BLS12-381 scalar field
+// modulus r. Roughly 55% of pool key hashes land there (r's leading byte is
+// 0x73, so any Blake2b-224 hash starting above that overflows). The Leios
+// prototype reference derives these keys through blst's
+// blst_scalar_from_be_bytes, which reduces mod r and fails only on zero, so
+// the prototype derivation must reduce rather than reject.
+func TestDerivePrototypeVoteSigningKeyReducesOverflowScalar(t *testing.T) {
+	poolHash := make([]byte, voterPoolKeyHashSize)
+	poolHash[0] = 0xf3
+	poolHash[len(poolHash)-1] = 0x34
+	padded := make([]byte, voteSigningKeySize)
+	copy(padded, poolHash)
+	// The unreduced scalar is out of range: the strict parser used for
+	// operator-supplied key files must keep rejecting it.
+	_, err := ParseVoteSigningKey(hex.EncodeToString(padded))
+	require.ErrorIs(t, err, ErrInvalidSigningKey)
+
+	derived, err := DerivePrototypeVoteSigningKey(poolHash)
+	require.NoError(t, err)
+	expectedScalar := new(big.Int).Mod(
+		new(big.Int).SetBytes(padded),
+		fr.Modulus(),
+	)
+	assert.Equal(t, expectedScalar, derived.sk)
+	// The reduced scalar is in range, so it round-trips through the strict
+	// parser and yields the same public key.
+	reduced, err := ParseVoteSigningKey(fmt.Sprintf("%064x", expectedScalar))
+	require.NoError(t, err)
+	assert.Equal(t, reduced.PublicKeyBytes(), derived.PublicKeyBytes())
+}
+
+// TestDerivePrototypeVoteSigningKeyLeavesInRangeScalarUnchanged pins that
+// reducing mod r is a no-op for the ~45% of pool key hashes whose padded
+// scalar is already below r.
+func TestDerivePrototypeVoteSigningKeyLeavesInRangeScalarUnchanged(
+	t *testing.T,
+) {
+	poolHash := make([]byte, voterPoolKeyHashSize)
+	poolHash[0] = 0x12
+	poolHash[len(poolHash)-1] = 0x34
+	padded := make([]byte, voteSigningKeySize)
+	copy(padded, poolHash)
+	derived, err := DerivePrototypeVoteSigningKey(poolHash)
+	require.NoError(t, err)
+	assert.Equal(t, new(big.Int).SetBytes(padded), derived.sk)
+	expected, err := ParseVoteSigningKey(hex.EncodeToString(padded))
+	require.NoError(t, err)
+	assert.Equal(t, expected.PublicKeyBytes(), derived.PublicKeyBytes())
+}
+
+// TestDerivePrototypeVoteSigningKeyRejectsZeroScalar keeps the one case blst
+// also rejects: a scalar of zero has no valid public key.
+func TestDerivePrototypeVoteSigningKeyRejectsZeroScalar(t *testing.T) {
+	_, err := DerivePrototypeVoteSigningKey(
+		make([]byte, voterPoolKeyHashSize),
+	)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+}
+
+// TestParseVoteSigningKeyStillRejectsUnreducedScalars guards the strict path:
+// operator key files must never be silently reduced, even though the
+// prototype pool-hash derivation reduces mod r.
+func TestParseVoteSigningKeyStillRejectsUnreducedScalars(t *testing.T) {
+	// A padded overflow pool key hash, as fed to the prototype derivation
+	padded := make([]byte, voteSigningKeySize)
+	padded[0] = 0xf3
+	_, err := ParseVoteSigningKey(hex.EncodeToString(padded))
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+	// r itself, r+1, and zero
+	_, err = ParseVoteSigningKey(fmt.Sprintf("%064x", fr.Modulus()))
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+	_, err = ParseVoteSigningKey(
+		fmt.Sprintf("%064x", new(big.Int).Add(fr.Modulus(), big.NewInt(1))),
+	)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+	_, err = ParseVoteSigningKey(fmt.Sprintf("%064x", 0))
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
 }
 
 func TestLoadVoteSigningKeyFile(t *testing.T) {
@@ -73,6 +171,52 @@ func TestLoadVoteSigningKeyFile(t *testing.T) {
 	expected, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
 	require.NoError(t, err)
 	assert.Equal(t, expected.PublicKeyBytes(), key.PublicKeyBytes())
+}
+
+func TestLoadVoteSigningKeyFileCardanoTextEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bls.skey")
+	scalar := make([]byte, voteSigningKeySize)
+	scalar[len(scalar)-1] = 42
+	cborBytes := append([]byte{0x58, voteSigningKeySize}, scalar...)
+	content := fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","description":"Leios BLS signing key","cborHex":"%s"}`,
+		hex.EncodeToString(cborBytes),
+	)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	key, err := LoadVoteSigningKeyFile(path)
+	require.NoError(t, err)
+	expected, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
+	require.NoError(t, err)
+	assert.Equal(t, expected.PublicKeyBytes(), key.PublicKeyBytes())
+}
+
+func TestLoadVoteSigningKeyFileRejectsTrailingCbor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bls.skey")
+	scalar := make([]byte, voteSigningKeySize)
+	scalar[len(scalar)-1] = 42
+	cborBytes := append([]byte{0x58, voteSigningKeySize}, scalar...)
+	cborBytes = append(cborBytes, 0x00)
+	content := fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","cborHex":"%s"}`,
+		hex.EncodeToString(cborBytes),
+	)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	_, err := LoadVoteSigningKeyFile(path)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+}
+
+func TestLoadVoteSigningKeyFileRejectsUnsupportedEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.skey")
+	content := `{"type":"Node KES Signing Key","description":"","cborHex":"582001"}`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	_, err := LoadVoteSigningKeyFile(path)
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
 }
 
 func TestLoadVoteSigningKeyFileRejectsLoosePermissions(t *testing.T) {
@@ -158,6 +302,18 @@ func TestNewVoterRegistryEmpty(t *testing.T) {
 	assert.Equal(t, 0, registry.Size())
 	_, ok := registry.PublicKeyFor(make([]byte, 28))
 	assert.False(t, ok)
+}
+
+func TestVoterRegistryZeroValueRegister(t *testing.T) {
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
+	require.NoError(t, err)
+	var registry VoterRegistry
+	poolHash, err := hex.DecodeString(testPoolHash(1))
+	require.NoError(t, err)
+	require.NoError(t, registry.RegisterPublicKey(poolHash, key.PublicKey()))
+	pub, ok := registry.PublicKeyFor(poolHash)
+	require.True(t, ok)
+	assert.True(t, pub.Equal(key.PublicKey()))
 }
 
 func TestNewVoterRegistryRejectsInvalidEntries(t *testing.T) {

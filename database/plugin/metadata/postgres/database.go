@@ -122,9 +122,18 @@ type MetadataStorePostgres struct {
 	dsn         string // Data source name (postgres connection string)
 	storageMode string
 
-	poolMaxIdle int // saved pool max idle connections
-	poolMaxOpen int // saved pool max open connections
+	poolMaxIdle         int           // saved pool max idle connections
+	poolMaxOpen         int           // saved pool max open connections
+	poolConnMaxLifetime time.Duration // saved pool connection max lifetime
 }
+
+// Default SQL connection pool settings, applied when not overridden via
+// config.
+const (
+	defaultPoolMaxOpenConns    = 100
+	defaultPoolMaxIdleConns    = 10
+	defaultPoolConnMaxLifetime = time.Hour
+)
 
 // New creates a new database
 func New(
@@ -201,6 +210,38 @@ func NewWithOptions(
 		)
 	}
 
+	// Default and validate the SQL connection pool settings. Negative
+	// values are always invalid; 0 selects the provider default rather
+	// than the stdlib meaning (unlimited/no idle conns retained), matching
+	// how a 0 port or empty host also select this package's defaults.
+	if db.poolMaxOpen < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max open connections %d: must not be negative",
+			db.poolMaxOpen,
+		)
+	}
+	if db.poolMaxOpen == 0 {
+		db.poolMaxOpen = defaultPoolMaxOpenConns
+	}
+	if db.poolMaxIdle < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max idle connections %d: must not be negative",
+			db.poolMaxIdle,
+		)
+	}
+	if db.poolMaxIdle == 0 {
+		db.poolMaxIdle = defaultPoolMaxIdleConns
+	}
+	if db.poolConnMaxLifetime < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool connection max lifetime %s: must not be negative",
+			db.poolConnMaxLifetime,
+		)
+	}
+	if db.poolConnMaxLifetime == 0 {
+		db.poolConnMaxLifetime = defaultPoolConnMaxLifetime
+	}
+
 	// Note: Database initialization moved to Start()
 	return db, nil
 }
@@ -271,11 +312,9 @@ func (d *MetadataStorePostgres) Start() error {
 	if err != nil {
 		return err
 	}
-	d.poolMaxIdle = 10
-	d.poolMaxOpen = 100
 	sqlDB.SetMaxOpenConns(d.poolMaxOpen)
 	sqlDB.SetMaxIdleConns(d.poolMaxIdle)
-	sqlDB.SetConnMaxLifetime(time.Hour)
+	sqlDB.SetConnMaxLifetime(d.poolConnMaxLifetime)
 
 	if err := d.init(); err != nil {
 		// MetadataStorePostgres is available for recovery, so return error but keep instance
@@ -335,6 +374,22 @@ func (d *MetadataStorePostgres) Start() error {
 			"account reward delta slot index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateRewardLiveStakePoolIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward live stake pool index migration failed: %w", err,
+		)
+	}
+	// Repair duplicate reward_live_stake rows from pre-index databases before
+	// AutoMigrate creates the credential identity constraint.
+	if err := models.DedupeRewardLiveStake(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward_live_stake dedup failed: %w", err,
+		)
+	}
 	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
 	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
 	// was enabled never enforced these cascades, so orphaned children
@@ -347,6 +402,14 @@ func (d *MetadataStorePostgres) Start() error {
 			"purging orphaned cascade rows failed: %w", err,
 		)
 	}
+	// Attempt the one-time account.created_slot backfill whenever the account
+	// table predates this process. BackfillAccountCreatedSlot is gated
+	// internally on a durable backfill_checkpoint marker, so it scans once and
+	// is crash-safe: an interrupted run (column added but backfill unfinished)
+	// is retried on the next startup instead of silently stranding rows at 0.
+	// On a fresh database the account table does not exist yet, so there is
+	// nothing to backfill.
+	backfillAccountCreatedSlot := d.db.Migrator().HasTable(&models.Account{})
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",
@@ -369,6 +432,35 @@ func (d *MetadataStorePostgres) Start() error {
 		)
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
+		}
+	}
+	// Drop the superseded reward_account_output credential index now that
+	// AutoMigrate above has created its spendable-aware replacement.
+	if err := models.MigrateRewardAccountOutputCredentialIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward account output credential index migration failed: %w", err,
+		)
+	}
+	// Drop the now-redundant address_transaction credential/staking index
+	// only now that AutoMigrate (above) has created its
+	// idx_addr_tx_stake_position replacement: this must run after
+	// AutoMigrate, not before, or a crash between the two steps would leave
+	// the table with neither index.
+	if err := models.MigrateAddressTransactionStakePositionIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"address_transaction stake position index migration failed: %w",
+			err,
+		)
+	}
+	if backfillAccountCreatedSlot {
+		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
+			return fmt.Errorf(
+				"account created_slot backfill failed: %w", err,
+			)
 		}
 	}
 	return nil
@@ -435,9 +527,15 @@ func (d *MetadataStorePostgres) Transaction() types.Txn {
 	return newPostgresTxn(db)
 }
 
-// ReadTransaction creates a read-only transaction.
+// ReadTransaction creates a read-only transaction with repeatable-read
+// isolation, so every statement run through it observes one consistent
+// snapshot for its whole lifetime instead of the server default (READ
+// COMMITTED), under which two statements in the same read-only transaction
+// can otherwise observe different commits. Read-only REPEATABLE READ
+// transactions cannot hit serialization failures (there is nothing for them
+// to conflict with), so this raises consistency at no retry cost.
 func (d *MetadataStorePostgres) ReadTransaction() types.Txn {
-	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true})
+	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if db.Error != nil {
 		d.logger.Error(
 			"failed to begin read transaction",

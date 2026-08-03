@@ -1,4 +1,6 @@
-FROM ghcr.io/blinklabs-io/go:1.25.7-1 AS build
+FROM ghcr.io/blinklabs-io/cardano-cli:11.0.0.0-1 AS cardano-cli
+
+FROM ghcr.io/blinklabs-io/go:1.26.3-1 AS build
 
 WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
@@ -14,8 +16,14 @@ RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache \
 
 FROM debian:bookworm-slim
 RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates passwd && \
     rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /logs
+COPY --from=cardano-cli /usr/local/bin/cardano-cli /usr/local/bin/cardano-cli
+COPY --from=cardano-cli /usr/local/lib/ /usr/local/lib/
+ENV LD_LIBRARY_PATH="/usr/local/lib"
+RUN useradd --uid 1000 --create-home --shell /bin/sh txpump && \
+    mkdir -p /logs && chmod 0777 /logs
 COPY --from=build /code/txpump /bin/txpump
-ENTRYPOINT ["/bin/txpump"]
+COPY internal/test/antithesis/scripts/txpump-entrypoint.sh /bin/txpump-entrypoint.sh
+RUN chmod 0755 /bin/txpump-entrypoint.sh
+ENTRYPOINT ["/bin/txpump-entrypoint.sh"]

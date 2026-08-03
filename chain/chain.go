@@ -62,10 +62,11 @@ type Chain struct {
 }
 
 type queuedHeader struct {
-	header      ledger.BlockHeader
-	point       ocommon.Point
-	prevHash    []byte
-	blockNumber uint64
+	header         ledger.BlockHeader
+	point          ocommon.Point
+	prevHash       []byte
+	blockNumber    uint64
+	cryptoVerified bool
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -132,6 +133,17 @@ func (c *Chain) MaxQueuedHeaders() int {
 }
 
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
+	return c.addBlockHeader(header, false)
+}
+
+func (c *Chain) AddVerifiedBlockHeader(header ledger.BlockHeader) error {
+	return c.addBlockHeader(header, true)
+}
+
+func (c *Chain) addBlockHeader(
+	header ledger.BlockHeader,
+	cryptoVerified bool,
+) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -143,8 +155,9 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 			Slot: header.SlotNumber(),
 			Hash: headerHash.Bytes(),
 		},
-		prevHash:    headerPrevHash.Bytes(),
-		blockNumber: header.BlockNumber(),
+		prevHash:       headerPrevHash.Bytes(),
+		blockNumber:    header.BlockNumber(),
+		cryptoVerified: cryptoVerified,
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -676,6 +689,108 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	return nil
 }
 
+// rollbackForkDepth returns the number of blocks a rollback to
+// rollbackBlockIndex removes from the chain. The rollback point is normally at
+// or behind the tip, but it can sit ahead of the tip: rolled-back blocks stay
+// resolvable through the manager's block cache with their original (higher)
+// block index, and ephemeral fork chains index above the primary chain tip, so
+// fork resolution can hand us a rollback point above the current tip. Nothing
+// sits between the tip and a point ahead of it, so the fork depth is zero.
+// Subtracting directly would wrap around uint64 and make any such rollback look
+// deeper than the security parameter K, which rejected and denied every peer
+// permanently (issue #3035).
+//
+// rollbackPointBlock now refuses a point above the tip before either rollback
+// entry point reaches this function, so the saturating branch is not exercised
+// from Rollback or ValidateRollback any more. It is kept, and unit-tested
+// directly by TestRollbackForkDepthSaturates, so the underflow cannot creep
+// back in through a future caller.
+//
+// Callers must hold c.mutex.
+func (c *Chain) rollbackForkDepth(
+	point ocommon.Point,
+	rollbackBlockIndex uint64,
+) uint64 {
+	if rollbackBlockIndex <= c.tipBlockIndex {
+		return c.tipBlockIndex - rollbackBlockIndex
+	}
+	slog.Default().Warn(
+		"rollback point is ahead of chain tip, treating fork depth as zero",
+		"rollback_slot", point.Slot,
+		"rollback_block_index", rollbackBlockIndex,
+		"tip_slot", c.currentTip.Point.Slot,
+		"tip_block_index", c.tipBlockIndex,
+	)
+	return 0
+}
+
+// rollbackPointBlock resolves a rollback target to the block this chain must
+// truncate to, rejecting any target the chain does not currently hold.
+//
+// The lookup itself goes through ChainManager.blockByPoint, which answers from
+// the retained block cache before the database. That cache deliberately keeps
+// blocks the primary chain rolled back so ephemeral fork chains can still
+// reconcile against them (see removeBlockByIndex and Chain.reconcile), which
+// means an abandoned block stays resolvable by point and still reports the
+// block index it used to occupy. Another fork has usually taken that index over
+// by the time a peer offers the abandoned point again.
+//
+// Truncating to that stale index leaves the chain claiming a tip it does not
+// store: the block physically at tipBlockIndex belongs to the competing fork,
+// while currentTip names the abandoned one. Every block appended afterwards is
+// then spliced onto a parent that is absent from the chain, so a spender can
+// reach the ledger whose producing block was never applied and cannot be found
+// by UtxoByRef, by transaction metadata, or by the backward chain scan. That is
+// the non-converging tip-band wedge in issue #3005.
+//
+// A target whose retained index sits ahead of the tip is refused here too. That
+// is the issue #3035/#3040 shape: no chain block occupies the index, so obeying
+// it raised tipBlockIndex above the last block the chain actually stores and
+// left currentTip naming an absent block, punching a hole that chain iteration
+// stops at. It must be refused as not-on-chain rather than as an over-K
+// rollback: #3035 was a node permanently denying every peer because that case
+// was misclassified as exceeding the security parameter, whereas a not-found
+// rollback makes callers re-intersect and recover. rollbackForkDepth keeps its
+// saturating arithmetic so no future caller can reintroduce the uint64
+// underflow that caused the misclassification.
+//
+// Callers must hold c.mutex and c.manager.mutex.
+func (c *Chain) rollbackPointBlock(
+	point ocommon.Point,
+) (models.Block, error) {
+	tmpBlock, err := c.manager.blockByPoint(point, nil)
+	if err != nil {
+		return models.Block{}, fmt.Errorf("lookup rollback point: %w", err)
+	}
+	if c.holdsBlockAtIndex(tmpBlock.ID, tmpBlock.Hash) {
+		return tmpBlock, nil
+	}
+	occupantHash := []byte(nil)
+	if occupant, occErr := c.blockByIndex(tmpBlock.ID); occErr == nil {
+		occupantHash = occupant.Hash
+	}
+	c.manager.recordRollbackPointNotOnChain()
+	slog.Default().Error(
+		"cross-fork splice prevented: rejecting rollback to a point this chain no longer holds",
+		"component", "chain",
+		"chain_id", c.id,
+		"rollback_slot", point.Slot,
+		"rollback_hash", hex.EncodeToString(point.Hash),
+		"retained_block_index", tmpBlock.ID,
+		"block_hash_at_index", hex.EncodeToString(occupantHash),
+		"tip_block_index", c.tipBlockIndex,
+		"tip_slot", c.currentTip.Point.Slot,
+		"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
+	)
+	return models.Block{}, fmt.Errorf(
+		"%w: slot %d hash %s resolved to block index %d, which this chain no longer holds",
+		ErrRollbackPointNotOnChain,
+		point.Slot,
+		hex.EncodeToString(point.Hash),
+		tmpBlock.ID,
+	)
+}
+
 // ValidateRollback verifies that Rollback(point) would be accepted without
 // mutating chain state. Callers can use this to avoid applying external
 // side effects before the chain's rollback pre-checks have run.
@@ -714,14 +829,14 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
 	if point.Slot > 0 {
-		tmpBlock, err := c.manager.blockByPoint(point, nil)
+		tmpBlock, err := c.rollbackPointBlock(point)
 		if err != nil {
-			return fmt.Errorf("lookup rollback point: %w", err)
+			return err
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
 	// Calculate fork depth before deleting blocks
-	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. When the chain is shorter than K
@@ -785,16 +900,14 @@ func (c *Chain) rollbackLocked(
 	var tmpBlock models.Block
 	if point.Slot > 0 {
 		var err error
-		tmpBlock, err = c.manager.blockByPoint(point, nil)
+		tmpBlock, err = c.rollbackPointBlock(point)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"lookup rollback point: %w", err,
-			)
+			return nil, err
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
 	// Calculate fork depth before deleting blocks
-	forkDepth := c.tipBlockIndex - rollbackBlockIndex
+	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. When the chain is shorter than K
@@ -1066,6 +1179,17 @@ func (c *Chain) HeaderCount() int {
 }
 
 func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
+	return c.firstHeaderMatchesPoint(point, false)
+}
+
+func (c *Chain) FirstVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
+	return c.firstHeaderMatchesPoint(point, true)
+}
+
+func (c *Chain) firstHeaderMatchesPoint(
+	point ocommon.Point,
+	requireCryptoVerified bool,
+) bool {
 	if c == nil {
 		return false
 	}
@@ -1078,7 +1202,10 @@ func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
 	if header.point.Slot != point.Slot {
 		return false
 	}
-	return bytes.Equal(header.point.Hash, point.Hash)
+	if !bytes.Equal(header.point.Hash, point.Hash) {
+		return false
+	}
+	return !requireCryptoVerified || header.cryptoVerified
 }
 
 func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
@@ -1208,19 +1335,57 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	if c.tipBlockIndex < initialBlockIndex {
 		return models.Block{}, models.ErrBlockNotFound
 	}
-	for blockIndex := c.tipBlockIndex; blockIndex >= initialBlockIndex; blockIndex-- {
-		block, err := c.blockByIndex(blockIndex)
+	// Block slots are strictly increasing with block index on the canonical
+	// chain, so binary-search for the highest index whose slot is below
+	// slotNumber rather than walking backward from the tip. The old linear walk
+	// cost O(tip - boundary) block reads; during catch-up the header chain runs
+	// far ahead of the ledger tip, so a boundary near the ledger tip made every
+	// lookup scan the entire header-ahead gap (the epoch-lab-nonce heal ran this
+	// per recent epoch, wedging large-DB startup for minutes — #2771). The
+	// search still resolves each candidate via blockByIndex (the active chain),
+	// so retained fork or synthetic blobs are never returned.
+	lo, hi := initialBlockIndex, c.tipBlockIndex
+	var (
+		result models.Block
+		found  bool
+	)
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		block, err := c.blockByIndex(mid)
 		if err != nil {
 			return models.Block{}, err
 		}
 		if block.Slot < slotNumber {
-			return block, nil
-		}
-		if blockIndex == initialBlockIndex {
-			break
+			result = block
+			found = true
+			lo = mid + 1
+		} else {
+			if mid == initialBlockIndex {
+				break
+			}
+			hi = mid - 1
 		}
 	}
-	return models.Block{}, models.ErrBlockNotFound
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return result, nil
+}
+
+// holdsBlockAtIndex reports whether this chain currently has the block with
+// the given hash at the given index. It distinguishes a point that is still
+// part of the chain from one that merely remains resolvable through the
+// manager's retained-block cache after a rollback, since blockByPoint answers
+// from that cache. Callers must hold c.mutex.
+func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
+	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
+		return false
+	}
+	tmpBlock, err := c.blockByIndex(blockIndex)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(tmpBlock.Hash, blockHash)
 }
 
 func (c *Chain) blockByIndex(
@@ -1248,6 +1413,56 @@ func (c *Chain) blockByIndex(
 		return models.Block{}, err
 	}
 	return tmpBlock, nil
+}
+
+func chainIteratorPreviousPoint(iter *ChainIterator) ocommon.Point {
+	if iter.lastPoint.Slot > 0 || len(iter.lastPoint.Hash) > 0 {
+		return iter.lastPoint
+	}
+	return iter.startPoint
+}
+
+func blockFollowsPoint(block models.Block, point ocommon.Point) bool {
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		return len(block.PrevHash) == 0
+	}
+	return bytes.Equal(block.PrevHash, point.Hash)
+}
+
+func (c *Chain) nextPersistentBlockAfterSparseIndex(
+	iter *ChainIterator,
+) (models.Block, bool, error) {
+	if !c.persistent || iter.reverse ||
+		iter.nextBlockIndex > c.tipBlockIndex {
+		return models.Block{}, false, nil
+	}
+	previousPoint := chainIteratorPreviousPoint(iter)
+	block, err := c.manager.blockAtOrAfterIndex(
+		iter.nextBlockIndex+1,
+		nil,
+	)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return models.Block{}, false, fmt.Errorf(
+			"persistent chain tip index %d is ahead of missing iterator index %d, but no later indexed block was found",
+			c.tipBlockIndex,
+			iter.nextBlockIndex,
+		)
+	}
+	if err != nil {
+		return models.Block{}, false, err
+	}
+	if blockFollowsPoint(block, previousPoint) {
+		return block, true, nil
+	}
+	return models.Block{}, false, fmt.Errorf(
+		"persistent chain index gap after index %d: block %d/%s at index %d has prev hash %s, expected %s",
+		iter.nextBlockIndex,
+		block.Slot,
+		hex.EncodeToString(block.Hash),
+		block.ID,
+		hex.EncodeToString(block.PrevHash),
+		hex.EncodeToString(previousPoint.Hash),
+	)
 }
 
 func (c *Chain) iterNext(
@@ -1305,6 +1520,18 @@ func (c *Chain) iterNext(
 		ret := &ChainIteratorResult{}
 		// Lookup next block in metadata DB
 		tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
+		if errors.Is(err, models.ErrBlockNotFound) && !iter.reverse {
+			recoveredBlock, recovered, recoverErr := c.nextPersistentBlockAfterSparseIndex(
+				iter,
+			)
+			if recoverErr != nil {
+				err = recoverErr
+			} else if recovered {
+				tmpBlock = recoveredBlock
+				iter.nextBlockIndex = tmpBlock.ID
+				err = nil
+			}
+		}
 		// Return immedidately if a block is found
 		if err == nil {
 			ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)

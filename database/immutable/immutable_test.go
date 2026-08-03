@@ -16,6 +16,7 @@ package immutable_test
 
 import (
 	"encoding/hex"
+	"errors"
 	"testing"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -93,6 +94,22 @@ func TestLastSlotInChunk(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("expected ok=false for out-of-range chunk 300")
+	}
+}
+
+func TestBlocksFromPointBeyondLastChunkError(t *testing.T) {
+	imm, err := immutable.New(testDataDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	_, err = imm.BlocksFromPoint(
+		ocommon.Point{Slot: 999999999, Hash: []byte{}},
+	)
+	if !errors.Is(err, immutable.ErrPointBeyondLastChunk) {
+		t.Fatalf(
+			"expected ErrPointBeyondLastChunk, got %v",
+			err,
+		)
 	}
 }
 

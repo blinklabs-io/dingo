@@ -22,8 +22,9 @@ import (
 )
 
 type protocolMetrics struct {
-	messagesReceived *prometheus.CounterVec
-	messageDuration  *prometheus.HistogramVec
+	messagesReceived             *prometheus.CounterVec
+	messageDuration              *prometheus.HistogramVec
+	txsubmissionAdmissionRetries prometheus.Histogram
 }
 
 func (o *Ouroboros) initProtocolMetrics() {
@@ -51,6 +52,15 @@ func (o *Ouroboros) initProtocolMetrics() {
 			},
 			[]string{"protocol", "outcome"},
 		),
+		txsubmissionAdmissionRetries: factory.NewHistogram(
+			prometheus.HistogramOpts{
+				Name: "dingo_txsubmission_admission_retry_streak",
+				Help: "consecutive mempool admission losses for a peer transaction under contention",
+				Buckets: []float64{
+					1, 2, 3, 5, 10, 20, 50,
+				},
+			},
+		),
 	}
 }
 
@@ -76,4 +86,11 @@ func (o *Ouroboros) recordProtocolMessage(
 	o.protocolMetrics.messageDuration.
 		WithLabelValues(protocol, outcome).
 		Observe(dur.Seconds())
+}
+
+func (o *Ouroboros) recordTxsubmissionAdmissionRetry(streak int) {
+	if o.protocolMetrics == nil {
+		return
+	}
+	o.protocolMetrics.txsubmissionAdmissionRetries.Observe(float64(streak))
 }

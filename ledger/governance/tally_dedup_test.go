@@ -57,7 +57,7 @@ func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
 	}
 	require.NoError(t, tallyDRepVotes(&TallyContext{DB: db}, votes, lazyTally))
 
-	state, err := LoadDRepVotingState(db, nil, 0)
+	state, err := LoadDRepVotingState(db, nil, 0, false)
 	require.NoError(t, err)
 	precomputedTally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -86,7 +86,7 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 		t, store, stakeCred, nil, models.DrepTypeAlwaysNoConfidence, 30, 3,
 	)
 
-	state, err := LoadDRepVotingState(db, nil, 0)
+	state, err := LoadDRepVotingState(db, nil, 0, false)
 	require.NoError(t, err)
 
 	noConfidence := &ProposalTally{

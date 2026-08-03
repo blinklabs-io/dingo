@@ -198,11 +198,24 @@ type AddressAmountResponse struct {
 	Quantity string `json:"quantity"`
 }
 
+// AddressResponse represents a Blockfrost address summary
+// object.
+type AddressResponse struct {
+	Address      string                  `json:"address"`
+	Amount       []AddressAmountResponse `json:"amount"`
+	StakeAddress *string                 `json:"stake_address"`
+	Type         string                  `json:"type"`
+	Script       bool                    `json:"script"`
+}
+
 // AddressUTXOResponse represents a Blockfrost address
 // UTxO object.
 type AddressUTXOResponse struct {
-	Address             string                  `json:"address"`
-	TxHash              string                  `json:"tx_hash"`
+	Address string `json:"address"`
+	TxHash  string `json:"tx_hash"`
+	// TxIndex is a deprecated Blockfrost alias for OutputIndex ("UTXO index
+	// in the transaction"), kept for schema compatibility.
+	TxIndex             int                     `json:"tx_index"`
 	OutputIndex         int                     `json:"output_index"`
 	Amount              []AddressAmountResponse `json:"amount"`
 	Block               string                  `json:"block"`
@@ -218,6 +231,13 @@ type AddressTransactionResponse struct {
 	TxIndex     int    `json:"tx_index"`
 	BlockHeight uint64 `json:"block_height"`
 	BlockTime   int    `json:"block_time"`
+}
+
+// AssetAddressResponse represents one entry in the
+// GET /assets/{asset}/addresses response.
+type AssetAddressResponse struct {
+	Address  string `json:"address"`
+	Quantity string `json:"quantity"`
 }
 
 // AssetResponse represents a Blockfrost native asset
@@ -237,17 +257,106 @@ type AssetResponse struct {
 	Metadata                *any    `json:"metadata"`
 }
 
-// DRepResponse represents a Blockfrost governance DRep object.
+// DRepResponse represents a Blockfrost governance DRep object
+// (OpenAPI 0.1.90 drep schema; active and active_epoch are deprecated
+// there but remain required).
 type DRepResponse struct {
-	DRepID      string `json:"drep_id"`
-	Hex         string `json:"hex"`
-	HasScript   bool   `json:"has_script"`
-	Registered  bool   `json:"registered"`
+	DRepID          string  `json:"drep_id"`
+	Hex             string  `json:"hex"`
+	Amount          string  `json:"amount"`
+	Active          bool    `json:"active"`
+	ActiveEpoch     *uint64 `json:"active_epoch"`
+	HasScript       bool    `json:"has_script"`
+	Retired         bool    `json:"retired"`
+	Expired         bool    `json:"expired"`
+	LastActiveEpoch *uint64 `json:"last_active_epoch"`
+}
+
+// DRepListItemResponse is one entry of the Blockfrost DRep list.
+type DRepListItemResponse struct {
+	DRepID          string                `json:"drep_id"`
+	Hex             string                `json:"hex"`
+	Amount          string                `json:"amount"`
+	HasScript       bool                  `json:"has_script"`
+	Retired         bool                  `json:"retired"`
+	Expired         bool                  `json:"expired"`
+	LastActiveEpoch *uint64               `json:"last_active_epoch"`
+	Metadata        *DRepMetadataResponse `json:"metadata"`
+}
+
+// DRepMetadataResponse is the resolved CIP-119 anchor document
+// attached to a DRep list entry.
+type DRepMetadataResponse struct {
+	URL          string          `json:"url"`
+	Hash         string          `json:"hash"`
+	JSONMetadata json.RawMessage `json:"json_metadata"`
+	Bytes        string          `json:"bytes"`
+}
+
+// PoolRetiringResponse is one entry of the Blockfrost retiring pools
+// list.
+type PoolRetiringResponse struct {
+	PoolID string `json:"pool_id"`
+	Epoch  uint64 `json:"epoch"`
+}
+
+// PoolMetadataResponse represents Blockfrost pool metadata. The error
+// object is only present when the off-chain document fetch failed.
+type PoolMetadataResponse struct {
+	PoolID      string                      `json:"pool_id"`
+	Hex         string                      `json:"hex"`
+	URL         *string                     `json:"url"`
+	Hash        *string                     `json:"hash"`
+	Ticker      *string                     `json:"ticker"`
+	Name        *string                     `json:"name"`
+	Description *string                     `json:"description"`
+	Homepage    *string                     `json:"homepage"`
+	Error       *OffchainFetchErrorResponse `json:"error,omitempty"`
+}
+
+// OffchainFetchErrorResponse is the Blockfrost error object attached to
+// metadata whose off-chain document fetch failed.
+type OffchainFetchErrorResponse struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// PoolDetailResponse represents a Blockfrost pool detail object (OpenAPI
+// 0.1.90 pool schema).
+type PoolDetailResponse struct {
+	PoolID         string                  `json:"pool_id"`
+	Hex            string                  `json:"hex"`
+	VrfKey         string                  `json:"vrf_key"`
+	BlocksMinted   uint64                  `json:"blocks_minted"`
+	BlocksEpoch    uint64                  `json:"blocks_epoch"`
+	LiveStake      string                  `json:"live_stake"`
+	LiveSize       float64                 `json:"live_size"`
+	LiveSaturation float64                 `json:"live_saturation"`
+	LiveDelegators uint64                  `json:"live_delegators"`
+	ActiveStake    string                  `json:"active_stake"`
+	ActiveSize     float64                 `json:"active_size"`
+	DeclaredPledge string                  `json:"declared_pledge"`
+	LivePledge     string                  `json:"live_pledge"`
+	MarginCost     float64                 `json:"margin_cost"`
+	FixedCost      string                  `json:"fixed_cost"`
+	RewardAccount  string                  `json:"reward_account"`
+	Owners         []string                `json:"owners"`
+	Registration   []string                `json:"registration"`
+	Retirement     []string                `json:"retirement"`
+	CalidusKey     *PoolCalidusKeyResponse `json:"calidus_key"`
+}
+
+// PoolCalidusKeyResponse represents a pool's latest valid CIP-0088 Calidus
+// key registration. dingo does not ingest Calidus key registrations from
+// any source, so this field is always null in responses.
+type PoolCalidusKeyResponse struct {
+	ID          string `json:"id"`
+	PubKey      string `json:"pub_key"`
+	Nonce       uint64 `json:"nonce"`
+	TxHash      string `json:"tx_hash"`
+	BlockHeight uint64 `json:"block_height"`
+	BlockTime   int64  `json:"block_time"`
 	Epoch       uint64 `json:"epoch"`
-	Amount      string `json:"amount"`
-	Active      bool   `json:"active"`
-	ActiveEpoch uint64 `json:"active_epoch"`
-	LiveStake   string `json:"live_stake"`
 }
 
 // ErrorResponse represents a Blockfrost error response.
@@ -257,26 +366,37 @@ type ErrorResponse struct {
 	Message    string `json:"message"`
 }
 
-// PoolRelayResponse represents a stake pool relay.
-type PoolRelayResponse struct {
-	IPv4 *string `json:"ipv4"`
-	IPv6 *string `json:"ipv6"`
-	DNS  *string `json:"dns"`
-	Port *int    `json:"port"`
+// PoolExtendedResponse represents an extended stake pool list item,
+// following the Blockfrost OpenAPI 0.1.90 pool_list_extended schema
+// exactly. Neither vrf_key nor relays is part of that schema (vrf_key
+// belongs to the pool-detail schema instead; see PoolDetailResponse), so
+// this type omits both.
+type PoolExtendedResponse struct {
+	PoolID         string                        `json:"pool_id"`
+	Hex            string                        `json:"hex"`
+	ActiveStake    string                        `json:"active_stake"`
+	LiveStake      string                        `json:"live_stake"`
+	BlocksMinted   uint64                        `json:"blocks_minted"`
+	LiveSaturation float64                       `json:"live_saturation"`
+	DeclaredPledge string                        `json:"declared_pledge"`
+	MarginCost     float64                       `json:"margin_cost"`
+	FixedCost      string                        `json:"fixed_cost"`
+	Metadata       *PoolExtendedMetadataResponse `json:"metadata"`
 }
 
-// PoolExtendedResponse represents an extended stake pool
-// list item.
-type PoolExtendedResponse struct {
-	PoolID         string              `json:"pool_id"`
-	Hex            string              `json:"hex"`
-	VrfKey         string              `json:"vrf_key"`
-	ActiveStake    string              `json:"active_stake"`
-	LiveStake      string              `json:"live_stake"`
-	DeclaredPledge string              `json:"declared_pledge"`
-	FixedCost      string              `json:"fixed_cost"`
-	MarginCost     float64             `json:"margin_cost"`
-	Relays         []PoolRelayResponse `json:"relays"`
+// PoolExtendedMetadataResponse represents pool_list_extended's nullable
+// metadata object. It mirrors PoolMetadataResponse's off-chain fields
+// (minus pool_id/hex, which pool_list_extended carries at the parent
+// level) and is omitted (metadata: null) entirely when the pool has no
+// registered metadata anchor.
+type PoolExtendedMetadataResponse struct {
+	URL         *string                     `json:"url"`
+	Hash        *string                     `json:"hash"`
+	Ticker      *string                     `json:"ticker"`
+	Name        *string                     `json:"name"`
+	Description *string                     `json:"description"`
+	Homepage    *string                     `json:"homepage"`
+	Error       *OffchainFetchErrorResponse `json:"error,omitempty"`
 }
 
 // MetadataTransactionJSONResponse represents a Blockfrost
@@ -510,4 +630,43 @@ type AccountRewardHistoryResponse struct {
 	Epoch  int32  `json:"epoch"`
 	Amount string `json:"amount"`
 	PoolID string `json:"pool_id"`
+	// Type is one of leader, member, or pool_deposit_refund, per the
+	// Blockfrost account_reward_content schema.
+	Type string `json:"type"`
+}
+
+// AccountUTXOResponse represents a Blockfrost stake-account
+// UTxO object.
+type AccountUTXOResponse struct {
+	Address string `json:"address"`
+	TxHash  string `json:"tx_hash"`
+	// TxIndex is a deprecated Blockfrost alias for OutputIndex ("UTXO index
+	// in the transaction"), kept for schema compatibility.
+	TxIndex             int                     `json:"tx_index"`
+	OutputIndex         int                     `json:"output_index"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	Block               string                  `json:"block"`
+	DataHash            *string                 `json:"data_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	ReferenceScriptHash *string                 `json:"reference_script_hash"`
+}
+
+// AccountWithdrawalResponse represents a stake-account
+// withdrawal history row.
+type AccountWithdrawalResponse struct {
+	TxHash      string `json:"tx_hash"`
+	Amount      string `json:"amount"`
+	TxSlot      int64  `json:"tx_slot"`
+	BlockTime   int64  `json:"block_time"`
+	BlockHeight int64  `json:"block_height"`
+}
+
+// AccountTransactionResponse represents a stake-account
+// transaction object.
+type AccountTransactionResponse struct {
+	Address     string `json:"address"`
+	TxHash      string `json:"tx_hash"`
+	TxIndex     int    `json:"tx_index"`
+	BlockHeight uint64 `json:"block_height"`
+	BlockTime   int    `json:"block_time"`
 }

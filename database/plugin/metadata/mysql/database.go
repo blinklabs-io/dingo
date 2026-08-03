@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,45 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
+
+// Default SQL connection pool settings, applied when not overridden via
+// config.
+const (
+	defaultPoolMaxOpenConns    = 100
+	defaultPoolMaxIdleConns    = 10
+	defaultPoolConnMaxLifetime = time.Hour
+)
+
+// validDatabaseNameRe matches the conservative identifier set allowed for MySQL
+// database names: letters, digits, underscores, and hyphens only.
+var validDatabaseNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// validateDatabaseName rejects names that would break backtick quoting in the
+// CREATE DATABASE statement or fall outside the conservative identifier set.
+func validateDatabaseName(name string) error {
+	if name == "" {
+		return errors.New("database name must not be empty")
+	}
+	if len(name) > 64 {
+		return fmt.Errorf(
+			"invalid database name %q: must be 64 characters or fewer",
+			name,
+		)
+	}
+	if strings.ContainsRune(name, '`') {
+		return fmt.Errorf(
+			"invalid database name %q: must not contain backticks",
+			name,
+		)
+	}
+	if !validDatabaseNameRe.MatchString(name) {
+		return fmt.Errorf(
+			"invalid database name %q: must contain only letters, digits, underscores, or hyphens",
+			name,
+		)
+	}
+	return nil
+}
 
 // mysqlTxn wraps a gorm transaction and implements types.Txn
 type mysqlTxn struct {
@@ -123,8 +163,9 @@ type MetadataStoreMysql struct {
 	dsn         string // Data source name (MySQL connection string)
 	storageMode string
 
-	poolMaxIdle int // saved pool max idle connections
-	poolMaxOpen int // saved pool max open connections
+	poolMaxIdle         int           // saved pool max idle connections
+	poolMaxOpen         int           // saved pool max open connections
+	poolConnMaxLifetime time.Duration // saved pool connection max lifetime
 }
 
 // New creates a new database
@@ -139,6 +180,11 @@ func New(
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
 ) (*MetadataStoreMysql, error) {
+	if database != "" {
+		if err := validateDatabaseName(database); err != nil {
+			return nil, fmt.Errorf("mysql config: %w", err)
+		}
+	}
 	return NewWithOptions(
 		WithHost(host),
 		WithPort(port),
@@ -174,6 +220,11 @@ func NewWithOptions(opts ...MysqlOptionFunc) (*MetadataStoreMysql, error) {
 	if db.database == "" {
 		db.database = "mysql"
 	}
+	if strings.TrimSpace(db.dsn) == "" {
+		if err := validateDatabaseName(db.database); err != nil {
+			return nil, fmt.Errorf("mysql config: %w", err)
+		}
+	}
 	if db.sslMode == "" {
 		db.sslMode = ""
 	}
@@ -198,6 +249,38 @@ func NewWithOptions(opts ...MysqlOptionFunc) (*MetadataStoreMysql, error) {
 			types.StorageModeCore,
 			types.StorageModeAPI,
 		)
+	}
+
+	// Default and validate the SQL connection pool settings. Negative
+	// values are always invalid; 0 selects the provider default rather
+	// than the stdlib meaning (unlimited/no idle conns retained), matching
+	// how a 0 port or empty host also select this package's defaults.
+	if db.poolMaxOpen < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max open connections %d: must not be negative",
+			db.poolMaxOpen,
+		)
+	}
+	if db.poolMaxOpen == 0 {
+		db.poolMaxOpen = defaultPoolMaxOpenConns
+	}
+	if db.poolMaxIdle < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool max idle connections %d: must not be negative",
+			db.poolMaxIdle,
+		)
+	}
+	if db.poolMaxIdle == 0 {
+		db.poolMaxIdle = defaultPoolMaxIdleConns
+	}
+	if db.poolConnMaxLifetime < 0 {
+		return nil, fmt.Errorf(
+			"invalid pool connection max lifetime %s: must not be negative",
+			db.poolConnMaxLifetime,
+		)
+	}
+	if db.poolConnMaxLifetime == 0 {
+		db.poolConnMaxLifetime = defaultPoolConnMaxLifetime
 	}
 
 	// Note: Database initialization moved to Start()
@@ -234,6 +317,9 @@ func (d *MetadataStoreMysql) Start() error {
 	logDatabase := d.database
 
 	if dsn == "" {
+		if err := validateDatabaseName(d.database); err != nil {
+			return fmt.Errorf("mysql config: %w", err)
+		}
 		cfg := mysql.Config{
 			User:   d.user,
 			Passwd: d.password,
@@ -265,7 +351,12 @@ func (d *MetadataStoreMysql) Start() error {
 			cfg.Params["tls"] = d.sslMode
 		}
 		dsn = cfg.FormatDSN()
-	} else if parsedDB, ok := parseMysqlDatabaseFromDSN(dsn); ok {
+	} else if parsedDB, ok, err := parseMysqlDatabaseFromDSN(dsn); err != nil {
+		return err
+	} else if ok {
+		if err := validateDatabaseName(parsedDB); err != nil {
+			return fmt.Errorf("mysql config dsn: %w", err)
+		}
 		logDatabase = parsedDB
 	}
 
@@ -311,11 +402,9 @@ func (d *MetadataStoreMysql) Start() error {
 	if err != nil {
 		return err
 	}
-	d.poolMaxIdle = 10
-	d.poolMaxOpen = 100
 	sqlDB.SetMaxOpenConns(d.poolMaxOpen)
 	sqlDB.SetMaxIdleConns(d.poolMaxIdle)
-	sqlDB.SetConnMaxLifetime(time.Hour)
+	sqlDB.SetConnMaxLifetime(d.poolConnMaxLifetime)
 
 	if err := d.init(); err != nil {
 		// MetadataStoreMysql is available for recovery, so return error but keep instance
@@ -375,6 +464,22 @@ func (d *MetadataStoreMysql) Start() error {
 			"account reward delta slot index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateRewardLiveStakePoolIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward live stake pool index migration failed: %w", err,
+		)
+	}
+	// Repair duplicate reward_live_stake rows from pre-index databases before
+	// AutoMigrate creates the credential identity constraint.
+	if err := models.DedupeRewardLiveStake(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward_live_stake dedup failed: %w", err,
+		)
+	}
 	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
 	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
 	// was enabled never enforced these cascades, so orphaned children
@@ -387,6 +492,14 @@ func (d *MetadataStoreMysql) Start() error {
 			"purging orphaned cascade rows failed: %w", err,
 		)
 	}
+	// Attempt the one-time account.created_slot backfill whenever the account
+	// table predates this process. BackfillAccountCreatedSlot is gated
+	// internally on a durable backfill_checkpoint marker, so it scans once and
+	// is crash-safe: an interrupted run (column added but backfill unfinished)
+	// is retried on the next startup instead of silently stranding rows at 0.
+	// On a fresh database the account table does not exist yet, so there is
+	// nothing to backfill.
+	backfillAccountCreatedSlot := d.db.Migrator().HasTable(&models.Account{})
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",
@@ -412,6 +525,35 @@ func (d *MetadataStoreMysql) Start() error {
 			return err
 		}
 	}
+	// Drop the superseded reward_account_output credential index now that
+	// AutoMigrate above has created its spendable-aware replacement.
+	if err := models.MigrateRewardAccountOutputCredentialIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward account output credential index migration failed: %w", err,
+		)
+	}
+	// Drop the now-redundant address_transaction credential/staking index
+	// only now that AutoMigrate (above) has created its
+	// idx_addr_tx_stake_position replacement: this must run after
+	// AutoMigrate, not before, or a crash between the two steps would leave
+	// the table with neither index.
+	if err := models.MigrateAddressTransactionStakePositionIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"address_transaction stake position index migration failed: %w",
+			err,
+		)
+	}
+	if backfillAccountCreatedSlot {
+		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
+			return fmt.Errorf(
+				"account created_slot backfill failed: %w", err,
+			)
+		}
+	}
 	return nil
 }
 
@@ -421,6 +563,9 @@ func (d *MetadataStoreMysql) ensureDatabaseExists(
 ) (bool, error) {
 	if dbName == "" {
 		return false, nil
+	}
+	if err := validateDatabaseName(dbName); err != nil {
+		return false, fmt.Errorf("cannot create database: %w", err)
 	}
 	adminDsn, ok := stripDatabaseFromDSN(dsn)
 	if !ok {
@@ -448,16 +593,15 @@ func (d *MetadataStoreMysql) ensureDatabaseExists(
 	return true, nil
 }
 
-func parseMysqlDatabaseFromDSN(dsn string) (string, bool) {
-	base := dsn
-	if before, _, found := strings.Cut(base, "?"); found {
-		base = before
+func parseMysqlDatabaseFromDSN(dsn string) (string, bool, error) {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", false, fmt.Errorf("parse mysql dsn: %w", err)
 	}
-	slash := strings.LastIndex(base, "/")
-	if slash < 0 || slash == len(base)-1 {
-		return "", false
+	if cfg.DBName == "" {
+		return "", false, nil
 	}
-	return base[slash+1:], true
+	return cfg.DBName, true, nil
 }
 
 func stripDatabaseFromDSN(dsn string) (string, bool) {
@@ -539,9 +683,13 @@ func (d *MetadataStoreMysql) Transaction() types.Txn {
 	return newMysqlTxn(db)
 }
 
-// ReadTransaction creates a read-only transaction.
+// ReadTransaction creates a read-only transaction with repeatable-read
+// isolation, so every statement run through it observes one consistent
+// snapshot for its whole lifetime. InnoDB's session default is already
+// REPEATABLE READ, but setting it explicitly here does not depend on that
+// ambient session configuration.
 func (d *MetadataStoreMysql) ReadTransaction() types.Txn {
-	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true})
+	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if db.Error != nil {
 		d.logger.Error(
 			"failed to begin read transaction",

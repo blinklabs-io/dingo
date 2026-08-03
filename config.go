@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -45,6 +46,11 @@ type ListenerConfig = connmanager.ListenerConfig
 
 // StorageMode controls how much data the metadata store persists.
 type StorageMode string
+
+const (
+	runModeServe = "serve"
+	runModeLeios = "leios"
+)
 
 const (
 	// StorageModeCore stores only consensus and chain state data.
@@ -132,6 +138,56 @@ type Config struct {
 	offchainMetadata OffchainMetadataConfig
 	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
+	// Compatibility mirrors used by the composition layer. cfg remains the
+	// canonical loaded configuration; these are refreshed by syncCompatFields.
+	dataDir                                                                             string
+	bindAddr                                                                            string
+	pluginSelections                                                                    map[hostplugin.Capability]hostplugin.Selection
+	network                                                                             string
+	tlsCertFilePath, tlsKeyFilePath                                                     string
+	outboundSourcePort, barkPort                                                        uint
+	barkBaseUrl                                                                         string
+	barkBlockDownloadHosts                                                              []string
+	historyExpiry                                                                       HistoryExpiryConfig
+	corsAllowedOrigins                                                                  []string
+	networkMagic                                                                        uint32
+	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
+	runMode                                                                             string
+	startEra                                                                            internalconfig.StartEra
+	shutdownTimeout                                                                     time.Duration
+	DatabaseWorkerPoolConfig                                                            ledger.DatabaseWorkerPoolConfig
+	targetNumberOfKnownPeers, targetNumberOfEstablishedPeers, targetNumberOfActivePeers int
+	activePeersTopologyQuota, activePeersGossipQuota, activePeersLedgerQuota            int
+	minHotPeers                                                                         int
+	reconcileInterval, inactivityTimeout                                                time.Duration
+	bootstrapPromotionMinDiversityGroups                                                int
+	inboundWarmTarget, inboundHotQuota                                                  int
+	inboundMinTenure                                                                    time.Duration
+	inboundHotScoreThreshold                                                            float64
+	inboundPruneAfter, inboundCooldown                                                  time.Duration
+	inboundDuplexOnlyForHot                                                             bool
+	maxConnectionsPerIP, maxInboundConns                                                int
+	genesisBootstrap                                                                    bool
+	genesisWindowSlots                                                                  uint64
+	genesisCorroborationPeers                                                           int
+	blockProducer                                                                       bool
+	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
+	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
+	validateForgedBlock                                                                 bool
+	minPoolMargin                                                                       uint
+	pledgeLeverageEnabled                                                               bool
+	pledgeLeverage                                                                      uint
+	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
+	delegatorInactivityEnabled                                                          bool
+	delegatorInactivity                                                                 uint64
+	leiosVoteSigningKeyFile                                                             string
+	leiosVoterPublicKeys                                                                map[string]string
+	midnight                                                                            MidnightConfig
+	chainsyncMaxClients                                                                 int
+	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
+	storageMode                                                                         StorageMode
+	cacheBlockLRUEntries, cacheHotUtxoEntries, cacheHotTxEntries                        int
+	cacheHotTxMaxBytes                                                                  int64
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -296,6 +352,9 @@ func (c *Config) isDevMode() bool {
 // regardless of the configured run mode. This lets `dingo -n musashi` follow
 // the chain without also requiring `--run-mode leios`.
 func (c *Config) isMusashiNetwork() bool {
+	if c.cfg == nil {
+		return false
+	}
 	return c.cfg.Network == ouroboros.NetworkCardanoMusashi.Name ||
 		c.cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
@@ -313,6 +372,9 @@ func (c *Config) isMusashiNetwork() bool {
 // the leios-notify / leios-fetch codecs decode the prototype's wire dialect,
 // so the Leios protocols can stay active on the Musashi testnet.
 func (c *Config) experimentalLeiosNetworkingEnabled() bool {
+	if c.cfg == nil {
+		return false
+	}
 	return c.isMusashiNetwork() ||
 		c.cfg.RunMode == internalconfig.RunModeLeios ||
 		c.cfg.StartEra.IsDijkstra()
@@ -347,6 +409,17 @@ func (n *Node) configValidate() error {
 			n.config.cfg.StartEra,
 			internalconfig.StartEraDijkstra,
 		)
+	}
+	if n.config.cfg.MinPoolMargin > 10_000 {
+		return fmt.Errorf("min pool margin (%d) must be in [0, 10000] basis points", n.config.cfg.MinPoolMargin)
+	}
+	if n.config.cfg.PledgeLeverageEnabled && (n.config.cfg.PledgeLeverage < 1 || n.config.cfg.PledgeLeverage > 10_000) {
+		return fmt.Errorf("pledge leverage (%d) must be in [1, 10000] when enabled", n.config.cfg.PledgeLeverage)
+	}
+	if n.config.cfg.FullPotRewardsEnabled && !n.config.cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		if network, ok := internalconfig.FullPotRewardsStandardNetwork(n.config.cfg.Network, n.config.cfg.NetworkMagic); ok {
+			return fmt.Errorf("full pot rewards are not permitted on standard network %q without unsafe full-pot rewards opt-in", network)
+		}
 	}
 	// In core mode, ignore API ports — they are only used in API mode.
 	// This lets defaults stay non-zero without requiring core-mode users
@@ -396,8 +469,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			EvictionWatermark:  internalconfig.DefaultEvictionWatermark,
-			RejectionWatermark: internalconfig.DefaultRejectionWatermark,
 			BindAddr:           "0.0.0.0",
 			StorageMode:        string(StorageModeCore),
 			RunMode:            internalconfig.RunModeServe,
@@ -408,6 +479,22 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			Logging:            internalconfig.DefaultLoggingConfig(),
 			Midnight:           internalconfig.DefaultMidnightConfig(),
 			CORSAllowedOrigins: []string{"*"},
+			Plugins: internalconfig.PluginsConfig{
+				Storage: internalconfig.StoragePluginsConfig{
+					Blob:     hostplugin.Selection{Provider: "badger", Config: map[string]any{}},
+					Metadata: hostplugin.Selection{Provider: "sqlite", Config: map[string]any{}},
+				},
+				Mempool: hostplugin.Selection{Provider: "default", Config: map[string]any{
+					"capacity":           int64(internalconfig.DefaultMempoolCapacityPraos),
+					"evictionWatermark":  internalconfig.DefaultEvictionWatermark,
+					"rejectionWatermark": internalconfig.DefaultRejectionWatermark,
+				}},
+				API: internalconfig.APIPluginsConfig{
+					Blockfrost: hostplugin.Selection{Provider: "builtin", Config: map[string]any{"port": uint(3000)}},
+					Mesh:       hostplugin.Selection{Provider: "builtin", Config: map[string]any{"port": uint(8080)}},
+					Utxorpc:    hostplugin.Selection{Provider: "builtin", Config: map[string]any{"port": uint(9090)}},
+				},
+			},
 		},
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
@@ -417,7 +504,133 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	for _, opt := range opts {
 		opt(&c)
 	}
+	c.syncCompatFields()
 	return c
+}
+
+func (c *Config) syncCompatFields() {
+	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
+	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
+	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
+	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
+	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
+	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
+	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
+	c.runMode, c.startEra, c.storageMode = string(c.cfg.RunMode), c.cfg.StartEra, StorageMode(c.cfg.StorageMode)
+	if c.runMode == string(internalconfig.RunModeLeios) && pluginInt64(c.cfg.Plugins.Mempool.Config["capacity"]) == internalconfig.DefaultMempoolCapacityPraos {
+		c.cfg.Plugins.Mempool.Config["capacity"] = int64(internalconfig.DefaultMempoolCapacityLeios)
+	}
+	c.historyExpiry = HistoryExpiryConfig{Enabled: c.cfg.HistoryExpiry.Enabled, Frequency: c.cfg.HistoryExpiry.Frequency}
+	c.midnight = MidnightConfig{Port: c.cfg.Midnight.Port, Host: c.cfg.Midnight.Host, CNightPolicyID: c.cfg.Midnight.CNightPolicyID, CNightAssetName: c.cfg.Midnight.CNightAssetName, MappingValidatorAddress: c.cfg.Midnight.MappingValidatorAddress, AuthTokenPolicyID: c.cfg.Midnight.AuthTokenPolicyID, AuthTokenAssetName: c.cfg.Midnight.AuthTokenAssetName, CommitteeCandidateAddress: c.cfg.Midnight.CommitteeCandidateAddress, TechnicalCommitteeAddress: c.cfg.Midnight.TechnicalCommitteeAddress, TechnicalCommitteePolicyID: c.cfg.Midnight.TechnicalCommitteePolicyID, CouncilAddress: c.cfg.Midnight.CouncilAddress, CouncilPolicyID: c.cfg.Midnight.CouncilPolicyID, PermissionedCandidatePolicy: c.cfg.Midnight.PermissionedCandidatePolicy}
+	c.shutdownTimeout, c.chainsyncMaxClients = 0, c.cfg.Chainsync.MaxClients
+	if c.cfg.ShutdownTimeout != "" {
+		c.shutdownTimeout, _ = time.ParseDuration(c.cfg.ShutdownTimeout)
+	}
+	c.chainsyncStallTimeout = c.ChainsyncStallTimeoutDuration()
+	c.chainsyncStrategy, _ = chainsync.ParseHeaderSyncStrategy(c.cfg.Chainsync.Strategy)
+	c.DatabaseWorkerPoolConfig = ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: c.cfg.DatabaseWorkers, TaskQueueSize: c.cfg.DatabaseQueueSize}
+	c.targetNumberOfKnownPeers, c.targetNumberOfEstablishedPeers, c.targetNumberOfActivePeers = c.cfg.TargetNumberOfKnownPeers, c.cfg.TargetNumberOfEstablishedPeers, c.cfg.TargetNumberOfActivePeers
+	c.activePeersTopologyQuota, c.activePeersGossipQuota, c.activePeersLedgerQuota = c.cfg.ActivePeersTopologyQuota, c.cfg.ActivePeersGossipQuota, c.cfg.ActivePeersLedgerQuota
+	c.minHotPeers, c.reconcileInterval, c.inactivityTimeout = c.cfg.MinHotPeers, c.cfg.ReconcileInterval, c.cfg.InactivityTimeout
+	c.inboundWarmTarget, c.inboundHotQuota, c.inboundMinTenure = c.cfg.InboundWarmTarget, c.cfg.InboundHotQuota, c.cfg.InboundMinTenure
+	c.inboundHotScoreThreshold, c.inboundPruneAfter, c.inboundDuplexOnlyForHot, c.inboundCooldown = c.cfg.InboundHotScoreThreshold, c.cfg.InboundPruneAfter, c.cfg.InboundDuplexOnlyForHot, c.cfg.InboundCooldown
+	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
+	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
+	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
+	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
+	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
+	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
+	c.leiosVoteSigningKeyFile, c.leiosVoterPublicKeys = c.cfg.LeiosVoteSigningKeyFile, c.cfg.LeiosVoterPublicKeys
+	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
+	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
+		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
+		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
+		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
+	}
+}
+
+func WithPluginSelection(capability hostplugin.Capability, selection hostplugin.Selection) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		if capability == hostplugin.CapabilityMempool {
+			if selection.Config == nil && (selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
+				selection.Config = map[string]any{"capacity": int64(internalconfig.DefaultMempoolCapacityPraos)}
+			}
+		}
+		selection.Config = clonePluginConfig(selection.Config)
+		switch capability {
+		case hostplugin.CapabilityStorageBlob:
+			c.cfg.Plugins.Storage.Blob = selection
+		case hostplugin.CapabilityStorageMetadata:
+			c.cfg.Plugins.Storage.Metadata = selection
+		case hostplugin.CapabilityMempool:
+			c.cfg.Plugins.Mempool = selection
+		case hostplugin.CapabilityAPIBlockfrost:
+			c.cfg.Plugins.API.Blockfrost = selection
+		case hostplugin.CapabilityAPIMesh:
+			c.cfg.Plugins.API.Mesh = selection
+		case hostplugin.CapabilityAPIUtxorpc:
+			c.cfg.Plugins.API.Utxorpc = selection
+		}
+	}
+}
+
+func clonePluginConfig(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		switch x := v.(type) {
+		case map[string]any:
+			out[k] = clonePluginConfig(x)
+		case []any:
+			y := make([]any, len(x))
+			copy(y, x)
+			out[k] = y
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
+	return func(c *Config) { c.cfg.GenesisBootstrap.CorroborationPeers = peers }
+}
+func WithMinPoolMargin(v uint) ConfigOptionFunc {
+	return func(c *Config) { c.cfg.MinPoolMargin, c.minPoolMargin = v, v }
+}
+func WithPledgeLeverage(enabled bool, v uint) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage = enabled, v
+		c.pledgeLeverageEnabled, c.pledgeLeverage = enabled, v
+	}
+}
+func WithFullPotRewards(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.FullPotRewardsEnabled = enabled
+		c.fullPotRewardsEnabled = enabled
+	}
+}
+func WithUnsafeFullPotRewardsOnStandardNetworks(enabled bool) ConfigOptionFunc {
+	return func(c *Config) { c.cfg.UnsafeFullPotRewardsOnStandardNetworks = enabled }
+}
+
+func WithDelegatorInactivity(enabled bool, epochs uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.DelegatorInactivityEnabled = enabled
+		c.cfg.DelegatorInactivity = epochs
+		c.delegatorInactivityEnabled, c.delegatorInactivity = enabled, epochs
+	}
 }
 
 // NewConfigFromInternal creates a Config from an already-loaded internal
@@ -452,7 +665,7 @@ func NewConfigFromInternal(
 	} else {
 		chainsyncDur = 2 * time.Minute
 	}
-	return Config{
+	c := Config{
 		cfg:                   cfg,
 		logger:                logger,
 		cardanoNodeConfig:     cardanoCfg,
@@ -461,7 +674,9 @@ func NewConfigFromInternal(
 		chainsyncStallTimeout: chainsyncDur,
 		tracing:               cfg.Tracing,
 		tracingStdout:         cfg.TracingStdout,
-	}, nil
+	}
+	c.syncCompatFields()
+	return c, nil
 }
 
 // WithCardanoNodeConfig specifies the CardanoNodeConfig object to use. This is mostly used for loading genesis config files
@@ -492,14 +707,14 @@ func WithDatabasePath(dataDir string) ConfigOptionFunc {
 // WithBlobPlugin specifies the blob storage plugin to use.
 func WithBlobPlugin(plugin string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BlobPlugin = plugin
+		c.cfg.Plugins.Storage.Blob.Provider = plugin
 	}
 }
 
 // WithMetadataPlugin specifies the metadata storage plugin to use.
 func WithMetadataPlugin(plugin string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.MetadataPlugin = plugin
+		c.cfg.Plugins.Storage.Metadata.Provider = plugin
 	}
 }
 
@@ -569,7 +784,7 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 // WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server (default)
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.UtxorpcPort = port
+		c.cfg.Plugins.API.Utxorpc.Config["port"] = port
 	}
 }
 
@@ -623,7 +838,7 @@ func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
 // WithMempoolCapacity sets the mempool capacity (in bytes)
 func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.MempoolCapacity = capacity
+		c.cfg.Plugins.Mempool.Config["capacity"] = capacity
 	}
 }
 
@@ -635,7 +850,7 @@ func WithEvictionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.EvictionWatermark = watermark
+		c.cfg.Plugins.Mempool.Config["evictionWatermark"] = watermark
 	}
 }
 
@@ -647,7 +862,7 @@ func WithRejectionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.RejectionWatermark = watermark
+		c.cfg.Plugins.Mempool.Config["rejectionWatermark"] = watermark
 	}
 }
 
@@ -939,7 +1154,7 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 // server (default).
 func WithBlockfrostPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BlockfrostPort = port
+		c.cfg.Plugins.API.Blockfrost.Config["port"] = port
 	}
 }
 
@@ -1001,6 +1216,9 @@ func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
 // WithMidnightConfig configures the Midnight indexer and optional gRPC API.
 func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
 		c.cfg.Midnight = internalconfig.MidnightConfig{
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
@@ -1016,6 +1234,7 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			CouncilPolicyID:             cfg.CouncilPolicyID,
 			PermissionedCandidatePolicy: cfg.PermissionedCandidatePolicy,
 		}
+		c.midnight = cfg
 	}
 }
 
@@ -1059,7 +1278,7 @@ func WithChainsyncHeaderStrategy(
 // server (default).
 func WithMeshPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.MeshPort = port
+		c.cfg.Plugins.API.Mesh.Config["port"] = port
 	}
 }
 
@@ -1068,7 +1287,11 @@ func WithMeshPort(port uint) ConfigOptionFunc {
 // transaction metadata for API queries.
 func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
 		c.cfg.StorageMode = string(mode)
+		c.storageMode = mode
 	}
 }
 
@@ -1119,12 +1342,12 @@ func (c *Config) Topology() string {
 
 // BlobPlugin returns the configured blob storage plugin name.
 func (c *Config) BlobPlugin() string {
-	return c.cfg.BlobPlugin
+	return c.cfg.Plugins.Storage.Blob.Provider
 }
 
 // MetadataPlugin returns the configured metadata storage plugin name.
 func (c *Config) MetadataPlugin() string {
-	return c.cfg.MetadataPlugin
+	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
 // BindAddr returns the IP address for API listeners.
@@ -1159,17 +1382,17 @@ func (c *Config) DebugPort() uint {
 
 // BlockfrostPort returns the Blockfrost API port. 0 disables the server.
 func (c *Config) BlockfrostPort() uint {
-	return c.cfg.BlockfrostPort
+	return internalconfig.APIPluginPort(c.cfg.Plugins.API.Blockfrost)
 }
 
 // UtxorpcPort returns the UTxO RPC gRPC API port. 0 disables the server.
 func (c *Config) UtxorpcPort() uint {
-	return c.cfg.UtxorpcPort
+	return internalconfig.APIPluginPort(c.cfg.Plugins.API.Utxorpc)
 }
 
 // MeshPort returns the Mesh (Rosetta) API port. 0 disables the server.
 func (c *Config) MeshPort() uint {
-	return c.cfg.MeshPort
+	return internalconfig.APIPluginPort(c.cfg.Plugins.API.Mesh)
 }
 
 // BarkPort returns the Bark API port. 0 disables the server.
@@ -1238,17 +1461,44 @@ func (c *Config) LedgerCatchupTimeout() string {
 
 // MempoolCapacity returns the mempool capacity in bytes.
 func (c *Config) MempoolCapacity() int64 {
-	return c.cfg.MempoolCapacity
+	return pluginInt64(c.cfg.Plugins.Mempool.Config["capacity"])
 }
 
 // EvictionWatermark returns the mempool eviction watermark (0.0-1.0).
 func (c *Config) EvictionWatermark() float64 {
-	return c.cfg.EvictionWatermark
+	return pluginFloat64(c.cfg.Plugins.Mempool.Config["evictionWatermark"])
 }
 
 // RejectionWatermark returns the mempool rejection watermark (0.0-1.0).
 func (c *Config) RejectionWatermark() float64 {
-	return c.cfg.RejectionWatermark
+	return pluginFloat64(c.cfg.Plugins.Mempool.Config["rejectionWatermark"])
+}
+
+func pluginInt64(value any) int64 {
+	switch v := value.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case uint:
+		return int64(v)
+	case float64:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+func pluginFloat64(value any) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	default:
+		return 0
+	}
 }
 
 // RunMode returns the operational mode (serve, load, dev, or leios).

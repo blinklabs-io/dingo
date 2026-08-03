@@ -45,11 +45,12 @@ func TestPostgresGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 
 	require.NoError(t, pgStore.SetDrep(0, rewardOnlyCred, 1000, "", nil, true, nil))
 	require.NoError(t, pgStore.DB().Create(&models.Account{
-		StakingKey: rewardOnlyStake,
-		Drep:       rewardOnlyCred,
-		Reward:     types.Uint64(700),
-		Active:     true,
-		AddedSlot:  1000,
+		StakingKey:      rewardOnlyStake,
+		Drep:            rewardOnlyCred,
+		Reward:          types.Uint64(700),
+		Active:          true,
+		AddedSlot:       1000,
+		ExpirationEpoch: 4,
 	}).Error)
 
 	multiUtxoCred := []byte("drep_multi_utxo_1234567890123456789012345")
@@ -57,11 +58,12 @@ func TestPostgresGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 
 	require.NoError(t, pgStore.SetDrep(0, multiUtxoCred, 1000, "", nil, true, nil))
 	require.NoError(t, pgStore.DB().Create(&models.Account{
-		StakingKey: multiUtxoStake,
-		Drep:       multiUtxoCred,
-		Reward:     types.Uint64(500),
-		Active:     true,
-		AddedSlot:  1000,
+		StakingKey:      multiUtxoStake,
+		Drep:            multiUtxoCred,
+		Reward:          types.Uint64(500),
+		Active:          true,
+		AddedSlot:       1000,
+		ExpirationEpoch: 6,
 	}).Error)
 	require.NoError(t, pgStore.DB().Create(&models.Utxo{
 		TxId:       []byte("tx_reward_123456789012345678901234567890"),
@@ -83,17 +85,37 @@ func TestPostgresGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 			{Tag: 0, Key: rewardOnlyCred},
 			{Tag: 0, Key: multiUtxoCred},
 		},
+		0,
 		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(700), powers[models.StakeCredentialRef{Tag: 0, Key: rewardOnlyCred}.MapKey()])
 	assert.Equal(t, uint64(1000), powers[models.StakeCredentialRef{Tag: 0, Key: multiUtxoCred}.MapKey()])
 
-	singlePower, err := pgStore.GetDRepVotingPower(0, rewardOnlyCred, nil)
+	singlePower, err := pgStore.GetDRepVotingPower(0, rewardOnlyCred, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(700), singlePower)
 
-	singlePower, err = pgStore.GetDRepVotingPower(0, multiUtxoCred, nil)
+	singlePower, err = pgStore.GetDRepVotingPower(0, multiUtxoCred, 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1000), singlePower)
+
+	powers, err = pgStore.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{
+			{Tag: 0, Key: rewardOnlyCred},
+			{Tag: 0, Key: multiUtxoCred},
+		},
+		5,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.NotContains(t, powers, models.StakeCredentialRef{Tag: 0, Key: rewardOnlyCred}.MapKey())
+	assert.Equal(t, uint64(1000), powers[models.StakeCredentialRef{Tag: 0, Key: multiUtxoCred}.MapKey()])
+
+	singlePower, err = pgStore.GetDRepVotingPower(0, rewardOnlyCred, 5, nil)
+	require.NoError(t, err)
+	assert.Zero(t, singlePower)
+	singlePower, err = pgStore.GetDRepVotingPower(0, multiUtxoCred, 5, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000), singlePower)
 }
@@ -131,12 +153,13 @@ func TestPostgresGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *test
 
 	powers, err := pgStore.GetDRepVotingPowerBatch(
 		[]models.StakeCredentialRef{{Tag: 0, Key: drepCred}},
+		0,
 		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1200), powers[models.StakeCredentialRef{Tag: 0, Key: drepCred}.MapKey()])
 
-	singlePower, err := pgStore.GetDRepVotingPower(0, drepCred, nil)
+	singlePower, err := pgStore.GetDRepVotingPower(0, drepCred, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1200), singlePower)
 }
@@ -177,11 +200,11 @@ func TestPostgresGetDRepVotingPowerCrossTagIsolation(t *testing.T) {
 		AddedSlot:     1000,
 	}).Error)
 
-	keyPower, err := pgStore.GetDRepVotingPower(0, sharedHash, nil)
+	keyPower, err := pgStore.GetDRepVotingPower(0, sharedHash, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), keyPower, "key-hash DRep power should be 100")
 
-	scriptPower, err := pgStore.GetDRepVotingPower(1, sharedHash, nil)
+	scriptPower, err := pgStore.GetDRepVotingPower(1, sharedHash, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(200), scriptPower, "script-hash DRep power should be 200")
 
@@ -190,6 +213,7 @@ func TestPostgresGetDRepVotingPowerCrossTagIsolation(t *testing.T) {
 			{Tag: 0, Key: sharedHash},
 			{Tag: 1, Key: sharedHash},
 		},
+		0,
 		nil,
 	)
 	require.NoError(t, err)

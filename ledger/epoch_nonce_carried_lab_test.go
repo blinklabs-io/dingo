@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -42,9 +43,8 @@ import (
 // epoch1347.LastEpochBlockNonce is the last block of epoch 1346 (the carried
 // value), not the last block of epoch 1347.
 func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -107,6 +107,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	hvNonce, _, hvCandidate, hvLab, err :=
 		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
@@ -169,9 +170,8 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 // path is unaffected (bootstrap epoch imports a non-nil lastEpochBlockNonce and
 // never takes this branch).
 func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 	// ShelleyGenesisHash set by the helper is 32 bytes of 0x11.
@@ -192,6 +192,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
 		ls.computeEpochNonceForSlot(500, initialEpoch)

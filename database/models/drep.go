@@ -43,7 +43,26 @@ type Drep struct {
 	LastActivityEpoch uint64 `gorm:"index;default:0"`
 	// Epoch when DRep expires (activity + inactivity).
 	ExpiryEpoch uint64 `gorm:"index;default:0"`
-	Active      bool   `gorm:"default:true"`
+	Active      bool   `gorm:"default:true;index:idx_drep_active"`
+}
+
+// DrepListRow is a Drep row extended with the credential's first
+// on-chain appearance slot, as returned by GetDreps for
+// registration-order listings.
+type DrepListRow struct {
+	AnchorURL         string `gorm:"column:anchor_url"`
+	Credential        []byte
+	AnchorHash        []byte
+	ID                uint
+	AddedSlot         uint64
+	CredentialTag     uint8
+	LastActivityEpoch uint64
+	ExpiryEpoch       uint64
+	Active            bool
+	FirstSeenSlot     uint64
+	// LastRegistrationSlot is the added_slot of the most recent
+	// registration certificate, 0 when no cert history exists.
+	LastRegistrationSlot uint64
 }
 
 // MigrateDrepCredentialTagIndex drops the legacy hash-only DRep uniqueness

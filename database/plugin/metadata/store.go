@@ -16,11 +16,9 @@ package metadata
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -108,6 +106,72 @@ type MetadataStore interface {
 	// ImportAccount.
 	CreateAccount(types.Txn, *models.Account) error
 
+	// RenewAccountExpirations sets expiration_epoch for every existing
+	// account row matching one of refs (CIP-0163 delegator-inactivity
+	// mechanism). A ref with no matching account row is ignored: an
+	// account must already be registered to have an expiration. Callers
+	// handling an ordinary witness pass currentEpoch + delegatorInactivity,
+	// which moves expiration forward. Rollback recomputation may instead lower
+	// expiration or reset it to zero to restore the value at the rollback point.
+	RenewAccountExpirations(
+		refs []models.StakeCredentialRef,
+		expirationEpoch uint64,
+		txn types.Txn,
+	) error
+
+	// AccountLastWitnessSlots returns, per requested credential, the greatest
+	// witnessing added_slot <= maxSlot across the stake-witnessing certificate
+	// tables and reward-withdrawal history. Withdrawal history includes
+	// account_withdrawal_witness (which preserves zero-amount withdrawals) and
+	// legacy account_reward_delta rows where withdrawal = TRUE — together with
+	// the certificate tables, this is the CIP-0163 witness set. The result is
+	// keyed by StakeCredentialRef.MapKey(); a credential with no witness <=
+	// maxSlot is absent from the map. Used by the ledger's rollback expiration
+	// recomputation to find each affected account's surviving witness slot.
+	AccountLastWitnessSlots(
+		refs []models.StakeCredentialRef,
+		maxSlot uint64,
+		txn types.Txn,
+	) (map[string]uint64, error)
+
+	// AccountsWitnessedAfterSlot returns the distinct reward-account
+	// credentials with a stake-witnessing certificate OR a reward withdrawal
+	// at added_slot > slot — the CIP-0163 rollback affected set. Withdrawals
+	// come from account_withdrawal_witness (including zero-amount withdrawals)
+	// and legacy account_reward_delta withdrawal rows. Callers must invoke it
+	// before deleting rolled-back certificate, withdrawal-witness, and
+	// reward-delta rows, since those are exactly the rows it inspects.
+	AccountsWitnessedAfterSlot(
+		slot uint64,
+		txn types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// StampAllActiveAccountExpirations sets expiration_epoch = expirationEpoch
+	// for every active account. Used once at CIP-0163 activation to give every
+	// pre-existing account a full inactivity window from the activation epoch,
+	// including accounts witnessed before activation. Returns the number of
+	// rows stamped.
+	StampAllActiveAccountExpirations(
+		expirationEpoch uint64,
+		txn types.Txn,
+	) (int64, error)
+
+	// AccountInactivityActivationMembership returns the requested credentials
+	// included in the one-time activation stamp, keyed by
+	// StakeCredentialRef.MapKey().
+	AccountInactivityActivationMembership(
+		[]models.StakeCredentialRef,
+		types.Txn,
+	) (map[string]struct{}, error)
+
+	// ResetAccountExpirationActivation clears expiration for the exact durable
+	// activation-membership set, deletes that set, and returns its credentials
+	// so the ledger can reconstruct any pre-activation witness expiration. Used
+	// when rollback crosses back before the activation boundary.
+	ResetAccountExpirationActivation(
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
 	// CreateUtxo inserts a Utxo row directly. The normal block-
 	// application path uses AddUtxos with UtxoSlot inputs; this is
 	// the simple-insert variant for callers that already have a
@@ -155,6 +219,58 @@ type MetadataStore interface {
 	// for the given block number and returns them so the caller can restore
 	// the in-memory tracked-UTxO set. Used during chain rollback.
 	DeleteMidnightDeregistrationsByBlock(types.Txn, uint64) ([]models.MidnightDeregistration, error)
+
+	// FindMidnightAssetCreatesFrom returns cNIGHT create rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// The result may hold more than limit rows: (block_number, tx_index) is
+	// not a unique key (one tx can write several rows to the same table),
+	// so implementations extend a page that would otherwise end mid-key to
+	// include the rest of that key's rows, keeping the cursor gap-free.
+	// Used to serve the MidnightState GetAssetCreates RPC.
+	FindMidnightAssetCreatesFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetCreate, error)
+
+	// FindMidnightAssetSpendsFrom returns cNIGHT spend rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetAssetSpends RPC.
+	FindMidnightAssetSpendsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetSpend, error)
+
+	// FindMidnightRegistrationsFrom returns registration rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetRegistrations RPC.
+	FindMidnightRegistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightRegistration, error)
+
+	// FindMidnightDeregistrationsFrom returns deregistration rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetDeregistrations
+	// RPC.
+	FindMidnightDeregistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightDeregistration, error)
 
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
@@ -205,6 +321,34 @@ type MetadataStore interface {
 		txn types.Txn,
 	) (*models.OffchainMetadata, error)
 
+	// GetOffchainMetadataBatch retrieves cached off-chain documents for
+	// many URLs of the given source type in a single query, rather than
+	// one GetOffchainMetadata call per item. Used by callers that need
+	// per-item off-chain metadata for a whole page of results (for
+	// example, pool metadata for /pools/extended): the unique index on
+	// (source_type, url, hash) covers source_type + url IN (...) as its
+	// leading columns, so this is index-backed the same way
+	// GetOffchainMetadata is. Because two documents can share a URL under
+	// different hashes (metadata republished at the same URL with new
+	// content), callers must still match each returned row against their
+	// own (url, hash) pointer rather than assuming one row per URL.
+	GetOffchainMetadataBatch(
+		sourceType string,
+		urls []string,
+		txn types.Txn,
+	) ([]models.OffchainMetadata, error)
+
+	// GetRetiringPools returns pools whose latest retirement
+	// certificate targets an epoch after currentEpoch and has not been
+	// cancelled by a later registration certificate. Certificate
+	// recency compares (added_slot, synthetic-import precedence,
+	// block_index, cert_index). Results are ordered by retirement
+	// epoch, then announcement position, matching Blockfrost.
+	GetRetiringPools(
+		currentEpoch uint64,
+		txn types.Txn,
+	) ([]models.PoolRetiringRow, error)
+
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,
@@ -230,6 +374,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer
+	// rows in the inclusive slot range, ordered by slot and pool key hash.
+	GetPoolBlockIssuersInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) ([]models.PoolOpCertSequence, error)
+
 	// CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
 	// inclusive slot range, grouped by pool key hash. The total return value
 	// counts all observed pool blocks in the range, not only the requested
@@ -240,6 +392,15 @@ type MetadataStore interface {
 		uint64, // endSlot
 		types.Txn,
 	) (map[string]uint64, uint64, error)
+
+	// SumTransactionFeesInSlotRange sums the fee-pot contributions in the
+	// inclusive slot range: declared fees of valid transactions plus
+	// consumed collateral of phase-2-invalid transactions.
+	SumTransactionFeesInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (uint64, error)
 
 	// GetPools retrieves pools by key hash in batch.
 	GetPools(
@@ -254,6 +415,20 @@ type MetadataStore interface {
 	GetPoolRegistrationsAtSlot(
 		[]lcommon.PoolKeyHash,
 		uint64, // slot
+		types.Txn,
+	) ([]models.PoolRegistration, error)
+
+	// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool,
+	// the registration whose parameters the ledger's pool-params map held
+	// during the ended epoch [epochStartSlot, snapshotSlot]. Re-registrations
+	// submitted during that epoch are future params (promoted after SNAP)
+	// and excluded; pools that freshly entered the params map during the
+	// epoch use their earliest in-epoch certificate.
+	GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash,
+		uint64, // epochStartSlot
+		uint64, // endedEpoch
+		uint64, // snapshotSlot
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
@@ -272,6 +447,29 @@ type MetadataStore interface {
 	// A pool is active if it has a registration and either no retirement or
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
+
+	// GetActivePoolKeyHashesOrdered retrieves the key hashes of all
+	// currently active pools (same active-pool semantics as
+	// GetActivePoolKeyHashes), ordered oldest-first by each pool's
+	// earliest on-chain registration certificate: added_slot ascending,
+	// then block_index and cert_index ascending to disambiguate
+	// certificates recorded in the same slot. This backs the Blockfrost
+	// pool_list endpoint's documented "oldest first, newest last"
+	// ordering. See poolorder.GetActivePoolKeyHashesOrdered for the full
+	// rationale, including why "oldest" is keyed on first registration
+	// rather than the most recent one.
+	GetActivePoolKeyHashesOrdered(types.Txn) ([][]byte, error)
+
+	// GetPoolCertificateHistory returns the transaction hashes of a pool's
+	// registration and retirement certificates, in chronological order
+	// (added_slot, block_index, cert_index ascending). Certificates with no
+	// linked transaction — rows synthesized by the Mithril ledger-state
+	// import, which carry certificate_id = 0 — are excluded since they have
+	// no originating transaction to report.
+	GetPoolCertificateHistory(
+		lcommon.PoolKeyHash,
+		types.Txn,
+	) (registrationTxHashes [][]byte, retirementTxHashes [][]byte, err error)
 
 	// GetActivePoolKeyHashesAtSlot retrieves the key hashes of pools that were
 	// active at the given slot. A pool was active at a slot if:
@@ -328,6 +526,79 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// GetStakeByPoolsAtSlot returns delegated stake for multiple pools at a
+	// historical slot. It uses certificate history plus slot-aware UTxO
+	// liveness so epoch-boundary stake snapshots do not read current live
+	// stake for an older boundary. expiryEpoch and inactivityPeriod drive the
+	// CIP-0163 reward-account inactivity gate: 0 disables it (result
+	// byte-identical to pre-CIP); otherwise expiration is reconstructed from
+	// witness history at slot and credentials expired before expiryEpoch are
+	// excluded.
+	GetStakeByPoolsAtSlot(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
+		types.Txn,
+	) (map[string]uint64, map[string]uint64, error)
+
+	// GetPoolOwnerStakeAtSlot returns historical stake for the requested pool
+	// owner key hashes, keyed by pool plus credential. An owner is included only
+	// when that credential was delegated to the pool at the requested slot.
+	// expiryEpoch drives the CIP-0163 inactivity gate (0 = gate off), and
+	// inactivityPeriod reconstructs expiration from historical witnesses.
+	GetPoolOwnerStakeAtSlot(
+		[][]byte, // ownerKeyHashes
+		uint64, // slot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// GetRewardStakeInputsForPools returns positive per-account delegated stake
+	// for pools. When the CIP-0163 inactivity gate is off (expiryEpoch == 0) it
+	// reads the live reward stake aggregate (slot and inactivityPeriod are
+	// ignored). When the gate is on
+	// (expiryEpoch > 0) it reconstructs per-credential stake and expiration at
+	// slot from the same historical CTE as GetStakeByPoolsAtSlot, so the
+	// reward-basis inputs agree with leader-election pool totals by construction
+	// rather than reading the mutable live account.expiration_epoch column
+	// (which can reflect a post-slot renewal on a fallback capture).
+	GetRewardStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		uint64, // expiryEpoch (0 = gate off)
+		uint64, // inactivityPeriod
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// GetLiveStakeInputsForPools returns every registered credential (including
+	// zero-stake credentials) from the transactionally maintained live reward
+	// aggregate for the requested pools. expiryEpoch applies the live
+	// CIP-0163 account-expiration filter when nonzero.
+	GetLiveStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // expiryEpoch (0 = gate off)
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
+	// canonical account and live UTxO metadata. Node startup uses it as an
+	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.
+	RebuildRewardLiveStake(uint64, types.Txn) error
+
+	// RewardLiveStakeNeedsBackfill reports whether the reward_live_stake
+	// aggregate needs a one-time RebuildRewardLiveStake pass: true when any
+	// canonical account or live-UTxO credential is missing from the aggregate.
+	// This detects both empty and partially populated upgraded databases without
+	// misfiring on a legitimately fresh, empty database.
+	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
+
+	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
+	// stake snapshots or authoritative Mark metadata use an older calculation
+	// version. Such snapshots cannot safely be recreated from a pruned database.
+	StaleConsensusStakeSnapshotsExist(types.Txn) (bool, error)
+
 	// GetStakeRegistrationsByCredential retrieves stake registration certificates
 	// using the full credential identity: credential tag plus 28-byte hash.
 	GetStakeRegistrationsByCredential(
@@ -356,8 +627,19 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]*models.Account, error)
 
+	// GetAccountsActiveAtSlot returns the subset of stake credentials that
+	// were registered and not subsequently deregistered at or before the given
+	// slot. The returned map is keyed by StakeCredentialRef.MapKey().
+	GetAccountsActiveAtSlot(
+		[]models.StakeCredentialRef, // stakeCredentials
+		uint64, // slot
+		types.Txn,
+	) (map[string]struct{}, error)
+
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
-	// validated transaction withdrawal and records rollback state.
+	// validated transaction withdrawal and records rollback state. txHash must
+	// identify the withdrawing transaction; callers that pass nil cannot safely
+	// apply more than one hashless withdrawal for the same credential.
 	ApplyAccountRewardWithdrawal(
 		uint8, // credentialTag
 		[]byte, // stakeKey
@@ -412,6 +694,15 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]byte, error)
 
+	// GetLatestBlockNonce returns the block_nonce row with the highest slot.
+	// block_nonce is written in the same metadata transaction as a block's
+	// UTxO/certificate effects and the ledger tip, so the maximum slot is the
+	// authoritative high-water mark of durably applied ledger state. The bool
+	// is false (with a zero row and nil error) when the table is empty.
+	GetLatestBlockNonce(
+		txn types.Txn,
+	) (models.BlockNonce, bool, error)
+
 	// GetDatum retrieves a datum by its hash, returning nil if not found.
 	GetDatum(
 		lcommon.Blake2b256,
@@ -440,6 +731,58 @@ type MetadataStore interface {
 	// GetActiveDreps retrieves all active DReps.
 	GetActiveDreps(types.Txn) ([]*models.Drep, error)
 
+	// GetDreps retrieves every DRep row, including deregistered ones,
+	// ordered by the credential's first on-chain appearance (earliest
+	// registration, update, or delegation reference). Used by the
+	// Blockfrost DRep list endpoint.
+	GetDreps(types.Txn) ([]models.DrepListRow, error)
+
+	// GetPredefinedDrepFirstSeenSlots returns the earliest delegation
+	// added_slot per predefined DRep type (AlwaysAbstain,
+	// AlwaysNoConfidence). Types never delegated to are absent.
+	GetPredefinedDrepFirstSeenSlots(types.Txn) (map[uint64]uint64, error)
+
+	// GetDrepLastRegistrationSlot returns the added_slot of the most
+	// recent registration certificate for the DRep credential, or 0
+	// when no registration certificate history exists. Blockfrost's
+	// active_epoch reports the most recent registration, which the
+	// mutable drep.added_slot cannot provide because update and
+	// deregistration certificates overwrite it.
+	GetDrepLastRegistrationSlot(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (uint64, error)
+
+	// GetActiveAccountCredentials returns the stake credentials (tag + key) of
+	// every currently active account. Used by Mithril v2 catch-up
+	// reconciliation to find accounts absent from a newer snapshot's live set.
+	GetActiveAccountCredentials(
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
+	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
+	// tombstoned via the active flag. Credentials that match no row are ignored.
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+
+	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
+	// Mithril v2 catch-up reconciliation; rows are never deleted, only
+	// tombstoned via the active flag. Credentials that match no row are ignored.
+	DeactivateDreps(types.Txn, []models.StakeCredentialRef) error
+
+	// RetirePools records a retirement at the given epoch (and added slot) for
+	// each supplied pool key hash, mirroring a retirement certificate. Used by
+	// Mithril v2 catch-up reconciliation to retire pools absent from a newer
+	// snapshot's active set; registrations are preserved. Key hashes that match
+	// no pool are ignored.
+	RetirePools(
+		txn types.Txn,
+		poolKeyHashes [][]byte,
+		epoch uint64,
+		addedSlot uint64,
+	) error
+
 	// GetPParams retrieves the latest protocol-parameters row at
 	// epoch <= the supplied epoch whose stored era_id matches the
 	// supplied era. The era filter is required: at era boundaries the
@@ -460,6 +803,14 @@ type MetadataStore interface {
 		uint64, // epoch
 		types.Txn,
 	) ([]models.PParamUpdate, error)
+
+	// GetGenesisDelegationForSlot returns the latest genesis-key delegation
+	// certificate for genesisHash before the supplied block slot.
+	GetGenesisDelegationForSlot(
+		[]byte, // genesisHash
+		uint64, // blockSlot
+		types.Txn,
+	) (*models.GenesisDelegation, error)
 
 	// GetUtxo retrieves an unspent transaction output by transaction ID and index.
 	GetUtxo(
@@ -501,65 +852,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint, bool, error)
 
-	// ExistingTransactionHashes returns the subset of the given hashes that
-	// are already recorded. Lightweight (selects the hash column only, no
-	// associations); used to skip re-applying transactions that an earlier
-	// endorser block already applied, since the Leios prototype re-includes
-	// unconfirmed mempool transactions in successive endorser blocks
-	// (issue #2699).
-	ExistingTransactionHashes(
-		[][]byte, // hashes
+	// GetTransactionMetadataByHash returns only the stored (API-mode)
+	// CBOR metadata blob for the transaction with the given hash,
+	// without loading any associations. Returns (nil, nil) when no such
+	// transaction exists or when it has no metadata. Used by the asset
+	// endpoint to resolve CIP-25 on-chain metadata without paying for
+	// full transaction preloads.
+	GetTransactionMetadataByHash(
+		[]byte, // hash
 		types.Txn,
-	) ([][]byte, error)
-
-	// AddEndorserTransactions records the given transaction hashes as
-	// endorser-block (speculative) transactions applied under the referencing
-	// ranking block at rbSlot. Used only when endorser-block conflict
-	// resolution is enabled (Musashi); it marks these spends as revocable so a
-	// later authoritative ranking-block transaction can override them
-	// (issue #2699). Idempotent: re-recording an existing hash is a no-op.
-	AddEndorserTransactions(
-		[][]byte, // hashes
-		uint64, // rbSlot
-		types.Txn,
-	) error
-
-	// FilterEndorserTransactions returns the subset of the given hashes that
-	// are recorded endorser-block transactions. Used to tell a revocable
-	// endorser-block spend from a final ranking-block spend when resolving a
-	// conflict, and to walk the endorser-on-endorser revoke cascade.
-	FilterEndorserTransactions(
-		[][]byte, // hashes
-		types.Txn,
-	) ([][]byte, error)
-
-	// UtxoSpenders returns the distinct hashes of transactions that spent any
-	// output produced by the given producer transaction hashes (i.e. the
-	// spent_at_tx_id of every utxo whose tx_id is in the set). Used to expand
-	// the endorser-on-endorser revoke cascade: revoking an endorser
-	// transaction must also revoke any endorser transaction that spent one of
-	// its outputs.
-	UtxoSpenders(
-		[][]byte, // producer hashes
-		types.Txn,
-	) ([][]byte, error)
-
-	// RevokeEndorserTransactions undoes the ledger effect of the given
-	// endorser-block transactions: it un-spends the inputs they consumed
-	// (clearing deleted_slot and spent_at_tx_id), deletes the outputs they
-	// produced, and removes their transaction, endorser-transaction, and
-	// address-mapping rows. The caller is responsible for passing a complete
-	// revoke set (the transitive endorser-on-endorser closure); this method
-	// does not expand the cascade itself.
-	RevokeEndorserTransactions(
-		[][]byte, // hashes
-		types.Txn,
-	) error
-
-	// DeleteEndorserTransactionsAfterSlot removes endorser-transaction records
-	// whose referencing ranking block is after the given slot, so a chain
-	// rollback drops the provenance for the spends it is undoing.
-	DeleteEndorserTransactionsAfterSlot(uint64, types.Txn) error
+	) ([]byte, error)
 
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
@@ -592,6 +894,15 @@ type MetadataStore interface {
 		[]byte, // paymentKey
 		uint8, // credentialTag
 		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// CountTransactionsByPaymentCred returns the total number of
+	// transactions involving the provided payment credential across every
+	// address that carries it, regardless of staking part. Used by the
+	// Blockfrost payment-credential (addr_vkh/script) address lookups.
+	CountTransactionsByPaymentCred(
+		[]byte, // paymentKey
 		types.Txn,
 	) (int, error)
 
@@ -650,6 +961,55 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
+	// GetAccountWithdrawalHistoryByCredential retrieves withdrawal history
+	// rows for a stake credential tag/hash pair.
+	GetAccountWithdrawalHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountWithdrawalHistoryRow, error)
+
+	// CountAccountWithdrawalHistoryByCredential retrieves the total count of
+	// withdrawal history rows for a stake credential tag/hash pair.
+	CountAccountWithdrawalHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// GetAddressTransactionsByCredential retrieves one page of (payment
+	// address, transaction) association rows for a stake credential
+	// tag/hash pair, ordered by (slot, tx_index, payment_key) and
+	// optionally bounded by an inclusive from/to (slot, tx_index) range
+	// (nil = unconstrained on that side). This is the direct SQL page: no
+	// caller-side fan-out or filtering is needed, so cost is bounded by
+	// limit/offset rather than by the credential's full transaction
+	// history.
+	GetAddressTransactionsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		*models.AddressTransactionPosition, // from
+		*models.AddressTransactionPosition, // to
+		types.Txn,
+	) ([]models.AccountTransactionAssociationRow, error)
+
+	// CountAddressTransactionsByCredential retrieves the total count of
+	// (payment address, transaction) association rows for a stake
+	// credential tag/hash pair within the same optional from/to range.
+	CountAddressTransactionsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		*models.AddressTransactionPosition, // from
+		*models.AddressTransactionPosition, // to
+		types.Txn,
+	) (int, error)
+
 	// GetAccountSumsByCredential retrieves the aggregated withdrawal, reserves,
 	// and treasury lovelace totals for a stake credential tag/hash pair.
 	GetAccountSumsByCredential(
@@ -691,6 +1051,16 @@ type MetadataStore interface {
 		[]byte, // assetName
 		types.Txn,
 	) (uint64, error)
+
+	// GetAssetMintBurnInfo returns the hash of the earliest transaction that
+	// minted the asset (its initial mint) and the total number of recorded
+	// mint/burn events for the asset. Returns (nil, 0, nil) when the asset has
+	// no recorded mint/burn history (e.g. running in core storage mode).
+	GetAssetMintBurnInfo(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (initialMintTxHash []byte, mintOrBurnCount int, err error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(
@@ -794,6 +1164,19 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// RecomputeGapCollateralFee recomputes and persists the collateral fee
+	// for a phase-2-invalid gap-block transaction after its consumed
+	// collateral inputs have been recovered into the metadata UTxO table.
+	// SetGapBlockTransaction computes the collateral fee before those inputs
+	// exist, so for a transaction that declares no total collateral the fee
+	// is undercounted until this recompute runs. It is a no-op for valid
+	// transactions (which have no collateral fee).
+	RecomputeGapCollateralFee(
+		lcommon.Transaction,
+		ocommon.Point,
+		types.Txn,
+	) error
+
 	// SetGenesisTransaction stores a genesis transaction record.
 	// Genesis transactions have no inputs, witnesses, or fees - just outputs.
 	SetGenesisTransaction(
@@ -886,12 +1269,35 @@ type MetadataStore interface {
 	// window for historical transaction queries.
 	GetUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
 
-	// GetUtxosByAddress retrieves all UTxOs for a given address.
-	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+	// GetUtxosByAddress retrieves coarse SQL candidates for an explicit
+	// address pattern. The database layer performs full exact-address CBOR
+	// filtering when ExactAddress is set.
+	GetUtxosByAddress(
+		models.UtxoAddressPattern,
+		types.Txn,
+	) ([]models.Utxo, error)
 
 	// GetControlledAmountByCredential returns the sum of live UTxO
 	// amounts controlled by the given stake credential.
 	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
+
+	// GetUtxoPaymentScriptByCredential returns, for the given bounded set
+	// of payment-key hashes previously observed under a stake credential,
+	// whether each payment credential is a script hash (true) or a key
+	// hash (false). Used by the Blockfrost account transactions endpoint
+	// to reconstruct the exact address type for one page of (payment
+	// address, transaction) rows without decoding UTxO CBOR or scanning
+	// the credential's full history: paymentKeys is expected to be the
+	// small (<= page size) distinct set drawn from an already-paginated
+	// GetAddressTransactionsByCredential page. A payment key with no
+	// matching UTxO row is omitted from the result; callers should
+	// default to key-hash for any omitted key.
+	GetUtxoPaymentScriptByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		[][]byte, // paymentKeys
+		types.Txn,
+	) (map[string]bool, error)
 
 	// GetMidnightCandidates retrieves live committee-candidate UTxOs with
 	// inline datum bytes from metadata rows, without materializing block CBOR.
@@ -902,8 +1308,23 @@ type MetadataStore interface {
 	// script-locked supply (blockfrost /network supply.locked).
 	GetScriptLockedSupply(types.Txn) (uint64, error)
 
-	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
-	// See models.UtxoWithOrderingQuery. q must be non-nil.
+	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
+	// per-asset balances (ordered by policy id then name), and live UTxO
+	// count for the given address, aggregated in SQL. Payment-credential
+	// mode aggregates across address forms. Exact mode returns
+	// models.ErrExactAddressRequiresCbor; exact summaries use the coordinated
+	// Database query path instead.
+	GetUtxoBalanceByAddress(
+		lcommon.Address,
+		models.UtxoAddressMatchMode,
+		types.Txn,
+	) (models.AddressBalance, error)
+
+	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering
+	// metadata. Snapshot-imported UTxOs without a producing transaction use
+	// AddedSlot and block index zero. Keyset ordering uses the unique tuple
+	// (slot, block_index, output_idx, tx_id). See
+	// models.UtxoWithOrderingQuery. q must be non-nil.
 	GetUtxosByAddressWithOrdering(
 		*models.UtxoWithOrderingQuery,
 		types.Txn,
@@ -911,7 +1332,7 @@ type MetadataStore interface {
 
 	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
 	GetUtxosByAddressAtSlot(
-		lcommon.Address,
+		models.UtxoAddressPattern,
 		uint64,
 		types.Txn,
 	) ([]models.Utxo, error)
@@ -982,9 +1403,41 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardAdaPots, error)
 
-	// SaveRewardSnapshot saves reward snapshot metadata for an epoch.
+	// SaveRewardSnapshot saves reward snapshot metadata for an epoch,
+	// overwriting any existing row for the (epoch, snapshot_type) pair
+	// (including its authoritative flag). Used by the authoritative
+	// epoch-rollover capture, which must always win over a fallback row.
 	SaveRewardSnapshot(
 		*models.RewardSnapshot,
+		types.Txn,
+	) error
+
+	// ClaimFallbackRewardSnapshot atomically reserves the (epoch, snapshot_type)
+	// reward snapshot marker for a fallback (non-authoritative) capture,
+	// returning false when an authoritative snapshot already occupies it so the
+	// caller abandons the fallback rather than overwriting the authoritative
+	// row. See rewardstate.ClaimFallbackSnapshot.
+	ClaimFallbackRewardSnapshot(
+		*models.RewardSnapshot,
+		types.Txn,
+	) (bool, error)
+
+	// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that cannot
+	// persist reward inputs against the authoritative epoch-rollover capture.
+	// It returns proceed=false when an authoritative row already exists. A
+	// non-zero guard ID identifies a temporary row that the caller must delete
+	// in the same transaction before commit.
+	ClaimFallbackRewardSnapshotGuard(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) (bool, uint, error)
+
+	// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row returned
+	// by ClaimFallbackRewardSnapshotGuard. It must run in the same transaction
+	// that claimed the guard.
+	ReleaseFallbackRewardSnapshotGuard(
+		uint, // guardID
 		types.Txn,
 	) error
 
@@ -1007,13 +1460,78 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
 
+	// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
+	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
+
+	// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
+	GetRewardStakeInputs(uint64, types.Txn) ([]*models.RewardStakeInput, error)
+
+	// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
+	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+
+	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an epoch.
+	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
+
+	// SaveRewardPoolOutputs saves per-pool reward calculation outputs.
+	SaveRewardPoolOutputs([]*models.RewardPoolOutput, types.Txn) error
+
+	// GetRewardPoolOutputs retrieves per-pool reward calculation outputs.
+	GetRewardPoolOutputs(uint64, types.Txn) ([]*models.RewardPoolOutput, error)
+
+	// SaveRewardAccountOutputs saves per-account reward calculation outputs.
+	SaveRewardAccountOutputs([]*models.RewardAccountOutput, types.Txn) error
+
+	// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
+	GetRewardAccountOutputs(uint64, types.Txn) ([]*models.RewardAccountOutput, error)
+
+	// GetRewardAccountOutputsByCredential retrieves reward account output
+	// rows for a stake credential tag/hash pair across every epoch that has
+	// not yet been pruned, paginated and ordered by epoch. Used by the
+	// Blockfrost account reward-history endpoint.
+	//
+	// Only spendable rows (spendable = true) are returned. A row with
+	// spendable = false was never credited to the account -- crediting skips
+	// it and adds the amount to the epoch's unspendable total instead -- so
+	// returning it would report a reward the account never received. See
+	// rewardstate.GetAccountOutputsByCredential for the full rationale,
+	// including a known gap for CIP-0163-guarded rows (dingo #3021).
+	GetRewardAccountOutputsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// CountRewardAccountOutputsByCredential retrieves the total count of
+	// reward account output rows for a stake credential tag/hash pair.
+	//
+	// Counts only spendable rows, matching
+	// GetRewardAccountOutputsByCredential's filter. The two must agree, or
+	// pagination advertises pages of rewards that were never paid.
+	CountRewardAccountOutputsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
 	// DeleteRewardStateAfterSlot deletes reward-state rows captured from
 	// rolled-back blocks.
 	DeleteRewardStateAfterSlot(uint64, types.Txn) error
 
 	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
-	// retained snapshot window.
+	// retained snapshot window. This is the CORE storage-mode pruning path:
+	// it deletes both reward_stake_input and reward_account_output. See
+	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
 	DeleteRewardStateBeforeEpoch(uint64, types.Txn) error
+
+	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
+	// older than the retained snapshot window, leaving reward_account_output
+	// intact. This is the API storage-mode pruning path, used so the
+	// Blockfrost account reward-history endpoint can serve an account's full
+	// reward history. See rewardstate.DeleteStakeInputBeforeEpoch.
+	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
 
 	// Stake snapshot methods
 
@@ -1079,11 +1597,16 @@ type MetadataStore interface {
 	// DeletePoolStakeSnapshotsBeforeEpoch deletes all snapshots before a given epoch.
 	DeletePoolStakeSnapshotsBeforeEpoch(uint64, types.Txn) error
 
-	// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given epoch.
+	// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given
+	// epoch, for discarding boundaries that a rollback rewound. Rollback does
+	// not currently call it: epoch numbering is slot-derived, so the boundary is
+	// re-crossed on the selected chain and SaveEpochSummary upserts the row.
+	//
+	// There is deliberately no before-epoch counterpart. epoch_summary is one
+	// small row per epoch and is retained for the life of the database, unlike
+	// the per-pool snapshot and reward-input rows that cleanupOldSnapshots
+	// prunes to the rotation window.
 	DeleteEpochSummariesAfterEpoch(uint64, types.Txn) error
-
-	// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
-	DeleteEpochSummariesBeforeEpoch(uint64, types.Txn) error
 
 	// GetTransactionHashesAfterSlot returns transaction hashes for transactions added after the given slot.
 	// This is used for blob cleanup during rollback/truncation.
@@ -1124,12 +1647,30 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetEnactedGovernanceProposalsAt returns proposals that were enacted at
+	// the given epoch-boundary slot. Used to replay enactment side effects when
+	// stake reward pot reset is reapplied after a boundary commit crash.
+	GetEnactedGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetExpiringGovernanceProposals returns proposals whose
 	// `expires_epoch` is strictly less than the given epoch and that
 	// have not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark expired proposals and return deposits.
 	GetExpiringGovernanceProposals(
 		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
+	// the given epoch-boundary slot. Used to replay deposit-return side effects
+	// when stake reward pot reset is reapplied after a boundary commit crash.
+	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
@@ -1283,9 +1824,14 @@ type MetadataStore interface {
 	// the current stake of all delegated accounts, approximated from live
 	// UTxO balance plus reward-account balance. credentialTag distinguishes
 	// key (0) from script (1) DRep credentials that share the same hash.
+	// expiryEpoch is the CIP-0163 reward-account inactivity gate: 0 excludes
+	// no accounts (gate off, byte-identical to the pre-CIP query); >0
+	// excludes accounts whose expiration_epoch is nonzero and less than
+	// expiryEpoch.
 	GetDRepVotingPower(
 		uint8, // credentialTag
 		[]byte, // drepCredential
+		uint64, // expiryEpoch
 		types.Txn,
 	) (uint64, error)
 
@@ -1304,18 +1850,22 @@ type MetadataStore interface {
 	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
 	// no delegated stake are omitted. Use StakeCredentialRef to carry both
 	// the tag and hash so that key-hash and script-hash DReps sharing a
-	// 28-byte hash are tallied independently.
+	// 28-byte hash are tallied independently. expiryEpoch is the CIP-0163
+	// gate; see GetDRepVotingPower.
 	GetDRepVotingPowerBatch(
 		drepCredentials []models.StakeCredentialRef,
+		expiryEpoch uint64,
 		txn types.Txn,
 	) (map[string]uint64, error)
 
 	// GetDRepVotingPowerByType returns voting power grouped by DRep
 	// delegation type. This is used for predefined DRep options such
 	// as AlwaysAbstain and AlwaysNoConfidence, which do not have a
-	// credential hash.
+	// credential hash. expiryEpoch is the CIP-0163 gate; see
+	// GetDRepVotingPower.
 	GetDRepVotingPowerByType(
 		drepTypes []uint64,
+		expiryEpoch uint64,
 		txn types.Txn,
 	) (map[uint64]uint64, error)
 
@@ -1484,6 +2034,7 @@ type MetadataStore interface {
 	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
 	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
 	GetMidnightAriadneParamsByEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
+	GetMidnightAriadneParamsAtOrBeforeEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
 	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
 	DeleteMidnightAriadneParamsByEpoch(types.Txn, uint64) error
 	CreateMidnightAriadneRollback(types.Txn, *models.MidnightAriadneRollback) error
@@ -1492,6 +2043,13 @@ type MetadataStore interface {
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
 	DeleteMidnightEpochCandidatesByBlock(types.Txn, uint64) error
+	GetMidnightEpochCandidatesByEpoch(uint64, types.Txn) (*models.MidnightEpochCandidates, error)
+	InsertMidnightCommitteeCandidateRegistration(types.Txn, *models.MidnightCommitteeCandidateRegistration) error
+	DeleteMidnightCommitteeCandidateRegistrationsByBlock(types.Txn, uint64) error
+	GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		[][]byte,
+		types.Txn,
+	) ([]models.MidnightCommitteeCandidateRegistration, error)
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can
@@ -1506,24 +2064,4 @@ type BulkLoadOptimizer interface {
 // collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
 type PlannerStatsUpdater interface {
 	UpdatePlannerStats() error
-}
-
-// New creates a new metadata store instance using the specified plugin
-func New(pluginName string) (MetadataStore, error) {
-	// Get and start the plugin
-	p, err := plugin.StartPlugin(plugin.PluginTypeMetadata, pluginName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Type assert to MetadataStore interface
-	metadataStore, ok := p.(MetadataStore)
-	if !ok {
-		return nil, fmt.Errorf(
-			"plugin '%s' does not implement MetadataStore interface",
-			pluginName,
-		)
-	}
-
-	return metadataStore, nil
 }

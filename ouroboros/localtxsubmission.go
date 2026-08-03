@@ -50,10 +50,24 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 	ctx olocaltxsubmission.CallbackContext,
 	tx olocaltxsubmission.MsgSubmitTxTransaction,
 ) error {
+	rawTx, ok := tx.Raw.Content.([]byte)
+	if !ok {
+		o.config.Logger.Warn(
+			fmt.Sprintf(
+				"received local-tx-submission payload with unexpected content type: %T",
+				tx.Raw.Content,
+			),
+			"component", "network",
+			"protocol", "local-tx-submission",
+			"role", "server",
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		return errors.New("local-tx-submission: unexpected transaction content type")
+	}
 	// Add transaction to mempool
 	err := o.Mempool.AddTransaction(
 		uint(tx.EraId),
-		tx.Raw.Content.([]byte),
+		rawTx,
 	)
 	if err != nil {
 		o.config.Logger.Error(

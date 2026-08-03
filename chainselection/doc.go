@@ -18,9 +18,11 @@
 // then the reference implementation's equal-length opcert/VRF tiebreaker when
 // it is armed.
 //
-// Genesis selection mode can be enabled at startup to prefer observed
-// density during bootstrap before automatically falling back to Praos once
-// the local tip is close enough to the best observed peer tip.
+// Genesis selection mode can be enabled at startup. The selector's rolling
+// observed density ranks peers during bootstrap; when fetched candidates fork,
+// ledger resolution performs the authoritative density comparison from their
+// exact common intersection. Both automatically fall back to Praos once the
+// local tip is close enough to the best observed peer tip.
 //
 // ChainSelector is the top-level type. It consumes PeerTipUpdateEvent
 // events from chainsync, compares peer tips against the local tip, and

@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
@@ -44,9 +45,9 @@ import (
 // (computeEpochNonceForSlot) must agree, because the first header of the
 // new epoch is verified against the eagerly-cached value.
 func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	cfg := newConwayBootstrapStabilityCfg(t)
 
@@ -142,6 +143,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	// Header-verification (eager) path.
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=

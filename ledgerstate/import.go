@@ -276,6 +276,18 @@ type ImportConfig struct {
 	// ImportKey identifies this import for resume tracking.
 	// Format: "{digest}:{slot}". If empty, resume is disabled.
 	ImportKey string
+	// Reconcile enables Mithril v2 catch-up reconciliation: after the import
+	// completes, every live database row absent from this (newer) snapshot's
+	// live set is marked inactive (UTxOs tombstoned, accounts/DReps
+	// deactivated, pools retired). It is false for a fresh bootstrap, where
+	// there is nothing stale to reconcile. Reconcile requires resume to be
+	// disabled (empty ImportKey) so the import pass always runs in full and the
+	// snapshot key set is complete.
+	Reconcile bool
+	// reconcileKeys accumulates the snapshot's live keys during the import pass
+	// when Reconcile is set. It is populated by the import phases and consumed
+	// by reconcileStaleLedgerState. Not caller-settable.
+	reconcileKeys *reconcileKeys
 }
 
 // ImportLedgerState orchestrates the full import of parsed ledger
@@ -295,6 +307,18 @@ func ImportLedgerState(
 	if cfg.State == nil {
 		return errors.New("ledger state is nil")
 	}
+	if cfg.State.Tip == nil {
+		return errors.New("snapshot tip is nil")
+	}
+	slot := cfg.State.Tip.Slot
+	if cfg.Reconcile {
+		if err := validateReconcileImportConfig(cfg); err != nil {
+			return err
+		}
+		// Accumulate the snapshot's live keys as the import phases run, so the
+		// post-import reconcile can mark every absent live row inactive.
+		cfg.reconcileKeys = newReconcileKeys()
+	}
 
 	progress := func(p ImportProgress) {
 		if cfg.OnProgress != nil {
@@ -302,14 +326,11 @@ func ImportLedgerState(
 		}
 	}
 
-	if cfg.State.Tip == nil {
-		return errors.New("snapshot tip is nil")
-	}
-	slot := cfg.State.Tip.Slot
-
-	// Check for existing checkpoint to enable resume
+	// Check for existing checkpoint to enable resume. Reconcile (catch-up)
+	// always runs the full import pass so the snapshot key set it collects is
+	// complete, so checkpoint resume is bypassed in that mode.
 	completedPhase := ""
-	if cfg.ImportKey != "" {
+	if cfg.ImportKey != "" && !cfg.Reconcile {
 		cp, err := cfg.Database.Metadata().GetImportCheckpoint(
 			cfg.ImportKey, nil,
 		)
@@ -400,7 +421,6 @@ func ImportLedgerState(
 			"component", "ledgerstate",
 		)
 	}
-
 	// Import stake snapshots
 	if !models.IsPhaseCompleted(
 		completedPhase,
@@ -496,6 +516,43 @@ func ImportLedgerState(
 		)
 	}
 
+	// Mithril v2 catch-up: the snapshot is the complete, trusted ledger state
+	// at its tip, so any live row absent from it has been spent/deregistered/
+	// retired by that tip. Mark those stale rows inactive (never delete). On a
+	// fresh bootstrap Reconcile is false and this is skipped entirely. This
+	// must run before advancing/checkpointing the tip, so a reconcile failure
+	// cannot leave metadata claiming the snapshot tip with stale rows active.
+	if cfg.Reconcile {
+		if err := reconcileStaleLedgerState(
+			ctx,
+			cfg.Database,
+			cfg.reconcileKeys,
+			slot,
+			cfg.State.Epoch,
+			cfg.Logger,
+		); err != nil {
+			return fmt.Errorf("reconciling stale ledger state: %w", err)
+		}
+	}
+
+	// RebuildRewardLiveStake is a full-table rebuild in a single expensive
+	// transaction and takes no context, so it cannot observe cancellation once
+	// started. Bail out here if the import was cancelled during the preceding
+	// phases rather than beginning the rebuild on an interrupted sync.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("cancelled before rebuilding reward live stake: %w", err)
+	}
+	if err := cfg.Database.RebuildRewardLiveStake(slot, nil); err != nil {
+		return fmt.Errorf("rebuilding reward live stake: %w", err)
+	}
+	progress(ImportProgress{
+		Stage:       "reward_live_stake",
+		Current:     1,
+		Total:       1,
+		Percent:     100,
+		Description: "reward live stake rebuilt",
+	})
+
 	// Set the chain tip
 	if !models.IsPhaseCompleted(
 		completedPhase,
@@ -518,6 +575,29 @@ func ImportLedgerState(
 		"slot", slot,
 	)
 
+	return nil
+}
+
+func validateReconcileImportConfig(cfg ImportConfig) error {
+	if cfg.ImportKey != "" {
+		return errors.New("reconcile import requires ImportKey to be empty")
+	}
+	if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" {
+		return errors.New(
+			"reconcile import requires the external UTxO-HD table file",
+		)
+	}
+	if cfg.State.UTxOTablePath == "" && len(cfg.State.UTxOData) == 0 {
+		return errors.New("reconcile import requires complete UTxO data")
+	}
+	if len(cfg.State.CertStateData) == 0 {
+		return errors.New("reconcile import requires cert-state data")
+	}
+	if cfg.State.EraIndex >= EraConway && len(cfg.State.GovStateData) == 0 {
+		return errors.New(
+			"reconcile import requires Conway governance state data",
+		)
+	}
 	return nil
 }
 
@@ -606,6 +686,18 @@ func importUTxOs(
 
 		utxos := make([]models.Utxo, 0, len(batch))
 		for i := range batch {
+			if cfg.reconcileKeys != nil {
+				if err := cfg.reconcileKeys.addUtxo(
+					batch[i].TxHash, batch[i].OutputIndex,
+				); err != nil {
+					return fmt.Errorf(
+						"recording reconcile UTxO key %x#%d: %w",
+						batch[i].TxHash,
+						batch[i].OutputIndex,
+						err,
+					)
+				}
+			}
 			utxos = append(
 				utxos,
 				UTxOToModel(&batch[i], slot),
@@ -683,6 +775,10 @@ func importUTxOs(
 		}
 	}
 
+	if cfg.reconcileKeys != nil {
+		cfg.reconcileKeys.markUtxosComplete()
+	}
+
 	cfg.Logger.Info(
 		"finished importing UTxOs",
 		"component", "ledgerstate",
@@ -712,11 +808,59 @@ func importCertState(
 				"parsing cert state: %w", err,
 			)
 		}
+		// A partial cert-state parse cannot feed the reconcile: the missing
+		// entries would be treated as stale and mass-deactivated. By this
+		// point earlier phases have already written to the database and
+		// reconcile forbids checkpoint resume, so a re-run fails here again —
+		// tell the operator how to get unstuck instead of looping.
+		if cfg.Reconcile {
+			return 0, fmt.Errorf(
+				"parsing cert state for reconcile: %w; catch-up cannot "+
+					"continue with a partial cert state and the database may "+
+					"contain a partial import — perform a full Mithril "+
+					"resync (remove the database and run `dingo mithril "+
+					"sync` again)", err,
+			)
+		}
 		cfg.Logger.Warn(
 			"cert state parse warnings",
 			"component", "ledgerstate",
 			"warning", err.Error(),
 		)
+	}
+
+	// Catch-up reconcile: record the snapshot's live cert-state keys (the
+	// registered accounts/pools/DReps at this tip) so the post-import reconcile
+	// can deactivate/retire any live row absent from this set. Entries whose
+	// credential type is unrepresentable are skipped here; importAccounts/
+	// importDReps surface that as an error on the same entry.
+	if cfg.reconcileKeys != nil {
+		for i := range certState.Accounts {
+			tag, tagErr := models.CredentialTagFromUint(
+				uint(certState.Accounts[i].StakingKey.Type),
+			)
+			if tagErr != nil {
+				continue
+			}
+			cfg.reconcileKeys.addAccount(
+				tag, certState.Accounts[i].StakingKey.Hash,
+			)
+		}
+		for i := range certState.Pools {
+			cfg.reconcileKeys.addPool(certState.Pools[i].PoolKeyHash)
+		}
+		for i := range certState.DReps {
+			tag, tagErr := models.CredentialTagFromUint(
+				uint(certState.DReps[i].Credential.Type),
+			)
+			if tagErr != nil {
+				continue
+			}
+			cfg.reconcileKeys.addDrep(
+				tag, certState.DReps[i].Credential.Hash,
+			)
+		}
+		cfg.reconcileKeys.markCertStateComplete()
 	}
 
 	// Import accounts
@@ -829,6 +973,14 @@ func importAccounts(
 			)
 		}
 
+		// CreatedSlot is deliberately left at 0. The account's real registration
+		// slot predates the snapshot and is not recoverable from it, and 0
+		// ("existed before any reachable rollback point") is the answer rollback
+		// needs: RestoreAccountStateAtSlot deletes an account only when
+		// created_slot is past the rollback slot, which is the only thing
+		// keeping these rows alive given the snapshot carries no certificate
+		// history to prove they were registered. Stamping the snapshot slot here
+		// would make every imported account deletable by a rollback to it.
 		model := &models.Account{
 			StakingKey:    acct.StakingKey.Hash,
 			CredentialTag: credentialTag,
@@ -1146,6 +1298,15 @@ func importSnapShots(
 		// Resolved=true, AutoVote=None entries.
 		snapshotPools := collectPoolsFromSnapshots(snapshots)
 		if len(snapshotPools) > 0 {
+			// Catch-up reconcile: fallback-imported pools are live snapshot
+			// state exactly like cert-state pools. Record their keys, or the
+			// post-import reconcile would see an empty pool key set and
+			// retire the very pools this run just imported.
+			if cfg.reconcileKeys != nil {
+				for i := range snapshotPools {
+					cfg.reconcileKeys.addPool(snapshotPools[i].PoolKeyHash)
+				}
+			}
 			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
 				return fmt.Errorf(
 					"importing pools from snapshots: %w",
@@ -1496,12 +1657,13 @@ func ActivePoolDistributionSnapshots(
 			continue
 		}
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:            epoch,
-			SnapshotType:     models.PoolStakeSnapshotTypeActive,
-			PoolKeyHash:      slices.Clone(pool.PoolKeyHash),
-			TotalStake:       types.Uint64(pool.StakeNumerator),
-			StakeDenominator: types.Uint64(pool.StakeDenominator),
-			CapturedSlot:     capturedSlot,
+			Epoch:              epoch,
+			SnapshotType:       models.PoolStakeSnapshotTypeActive,
+			PoolKeyHash:        slices.Clone(pool.PoolKeyHash),
+			TotalStake:         types.Uint64(pool.StakeNumerator),
+			StakeDenominator:   types.Uint64(pool.StakeDenominator),
+			CapturedSlot:       capturedSlot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
 	return snapshots
@@ -2140,25 +2302,25 @@ func importGovState(
 
 	// Import governance proposals
 	if len(govState.Proposals) > 0 {
-		// Snapshot bootstrap close-the-1-epoch-lag heuristic. Canon
-		// nodes mark a HFI ratified at boundary N-1 -> N and enact at
-		// boundary N -> N+1. The snapshot at epoch N reflects the
-		// ratification (in cgsDRepPulsingState's DRComplete result)
-		// but we don't parse that field, so without intervention our
-		// local node would re-ratify at boundary N -> N+1 and only
-		// enact at N+1 -> N+2 — putting us one epoch behind canon
-		// for the protocol-version bump. As a block producer that is
-		// the difference between forging vN+ blocks alongside canon
-		// and forging vN- blocks that risk rejection on TX-validation
-		// rule mismatches gated by the new version.
-		//
-		// Heuristic: when there is exactly one active HFI whose
-		// parent equals the snapshot's per-purpose HardFork root,
-		// mark it ratified at the snapshot's epoch so ENACT picks
-		// it up at the next boundary tick. Skips silently when the
-		// match is ambiguous (0 or >1 candidates) — the lag returns
-		// in those cases but correctness is preserved.
-		ratifiedHFI := findRatifiedHFICandidate(govState)
+		ratifiedIds := ratifiedGovActionIdSet(
+			govState.RatifiedGovActionIds,
+		)
+		var ratifiedHFI *ParsedGovProposal
+		if govState.RatifiedGovActionIds == nil {
+			// Snapshot bootstrap close-the-1-epoch-lag fallback for
+			// older or partial GovState payloads that don't expose
+			// cgsDRepPulsingState's DRComplete result. Exact
+			// RatifyState.rsEnacted IDs above are preferred.
+			ratifiedHFI = findRatifiedHFICandidate(govState)
+		}
+		if len(ratifiedIds) > 0 {
+			cfg.Logger.Info(
+				"marking ratified governance proposals from snapshot DRep pulsing state",
+				"component", "ledgerstate",
+				"count", len(ratifiedIds),
+				"ratified_epoch", cfg.State.Epoch,
+			)
+		}
 		if ratifiedHFI != nil {
 			cfg.Logger.Info(
 				"marking active HFI as ratified at snapshot epoch (close 1-epoch lag)",
@@ -2187,9 +2349,16 @@ func importGovState(
 				)
 				var ratifiedEpoch *uint64
 				var ratifiedSlot *uint64
-				if ratifiedHFI != nil &&
+				_, ratified := ratifiedIds[govActionIdKey(
+					prop.TxHash,
+					prop.ActionIndex,
+				)]
+				if !ratified && ratifiedHFI != nil &&
 					bytes.Equal(prop.TxHash, ratifiedHFI.TxHash) &&
 					prop.ActionIndex == ratifiedHFI.ActionIndex {
+					ratified = true
+				}
+				if ratified {
 					re := cfg.State.Epoch
 					rs := currentEpochSlot
 					ratifiedEpoch = &re
@@ -2276,6 +2445,23 @@ func importGovState(
 	})
 
 	return nil
+}
+
+func ratifiedGovActionIdSet(
+	ids []ParsedGovActionId,
+) map[string]struct{} {
+	if ids == nil {
+		return nil
+	}
+	result := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		result[govActionIdKey(id.TxHash, id.ActionIndex)] = struct{}{}
+	}
+	return result
+}
+
+func govActionIdKey(txHash []byte, actionIdx uint32) string {
+	return fmt.Sprintf("%s#%d", hex.EncodeToString(txHash), actionIdx)
 }
 
 // seedPrevGovActionIds writes synthetic enacted GovernanceProposal

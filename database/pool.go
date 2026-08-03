@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -76,6 +77,29 @@ func (d *Database) GetPool(
 		return nil, models.ErrPoolNotFound
 	}
 	return ret, nil
+}
+
+// ImportPool upserts a pool and creates a registration record. A supplied txn
+// must be writable and include a metadata handle. When txn is nil a write
+// transaction is opened, committed on success and rolled back on error via
+// Txn.Do.
+func (d *Database) ImportPool(
+	txn *Txn,
+	pool *models.Pool,
+	reg *models.PoolRegistration,
+) error {
+	if txn != nil {
+		if txn.Metadata() == nil {
+			return fmt.Errorf("import pool: %w", types.ErrNilTxn)
+		}
+		if !txn.IsReadWrite() {
+			return fmt.Errorf("import pool: %w", types.ErrTxnWrongType)
+		}
+		return d.metadata.ImportPool(pool, reg, txn.Metadata())
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.ImportPool(pool, reg, t.Metadata())
+	})
 }
 
 // UpdatePoolOpCertSequence records an observed op-cert sequence for a pool
@@ -177,4 +201,32 @@ func (d *Database) GetActivePoolKeyHashes(
 		defer txn.Release()
 	}
 	return d.metadata.GetActivePoolKeyHashes(txn.Metadata())
+}
+
+// GetActivePoolKeyHashesOrdered returns the key hashes of all currently
+// active (registered, non-retired) stake pools, ordered oldest-first by
+// each pool's earliest on-chain registration certificate. See
+// metadata.MetadataStore.GetActivePoolKeyHashesOrdered for the full
+// ordering semantics. This backs the Blockfrost pool_list endpoint.
+func (d *Database) GetActivePoolKeyHashesOrdered(
+	txn *Txn,
+) ([][]byte, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetActivePoolKeyHashesOrdered(txn.Metadata())
+}
+
+// GetPoolCertificateHistory returns the transaction hashes of a pool's
+// registration and retirement certificates, in chronological order.
+func (d *Database) GetPoolCertificateHistory(
+	pkh lcommon.PoolKeyHash,
+	txn *Txn,
+) ([][]byte, [][]byte, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetPoolCertificateHistory(pkh, txn.Metadata())
 }

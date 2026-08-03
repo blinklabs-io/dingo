@@ -297,10 +297,7 @@ func isTransientDownloadError(err error) bool {
 // defaultTransientRetryMaxDelay with ±25% jitter.
 func transientRetryDelay(attempt int) time.Duration {
 	shift := min(attempt, 6) // 2^6 * 500ms = 32s, capped at 30s
-	d := defaultTransientRetryBaseDelay * (1 << shift)
-	if d > defaultTransientRetryMaxDelay {
-		d = defaultTransientRetryMaxDelay
-	}
+	d := min(defaultTransientRetryBaseDelay*(1<<shift), defaultTransientRetryMaxDelay)
 	if quarter := d / 4; quarter > 0 {
 		// Jitter in [-quarter, +quarter]
 		d += time.Duration(rand.Int63n(int64(quarter)*2+1)) - quarter //nolint:gosec

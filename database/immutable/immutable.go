@@ -29,6 +29,10 @@ type ImmutableDb struct {
 	dataDir string
 }
 
+var ErrPointBeyondLastChunk = errors.New(
+	"immutable DB: point is beyond the last chunk",
+)
+
 type Block struct {
 	Hash  []byte
 	Cbor  []byte
@@ -93,6 +97,7 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 		if err != nil {
 			return nil, err
 		}
+		defer func() { _ = middleSecondary.Close() }()
 		next, err := middleSecondary.Next()
 		if err != nil {
 			return nil, err
@@ -127,8 +132,9 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 	}
 	if lowerBound >= len(chunkNames) {
 		return nil, fmt.Errorf(
-			"immutable DB: slot %d is beyond the last chunk",
+			"immutable DB: slot %d is beyond the last chunk: %w",
 			point.Slot,
+			ErrPointBeyondLastChunk,
 		)
 	}
 	return chunkNames[lowerBound:], nil
@@ -209,6 +215,7 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = secondary.Close() }()
 	var tmpPoint ocommon.Point
 	for {
 		next, err := secondary.Next()

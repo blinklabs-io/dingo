@@ -382,13 +382,13 @@ func (d *BlobStoreBadger) init() error {
 		// We do this so we don't have to add guards around every log operation
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	// Configure metrics — fall back to the default registry so that
-	// plugins created via NewFromCmdlineOptions (which does not
-	// receive a prometheus.Registerer) still export metrics.
-	if d.promRegistry == nil {
-		d.promRegistry = prometheus.DefaultRegisterer
+	// Metrics are an explicitly injected shared dependency. Transient
+	// database compositions (for example startup preflight checks) omit the
+	// registry so opening and closing them cannot leave collectors behind in
+	// the process-global registry.
+	if d.promRegistry != nil {
+		d.registerBlobMetrics()
 	}
-	d.registerBlobMetrics()
 	// Configure GC
 	if d.gcEnabled {
 		d.gcTicker = time.NewTicker(5 * time.Minute)
@@ -475,6 +475,24 @@ func (d *BlobStoreBadger) DiskSize() (int64, error) {
 	}
 	lsm, vlog := db.Size()
 	return lsm + vlog, nil
+}
+
+// Sync flushes committed writes to disk. Badger is opened with its default
+// SyncWrites=false, so a committed transaction lives in the active memtable's
+// WAL and the value log without an fsync; with a 128MiB default memtable and
+// only a few MiB of blocks per hour at chain tip, an unclean shutdown can
+// discard hours of committed blocks. badger.DB.Sync syncs both the memtable WAL
+// and the value log, which is what makes those commits recoverable on reopen.
+// It is a no-op for in-memory and read-only stores.
+func (d *BlobStoreBadger) Sync() error {
+	db := d.DB()
+	if db == nil {
+		return nil
+	}
+	if err := db.Sync(); err != nil {
+		return fmt.Errorf("badger sync: %w", err)
+	}
+	return nil
 }
 
 // NewTransaction creates a new badger transaction

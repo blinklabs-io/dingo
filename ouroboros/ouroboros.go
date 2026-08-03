@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
@@ -52,6 +53,17 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+// Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
+// this interface local prevents networking from depending on FIFO internals.
+type Mempool interface {
+	AddTransaction(txType uint, txBytes []byte) error
+	Transactions() []mempool.MempoolTransaction
+	CapacityBytes() int64
+	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+	RemoveConsumer(connId ouroboros.ConnectionId)
+	Consumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+}
+
 func blockfetchConfig(
 	opts ...oblockfetch.BlockFetchOptionFunc,
 ) oblockfetch.Config {
@@ -67,7 +79,7 @@ type Ouroboros struct {
 	PeerGov                  *peergov.PeerGovernor
 	ChainsyncState           *chainsync.State
 	EventBus                 *event.EventBus
-	Mempool                  *mempool.Mempool
+	Mempool                  mempool.Service
 	LedgerState              *ledger.LedgerState
 	LeiosVotes               LeiosVoteHandler
 	LeiosPipeline            LeiosPipelineHandler
@@ -89,6 +101,12 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// Waiters blocked in the NtC serving path until an endorser block's
+	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
+	// channel is closed once a complete closure is stored for that key.
+	leiosClosureWaiters map[string][]chan struct{}
+	// NtC CertRB closure-resolution metrics.
+	leiosMetrics *leiosMetrics
 
 	// Per-connection serialization and bound for asynchronous leios-fetch
 	// client operations (manifest and EB-tx fetches). The leios-fetch client
@@ -103,6 +121,19 @@ type Ouroboros struct {
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
+	// LeiosNotify ranking-block announcements observed on this node. The map
+	// is keyed by announcing ranking-block hash and prevents an inconsistent
+	// second description of the same ranking block from being relayed.
+	leiosAnnouncementsMu       sync.Mutex
+	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosDeferredMu            sync.Mutex
+	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
+	leiosAnnouncementSizes     map[string]uint64
+	// LeiosNotify permits at most two distinct announcements for one election
+	// (slot plus issuer) from each peer. Keep that bound per source so one
+	// equivocating peer cannot inject an unbounded stream without suppressing
+	// independent observations from other peers.
+	leiosAnnouncementElections map[string]map[string]struct{}
 
 	// Asynchronous best-effort persistence of fetched endorser blocks to the
 	// blob store for historical serving. The blob write (CBOR encode + commit)
@@ -153,8 +184,42 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncApplyEligible reports whether a peer's chainsync headers
+	// and rollbacks may be APPLIED to the ledger. It is a second gate,
+	// stricter than ChainsyncIngressEligible: a peer can be ingress-
+	// eligible (so its tips are observed for chain selection) yet not
+	// apply-eligible, so its blocks are not applied. This enforces the
+	// Ouroboros Genesis corroboration stall — an uncorroborated fast source
+	// is observed but cannot steer the ledger. When nil, every ingress-
+	// eligible peer is apply-eligible (no behavior change).
+	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerTipUpdateEvent (avoids a double update). This
+	// lets the node update chain-selection state synchronously before the
+	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
+	// currently being admitted (closing the race where an async tip update that
+	// revokes corroboration is not yet processed). Returning false (or nil hook)
+	// falls back to the async PeerTipUpdateEvent path.
+	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncObservePeerRollback observes a peer rollback. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerRollbackEvent (avoids a double update). It
+	// mirrors ChainsyncObservePeerTip for the roll-backward path: a rollback
+	// trims the peer's observed frontier (ApplyRollback) and can therefore
+	// change its corroboration status, so the node applies it to chain selection
+	// synchronously before the ChainsyncApplyEligible gate runs, so the rollback
+	// apply decision reflects the post-rollback state. Returning false (or nil
+	// hook) falls back to the async PeerRollbackEvent path.
+	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
+	// server waits for a certifying ranking block's endorser block transaction
+	// closure to become available before closing the connection. When 0 (the
+	// default) the wait is derived from the ledger's Leios pipeline timing
+	// (EndorserBlockWaitSlots × slot length), matching ledger application.
+	LeiosClosureWaitTimeout time.Duration
 	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol
 	// (protocol 20) toward peers. This is a dingo extension that is ahead
 	// of the IOG Leios prototype: the prototype Haskell node does not run a
@@ -214,14 +279,19 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.ChainsyncBlockTimeout,
 	)
 	o := &Ouroboros{
-		config:                   cfg,
-		EventBus:                 cfg.EventBus,
-		ConnManager:              cfg.ConnManager,
-		blockFetchStarts:         make(map[ouroboros.ConnectionId]time.Time),
-		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
-		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
-		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosEBLog:               newLeiosForgedEBLog(),
+		config:                     cfg,
+		EventBus:                   cfg.EventBus,
+		ConnManager:                cfg.ConnManager,
+		blockFetchStarts:           make(map[ouroboros.ConnectionId]time.Time),
+		blockfetchNoBlocksCounts:   make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
+		chainsyncStats:             make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters:        make(map[string][]chan struct{}),
+		leiosEBLog:                 newLeiosForgedEBLog(),
+		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
+		leiosAnnouncementSizes:     make(map[string]uint64),
+		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -236,7 +306,9 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
+		o.initLeiosMetrics()
 	}
+	o.subscribeLeiosAnnouncementRetries()
 	return o
 }
 

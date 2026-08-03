@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,31 +28,23 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		// MempoolCapacity left as the zero sentinel; LoadConfig fills
-		// it in from RunMode after CLI/env/YAML processing.
-		MempoolCapacity:             0,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
+		Plugins:                     defaultPluginsConfig(),
 		BindAddr:                    "0.0.0.0",
 		CardanoConfig:               "", // Will be set dynamically based on network
 		DatabasePath:                ".dingo",
 		SocketPath:                  "dingo.socket",
 		IntersectTip:                false,
-		ValidateHistorical:          false,
+		ValidateHistorical:          true,
+		StrictUtxoValidation:        true,
 		Network:                     "preview",
 		MetricsPort:                 12798,
 		PrivateBindAddr:             "127.0.0.1",
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
-		UtxorpcPort:                 9090,
 		CORSAllowedOrigins:          []string{"*"},
-		BlockfrostPort:              3000,
-		MeshPort:                    8080,
 		Topology:                    "",
 		TlsCertFilePath:             "",
 		TlsKeyFilePath:              "",
-		BlobPlugin:                  DefaultBlobPlugin,
-		MetadataPlugin:              DefaultMetadataPlugin,
 		RunMode:                     RunModeServe,
 		StartEra:                    StartEraDefault,
 		ImmutableDbPath:             "",
@@ -78,8 +70,18 @@ func resetGlobalConfig() {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
-badgerCacheSize: 8388608
-mempoolCapacity: 2097152
+plugins:
+  mempool:
+    provider: fifo
+    config:
+      capacity: 2097152
+      evictionWatermark: 0.90
+      rejectionWatermark: 0.95
+  api:
+    utxorpc:
+      provider: builtin
+      config:
+        port: 9940
 bindAddr: "127.0.0.1"
 cardanoConfig: "./cardano/preview/config.json"
 databasePath: ".dingo"
@@ -90,7 +92,6 @@ metricsPort: 8088
 privateBindAddr: "127.0.0.1"
 privatePort: 8000
 relayPort: 4000
-utxorpcPort: 9940
 databaseWorkers: 11
 databaseQueueSize: 77
 backfillBatchSize: 200
@@ -139,30 +140,27 @@ mithril:
 	}
 	defer os.Remove(tmpFile)
 
+	expectedPlugins := defaultPluginsConfig()
+	expectedPlugins.Mempool.Config["capacity"] = 2097152
+	expectedPlugins.API.Utxorpc.Config["port"] = 9940
 	expected := &Config{
-		MempoolCapacity:      2097152,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
+		Plugins:              expectedPlugins,
 		BindAddr:             "127.0.0.1",
 		CardanoConfig:        "./cardano/preview/config.json",
 		DatabasePath:         ".dingo",
 		SocketPath:           "env.socket",
 		IntersectTip:         true,
-		ValidateHistorical:   false,
+		ValidateHistorical:   true,
+		StrictUtxoValidation: true,
 		Network:              "preview",
 		MetricsPort:          8088,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          8000,
 		RelayPort:            4000,
-		UtxorpcPort:          9940, // explicit override from YAML
 		CORSAllowedOrigins:   []string{"*"},
-		BlockfrostPort:       3000, // default
-		MeshPort:             8080, // default
 		Topology:             "",
 		TlsCertFilePath:      "cert1.pem",
 		TlsKeyFilePath:       "key1.pem",
-		BlobPlugin:           DefaultBlobPlugin,
-		MetadataPlugin:       DefaultMetadataPlugin,
 		RunMode:              RunModeServe,
 		StartEra:             StartEraDefault,
 		ImmutableDbPath:      "/tmp/immutable",
@@ -217,6 +215,32 @@ mithril:
 		)
 	}
 }
+
+func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
+	if got := defaultPluginsConfig().Mempool.Provider; got != "fifo" {
+		t.Fatalf("default mempool provider = %q, want fifo", got)
+	}
+}
+
+func TestLoad_DAGMempoolProvider(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dag-mempool.yaml")
+	if err := os.WriteFile(
+		tmpFile,
+		[]byte("plugins:\n  mempool:\n    provider: dag\n"),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Plugins.Mempool.Provider; got != "dag" {
+		t.Fatalf("mempool provider = %q, want dag", got)
+	}
+}
+
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 
@@ -225,32 +249,33 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
+	// LoadConfig only parses and merges; derived defaults (runMode,
+	// mempool capacity, watermarks) are filled in afterwards
+	cfg.ApplyDefaults()
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		MempoolCapacity:      1048576,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
+		Plugins: func() PluginsConfig {
+			plugins := defaultPluginsConfig()
+			plugins.Mempool.Config["capacity"] = int64(1048576)
+			return plugins
+		}(),
 		BindAddr:             "0.0.0.0",
 		CardanoConfig:        "", // Resolved by consumers using cfg.Network
 		DatabasePath:         ".dingo",
 		SocketPath:           "dingo.socket",
 		IntersectTip:         false,
-		ValidateHistorical:   false,
+		ValidateHistorical:   true,
+		StrictUtxoValidation: true,
 		Network:              "preview",
 		MetricsPort:          12798,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          3002,
 		RelayPort:            3001,
-		UtxorpcPort:          9090,
 		CORSAllowedOrigins:   []string{"*"},
-		BlockfrostPort:       3000,
-		MeshPort:             8080,
 		Topology:             "",
 		TlsCertFilePath:      "",
 		TlsKeyFilePath:       "",
-		BlobPlugin:           DefaultBlobPlugin,
-		MetadataPlugin:       DefaultMetadataPlugin,
 		RunMode:              RunModeServe,
 		StartEra:             StartEraDefault,
 		ImmutableDbPath:      "",
@@ -325,6 +350,7 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 		"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS",
 		"6",
 	)
+	t.Setenv("DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS", "3")
 
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -344,6 +370,12 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 		t.Fatalf(
 			"expected GenesisBootstrap.PromotionMinDiversityGroups to be 6, got %d",
 			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+		)
+	}
+	if cfg.GenesisBootstrap.CorroborationPeers != 3 {
+		t.Fatalf(
+			"expected GenesisBootstrap.CorroborationPeers to be 3, got %d",
+			cfg.GenesisBootstrap.CorroborationPeers,
 		)
 	}
 }
@@ -603,6 +635,11 @@ func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 		t.Errorf("expected RelayPort to be 3001, got %d", cfg.RelayPort)
 	}
 
+	// Topology is resolved separately from LoadConfig, once the merged
+	// configuration is final (see cmd/dingo)
+	if _, err := LoadTopologyConfig(); err != nil {
+		t.Fatalf("failed to load topology: %v", err)
+	}
 	topologyConfig := GetTopologyConfig()
 	if topologyConfig.PeerSnapshotFile != "peer-snapshot.json" {
 		t.Fatalf(
@@ -688,7 +725,12 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_WatermarkValidation(t *testing.T) {
+// TestWatermarkDefaultingAndValidation covers the post-merge pipeline
+// for the mempool watermarks: ApplyDefaults fills unset (zero) values
+// and validate rejects out-of-range ones. LoadConfig itself no longer
+// judges watermark values, so a CLI flag can still override a bad YAML
+// value before validation.
+func TestWatermarkDefaultingAndValidation(t *testing.T) {
 	tests := []struct {
 		name       string
 		eviction   float64
@@ -731,28 +773,28 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 			eviction:   -0.1,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:       "rejection negative",
 			eviction:   0.90,
 			rejection:  -0.5,
 			wantErr:    true,
-			errContain: "invalid rejectionWatermark",
+			errContain: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name:       "eviction above 1",
 			eviction:   1.5,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:       "rejection above 1",
 			eviction:   0.90,
 			rejection:  1.1,
 			wantErr:    true,
-			errContain: "invalid rejectionWatermark",
+			errContain: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name:       "eviction equals rejection",
@@ -773,18 +815,23 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 			eviction:   1.0,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetGlobalConfig()
-			globalConfig.EvictionWatermark = tt.eviction
-			globalConfig.RejectionWatermark = tt.rejection
+			globalConfig.Plugins.Mempool.Config["evictionWatermark"] = tt.eviction
+			globalConfig.Plugins.Mempool.Config["rejectionWatermark"] = tt.rejection
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			cfg.ApplyDefaults()
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf(
@@ -838,20 +885,9 @@ database:
 	}
 	defer os.Remove(tmpFile)
 
-	cfg, err := LoadConfig(tmpFile)
-	if err != nil {
-		t.Fatalf("failed to load config: %v", err)
-	}
-
-	if cfg.BlobPlugin != "badger" {
-		t.Errorf("expected BlobPlugin to be 'badger', got %q", cfg.BlobPlugin)
-	}
-
-	if cfg.MetadataPlugin != "sqlite" {
-		t.Errorf(
-			"expected MetadataPlugin to be 'sqlite', got %q",
-			cfg.MetadataPlugin,
-		)
+	_, err = LoadConfig(tmpFile)
+	if err == nil || !strings.Contains(err.Error(), "field database not found") {
+		t.Fatalf("expected legacy database section rejection, got %v", err)
 	}
 }
 
@@ -870,7 +906,7 @@ database:
   blob:
     plugin: 123
 `,
-			errContain: "blob plugin name must be a string",
+			errContain: "field database not found",
 		},
 		{
 			name: "metadata plugin selector is not string",
@@ -879,7 +915,7 @@ database:
   metadata:
     plugin: true
 `,
-			errContain: "metadata plugin name must be a string",
+			errContain: "field database not found",
 		},
 		{
 			name: "blob plugin config is not map",
@@ -889,7 +925,7 @@ database:
     plugin: "badger"
     badger: "/tmp/badger"
 `,
-			errContain: `blob plugin config "badger" must be a map`,
+			errContain: "field database not found",
 		},
 		{
 			name: "metadata plugin config is not map",
@@ -899,7 +935,7 @@ database:
     plugin: "sqlite"
     sqlite: "/tmp/test.db"
 `,
-			errContain: `metadata plugin config "sqlite" must be a map`,
+			errContain: "field database not found",
 		},
 	}
 	for _, tt := range tests {
@@ -926,7 +962,7 @@ database:
 	}
 }
 
-func TestLoadConfig_NetworkNameValidation(t *testing.T) {
+func TestNetworkNameValidation(t *testing.T) {
 	validTests := []struct {
 		name    string
 		network string
@@ -950,6 +986,13 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 		{
 			name:    "underscore name",
 			network: "test_net",
+		},
+		{
+			// An empty network must load: Validate() enforces that
+			// network or networkMagic is set, so a networkMagic-only
+			// configuration is legal at the LoadConfig layer.
+			name:    "empty network for magic-only configs",
+			network: "",
 		},
 	}
 
@@ -1015,10 +1058,6 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			network: ".hidden",
 		},
 		{
-			name:    "empty string",
-			network: "",
-		},
-		{
 			name:    "hyphen prefix",
 			network: "-bad",
 		},
@@ -1034,7 +1073,14 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			globalConfig.Network = tt.network
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			// LoadConfig only parses and merges; a CLI flag may still
+			// replace the network name, so the traversal guard runs in
+			// validate on the final value.
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if err == nil {
 				t.Fatal(
 					"expected error for invalid network name, got nil",
@@ -1052,12 +1098,51 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_NetworkMagicOnly is a regression test for the
+// networkMagic-without-network contract: a YAML config with an empty
+// network and a custom networkMagic must survive both LoadConfig and
+// validation, since Validate() accepts either network or networkMagic.
+func TestLoadConfig_NetworkMagicOnly(t *testing.T) {
+	resetGlobalConfig()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+	yamlContent := "network: \"\"\nnetworkMagic: 42\n"
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Network != "" {
+		t.Errorf("Network = %q, want empty", cfg.Network)
+	}
+	if cfg.NetworkMagic != 42 {
+		t.Errorf("NetworkMagic = %d, want 42", cfg.NetworkMagic)
+	}
+	if err := cfg.validate(cfg.RunMode, minUnprivilegedPort); err != nil {
+		t.Errorf("validation rejected magic-only config: %v", err)
+	}
+}
+
 func TestLoad_APIPorts(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
-blockfrostPort: 8080
-utxorpcPort: 9090
-meshPort: 8081
+plugins:
+  api:
+    blockfrost:
+      provider: builtin
+      config:
+        port: 8080
+    utxorpc:
+      provider: builtin
+      config:
+        port: 9090
+    mesh:
+      provider: builtin
+      config:
+        port: 8081
 network: "preview"
 `
 
@@ -1074,23 +1159,85 @@ network: "preview"
 		t.Fatalf("failed to load config: %v", err)
 	}
 
-	if cfg.BlockfrostPort != 8080 {
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 8080 {
 		t.Errorf(
-			"expected BlockfrostPort to be 8080, got %d",
-			cfg.BlockfrostPort,
+			"expected Blockfrost port to be 8080, got %d",
+			port,
 		)
 	}
-	if cfg.UtxorpcPort != 9090 {
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
-			"expected UtxorpcPort to be 9090, got %d",
-			cfg.UtxorpcPort,
+			"expected Utxorpc port to be 9090, got %d",
+			port,
 		)
 	}
-	if cfg.MeshPort != 8081 {
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8081 {
 		t.Errorf(
-			"expected MeshPort to be 8081, got %d",
-			cfg.MeshPort,
+			"expected Mesh port to be 8081, got %d",
+			port,
 		)
+	}
+}
+
+func TestLoad_APIPortCompatibilityEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCKFROST_PORT", "3100")
+	t.Setenv("DINGO_MESH_PORT", "8181")
+	t.Setenv("DINGO_UTXORPC_PORT", "9191")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 3100 {
+		t.Fatalf("Blockfrost port = %d, want 3100", port)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8181 {
+		t.Fatalf("Mesh port = %d, want 8181", port)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9191 {
+		t.Fatalf("Utxorpc port = %d, want 9191", port)
+	}
+}
+
+func TestLoad_CanonicalAPIPortEnvironmentOverridesCompatibility(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_UTXORPC_PORT", "9191")
+	t.Setenv("DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT", "9292")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9292 {
+		t.Fatalf("Utxorpc port = %d, want canonical value 9292", port)
+	}
+}
+
+func TestLoad_InvalidAPIPortCompatibilityEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_UTXORPC_PORT", "not-a-port")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	_, err := LoadConfig(configFile)
+	if err == nil || !strings.Contains(err.Error(), "DINGO_UTXORPC_PORT") {
+		t.Fatalf("expected invalid compatibility port error, got %v", err)
 	}
 }
 
@@ -1102,22 +1249,22 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.BlockfrostPort != 3000 {
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 3000 {
 		t.Errorf(
 			"expected BlockfrostPort default to be 3000, got %d",
-			cfg.BlockfrostPort,
+			port,
 		)
 	}
-	if cfg.UtxorpcPort != 9090 {
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
 			"expected UtxorpcPort default to be 9090, got %d",
-			cfg.UtxorpcPort,
+			port,
 		)
 	}
-	if cfg.MeshPort != 8080 {
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8080 {
 		t.Errorf(
 			"expected MeshPort default to be 8080, got %d",
-			cfg.MeshPort,
+			port,
 		)
 	}
 }
@@ -1420,12 +1567,12 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 		},
 		{
 			name:     "explicit value wins under leios",
-			yaml:     "runMode: \"leios\"\nmempoolCapacity: 5242880\n",
+			yaml:     "runMode: \"leios\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
 		},
 		{
 			name:     "explicit value wins under serve",
-			yaml:     "runMode: \"serve\"\nmempoolCapacity: 5242880\n",
+			yaml:     "runMode: \"serve\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
 		},
 	}
@@ -1441,10 +1588,12 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadConfig: %v", err)
 			}
-			if cfg.MempoolCapacity != tc.expected {
+			cfg.ApplyDefaults()
+			capacity, _, _ := cfg.MempoolSettings()
+			if capacity != tc.expected {
 				t.Errorf(
 					"MempoolCapacity: got %d, want %d",
-					cfg.MempoolCapacity, tc.expected,
+					capacity, tc.expected,
 				)
 			}
 		})

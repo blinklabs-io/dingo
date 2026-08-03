@@ -394,6 +394,216 @@ func TestGetUtxosBySlotIncludesSpent(t *testing.T) {
 	assert.Equal(t, live.TxId, gotLive[0].Hash)
 }
 
+// utxoTestTxID builds a distinct 32-byte tx id for the given ordinal so
+// seeded rows satisfy the (tx_id, output_idx) unique index.
+func utxoTestTxID(n int) []byte {
+	id := make([]byte, 32)
+	id[0] = byte(n >> 8)
+	id[1] = byte(n)
+	return id
+}
+
+// TestGetUtxosDeletedBeforeSlotCleanupLoop exercises the consumed-UTxO cleanup
+// path (GetUtxosDeletedBeforeSlot + DeleteUtxos) the way UtxosDeleteConsumed
+// drives it: repeatedly fetch a bounded batch and physically delete it until
+// none remain. It proves the fix that removed "ORDER BY id DESC" preserves
+// correctness — exactly the consumed rows at or before the boundary are
+// deleted, while live rows and rows consumed after the boundary survive — and
+// that the multi-batch loop (batch smaller than the consumed set) terminates
+// and deletes every eligible row regardless of return order.
+func TestGetUtxosDeletedBeforeSlotCleanupLoop(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	const boundary = 1000
+	n := 0
+
+	// Consumed at or before the boundary: must all be deleted. Seed more than
+	// one batch worth (25 rows vs. a batch limit of 10) so the cleanup loop
+	// runs several iterations. Spread across several deleted slots, including
+	// the boundary slot itself (<= boundary is inclusive).
+	consumedBeforeSlots := []uint64{100, 100, 500, 999, 1000}
+	consumedBefore := make([]models.UtxoId, 0, 25)
+	for range 5 { // 5 * 5 = 25 rows
+		for _, ds := range consumedBeforeSlots {
+			n++
+			txID := utxoTestTxID(n)
+			require.NoError(t, store.DB().Create(&models.Utxo{
+				TxId:        txID,
+				OutputIdx:   0,
+				AddedSlot:   ds - 50,
+				DeletedSlot: ds,
+				Amount:      types.Uint64(1_000_000),
+			}).Error)
+			consumedBefore = append(
+				consumedBefore,
+				models.UtxoId{Hash: txID, Idx: 0},
+			)
+		}
+	}
+
+	// Consumed strictly after the boundary: must survive cleanup.
+	consumedAfterSlots := []uint64{1001, 2000, 5000}
+	consumedAfter := make([]models.UtxoId, 0, len(consumedAfterSlots))
+	for _, ds := range consumedAfterSlots {
+		n++
+		txID := utxoTestTxID(n)
+		require.NoError(t, store.DB().Create(&models.Utxo{
+			TxId:        txID,
+			OutputIdx:   0,
+			AddedSlot:   500,
+			DeletedSlot: ds,
+			Amount:      types.Uint64(2_000_000),
+		}).Error)
+		consumedAfter = append(
+			consumedAfter,
+			models.UtxoId{Hash: txID, Idx: 0},
+		)
+	}
+
+	// Live rows (deleted_slot = 0): must survive cleanup.
+	liveAddedSlots := []uint64{50, 700, 1500}
+	live := make([]models.UtxoId, 0, len(liveAddedSlots))
+	for _, as := range liveAddedSlots {
+		n++
+		txID := utxoTestTxID(n)
+		require.NoError(t, store.DB().Create(&models.Utxo{
+			TxId:      txID,
+			OutputIdx: 0,
+			AddedSlot: as,
+			Amount:    types.Uint64(3_000_000),
+		}).Error)
+		live = append(live, models.UtxoId{Hash: txID, Idx: 0})
+	}
+
+	// Drive the cleanup loop exactly like UtxosDeleteConsumed: fetch a bounded
+	// batch, delete it, repeat until the query returns nothing.
+	const batchLimit = 10
+	iterations := 0
+	deleted := 0
+	for {
+		batch, err := store.GetUtxosDeletedBeforeSlot(boundary, batchLimit, nil)
+		require.NoError(t, err)
+		if len(batch) == 0 {
+			break
+		}
+		// Every returned row must be eligible: consumed at or before boundary.
+		for i := range batch {
+			require.Positive(t, batch[i].DeletedSlot)
+			require.LessOrEqual(t, batch[i].DeletedSlot, uint64(boundary))
+		}
+		require.LessOrEqual(t, len(batch), batchLimit)
+		ids := make([]models.UtxoId, len(batch))
+		for i := range batch {
+			ids[i] = models.UtxoId{Hash: batch[i].TxId, Idx: batch[i].OutputIdx}
+		}
+		require.NoError(t, store.DeleteUtxos(ids, nil))
+		deleted += len(batch)
+		iterations++
+		require.Less(t, iterations, 100, "cleanup loop failed to terminate")
+	}
+
+	// All consumed-before rows were deleted, across multiple batches.
+	assert.Equal(t, len(consumedBefore), deleted)
+	assert.GreaterOrEqual(
+		t,
+		iterations,
+		3,
+		"expected the multi-batch loop to run several times",
+	)
+
+	// Nothing eligible remains.
+	remaining, err := store.GetUtxosDeletedBeforeSlot(boundary, 0, nil)
+	require.NoError(t, err)
+	assert.Empty(t, remaining)
+
+	// Every consumed-before row is physically gone.
+	for _, id := range consumedBefore {
+		got, err := store.GetUtxoIncludingSpent(id.Hash, id.Idx, nil)
+		require.NoError(t, err)
+		assert.Nil(t, got, "consumed-before UTxO should be deleted")
+	}
+
+	// Rows consumed after the boundary survive (still soft-spent).
+	for _, id := range consumedAfter {
+		got, err := store.GetUtxoIncludingSpent(id.Hash, id.Idx, nil)
+		require.NoError(t, err)
+		require.NotNil(t, got, "consumed-after UTxO must survive cleanup")
+		assert.Positive(t, got.DeletedSlot)
+	}
+
+	// Live rows survive and remain live.
+	for _, id := range live {
+		got, err := store.GetUtxo(id.Hash, id.Idx, nil)
+		require.NoError(t, err)
+		require.NotNil(t, got, "live UTxO must survive cleanup")
+		assert.Zero(t, got.DeletedSlot)
+	}
+
+	// Row-count cross-check: only the surviving rows are left.
+	var total int64
+	require.NoError(
+		t,
+		store.DB().Model(&models.Utxo{}).Count(&total).Error,
+	)
+	assert.Equal(t, int64(len(consumedAfter)+len(live)), total)
+}
+
+// TestGetUtxosDeletedBeforeSlotNoOrderBySort proves the query no longer forces a
+// sort: with "ORDER BY id DESC" removed, the plan contains no temp-b-tree
+// ordering step (the hot spot that wedged from-genesis sync), so the
+// deleted_slot range + LIMIT can be served directly from the index.
+func TestGetUtxosDeletedBeforeSlotNoOrderBySort(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	for i := range 40 {
+		require.NoError(t, store.DB().Create(&models.Utxo{
+			TxId:        utxoTestTxID(i + 1),
+			OutputIdx:   0,
+			AddedSlot:   uint64(i + 1), //nolint:gosec
+			DeletedSlot: uint64(i + 1), //nolint:gosec
+			Amount:      types.Uint64(1_000_000),
+		}).Error)
+	}
+
+	var capturedSQL string
+	var capturedVars []any
+	callbackName := "test:capture_get_utxos_deleted_before_slot_sql"
+	require.NoError(t, store.ReadDB().Callback().Query().
+		After("gorm:query").
+		Register(callbackName, func(tx *gorm.DB) {
+			if capturedSQL != "" {
+				return
+			}
+			capturedSQL = tx.Statement.SQL.String()
+			capturedVars = append([]any(nil), tx.Statement.Vars...)
+		}))
+
+	got, err := store.GetUtxosDeletedBeforeSlot(1000, 10, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 10)
+	require.NotEmpty(t, capturedSQL)
+	assert.NotContains(t, capturedSQL, "ORDER BY")
+
+	planRows, err := store.DB().
+		Raw("EXPLAIN QUERY PLAN "+capturedSQL, capturedVars...).
+		Rows()
+	require.NoError(t, err)
+	defer planRows.Close()
+
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, planRows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, planRows.Err())
+	plan := strings.Join(details, "\n")
+	assert.NotContains(t, plan, "USE TEMP B-TREE FOR ORDER BY")
+}
+
 func sortUtxoIds(ids []models.UtxoId) {
 	sort.Slice(ids, func(i, j int) bool {
 		if c := bytes.Compare(ids[i].Hash, ids[j].Hash); c != 0 {
@@ -506,24 +716,254 @@ func TestGetUtxosByAddressUsesPaymentScript(t *testing.T) {
 	require.NoError(t, store.DB().Create(&keyUtxo).Error)
 	require.NoError(t, store.DB().Create(&scriptUtxo).Error)
 
-	keyRows, err := store.GetUtxosByAddress(keyAddr, nil)
+	keyPattern, err := models.ExactUtxoAddressPattern(keyAddr)
+	require.NoError(t, err)
+	keyRows, err := store.GetUtxosByAddress(keyPattern, nil)
 	require.NoError(t, err)
 	require.Len(t, keyRows, 1)
 	assert.False(t, keyRows[0].PaymentScript)
 	assert.Equal(t, keyUtxo.TxId, keyRows[0].TxId)
 
-	scriptRows, err := store.GetUtxosByAddress(scriptAddr, nil)
+	scriptPattern, err := models.ExactUtxoAddressPattern(scriptAddr)
+	require.NoError(t, err)
+	scriptRows, err := store.GetUtxosByAddress(scriptPattern, nil)
 	require.NoError(t, err)
 	require.Len(t, scriptRows, 1)
 	assert.True(t, scriptRows[0].PaymentScript)
 	assert.Equal(t, scriptUtxo.TxId, scriptRows[0].TxId)
 
 	orderedRows, err := store.GetUtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{Addresses: []lcommon.Address{scriptAddr}},
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{scriptPattern},
+		},
 		nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, orderedRows, 1)
 	assert.True(t, orderedRows[0].PaymentScript)
 	assert.Equal(t, scriptUtxo.TxId, orderedRows[0].TxId)
+}
+
+func TestGetUtxosByAddressWithOrderingIncludesSnapshotUtxos(t *testing.T) {
+	store := setupTestDB(t)
+
+	paymentHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		nil,
+	)
+	require.NoError(t, err)
+
+	txID := uint(1)
+	require.NoError(t, store.DB().Create(&models.Transaction{
+		ID:         txID,
+		Hash:       bytes.Repeat([]byte{0x01}, 32),
+		Slot:       10,
+		BlockIndex: 3,
+	}).Error)
+	rows := []models.Utxo{
+		{
+			TransactionID: &txID,
+			TxId:          bytes.Repeat([]byte{0x10}, 32),
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			AddedSlot:     10,
+			Amount:        types.Uint64(1_000_000),
+		},
+		{
+			// Snapshot imports contain the live output but not its historical
+			// transaction relationship.
+			TxId:       bytes.Repeat([]byte{0x20}, 32),
+			OutputIdx:  1,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(2_000_000),
+		},
+	}
+	for i := range rows {
+		require.NoError(t, store.DB().Create(&rows[i]).Error)
+	}
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+
+	got, err := store.GetUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, rows[0].TxId, got[0].TxId)
+	assert.Equal(t, uint64(10), got[0].TxSlot)
+	assert.Equal(t, uint32(3), got[0].TxBlockIndex)
+	assert.Equal(t, rows[1].TxId, got[1].TxId)
+	assert.Equal(t, uint64(20), got[1].TxSlot)
+	assert.Equal(t, uint32(0), got[1].TxBlockIndex)
+}
+
+func TestGetUtxosByAddressWithOrderingPaginatesCollidingSnapshotUtxos(
+	t *testing.T,
+) {
+	store := setupTestDB(t)
+
+	paymentHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		nil,
+	)
+	require.NoError(t, err)
+
+	rows := []models.Utxo{
+		{
+			TxId:       bytes.Repeat([]byte{0x10}, 32),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(1_000_000),
+		},
+		{
+			TxId:       bytes.Repeat([]byte{0x20}, 32),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(2_000_000),
+		},
+		{
+			TxId:       bytes.Repeat([]byte{0x30}, 32),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  20,
+			Amount:     types.Uint64(3_000_000),
+		},
+	}
+	for i := range rows {
+		require.NoError(t, store.DB().Create(&rows[i]).Error)
+	}
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+
+	firstPage, err := store.GetUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           2,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, firstPage, 2)
+	assert.Equal(t, rows[0].TxId, firstPage[0].TxId)
+	assert.Equal(t, rows[1].TxId, firstPage[1].TxId)
+
+	last := firstPage[len(firstPage)-1]
+	secondPage, err := store.GetUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			After: &models.UtxoOrderingCursor{
+				Slot:       last.TxSlot,
+				BlockIndex: last.TxBlockIndex,
+				OutputIdx:  last.OutputIdx,
+				TxId:       last.TxId,
+			},
+			Limit: 2,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, secondPage, 1)
+	assert.Equal(t, rows[2].TxId, secondPage[0].TxId)
+}
+
+// TestGetUtxoBalanceByAddressMatchModes seeds enterprise, base, and
+// pointer UTxOs sharing one payment hash and verifies that exact
+// matching keeps full-address identity while payment-credential
+// matching deliberately aggregates across address forms. Regression
+// coverage for the address-conflation review on the Blockfrost address
+// summary endpoint.
+func TestGetUtxoBalanceByAddressMatchModes(t *testing.T) {
+	store := setupTestDB(t)
+
+	paymentHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
+	stakeHash := bytes.Repeat([]byte{0xCD}, lcommon.AddressHashSize)
+	otherPayment := bytes.Repeat([]byte{0xEE}, lcommon.AddressHashSize)
+
+	enterpriseAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		paymentHash,
+		nil,
+	)
+	require.NoError(t, err)
+	rows := []models.Utxo{
+		// Enterprise-form UTxO (no staking part).
+		{
+			TxId:       bytes.Repeat([]byte{0x01}, 32),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  10,
+			Amount:     types.Uint64(1_000_000),
+		},
+		// Base-address UTxO sharing the same payment hash.
+		{
+			TxId:          bytes.Repeat([]byte{0x02}, 32),
+			OutputIdx:     0,
+			PaymentKey:    paymentHash,
+			StakingKey:    stakeHash,
+			CredentialTag: 0,
+			AddedSlot:     11,
+			Amount:        types.Uint64(2_000_000),
+		},
+		// Pointer-address UTxO: like enterprise it carries no staking
+		// key in the row, so it lands in the payment-only bucket. The
+		// adapter separates real pointer addresses by exact CBOR
+		// address comparison; at the storage layer it is part of the
+		// staking-less set.
+		{
+			TxId:       bytes.Repeat([]byte{0x03}, 32),
+			OutputIdx:  0,
+			PaymentKey: paymentHash,
+			AddedSlot:  12,
+			Amount:     types.Uint64(4_000_000),
+		},
+		// Unrelated payment credential: never included.
+		{
+			TxId:       bytes.Repeat([]byte{0x04}, 32),
+			OutputIdx:  0,
+			PaymentKey: otherPayment,
+			AddedSlot:  13,
+			Amount:     types.Uint64(64_000_000),
+		},
+		// Spent UTxO on the shared credential: never included.
+		{
+			TxId:        bytes.Repeat([]byte{0x05}, 32),
+			OutputIdx:   0,
+			PaymentKey:  paymentHash,
+			AddedSlot:   14,
+			DeletedSlot: 20,
+			Amount:      types.Uint64(32_000_000),
+		},
+	}
+	for i := range rows {
+		require.NoError(t, store.DB().Create(&rows[i]).Error)
+	}
+
+	// Metadata-only aggregation cannot promise exact identity because pointer
+	// payloads and network IDs are available only in output CBOR.
+	_, err = store.GetUtxoBalanceByAddress(
+		enterpriseAddr, models.UtxoAddressMatchExact, nil,
+	)
+	require.ErrorIs(t, err, models.ErrExactAddressRequiresCbor)
+
+	// Payment-credential matching aggregates every live UTxO sharing
+	// the credential, across address forms.
+	balance, err := store.GetUtxoBalanceByAddress(
+		enterpriseAddr, models.UtxoAddressMatchPaymentCred, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7_000_000), balance.Lovelace)
+	assert.Equal(t, int64(3), balance.UtxoCount)
 }

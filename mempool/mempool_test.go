@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,8 +36,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // =============================================================================
@@ -55,6 +55,122 @@ func newMockValidator() *mockValidator {
 	return &mockValidator{
 		failHashes: make(map[string]bool),
 	}
+}
+
+type blockingOverlayValidator struct {
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	shouldBlock atomic.Bool
+}
+
+type blockingSessionValidator struct {
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+}
+
+type changingSessionValidator struct {
+	sessions atomic.Int32
+}
+
+func (v *changingSessionValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *changingSessionValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	return nil
+}
+
+func (v *changingSessionValidator) WithTxValidationSession(
+	fn func(
+		func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error,
+		func() bool,
+	) error,
+) error {
+	v.sessions.Add(1)
+	return fn(
+		func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error {
+			return nil
+		},
+		func() bool { return false },
+	)
+}
+
+func newBlockingSessionValidator() *blockingSessionValidator {
+	return &blockingSessionValidator{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (v *blockingSessionValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *blockingSessionValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	return nil
+}
+
+func (v *blockingSessionValidator) WithTxValidationSession(
+	fn func(
+		func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error,
+		func() bool,
+	) error,
+) error {
+	v.startOnce.Do(func() { close(v.started) })
+	validate := func(
+		gledger.Transaction,
+		map[string]struct{},
+		map[string]lcommon.Utxo,
+	) error {
+		<-v.release
+		return nil
+	}
+	return fn(validate, func() bool { return true })
+}
+
+func newBlockingOverlayValidator() *blockingOverlayValidator {
+	return &blockingOverlayValidator{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (v *blockingOverlayValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *blockingOverlayValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	if v.shouldBlock.Load() {
+		v.startOnce.Do(func() { close(v.started) })
+		<-v.release
+	}
+	return nil
 }
 
 func (v *mockValidator) ValidateTx(tx gledger.Transaction) error {
@@ -104,6 +220,7 @@ func newTestMempool(t *testing.T) *Mempool {
 		MempoolCapacity: 1024 * 1024, // 1MB
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -121,6 +238,7 @@ func newTestMempoolWithValidator(
 		MempoolCapacity: 1024 * 1024,
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -328,6 +446,18 @@ func TestMempool_AddRemoveConsumer(t *testing.T) {
 	m.consumersMutex.Lock()
 	assert.Equal(t, 3, len(m.consumers), "should have 3 consumers remaining")
 	m.consumersMutex.Unlock()
+}
+
+func TestMempool_AddConsumerIsIdempotent(t *testing.T) {
+	m := newTestMempool(t)
+	defer m.Stop(context.Background())
+	connId := newTestConnectionId(0)
+
+	first := m.AddConsumer(connId)
+	second := m.AddConsumer(connId)
+
+	require.Same(t, first, second)
+	assert.Len(t, m.consumers, 1)
 }
 
 func TestMempoolConsumer_NextTx_NonBlocking(t *testing.T) {
@@ -1160,6 +1290,21 @@ func TestMempool_ConsumerAfterStop(t *testing.T) {
 	m.RUnlock()
 }
 
+func TestMempool_RejectsOperationsAfterStop(t *testing.T) {
+	m := newTestMempool(t)
+	connId := newTestConnectionId(0)
+
+	require.NoError(t, m.Stop(context.Background()))
+
+	err := m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t))
+	require.ErrorIs(t, err, ErrMempoolStopped)
+	assert.Empty(t, m.Transactions())
+	assert.Nil(t, m.AddConsumer(connId))
+	assert.Nil(t, m.Consumer(connId))
+
+	require.NoError(t, m.Stop(context.Background()))
+}
+
 func TestMempool_BlockingNextTx_WithEmptyMempool(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
@@ -1264,6 +1409,7 @@ func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
 	// Modify returned transaction
 	originalHash := txs[0].Hash
 	txs[0].Hash = "modified-hash"
+	txs[0].Cbor[0] = 'X'
 
 	// Verify mempool transaction is unchanged
 	mempoolTxs := m.Transactions()
@@ -1273,6 +1419,7 @@ func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
 		mempoolTxs[0].Hash,
 		"mempool should return copies",
 	)
+	assert.NotEqual(t, byte('X'), mempoolTxs[0].Cbor[0], "CBOR should be copied")
 }
 
 func TestMempool_GetTransaction_ReturnsCopy(t *testing.T) {
@@ -1288,11 +1435,39 @@ func TestMempool_GetTransaction_ReturnsCopy(t *testing.T) {
 
 	// Modify returned transaction
 	tx.Hash = "modified"
+	tx.Cbor[0] = 'X'
 
 	// Verify mempool transaction is unchanged
 	tx2, exists := m.GetTransaction("tx-hash-0")
 	require.True(t, exists)
 	assert.Equal(t, "tx-hash-0", tx2.Hash, "mempool should return copy")
+	assert.NotEqual(t, byte('X'), tx2.Cbor[0], "CBOR should be copied")
+}
+
+func TestMempoolConsumer_ReturnsImmutableCopies(t *testing.T) {
+	m := newTestMempool(t)
+	defer m.Stop(context.Background())
+
+	txs := addMockTransactions(t, m, 1)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+
+	nextTx := consumer.NextTx(false)
+	require.NotNil(t, nextTx)
+	nextTx.Cbor[0] = 'X'
+
+	cachedTx := consumer.GetTxFromCache(txs[0].Hash)
+	require.NotNil(t, cachedTx)
+	assert.NotEqual(t, byte('X'), cachedTx.Cbor[0], "cache should not alias NextTx")
+	cachedTx.Cbor[0] = 'Y'
+
+	cachedTxAgain := consumer.GetTxFromCache(txs[0].Hash)
+	require.NotNil(t, cachedTxAgain)
+	assert.NotEqual(t, byte('Y'), cachedTxAgain.Cbor[0], "cache reads should be copied")
+
+	poolTx, ok := m.GetTransaction(txs[0].Hash)
+	require.True(t, ok)
+	assert.NotEqual(t, byte('X'), poolTx.Cbor[0], "pool should not alias NextTx")
+	assert.NotEqual(t, byte('Y'), poolTx.Cbor[0], "pool should not alias cache")
 }
 
 func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
@@ -1677,6 +1852,7 @@ func newTestMempoolWithCapacity(
 		RejectionWatermark: rejectionWM,
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -2090,6 +2266,7 @@ func newTestMempoolWithTTL(
 		CleanupInterval: cleanupInterval,
 	})
 	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
 	return m
 }
 
@@ -2716,95 +2893,315 @@ func TestMempool_MEM03_SubscriberAccessesMempoolDuringRemove(
 	)
 }
 
-// TestMempool_MEM04_ConcurrentAccessDuringRevalidation verifies that
-// other goroutines can read/write the mempool while processChainEvents
-// is re-validating transactions. Before the MEM-04 fix, the write lock
-// was held during the entire re-validation loop.
-func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(
-	t *testing.T,
-) {
-	validator := newMockValidator()
+// TestMempool_MEM04_ConcurrentAccessDuringRevalidation synchronizes directly
+// with a paused validator to prove snapshot readers remain available while
+// mutations continue and are reconciled into the candidate overlay.
+func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
+	validator := newBlockingOverlayValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
 
-	// Add transactions
-	addMockTransactions(t, m, 10)
+	txBytes := getTestTxBytes(t)
+	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), txBytes))
+	txs := m.Transactions()
+	require.Len(t, txs, 1)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	validator.shouldBlock.Store(true)
 
-	// Start concurrent readers/writers
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-	var readsCompleted atomic.Int32
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
 
-	// Reader goroutine: continuously reads mempool
-	wg.Go(func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				txs := m.Transactions()
-				_ = txs
-				readsCompleted.Add(1)
-			}
-		}
-	})
+	snapshotDone := make(chan []MempoolTransaction, 1)
+	go func() { snapshotDone <- m.Transactions() }()
+	assert.Len(
+		t,
+		dingotestutil.RequireReceive(t, snapshotDone, time.Second, "mempool snapshot"),
+		1,
+	)
 
-	// Writer goroutine: continuously adds/removes
-	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("revalidation-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.txByHash[tx.Hash] = tx
-				m.Unlock()
-				time.Sleep(time.Millisecond)
-			}
-		}
-	})
-
-	// Trigger chain update events to cause re-validation
-	for range 5 {
-		m.eventBus.Publish(
-			chain.ChainUpdateEventType,
-			event.NewEvent(chain.ChainUpdateEventType, nil),
-		)
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Let things run concurrently
-	time.Sleep(100 * time.Millisecond)
-	close(done)
-
-	waitCh := make(chan struct{})
+	lookupDone := make(chan bool, 1)
 	go func() {
-		wg.Wait()
-		close(waitCh)
+		_, ok := m.GetTransaction(txs[0].Hash)
+		lookupDone <- ok
 	}()
+	assert.True(t, dingotestutil.RequireReceive(t, lookupDone, time.Second, "transaction lookup"))
 
-	select {
-	case <-waitCh:
-		t.Logf(
-			"Reads completed during re-validation: %d",
-			readsCompleted.Load(),
-		)
-		// Under the old code with write lock held during validation,
-		// reads would be blocked. With the fix, reads should proceed.
-		assert.Greater(
-			t, readsCompleted.Load(), int32(0),
-			"reads should complete during re-validation",
-		)
-	case <-time.After(5 * time.Second):
-		t.Fatal("deadlock: concurrent access blocked during re-validation")
+	consumerDone := make(chan *MempoolTransaction, 1)
+	go func() { consumerDone <- consumer.NextTx(false) }()
+	assert.NotNil(
+		t,
+		dingotestutil.RequireReceive(t, consumerDone, time.Second, "consumer read"),
+	)
+
+	removeDone := make(chan struct{}, 1)
+	go func() {
+		m.RemoveTransaction(txs[0].Hash)
+		removeDone <- struct{}{}
+	}()
+	dingotestutil.RequireReceive(t, removeDone, time.Second, "mutation during rebuild")
+
+	close(validator.release)
+	require.NoError(t, dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"))
+	assert.Empty(t, m.Transactions())
+	assert.Empty(t, m.overlay.applied)
+}
+
+func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
+	validator := newBlockingSessionValidator()
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+
+	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
+	require.NoError(t, err)
+	addDone := make(chan error, 1)
+	go func() {
+		addDone <- m.AddTransaction(uint(conway.EraIdConway), secondTx)
+	}()
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(t, addDone, time.Second, "concurrent admission"),
+	)
+
+	close(validator.release)
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+	)
+	assert.Len(t, m.Transactions(), 2)
+	assert.Len(t, m.overlay.applied, 2)
+}
+
+func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		remove func(*Mempool, string)
+	}{
+		{
+			name: "confirmed",
+			remove: func(m *Mempool, hash string) {
+				m.RemoveTxsByHash([]string{hash})
+			},
+		},
+		{
+			name: "expired",
+			remove: func(m *Mempool, _ string) {
+				m.Lock()
+				m.transactions[0].LastSeen = time.Now().Add(-time.Hour)
+				m.transactionTTL = time.Minute
+				m.Unlock()
+				m.removeExpiredTransactions()
+			},
+		},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			validator := newBlockingSessionValidator()
+			m := newTestMempoolWithValidator(t, validator)
+			defer m.Stop(context.Background())
+			require.NoError(
+				t,
+				m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+			)
+			hash := m.Transactions()[0].Hash
+
+			rebuildDone := make(chan error, 1)
+			go func() { rebuildDone <- m.rebuildOverlay() }()
+			dingotestutil.RequireReceive(
+				t,
+				validator.started,
+				time.Second,
+				"revalidation start",
+			)
+			removeDone := make(chan struct{}, 1)
+			go func() {
+				test.remove(m, hash)
+				removeDone <- struct{}{}
+			}()
+			dingotestutil.RequireReceive(
+				t,
+				removeDone,
+				time.Second,
+				"concurrent removal",
+			)
+
+			close(validator.release)
+			require.NoError(
+				t,
+				dingotestutil.RequireReceive(
+					t,
+					rebuildDone,
+					time.Second,
+					"rebuild completion",
+				),
+			)
+			assert.Empty(t, m.Transactions())
+			assert.Empty(t, m.overlay.applied)
+		})
+	}
+}
+
+func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
+	validator := newBlockingSessionValidator()
+	firstTx := getTestTxBytes(t)
+	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
+	require.NoError(t, err)
+	totalSize := len(firstTx) + len(secondTx)
+	capacity := int64(float64(totalSize)/0.925) + 1
+	m, err := NewMempool(MempoolConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           event.NewEventBus(nil, nil),
+		PromRegistry:       prometheus.NewRegistry(),
+		Validator:          validator,
+		MempoolCapacity:    capacity,
+		EvictionWatermark:  0.90,
+		RejectionWatermark: 0.95,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop(context.Background())
+	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), firstTx))
+	firstHash := m.Transactions()[0].Hash
+
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+	addDone := make(chan error, 1)
+	go func() {
+		addDone <- m.AddTransaction(uint(conway.EraIdConway), secondTx)
+	}()
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(t, addDone, time.Second, "evicting admission"),
+	)
+
+	close(validator.release)
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+	)
+	txs := m.Transactions()
+	require.Len(t, txs, 1)
+	assert.NotEqual(t, firstHash, txs[0].Hash)
+	require.Len(t, m.overlay.applied, 1)
+	assert.Equal(t, txs[0].Hash, m.overlay.applied[0].hash)
+}
+
+func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
+	validator := &changingSessionValidator{}
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+
+	err := m.rebuildOverlay()
+	require.ErrorIs(t, err, errValidationSnapshotChanged)
+	assert.Equal(t, int32(2), validator.sessions.Load())
+	assert.Len(t, m.Transactions(), 1, "failed candidates must not alter live state")
+	assert.Len(t, m.overlay.applied, 1)
+}
+
+func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
+	t *testing.T,
+) {
+	validator := newBlockingSessionValidator()
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	firstHash := m.Transactions()[0].Hash
+	m.revalidationJournalCap = 1
+
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+	m.RemoveTransaction(firstHash)
+	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
+	require.NoError(t, err)
+	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), secondTx))
+
+	close(validator.release)
+	require.ErrorIs(
+		t,
+		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+		errRevalidationJournalOverflow,
+	)
+	txs := m.Transactions()
+	require.Len(t, txs, 1)
+	assert.NotEqual(t, firstHash, txs[0].Hash)
+	require.Len(t, m.overlay.applied, 1)
+	assert.Equal(t, txs[0].Hash, m.overlay.applied[0].hash)
+}
+
+func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
+	validator := newBlockingSessionValidator()
+	m := newTestMempoolWithValidator(t, validator)
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- m.Stop(context.Background()) }()
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(t, stopDone, time.Second, "mempool stop"),
+	)
+	close(validator.release)
+	require.ErrorIs(
+		t,
+		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+		ErrMempoolStopped,
+	)
+	assert.Empty(t, m.Transactions())
+}
+
+func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(t *testing.T) {
+	validator := newBlockingOverlayValidator()
+	validator.shouldBlock.Store(true)
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+	txBytes := getTestTxBytes(t)
+
+	addDone := make(chan error, 1)
+	go func() {
+		addDone <- m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	}()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "admission validation start")
+
+	snapshotDone := make(chan []MempoolTransaction, 1)
+	go func() { snapshotDone <- m.Transactions() }()
+	assert.Empty(
+		t,
+		dingotestutil.RequireReceive(t, snapshotDone, time.Second, "admission snapshot"),
+	)
+
+	consumerDone := make(chan *MempoolConsumer, 1)
+	go func() { consumerDone <- m.AddConsumer(newTestConnectionId(0)) }()
+	assert.NotNil(
+		t,
+		dingotestutil.RequireReceive(t, consumerDone, time.Second, "consumer registration"),
+	)
+
+	close(validator.release)
+	require.NoError(t, dingotestutil.RequireReceive(t, addDone, time.Second, "admission completion"))
+	assert.Len(t, m.Transactions(), 1)
 }
 
 // TestMempool_MEM03_NoDeadlockOnConcurrentPublish exercises the scenario
@@ -3229,4 +3626,16 @@ func TestNewMempool_RejectsNilValidator(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrNilValidator)
 	assert.Nil(t, m)
+}
+
+// TestNewConsumerReturnsUntypedNilAfterStop pins that NewConsumer hands back an
+// untyped nil interface (not an interface wrapping a nil *MempoolConsumer) when
+// the mempool is stopped, so callers' == nil checks detect the stopped mempool.
+func TestNewConsumerReturnsUntypedNilAfterStop(t *testing.T) {
+	m := newTestMempool(t)
+	require.NoError(t, m.Stop(context.Background()))
+	consumer := m.NewConsumer(newTestConnectionId(1))
+	if consumer != nil {
+		t.Fatalf("NewConsumer after Stop = %#v, want untyped nil", consumer)
+	}
 }

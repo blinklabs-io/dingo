@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	metadataSqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -33,12 +34,29 @@ import (
 )
 
 type mockBlobStore struct {
-	deleteTxErrs map[string]error
-	commitErrs   []error
-	deleteTxnIDs []int
-	iterator     types.BlobIterator
-	txns         []*mockBlobTxn
-	utxoData     map[string][]byte
+	deleteTxErrs     map[string]error
+	deleteUtxoErrs   map[string]error
+	commitErrs       []error
+	deleteTxnIDs     []int
+	deleteUtxoTxnIDs []int
+	iterator         types.BlobIterator
+	txns             []*mockBlobTxn
+	utxoData         map[string][]byte
+	// syncErr is returned by Sync. syncCount counts calls, and
+	// syncAtBlobCommitCount snapshots the blob transaction's commit count as
+	// observed from inside Sync, so tests can assert the durability barrier
+	// fires after the blob commit rather than before it.
+	syncErr               error
+	syncCount             int
+	syncAtBlobCommitCount int
+}
+
+func (m *mockBlobStore) Sync() error {
+	m.syncCount++
+	if len(m.txns) > 0 {
+		m.syncAtBlobCommitCount = m.txns[0].commitCount
+	}
+	return m.syncErr
 }
 
 type mockBlobTxn struct {
@@ -142,7 +160,15 @@ func (m *mockBlobStore) GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([
 	return nil, types.ErrBlobKeyNotFound
 }
 
-func (m *mockBlobStore) DeleteUtxo(types.Txn, []byte, uint32) error {
+func (m *mockBlobStore) DeleteUtxo(txn types.Txn, txId []byte, outputIdx uint32) error {
+	mockTxn, ok := txn.(*mockBlobTxn)
+	if !ok {
+		return types.ErrTxnWrongType
+	}
+	m.deleteUtxoTxnIDs = append(m.deleteUtxoTxnIDs, mockTxn.id)
+	if err, ok := m.deleteUtxoErrs[fmt.Sprintf("%x:%d", txId, outputIdx)]; ok {
+		return err
+	}
 	return nil
 }
 
@@ -224,8 +250,132 @@ func TestDeleteTxBlobsCountsFailedBatchCommit(t *testing.T) {
 	require.Contains(t, logs.String(), "\"total\":3")
 }
 
+// TestDeleteUtxoBlobsCountsFailedBatchCommit injects a UTxO batch commit failure.
+// It verifies every uncommitted deletion is included in the aggregate error count.
+func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	store := &mockBlobStore{commitErrs: []error{errors.New("commit failed")}}
+	db := &Database{
+		blob: store,
+		logger: slog.New(
+			slog.NewJSONHandler(
+				&logs,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			),
+		),
+	}
+
+	utxos := []models.Utxo{
+		{TxId: []byte{0x01}, OutputIdx: 0},
+		{TxId: []byte{0x02}, OutputIdx: 1},
+		{TxId: []byte{0x03}, OutputIdx: 2},
+	}
+	require.NoError(t, deleteUtxoBlobs(db, utxos, nil))
+	require.Len(t, store.txns, 1)
+	require.Equal(t, 1, store.txns[0].commitCount)
+	require.Contains(t, logs.String(), "\"failed\":3")
+	require.Contains(t, logs.String(), "\"total\":3")
+}
+
+// TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata injects a transaction blob deletion failure.
+// It verifies the failure is logged while rollback metadata cleanup still succeeds.
+func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(
+		slog.NewJSONHandler(
+			&logs,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+	txHash := bytes.Repeat([]byte{0x11}, 32)
+	sqliteStore, err := metadataSqlite.New("", logger, nil)
+	require.NoError(t, err)
+	require.NoError(t, sqliteStore.Start())
+	store := &mockBlobStore{
+		deleteTxErrs: map[string]error{
+			string(txHash): errors.New("delete tx blob failed"),
+		},
+	}
+	db := &Database{
+		blob:     store,
+		metadata: sqliteStore,
+		logger:   logger,
+		config:   &Config{Logger: logger},
+	}
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+	require.NoError(t, sqliteStore.DB().Create(&models.Transaction{
+		Hash:  txHash,
+		Slot:  200,
+		Valid: true,
+	}).Error)
+
+	require.NoError(t, db.TransactionsDeleteRolledback(100, nil))
+
+	var count int64
+	require.NoError(t, sqliteStore.DB().Model(&models.Transaction{}).
+		Where("hash = ?", txHash).
+		Count(&count).Error)
+	require.Zero(t, count)
+	require.Contains(t, logs.String(), "\"level\":\"WARN\"")
+	require.Contains(t, logs.String(), "failed to delete TX blob data")
+	require.Contains(t, logs.String(), "\"txHash\"")
+	require.Contains(t, logs.String(), "\"total\":1")
+}
+
+// TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata injects a UTxO blob deletion failure.
+// It verifies the failure is logged while rollback metadata cleanup still succeeds.
+func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(
+		slog.NewJSONHandler(
+			&logs,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+	txID := bytes.Repeat([]byte{0x22}, 32)
+	sqliteStore, err := metadataSqlite.New("", logger, nil)
+	require.NoError(t, err)
+	require.NoError(t, sqliteStore.Start())
+	store := &mockBlobStore{
+		deleteUtxoErrs: map[string]error{
+			fmt.Sprintf("%x:%d", txID, 0): errors.New("delete utxo blob failed"),
+		},
+	}
+	db := &Database{
+		blob:     store,
+		metadata: sqliteStore,
+		logger:   logger,
+		config:   &Config{Logger: logger},
+	}
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+	require.NoError(t, sqliteStore.DB().Create(&models.Utxo{
+		TxId:      txID,
+		OutputIdx: 0,
+		AddedSlot: 200,
+		Amount:    1,
+	}).Error)
+
+	require.NoError(t, db.UtxosDeleteRolledback(100, nil))
+
+	var count int64
+	require.NoError(t, sqliteStore.DB().Model(&models.Utxo{}).
+		Where("tx_id = ? AND output_idx = ?", txID, 0).
+		Count(&count).Error)
+	require.Zero(t, count)
+	require.Contains(t, logs.String(), "\"level\":\"WARN\"")
+	require.Contains(t, logs.String(), "failed to delete UTxO blob data")
+	require.Contains(t, logs.String(), "\"added_slot\":200")
+	require.Contains(t, logs.String(), "\"total\":1")
+}
+
 func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T) {
-	db, err := New(&Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, db.Close())
@@ -263,15 +413,11 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T)
 // Preload("Outputs") through the producer Transaction would silently
 // drop it.
 func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
-	// Intentionally not t.Parallel(): database.New() writes to plugin
-	// option destination pointers via SetPluginOption, which the race
-	// detector flags when two tests build a Database concurrently.
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -460,20 +606,16 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 // trust boundary (blocks past the boundary should have complete producer
 // history; blocks at or below it legitimately may not).
 func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
-	// Intentionally not t.Parallel(): database.New() writes to plugin
-	// option destination pointers via SetPluginOption, which the race
-	// detector flags when two tests build a Database concurrently.
 	candidate := findGapConsumeCandidateWithoutCertificates(t)
 
 	newTestDB := func(t *testing.T, strict bool) *Database {
 		t.Helper()
-		db, err := New(&Config{
+		db, err := newTestDatabase(t, &Config{
 			DataDir:              t.TempDir(),
 			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-			BlobPlugin:           "badger",
-			MetadataPlugin:       "sqlite",
 			StrictUtxoValidation: strict,
 		})
+
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		// Intentionally do NOT persist candidate.producers, so the

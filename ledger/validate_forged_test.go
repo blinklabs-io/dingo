@@ -78,16 +78,16 @@ type stubValidateBlock struct {
 	bodyHash lcommon.Blake2b256
 }
 
-func (b *stubValidateBlock) Header() lcommon.BlockHeader      { return b }
-func (b *stubValidateBlock) Type() int                        { return 0 }
-func (b *stubValidateBlock) Transactions() []lcommon.Transaction { return nil }
+func (b *stubValidateBlock) Header() lcommon.BlockHeader              { return b }
+func (b *stubValidateBlock) Type() int                                { return 0 }
+func (b *stubValidateBlock) Transactions() []lcommon.Transaction      { return nil }
 func (b *stubValidateBlock) Utxorpc() (*utxorpc_cardano.Block, error) { return nil, nil }
-func (b *stubValidateBlock) Hash() lcommon.Blake2b256         { return lcommon.Blake2b256{} }
-func (b *stubValidateBlock) PrevHash() lcommon.Blake2b256     { return lcommon.Blake2b256{} }
-func (b *stubValidateBlock) BlockNumber() uint64              { return 0 }
-func (b *stubValidateBlock) SlotNumber() uint64               { return b.slot }
-func (b *stubValidateBlock) IssuerVkey() lcommon.IssuerVkey   { return lcommon.IssuerVkey{} }
-func (b *stubValidateBlock) BlockBodySize() uint64            { return 0 }
+func (b *stubValidateBlock) Hash() lcommon.Blake2b256                 { return lcommon.Blake2b256{} }
+func (b *stubValidateBlock) PrevHash() lcommon.Blake2b256             { return lcommon.Blake2b256{} }
+func (b *stubValidateBlock) BlockNumber() uint64                      { return 0 }
+func (b *stubValidateBlock) SlotNumber() uint64                       { return b.slot }
+func (b *stubValidateBlock) IssuerVkey() lcommon.IssuerVkey           { return lcommon.IssuerVkey{} }
+func (b *stubValidateBlock) BlockBodySize() uint64                    { return 0 }
 func (b *stubValidateBlock) Era() lcommon.Era {
 	// Return a non-Byron era so body-hash checks are applied.
 	return lcommon.Era{Id: 5, Name: "Babbage"}

@@ -315,3 +315,56 @@ func Get(
 	}
 	return &doc, nil
 }
+
+// DedupeURLs drops empty and repeated URLs, preserving first-seen order.
+//
+// Exported so a backend that has to split a batch into several queries can
+// deduplicate the whole list before chunking. Deduplicating only within each
+// chunk cannot enforce the batch contract: a URL landing in two different
+// chunks would be queried twice and its row returned twice.
+func DedupeURLs(urls []string) []string {
+	seen := make(map[string]struct{}, len(urls))
+	uniq := make([]string, 0, len(urls))
+	for _, url := range urls {
+		if url == "" {
+			continue
+		}
+		if _, ok := seen[url]; ok {
+			continue
+		}
+		seen[url] = struct{}{}
+		uniq = append(uniq, url)
+	}
+	return uniq
+}
+
+// GetBatch retrieves cached off-chain metadata rows for many URLs of
+// the given source type in a single query, for callers serving a whole
+// page of results (for example, per-pool metadata on /pools/extended) that
+// need to avoid one Get call per item. The source_type + url IN (...)
+// predicate uses the leading two columns of the (source_type, url, hash)
+// unique index. Duplicate and empty URLs are removed before querying;
+// callers must still match returned rows against their own (url, hash)
+// pointer, since two documents can share a URL under different hashes.
+func GetBatch(
+	db *gorm.DB,
+	sourceType string,
+	urls []string,
+) ([]models.OffchainMetadata, error) {
+	uniq := DedupeURLs(urls)
+	if len(uniq) == 0 {
+		return nil, nil
+	}
+	var docs []models.OffchainMetadata
+	result := db.Where(
+		"source_type = ? AND url IN ?",
+		sourceType,
+		uniq,
+	).Find(&docs)
+	if result.Error != nil {
+		return nil, fmt.Errorf(
+			"get off-chain metadata batch: %w", result.Error,
+		)
+	}
+	return docs, nil
+}

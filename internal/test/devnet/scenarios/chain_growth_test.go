@@ -28,14 +28,18 @@ import (
 // rate over a measurement window.
 //
 // With activeSlotsCoeff=0.4 and slotLength=1s, each slot has a 40% chance
-// of producing a block. With 2 pools sharing stake equally the per-pool
-// leader probability per slot is approximately 1-(1-f)^σ ≈ 0.225, and the
-// network-wide probability is 1-(1-f)^1 = 0.4. In a 100-slot window we
-// therefore expect ~40 blocks network-wide. We require at least 8 (20% of
-// expected) as a conservative lower bound. This accounts for: random VRF
-// variance, chain rollbacks (both pools can win the same slot), catch-up
-// delays after rollback/resync, and the fact that a single endpoint only
-// sees its own view of the chain which may lag behind the network tip.
+// of producing a block. With pools sharing stake equally the per-pool
+// leader probability per slot is approximately 1-(1-f)^σ; illustrative for
+// the 2-pool conformance case, σ=0.5 gives ≈0.225, while the 3-pool dingo
+// case (σ=1/3) gives ≈0.157. The network-wide probability is 1-(1-f)^1 =
+// 0.4 regardless of pool count, since network-wide rate is activeSlotsCoeff.
+// In a 100-slot window we therefore expect ~40 blocks network-wide. We
+// require at least 8 (20% of expected) as a conservative lower bound; this
+// threshold is pool-count independent. This accounts for: random VRF
+// variance, chain rollbacks (multiple pools can win the same slot),
+// catch-up delays after rollback/resync, and the fact that a single
+// endpoint only sees its own view of the chain which may lag behind the
+// network tip.
 func TestChainGrowthRate(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
@@ -46,13 +50,13 @@ func TestChainGrowthRate(t *testing.T) {
 		cfg.EpochLength, cfg.SecurityParam, cfg.ExpectedBlockTime(),
 	)
 
-	endpoints := devnet.DefaultEndpoints()
+	endpoints := devnet.LoadEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
 	)
 
-	dingoEndpoint := endpoints[0]
+	dingoEndpoint := h.DingoNode()
 
 	// Wait for the chain to stabilize at slot 50.
 	// Timeout: 50 slots + 5 expected block times for margin.
@@ -77,19 +81,40 @@ func TestChainGrowthRate(t *testing.T) {
 	targetSlot := startTip.SlotNumber + measureSlots
 	measureTimeout := time.Duration(measureSlots)*cfg.SlotDuration() +
 		cfg.ExpectedBlockTime()*5
-	h.WaitForNodeSlot(dingoEndpoint, targetSlot, measureTimeout)
 
-	// Record the ending point
-	endTip, err := h.GetChainTip(dingoEndpoint)
-	require.NoError(t, err, "failed to get end tip")
+	// With activeSlotsCoeff=0.4 we expect ~40 blocks in 100 slots.
+	// Require at least 8 (20% of expected) as a conservative lower bound
+	// that accounts for random variance and possible rollbacks.
+	const minBlocks = uint64(8)
+	minBlock := startTip.BlockNumber + minBlocks
+	var endTip devnet.ChainTip
+	require.Eventually(t, func() bool {
+		tip, err := h.GetChainTip(dingoEndpoint)
+		if err != nil {
+			t.Logf("growth check: error querying %s: %v",
+				dingoEndpoint.Name, err)
+			return false
+		}
+		endTip = tip
+		t.Logf(
+			"growth check: %s at slot %d, block %d",
+			dingoEndpoint.Name, tip.SlotNumber, tip.BlockNumber,
+		)
+		return tip.SlotNumber >= targetSlot &&
+			tip.BlockNumber >= minBlock
+	}, measureTimeout, 2*time.Second,
+		"%s did not reach slot %d and block %d within %s",
+		dingoEndpoint.Name, targetSlot, minBlock, measureTimeout,
+	)
 	t.Logf(
 		"end tip: slot=%d block=%d",
 		endTip.SlotNumber, endTip.BlockNumber,
 	)
 
-	require.GreaterOrEqual(t, endTip.BlockNumber, startTip.BlockNumber,
-		"end block number should not be less than start (possible rollback)",
-	)
+	// The require.Eventually above already guarantees
+	// endTip.BlockNumber >= startTip.BlockNumber + minBlocks, so the
+	// subtraction below cannot underflow and a rollback below the start tip
+	// would have failed the Eventually rather than reaching here.
 	blocksProduced := endTip.BlockNumber - startTip.BlockNumber
 	slotsElapsed := endTip.SlotNumber - startTip.SlotNumber
 	if slotsElapsed == 0 {
@@ -104,10 +129,6 @@ func TestChainGrowthRate(t *testing.T) {
 		cfg.ExpectedBlocksPerSlot()*100,
 	)
 
-	// With activeSlotsCoeff=0.4 we expect ~40 blocks in 100 slots.
-	// Require at least 8 (20% of expected) as a conservative lower bound
-	// that accounts for random variance and possible rollbacks.
-	const minBlocks = uint64(8)
 	require.GreaterOrEqual(t, blocksProduced, minBlocks,
 		"chain should produce at least %d blocks in %d slots "+
 			"(activeSlotsCoeff=%.2f)",
@@ -115,20 +136,21 @@ func TestChainGrowthRate(t *testing.T) {
 	)
 }
 
-// TestRelayPropagation verifies that blocks produced by either producer
-// reach the relay node. The relay connects to both producers and should
-// see blocks from both.
+// TestRelayPropagation verifies that blocks produced by any producer
+// reach the relay node. The relay connects to all producers (three in
+// dingo mode, two in conformance mode) and should see blocks from all
+// of them.
 func TestRelayPropagation(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
 
-	endpoints := devnet.DefaultEndpoints()
+	endpoints := devnet.LoadEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
 	)
 
-	relayEndpoint := endpoints[2] // cardano-relay
+	relayEndpoint := h.Relay()
 
 	// Wait for all nodes including relay
 	h.WaitForAllNodesReady(60 * time.Second)
@@ -160,7 +182,7 @@ func TestSustainedConsensus(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
 
-	endpoints := devnet.DefaultEndpoints()
+	endpoints := devnet.LoadEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
@@ -170,7 +192,7 @@ func TestSustainedConsensus(t *testing.T) {
 
 	// Get the current tip to compute relative checkpoints.
 	// The chain may already be well past genesis when the tests run.
-	baseTip, err := h.GetChainTip(endpoints[0])
+	baseTip, err := h.GetChainTip(h.DingoNode())
 	require.NoError(t, err, "failed to get initial tip")
 	baseSlot := baseTip.SlotNumber
 
@@ -197,45 +219,4 @@ func TestSustainedConsensus(t *testing.T) {
 		h.VerifyChainConsensus(tolerance, convergenceTimeout)
 		t.Logf("consensus verified at slot %d", targetSlot)
 	}
-}
-
-// TestCardanoProducerChainAdvances verifies the cardano-node producer
-// is also forging blocks, serving as a baseline comparison.
-func TestCardanoProducerChainAdvances(t *testing.T) {
-	cfg, err := devnet.LoadDevNetConfig()
-	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
-
-	endpoints := devnet.DefaultEndpoints()
-	h := devnet.NewTestHarness(
-		t, endpoints,
-		devnet.WithNetworkMagic(cfg.NetworkMagic),
-	)
-
-	cardanoEndpoint := endpoints[1] // cardano-producer
-
-	h.WaitForNodeSlot(cardanoEndpoint, 0, 60*time.Second)
-
-	initialTip, err := h.GetChainTip(cardanoEndpoint)
-	require.NoError(t, err, "failed to get initial cardano-producer tip")
-
-	// Wait for the chain to advance by at least 10 slots.
-	// Timeout: 10 slots + 5 expected block times for margin.
-	const advanceSlots = 10
-	targetSlot := initialTip.SlotNumber + advanceSlots
-	timeout := time.Duration(advanceSlots)*cfg.SlotDuration() +
-		cfg.ExpectedBlockTime()*5
-	h.WaitForNodeSlot(cardanoEndpoint, targetSlot, timeout)
-
-	newTip, err := h.GetChainTip(cardanoEndpoint)
-	require.NoError(t, err, "failed to get new cardano-producer tip")
-	require.Greater(t, newTip.BlockNumber, initialTip.BlockNumber,
-		"cardano-producer should have forged new blocks",
-	)
-
-	t.Logf(
-		"cardano-producer chain advanced from slot %d to %d"+
-			" (blocks: %d -> %d)",
-		initialTip.SlotNumber, newTip.SlotNumber,
-		initialTip.BlockNumber, newTip.BlockNumber,
-	)
 }

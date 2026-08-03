@@ -20,51 +20,74 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
+	if _, err := n.blockProducerShelleyGenesis(); err != nil {
+		return nil, err
+	}
+	if n.ledgerState == nil {
+		return nil, errors.New(
+			"block producer mode requires ledger state for current slot",
+		)
+	}
+	currentSlot, err := n.ledgerState.CurrentSlot()
+	if err != nil {
+		if !errors.Is(err, ledger.ErrBeforeGenesis) {
+			return nil, fmt.Errorf("compute current slot: %w", err)
+		}
+		currentSlot = 0
+	}
+	return n.validateBlockProducerStartupAtSlot(currentSlot)
+}
+
+func (n *Node) validateBlockProducerStartupAtSlot(
+	currentSlot uint64,
+) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if err := creds.LoadFromFiles(
-		n.config.ShelleyVRFKey(),
-		n.config.ShelleyKESKey(),
-		n.config.ShelleyOperationalCertificate(),
+		n.config.shelleyVRFKey,
+		n.config.shelleyKESKey,
+		n.config.shelleyOperationalCertificate,
 	); err != nil {
 		return nil, fmt.Errorf("load pool credentials: %w", err)
 	}
 	if err := creds.ValidateOpCert(); err != nil {
 		return nil, fmt.Errorf("validate operational certificate: %w", err)
 	}
-	// KES-period plausibility requires a Shelley genesis. Block producer
-	// mode without one is unsafe — a node with no genesis cannot tell
-	// whether the opcert is current — so refuse to start.
-	if n.config.CardanoNodeConfig() == nil {
-		return nil, errors.New(
-			"block producer mode requires Cardano node config with Shelley genesis",
-		)
+	genesis, err := n.blockProducerShelleyGenesis()
+	if err != nil {
+		return nil, err
 	}
-	genesis := n.config.CardanoNodeConfig().ShelleyGenesis()
-	if genesis == nil {
-		return nil, errors.New(
-			"block producer mode requires Shelley genesis information",
-		)
-	}
-	now := time.Now()
-	if err := creds.ValidateKESPeriod(genesis, now); err != nil {
+	if err := creds.ValidateKESPeriod(genesis, currentSlot); err != nil {
 		return nil, fmt.Errorf("validate KES period: %w", err)
 	}
-	currentPeriod, err := forging.CurrentKESPeriod(genesis, now)
+	currentPeriod, err := forging.CurrentKESPeriodFromGenesis(
+		genesis,
+		currentSlot,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("compute current KES period: %w", err)
 	}
@@ -76,12 +99,31 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 		"block producer credentials validated",
 		"component", "node",
 		"pool_id", creds.GetPoolID().String(),
+		"current_slot", currentSlot,
 		"current_kes_period", currentPeriod,
 		"opcert_kes_period", opCert.KESPeriod,
 		"opcert_counter", opCert.IssueNumber,
 		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
 	)
 	return creds, nil
+}
+
+func (n *Node) blockProducerShelleyGenesis() (*shelley.ShelleyGenesis, error) {
+	// KES-period plausibility requires a Shelley genesis. Block producer
+	// mode without one is unsafe — a node with no genesis cannot tell
+	// whether the opcert is current — so refuse to start.
+	if n.config.cardanoNodeConfig == nil {
+		return nil, errors.New(
+			"block producer mode requires Cardano node config with Shelley genesis",
+		)
+	}
+	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return nil, errors.New(
+			"block producer mode requires Shelley genesis information",
+		)
+	}
+	return genesis, nil
 }
 
 // blockProducerLedgerView adapts ledger.LedgerState to
@@ -124,7 +166,8 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	}
 	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
 	if err != nil {
-		if errors.Is(err, forging.ErrVRFKeyHashMismatch) && n.config.Network() == "devnet" {
+		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
+			n.config.network == "devnet" {
 			n.config.logger.Warn(
 				"devnet block producer VRF cross-check failed; node will continue",
 				"component", "node",
@@ -163,14 +206,11 @@ func (n *Node) validateBlockProducerLedgerWithView(
 // require the genesis snapshot for leader election) and logs a warning for
 // relay nodes (which do not perform leader election).
 func (n *Node) handleGenesisSnapshotError(err error) error {
-	if n.config.BlockProducer() {
-		return fmt.Errorf("failed to capture genesis snapshot: %w", err)
-	}
-	n.config.logger.Warn(
-		"failed to capture genesis snapshot",
-		"error", err,
+	return snapshot.HandleGenesisSnapshotError(
+		n.config.blockProducer,
+		n.config.logger,
+		err,
 	)
-	return nil
 }
 
 // initBlockForger initializes the block forger for production mode.
@@ -230,7 +270,7 @@ func (n *Node) initBlockForger(
 		n.eventBus,
 		n.config.logger,
 	)
-	election.SetPromRegistry(n.config.PrometheusRegistry())
+	election.SetPromRegistry(n.config.promRegistry)
 	if n.db != nil {
 		if scheduleStore := leader.NewSyncStateScheduleStore(
 			n.db.Metadata(),
@@ -251,18 +291,38 @@ func (n *Node) initBlockForger(
 	// (i.e. Dijkstra era is enabled). Relay nodes and pre-Dijkstra
 	// block producers leave these nil and skip EB production.
 	var leiosChecker forging.LeiosProduceChecker
+	var leiosCerts forging.LeiosCertificateProvider
+	var leiosParent forging.LeiosParentAnnouncementProvider
 	var leiosEBCaster forging.EndorserBlockBroadcaster
 	var leiosMempool forging.MempoolProvider
 	if n.leiosPipelineManager != nil && n.ouroboros != nil {
-		leiosChecker = &leiosPipelineAdapter{mgr: n.leiosPipelineManager}
+		adapter := &leiosPipelineAdapter{
+			mgr:                   n.leiosPipelineManager,
+			chain:                 n.chainManager.PrimaryChain(),
+			endorserBlockTxHashes: n.ouroboros.EndorserBlockTxHashesByHash,
+		}
+		leiosChecker = adapter
+		leiosCerts = adapter
+		leiosParent = adapter
 		leiosEBCaster = n.ouroboros
 		leiosMempool = mempoolAdapter
+	}
+	blockForged := n.ledgerState.RecordForgedBlock
+	if n.ouroboros != nil {
+		blockForged = func(block gledger.Block, blockCbor []byte, latency time.Duration) {
+			n.ledgerState.RecordForgedBlock(block, blockCbor, latency)
+			if header, ok := block.Header().(*gdijkstra.DijkstraBlockHeader); ok {
+				if _, _, announces := header.LeiosAnnouncement(); announces {
+					n.ouroboros.EnqueueLeiosBlockAnnouncement(header.Cbor())
+				}
+			}
+		}
 	}
 
 	// Wire self-validation when the operator opts in. The validator runs
 	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
 	var blockValidator forging.BlockValidator
-	if n.config.ValidateForgedBlock() {
+	if n.config.validateForgedBlock {
 		blockValidator = &forgedBlockValidatorAdapter{
 			ledgerState: n.ledgerState,
 		}
@@ -270,21 +330,23 @@ func (n *Node) initBlockForger(
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:                        forging.ModeProduction,
-		Logger:                      n.config.logger,
-		Credentials:                 creds,
-		LeaderChecker:               election,
-		BlockBuilder:                builder,
-		BlockBroadcaster:            broadcaster,
-		BlockForged:                 n.ledgerState.RecordForgedBlock,
-		SlotClock:                   slotClock,
-		ForgeSyncToleranceSlots:     n.config.ForgeSyncToleranceSlots(),
-		ForgeStaleGapThresholdSlots: n.config.ForgeStaleGapThresholdSlots(),
-		BlockValidator:              blockValidator,
-		PromRegistry:                n.config.PrometheusRegistry(),
-		LeiosProduceChecker:         leiosChecker,
-		LeiosEBBroadcaster:          leiosEBCaster,
-		LeiosMempool:                leiosMempool,
+		Mode:                            forging.ModeProduction,
+		Logger:                          n.config.logger,
+		Credentials:                     creds,
+		LeaderChecker:                   election,
+		BlockBuilder:                    builder,
+		BlockBroadcaster:                broadcaster,
+		BlockForged:                     blockForged,
+		SlotClock:                       slotClock,
+		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
+		BlockValidator:                  blockValidator,
+		PromRegistry:                    n.config.promRegistry,
+		LeiosProduceChecker:             leiosChecker,
+		LeiosEBBroadcaster:              leiosEBCaster,
+		LeiosMempool:                    leiosMempool,
+		LeiosCertificateProvider:        leiosCerts,
+		LeiosParentAnnouncementProvider: leiosParent,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -524,8 +586,50 @@ func (a *epochInfoAdapter) NextEpochNonceReadyEpoch() (uint64, bool) {
 	return a.ledgerState.NextEpochNonceReadyEpoch()
 }
 
-func (a *epochInfoAdapter) SlotsPerEpoch() uint64 {
-	return a.ledgerState.SlotsPerEpoch()
+func (a *epochInfoAdapter) EpochSlotRange(
+	epoch uint64,
+) (leader.EpochSlotRange, error) {
+	info, err := a.ledgerState.EpochInfo(epoch)
+	if err != nil {
+		if !errors.Is(err, hardfork.ErrPastHorizon) {
+			return leader.EpochSlotRange{}, err
+		}
+		// The nonce-stability cutoff can precede the HFC header horizon. Once
+		// the next epoch's nonce is stable, leader election still needs that
+		// immediate Praos epoch's slot range to precompute its schedule. All
+		// Praos eras use the Shelley genesis epoch/slot dimensions.
+		readyEpoch, ready := a.ledgerState.NextEpochNonceReadyEpoch()
+		currentEpoch := a.ledgerState.CurrentEpoch()
+		if !ready ||
+			readyEpoch != epoch ||
+			currentEpoch == ^uint64(0) ||
+			epoch != currentEpoch+1 {
+			return leader.EpochSlotRange{}, err
+		}
+		currentInfo, currentErr := a.ledgerState.EpochInfo(
+			currentEpoch,
+		)
+		if currentErr != nil {
+			return leader.EpochSlotRange{}, currentErr
+		}
+		slotCount := uint64(currentInfo.LengthInSlots)
+		if slotCount == 0 ||
+			currentInfo.StartSlot > ^uint64(0)-slotCount {
+			return leader.EpochSlotRange{}, fmt.Errorf(
+				"current epoch slot range is invalid: start=%d count=%d",
+				currentInfo.StartSlot,
+				slotCount,
+			)
+		}
+		return leader.EpochSlotRange{
+			StartSlot: currentInfo.StartSlot + slotCount,
+			SlotCount: slotCount,
+		}, nil
+	}
+	return leader.EpochSlotRange{
+		StartSlot: info.StartSlot,
+		SlotCount: uint64(info.LengthInSlots),
+	}, nil
 }
 
 func (a *epochInfoAdapter) EpochForSlot(slot uint64) (uint64, error) {
@@ -538,6 +642,14 @@ func (a *epochInfoAdapter) EpochForSlot(slot uint64) (uint64, error) {
 
 func (a *epochInfoAdapter) ActiveSlotCoeff() float64 {
 	return a.ledgerState.ActiveSlotCoeff()
+}
+
+// ActiveSlotCoeffRat satisfies leader.ActiveSlotCoeffRatProvider so the leader
+// schedule derives its threshold from the exact Shelley genesis rational, the
+// same value LedgerState.verifyLeaderEligibility uses, instead of a float64
+// approximation of it.
+func (a *epochInfoAdapter) ActiveSlotCoeffRat() *big.Rat {
+	return a.ledgerState.ActiveSlotCoeffRat()
 }
 
 func (a *epochInfoAdapter) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
@@ -569,11 +681,17 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 	return a.ledgerState.UpstreamTipSlot()
 }
 
-// leiosPipelineAdapter adapts leios.PipelineManager to
-// forging.LeiosProduceChecker. It translates the ProduceDecision return
-// value into the (bool, string, error) form the forge loop expects.
+// leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
+// the narrow Leios interfaces the forge loop expects.
 type leiosPipelineAdapter struct {
-	mgr *leios.PipelineManager
+	mgr                   *leios.PipelineManager
+	chain                 leiosParentChain
+	endorserBlockTxHashes func([]byte) ([]string, bool)
+}
+
+type leiosParentChain interface {
+	Tip() ochainsync.Tip
+	BlockByPoint(ocommon.Point, *database.Txn) (models.Block, error)
 }
 
 func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
@@ -584,6 +702,67 @@ func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
 		return false, "", err
 	}
 	return dec.Allowed, dec.Reason, nil
+}
+
+func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.LeiosCertifiedEndorserBlock {
+	eligible := a.mgr.EligibleCertifiedEbs()
+	out := make([]forging.LeiosCertifiedEndorserBlock, 0, len(eligible))
+	for _, eb := range eligible {
+		out = append(out, forging.LeiosCertifiedEndorserBlock{
+			SlotNo:            eb.SlotNo,
+			EndorserBlockHash: eb.EndorserBlockHash,
+			Certificate:       eb.Certificate,
+			AnnouncingRbHash:  eb.AnnouncingRbHash,
+		})
+	}
+	return out
+}
+
+func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
+	ebHash lcommon.Blake2b256,
+) ([]string, bool) {
+	if a.endorserBlockTxHashes == nil {
+		return nil, false
+	}
+	return a.endorserBlockTxHashes(ebHash.Bytes())
+}
+
+func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
+	ebHash lcommon.Blake2b256,
+) {
+	a.mgr.MarkEmbedded(ebHash)
+}
+
+func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
+	lcommon.Blake2b256,
+	lcommon.Blake2b256,
+	bool,
+	error,
+) {
+	if a.chain == nil {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, errors.New("chain unavailable")
+	}
+	tip := a.chain.Tip()
+	if len(tip.Point.Hash) == 0 {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, nil
+	}
+	block, err := a.chain.BlockByPoint(tip.Point, nil)
+	if err != nil {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
+			"resolve parent block: %w",
+			err,
+		)
+	}
+	decoded, err := block.Decode()
+	if err != nil {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
+			"decode parent block: %w",
+			err,
+		)
+	}
+	hash, _, ok := leiosheader.ReferencedEndorserBlock(decoded.Header())
+	rbHash := lcommon.NewBlake2b256(tip.Point.Hash)
+	return rbHash, hash, ok, nil
 }
 
 // forgedBlockValidatorAdapter adapts ledger.LedgerState to

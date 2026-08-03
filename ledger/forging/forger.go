@@ -84,6 +84,8 @@ type BlockForger struct {
 	leiosChecker  LeiosProduceChecker
 	leiosEBCaster EndorserBlockBroadcaster
 	leiosMempool  MempoolProvider
+	leiosCerts    LeiosCertificateProvider
+	leiosParent   LeiosParentAnnouncementProvider
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -117,6 +119,17 @@ type BlockBuilder interface {
 	BuildBlock(slot uint64, kesPeriod uint64) (ledger.Block, []byte, error)
 }
 
+// LeiosBlockBuilder constructs Dijkstra blocks with Leios prototype header/body
+// extensions. Builders that do not implement it cannot safely announce or
+// certify Leios endorser blocks.
+type LeiosBlockBuilder interface {
+	BuildBlockWithLeios(
+		slot uint64,
+		kesPeriod uint64,
+		leios LeiosBlockData,
+	) (ledger.Block, []byte, error)
+}
+
 // BlockBroadcaster submits built blocks to the chain.
 type BlockBroadcaster interface {
 	// AddBlock adds a block to the local chain and propagates to peers.
@@ -147,6 +160,36 @@ type LeiosProduceChecker interface {
 	MayProduceEndorserBlock(slot uint64) (allowed bool, reason string, err error)
 }
 
+// LeiosCertifiedEndorserBlock is a certified EB ready for inclusion in a
+// Dijkstra ranking block.
+type LeiosCertifiedEndorserBlock struct {
+	SlotNo            uint64
+	EndorserBlockHash lcommon.Blake2b256
+	Certificate       *lcommon.LeiosEbCertificate
+	AnnouncingRbHash  lcommon.Blake2b256
+}
+
+// LeiosCertificateProvider supplies certified EBs and records successful
+// inclusion after the certifying ranking block is adopted.
+type LeiosCertificateProvider interface {
+	EligibleCertifiedEndorserBlocks() []LeiosCertifiedEndorserBlock
+	CertifiedEndorserBlockTxHashes(
+		ebHash lcommon.Blake2b256,
+	) (hashes []string, ok bool)
+	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256)
+}
+
+// LeiosParentAnnouncementProvider reports the EB announced by the parent
+// ranking block. CertRBs may only certify that announced EB.
+type LeiosParentAnnouncementProvider interface {
+	ParentLeiosAnnouncement() (
+		lcommon.Blake2b256,
+		lcommon.Blake2b256,
+		bool,
+		error,
+	)
+}
+
 // EndorserBlockBroadcaster stores a locally-forged endorser block and
 // notifies connected peers via the LeiosNotify protocol. txBodies are the
 // referenced transactions' raw CBOR, in manifest order, so the endorser block
@@ -158,6 +201,25 @@ type EndorserBlockBroadcaster interface {
 		cbor []byte,
 		txBodies [][]byte,
 	) error
+}
+
+// LeiosEndorserBlockAnnouncement is the header extension payload for an
+// endorser block announced by a Dijkstra ranking block.
+type LeiosEndorserBlockAnnouncement struct {
+	Hash lcommon.Blake2b256
+	Size uint64
+}
+
+// LeiosBlockData carries the Leios prototype data a Dijkstra ranking block
+// should commit to. Since prototype-2026w29 a ranking block may certify its
+// parent's endorser block and independently announce a new one.
+type LeiosBlockData struct {
+	Announcement *LeiosEndorserBlockAnnouncement
+	Certificate  *lcommon.LeiosEbCertificate
+}
+
+func (d LeiosBlockData) empty() bool {
+	return d.Announcement == nil && d.Certificate == nil
 }
 
 // SlotClockProvider provides current slot information from the slot clock.
@@ -197,6 +259,11 @@ type ForgerConfig struct {
 	// LeiosMempool provides transactions for EB building. May reuse the
 	// same MempoolProvider as the RB builder.
 	LeiosMempool MempoolProvider
+	// LeiosCertificateProvider supplies certified EBs for Dijkstra CertRBs.
+	LeiosCertificateProvider LeiosCertificateProvider
+	// LeiosParentAnnouncementProvider supplies the EB hash announced by the
+	// parent RB so CertRB selection cannot certify an unrelated EB.
+	LeiosParentAnnouncementProvider LeiosParentAnnouncementProvider
 
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
 	// upstream tip before forging is skipped. Zero uses the default.
@@ -239,6 +306,8 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosChecker:     cfg.LeiosProduceChecker,
 		leiosEBCaster:    cfg.LeiosEBBroadcaster,
 		leiosMempool:     cfg.LeiosMempool,
+		leiosCerts:       cfg.LeiosCertificateProvider,
+		leiosParent:      cfg.LeiosParentAnnouncementProvider,
 		blockValidator:   cfg.BlockValidator,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
@@ -274,6 +343,12 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		if cfg.LeiosMempool == nil {
 			return nil, errors.New("LeiosProduceChecker requires LeiosMempool")
 		}
+	}
+	if cfg.LeiosCertificateProvider != nil &&
+		cfg.LeiosParentAnnouncementProvider == nil {
+		return nil, errors.New(
+			"leios certificate provider requires LeiosParentAnnouncementProvider",
+		)
 	}
 
 	if cfg.PromRegistry != nil {
@@ -321,7 +396,12 @@ func (f *BlockForger) Start(ctx context.Context) error {
 	if f.metrics != nil && f.slotClock != nil && f.creds != nil {
 		if slotsPerKES := f.slotClock.SlotsPerKESPeriod(); slotsPerKES > 0 {
 			if currentSlot, err := f.slotClock.CurrentSlot(); err == nil {
-				f.updateKESMetrics(currentSlot / slotsPerKES)
+				if kesPeriod, err := CurrentKESPeriod(
+					currentSlot,
+					slotsPerKES,
+				); err == nil {
+					f.updateKESMetrics(kesPeriod)
+				}
 			}
 		}
 	}
@@ -544,18 +624,40 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
 
-	// Leios EB production: attempt before the RB so the EB can begin
-	// diffusing while the RB is being assembled. Failure is non-fatal
-	// for the RB — a missed EB is better than a missed block.
+	leiosBlockData, embeddedEb := f.leiosBlockDataForSlot(currentSlot)
 	if f.leiosChecker != nil {
-		if err := f.checkAndForgeLeiosEB(currentSlot); err != nil {
-			f.logger.Warn(
-				"leios endorser block production failed",
-				"slot", currentSlot,
-				"error", err,
-			)
-			if f.metrics != nil {
-				f.metrics.leiosEbFailed.Inc()
+		var excludedTxHashes map[string]struct{}
+		canAnnounce := true
+		if embeddedEb != nil {
+			hashes, ok := f.leiosCerts.CertifiedEndorserBlockTxHashes(*embeddedEb)
+			if !ok {
+				f.logger.Warn(
+					"leios EB announcement skipped: certified closure unavailable for mempool rebase",
+					"slot", currentSlot,
+					"eb_hash", embeddedEb.String(),
+				)
+				canAnnounce = false
+			}
+			if canAnnounce {
+				excludedTxHashes = make(map[string]struct{}, len(hashes))
+				for _, hash := range hashes {
+					excludedTxHashes[hash] = struct{}{}
+				}
+			}
+		}
+		if canAnnounce {
+			announcement, err := f.checkAndForgeLeiosEB(currentSlot, excludedTxHashes)
+			if err != nil {
+				f.logger.Warn(
+					"leios endorser block production failed",
+					"slot", currentSlot,
+					"error", err,
+				)
+				if f.metrics != nil {
+					f.metrics.leiosEbFailed.Inc()
+				}
+			} else if announcement != nil {
+				leiosBlockData.Announcement = announcement
 			}
 		}
 	}
@@ -568,7 +670,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	if slotsPerKESPeriod == 0 {
 		return errors.New("slots per KES period is zero")
 	}
-	kesPeriod := currentSlot / slotsPerKESPeriod
+	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
+	if err != nil {
+		return err
+	}
 
 	// Ensure KES key is at correct period
 	if err := f.creds.UpdateKESPeriod(kesPeriod); err != nil {
@@ -579,10 +684,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	f.updateKESMetrics(kesPeriod)
 
 	// Build the block
-	block, blockCbor, err := f.blockBuilder.BuildBlock(
-		currentSlot,
-		kesPeriod,
-	)
+	block, blockCbor, err := f.buildBlock(currentSlot, kesPeriod, leiosBlockData)
 	if err != nil {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
@@ -662,6 +764,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	if f.metrics != nil {
 		f.metrics.forgeAdopted.Inc()
 	}
+	if embeddedEb != nil && f.leiosCerts != nil {
+		f.leiosCerts.MarkEndorserBlockEmbedded(*embeddedEb)
+	}
 
 	// Record the forged block for slot battle detection
 	f.slotTracker.RecordForgedBlock(
@@ -673,6 +778,67 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		"hash", hex.EncodeToString(block.Hash().Bytes()),
 	)
 	return nil
+}
+
+func (f *BlockForger) leiosBlockDataForSlot(
+	slot uint64,
+) (LeiosBlockData, *lcommon.Blake2b256) {
+	if f.leiosCerts == nil {
+		return LeiosBlockData{}, nil
+	}
+	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
+	if err != nil {
+		f.logger.Warn(
+			"leios endorser block certificate skipped: parent announcement unavailable",
+			"slot", slot,
+			"error", err,
+		)
+		return LeiosBlockData{}, nil
+	}
+	if !ok {
+		f.logger.Debug(
+			"leios endorser block certificate skipped: parent has no announcement",
+			"slot", slot,
+		)
+		return LeiosBlockData{}, nil
+	}
+	eligible := f.leiosCerts.EligibleCertifiedEndorserBlocks()
+	for _, eb := range eligible {
+		if eb.Certificate == nil {
+			continue
+		}
+		if eb.EndorserBlockHash != parentHash ||
+			eb.Certificate.EndorserBlockHash != parentHash ||
+			eb.AnnouncingRbHash != parentRbHash {
+			continue
+		}
+		hash := eb.EndorserBlockHash
+		f.logger.Info(
+			"leios endorser block certificate selected for ranking block",
+			"slot", slot,
+			"eb_slot", eb.SlotNo,
+			"eb_hash", eb.EndorserBlockHash.String(),
+		)
+		return LeiosBlockData{Certificate: eb.Certificate}, &hash
+	}
+	return LeiosBlockData{}, nil
+}
+
+func (f *BlockForger) buildBlock(
+	slot uint64,
+	kesPeriod uint64,
+	leiosData LeiosBlockData,
+) (ledger.Block, []byte, error) {
+	if leiosData.empty() {
+		return f.blockBuilder.BuildBlock(slot, kesPeriod)
+	}
+	leiosBuilder, ok := f.blockBuilder.(LeiosBlockBuilder)
+	if !ok {
+		return nil, nil, errors.New(
+			"leios block data requires a LeiosBlockBuilder",
+		)
+	}
+	return leiosBuilder.BuildBlockWithLeios(slot, kesPeriod, leiosData)
 }
 
 // incCouldNotForge increments Forge_could_not_forge. Safe to call
@@ -770,10 +936,13 @@ func (f *BlockForger) SlotTracker() *SlotTracker {
 // checkAndForgeLeiosEB attempts to produce and broadcast a Leios endorser
 // block for the given slot. It is called by the slot leader before RB
 // construction so the EB can begin diffusing while the RB is assembled.
-func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
+func (f *BlockForger) checkAndForgeLeiosEB(
+	slot uint64,
+	excludedTxHashes map[string]struct{},
+) (*LeiosEndorserBlockAnnouncement, error) {
 	allowed, reason, err := f.leiosChecker.MayProduceEndorserBlock(slot)
 	if err != nil {
-		return fmt.Errorf("leios produce check: %w", err)
+		return nil, fmt.Errorf("leios produce check: %w", err)
 	}
 	if !allowed {
 		f.logger.Debug(
@@ -784,16 +953,26 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 		if f.metrics != nil {
 			f.metrics.leiosEbSkipped.WithLabelValues(reason).Inc()
 		}
-		return nil
+		return nil, nil
 	}
 
-	txs := f.leiosMempool.Transactions()
+	allTxs := f.leiosMempool.Transactions()
+	txs := allTxs
+	if len(excludedTxHashes) > 0 {
+		txs = make([]MempoolTransaction, 0, len(allTxs))
+		for _, tx := range allTxs {
+			if _, excluded := excludedTxHashes[tx.Hash]; excluded {
+				continue
+			}
+			txs = append(txs, tx)
+		}
+	}
 	if len(txs) == 0 {
 		f.logger.Debug("leios EB skipped: mempool empty", "slot", slot)
 		if f.metrics != nil {
 			f.metrics.leiosEbSkipped.WithLabelValues("no_transactions").Inc()
 		}
-		return nil
+		return nil, nil
 	}
 
 	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
@@ -803,9 +982,9 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 			if f.metrics != nil {
 				f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").Inc()
 			}
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("build leios EB: %w", err)
+		return nil, fmt.Errorf("build leios EB: %w", err)
 	}
 
 	// Pass the transaction bodies alongside the manifest so the endorser
@@ -817,7 +996,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 		ebCbor,
 		bodies,
 	); err != nil {
-		return fmt.Errorf("broadcast leios EB: %w", err)
+		return nil, fmt.Errorf("broadcast leios EB: %w", err)
 	}
 
 	f.logger.Info(
@@ -829,7 +1008,10 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 	if f.metrics != nil {
 		f.metrics.leiosEbForged.Inc()
 	}
-	return nil
+	return &LeiosEndorserBlockAnnouncement{
+		Hash: lcommon.NewBlake2b256(ebHash),
+		Size: uint64(len(ebCbor)),
+	}, nil
 }
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.

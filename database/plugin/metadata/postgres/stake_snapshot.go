@@ -73,6 +73,7 @@ func (d *MetadataStorePostgres) SavePoolStakeSnapshots(
 				"total_stake",
 				"delegator_count",
 				"captured_slot",
+				"calculation_version",
 				"reward_account_auto_vote",
 				"reward_account_auto_vote_resolved",
 			}),
@@ -341,28 +342,6 @@ func (d *MetadataStorePostgres) DeleteEpochSummariesAfterEpoch(
 	if err := db.Where("epoch > ?", epoch).Delete(&models.EpochSummary{}).Error; err != nil {
 		return fmt.Errorf(
 			"DeleteEpochSummariesAfterEpoch: failed to delete summaries after epoch %d: %w",
-			epoch,
-			err,
-		)
-	}
-	return nil
-}
-
-// DeleteEpochSummariesBeforeEpoch deletes all epoch summaries before a given epoch.
-func (d *MetadataStorePostgres) DeleteEpochSummariesBeforeEpoch(
-	epoch uint64,
-	txn types.Txn,
-) error {
-	db, err := d.resolveDB(txn)
-	if err != nil {
-		return fmt.Errorf(
-			"DeleteEpochSummariesBeforeEpoch: resolve db: %w",
-			err,
-		)
-	}
-	if err := db.Where("epoch < ?", epoch).Delete(&models.EpochSummary{}).Error; err != nil {
-		return fmt.Errorf(
-			"DeleteEpochSummariesBeforeEpoch: failed to delete summaries before epoch %d: %w",
 			epoch,
 			err,
 		)

@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +41,16 @@ func serveRun(
 	// did not complete. The user must finish (or re-run) the sync
 	// before starting the node.
 	if err := checkSyncState(cfg, logger); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
+	// CIP-0163: refuse to serve a Mithril-bootstrapped database with the
+	// delegator-inactivity gate enabled. This closes the "run 'mithril sync'
+	// with the gate off, then restart with it on" path that Guard 1 in the
+	// sync command cannot see; a bootstrapped node cannot reproduce a
+	// genesis-synced node's expiration state.
+	if err := checkMithrilInactivityCompat(cfg, logger); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
@@ -82,24 +94,25 @@ func checkSyncState(
 	cfg *config.Config,
 	logger *slog.Logger,
 ) error {
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DatabasePath,
-		Logger:         logger,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        string(cfg.RunMode),
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: 1,
-		StorageMode:    cfg.StorageMode,
-		Network:        cfg.Network,
-	})
+	runtime, err := openConfiguredDatabase(
+		context.Background(), cfg, logger, 1,
+	)
 	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	db, runtimeErr := runtimeDatabase(runtime)
+	if runtimeErr != nil {
+		return runtimeErr
+	}
+	defer runtime.Close(context.Background()) //nolint:contextcheck
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// A commit-timestamp mismatch is recoverable downstream in
 		// node.Run. We only need to read sync_status here, which
 		// works on the partially-initialised db handle returned with
 		// the error.
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) || db == nil {
-			return fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 		logger.Warn(
 			"sync state check observed commit timestamp mismatch; "+
@@ -108,7 +121,6 @@ func checkSyncState(
 			"blob_timestamp", cte.BlobTimestamp,
 		)
 	}
-	defer db.Close()
 
 	val, err := db.GetSyncState("sync_status", nil)
 	if err != nil {
@@ -131,28 +143,71 @@ func checkSyncState(
 	)
 }
 
+// checkMithrilInactivityCompat refuses to start a node that has the CIP-0163
+// delegator-inactivity gate enabled on a database populated by a Mithril
+// bootstrap. Reward-account expiration state is dingo-only and absent from the
+// cardano-ledger Mithril snapshot, and cannot be reconstructed after import, so
+// serving such a database would diverge from a genesis-synced node. A no-op
+// when the gate is off or the database was not Mithril-bootstrapped.
+func checkMithrilInactivityCompat(
+	cfg *config.Config,
+	logger *slog.Logger,
+) error {
+	if !cfg.DelegatorInactivityEnabled {
+		return nil
+	}
+	runtime, err := openConfiguredDatabase(
+		context.Background(), cfg, logger, 1,
+	)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	db, runtimeErr := runtimeDatabase(runtime)
+	if runtimeErr != nil {
+		return runtimeErr
+	}
+	defer runtime.Close(context.Background()) //nolint:contextcheck
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
+		// A commit-timestamp mismatch is recovered downstream in node.Run;
+		// the marker read works on the partially-initialised handle.
+		var cte database.CommitTimestampError
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
+		}
+	}
+
+	bootstrapped, err := mithril.WasBootstrapped(db)
+	if err != nil {
+		return fmt.Errorf("checking mithril bootstrap marker: %w", err)
+	}
+	if bootstrapped {
+		return errMithrilInactivityIncompatible()
+	}
+	return nil
+}
+
 // repairDeferredIndexes rebuilds any deferred metadata indexes left
 // outstanding by a prior interrupted bulk-load run.
 func repairDeferredIndexes(
 	cfg *config.Config, logger *slog.Logger,
 ) error {
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DatabasePath,
-		Logger:         logger,
-		Network:        cfg.Network,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        string(cfg.RunMode),
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
-		StorageMode:    cfg.StorageMode,
-	})
+	runtime, err := openConfiguredDatabase(
+		context.Background(), cfg, logger, cfg.DatabaseWorkers,
+	)
 	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	db, runtimeErr := runtimeDatabase(runtime)
+	if runtimeErr != nil {
+		return runtimeErr
+	}
+	defer runtime.Close(context.Background()) //nolint:contextcheck
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) || db == nil {
-			return fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
-	defer db.Close()
 	return node.RepairDeferredIndexes(db, logger)
 }
 
@@ -188,24 +243,25 @@ func resumeBackfill(
 		)
 	}
 
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DatabasePath,
-		Logger:         logger,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        string(cfg.RunMode),
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
-		StorageMode:    cfg.StorageMode,
-		Network:        cfg.Network,
-	})
+	runtime, err := openConfiguredDatabase(
+		ctx, cfg, logger, cfg.DatabaseWorkers,
+	)
 	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	db, runtimeErr := runtimeDatabase(runtime)
+	if runtimeErr != nil {
+		return runtimeErr
+	}
+	defer runtime.Close(context.Background()) //nolint:contextcheck
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Backfill writes through full transactions which heal a
 		// commit-timestamp mismatch as it makes progress, and
 		// node.Run will run a full recovery pass afterwards. So a
 		// recoverable mismatch should not block the resume.
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) || db == nil {
-			return fmt.Errorf("opening database: %w", err)
+		if !errors.As(recoveryErr, &cte) {
+			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 		logger.Warn(
 			"backfill observed commit timestamp mismatch; "+
@@ -215,7 +271,6 @@ func resumeBackfill(
 			"blob_timestamp", cte.BlobTimestamp,
 		)
 	}
-	defer db.Close()
 
 	bf := node.NewBackfill(db, nodeCfg, logger)
 	if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
@@ -267,6 +322,39 @@ func resumeBackfill(
 		return err
 	}
 	return nil
+}
+
+func openConfiguredDatabase(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	maxConnections int,
+) (*internalplugins.DatabaseRuntime, error) {
+	return internalplugins.OpenDatabase(
+		ctx,
+		&database.Config{
+			DataDir: cfg.DatabasePath, Logger: logger,
+			StorageMode: cfg.StorageMode, Network: cfg.Network,
+		},
+		internalplugins.StorageSelections{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		internalplugins.StorageDependencies{
+			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
+			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
+			Logger: logger,
+		},
+	)
+}
+
+func runtimeDatabase(
+	runtime *internalplugins.DatabaseRuntime,
+) (*database.Database, error) {
+	if runtime == nil || runtime.Database == nil {
+		return nil, errors.New("database runtime did not provide a database")
+	}
+	return runtime.Database, nil
 }
 
 func clearBackfillSyncStatus(db *database.Database) error {

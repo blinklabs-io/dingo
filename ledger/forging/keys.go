@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -398,18 +397,17 @@ func (pc *PoolCredentials) PeriodsRemaining(currentPeriod uint64) uint64 {
 }
 
 // ValidateKESPeriod checks that the loaded operational certificate's KES
-// period is plausible at wall-clock time `now`, given the chain's Shelley
-// genesis. A non-nil result means the node should refuse to start: either
-// the opcert claims a period that hasn't started yet (rotated key staged
-// too early, or wrong network) or the opcert has expired and needs to be
-// rotated.
+// period is plausible at currentSlot, given the chain's Shelley genesis. A
+// non-nil result means the node should refuse to start: either the opcert
+// claims a period that hasn't started yet (rotated key staged too early, or
+// wrong network) or the opcert has expired and needs to be rotated.
 //
 // The protocol-level expiry uses MaxKESEvolutions from genesis rather
 // than the raw 2^depth ceiling, so this matches the chain's view of when
 // an opcert stops being valid.
 func (pc *PoolCredentials) ValidateKESPeriod(
 	genesis *shelley.ShelleyGenesis,
-	now time.Time,
+	currentSlot uint64,
 ) error {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -420,7 +418,7 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 	if genesis == nil {
 		return errors.New("shelley genesis is required")
 	}
-	current, err := CurrentKESPeriod(genesis, now)
+	current, err := CurrentKESPeriodFromGenesis(genesis, currentSlot)
 	if err != nil {
 		return err
 	}

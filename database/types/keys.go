@@ -118,6 +118,20 @@ func TxBlobKey(txHash []byte) []byte {
 	return key
 }
 
+// PoolCredentialStakeKey produces the binary map key used for stake belonging
+// to a credential delegated to a particular pool.
+func PoolCredentialStakeKey(
+	poolKeyHash []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+) string {
+	key := make([]byte, 0, len(poolKeyHash)+1+len(stakingKey))
+	key = append(key, poolKeyHash...)
+	key = append(key, credentialTag)
+	key = append(key, stakingKey...)
+	return string(key)
+}
+
 const (
 	// LeiosEBManifestKeyPrefix is the key prefix for storing raw Leios
 	// endorser-block manifest CBOR (the bytes received over leios-fetch

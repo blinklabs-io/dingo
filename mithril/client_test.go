@@ -669,31 +669,64 @@ func TestSignedEntityTypeCardanoTransactionsFeedHash(t *testing.T) {
 }
 
 func TestNetworkConfigForNetwork(t *testing.T) {
-	cfg, err := NetworkConfigForNetwork("preview")
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		"https://aggregator.pre-release-preview.api.mithril.network/aggregator",
-		cfg.AggregatorURL,
-	)
-	require.Contains(t, cfg.GenesisVerificationKeyURL, "/preview/genesis.vkey")
-	require.Contains(
-		t,
-		cfg.AncillaryVerificationKeyURL,
-		"/preview/genesis-ancillary.vkey",
-	)
+	const keyURLBase = "https://raw.githubusercontent.com/" +
+		"IntersectMBO/mithril/main/mithril-infra/configuration/"
+	testCases := map[string]NetworkConfig{
+		"mainnet": {
+			AggregatorURL: "https://aggregator.release-mainnet.api." +
+				"mithril.network/aggregator",
+			GenesisVerificationKeyURL: keyURLBase +
+				"release-mainnet/genesis.vkey",
+			AncillaryVerificationKeyURL: keyURLBase +
+				"release-mainnet/ancillary.vkey",
+		},
+		"preprod": {
+			AggregatorURL: "https://aggregator.release-preprod.api." +
+				"mithril.network/aggregator",
+			GenesisVerificationKeyURL: keyURLBase +
+				"release-preprod/genesis.vkey",
+			AncillaryVerificationKeyURL: keyURLBase +
+				"release-preprod/ancillary.vkey",
+		},
+		"preview": {
+			AggregatorURL: "https://aggregator.pre-release-preview.api." +
+				"mithril.network/aggregator",
+			GenesisVerificationKeyURL: keyURLBase +
+				"pre-release-preview/genesis.vkey",
+			AncillaryVerificationKeyURL: keyURLBase +
+				"pre-release-preview/ancillary.vkey",
+		},
+	}
+
+	for network, expected := range testCases {
+		t.Run(network, func(t *testing.T) {
+			cfg, err := NetworkConfigForNetwork(network)
+			require.NoError(t, err)
+			require.Equal(t, expected, cfg)
+		})
+	}
 }
 
 func TestGenesisVerificationKeyURLForNetwork(t *testing.T) {
 	url, err := GenesisVerificationKeyURLForNetwork("mainnet")
 	require.NoError(t, err)
-	require.Contains(t, url, "/mainnet/genesis.vkey")
+	require.Equal(
+		t,
+		"https://raw.githubusercontent.com/IntersectMBO/mithril/main/"+
+			"mithril-infra/configuration/release-mainnet/genesis.vkey",
+		url,
+	)
 }
 
 func TestAncillaryVerificationKeyURLForNetwork(t *testing.T) {
 	url, err := AncillaryVerificationKeyURLForNetwork("preprod")
 	require.NoError(t, err)
-	require.Contains(t, url, "/preprod/genesis-ancillary.vkey")
+	require.Equal(
+		t,
+		"https://raw.githubusercontent.com/IntersectMBO/mithril/main/"+
+			"mithril-infra/configuration/release-preprod/ancillary.vkey",
+		url,
+	)
 }
 
 func TestCertificateAggregateVerificationKeyBytes(t *testing.T) {
@@ -1444,7 +1477,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 
 	downloadDir := t.TempDir()
 
-	result, err := Bootstrap(
+	_, err = Bootstrap(
 		context.Background(),
 		BootstrapConfig{
 			Network:                "preprod",
@@ -1455,11 +1488,6 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 			VerifyCertificateChain: true,
 		},
 	)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(
-		t,
-		"abc123def456789012345678",
-		result.Snapshot.Digest,
-	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "signed ancillary state")
 }

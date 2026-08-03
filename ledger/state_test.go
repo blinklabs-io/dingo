@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -968,7 +969,7 @@ func newNonceReadyTestLedgerState(
 ) *LedgerState {
 	t.Helper()
 
-	return &LedgerState{
+	ls := &LedgerState{
 		currentEra: eras.ShelleyEraDesc,
 		currentEpoch: models.Epoch{
 			EpochId:             10,
@@ -991,6 +992,8 @@ func newNonceReadyTestLedgerState(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
+	return ls
 }
 
 func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
@@ -1111,6 +1114,7 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(1100)
+	ls.publishSnapshotsLocked()
 
 	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
 	require.True(t, ok)
@@ -1118,10 +1122,8 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 }
 
 func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
-
 	tipNonce := bytes.Repeat([]byte{0x22}, 32)
 	candidateNonce := bytes.Repeat([]byte{0x33}, 32)
 
@@ -1158,6 +1160,7 @@ func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	got := ls.computeNextEpochNonce(ls.currentEpoch, ls.currentEra)
 	require.Equal(t, candidateNonce, got)
@@ -1224,6 +1227,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(1100)
+	ls.publishSnapshotsLocked()
 
 	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
 	require.False(t, ok)
@@ -1717,14 +1721,10 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	)
 
 	// Create in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:             db,
 		currentEra:     eras.ByronEraDesc,
@@ -1823,14 +1823,10 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ByronEraDesc,
@@ -2032,14 +2028,10 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
@@ -2134,14 +2126,10 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
@@ -2266,14 +2254,10 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
@@ -2393,13 +2377,10 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 // TestTransitionToEra_ErrorHandling tests error conditions in transitionToEra
 func TestTransitionToEra_ErrorHandling(t *testing.T) {
 	t.Run("invalid era ID returns error", func(t *testing.T) {
-		db, err := database.New(&database.Config{
-			BlobPlugin:     "badger",
-			MetadataPlugin: "sqlite",
-			DataDir:        "",
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir: "",
 		})
 		require.NoError(t, err)
-		defer db.Close()
 
 		ls := &LedgerState{
 			db:         db,
@@ -2441,8 +2422,12 @@ func makeTestPoint(block models.Block) pcommon.Point {
 	return pcommon.NewPoint(block.Slot, block.Hash)
 }
 
-// TestCleanupOrphanedBlobs_NoBlobStore tests that cleanup gracefully handles nil blob store
-func TestCleanupOrphanedBlobs_NoBlobStore(t *testing.T) {
+// TestCleanupOrphanedBlobs_EmptyBlobStore verifies cleanup returns without
+// error against a real (badger) blob store that has no stored blocks, so there
+// are no orphaned blobs to remove. dbtest.NewDatabase always composes a badger
+// blob store, and database.New now requires a non-nil blob store, so a
+// no-blob-store database is no longer constructible.
+func TestCleanupOrphanedBlobs_EmptyBlobStore(t *testing.T) {
 	ls := &LedgerState{
 		db: nil, // No database
 		config: LedgerStateConfig{
@@ -2450,18 +2435,15 @@ func TestCleanupOrphanedBlobs_NoBlobStore(t *testing.T) {
 		},
 	}
 
-	// Create a mock database that returns nil blob store
-	mockDB, err := database.New(&database.Config{
-		BlobPlugin:     "",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	// Create a database backed by a real (badger) blob store with no blocks.
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer mockDB.Close()
 
-	ls.db = mockDB
+	ls.db = db
 
-	// Cleanup should return nil when there's no blob store
+	// Cleanup should return nil when there are no orphaned blobs.
 	err = ls.cleanupOrphanedBlobs(100)
 	assert.NoError(t, err)
 }
@@ -2469,14 +2451,10 @@ func TestCleanupOrphanedBlobs_NoBlobStore(t *testing.T) {
 // TestCleanupOrphanedBlobs_NoOrphans tests cleanup when there are no orphaned blocks
 func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
 	// Create an in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -2506,14 +2484,10 @@ func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
 // TestCleanupOrphanedBlobs_WithOrphans tests cleanup when orphaned blocks exist
 func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
 	// Create an in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -2550,14 +2524,10 @@ func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
 // TestCleanupOrphanedBlobs_SlotZero tests cleanup behavior when tip is at slot 0
 func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 	// Create an in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -2650,14 +2620,10 @@ func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 }
 
 func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 5)
 	for slot := uint64(1); slot <= 5; slot++ {
 		block := makeTestBlock(slot, slot)
@@ -2696,14 +2662,10 @@ func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 }
 
 func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 256)
 	for slot := uint64(1); slot <= 256; slot++ {
 		block := makeTestBlock(slot, slot)
@@ -2741,14 +2703,10 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 }
 
 func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 256)
 	for slot := uint64(1); slot <= 256; slot++ {
 		block := makeTestBlock(slot, slot)
@@ -3119,14 +3077,10 @@ func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := []models.Block{
 		makeTestBlock(10, 1),
 		makeTestBlock(20, 2),
@@ -3179,14 +3133,10 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := []models.Block{
 		makeTestBlock(10, 1),
 		makeTestBlock(20, 2),
@@ -3231,14 +3181,10 @@ func TestFragmentDensityIgnoresByronEbbBlockNumber(t *testing.T) {
 func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 5)
 	for slot := uint64(1); slot <= 5; slot++ {
 		block := makeTestBlock(slot, slot)
@@ -4049,6 +3995,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			false,
 			false,
 			nil,
+			envelopeParent{},
 			nil,
 			eras.BabbageEraDesc,
 			nil,
@@ -4063,4 +4010,121 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, uint64(4), sequence)
+}
+
+func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	certified, err := cbor.Encode(true)
+	require.NoError(t, err)
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 2,
+					Slot:        10,
+					PrevHash: lcommon.NewBlake2b256(
+						[]byte("missing-cert-rb-parent"),
+					),
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{certified},
+		},
+	}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func(
+				[]byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return 0, nil, false
+			},
+		},
+	}
+
+	err = db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: block.SlotNumber()},
+			block,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			nil,
+			eras.DijkstraEraDesc,
+			nil,
+			nil,
+		)
+		return err
+	})
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+}
+
+func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
+	t *testing.T,
+) {
+	tests := []struct {
+		name     string
+		applyTxs bool
+		ebTxs    []cbor.RawMessage
+		applied  int
+		want     string
+		notWant  []string
+	}{
+		{
+			name:     "empty CIP block",
+			applyTxs: true,
+			want:     "Leios endorser block has no transactions",
+			notWant: []string{
+				"skipped already-applied Leios endorser block transactions",
+				"stored Leios endorser block without applying to UTxO",
+			},
+		},
+		{
+			name:     "CIP deduplicated block",
+			applyTxs: true,
+			ebTxs:    []cbor.RawMessage{{0x80}},
+			want:     "skipped already-applied Leios endorser block transactions",
+			notWant:  []string{"Leios endorser block has no transactions"},
+		},
+		{
+			name:  "Haskell deduplicated block",
+			ebTxs: []cbor.RawMessage{{0x80}},
+			want:  "skipped already-applied Leios endorser block transactions",
+			notWant: []string{
+				"Leios endorser block has no transactions",
+				"stored Leios endorser block without applying to UTxO",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			ls := &LedgerState{
+				config: LedgerStateConfig{
+					LeiosApplyEndorserBlockTxs: tc.applyTxs,
+					Logger: slog.New(slog.NewTextHandler(
+						&logBuf,
+						&slog.HandlerOptions{Level: slog.LevelDebug},
+					)),
+				},
+			}
+
+			ls.logLeiosEndorserBlockApplyResult(
+				ocommon.Point{Slot: 10},
+				20,
+				tc.ebTxs,
+				tc.applied,
+			)
+
+			logs := logBuf.String()
+			assert.Contains(t, logs, tc.want)
+			for _, notWant := range tc.notWant {
+				assert.NotContains(t, logs, notWant)
+			}
+		})
+	}
 }

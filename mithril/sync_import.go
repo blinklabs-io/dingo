@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -29,8 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledgerstate"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -98,47 +97,30 @@ func updateMithrilReadyState(
 	syncStatus string,
 	clearSyncState bool,
 ) error {
-	recentBlocks, err := database.BlocksRecent(db, 1)
+	ledgerTip, err := db.GetTip(nil)
 	if err != nil {
-		return fmt.Errorf("reading final chain tip: %w", err)
+		return fmt.Errorf("reading imported ledger tip: %w", err)
 	}
-	if len(recentBlocks) > 0 {
-		chainTip := recentBlocks[0]
-		if err := db.SetTip(
-			ochainsync.Tip{
-				Point: ocommon.Point{
-					Slot: chainTip.Slot,
-					Hash: chainTip.Hash,
-				},
-				BlockNumber: chainTip.Number,
-			},
-			nil,
-		); err != nil {
-			return fmt.Errorf("updating metadata tip: %w", err)
-		}
-		var blocksCopied int
-		if loadResult != nil {
-			blocksCopied = loadResult.BlocksCopied
-		}
-		logger.Info(
-			"metadata tip set",
-			"component", "mithril",
-			"slot", chainTip.Slot,
-			"blocks_loaded", blocksCopied,
+	if ledgerTip.Point.Slot != ledgerStateSlot ||
+		!bytes.Equal(ledgerTip.Point.Hash, ledgerStateHash) {
+		return fmt.Errorf(
+			"imported ledger tip %d.%x does not match stable Mithril anchor %d.%x",
+			ledgerTip.Point.Slot,
+			ledgerTip.Point.Hash,
+			ledgerStateSlot,
+			ledgerStateHash,
 		)
 	}
-
-	// Record the trust boundary as the chain tip AFTER gap closure,
-	// not the Mithril snapshot slot. Gap blocks between the snapshot
-	// slot and chain tip were imported via SetGapBlockTransaction
-	// (no UTxO tracking), so chainsync replay must skip them too.
-	// Fall back to the snapshot slot when no gap blocks were fetched.
-	trustBoundarySlot := ledgerStateSlot
-	trustBoundaryHash := ledgerStateHash
-	if len(recentBlocks) > 0 {
-		trustBoundarySlot = recentBlocks[0].Slot
-		trustBoundaryHash = recentBlocks[0].Hash
+	var blocksCopied int
+	if loadResult != nil {
+		blocksCopied = loadResult.BlocksCopied
 	}
+	logger.Info(
+		"metadata tip retained at stable Mithril anchor",
+		"component", "mithril",
+		"slot", ledgerTip.Point.Slot,
+		"blocks_loaded", blocksCopied,
+	)
 
 	txn := db.MetadataTxn(true)
 	if err := txn.Do(func(txn *database.Txn) error {
@@ -157,17 +139,17 @@ func updateMithrilReadyState(
 		}
 		if err := db.SetSyncState(
 			mithrilLedgerSlotSyncKey,
-			strconv.FormatUint(trustBoundarySlot, 10),
+			strconv.FormatUint(ledgerStateSlot, 10),
 			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"recording mithril ledger slot: %w", err,
 			)
 		}
-		if len(trustBoundaryHash) > 0 {
+		if len(ledgerStateHash) > 0 {
 			if err := db.SetSyncState(
 				mithrilLedgerHashSyncKey,
-				hex.EncodeToString(trustBoundaryHash),
+				hex.EncodeToString(ledgerStateHash),
 				txn,
 			); err != nil {
 				return fmt.Errorf(
@@ -200,6 +182,8 @@ func importLedgerState(
 	logger *slog.Logger,
 	nodeCfg *cardano.CardanoNodeConfig,
 	result *BootstrapResult,
+	reconcile bool,
+	maxTrustedSlot uint64,
 	onLedger func(ledgerstate.ImportProgress),
 ) (ledgerStateSlot uint64, ledgerStateHash []byte, err error) {
 	// Search for ledger state: prefer ancillary dir, fall back to
@@ -211,12 +195,13 @@ func importLedgerState(
 	searchDirs = append(searchDirs, result.ExtractDir)
 
 	var lstatePath string
-	var searchDir string
 	for _, dir := range searchDirs {
-		path, findErr := ledgerstate.FindLedgerStateFile(dir)
+		path, findErr := ledgerstate.FindLedgerStateFileAtOrBefore(
+			dir,
+			maxTrustedSlot,
+		)
 		if findErr == nil {
 			lstatePath = path
-			searchDir = dir
 			break
 		}
 		logger.Debug(
@@ -228,18 +213,18 @@ func importLedgerState(
 	}
 
 	if lstatePath == "" {
-		logger.Warn(
-			"no ledger state file found in snapshot, "+
-				"skipping ledger state import",
-			"component", "mithril",
+		return 0, nil, fmt.Errorf(
+			"no ledger state at or before certified ImmutableDB tip slot %d; "+
+				"refusing to trust a volatile ancillary ledger state",
+			maxTrustedSlot,
 		)
-		return 0, nil, nil
 	}
 
 	logger.Info(
 		"found ledger state file",
 		"component", "mithril",
 		"path", lstatePath,
+		"max_trusted_slot", maxTrustedSlot,
 	)
 
 	// Parse the snapshot
@@ -249,7 +234,7 @@ func importLedgerState(
 	}
 
 	// Check for UTxO-HD tvar file (UTxOs stored separately)
-	tvarPath := ledgerstate.FindUTxOTableFile(searchDir)
+	tvarPath := ledgerstate.FindUTxOTableFileForState(lstatePath)
 	if tvarPath != "" {
 		state.UTxOTablePath = tvarPath
 		logger.Info(
@@ -280,9 +265,11 @@ func importLedgerState(
 		"epoch_nonce", nonceHex,
 	)
 
-	// Build import key for resume tracking
+	// Build import key for resume tracking. A catch-up reconcile must run the
+	// full import pass (so its snapshot key set is complete), so resume is
+	// disabled by leaving the import key empty.
 	importKey := ""
-	if result.Snapshot != nil && result.Snapshot.Digest != "" {
+	if !reconcile && result.Snapshot != nil && result.Snapshot.Digest != "" {
 		digest := result.Snapshot.Digest
 		if len(digest) > 16 {
 			digest = digest[:16]
@@ -302,6 +289,7 @@ func importLedgerState(
 			State:     state,
 			Logger:    logger,
 			ImportKey: importKey,
+			Reconcile: reconcile,
 			EpochLength: epochLengthFromConfig(
 				nodeCfg,
 			),

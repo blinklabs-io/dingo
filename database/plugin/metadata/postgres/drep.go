@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/drepquery"
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -174,35 +175,18 @@ func (d *MetadataStorePostgres) InsertDrepIfAbsent(
 func (d *MetadataStorePostgres) GetDRepVotingPower(
 	credentialTag uint8,
 	drepCredential []byte,
+	expiryEpoch uint64,
 	txn types.Txn,
 ) (uint64, error) {
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return 0, err
 	}
+	sql, args := drepquery.VotingPowerSQL(
+		db.Name(), credentialTag, drepCredential, expiryEpoch,
+	)
 	var totalStake uint64
-	if err := db.Raw(`
-		SELECT COALESCE(SUM(
-				   COALESCE(u.utxo_sum, 0)
-				   + COALESCE(CAST(a.reward AS BIGINT), 0)
-			   ), 0)
-		FROM account a
-		LEFT JOIN (
-			SELECT credential_tag, staking_key,
-				   COALESCE(SUM(CAST(amount AS BIGINT)), 0) AS utxo_sum
-			FROM utxo
-			WHERE deleted_slot = 0
-			  AND EXISTS (
-				  SELECT 1 FROM account ax
-				  WHERE ax.credential_tag = utxo.credential_tag
-				    AND ax.staking_key = utxo.staking_key
-				    AND ax.drep = $1 AND ax.drep_type = $2 AND ax.active = true
-			  )
-			GROUP BY credential_tag, staking_key
-		) u ON u.credential_tag = a.credential_tag
-			AND u.staking_key = a.staking_key
-		WHERE a.drep = $1 AND a.drep_type = $2 AND a.active = true
-	`, drepCredential, credentialTag).Scan(&totalStake).Error; err != nil {
+	if err := db.Raw(sql, args...).Scan(&totalStake).Error; err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
 	return totalStake, nil
@@ -244,6 +228,7 @@ func (d *MetadataStorePostgres) GetDRepDelegators(
 // in a single query. See sqlite/drep.go for the documented contract.
 func (d *MetadataStorePostgres) GetDRepVotingPowerBatch(
 	drepCredentials []models.StakeCredentialRef,
+	expiryEpoch uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
 	out := make(map[string]uint64, len(drepCredentials))
@@ -265,29 +250,10 @@ func (d *MetadataStorePostgres) GetDRepVotingPowerBatch(
 		hashes[i] = ref.Key
 		requested[ref.MapKey()] = struct{}{}
 	}
+	sql := drepquery.VotingPowerBatchSQL(db.Name(), expiryEpoch)
+	args := drepquery.CollectionArgs(hashes, expiryEpoch)
 	var rows []row
-	if err := db.Raw(`
-		SELECT a.drep AS drep, a.drep_type AS credential_tag,
-			   COALESCE(SUM(
-				   COALESCE(u.utxo_sum, 0)
-				   + COALESCE(CAST(a.reward AS BIGINT), 0)
-			   ), 0) AS stake
-		FROM account a
-		LEFT JOIN (
-			SELECT ax.drep_type, ax.credential_tag, ax.staking_key,
-				   COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0) AS utxo_sum
-			FROM account ax
-			JOIN utxo ON utxo.credential_tag = ax.credential_tag
-			         AND utxo.staking_key = ax.staking_key
-			         AND utxo.deleted_slot = 0
-			WHERE ax.active = true AND ax.drep IN ?
-			GROUP BY ax.drep_type, ax.credential_tag, ax.staking_key
-		) u ON u.credential_tag = a.credential_tag
-			AND u.staking_key = a.staking_key
-			AND u.drep_type = a.drep_type
-		WHERE a.active = true AND a.drep IN ?
-		GROUP BY a.drep, a.drep_type
-	`, hashes, hashes).Scan(&rows).Error; err != nil {
+	if err := db.Raw(sql, args...).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("get drep voting power batch: %w", err)
 	}
 	for _, r := range rows {
@@ -310,6 +276,7 @@ func (d *MetadataStorePostgres) GetDRepVotingPowerBatch(
 // type. It is used for predefined DRep options, which carry no credential.
 func (d *MetadataStorePostgres) GetDRepVotingPowerByType(
 	drepTypes []uint64,
+	expiryEpoch uint64,
 	txn types.Txn,
 ) (map[uint64]uint64, error) {
 	out := make(map[uint64]uint64, len(drepTypes))
@@ -327,36 +294,15 @@ func (d *MetadataStorePostgres) GetDRepVotingPowerByType(
 		DrepType uint64
 		Stake    uint64
 	}
+	sql := drepquery.VotingPowerByTypeSQL(db.Name(), expiryEpoch)
+	args := drepquery.CollectionArgs(drepTypes, expiryEpoch)
 	var rows []row
 	// Aggregate UTxO amounts per staking_key in a subquery before
 	// adding account.reward, otherwise the LEFT JOIN would multiply
 	// the per-account reward by the number of live UTxOs and inflate
 	// the totals. Each account contributes (utxo_sum + reward) once
 	// to its drep_type bucket.
-	if err := db.Raw(`
-		SELECT a.drep_type AS drep_type,
-			   COALESCE(SUM(
-				   COALESCE(u.utxo_sum, 0)
-				   + COALESCE(CAST(a.reward AS BIGINT), 0)
-			   ), 0) AS stake
-		FROM account a
-		LEFT JOIN (
-			SELECT credential_tag, staking_key,
-				   COALESCE(SUM(CAST(amount AS BIGINT)), 0) AS utxo_sum
-			FROM utxo
-			WHERE deleted_slot = 0
-			  AND EXISTS (
-				  SELECT 1 FROM account ax
-				  WHERE ax.credential_tag = utxo.credential_tag
-				    AND ax.staking_key = utxo.staking_key
-				    AND ax.active = true AND ax.drep_type IN ?
-			  )
-			GROUP BY credential_tag, staking_key
-		) u ON u.credential_tag = a.credential_tag
-			AND u.staking_key = a.staking_key
-		WHERE a.active = true AND a.drep_type IN ?
-		GROUP BY a.drep_type
-	`, drepTypes, drepTypes).Scan(&rows).Error; err != nil {
+	if err := db.Raw(sql, args...).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("get drep voting power by type: %w", err)
 	}
 	for _, r := range rows {
@@ -798,4 +744,131 @@ func (d *MetadataStorePostgres) RestoreDrepStateAtSlot(
 	}
 
 	return nil
+}
+
+// GetDreps retrieves every DRep row, including deregistered ones,
+// ordered by registration (added_slot, then insertion id).
+func (d *MetadataStorePostgres) GetDreps(
+	txn types.Txn,
+) ([]models.DrepListRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var dreps []models.DrepListRow
+	// Order by first on-chain appearance of the credential (earliest
+	// registration, update, or delegation reference), which survives
+	// deregister/re-register cycles and matches hosted Blockfrost's
+	// db-sync row ordering. Rows without cert history (core-mode or
+	// pre-backfill databases) fall back to the current registration
+	// slot.
+	const firstSeenSQL = `
+		WITH first_seen AS (
+			SELECT cred, tag, MIN(slot) AS slot FROM (
+				SELECT drep_credential AS cred, credential_tag AS tag,
+				       MIN(added_slot) AS slot
+				FROM registration_drep GROUP BY drep_credential, credential_tag
+				UNION ALL SELECT credential, credential_tag, MIN(added_slot)
+				FROM update_drep GROUP BY credential, credential_tag
+				UNION ALL SELECT drep, drep_type, MIN(added_slot)
+				FROM vote_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+				UNION ALL SELECT drep, drep_type, MIN(added_slot)
+				FROM stake_vote_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+				UNION ALL SELECT drep, drep_type, MIN(added_slot)
+				FROM vote_registration_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+				UNION ALL SELECT drep, drep_type, MIN(added_slot)
+				FROM stake_vote_registration_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+			) u GROUP BY cred, tag
+		),
+		last_reg AS (
+			-- certificate_id filters out the synthetic rows the
+			-- Mithril ledger-state import writes at the bootstrap
+			-- slot; only real on-chain certificates count.
+			SELECT drep_credential AS cred, credential_tag AS tag,
+			       MAX(added_slot) AS slot
+			FROM registration_drep
+			WHERE certificate_id IS NOT NULL AND certificate_id != 0
+			GROUP BY drep_credential, credential_tag
+		)
+		SELECT drep.*, COALESCE(first_seen.slot, drep.added_slot) AS first_seen_slot,
+		       COALESCE(last_reg.slot, 0) AS last_registration_slot
+		FROM drep
+		LEFT JOIN first_seen
+			ON first_seen.cred = drep.credential
+			AND first_seen.tag = drep.credential_tag
+		LEFT JOIN last_reg
+			ON last_reg.cred = drep.credential
+			AND last_reg.tag = drep.credential_tag
+		ORDER BY COALESCE(first_seen.slot, drep.added_slot), drep.id`
+	if err := db.Raw(firstSeenSQL).Scan(&dreps).Error; err != nil {
+		return nil, fmt.Errorf("get dreps: %w", err)
+	}
+	return dreps, nil
+}
+
+// GetPredefinedDrepFirstSeenSlots returns the earliest delegation
+// added_slot per predefined DRep type (AlwaysAbstain,
+// AlwaysNoConfidence). Types never delegated to are absent.
+func (d *MetadataStorePostgres) GetPredefinedDrepFirstSeenSlots(
+	txn types.Txn,
+) (map[uint64]uint64, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	type row struct {
+		DrepType uint64
+		Slot     uint64
+	}
+	var rows []row
+	const sql = `
+		SELECT drep_type, MIN(slot) AS slot FROM (
+			SELECT drep_type, MIN(added_slot) AS slot
+			FROM vote_delegation WHERE drep_type >= 2 GROUP BY drep_type
+			UNION ALL SELECT drep_type, MIN(added_slot)
+			FROM stake_vote_delegation WHERE drep_type >= 2 GROUP BY drep_type
+			UNION ALL SELECT drep_type, MIN(added_slot)
+			FROM vote_registration_delegation WHERE drep_type >= 2 GROUP BY drep_type
+			UNION ALL SELECT drep_type, MIN(added_slot)
+			FROM stake_vote_registration_delegation WHERE drep_type >= 2 GROUP BY drep_type
+		) u GROUP BY drep_type`
+	if err := db.Raw(sql).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf(
+			"get predefined drep first seen slots: %w", err,
+		)
+	}
+	out := make(map[uint64]uint64, len(rows))
+	for _, r := range rows {
+		out[r.DrepType] = r.Slot
+	}
+	return out, nil
+}
+
+// GetDrepLastRegistrationSlot returns the added_slot of the most recent
+// registration certificate for the DRep credential, or 0 when no
+// registration certificate history exists.
+func (d *MetadataStorePostgres) GetDrepLastRegistrationSlot(
+	credentialTag uint8,
+	credential []byte,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var slot uint64
+	if err := db.Model(&models.RegistrationDrep{}).
+		Where(
+			"credential_tag = ? AND drep_credential = ? "+
+				"AND certificate_id IS NOT NULL AND certificate_id != 0",
+			credentialTag,
+			credential,
+		).
+		Select("COALESCE(MAX(added_slot), 0)").
+		Scan(&slot).Error; err != nil {
+		return 0, fmt.Errorf(
+			"get drep last registration slot: %w", err,
+		)
+	}
+	return slot, nil
 }

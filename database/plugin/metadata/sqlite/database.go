@@ -135,6 +135,10 @@ type MetadataStoreSqlite struct {
 	storageMode    string
 	timerMutex     sync.Mutex
 	closed         bool
+	// skipSchemaTemplate forces an in-memory store through the full
+	// migration chain instead of replaying the recorded schema. It exists so
+	// the schema template can be checked against the chain it stands in for.
+	skipSchemaTemplate bool
 }
 
 // New creates a new database
@@ -478,6 +482,22 @@ func (d *MetadataStoreSqlite) Start() error {
 	if err := d.init(); err != nil {
 		return err
 	}
+	// An in-memory store always starts from an empty database, so the
+	// migration chain below always produces the same schema: the model set is
+	// a compile-time constant and every fixup step is a no-op against a
+	// database with no tables. Replay the DDL captured from the first such
+	// migration in this process instead of driving AutoMigrate over ~80 models
+	// again. See migrateInMemoryFromTemplate for why this is schema-identical.
+	if d.dataDir == "" && !d.skipSchemaTemplate {
+		applied, err := d.migrateInMemoryFromTemplate()
+		if err != nil {
+			return err
+		}
+		if applied {
+			success = true
+			return nil
+		}
+	}
 	// Deduplicate pool_stake_snapshot rows before AutoMigrate
 	// creates the unique index idx_pool_stake_epoch_pool.
 	if err := models.DedupePoolStakeSnapshots(
@@ -532,6 +552,22 @@ func (d *MetadataStoreSqlite) Start() error {
 			"account reward delta slot index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateRewardLiveStakePoolIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward live stake pool index migration failed: %w", err,
+		)
+	}
+	// Repair duplicate reward_live_stake rows from pre-index databases before
+	// AutoMigrate creates the credential identity constraint.
+	if err := models.DedupeRewardLiveStake(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward_live_stake dedup failed: %w", err,
+		)
+	}
 	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
 	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
 	// was enabled never enforced these cascades, so orphaned children
@@ -544,6 +580,14 @@ func (d *MetadataStoreSqlite) Start() error {
 			"purging orphaned cascade rows failed: %w", err,
 		)
 	}
+	// Attempt the one-time account.created_slot backfill whenever the account
+	// table predates this process. BackfillAccountCreatedSlot is gated
+	// internally on a durable backfill_checkpoint marker, so it scans once and
+	// is crash-safe: an interrupted run (column added but backfill unfinished)
+	// is retried on the next startup instead of silently stranding rows at 0.
+	// On a fresh database the account table does not exist yet, so there is
+	// nothing to backfill.
+	backfillAccountCreatedSlot := d.db.Migrator().HasTable(&models.Account{})
 	// Create table schemas (uses write connection)
 	d.logger.Debug(
 		"creating table",
@@ -565,6 +609,42 @@ func (d *MetadataStoreSqlite) Start() error {
 	)
 	if err := d.db.AutoMigrate(models.MigrateModels...); err != nil {
 		return err
+	}
+	// Drop the superseded reward_account_output credential index now that
+	// AutoMigrate above has created its spendable-aware replacement.
+	if err := models.MigrateRewardAccountOutputCredentialIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward account output credential index migration failed: %w", err,
+		)
+	}
+	// Drop the now-redundant address_transaction credential/staking index
+	// only now that AutoMigrate (above) has created its
+	// idx_addr_tx_stake_position replacement: this must run after
+	// AutoMigrate, not before, or a crash between the two steps would leave
+	// the table with neither index.
+	if err := models.MigrateAddressTransactionStakePositionIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"address_transaction stake position index migration failed: %w",
+			err,
+		)
+	}
+	if backfillAccountCreatedSlot {
+		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
+			return fmt.Errorf(
+				"account created_slot backfill failed: %w", err,
+			)
+		}
+	}
+	// Record the finished schema so the next in-memory store in this process
+	// can replay it instead of repeating the whole migration chain.
+	if d.dataDir == "" && !d.skipSchemaTemplate {
+		if err := d.captureInMemorySchemaTemplate(); err != nil {
+			return err
+		}
 	}
 	success = true
 	return nil
@@ -707,7 +787,11 @@ func (d *MetadataStoreSqlite) Transaction() types.Txn {
 // ReadTransaction creates a read-only transaction using the read
 // connection pool. For file-based databases this avoids contending
 // with the write connection; for in-memory databases it falls back
-// to the write connection.
+// to the write connection. No explicit isolation level is needed here
+// (unlike the postgres/mysql implementations): SQLite's WAL journal mode
+// (enabled for every file-based database this store opens) gives a
+// transaction a consistent snapshot for its whole lifetime as soon as its
+// first statement runs, regardless of concurrent writers.
 func (d *MetadataStoreSqlite) ReadTransaction() types.Txn {
 	db := d.ReadDB().Begin()
 	if db.Error != nil {

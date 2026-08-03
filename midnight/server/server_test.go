@@ -43,15 +43,25 @@ func freePort(t *testing.T) uint {
 	return uint(port) //nolint:gosec // port is always in range
 }
 
-// startTestServer starts a server on a free loopback port and returns its
-// dial address. The server is stopped on test cleanup.
-func startTestServer(t *testing.T) string {
+// startTestServerConfig starts a server with cfg (Host/Port populated from a
+// free loopback port, overriding whatever cfg set) and returns its dial
+// address. The server is stopped on test cleanup. Shared by every test
+// helper that needs a running server so the start/stop boilerplate and its
+// cleanup ordering live in exactly one place.
+func startTestServerConfig(t *testing.T, cfg server.Config) string {
+	t.Helper()
+	return startTestServerWithConfig(t, cfg)
+}
+
+// startTestServerWithConfig is like startTestServer but lets the caller
+// supply Database/SlotTimer (and any other Config field); Host and Port are
+// always overridden to a free loopback address.
+func startTestServerWithConfig(t *testing.T, cfg server.Config) string {
 	t.Helper()
 	port := freePort(t)
-	srv, err := server.New(server.Config{
-		Host: "127.0.0.1",
-		Port: port,
-	})
+	cfg.Host = "127.0.0.1"
+	cfg.Port = port
+	srv, err := server.New(cfg)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,6 +77,13 @@ func startTestServer(t *testing.T) string {
 	})
 
 	return net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
+}
+
+// startTestServer starts a server on a free loopback port and returns its
+// dial address. The server is stopped on test cleanup.
+func startTestServer(t *testing.T) string {
+	t.Helper()
+	return startTestServerConfig(t, server.Config{})
 }
 
 func dial(t *testing.T, addr string) *grpc.ClientConn {
@@ -87,7 +104,7 @@ func TestStubServiceReturnsUnimplemented(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := client.GetLatestBlock(ctx, &midnight.LatestBlockRequest{})
+	_, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 }
@@ -169,7 +186,7 @@ func TestShutdownOnContextCancel(t *testing.T) {
 	client := midnight.NewMidnightStateClient(dial(t, addr))
 	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer callCancel()
-	_, err = client.GetLatestBlock(callCtx, &midnight.LatestBlockRequest{})
+	_, err = client.GetAssetCreates(callCtx, &midnight.AssetCreatesRequest{})
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 
 	// Cancellation triggers graceful shutdown; once stopped a fresh call no
@@ -190,7 +207,7 @@ func TestShutdownOnContextCancel(t *testing.T) {
 			200*time.Millisecond,
 		)
 		defer probeCancel()
-		_, probeErr := c.GetLatestBlock(probeCtx, &midnight.LatestBlockRequest{})
+		_, probeErr := c.GetAssetCreates(probeCtx, &midnight.AssetCreatesRequest{})
 		return status.Code(probeErr) != codes.Unimplemented
 	}, 5*time.Second, "server did not shut down after context cancel")
 }

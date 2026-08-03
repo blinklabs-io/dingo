@@ -59,18 +59,14 @@ func New(
 	}
 }
 
-// Start starts the HTTP server in a background goroutine.
-func (b *Blockfrost) Start(
-	ctx context.Context,
-) error {
-	b.mu.Lock()
-	if b.httpServer != nil {
-		b.mu.Unlock()
-		return errors.New("server already started")
-	}
-
+// handler builds the HTTP handler for the Blockfrost API,
+// including route registration and middleware.
+func (b *Blockfrost) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", b.handleRoot)
+	// "GET /{$}" matches only the literal root path. Without
+	// "{$}" the pattern would act as a subtree match and
+	// silently catch every unimplemented route.
+	mux.HandleFunc("GET /{$}", b.handleRoot)
 	mux.HandleFunc("GET /health", b.handleHealth)
 	mux.HandleFunc(
 		"GET /api/v0/blocks/latest",
@@ -113,12 +109,40 @@ func (b *Blockfrost) Start(
 		b.handleAsset,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/assets/{asset}/addresses",
+		b.handleAssetAddresses,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools",
+		b.handlePoolsList,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/pools/extended",
 		b.handlePoolsExtended,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/pools/retiring",
+		b.handlePoolsRetiring,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}/metadata",
+		b.handlePoolMetadata,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}",
+		b.handlePoolDetail,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps",
+		b.handleDReps,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/governance/dreps/{drep_id}",
 		b.handleDRep,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}",
+		b.handleAddress,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}/utxos",
@@ -212,20 +236,49 @@ func (b *Blockfrost) Start(
 		"GET /api/v0/accounts/{stake_address}/rewards",
 		b.handleAccountRewardHistory,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/utxos",
+		b.handleAccountUTXOs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/withdrawals",
+		b.handleAccountWithdrawals,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/transactions",
+		b.handleAccountTransactions,
+	)
+
+	// Catch-all for any path not matched above. Registered
+	// last so more specific patterns still take precedence;
+	// ServeMux resolves by pattern specificity, not
+	// registration order.
+	mux.HandleFunc("/", b.handleNotFound)
 
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
-	handler := httpcors.Handler(
+	return httpcors.Handler(
 		http.MaxBytesHandler(mux, maxRequestBodyBytes),
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 		},
 	)
+}
+
+// Start starts the HTTP server in a background goroutine.
+func (b *Blockfrost) Start(
+	ctx context.Context,
+) error {
+	b.mu.Lock()
+	if b.httpServer != nil {
+		b.mu.Unlock()
+		return errors.New("server already started")
+	}
 
 	server := &http.Server{
 		Addr:              b.config.ListenAddress,
-		Handler:           handler,
+		Handler:           b.handler(),
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,

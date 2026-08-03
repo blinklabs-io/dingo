@@ -44,8 +44,9 @@ type flagSpec struct {
 // Ordering controls --help output and error reporting precedence.
 var flagSpecs = []flagSpec{
 	// Core
-	stringFlag("BlobPlugin", "blob", "b", "blob store plugin to use, 'list' to show available"),
-	stringFlag("MetadataPlugin", "metadata", "m", "metadata store plugin to use, 'list' to show available"),
+	stringFlag("Plugins.Storage.Blob.Provider", "blob", "b", "blob store provider"),
+	stringFlag("Plugins.Storage.Metadata.Provider", "metadata", "m", "metadata store provider"),
+	stringFlag("Plugins.Mempool.Provider", "mempool", "", "mempool provider"),
 	stringFlag("DatabasePath", "data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)"),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
@@ -66,7 +67,15 @@ var flagSpecs = []flagSpec{
 	boolFlag("TracingStdout", "tracing-stdout", "export traces to stdout instead of OTLP (requires --tracing; for debugging)"),
 
 	// Networking
-	validatedStringFlag("Network", "network", "n", "Cardano network name (e.g. preview, preprod, mainnet)", ValidateNetworkName),
+	// An explicitly empty --network is allowed: Validate() enforces
+	// that network or networkMagic is set, so a magic-only invocation
+	// can clear a configured network name.
+	validatedStringFlag("Network", "network", "n", "Cardano network name (e.g. preview, preprod, mainnet)", func(v string) error {
+		if v == "" {
+			return nil
+		}
+		return ValidateNetworkName(v)
+	}),
 	uint32Flag("NetworkMagic", "network-magic", "network magic override"),
 	uintFlag("RelayPort", "port", "relay/NtN port"),
 	stringFlag("PrivateBindAddr", "private-bind-addr", "", "private bind address"),
@@ -76,9 +85,9 @@ var flagSpecs = []flagSpec{
 	boolPtrFlag("PeerSharing", "peer-sharing", "enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers; false for block producers)"),
 
 	// APIs
-	uintFlag("UtxorpcPort", "utxorpc-port", "UTxO RPC API port"),
-	uintFlag("BlockfrostPort", "blockfrost-port", "Blockfrost-compatible API port"),
-	uintFlag("MeshPort", "mesh-port", "Mesh API port"),
+	stringFlag("Plugins.API.Utxorpc.Provider", "utxorpc-provider", "", "UTxO RPC API provider"),
+	stringFlag("Plugins.API.Blockfrost.Provider", "blockfrost-provider", "", "Blockfrost API provider"),
+	stringFlag("Plugins.API.Mesh.Provider", "mesh-provider", "", "Mesh API provider"),
 	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
 	durationFlag("OffchainMetadata.Interval", "offchain-metadata-interval", "off-chain metadata fetch interval (0 = default)"),
 	durationFlag("OffchainMetadata.RequestTimeout", "offchain-metadata-request-timeout", "off-chain metadata HTTP request timeout (0 = default)"),
@@ -98,11 +107,6 @@ var flagSpecs = []flagSpec{
 	// History expiry
 	boolFlag("HistoryExpiry.Enabled", "history-expiry-enabled", "enable local immutable block history expiry"),
 	durationFlag("HistoryExpiry.Frequency", "history-expiry-frequency", "history expiry scan frequency"),
-
-	// Mempool
-	int64Flag("MempoolCapacity", "mempool-capacity", "mempool max bytes"),
-	float64Flag("EvictionWatermark", "eviction-watermark", "mempool eviction watermark"),
-	float64Flag("RejectionWatermark", "rejection-watermark", "mempool rejection watermark"),
 
 	// Peer governance
 	intFlag("TargetNumberOfKnownPeers", "target-known-peers", "target number of known peers"),
@@ -141,6 +145,7 @@ var flagSpecs = []flagSpec{
 	boolFlag("GenesisBootstrap.Enabled", "genesis-bootstrap-enabled", "enable Genesis bootstrap mode when starting from origin"),
 	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)"),
 	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
+	intFlag("GenesisBootstrap.CorroborationPeers", "genesis-bootstrap-corroboration-peers", "independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)"),
 
 	// Logging
 	transformStringFlag("Logging.Format", "logging-format", "log output format: text (default) or json", normalizeLoggingValue),
@@ -162,8 +167,21 @@ var flagSpecs = []flagSpec{
 	uint64Flag("ForgeStaleGapThresholdSlots", "forge-stale-gap-threshold-slots", "slot gap threshold for stale slot clock alerts"),
 	boolFlag("ValidateForgedBlock", "validate-forged-block", "validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)"),
 
+	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
+	uintFlag("MinPoolMargin", "min-pool-margin", "CIP-23 minimum pool margin in basis points [0,10000] (150 = 1.5%); 0 disables (enable only where every node also enables it)"),
+	// CIP-0163 full-pot reward distribution (consensus-affecting; default off)
+	boolFlag("FullPotRewardsEnabled", "full-pot-rewards-enabled", "enable CIP-0163 full-pot reward distribution (custom networks only unless explicitly unsafe)"),
+	boolFlag("UnsafeFullPotRewardsOnStandardNetworks", "unsafe-full-pot-rewards-on-standard-networks", "allow CIP-0163 full-pot rewards on predefined standard networks; consensus-breaking unless the network has adopted it"),
+	// CIP-0163 reward-account inactivity expiry (consensus-affecting; default off)
+	boolFlag("DelegatorInactivityEnabled", "delegator-inactivity-enabled", "enable CIP-0163 reward-account inactivity expiry (only where every node also enables it)"),
+	uint64Flag("DelegatorInactivity", "delegator-inactivity", "CIP-0163 inactivity window in epochs, in [1,10000] (used when delegator-inactivity-enabled)"),
+
+	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
+	boolFlag("PledgeLeverageEnabled", "pledge-leverage-enabled", "enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)"),
+	uintFlag("PledgeLeverage", "pledge-leverage", "CIP-50 max pledge leverage L in [1,10000] (used when pledge-leverage-enabled)"),
+
 	// Leios voting (experimental)
-	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to hex-encoded BLS12-381 Leios vote signing key"),
+	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar"),
 	stringToStringFlag("LeiosVoterPublicKeys", "leios-voter-public-keys", "Leios voter public key registry: pool key hash hex=public key hex"),
 
 	// Mithril
@@ -201,9 +219,10 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	}
 	applyMidnightNetworkDefaults(cfg)
 	globalConfig = cfg
-	if _, err := LoadTopologyConfig(); err != nil {
-		return fmt.Errorf("loading topology after flags: %w", err)
-	}
+	// Topology is not resolved here: Network and Topology are final at
+	// this point, but the merged configuration has not been validated
+	// yet, so cmd/dingo loads topology once after ApplyDefaults and
+	// Validate.
 	return nil
 }
 

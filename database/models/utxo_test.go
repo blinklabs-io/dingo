@@ -93,3 +93,26 @@ func TestUtxoLedgerToModelPaymentScript(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchesUtxoAddressPatternsRejectsEmptyPattern(t *testing.T) {
+	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	addrBytes, err := addr.Bytes()
+	require.NoError(t, err)
+	match, err := MatchesUtxoAddressPatterns(
+		addr,
+		[]UtxoAddressPattern{
+			{ExactAddress: addrBytes},
+			{},
+		},
+	)
+	require.ErrorIs(t, err, ErrEmptyUtxoAddressPattern)
+	require.False(t, match)
+}

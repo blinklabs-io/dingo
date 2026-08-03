@@ -37,6 +37,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -116,6 +117,7 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -255,6 +257,7 @@ func TestStakePoolsResult_Empty(t *testing.T) {
 func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(nil)
 	require.NoError(t, err)
@@ -300,6 +303,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 		AddedSlot:     100,
 	}))
 	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(nil)
 	require.NoError(t, err)
@@ -615,6 +619,167 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(t *testing.T) 
 	assert.Equal(t, uint64(200), rwds[scriptCred])
 }
 
+func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0x51)
+	cred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(stakeKey),
+	}
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0x52}, 32))
+	txBuilder.WithValid(true)
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0x54}, 32),
+		0,
+	)
+	require.NoError(t, err)
+	txBuilder.WithInputs(input)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(
+			"addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd",
+		).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder.WithOutputs(output)
+	txBuilder.WithCertificates(&lcommon.StakeRegistrationCertificate{
+		StakeCredential: cred,
+	})
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		ocommon.NewPoint(100, bytes.Repeat([]byte{0x53}, 32)),
+		0,
+		map[int]uint64{0: 2_000_000},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	queryCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(stakeKey),
+	}
+	unknownCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(stakeCred28(0x55)),
+	}
+	result, err := ls.queryShelleyStakeDelegDeposits(
+		[]olocalstatequery.StakeCredential{queryCred, unknownCred},
+	)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	deposits, ok := outer[0].(olocalstatequery.StakeDelegDepositsResult)
+	require.True(t, ok)
+	assert.Equal(t, uint64(2_000_000), deposits[queryCred])
+	assert.NotContains(t, deposits, unknownCred)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.StakeDelegDepositsResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2_000_000), decoded[queryCred])
+}
+
+func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0x61)
+	drepKey := stakeCred28(0x62)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Drep:          drepKey,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Active:        true,
+	}))
+	ls := &LedgerState{db: db}
+	cred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(stakeKey),
+	}
+
+	result, err := ls.queryShelleyFilteredVoteDelegatees(
+		[]lcommon.Credential{cred},
+	)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	delegatees, ok := outer[0].(olocalstatequery.FilteredVoteDelegateesResult)
+	require.True(t, ok)
+	queryCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(stakeKey),
+	}
+	require.Contains(t, delegatees, queryCred)
+	assert.Equal(t, int(models.DrepTypeAddrKeyHash), delegatees[queryCred].Type)
+	assert.Equal(t, drepKey, delegatees[queryCred].Credential)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.FilteredVoteDelegateesResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(t, delegatees[queryCred], decoded[queryCred])
+}
+
+func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
+	db := newTestDB(t)
+	txHash := bytes.Repeat([]byte{0x71}, 32)
+	returnAddressBytes := append(
+		[]byte{0xe0},
+		bytes.Repeat([]byte{0x72}, 28)...,
+	)
+	govAction, err := cbor.Encode([]any{uint64(lcommon.GovActionTypeInfo)})
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   1,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 0,
+		ExpiresEpoch:  10,
+		AnchorURL:     "https://example.com/proposal.json",
+		AnchorHash:    bytes.Repeat([]byte{0x73}, 32),
+		Deposit:       100_000_000,
+		ReturnAddress: returnAddressBytes,
+		GovActionCbor: govAction,
+		AddedSlot:     100,
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         proposal.ID,
+		VoterType:          models.VoterTypeDRep,
+		VoterCredentialTag: 0,
+		VoterCredential:    stakeCred28(0x74),
+		Vote:               models.VoteYes,
+		AddedSlot:          101,
+	}, nil))
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryShelleyGetProposals(nil)
+	require.NoError(t, err)
+	outer, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, outer, 1)
+	proposals, ok := outer[0].(olocalstatequery.ProposalsResult)
+	require.True(t, ok)
+	require.Len(t, proposals, 1)
+	assert.Len(t, proposals[0].DRepVotes, 1)
+
+	var procedure conway.ConwayProposalProcedure
+	_, err = cbor.Decode(proposals[0].ProposalProcedure, &procedure)
+	require.NoError(t, err)
+	assert.Equal(t, proposal.Deposit, procedure.Deposit())
+	gotReturnAddress, err := procedure.RewardAccount().Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, returnAddressBytes, gotReturnAddress)
+}
+
 func TestEpochPicoseconds(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -790,6 +955,7 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -860,6 +1026,7 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -922,6 +1089,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -988,6 +1156,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1039,6 +1208,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1079,7 +1249,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 			eras.ConwayEraDesc.Id, slotLenMs, epochLen,
 			nil,
 		))
-		return &LedgerState{
+		ls := &LedgerState{
 			db:             db,
 			currentEra:     eras.ConwayEraDesc,
 			currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
@@ -1089,6 +1259,8 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			},
 		}
+		ls.publishSnapshotsLocked()
+		return ls
 	}
 
 	eraEndSlot := func(ls *LedgerState) uint64 {
@@ -1333,6 +1505,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1431,6 +1604,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1556,6 +1730,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1624,6 +1799,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 // TestQueryChainBlockNoAtGenesis verifies origin is encoded as WithOrigin [0].
 func TestQueryChainBlockNoAtGenesis(t *testing.T) {
 	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryChainBlockNo()
 	assert.NoError(t, err)
 	// WithOrigin at genesis: [0]
@@ -1639,6 +1815,7 @@ func TestQueryChainBlockNoAtBlock(t *testing.T) {
 		},
 		BlockNumber: 12345,
 	}
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryChainBlockNo()
 	assert.NoError(t, err)
 	// WithOrigin at block: [1, blockNo]
@@ -1654,6 +1831,7 @@ func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
 		},
 		BlockNumber: 0,
 	}
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryChainBlockNo()
 	assert.NoError(t, err)
 	// Cardano block numbers are 0-indexed, so block 0 is not origin.

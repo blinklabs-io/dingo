@@ -15,7 +15,10 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,6 +90,170 @@ func TestVoteBackfillPending(t *testing.T) {
 		Completed: true,
 	}) {
 		t.Fatal("completed backfill should not be pending")
+	}
+}
+
+func TestDrepExpiryPredicate(t *testing.T) {
+	tests := map[string]struct {
+		want string
+		ok   bool
+	}{
+		"":        {want: "", ok: true},
+		"expired": {want: drepExpiredPredicate, ok: true},
+		"active":  {want: drepUnexpiredPredicate, ok: true},
+		"bogus":   {want: "", ok: false},
+		"ACTIVE":  {want: "", ok: false},
+	}
+	for filter, expected := range tests {
+		got, ok := drepExpiryPredicate(filter)
+		if ok != expected.ok {
+			t.Fatalf("drepExpiryPredicate(%q) ok = %v, want %v", filter, ok, expected.ok)
+		}
+		if got != expected.want {
+			t.Fatalf("drepExpiryPredicate(%q) = %q, want %q", filter, got, expected.want)
+		}
+	}
+}
+
+func TestDrepExpiryState(t *testing.T) {
+	epoch := func(v int64) sql.NullInt64 {
+		return sql.NullInt64{Int64: v, Valid: true}
+	}
+
+	status, remaining := drepExpiryState(0, epoch(120))
+	if status != "unknown" || remaining != nil {
+		t.Fatalf("zero expiry epoch = (%q, %v), want (unknown, nil)", status, remaining)
+	}
+
+	status, remaining = drepExpiryState(120, sql.NullInt64{})
+	if status != "unknown" || remaining != nil {
+		t.Fatalf("unknown latest epoch = (%q, %v), want (unknown, nil)", status, remaining)
+	}
+
+	status, remaining = drepExpiryState(125, epoch(120))
+	if status != "active" || remaining == nil || *remaining != 5 {
+		t.Fatalf("unexpired = (%q, %v), want (active, 5)", status, remaining)
+	}
+
+	// The Conway tally treats expiry_epoch <= current epoch as expired, so
+	// an equal epoch is already expired rather than about to expire.
+	status, remaining = drepExpiryState(120, epoch(120))
+	if status != "expired" || remaining == nil || *remaining != 0 {
+		t.Fatalf("expiry at current epoch = (%q, %v), want (expired, 0)", status, remaining)
+	}
+
+	status, remaining = drepExpiryState(100, epoch(120))
+	if status != "expired" || remaining == nil || *remaining != -20 {
+		t.Fatalf("expired = (%q, %v), want (expired, -20)", status, remaining)
+	}
+
+	// A bigint column cannot hold an epoch this large, so an unrepresentable
+	// value is reported as unknown rather than wrapped into a bogus count.
+	status, remaining = drepExpiryState(math.MaxUint64, epoch(120))
+	if status != "unknown" || remaining != nil {
+		t.Fatalf("unrepresentable expiry = (%q, %v), want (unknown, nil)", status, remaining)
+	}
+}
+
+func TestFirstSeenSlot(t *testing.T) {
+	if got := firstSeenSlot(4_000, 9_000); got != 4_000 {
+		t.Fatalf("firstSeenSlot with cert history = %d, want 4000", got)
+	}
+	if got := firstSeenSlot(0, 9_000); got != 9_000 {
+		t.Fatalf("firstSeenSlot without cert history = %d, want 9000", got)
+	}
+}
+
+func TestWithdrawalZeroAmount(t *testing.T) {
+	tests := map[string]bool{
+		"":        true,
+		" ":       true,
+		"0":       true,
+		"000":     true,
+		"1":       false,
+		"100":     false,
+		"1000000": false,
+	}
+	for amount, expected := range tests {
+		if got := withdrawalZeroAmount(amount); got != expected {
+			t.Fatalf("withdrawalZeroAmount(%q) = %v, want %v", amount, got, expected)
+		}
+	}
+}
+
+func TestNullSlot(t *testing.T) {
+	if got := nullSlot(sql.NullInt64{}); got != 0 {
+		t.Fatalf("nullSlot(invalid) = %d, want 0", got)
+	}
+	if got := nullSlot(sql.NullInt64{Int64: -5, Valid: true}); got != 0 {
+		t.Fatalf("nullSlot(negative) = %d, want 0", got)
+	}
+	if got := nullSlot(sql.NullInt64{Int64: 77, Valid: true}); got != 77 {
+		t.Fatalf("nullSlot(77) = %d, want 77", got)
+	}
+}
+
+func TestDrepJSONOmitsUnknownExpiryFields(t *testing.T) {
+	body, err := json.Marshal(drep{
+		Credential:   "aa",
+		ExpiryStatus: "unknown",
+	})
+	if err != nil {
+		t.Fatalf("marshal drep: %v", err)
+	}
+	encoded := string(body)
+	for _, field := range []string{
+		"epochsUntilExpiry",
+		"firstSeenSlot",
+		"lastRegistrationSlot",
+	} {
+		if strings.Contains(encoded, field) {
+			t.Fatalf("drep JSON = %s, want %q omitted", encoded, field)
+		}
+	}
+	if !strings.Contains(encoded, `"expiryStatus":"unknown"`) {
+		t.Fatalf("drep JSON = %s, want expiryStatus", encoded)
+	}
+}
+
+func TestHandleDrepsRejectsInvalidFilters(t *testing.T) {
+	// A nil database is safe here: both filters are validated before any
+	// query runs, so a rejected request must never reach the database.
+	a := &app{}
+	for _, query := range []string{
+		"/api/dreps?active=maybe",
+		"/api/dreps?expiry=soon",
+	} {
+		req := httptest.NewRequest(http.MethodGet, query, nil)
+		rec := httptest.NewRecorder()
+		a.handleDreps(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s status = %d, want %d", query, rec.Code, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestHandleStakeLookupRejectsInvalidInput(t *testing.T) {
+	a := &app{}
+	validCredential := strings.Repeat("ab", 28)
+	tests := map[string]string{
+		"short credential": "/api/stake/abcd?credential_tag=0",
+		"missing tag":      "/api/stake/" + validCredential,
+		"invalid tag":      "/api/stake/" + validCredential + "?credential_tag=2",
+	}
+	for name, target := range tests {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		// PathValue is only populated by the router, so set the pattern
+		// values the handler reads directly.
+		req.SetPathValue("credential", strings.TrimSuffix(
+			strings.TrimPrefix(strings.Split(target, "?")[0], "/api/stake/"),
+			"/",
+		))
+		a.handleStakeLookup(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want %d", name, rec.Code, http.StatusBadRequest)
+		}
 	}
 }
 

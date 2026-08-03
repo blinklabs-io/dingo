@@ -102,6 +102,7 @@ func HardForkConway(
 		)
 	}
 	ret := conway.UpgradePParams(*babbagePParams)
+	ret.CostModels = cloneCostModels(ret.CostModels)
 	conwayGenesis := nodeConfig.ConwayGenesis()
 	if err := ret.UpdateFromGenesis(conwayGenesis); err != nil {
 		return nil, err
@@ -948,6 +949,10 @@ func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
 // declared redeemer budget.
 //
 // math.MaxInt64/2 avoids overflow in ExBudget arithmetic (consumed = enormous - remaining).
+//
+// The Alonzo and Babbage phase-2 script validation helpers in this package use
+// the same value, so changing it changes script validation in every era from
+// Alonzo onward.
 const restrictiveEnormousBudget = int64(math.MaxInt64 / 2)
 
 func evaluateConwayPlutusScript(
@@ -960,13 +965,19 @@ func evaluateConwayPlutusScript(
 	txInfos *conwayTxInfoCache,
 	skipFinalSlippageFlush bool,
 ) (lcommon.ExUnits, error, error) {
-	// In restrictive mode (skipFinalSlippageFlush=true), pass an enormous
-	// budget to gouroboros/plutigo so intermediate slippage-batch flushes
-	// never exhaust the budget mid-execution. After execution we compare the
-	// consumed amount (final batch already excluded by SkipFinalSlippageFlush)
-	// against the declared redeemer budget. This matches cardano-node's
-	// restrictingEnormous mode. In exact mode the declared budget is used as
-	// the machine limit (unchanged behavior).
+	// In restrictive mode (skipFinalSlippageFlush=true), ignore the budget
+	// argument as a machine limit and pass an enormous budget to
+	// gouroboros/plutigo so intermediate slippage-batch flushes never exhaust
+	// the budget mid-execution. After execution we compare the consumed amount
+	// (final batch already excluded by SkipFinalSlippageFlush) against the
+	// budget argument, which callers set to the declared redeemer budget. This
+	// matches cardano-node's restrictingEnormous mode.
+	//
+	// In exact mode (skipFinalSlippageFlush=false) the caller-supplied budget
+	// argument is itself the machine limit, and no post-execution comparison is
+	// done. EvaluateTxConway uses that mode and passes tmpPparams.MaxTxExUnits,
+	// so the limit there is the protocol per-transaction maximum rather than
+	// any redeemer-declared budget.
 	evalBudget := budget
 	if skipFinalSlippageFlush {
 		evalBudget = lcommon.ExUnits{
@@ -1103,7 +1114,7 @@ func buildConwayScriptPurpose(
 			ok = false
 		}
 	}()
-	purpose = script.BuildScriptPurpose(
+	purpose, _ = script.BuildScriptPurpose(
 		redeemerKey,
 		resolvedInputs,
 		inputs,

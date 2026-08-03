@@ -56,7 +56,10 @@ type Txn struct {
 	metadataTxn types.Txn
 	lock        sync.Mutex
 	finished    bool
+	committed   bool
 	readWrite   bool
+	afterCommit []func()
+	dispatching bool
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
@@ -125,6 +128,71 @@ func (t *Txn) Blob() types.Txn {
 // IsReadWrite reports whether the transaction was opened for writing.
 func (t *Txn) IsReadWrite() bool {
 	return t.readWrite
+}
+
+// AfterCommit registers fn to run after this transaction commits durably.
+// Callbacks run in registration order, once, only on a successful Commit; a
+// rollback or a failed commit never fires them. Use it for side effects that
+// must reflect committed state only — e.g. metrics that must not count work a
+// rollback discards. Registration concurrent with, or after, a successful
+// Commit joins the serialized callback drain instead of being lost. Callbacks
+// run without the transaction lock held, so they may register another callback.
+// A callback that panics has its panic recovered and logged: it does not
+// propagate to Commit's caller, abort the other callbacks in the drain, or
+// wedge the dispatch loop for callbacks registered afterward.
+func (t *Txn) AfterCommit(fn func()) {
+	if fn == nil {
+		return
+	}
+	t.lock.Lock()
+	if t.finished && !t.committed {
+		t.lock.Unlock()
+		return
+	}
+	t.afterCommit = append(t.afterCommit, fn)
+	if !t.committed || t.dispatching {
+		t.lock.Unlock()
+		return
+	}
+	t.dispatching = true
+	t.lock.Unlock()
+	t.dispatchAfterCommit()
+}
+
+func (t *Txn) dispatchAfterCommit() {
+	for {
+		t.lock.Lock()
+		callbacks := t.afterCommit
+		t.afterCommit = nil
+		if len(callbacks) == 0 {
+			t.dispatching = false
+			t.lock.Unlock()
+			return
+		}
+		t.lock.Unlock()
+		for _, fn := range callbacks {
+			t.runAfterCommitCallback(fn)
+		}
+	}
+}
+
+// runAfterCommitCallback runs a single after-commit callback, recovering and
+// logging any panic. Callbacks run detached from the transaction (after the
+// durable commit, without the txn lock), so a panic must not escape the drain
+// loop: an escaping panic would leave dispatching=true, silently stranding
+// every callback registered afterward, and would drop the callbacks already
+// dequeued for this drain. Panics are logged, not propagated.
+func (t *Txn) runAfterCommitCallback(fn func()) {
+	defer func() {
+		if r := recover(); r != nil && t.db != nil {
+			t.db.logger.Error(
+				"panic in after-commit callback",
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	fn()
 }
 
 type savepointTxn interface {
@@ -202,18 +270,21 @@ func (t *Txn) Do(fn func(*Txn) error) error {
 
 func (t *Txn) Commit() error {
 	t.lock.Lock()
-	defer t.lock.Unlock()
 	if t.finished {
+		t.lock.Unlock()
 		return nil
 	}
 	// Fail fast if neither store is available for a read-write transaction
 	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
 		t.finished = true
+		t.lock.Unlock()
 		return types.ErrNoStoreAvailable
 	}
 	// No need to commit for read-only, but we do want to free up resources
 	if !t.readWrite {
-		return t.rollback()
+		err := t.rollback()
+		t.lock.Unlock()
+		return err
 	}
 	// Update the commit timestamp in both DBs if using both.
 	// Track timestamp for error reporting if partial commit occurs.
@@ -225,6 +296,7 @@ func (t *Txn) Commit() error {
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
 			t.finished = true
+			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
@@ -237,7 +309,46 @@ func (t *Txn) Commit() error {
 				_ = t.metadataTxn.Rollback()
 			}
 			t.finished = true
+			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
+		}
+		// Make the blob commit durable before the metadata commit that
+		// references it. Committing blob first only keeps the blob store ahead
+		// of the metadata tip in memory; on disk the two stores flush on very
+		// different schedules (SQLite at WAL checkpoints, Badger when its
+		// 128MiB memtable rotates, which at chain tip can take hours), so
+		// without this barrier an unclean host shutdown leaves a durable
+		// metadata tip pointing at blocks the blob store discarded. Startup
+		// reconciliation can trim a blob store that is ahead but cannot rebuild
+		// blocks missing beneath the ledger tip; it rolls the ledger back
+		// instead, and that rollback is far more destructive than one fsync per
+		// commit. Only combined transactions pay the cost -- blob-only bulk
+		// paths sync at their own barriers, and Sync is a store-wide flush, so
+		// the next combined commit also makes those batches durable.
+		if blobStore := t.db.Blob(); blobStore != nil && t.metadataTxn != nil {
+			if syncErr := blobStore.Sync(); syncErr != nil {
+				_ = t.metadataTxn.Rollback()
+				t.finished = true
+				// The blob transaction is committed and carries the new commit
+				// timestamp while metadata does not, which is the same
+				// inconsistency a failed metadata commit leaves behind. Report
+				// it as a partial commit so the caller runs the existing
+				// recovery that trims the blob store back to the metadata tip,
+				// rather than leaving an un-reconciled timestamp mismatch for
+				// the next startup to trip over.
+				err := fmt.Errorf("blob sync failed: %w", syncErr)
+				t.db.logger.Error(
+					"partial commit: blob committed, blob sync failed",
+					"error", syncErr,
+					"commit_timestamp", commitTimestamp,
+				)
+				ret := PartialCommitError{
+					MetadataErr:     err,
+					CommitTimestamp: commitTimestamp,
+				}
+				t.lock.Unlock()
+				return ret
+			}
 		}
 	}
 	// Commit metadata transaction
@@ -256,15 +367,22 @@ func (t *Txn) Commit() error {
 				)
 				// Return PartialCommitError so callers can detect with
 				// errors.Is(err, types.ErrPartialCommit) and trigger recovery
-				return PartialCommitError{
+				ret := PartialCommitError{
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
+				t.lock.Unlock()
+				return ret
 			}
+			t.lock.Unlock()
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
 	t.finished = true
+	t.committed = true
+	t.dispatching = true
+	t.lock.Unlock()
+	t.dispatchAfterCommit()
 	return nil
 }
 

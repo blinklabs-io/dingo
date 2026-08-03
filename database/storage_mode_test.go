@@ -26,14 +26,13 @@ import (
 
 func newSettingsTestDB(t *testing.T, dataDir, storageMode, network string) (*Database, error) {
 	t.Helper()
-	return New(&Config{
-		DataDir:        dataDir,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		StorageMode:    storageMode,
-		Network:        network,
-		Logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	return newTestDatabase(t, &Config{
+		DataDir:     dataDir,
+		StorageMode: storageMode,
+		Network:     network,
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
+
 }
 
 func TestNodeSettingsPersistence(t *testing.T) {
@@ -47,12 +46,12 @@ func TestNodeSettingsPersistence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "preview", s.Network)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	// Reopen with same settings: succeeds
 	db, err = newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 }
 
 func TestNodeSettingsRejectStorageModeChange(t *testing.T) {
@@ -60,7 +59,7 @@ func TestNodeSettingsRejectStorageModeChange(t *testing.T) {
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	// Change storage mode → error
 	db, err = newSettingsTestDB(t, dataDir, "api", "preview")
@@ -70,7 +69,7 @@ func TestNodeSettingsRejectStorageModeChange(t *testing.T) {
 	require.Len(t, nsErr.Mismatches, 1)
 	require.Contains(t, nsErr.Mismatches[0], "storage mode")
 	if db != nil {
-		require.NoError(t, db.Close())
+		require.NoError(t, closeTestDatabase(db))
 	}
 }
 
@@ -79,7 +78,7 @@ func TestNodeSettingsRejectNetworkChange(t *testing.T) {
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	// Change network → error
 	db, err = newSettingsTestDB(t, dataDir, "core", "mainnet")
@@ -89,7 +88,7 @@ func TestNodeSettingsRejectNetworkChange(t *testing.T) {
 	require.Len(t, nsErr.Mismatches, 1)
 	require.Contains(t, nsErr.Mismatches[0], "network")
 	if db != nil {
-		require.NoError(t, db.Close())
+		require.NoError(t, closeTestDatabase(db))
 	}
 }
 
@@ -98,11 +97,11 @@ func TestNodeSettingsAllowOpenWithoutConfiguredNetwork(t *testing.T) {
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	db, err = newSettingsTestDB(t, dataDir, "core", "")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 }
 
 func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
@@ -115,7 +114,7 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "", s.Network)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	db, err = newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
@@ -124,7 +123,7 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "preview", s.Network)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 }
 
 func TestNodeSettingsRejectStorageModeChangeWhenNetworkUnset(t *testing.T) {
@@ -132,7 +131,7 @@ func TestNodeSettingsRejectStorageModeChangeWhenNetworkUnset(t *testing.T) {
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	db, err = newSettingsTestDB(t, dataDir, "api", "")
 	require.Error(t, err)
@@ -141,7 +140,7 @@ func TestNodeSettingsRejectStorageModeChangeWhenNetworkUnset(t *testing.T) {
 	require.Len(t, nsErr.Mismatches, 1)
 	require.Contains(t, nsErr.Mismatches[0], "storage mode")
 	if db != nil {
-		require.NoError(t, db.Close())
+		require.NoError(t, closeTestDatabase(db))
 	}
 }
 
@@ -150,7 +149,7 @@ func TestNodeSettingsRejectBothChanged(t *testing.T) {
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	// Change both → error with 2 mismatches
 	db, err = newSettingsTestDB(t, dataDir, "api", "mainnet")
@@ -159,7 +158,7 @@ func TestNodeSettingsRejectBothChanged(t *testing.T) {
 	require.True(t, errors.As(err, &nsErr))
 	require.Len(t, nsErr.Mismatches, 2)
 	if db != nil {
-		require.NoError(t, db.Close())
+		require.NoError(t, closeTestDatabase(db))
 	}
 }
 
@@ -174,12 +173,12 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "api", s.StorageMode)
 	require.Equal(t, "mainnet", s.Network)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	// Reopen: succeeds
 	db, err = newSettingsTestDB(t, dataDir, "api", "mainnet")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	// Attempt downgrade → error
 	db, err = newSettingsTestDB(t, dataDir, "core", "mainnet")
@@ -187,7 +186,7 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 	var nsErr NodeSettingsError
 	require.True(t, errors.As(err, &nsErr))
 	if db != nil {
-		require.NoError(t, db.Close())
+		require.NoError(t, closeTestDatabase(db))
 	}
 }
 
@@ -207,17 +206,17 @@ func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "preview", s.Network)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	db, err = newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDatabase(db))
 
 	db, err = newSettingsTestDB(t, dataDir, "api", "mainnet")
 	require.Error(t, err)
 	var nsErr NodeSettingsError
 	require.True(t, errors.As(err, &nsErr))
 	if db != nil {
-		require.NoError(t, db.Close())
+		require.NoError(t, closeTestDatabase(db))
 	}
 }

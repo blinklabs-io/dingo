@@ -15,12 +15,14 @@
 package ledger
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
 func TestSlotCalc(t *testing.T) {
@@ -67,6 +69,7 @@ func TestSlotCalc(t *testing.T) {
 			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
 		},
 	}
+	testLedgerState.publishSnapshotsLocked()
 	testShelleyGenesis := `{"systemStart": "2022-10-25T00:00:00Z"}`
 	if err := testLedgerState.config.CardanoNodeConfig.LoadShelleyGenesisFromReader(strings.NewReader(testShelleyGenesis)); err != nil {
 		t.Fatalf("unexpected error loading cardano node config: %s", err)
@@ -173,6 +176,7 @@ func TestSlotToEpochProjection(t *testing.T) {
 			},
 		},
 	}
+	testLedgerState.publishSnapshotsLocked()
 
 	testCases := []struct {
 		name          string
@@ -262,6 +266,7 @@ func TestSlotToEpochEmptyCache(t *testing.T) {
 	testLedgerState := &LedgerState{
 		epochCache: []models.Epoch{},
 	}
+	testLedgerState.publishSnapshotsLocked()
 
 	_, err := testLedgerState.SlotToEpoch(100)
 	if err == nil {
@@ -292,13 +297,17 @@ func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
 			},
 		},
 	}
+	testLedgerState.publishSnapshotsLocked()
 
 	// Slot before first known epoch should error
 	_, err := testLedgerState.SlotToEpoch(100)
 	if err == nil {
 		t.Error("expected error for slot before first known epoch")
 	}
-	if err.Error() != "slot is outside the known epoch range" {
+	if !errors.Is(err, hardfork.ErrPastHorizon) {
+		t.Errorf("expected ErrPastHorizon, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "slot is outside the known epoch range") {
 		t.Errorf("unexpected error message: %s", err.Error())
 	}
 

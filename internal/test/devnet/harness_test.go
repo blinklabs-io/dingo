@@ -23,8 +23,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHarnessReferenceNodeSelectsProducer(t *testing.T) {
+	endpoints := []NodeEndpoint{
+		{
+			Name:        "cardano-relay",
+			Role:        "relay",
+			IsReference: true,
+		},
+		{
+			Name:        "cardano-producer",
+			Role:        "producer",
+			IsReference: true,
+		},
+	}
+	h := NewTestHarness(t, endpoints)
+
+	referenceNode, ok := h.ReferenceNode()
+
+	require.True(t, ok)
+	require.Equal(t, endpoints[1], referenceNode)
+}
+
 func TestHarnessGetChainTip(t *testing.T) {
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(DefaultNetworkMagic),
 	)
@@ -46,17 +67,19 @@ func TestHarnessWaitForSlot(t *testing.T) {
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(cfg.NetworkMagic),
 	)
 
 	h.WaitForAllNodesReady(60 * time.Second)
 
-	// Wait for slot 10. Timeout: 10 slots worth of wall-clock time
-	// plus margin for startup variance.
+	// Wait for slot 10. Container health means the node is queryable, but it
+	// can precede the generated network's system start. Include a fixed startup
+	// allowance in addition to slot and block-production time.
 	const targetSlot = 10
-	timeout := time.Duration(targetSlot)*cfg.SlotDuration() +
+	timeout := 30*time.Second +
+		time.Duration(targetSlot)*cfg.SlotDuration() +
 		cfg.ExpectedBlockTime()*5
 	h.WaitForSlot(targetSlot, timeout)
 }
@@ -67,7 +90,7 @@ func TestHarnessVerifyConsensus(t *testing.T) {
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(cfg.NetworkMagic),
 	)

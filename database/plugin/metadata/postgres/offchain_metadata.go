@@ -74,3 +74,18 @@ func (d *MetadataStorePostgres) GetOffchainMetadata(
 	}
 	return offchain.Get(db, sourceType, url, hash)
 }
+
+// GetOffchainMetadataBatch retrieves cached off-chain documents for many
+// URLs in a single query. Postgres's bind-parameter limit (65535) is far
+// above any realistic pool count, so unlike sqlite this does not chunk.
+func (d *MetadataStorePostgres) GetOffchainMetadataBatch(
+	sourceType string,
+	urls []string,
+	txn types.Txn,
+) ([]models.OffchainMetadata, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return offchain.GetBatch(db, sourceType, urls)
+}

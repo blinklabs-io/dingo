@@ -3,21 +3,29 @@ package node
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
@@ -208,7 +216,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
-	// SetPluginOption and the in-memory schema migration.
+	// instance-local provider setup and the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
 		"..",
@@ -371,7 +379,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 ) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
-	// SetPluginOption and the in-memory schema migration.
+	// instance-local provider setup and the in-memory schema migration.
 	immutableDir := filepath.Join(
 		"..",
 		"..",
@@ -431,6 +439,353 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	assert.Equal(t, 0, blocksCopied)
 	assert.Equal(t, immutableTipSlot, resumedImmutableTipSlot)
 	assert.Greater(t, offsetsStored, 0)
+}
+
+func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	stopAfterHook := errors.New("stop after snapshot hook capture")
+	var captured ledger.LedgerStateConfig
+	var capturedHook func(*database.Txn, event.EpochTransitionEvent) error
+	oldNewLedgerStateForLoad := newLedgerStateForLoad
+	oldInstallHook := installEpochBoundarySnapshotHookForLoad
+	newLedgerStateForLoad = func(
+		cfg ledger.LedgerStateConfig,
+	) (*ledger.LedgerState, error) {
+		captured = cfg
+		return &ledger.LedgerState{}, nil
+	}
+	installEpochBoundarySnapshotHookForLoad = func(
+		_ *ledger.LedgerState,
+		fn func(*database.Txn, event.EpochTransitionEvent) error,
+	) error {
+		capturedHook = fn
+		return stopAfterHook
+	}
+	t.Cleanup(func() {
+		newLedgerStateForLoad = oldNewLedgerStateForLoad
+		installEpochBoundarySnapshotHookForLoad = oldInstallHook
+	})
+
+	err := LoadWithDB(
+		context.Background(),
+		&config.Config{Network: "preview"},
+		logger,
+		"unused",
+		db,
+	)
+	require.ErrorIs(t, err, stopAfterHook)
+	require.Same(t, db, captured.Database)
+	require.NotNil(t, captured.ChainManager)
+	require.NotNil(t, capturedHook)
+	require.True(t, captured.TrustedReplay)
+	require.True(t, captured.ManualBlockProcessing)
+}
+
+// TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot
+// feature gate flows from the loaded config into the load-mode ledger config,
+// so `dingo load` computes the same reward state as an enabled serve node
+// instead of the legacy residual-to-reserves behavior.
+func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stopAfterCapture := errors.New("stop after ledger config capture")
+
+	run := func(enabled bool) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		oldNewLedgerStateForLoad := newLedgerStateForLoad
+		newLedgerStateForLoad = func(
+			cfg ledger.LedgerStateConfig,
+		) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stopAfterCapture
+		}
+		t.Cleanup(func() {
+			newLedgerStateForLoad = oldNewLedgerStateForLoad
+		})
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                                "preview",
+				FullPotRewardsEnabled:                  enabled,
+				UnsafeFullPotRewardsOnStandardNetworks: enabled,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stopAfterCapture)
+		return captured
+	}
+
+	require.True(t, run(true).FullPotRewardsEnabled)
+	require.False(t, run(false).FullPotRewardsEnabled)
+}
+
+func TestLoadWithDBRejectsFullPotRewardsOnStandardNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := LoadWithDB(
+		context.Background(),
+		&config.Config{
+			Network:               "preview",
+			FullPotRewardsEnabled: true,
+		},
+		logger,
+		"unused",
+		nil,
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+	)
+}
+
+func TestLoadWithDBRejectsFullPotRewardsFromCardanoConfigNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, test := range []struct {
+		name         string
+		network      string
+		networkMagic uint32
+	}{
+		{name: "configured identity unset"},
+		{
+			name:         "configured identity claims custom network",
+			network:      "devnet",
+			networkMagic: 42,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := LoadWithDB(
+				context.Background(),
+				&config.Config{
+					Network:               test.network,
+					NetworkMagic:          test.networkMagic,
+					CardanoConfig:         "preview/config.json",
+					FullPotRewardsEnabled: true,
+				},
+				logger,
+				"unused",
+				nil,
+			)
+			require.ErrorContains(
+				t,
+				err,
+				"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+			)
+		})
+	}
+}
+
+// TestLoadWithDBPropagatesDelegatorInactivity verifies that load mode
+// (`dingo load`) sets LedgerStateConfig.DelegatorInactivityEnabled /
+// DelegatorInactivity from the operator config, matching serve mode, since a
+// mismatch between load and serve would diverge consensus on replay.
+func TestLoadWithDBPropagatesDelegatorInactivity(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := errors.New("stop after ledger config capture")
+	run := func(enabled bool, epochs uint64) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		old := newLedgerStateForLoad
+		newLedgerStateForLoad = func(cfg ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stop
+		}
+		t.Cleanup(func() { newLedgerStateForLoad = old })
+		err := LoadWithDB(context.Background(),
+			&config.Config{Network: "preview", DelegatorInactivityEnabled: enabled, DelegatorInactivity: epochs},
+			logger, "unused", db)
+		require.ErrorIs(t, err, stop)
+		return captured
+	}
+	on := run(true, 90)
+	require.True(t, on.DelegatorInactivityEnabled)
+	require.Equal(t, uint64(90), on.DelegatorInactivity)
+	require.False(t, run(false, 0).DelegatorInactivityEnabled)
+}
+
+// TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
+// recorded failures reports success, so a clean load is never turned into an
+// error.
+func TestLoadCaptureFailureTrackerCleanReturnsNil(t *testing.T) {
+	t.Parallel()
+	tracker := &loadCaptureFailureTracker{}
+	require.NoError(t, tracker.err())
+}
+
+// TestLoadCaptureFailureTrackerSurfacesFailures verifies that a recorded capture
+// failure surfaces as an error that preserves the first cause and names every
+// failed epoch. This is the load-mode safety net for #1959: the ledger
+// suppresses the authoritative capture error and load has no event-driven
+// fallback, so without this the missing mark/reward snapshot would be silent.
+func TestLoadCaptureFailureTrackerSurfacesFailures(t *testing.T) {
+	t.Parallel()
+	tracker := &loadCaptureFailureTracker{}
+
+	first := errors.New("capture epoch 3 failed")
+	tracker.record(3, first)
+	tracker.record(7, errors.New("capture epoch 7 failed"))
+
+	err := tracker.err()
+	require.Error(t, err)
+	// First error is kept as the representative cause.
+	require.ErrorIs(t, err, first)
+	// Every failed epoch is named for the operator.
+	require.Contains(t, err.Error(), "3")
+	require.Contains(t, err.Error(), "7")
+	require.Contains(t, err.Error(), "re-imported")
+}
+
+// TestLoadCaptureFailureTrackerConcurrentRecord exercises the tracker under the
+// race detector to confirm record/err are safe to call from the replay
+// goroutine while the load goroutine reads the result.
+func TestLoadCaptureFailureTrackerConcurrentRecord(t *testing.T) {
+	t.Parallel()
+	tracker := &loadCaptureFailureTracker{}
+
+	const n = 64
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range uint64(n) {
+		go func(epoch uint64) {
+			defer wg.Done()
+			tracker.record(epoch, fmt.Errorf("capture epoch %d failed", epoch))
+		}(i)
+	}
+	wg.Wait()
+
+	err := tracker.err()
+	require.Error(t, err)
+}
+
+// TestCaptureLoadGenesisSnapshot_BlockProducerFatal verifies that
+// captureLoadGenesisSnapshot returns a fatal, wrapped error for a
+// block-producer load when the underlying capture fails, mirroring
+// node.go's handleGenesisSnapshotError guard for the normal Run path.
+func TestCaptureLoadGenesisSnapshot_BlockProducerFatal(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := snapshot.NewManager(db, nil, logger)
+
+	// Close the database so the capture call fails deterministically.
+	require.NoError(t, closeTestDB(db))
+
+	err := captureLoadGenesisSnapshot(
+		context.Background(),
+		mgr,
+		&config.Config{BlockProducer: true},
+		logger,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to capture genesis snapshot")
+}
+
+// TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues verifies that a
+// non-block-producer load only warns and continues when the capture fails,
+// matching the relay behavior of node.go's handleGenesisSnapshotError.
+func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := snapshot.NewManager(db, nil, logger)
+
+	require.NoError(t, closeTestDB(db))
+
+	err := captureLoadGenesisSnapshot(
+		context.Background(),
+		mgr,
+		&config.Config{BlockProducer: false},
+		logger,
+	)
+	require.NoError(t, err)
+}
+
+// TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking verifies
+// finding B (#1959): replaying a genesis with Shelley-genesis staking (as
+// devnets configure) through `dingo load` must seed the epoch-0 "mark"
+// RewardSnapshot the same way the normal node.Run startup path does via
+// CaptureGenesisSnapshot, or the first reward round applied at the epoch-3
+// boundary is silently skipped.
+//
+// The chain tip is advanced past the immutable testdata tip before calling
+// LoadWithDB so copyBlocksDirect takes its "chain tip already beyond
+// immutable DB tip" short-circuit (see load.go) and skips decoding the real
+// mainnet blocks in testdata, which are unrelated to the devnet genesis
+// configured here. This isolates the test to the genesis-application and
+// genesis-snapshot-capture behavior that finding B is about.
+func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
+	t *testing.T,
+) {
+	// No t.Parallel(): newTestDB shares process-wide plugin state (see
+	// database construction, so concurrent test runs share no provider options and
+	// the in-memory schema migration.
+	immutableDir := filepath.Join(
+		"..",
+		"..",
+		"database",
+		"immutable",
+		"testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	immutableTip, err := imm.GetTip()
+	require.NoError(t, err)
+	require.NotNil(t, immutableTip)
+
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	currentTip := cm.PrimaryChain().Tip()
+	stubSlot := immutableTip.Slot + 5
+	stubHash := bytes.Repeat([]byte{0xAB}, 32)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        stubSlot,
+			Hash:        stubHash,
+			BlockNumber: currentTip.BlockNumber + 1,
+			Type:        0,
+			PrevHash:    currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(stubSlot, stubHash),
+		BlockNumber: currentTip.BlockNumber + 1,
+	}, nil))
+
+	cfg := &config.Config{
+		Network:       "devnet",
+		CardanoConfig: "devnet/config.json",
+	}
+
+	err = LoadWithDB(context.Background(), cfg, logger, immutableDir, db)
+	require.NoError(t, err)
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cfg.CardanoConfig,
+		cfg.Network,
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	shelleyGenesis := nodeCfg.ShelleyGenesis()
+	require.NotNil(t, shelleyGenesis)
+	require.NotEmpty(
+		t,
+		shelleyGenesis.Staking.Pools,
+		"devnet genesis fixture must declare staking for this test to be meaningful",
+	)
+
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(0, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		rewardSnapshot,
+		"expected epoch-0 mark RewardSnapshot after loading a genesis "+
+			"with Shelley staking via `dingo load`",
+	)
 }
 
 func decodeImmutableBlockHeader(
@@ -501,7 +856,7 @@ func TestRunPlannerStats_Idempotent(t *testing.T) {
 
 func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
 	db := newTestDB(t)
-	require.NoError(t, db.Close())
+	require.NoError(t, closeTestDB(db))
 
 	err := RunPlannerStats(db, slog.Default())
 	require.Error(t, err)

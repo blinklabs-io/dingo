@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/blinklabs-io/dingo/plugin"
 )
 
 func (n *Node) Stop() error {
@@ -103,6 +105,10 @@ func (n *Node) shutdown() error {
 	// Phase 1: Stop accepting new work
 	n.config.logger.Info("shutdown phase 1: stopping new work")
 
+	// n.cancel() above asks the stall recycler to stop; wait here so it cannot
+	// race later shutdown phases that close connection, ledger, or DB state.
+	n.waitChainsyncStallRecycler()
+
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {
 		n.blockForger.Stop()
@@ -135,12 +141,6 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.utxorpc != nil {
-		if stopErr := n.utxorpc.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("utxorpc shutdown: %w", stopErr))
-		}
-	}
-
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
@@ -164,21 +164,16 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.blockfrostAPI != nil {
-		if stopErr := n.blockfrostAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
-			)
-		}
-	}
-
-	if n.meshAPI != nil {
-		if stopErr := n.meshAPI.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("mesh API shutdown: %w", stopErr),
-			)
+	// API providers are stopped before consumers and stateful dependencies.
+	if n.pluginHost != nil {
+		for _, capability := range []plugin.Capability{
+			plugin.CapabilityAPIUtxorpc,
+			plugin.CapabilityAPIMesh,
+			plugin.CapabilityAPIBlockfrost,
+		} {
+			if stopErr := n.pluginHost.StopCapability(ctx, capability); stopErr != nil {
+				err = errors.Join(err, stopErr)
+			}
 		}
 	}
 
@@ -200,9 +195,9 @@ func (n *Node) shutdown() error {
 	n.config.logger.Info("shutdown phase 2: draining connections")
 	phase2Start := time.Now()
 
-	if n.mempool != nil {
-		if stopErr := n.mempool.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("mempool shutdown: %w", stopErr))
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(ctx, plugin.CapabilityMempool); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 
@@ -274,6 +269,11 @@ func (n *Node) shutdown() error {
 			)
 		}
 	}
+	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("plugin host shutdown: %w", stopErr))
+		}
+	}
 
 	n.config.logger.Info(
 		"shutdown phase 3 complete",
@@ -292,7 +292,9 @@ func (n *Node) shutdown() error {
 	n.shutdownFuncs = nil
 
 	if n.eventBus != nil {
-		n.eventBus.Stop()
+		// Close (not Stop): this is a terminal shutdown, and Stop restarts the
+		// async-worker pool, leaking those goroutines past node teardown.
+		n.eventBus.Close()
 	}
 
 	n.config.logger.Info(

@@ -15,11 +15,13 @@
 package sqlite
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/rewardstate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -40,6 +42,26 @@ type UtxoAddressKeys struct {
 	StakingKey    []byte `gorm:"column:staking_key"`
 	CredentialTag uint8  `gorm:"column:credential_tag"`
 	OutputIdx     uint32 `gorm:"column:output_idx"`
+}
+
+type utxoRewardStakeRef struct {
+	CredentialTag uint8  `gorm:"column:credential_tag"`
+	StakingKey    []byte `gorm:"column:staking_key"`
+	AddedSlot     uint64 `gorm:"column:added_slot"`
+}
+
+func rewardStakeRefsFromUtxoRewardStakeRefs(
+	rows []utxoRewardStakeRef,
+) map[string]rewardCredentialSlotRef {
+	refs := make(map[string]rewardCredentialSlotRef)
+	for _, row := range rows {
+		addRewardStakeRef(
+			refs,
+			models.NewStakeCredentialRef(row.CredentialTag, row.StakingKey),
+			row.AddedSlot,
+		)
+	}
+	return refs
 }
 
 // GetUtxo returns a Utxo by reference
@@ -279,6 +301,15 @@ func (d *MetadataStoreSqlite) GetUtxosBySlot(
 }
 
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
+//
+// No ORDER BY is applied. Cleanup (UtxosDeleteConsumed) physically deletes every
+// row this returns and loops until none remain, so the order the batch is
+// returned in has no effect on correctness. Omitting the ordering lets SQLite
+// satisfy the deleted_slot range and LIMIT directly from the deleted_slot-leading
+// composite index (idx_utxo_deleted_staking_amount) instead of materializing and
+// sorting the entire matching set (millions of consumed UTxOs on a from-genesis
+// sync) on every batch. An "ORDER BY id DESC" here forced exactly that temp-btree
+// sort because the primary-key id is not aligned with the deleted_slot index.
 func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	slot uint64,
 	limit int,
@@ -289,8 +320,7 @@ func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	if err != nil {
 		return nil, err
 	}
-	db = db.Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
-		Order("id DESC")
+	db = db.Where("deleted_slot > 0 AND deleted_slot <= ?", slot)
 	if limit > 0 {
 		db = db.Limit(limit)
 	}
@@ -347,9 +377,25 @@ func addressWhereClause(
 	}
 }
 
+func addressPatternWhereClause(
+	db *gorm.DB,
+	pattern models.UtxoAddressPattern,
+) (*gorm.DB, error) {
+	var ors []string
+	var args []any
+	if err := models.AppendUtxoAddressPatternOrBranch(
+		&ors,
+		&args,
+		pattern,
+	); err != nil {
+		return nil, err
+	}
+	return db.Where(ors[0], args...), nil
+}
+
 // GetUtxosByAddress returns a list of Utxos
 func (d *MetadataStoreSqlite) GetUtxosByAddress(
-	addr ledger.Address,
+	pattern models.UtxoAddressPattern,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	var ret []models.Utxo
@@ -357,7 +403,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery, err := addressWhereClause(db, addr)
+	addrQuery, err := addressPatternWhereClause(db, pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -409,6 +455,51 @@ func (d *MetadataStoreSqlite) GetControlledAmountByCredential(
 	return total, nil
 }
 
+// GetUtxoPaymentScriptByCredential returns, for the given bounded set of
+// payment-key hashes previously observed under a stake credential, whether
+// each payment credential is a script hash. See the interface doc comment
+// in store.go for the full contract.
+func (d *MetadataStoreSqlite) GetUtxoPaymentScriptByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	paymentKeys [][]byte,
+	txn types.Txn,
+) (map[string]bool, error) {
+	ret := make(map[string]bool, len(paymentKeys))
+	if len(stakingKey) == 0 || len(paymentKeys) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve read DB for payment script by stake credential: %w",
+			err,
+		)
+	}
+	var rows []struct {
+		PaymentKey    []byte
+		PaymentScript bool
+	}
+	if err := db.Model(&models.Utxo{}).
+		Select("DISTINCT payment_key, payment_script").
+		Where(
+			"credential_tag = ? AND staking_key = ? AND payment_key IN ?",
+			credentialTag,
+			stakingKey,
+			paymentKeys,
+		).
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf(
+			"get payment script by stake credential: %w",
+			err,
+		)
+	}
+	for _, row := range rows {
+		ret[hex.EncodeToString(row.PaymentKey)] = row.PaymentScript
+	}
+	return ret, nil
+}
+
 // GetScriptLockedSupply returns the sum of lovelace held in live UTxOs
 // whose payment credential is a script.
 func (d *MetadataStoreSqlite) GetScriptLockedSupply(
@@ -447,26 +538,32 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
+	// Snapshot-imported UTxOs have no producing transaction row. Keep them in
+	// the result and fall back to their import slot for stable ordering.
 	// SQLite treats TRANSACTION as a reserved keyword, so table references
 	// must be quoted when joining against the transaction table.
 	base := db.
 		Table("utxo").
 		Joins(
-			`INNER JOIN "transaction" ON utxo.transaction_id = "transaction".id`,
+			`LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id`,
 		).
 		Where("utxo.deleted_slot = 0")
 
-	addrs := q.Addresses
+	patterns := q.AddressPatterns
 	switch {
 	case q.MatchAllAddresses:
 		// No payment_key / staking_key filter.
-	case len(addrs) == 0:
+	case len(patterns) == 0:
 		base = base.Where("1 = 0")
 	default:
 		var ors []string
 		var args []any
-		for i := range addrs {
-			if err := models.AppendUtxoAddressOrBranch(&ors, &args, addrs[i]); err != nil {
+		for i := range patterns {
+			if err := models.AppendUtxoAddressPatternOrBranch(
+				&ors,
+				&args,
+				patterns[i],
+			); err != nil {
 				return nil, fmt.Errorf(
 					"GetUtxosByAddressWithOrdering: %w",
 					err,
@@ -499,8 +596,8 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 
 	useKeyset := q.Limit > 0 || q.After != nil
 	if useKeyset {
-		slotExpr := `"transaction".slot`
-		biExpr := `"transaction".block_index`
+		slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
+		biExpr := `COALESCE("transaction".block_index, 0)`
 		base = base.Select(fmt.Sprintf(
 			"utxo.*, %s as tx_slot, %s as tx_block_index",
 			slotExpr,
@@ -509,8 +606,9 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 		if q.After != nil {
 			base = base.Where(
 				fmt.Sprintf(
-					"(%s > ?) OR (%s = ? AND %s > ?) OR (%s = ? AND %s = ? AND utxo.output_idx > ?)",
+					"(%s > ?) OR (%s = ? AND %s > ?) OR (%s = ? AND %s = ? AND utxo.output_idx > ?) OR (%s = ? AND %s = ? AND utxo.output_idx = ? AND utxo.tx_id > ?)",
 					slotExpr, slotExpr, biExpr, slotExpr, biExpr,
+					slotExpr, biExpr,
 				),
 				q.After.Slot,
 				q.After.Slot,
@@ -518,20 +616,24 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 				q.After.Slot,
 				q.After.BlockIndex,
 				q.After.OutputIdx,
+				q.After.Slot,
+				q.After.BlockIndex,
+				q.After.OutputIdx,
+				q.After.TxId,
 			)
 		}
 		base = base.Order(
 			fmt.Sprintf(
-				"%s ASC, %s ASC, utxo.output_idx ASC",
+				"%s ASC, %s ASC, utxo.output_idx ASC, utxo.tx_id ASC",
 				slotExpr,
 				biExpr,
 			),
 		)
 	} else {
 		base = base.Select(
-			`utxo.*, "transaction".slot as tx_slot, "transaction".block_index as tx_block_index`,
+			`utxo.*, COALESCE("transaction".slot, utxo.added_slot) as tx_slot, COALESCE("transaction".block_index, 0) as tx_block_index`,
 		).Order(
-			`"transaction".slot ASC, "transaction".block_index ASC, utxo.output_idx ASC`,
+			`COALESCE("transaction".slot, utxo.added_slot) ASC, COALESCE("transaction".block_index, 0) ASC, utxo.output_idx ASC, utxo.tx_id ASC`,
 		)
 	}
 
@@ -574,7 +676,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 // GetUtxosByAddressAtSlot returns UTxOs for an address
 // that existed at a specific slot.
 func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
-	addr lcommon.Address,
+	pattern models.UtxoAddressPattern,
 	slot uint64,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
@@ -583,7 +685,7 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery, err := addressWhereClause(db, addr)
+	addrQuery, err := addressPatternWhereClause(db, pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -644,12 +746,31 @@ func (d *MetadataStoreSqlite) DeleteUtxo(
 	if err != nil {
 		return err
 	}
-	result := db.Where("tx_id = ? AND output_idx = ?", utxoId.Hash, utxoId.Idx).
-		Delete(&models.Utxo{})
-	if result.Error != nil {
-		return result.Error
+	mutation := func(tx *gorm.DB) error {
+		tipSlot, err := rewardstate.CurrentTipSlot(tx)
+		if err != nil {
+			return err
+		}
+		refs, err := rewardStakeRefsFromLiveUtxoIDs(
+			tx,
+			[]models.UtxoId{utxoId},
+			tipSlot,
+		)
+		if err != nil {
+			return err
+		}
+		result := tx.Where(
+			"tx_id = ? AND output_idx = ?", utxoId.Hash, utxoId.Idx,
+		).Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 func (d *MetadataStoreSqlite) DeleteUtxos(
@@ -663,25 +784,39 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 	if err != nil {
 		return err
 	}
-	// Process in chunks to avoid SQLite bind parameter limits
-	for i := 0; i < len(utxos); i += batchChunkSize {
-		end := min(i+batchChunkSize, len(utxos))
-		chunk := utxos[i:end]
+	mutation := func(tx *gorm.DB) error {
+		tipSlot, err := rewardstate.CurrentTipSlot(tx)
+		if err != nil {
+			return err
+		}
+		refs, err := rewardStakeRefsFromLiveUtxoIDs(tx, utxos, tipSlot)
+		if err != nil {
+			return err
+		}
+		// Process in chunks to avoid SQLite bind parameter limits
+		for i := 0; i < len(utxos); i += batchChunkSize {
+			end := min(i+batchChunkSize, len(utxos))
+			chunk := utxos[i:end]
 
-		// Build batch delete with OR conditions for this chunk (preallocated slices)
-		conditions := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk)*2)
-		for _, u := range chunk {
-			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
-			args = append(args, u.Hash, u.Idx)
+			// Build batch delete with OR conditions for this chunk (preallocated slices)
+			conditions := make([]string, 0, len(chunk))
+			args := make([]any, 0, len(chunk)*2)
+			for _, u := range chunk {
+				conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+				args = append(args, u.Hash, u.Idx)
+			}
+			query := strings.Join(conditions, " OR ")
+			result := tx.Where(query, args...).Delete(&models.Utxo{})
+			if result.Error != nil {
+				return result.Error
+			}
 		}
-		query := strings.Join(conditions, " OR ")
-		result := db.Where(query, args...).Delete(&models.Utxo{})
-		if result.Error != nil {
-			return result.Error
-		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
@@ -692,12 +827,31 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	if err != nil {
 		return err
 	}
-	result := db.Where("added_slot > ?", slot).
-		Delete(&models.Utxo{})
-	if result.Error != nil {
-		return result.Error
+	mutation := func(tx *gorm.DB) error {
+		var rows []utxoRewardStakeRef
+		if err := tx.Model(&models.Utxo{}).
+			Where("added_slot > ?", slot).
+			Select("credential_tag", "staking_key").
+			Group("credential_tag, staking_key").
+			Find(&rows).Error; err != nil {
+			return err
+		}
+		refs := rewardStakeRefsFromUtxoRewardStakeRefs(rows)
+		// Pin the recompute slot to the rollback target rather than the deleted
+		// UTxOs' own added_slot (which is > slot), mirroring
+		// SetUtxosNotDeletedAfterSlot, so the live-stake refresh resolves
+		// delegation state as of the rollback boundary.
+		pinRewardStakeRefsToSlot(refs, slot)
+		result := tx.Where("added_slot > ?", slot).Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 // AddUtxos saves a batch of UTxOs directly
@@ -714,16 +868,28 @@ func (d *MetadataStoreSqlite) AddUtxos(
 		return err
 	}
 
-	items := make([]models.Utxo, 0, len(utxos))
-	for _, utxo := range utxos {
-		items = append(items, models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot))
-	}
+	mutation := func(tx *gorm.DB) error {
+		items := make([]models.Utxo, 0, len(utxos))
+		for _, utxo := range utxos {
+			items = append(items, models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot))
+		}
 
-	result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-		DoNothing: true,
-	}).Create(&items)
-	return result.Error
+		result := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(&items)
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(
+			tx,
+			rewardStakeRefsFromUtxos(items),
+		)
+	}
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 // SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot and
@@ -740,56 +906,73 @@ func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 	if err != nil {
 		return err
 	}
-	result := db.Model(&models.Utxo{}).
-		Where(
-			"tx_id = ? AND output_idx = ? AND spent_at_tx_id IS NULL AND (deleted_slot = 0 OR deleted_slot = ?)",
-			input.Id().Bytes(),
-			input.Index(),
-			slot,
-		).
-		Updates(map[string]any{
-			"deleted_slot":   slot,
-			"spent_at_tx_id": spenderTxHash,
-		})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		var count int64
-		existsResult := db.Model(&models.Utxo{}).
+	mutation := func(tx *gorm.DB) error {
+		result := tx.Model(&models.Utxo{}).
 			Where(
-				"tx_id = ? AND output_idx = ?",
+				"tx_id = ? AND output_idx = ? AND spent_at_tx_id IS NULL AND (deleted_slot = 0 OR deleted_slot = ?)",
 				input.Id().Bytes(),
 				input.Index(),
+				slot,
 			).
-			Count(&count)
-		if existsResult.Error != nil {
-			return existsResult.Error
+			Updates(map[string]any{
+				"deleted_slot":   slot,
+				"spent_at_tx_id": spenderTxHash,
+			})
+		if result.Error != nil {
+			return result.Error
 		}
-		if count == 0 {
+		if result.RowsAffected == 0 {
+			var count int64
+			existsResult := tx.Model(&models.Utxo{}).
+				Where(
+					"tx_id = ? AND output_idx = ?",
+					input.Id().Bytes(),
+					input.Index(),
+				).
+				Count(&count)
+			if existsResult.Error != nil {
+				return existsResult.Error
+			}
+			if count == 0 {
+				return fmt.Errorf(
+					"%w: %x:%d",
+					types.ErrUtxoNotFound,
+					input.Id().Bytes(),
+					input.Index(),
+				)
+			}
 			return fmt.Errorf(
 				"%w: %x:%d",
-				types.ErrUtxoNotFound,
+				types.ErrUtxoConflict,
 				input.Id().Bytes(),
 				input.Index(),
 			)
 		}
-		return fmt.Errorf(
-			"%w: %x:%d",
-			types.ErrUtxoConflict,
-			input.Id().Bytes(),
-			input.Index(),
+		if result.RowsAffected != 1 {
+			return fmt.Errorf(
+				"%w: %x:%d",
+				types.ErrUtxoConflict,
+				input.Id().Bytes(),
+				input.Index(),
+			)
+		}
+		refs, err := rewardStakeRefsFromUtxoIDs(
+			tx,
+			[]models.UtxoId{{
+				Hash: input.Id().Bytes(),
+				Idx:  input.Index(),
+			}},
+			slot,
 		)
+		if err != nil {
+			return err
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf(
-			"%w: %x:%d",
-			types.ErrUtxoConflict,
-			input.Id().Bytes(),
-			input.Index(),
-		)
+	if txn != nil {
+		return mutation(db)
 	}
-	return nil
+	return db.Transaction(mutation)
 }
 
 // SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot.
@@ -804,16 +987,32 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	if err != nil {
 		return err
 	}
-	result := db.Model(models.Utxo{}).
-		Where("deleted_slot > ?", slot).
-		Updates(map[string]any{
-			"deleted_slot":   0,
-			"spent_at_tx_id": nil,
-		})
-	if result.Error != nil {
-		return result.Error
+	mutation := func(tx *gorm.DB) error {
+		var rows []utxoRewardStakeRef
+		if err := tx.Model(&models.Utxo{}).
+			Where("deleted_slot > ?", slot).
+			Select("credential_tag", "staking_key").
+			Group("credential_tag, staking_key").
+			Find(&rows).Error; err != nil {
+			return err
+		}
+		refs := rewardStakeRefsFromUtxoRewardStakeRefs(rows)
+		pinRewardStakeRefsToSlot(refs, slot)
+		result := tx.Model(models.Utxo{}).
+			Where("deleted_slot > ?", slot).
+			Updates(map[string]any{
+				"deleted_slot":   0,
+				"spent_at_tx_id": nil,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 // liveUtxoIterPageSize bounds how many rows are fetched per page from
@@ -878,33 +1077,144 @@ func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
 	if err != nil {
 		return err
 	}
-	for start := 0; start < len(refs); start += markUtxosDeletedChunkSize {
-		end := min(start+markUtxosDeletedChunkSize, len(refs))
-		chunk := refs[start:end]
-		// GORM's tuple-IN handling unpacks []byte arguments byte-by-byte
-		// across drivers, so build an OR chain with parallel
-		// (tx_id, output_idx) equality predicates instead.
-		var (
-			clauses strings.Builder
-			args    = make([]any, 0, 2*len(chunk))
-		)
-		for i, r := range chunk {
-			if i > 0 {
-				clauses.WriteString(" OR ")
+	mutation := func(tx *gorm.DB) error {
+		utxoIDs := make([]models.UtxoId, 0, len(refs))
+		for _, ref := range refs {
+			utxoIDs = append(utxoIDs, models.UtxoId{
+				Hash: ref.TxId,
+				Idx:  ref.OutputIdx,
+			})
+		}
+		rewardRefs, err := rewardStakeRefsFromUtxoIDs(tx, utxoIDs, atSlot)
+		if err != nil {
+			return err
+		}
+		for start := 0; start < len(refs); start += markUtxosDeletedChunkSize {
+			end := min(start+markUtxosDeletedChunkSize, len(refs))
+			chunk := refs[start:end]
+			// GORM's tuple-IN handling unpacks []byte arguments byte-by-byte
+			// across drivers, so build an OR chain with parallel
+			// (tx_id, output_idx) equality predicates instead.
+			var (
+				clauses strings.Builder
+				args    = make([]any, 0, 2*len(chunk))
+			)
+			for i, r := range chunk {
+				if i > 0 {
+					clauses.WriteString(" OR ")
+				}
+				clauses.WriteString("(tx_id = ? AND output_idx = ?)")
+				args = append(args, r.TxId, r.OutputIdx)
 			}
-			clauses.WriteString("(tx_id = ? AND output_idx = ?)")
-			args = append(args, r.TxId, r.OutputIdx)
+			whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
+			updateArgs := append([]any{atSlot}, args...)
+			result := tx.Exec(
+				"UPDATE "+utxoRefIndexedTable()+
+					" SET deleted_slot = ? WHERE "+whereClause,
+				updateArgs...,
+			)
+			if result.Error != nil {
+				return result.Error
+			}
 		}
-		whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
-		updateArgs := append([]any{atSlot}, args...)
-		result := db.Exec(
-			"UPDATE "+utxoRefIndexedTable()+
-				" SET deleted_slot = ? WHERE "+whereClause,
-			updateArgs...,
-		)
-		if result.Error != nil {
-			return result.Error
-		}
+		return refreshRewardLiveStakeAggregates(tx, rewardRefs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
+}
+
+// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance, per-asset
+// balances, and live UTxO count for the given address, aggregated in SQL.
+// Assets are ordered by (policy id, name) for deterministic output.
+//
+// SQLite's planner tends to pick idx_utxo_deleted_payment_script for these
+// aggregates (it matches deleted_slot + payment_script, i.e. nearly every
+// live UTxO) and then filters the credential row by row, which takes tens of
+// seconds on large chains. Force the credential-selective index when it is
+// present; fall back to the planner when it is missing (e.g. during bulk
+// load), mirroring the live-stake INDEXED BY handling.
+func (d *MetadataStoreSqlite) GetUtxoBalanceByAddress(
+	addr lcommon.Address,
+	mode models.UtxoAddressMatchMode,
+	txn types.Txn,
+) (models.AddressBalance, error) {
+	var ret models.AddressBalance
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return ret, fmt.Errorf(
+			"resolve DB for utxo balance by address: %w",
+			err,
+		)
+	}
+	var ors []string
+	var args []any
+	if err := models.AppendUtxoAddressOrBranchMode(
+		&ors, &args, addr, mode,
+	); err != nil {
+		return ret, fmt.Errorf("utxo balance by address: %w", err)
+	}
+	if len(ors) == 0 {
+		return ret, nil
+	}
+	addrCond := "(" + strings.Join(ors, " OR ") + ")"
+
+	// Pick the credential-selective index for the address form: payment
+	// lookups drive through the payment key, staking-only lookups through
+	// the staking composite.
+	zeroHash := lcommon.NewBlake2b224(nil)
+	hintIndex := "idx_utxo_payment_key"
+	if addr.PaymentKeyHash() == zeroHash {
+		hintIndex = "idx_utxo_staking_deleted_amount"
+	}
+	indexedBy := ""
+	var indexPresent bool
+	if err := db.Raw(
+		"SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
+		hintIndex,
+	).Scan(&indexPresent).Error; err != nil {
+		return ret, fmt.Errorf(
+			"probe index for utxo balance by address: %w",
+			err,
+		)
+	}
+	if indexPresent {
+		indexedBy = "INDEXED BY " + hintIndex
+	}
+
+	var totals struct {
+		Cnt      int64
+		Lovelace uint64
+	}
+	if err := db.Raw(
+		"SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace "+
+			"FROM utxo "+indexedBy+
+			" WHERE utxo.deleted_slot = 0 AND "+addrCond,
+		args...,
+	).Scan(&totals).Error; err != nil {
+		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
+	}
+	ret.UtxoCount = totals.Cnt
+	ret.Lovelace = totals.Lovelace
+	if ret.UtxoCount == 0 {
+		return ret, nil
+	}
+
+	if err := db.Raw(
+		"SELECT asset.policy_id AS policy_id, asset.name AS name, "+
+			"COALESCE(SUM(asset.amount), 0) AS amount "+
+			"FROM utxo "+indexedBy+
+			" JOIN asset ON asset.utxo_id = utxo.id"+
+			" WHERE utxo.deleted_slot = 0 AND "+addrCond+
+			" GROUP BY asset.policy_id, asset.name"+
+			" ORDER BY asset.policy_id, asset.name",
+		args...,
+	).Scan(&ret.Assets).Error; err != nil {
+		return ret, fmt.Errorf(
+			"sum utxo asset balances by address: %w",
+			err,
+		)
+	}
+	return ret, nil
 }

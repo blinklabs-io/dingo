@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
@@ -73,6 +77,150 @@ func mithrilJSONHexKey(t *testing.T, key []byte) string {
 	return hex.EncodeToString(encoded)
 }
 
+func validImmutableFiles(t *testing.T, slot uint64) (map[string][]byte, []byte) {
+	t.Helper()
+	makeBlock := func(
+		blockNumber, blockSlot uint64, prevHash common.Blake2b256,
+	) ([]byte, []byte) {
+		header := shelley.ShelleyBlockHeader{
+			Body: shelley.ShelleyBlockHeaderBody{
+				BlockNumber:       blockNumber,
+				Slot:              blockSlot,
+				PrevHash:          prevHash,
+				BlockBodySize:     0,
+				ProtoMajorVersion: 1,
+			},
+		}
+		headerCbor, err := cbor.Encode(header)
+		require.NoError(t, err)
+		blockCbor, err := cbor.Encode([]any{
+			cbor.RawMessage(headerCbor), []any{},
+		})
+		require.NoError(t, err)
+		blockHash := common.Blake2b256Hash(headerCbor)
+		block, err := cbor.Encode([]any{
+			uint64(shelley.BlockTypeShelley), cbor.RawMessage(blockCbor),
+		})
+		require.NoError(t, err)
+		return block, blockHash[:]
+	}
+	first, firstHash := makeBlock(1, slot-1, common.Blake2b256{})
+	var firstPrev common.Blake2b256
+	copy(firstPrev[:], firstHash)
+	second, secondHash := makeBlock(
+		2, slot, firstPrev,
+	)
+	primary := make([]byte, 5)
+	primary[0] = 0
+	binary.BigEndian.PutUint32(primary[1:], 0)
+	primary = append(primary, make([]byte, 4)...)
+	binary.BigEndian.PutUint32(primary[5:], 56)
+	secondary := make([]byte, 112)
+	for i, entry := range []struct {
+		offset uint64
+		slot   uint64
+		hash   []byte
+	}{
+		{hash: firstHash, slot: slot - 1},
+		{hash: secondHash, slot: slot, offset: uint64(len(first))},
+	} {
+		base := i * 56
+		binary.BigEndian.PutUint64(secondary[base:base+8], entry.offset)
+		copy(secondary[base+16:base+48], entry.hash)
+		binary.BigEndian.PutUint64(secondary[base+48:base+56], entry.slot)
+	}
+	return map[string][]byte{
+		"immutable/00000.chunk":     append(first, second...),
+		"immutable/00000.primary":   primary,
+		"immutable/00000.secondary": secondary,
+	}, secondHash
+}
+
+func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
+	t.Helper()
+	emptyMap, err := cbor.Encode(map[uint64]uint64{})
+	require.NoError(t, err)
+	emptySnapshots, err := cbor.Encode([]any{
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+	snapshots, err := cbor.Encode([]any{
+		cbor.RawMessage(emptySnapshots),
+		cbor.RawMessage(emptySnapshots),
+		cbor.RawMessage(emptySnapshots),
+	})
+	require.NoError(t, err)
+	vState, err := cbor.Encode([]any{cbor.RawMessage(emptyMap)})
+	require.NoError(t, err)
+	pState, err := cbor.Encode([]any{cbor.RawMessage(emptyMap)})
+	require.NoError(t, err)
+	dStateAccounts, err := cbor.Encode([]any{
+		cbor.RawMessage(emptyMap), cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+	dState, err := cbor.Encode([]any{cbor.RawMessage(dStateAccounts)})
+	require.NoError(t, err)
+	certState, err := cbor.Encode([]any{
+		cbor.RawMessage(vState),
+		cbor.RawMessage(pState),
+		cbor.RawMessage(dState),
+	})
+	require.NoError(t, err)
+	utxoState, err := cbor.Encode([]any{cbor.RawMessage(emptyMap)})
+	require.NoError(t, err)
+	ledgerState, err := cbor.Encode([]any{
+		cbor.RawMessage(certState),
+		cbor.RawMessage(utxoState),
+	})
+	require.NoError(t, err)
+	accountState, err := cbor.Encode([]any{uint64(0), uint64(0)})
+	require.NoError(t, err)
+	epochState, err := cbor.Encode([]any{
+		cbor.RawMessage(accountState),
+		cbor.RawMessage(ledgerState),
+		cbor.RawMessage(snapshots),
+		cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+	newEpochState, err := cbor.Encode([]any{
+		uint64(0), []any{}, []any{}, cbor.RawMessage(epochState),
+		[]any{}, cbor.RawMessage(emptyMap), []any{},
+	})
+	require.NoError(t, err)
+	tip, err := cbor.Encode([]any{slot, uint64(1), hash})
+	require.NoError(t, err)
+	tipWithOrigin, err := cbor.Encode([]any{cbor.RawMessage(tip)})
+	require.NoError(t, err)
+	shelleyState, err := cbor.Encode([]any{
+		cbor.RawMessage(tipWithOrigin),
+		cbor.RawMessage(newEpochState),
+		[]any{},
+	})
+	require.NoError(t, err)
+	bound, err := cbor.Encode([]any{uint64(0), uint64(0), uint64(0)})
+	require.NoError(t, err)
+	pastEra, err := cbor.Encode([]any{
+		cbor.RawMessage(bound), cbor.RawMessage(bound),
+	})
+	require.NoError(t, err)
+	currentEra, err := cbor.Encode([]any{
+		cbor.RawMessage(bound), cbor.RawMessage(shelleyState),
+	})
+	require.NoError(t, err)
+	telescope, err := cbor.Encode([]any{
+		cbor.RawMessage(pastEra), cbor.RawMessage(currentEra),
+	})
+	require.NoError(t, err)
+	headerState, err := cbor.Encode([]any{[]any{}, []any{}})
+	require.NoError(t, err)
+	snapshot, err := cbor.Encode([]any{
+		cbor.RawMessage(telescope), cbor.RawMessage(headerState),
+	})
+	require.NoError(t, err)
+	return snapshot
+}
+
 type v2FixtureOptions struct {
 	immutableFileNumber  uint64
 	tamperArtifactHash   bool
@@ -83,6 +231,9 @@ type v2FixtureOptions struct {
 	digestsCloud404      bool
 	digestsCloudBadRoot  bool
 	immutableBadMirror   bool
+	missingAncillary     bool
+	validImmutable       bool
+	fallbackLedgerState  bool
 }
 
 type v2Fixture struct {
@@ -125,6 +276,16 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		for _, ext := range []string{"chunk", "primary", "secondary"} {
 			name := fmt.Sprintf("%05d.%s", num, ext)
 			content := fmt.Appendf(nil, "immutable-%s-data", name)
+			if opts.validImmutable && num == 0 {
+				var blockHash []byte
+				files, blockHash = validImmutableFiles(t, 1000)
+				if opts.fallbackLedgerState {
+					files["ledger/100/state"] = minimalLedgerState(
+						t, 1000, blockHash,
+					)
+				}
+				break
+			}
 			fixture.immutableContent[name] = content
 			files["immutable/"+name] = content
 			digest := sha256.Sum256(content)
@@ -135,6 +296,22 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					Digest:            hex.EncodeToString(digest[:]),
 				},
 			)
+		}
+		if opts.validImmutable && num == 0 {
+			for name, content := range files {
+				if !strings.HasPrefix(name, "immutable/") {
+					continue
+				}
+				fixture.immutableContent[filepath.Base(name)] = content
+				digest := sha256.Sum256(content)
+				fixture.digestEntries = append(
+					fixture.digestEntries,
+					CardanoDatabaseDigestEntry{
+						ImmutableFileName: filepath.Base(name),
+						Digest:            hex.EncodeToString(digest[:]),
+					},
+				)
+			}
 		}
 		badFiles := map[string][]byte{}
 		maps.Copy(badFiles, files)
@@ -253,13 +430,18 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		},
 		Ancillary: CardanoDatabaseAncillary{
 			SizeUncompressed: int64(len(fixture.ancillaryArchive)),
-			Locations: []CardanoDatabaseLocation{
-				{
-					Type:                 locationTypeCloudStorage,
-					URI:                  baseURL + "/files/ancillary.tar.zst",
-					CompressionAlgorithm: "zstandard",
-				},
-			},
+			Locations: func() []CardanoDatabaseLocation {
+				if opts.missingAncillary {
+					return nil
+				}
+				return []CardanoDatabaseLocation{
+					{
+						Type:                 locationTypeCloudStorage,
+						URI:                  baseURL + "/files/ancillary.tar.zst",
+						CompressionAlgorithm: "zstandard",
+					},
+				}
+			}(),
 		},
 		CardanoNodeVersion: "11.0.1",
 		CreatedAt:          "2026-06-12T00:00:00.000000000Z",
@@ -511,6 +693,25 @@ func TestBootstrapV2NoCertVerification(t *testing.T) {
 	require.NotEmpty(t, result.AncillaryDir)
 }
 
+func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		missingAncillary:    true,
+		validImmutable:      true,
+		fallbackLedgerState: true,
+	})
+	result, err := Sync(context.Background(), SyncConfig{
+		Network:          "preprod",
+		DataDir:          t.TempDir(),
+		StorageMode:      "core",
+		Backend:          BackendV2,
+		AggregatorURL:    fixture.server.URL,
+		VerifyCertChain:  false,
+		CleanupAfterLoad: false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1000), result.LedgerSlot)
+}
+
 func TestBootstrapV2DigestsAggregatorFallback(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
@@ -631,15 +832,34 @@ func TestBootstrapV2AncillaryBadSignature(t *testing.T) {
 		immutableFileNumber: 1,
 		badAncillarySig:     true,
 	})
-	result, err := Bootstrap(
+	_, err := Bootstrap(
 		context.Background(),
 		fixture.bootstrapConfig(t.TempDir()),
 	)
-	// Ancillary failure is non-fatal, matching v1 behavior: the node
-	// continues without ledger state.
-	require.NoError(t, err)
-	assert.Empty(t, result.AncillaryDir)
-	require.True(t, hasChunkFiles(result.ImmutableDir))
+	// A verified bootstrap must not continue with uncertified ledger state.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ancillary")
+}
+
+func TestBootstrapV2RejectsNetworkMismatchBeforeDownload(t *testing.T) {
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	cfg := fixture.bootstrapConfig(t.TempDir())
+	cfg.Network = "preview"
+
+	_, err := Bootstrap(context.Background(), cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "network mismatch")
+	assert.Zero(t, fixture.immutableHits.Load())
+}
+
+func TestBootstrapV2VerifiedRequiresAncillaryKey(t *testing.T) {
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	cfg := fixture.bootstrapConfig(t.TempDir())
+	cfg.AncillaryVerificationKey = ""
+
+	_, err := Bootstrap(context.Background(), cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ancillary verification key")
 }
 
 func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {

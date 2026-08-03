@@ -72,3 +72,34 @@ func (d *MetadataStoreSqlite) GetOffchainMetadata(
 	}
 	return offchain.Get(db, sourceType, url, hash)
 }
+
+// GetOffchainMetadataBatch retrieves cached off-chain documents for many
+// URLs in one or more queries, chunked at sqliteBindVarLimit to stay under
+// sqlite's bound-parameter limit for the url IN (...) clause.
+func (d *MetadataStoreSqlite) GetOffchainMetadataBatch(
+	sourceType string,
+	urls []string,
+	txn types.Txn,
+) ([]models.OffchainMetadata, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	// Deduplicate across the whole list before chunking, not per chunk:
+	// GetBatch removes duplicates within whatever slice it is handed, so a
+	// URL appearing in two different chunks would otherwise be queried twice
+	// and its row appended twice, breaking the batch's one-row-per-match
+	// contract. Two pools can share a metadata anchor, so repeats are
+	// expected input here rather than pathological.
+	uniq := offchain.DedupeURLs(urls)
+	docs := make([]models.OffchainMetadata, 0, len(uniq))
+	for start := 0; start < len(uniq); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(uniq))
+		chunk, err := offchain.GetBatch(db, sourceType, uniq[start:end])
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, chunk...)
+	}
+	return docs, nil
+}

@@ -26,8 +26,8 @@ import (
 type UTxO struct {
 	TxHash     string
 	Index      uint32
-	Amount     uint64     // lovelace
-	SigningKey *UTxOKey   // optional: Ed25519 key for signing inputs from this UTxO
+	Amount     uint64   // lovelace
+	SigningKey *UTxOKey // optional: Ed25519 key for signing inputs from this UTxO
 }
 
 // ErrInsufficientFunds is returned by SelectCoins when the wallet does not

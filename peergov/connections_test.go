@@ -206,6 +206,22 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 			want: false,
 		},
 		{
+			// gouroboros closes the muxer with this error when a crossing
+			// duplicate connection is pruned during the handshake (duplex
+			// connection-manager dedup). It is benign, not a dial failure.
+			name: "connection shutdown initiated eof (duplex dedup)",
+			err: fmt.Errorf(
+				"connection shutdown initiated: %w",
+				io.EOF,
+			),
+			want: true,
+		},
+		{
+			name: "connection shutdown initiated without eof",
+			err:  errors.New("connection shutdown initiated: handshake failed"),
+			want: false,
+		},
+		{
 			name: "nil",
 			err:  nil,
 			want: false,
@@ -520,8 +536,17 @@ func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsume
 		// Suppress reconnect goroutine; this test only checks close accounting.
 		Reconnecting: true,
 	}
+	// The short-lived backoff escalates only while the hot pool is healthy; the
+	// issue #2765 cap engages when hot peers <= criticalHotPeerThreshold. Add
+	// hot fillers so this test exercises the escalation path rather than the
+	// critically-low cap (which has its own test below).
 	pg.mu.Lock()
-	pg.peers = []*Peer{peer}
+	pg.peers = []*Peer{
+		peer,
+		{Address: "10.0.0.1:3001", State: PeerStateHot},
+		{Address: "10.0.0.2:3001", State: PeerStateHot},
+		{Address: "10.0.0.3:3001", State: PeerStateHot},
+	}
 	pg.mu.Unlock()
 
 	wantDelays := []time.Duration{
@@ -565,5 +590,73 @@ func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsume
 				i+1, got, want,
 			)
 		}
+	}
+}
+
+// TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff verifies the
+// issue #2765 fix: when the hot pool is at or below criticalHotPeerThreshold,
+// the short-lived reconnect backoff is capped at emergencyReconnectDelay rather
+// than escalating toward maxReconnectDelay, so the node keeps reconnecting to
+// its known peers instead of collapsing to a single stalled upstream on a
+// network of few, flaky relays.
+func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.101:3003",
+		NormalizedAddress: "192.168.12.101:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		// Suppress reconnect goroutine; this test only checks close accounting.
+		Reconnecting: true,
+	}
+	// No hot peers: the pool is critically low, so the cap must engage.
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	// Unbounded escalation would reach 1,2,4,8,16,32s; the cap holds the delay
+	// at emergencyReconnectDelay once it would exceed that, and never above it.
+	for i := range 6 {
+		pg.mu.Lock()
+		peer.ReconnectDelay = 0
+		peer.Connection = &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		}
+		peer.State = PeerStateWarm
+		peer.ConnectedAt = time.Now().Add(-600 * time.Millisecond)
+		pg.mu.Unlock()
+
+		pg.handleConnectionClosedEvent(event.NewEvent(
+			connmanager.ConnectionClosedEventType,
+			connmanager.ConnectionClosedEvent{
+				ConnectionId: connId,
+			},
+		))
+
+		pg.mu.Lock()
+		got := peer.ReconnectDelay
+		pg.mu.Unlock()
+		if got > emergencyReconnectDelay {
+			t.Fatalf(
+				"close %d: ReconnectDelay = %s, want <= %s (critically-low cap)",
+				i+1, got, emergencyReconnectDelay,
+			)
+		}
+	}
+	// After enough short-lived closes to exceed the cap, the delay must sit at
+	// the emergency cap, not the escalated value it would otherwise reach.
+	pg.mu.Lock()
+	got := peer.ReconnectDelay
+	pg.mu.Unlock()
+	if got != emergencyReconnectDelay {
+		t.Fatalf(
+			"final ReconnectDelay = %s, want %s (emergency cap)",
+			got, emergencyReconnectDelay,
+		)
 	}
 }

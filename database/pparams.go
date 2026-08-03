@@ -182,9 +182,10 @@ func (d *Database) ApplyPParamUpdates(
 // The quorum parameter specifies the minimum number of unique genesis key
 // delegates that must have submitted update proposals for the update to be
 // applied (from shelley-genesis.json updateQuorum).
-// This function takes currentPParams as a value and returns the updated parameters
-// without mutating the input. This allows callers to capture the result in a
-// transaction and apply it to in-memory state after the transaction commits.
+// Although the interface is passed by value, era-specific update functions may
+// mutate its underlying concrete protocol-parameter pointer in place. Callers
+// that need the original value preserved must pass an independently owned copy;
+// the returned value is the authoritative updated parameter set.
 func (d *Database) ComputeAndApplyPParamUpdates(
 	slot, epoch uint64,
 	era uint,

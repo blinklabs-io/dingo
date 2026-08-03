@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,8 +23,8 @@ import (
 	"runtime/pprof"
 	"strings"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -137,56 +137,100 @@ func parseLogLevel(level string) (slog.Level, bool) {
 	}
 }
 
-func listPlugins(
-	blobPlugin, metadataPlugin string,
-) (shouldExit bool, output string) {
-	var buf strings.Builder
-	listed := false
-
-	if blobPlugin == "list" {
-		buf.WriteString("Available blob plugins:\n")
-		blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-		for _, p := range blobPlugins {
-			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
-		}
-		listed = true
-	}
-
-	if metadataPlugin == "list" {
-		if listed {
-			buf.WriteString("\n")
-		}
-		buf.WriteString("Available metadata plugins:\n")
-		metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-		for _, p := range metadataPlugins {
-			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
-		}
-		listed = true
-	}
-
-	if listed {
-		return true, buf.String()
-	}
-	return false, ""
-}
-
 func listAllPlugins() string {
 	var buf strings.Builder
-	buf.WriteString("Available plugins:\n\n")
-
-	buf.WriteString("Blob Storage Plugins:\n")
-	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-	for _, p := range blobPlugins {
-		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
+	host, err := internalplugins.NewHost()
+	if err != nil {
+		return fmt.Sprintf("failed to build plugin host: %v\n", err)
 	}
-
-	buf.WriteString("\nMetadata Storage Plugins:\n")
-	metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-	for _, p := range metadataPlugins {
-		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
+	buf.WriteString("Available plugins:\n")
+	var previous string
+	for _, provider := range host.Providers() {
+		capability := string(provider.Capability)
+		if capability != previous {
+			fmt.Fprintf(&buf, "\n%s:\n", capability)
+			previous = capability
+		}
+		fmt.Fprintf(&buf, "  %s: %s\n", provider.Name, provider.Description)
 	}
 
 	return buf.String()
+}
+
+// topLevelCommand returns the top-level subcommand under root for cmd
+// (walking up past any nested subcommands such as `mithril list`), or
+// nil when cmd is the bare root command itself.
+func topLevelCommand(cmd *cobra.Command) *cobra.Command {
+	if !cmd.HasParent() {
+		return nil
+	}
+	top := cmd
+	for top.Parent().HasParent() {
+		top = top.Parent()
+	}
+	return top
+}
+
+// effectiveRunMode reports the run mode a command invocation will
+// actually execute, which governs the config it requires. Only the bare
+// `dingo` process honors the configured runMode; each explicit
+// subcommand runs a fixed operation, so its listener/source requirements
+// come from the command (cmd, the leaf being run) rather than cfg.RunMode.
+func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
+	top := topLevelCommand(cmd)
+	if top == nil {
+		// Bare root command dispatches on the configured run mode,
+		// falling through to serve for an empty or unrecognized mode
+		// (matching rootCmd's dispatch default). Serving-listener checks
+		// therefore still apply to an invalid runMode; the invalid mode
+		// itself is reported separately by Validate.
+		if cfg.RunMode.Valid() && cfg.RunMode != "" {
+			return cfg.RunMode
+		}
+		return config.RunModeServe
+	}
+	switch top.Name() {
+	case "serve":
+		return config.RunModeServe
+	case "load":
+		return config.RunModeLoad
+	case "sync":
+		// `dingo sync [--mithril]` runs the Mithril snapshot sync, which
+		// starts a metrics listener and an optional pprof debug listener.
+		return config.RunModeSync
+	case "mithril":
+		// Only `mithril sync` binds the metrics/debug listeners; the
+		// read-only `mithril list` / `mithril show` (and bare `mithril`)
+		// query the aggregator and start nothing.
+		if cmd.Name() == "sync" {
+			return config.RunModeSync
+		}
+		return config.RunModeMithril
+	default:
+		// No other non-informational top-level command exists today;
+		// fall back to full serving validation so a future command's
+		// misconfiguration is caught rather than silently skipped.
+		return config.RunModeServe
+	}
+}
+
+// isInformationalCommand reports whether a top-level command only prints
+// static information — version, list, and cobra's built-in help and
+// completion commands — and therefore needs no runtime configuration at
+// all: config loading and validation are skipped for them. (cobra runs
+// the root PersistentPreRunE for help and completion too, so without
+// the exemption a missing or invalid config would block `dingo help`
+// and shell-completion generation.)
+func isInformationalCommand(top *cobra.Command) bool {
+	if top == nil {
+		return false
+	}
+	switch top.Name() {
+	case "version", "list", "help", "completion":
+		return true
+	default:
+		return false
+	}
 }
 
 func listCommand() *cobra.Command {
@@ -267,23 +311,16 @@ Configuration Precedence (highest to lowest):
   3. Config file        (dingo.yaml or --config path)
   4. Built-in defaults
 
-Data Directory:
-  The CARDANO_DATABASE_PATH env var (or databasePath in config) sets the
-  data directory for both blob and metadata storage plugins. Plugin-specific
-  flags override this global setting:
-
-    --blob-badger-data-dir      overrides the blob plugin data directory
-    --metadata-sqlite-data-dir  overrides the metadata plugin data directory
-
-  For example, to store metadata separately from block data:
-    dingo --blob-badger-data-dir /fast-ssd/blocks \
-          --metadata-sqlite-data-dir /nvme/indexes
+Plugins:
+  Provider selectors use --blob, --metadata, --mempool,
+  --blockfrost-provider, --mesh-provider, and --utxorpc-provider.
+  Provider configuration uses the plugins YAML tree or generic
+  DINGO_PLUGINS_* environment variables. Run 'dingo list' to see providers.
 
 Storage Mode:
   --storage-mode sets the global storage mode for all plugins. Use "core"
   for minimal validation data or "api" for full indexing (witnesses,
   scripts, datums, redeemers). Dev mode always enables "api" mode.
-  Per-plugin overrides: --blob-badger-storage-mode, --metadata-*-storage-mode.
 
 Network:
   --network sets the Cardano network name and automatically derives the
@@ -291,12 +328,7 @@ Network:
   This overrides the CARDANO_NETWORK env var and the network config field.
 
 Database Workers:
-  --db-workers controls the worker pool size. When using SQLite, set
-  --metadata-sqlite-max-connections to match (both default to 5).
-
-DSN Override:
-  --metadata-mysql-dsn and --metadata-postgres-dsn override all individual
-  connection flags (host, port, user, password, database) when set.`,
+  --db-workers controls the worker pool size.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -304,15 +336,14 @@ DSN Override:
 				os.Exit(1)
 			}
 
-			// When no subcommand given, check RunMode from config
-			switch cfg.RunMode {
+			// When no subcommand given, check RunMode from config.
+			// cfg.RunMode is a configured mode (validated by
+			// RunMode.Valid); the effective-only sync/mithril modes never
+			// reach here.
+			switch cfg.RunMode { //nolint:exhaustive // sync/mithril are effective-only, never configured
 			case config.RunModeLoad:
-				if cfg.ImmutableDbPath == "" {
-					slog.Error(
-						"immutableDbPath must be set when runMode is 'load'",
-					)
-					os.Exit(1)
-				}
+				// Validate() has already enforced that ImmutableDbPath
+				// is set for load mode
 				loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
 			case config.RunModeServe, config.RunModeDev, config.RunModeLeios:
 				// serve, dev, and leios modes all run the server
@@ -331,21 +362,15 @@ DSN Override:
 		StringVar(&configFile, "config", "", "path to config file")
 	config.RegisterFlags(rootCmd)
 
-	// Add plugin-specific flags
-	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
-		fmt.Fprintf(os.Stderr, "Error adding plugin flags: %v\n", err)
-		os.Exit(1)
-	}
-
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		// Handle plugin listing before config loading
-		blobPlugin, _ := cmd.Root().PersistentFlags().GetString("blob")
-		metadataPlugin, _ := cmd.Root().PersistentFlags().GetString("metadata")
+		top := topLevelCommand(cmd)
 
-		shouldExit, output := listPlugins(blobPlugin, metadataPlugin)
-		if shouldExit {
-			fmt.Print(output)
-			os.Exit(0)
+		// The informational commands (version, list, help, completion)
+		// print static output and read no configuration, so they skip
+		// config loading and validation entirely: they must work even
+		// when the config file is missing or invalid.
+		if isInformationalCommand(top) {
+			return nil
 		}
 
 		cfg, err := config.LoadConfig(configFile)
@@ -355,6 +380,32 @@ DSN Override:
 
 		if err := config.ApplyFlags(cmd, cfg); err != nil {
 			return fmt.Errorf("applying CLI flags: %w", err)
+		}
+
+		// `dingo load <path>`: the positional argument is the
+		// highest-precedence source for ImmutableDbPath; merge it before
+		// validation so a config with runMode "load" and no
+		// immutableDbPath doesn't fail spuriously.
+		if top != nil && top.Name() == "load" && len(args) > 0 {
+			cfg.ImmutableDbPath = args[0]
+		}
+
+		// Every configuration source is merged at this point (defaults,
+		// YAML, environment, CLI flags, and the load positional
+		// argument), so defaults derived from other settings can now be
+		// filled in and the final configuration validated.
+		cfg.ApplyDefaults()
+
+		if err := cfg.Validate(effectiveRunMode(cmd, cfg)); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
+		}
+
+		// Topology derives from the network and topology settings, so it
+		// is resolved only now that the merged configuration is final and
+		// valid — resolving it earlier could reject a YAML/env value a
+		// CLI flag has since repaired.
+		if _, err := config.LoadTopologyConfig(); err != nil {
+			return fmt.Errorf("loading topology: %w", err)
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))

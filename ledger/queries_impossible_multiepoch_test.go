@@ -90,6 +90,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(t *testing.T
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)

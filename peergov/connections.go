@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
 func isConnectionCancellationError(err error) bool {
@@ -54,7 +55,14 @@ func isExpectedNetworkDialError(err error) bool {
 		strings.Contains(msg, "i/o timeout") ||
 		strings.Contains(msg, "cannot assign requested address") ||
 		strings.Contains(msg, "version data mismatch") ||
-		strings.Contains(msg, "timeout waiting on transition")
+		strings.Contains(msg, "timeout waiting on transition") ||
+		// gouroboros reports a crossing duplicate connection pruned during
+		// the handshake (duplex connection-manager dedup) as an EOF-wrapped
+		// "connection shutdown initiated". This happens routinely when a peer
+		// dials us while we dial it; the surviving duplex connection carries
+		// diffusion both ways, so it is expected rather than a dial failure.
+		(errors.Is(err, io.EOF) &&
+			strings.Contains(msg, "connection shutdown initiated"))
 }
 
 // shortLivedReconnectDelay returns the exponential backoff rung for the
@@ -69,6 +77,18 @@ func shortLivedReconnectDelay(count uint32) time.Duration {
 		}
 	}
 	return delay
+}
+
+// countHotPeersLocked returns the number of peers currently in the hot state.
+// Callers must hold p.mu.
+func (p *PeerGovernor) countHotPeersLocked() int {
+	n := 0
+	for _, peer := range p.peers {
+		if peer != nil && peer.State == PeerStateHot {
+			n++
+		}
+	}
+	return n
 }
 
 // isAddrInUseError returns true if the error is a "cannot assign
@@ -285,16 +305,33 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			continue
 		}
 
-		// Re-resolve hostname-based peers on every attempt and rotate the
-		// dial target across all resolved records so load spreads across
+		// Determine the dial target for this attempt. Ledger-discovered
+		// pool relays are resolved once and locked to that IP (see
+		// resolveLedgerDialTarget): their hostname is attacker-supplied via
+		// on-chain stake pool registration, so re-resolving it at dial time
+		// would let a malicious DNS server pass the routability check with
+		// one IP and dial an internal one with another (DNS rebind). Every
+		// other source re-resolves on each attempt and rotates the dial
+		// target across all resolved records so load spreads across
 		// load-balancer backends and a stuck/unhealthy backend is escaped
-		// on the next attempt without a process restart. IP-literal peers
-		// are returned unchanged. Peer identity/dedup is keyed on
+		// without a process restart; those hostnames are operator- or
+		// protocol-controlled, not attacker-supplied. IP-literal peers are
+		// returned unchanged either way. Peer identity/dedup is keyed on
 		// peer.Address / NormalizedAddress and is unaffected.
-		conn, err := p.config.ConnManager.CreateOutboundConn(
-			p.ctx,
-			p.resolveDialAddress(p.ctx, peer.Address),
-		)
+		var dialTarget string
+		var err error
+		if peer.Source == PeerSourceP2PLedger {
+			dialTarget, err = p.resolveLedgerDialTarget(p.ctx, peer)
+		} else {
+			dialTarget = p.resolveDialAddress(p.ctx, peer.Address)
+		}
+		var conn *ouroboros.Connection
+		if err == nil {
+			conn, err = p.config.ConnManager.CreateOutboundConn(
+				p.ctx,
+				dialTarget,
+			)
+		}
 		if err == nil {
 			connId := conn.Id()
 			p.mu.Lock()
@@ -827,12 +864,29 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 							peer.ReconnectDelay = maxReconnectDelay
 						}
 					}
-					p.config.Logger.Warn(
-						"short-lived connection detected, applying backoff",
-						"address", peer.Address,
-						"connection_duration", connDur,
-						"next_delay", peer.ReconnectDelay,
-					)
+					// When the hot pool is critically low, cap the backoff so we
+					// keep reconnecting to known peers instead of locking them
+					// out for minutes and collapsing to a single stalled
+					// upstream. On a network of few flaky relays every session
+					// is short-lived, so the escalating backoff would otherwise
+					// erode the pool to one. See issue #2765.
+					if peer.ReconnectDelay > emergencyReconnectDelay &&
+						p.countHotPeersLocked() <= criticalHotPeerThreshold {
+						peer.ReconnectDelay = emergencyReconnectDelay
+						p.config.Logger.Warn(
+							"hot peer pool critically low; capping reconnect backoff to replenish faster",
+							"address", peer.Address,
+							"capped_delay", peer.ReconnectDelay,
+							"component", "peergov",
+						)
+					} else {
+						p.config.Logger.Warn(
+							"short-lived connection detected, applying backoff",
+							"address", peer.Address,
+							"connection_duration", connDur,
+							"next_delay", peer.ReconnectDelay,
+						)
+					}
 				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection

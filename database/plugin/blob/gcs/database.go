@@ -143,6 +143,12 @@ func (d *BlobStoreGCS) DiskSize() (int64, error) {
 	return 0, nil
 }
 
+// Sync is a no-op: a GCS object is durable once its writer has been closed
+// successfully, so a committed write needs no additional flush.
+func (d *BlobStoreGCS) Sync() error {
+	return nil
+}
+
 // NewTransaction returns a lightweight transaction wrapper.
 func (d *BlobStoreGCS) NewTransaction(readWrite bool) types.Txn {
 	return &gcsTxn{store: d, readWrite: readWrite}

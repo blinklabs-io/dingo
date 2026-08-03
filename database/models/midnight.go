@@ -36,6 +36,11 @@ func (MidnightAssetCreate) TableName() string {
 	return "midnight_asset_creates"
 }
 
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightAssetCreate) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
+}
+
 // MidnightAssetSpend stores cNIGHT UTxO spends for the Midnight indexer.
 type MidnightAssetSpend struct {
 	ID               uint   `gorm:"primarykey"`
@@ -54,6 +59,11 @@ func (MidnightAssetSpend) TableName() string {
 	return "midnight_asset_spends"
 }
 
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightAssetSpend) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
+}
+
 // MidnightRegistration stores mapping validator registration events.
 type MidnightRegistration struct {
 	ID               uint   `gorm:"primarykey"`
@@ -68,6 +78,11 @@ type MidnightRegistration struct {
 
 func (MidnightRegistration) TableName() string {
 	return "midnight_registrations"
+}
+
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightRegistration) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
 }
 
 // MidnightDeregistration stores mapping validator deregistration events.
@@ -85,6 +100,11 @@ type MidnightDeregistration struct {
 
 func (MidnightDeregistration) TableName() string {
 	return "midnight_deregistrations"
+}
+
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightDeregistration) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
 }
 
 // MidnightGovernanceDatum stores latest Technical Committee and Council datums.
@@ -136,4 +156,27 @@ type MidnightEpochCandidates struct {
 
 func (MidnightEpochCandidates) TableName() string {
 	return "midnight_epoch_candidates"
+}
+
+// MidnightCommitteeCandidateRegistration stores full on-chain provenance for
+// a committee-candidate UTxO the first time it is observed as a transaction
+// output: which block/slot/transaction created it and which UTxOs its
+// creating transaction consumed. MidnightEpochCandidates.CandidatesCbor
+// records only (tx_hash, output_index, datum) membership at each epoch
+// boundary — this table is the durable side-store GetEpochCandidates joins
+// against to fill in tx_inputs/slot_number/tx_index/block_number, since the
+// in-memory candidate set is rebuilt on restart from the generic UTXO index
+// (GetMidnightCandidates), which carries only tx_hash/output_index/datum.
+type MidnightCommitteeCandidateRegistration struct {
+	ID           uint   `gorm:"primarykey"`
+	TxHash       []byte `gorm:"uniqueIndex:idx_midnight_committee_candidate_reg_utxo,priority:1;size:32;not null"`
+	OutputIndex  uint32 `gorm:"uniqueIndex:idx_midnight_committee_candidate_reg_utxo,priority:2;not null"`
+	BlockNumber  uint64 `gorm:"index;not null"`
+	SlotNumber   uint64 `gorm:"not null"`
+	TxIndex      uint32 `gorm:"not null"`
+	TxInputsCbor []byte `gorm:"not null"`
+}
+
+func (MidnightCommitteeCandidateRegistration) TableName() string {
+	return "midnight_committee_candidate_registrations"
 }

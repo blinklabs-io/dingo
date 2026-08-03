@@ -96,6 +96,22 @@ const (
 	reconnectBackoffFactor      = 2
 	inboundCheckDelay           = 30 * time.Second
 	minStableConnectionDuration = 30 * time.Second
+	// criticalHotPeerThreshold is the hot-peer low-water mark below which the
+	// short-lived-connection reconnect backoff is capped at
+	// emergencyReconnectDelay instead of escalating toward maxReconnectDelay.
+	// The escalating backoff exists to avoid ephemeral-port exhaustion from
+	// rapid reconnect cycles to an unstable peer, but when the hot pool is this
+	// small the greater risk is losing the last upstreams entirely: on a network
+	// of few, flaky relays (e.g. the Leios prototype) every connection is
+	// short-lived, so escalating backoff locks every known peer out for minutes
+	// and the pool collapses to one stalled upstream. Below this threshold we
+	// prioritize replenishment over port conservation. See issue #2765.
+	criticalHotPeerThreshold = 2
+	// emergencyReconnectDelay is the capped reconnect delay used when hot peers
+	// are at or below criticalHotPeerThreshold: frequent enough to replenish the
+	// pool within seconds, slow enough (a handful of reconnects per minute per
+	// peer) to avoid port exhaustion.
+	emergencyReconnectDelay = 5 * time.Second
 	// dialDNSResolveTimeout bounds the fresh per-attempt DNS resolution in
 	// resolveDialAddress. It is intentionally shorter than connmanager's 10s
 	// dial timeout so a hung or slow resolver cannot wedge the outbound-dial

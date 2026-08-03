@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"fmt"
 	"net"
-	"os"
 	"sort"
 	"testing"
 	"time"
@@ -39,30 +38,11 @@ const DefaultNetworkMagic = 42
 // NodeEndpoint describes a node that the test harness can connect to
 // using the Ouroboros Node-to-Node mini-protocol over TCP.
 type NodeEndpoint struct {
-	Name    string
-	Address string // host:port
-}
-
-// DefaultEndpoints returns the standard DevNet endpoints.
-// These can be overridden via environment variables for CI flexibility.
-func DefaultEndpoints() []NodeEndpoint {
-	dingoAddr := os.Getenv("DEVNET_DINGO_ADDR")
-	if dingoAddr == "" {
-		dingoAddr = "localhost:3010"
-	}
-	cardanoAddr := os.Getenv("DEVNET_CARDANO_ADDR")
-	if cardanoAddr == "" {
-		cardanoAddr = "localhost:3011"
-	}
-	relayAddr := os.Getenv("DEVNET_RELAY_ADDR")
-	if relayAddr == "" {
-		relayAddr = "localhost:3012"
-	}
-	return []NodeEndpoint{
-		{Name: "dingo-producer", Address: dingoAddr},
-		{Name: "cardano-producer", Address: cardanoAddr},
-		{Name: "cardano-relay", Address: relayAddr},
-	}
+	Name        string
+	Address     string // host:port
+	Role        string // "producer" or "relay"
+	IsDingo     bool   // node runs Dingo
+	IsReference bool   // node runs the cardano-node reference impl
 }
 
 // ChainTip holds the chain tip information retrieved from a node.
@@ -108,6 +88,51 @@ func WithNetworkMagic(magic uint32) HarnessOptionFunc {
 	return func(h *TestHarness) {
 		h.networkMagic = magic
 	}
+}
+
+// Producers returns the endpoints that forge blocks.
+func (h *TestHarness) Producers() []NodeEndpoint {
+	var out []NodeEndpoint
+	for _, ep := range h.endpoints {
+		if ep.Role == "producer" {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
+// Relay returns the first relay endpoint. It fails the test if none exists,
+// since every supported topology includes exactly one relay.
+func (h *TestHarness) Relay() NodeEndpoint {
+	for _, ep := range h.endpoints {
+		if ep.Role == "relay" {
+			return ep
+		}
+	}
+	h.t.Fatalf("no relay endpoint configured")
+	return NodeEndpoint{}
+}
+
+// DingoNode returns a Dingo producer to observe for chain progress.
+func (h *TestHarness) DingoNode() NodeEndpoint {
+	for _, ep := range h.endpoints {
+		if ep.IsDingo && ep.Role == "producer" {
+			return ep
+		}
+	}
+	h.t.Fatalf("no dingo producer endpoint configured")
+	return NodeEndpoint{}
+}
+
+// ReferenceNode returns the cardano-node reference producer endpoint and true
+// when running in conformance mode; false otherwise.
+func (h *TestHarness) ReferenceNode() (NodeEndpoint, bool) {
+	for _, ep := range h.endpoints {
+		if ep.IsReference && ep.Role == "producer" {
+			return ep, true
+		}
+	}
+	return NodeEndpoint{}, false
 }
 
 // GetChainTip connects to the specified node using the Ouroboros N2N

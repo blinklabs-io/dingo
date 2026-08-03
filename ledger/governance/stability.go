@@ -40,6 +40,7 @@ type StabilityCheckInputs struct {
 	DB                      *database.Database
 	Txn                     *database.Txn
 	CurrentEpoch            uint64
+	DelegatorInactivityOn   bool
 	PParams                 lcommon.ProtocolParameters
 	ConwayGenesis           *conway.ConwayGenesis
 	OnProposalDecodeFailure func(proposal *models.GovernanceProposal, err error)
@@ -49,6 +50,7 @@ func NewStabilityCheckInputs(
 	db *database.Database,
 	txn *database.Txn,
 	currentEpoch uint64,
+	delegatorInactivityOn bool,
 	pparams lcommon.ProtocolParameters,
 	conwayGenesis *conway.ConwayGenesis,
 	onProposalDecodeFailure func(proposal *models.GovernanceProposal, err error),
@@ -57,6 +59,7 @@ func NewStabilityCheckInputs(
 		DB:                      db,
 		Txn:                     txn,
 		CurrentEpoch:            currentEpoch,
+		DelegatorInactivityOn:   delegatorInactivityOn,
 		PParams:                 pparams,
 		ConwayGenesis:           conwayGenesis,
 		OnProposalDecodeFailure: onProposalDecodeFailure,
@@ -125,10 +128,11 @@ func EvaluateRatifiableHardForkInitiation(
 	// boundary path performs; doing them again here is the cost of not
 	// sharing with ProcessEpoch.
 	tallyCtx := &TallyContext{
-		DB:           in.DB,
-		Txn:          in.Txn,
-		StakeEpoch:   stakeEpochFor(in.CurrentEpoch),
-		CurrentEpoch: in.CurrentEpoch,
+		DB:                    in.DB,
+		Txn:                   in.Txn,
+		StakeEpoch:            stakeEpochFor(in.CurrentEpoch),
+		CurrentEpoch:          in.CurrentEpoch,
+		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
 	activeDRepCount, err := countActiveDReps(in.DB, in.Txn, in.CurrentEpoch)

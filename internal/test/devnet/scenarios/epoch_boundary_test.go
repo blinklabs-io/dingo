@@ -24,17 +24,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEpochBoundaryConsensus verifies Dingo and cardano-node remain in
-// consensus across at least one full epoch transition. With
-// epochLength=500, this exercises the candidate-nonce freeze, lab nonce
-// roll, and VRF verification with the new epoch nonce — the same code
-// path that has been observed to wedge on preview after a Mithril
-// bootstrap.
+// TestEpochBoundaryConsensus verifies the producers remain in consensus
+// across at least one full epoch transition. With epochLength=500, this
+// exercises the candidate-nonce freeze, lab nonce roll, and VRF
+// verification with the new epoch nonce — the same code path that has
+// been observed to wedge on preview after a Mithril bootstrap.
 //
-// Failure mode this catches: Dingo's tip falls behind cardano-node's by
+// Failure mode this catches: a producer's tip falls behind the others by
 // more than slotTolerance after the boundary because every header in
-// the new epoch fails VRF verification (chain stops advancing on Dingo
-// while cardano-node continues forging).
+// the new epoch fails VRF verification (chain stops advancing on that
+// producer while the others continue forging).
 func TestEpochBoundaryConsensus(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(
@@ -47,7 +46,7 @@ func TestEpochBoundaryConsensus(t *testing.T) {
 		cfg.ActiveSlotsCoeff, cfg.SecurityParam,
 	)
 
-	endpoints := devnet.DefaultEndpoints()
+	endpoints := devnet.LoadEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
@@ -66,8 +65,8 @@ func TestEpochBoundaryConsensus(t *testing.T) {
 		targetSlot, cfg.EpochLength, timeout,
 	)
 
-	cardanoEndpoint := endpoints[1]
-	h.WaitForNodeSlot(cardanoEndpoint, targetSlot, timeout)
+	observed := h.DingoNode()
+	h.WaitForNodeSlot(observed, targetSlot, timeout)
 
 	// Both producers must agree on the chain after crossing the
 	// boundary. K is the initial catch-up tolerance; anything larger
@@ -83,25 +82,16 @@ func TestEpochBoundaryConsensus(t *testing.T) {
 	tightConvergeTimeout := cfg.ExpectedBlockTime() * 10
 	h.VerifyChainConsensus(tightTolerance, tightConvergeTimeout)
 
-	dingoEndpoint := endpoints[0]
-	dingoTip, err := h.GetChainTip(dingoEndpoint)
-	require.NoError(t, err, "failed to get dingo tip after boundary")
-	cardanoTip, err := h.GetChainTip(cardanoEndpoint)
-	require.NoError(t, err, "failed to get cardano tip after boundary")
-	t.Logf(
-		"post-boundary: dingo slot=%d block=%d, cardano slot=%d block=%d",
-		dingoTip.SlotNumber, dingoTip.BlockNumber,
-		cardanoTip.SlotNumber, cardanoTip.BlockNumber,
-	)
-
-	// Dingo's tip slot must be past the boundary. If VRF verification
-	// fails on every new-epoch header, Dingo's chain stalls a few
-	// slots before slot=epochLength.
-	require.Greater(
-		t, dingoTip.SlotNumber, cfg.EpochLength,
-		"dingo did not advance past first epoch boundary "+
-			"(stuck before slot %d) — likely VRF verification "+
-			"failure on epoch 1 headers",
-		cfg.EpochLength,
-	)
+	// Every producer's tip slot must be past the boundary. If VRF
+	// verification fails on every new-epoch header, a node's chain stalls
+	// a few slots before slot=epochLength.
+	for _, p := range h.Producers() {
+		tip, terr := h.GetChainTip(p)
+		require.NoError(t, terr, "failed to get %s tip after boundary", p.Name)
+		t.Logf("post-boundary: %s slot=%d block=%d", p.Name, tip.SlotNumber, tip.BlockNumber)
+		require.Greater(t, tip.SlotNumber, cfg.EpochLength,
+			"%s did not advance past first epoch boundary "+
+				"(stuck before slot %d) - likely VRF verification "+
+				"failure on epoch 1 headers", p.Name, cfg.EpochLength)
+	}
 }

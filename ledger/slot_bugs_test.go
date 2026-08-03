@@ -66,6 +66,7 @@ func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
 		// epochCache empty — HardForkSummary will error.
 		config: LedgerStateConfig{CardanoNodeConfig: cfg},
 	}
+	ls.publishSnapshotsLocked()
 
 	// Far-future time; well past any "near now" tolerance.
 	future := time.Now().Add(24 * time.Hour)

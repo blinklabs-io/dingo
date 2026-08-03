@@ -15,13 +15,11 @@
 package ouroboros
 
 import (
+	"fmt"
+	"math"
 	"time"
 
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
-)
-
-const (
-	localtxmonitorMempoolCapacity = 10 * 1024 * 1024 // TODO: replace with configurable value (#400)
 )
 
 func (o *Ouroboros) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {
@@ -47,6 +45,13 @@ func (o *Ouroboros) localtxmonitorServerGetMempool(
 	ctx olocaltxmonitor.CallbackContext,
 ) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
 	tip := o.LedgerState.Tip()
+	capacity := o.Mempool.CapacityBytes()
+	if capacity < 0 || capacity > math.MaxUint32 {
+		return 0, 0, nil, fmt.Errorf(
+			"mempool capacity %d cannot be represented by LocalTxMonitor",
+			capacity,
+		)
+	}
 	mempoolTxs := o.Mempool.Transactions()
 	retTxs := make([]olocaltxmonitor.TxAndEraId, len(mempoolTxs))
 	for i := range mempoolTxs {
@@ -55,5 +60,5 @@ func (o *Ouroboros) localtxmonitorServerGetMempool(
 			Tx:    mempoolTxs[i].Cbor,
 		}
 	}
-	return tip.Point.Slot, localtxmonitorMempoolCapacity, retTxs, nil
+	return tip.Point.Slot, uint32(capacity), retTxs, nil // #nosec G115 -- range checked above
 }

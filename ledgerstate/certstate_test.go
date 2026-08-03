@@ -262,6 +262,108 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 	}
 }
 
+func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
+	poolHash := bytes.Repeat([]byte{0x61}, 28)
+	vrfHash := bytes.Repeat([]byte{0x62}, 32)
+	rewardHash := bytes.Repeat([]byte{0x63}, 28)
+	ownerHash := bytes.Repeat([]byte{0x64}, 28)
+	leiosKey := []any{
+		bytes.Repeat([]byte{0x65}, 96),
+		bytes.Repeat([]byte{0x66}, 48),
+	}
+
+	for _, tc := range []struct {
+		name      string
+		leiosKey  any
+		wantError bool
+	}{
+		{name: "registered key", leiosKey: leiosKey},
+		{name: "explicit null", leiosKey: nil},
+		{
+			name: "malformed key",
+			leiosKey: []any{
+				bytes.Repeat([]byte{0x65}, 95),
+				bytes.Repeat([]byte{0x66}, 48),
+			},
+			wantError: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			poolMap := encodeCredentialMapEntry(
+				t,
+				poolHash,
+				[]any{
+					vrfHash,
+					tc.leiosKey,
+					uint64(500_000_000),
+					uint64(340_000_000),
+					[]uint64{1, 20},
+					[]any{uint64(0), []any{uint64(0), rewardHash}},
+					[]any{ownerHash},
+					[]any{},
+					nil,
+					uint64(500_000_000),
+					[]any{},
+				},
+			)
+			pstate, err := cbor.Encode([]any{
+				map[uint64]uint64{},
+				cbor.RawMessage(poolMap),
+				map[uint64]uint64{},
+				map[uint64]uint64{},
+			})
+			if err != nil {
+				t.Fatalf("encoding PState: %v", err)
+			}
+
+			pools, err := parsePState(pstate)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected malformed Leios key to fail")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePState failed: %v", err)
+			}
+			if len(pools) != 1 {
+				t.Fatalf("expected 1 pool, got %d", len(pools))
+			}
+
+			pool := pools[0]
+			if !bytes.Equal(pool.VrfKeyHash, vrfHash) {
+				t.Fatalf("vrf hash mismatch: %x", pool.VrfKeyHash)
+			}
+			if pool.Pledge != 500_000_000 {
+				t.Fatalf("pledge mismatch: %d", pool.Pledge)
+			}
+			if pool.Cost != 340_000_000 {
+				t.Fatalf("cost mismatch: %d", pool.Cost)
+			}
+			if pool.MarginNum != 1 || pool.MarginDen != 20 {
+				t.Fatalf(
+					"margin mismatch: %d/%d",
+					pool.MarginNum,
+					pool.MarginDen,
+				)
+			}
+			if !bytes.Equal(pool.RewardAccount, rewardHash) {
+				t.Fatalf(
+					"reward account mismatch: %x",
+					pool.RewardAccount,
+				)
+			}
+			if len(pool.Owners) != 1 ||
+				!bytes.Equal(pool.Owners[0], ownerHash) {
+				t.Fatalf("owners mismatch: %#v", pool.Owners)
+			}
+			if pool.Deposit != 500_000_000 {
+				t.Fatalf("deposit mismatch: %d", pool.Deposit)
+			}
+		})
+	}
+}
+
 // TestParseRewardAccountNormalizesAddressBytes verifies full reward
 // addresses are stored as 28-byte hashes plus their credential tag.
 func TestParseRewardAccountNormalizesAddressBytes(t *testing.T) {

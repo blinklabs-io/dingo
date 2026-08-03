@@ -307,6 +307,20 @@ func (p *DingoStateProvider) DRepRegistration(
 	return nil, nil
 }
 
+// DRepDelegation returns the DRep a stake credential is vote-delegated to, or
+// nil if it is not delegated. Used to validate reward withdrawals on protocol
+// versions 10 and 11.
+func (p *DingoStateProvider) DRepDelegation(
+	cred common.Credential,
+) (*common.Drep, error) {
+	delegation, ok := p.manager.govState.DRepDelegations[cred.Credential]
+	if !ok {
+		return nil, nil
+	}
+	delegation.Credential = append([]byte(nil), delegation.Credential...)
+	return &delegation, nil
+}
+
 // DRepRegistrations returns all DRep registrations
 func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, error) {
 	dreps := make([]common.DRepRegistration, 0, len(p.manager.drepRegistrations))

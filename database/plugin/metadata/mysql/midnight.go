@@ -20,6 +20,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/pagination"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"gorm.io/gorm"
@@ -27,7 +28,8 @@ import (
 )
 
 // CreateMidnightAssetCreate inserts a cNIGHT UTxO creation row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightAssetCreate(
 	txn types.Txn,
 	row *models.MidnightAssetCreate,
@@ -40,7 +42,8 @@ func (d *MetadataStoreMysql) CreateMidnightAssetCreate(
 }
 
 // CreateMidnightAssetSpend inserts a cNIGHT UTxO spend row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightAssetSpend(
 	txn types.Txn,
 	row *models.MidnightAssetSpend,
@@ -53,7 +56,8 @@ func (d *MetadataStoreMysql) CreateMidnightAssetSpend(
 }
 
 // CreateMidnightRegistration inserts a mapping-validator registration row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightRegistration(
 	txn types.Txn,
 	row *models.MidnightRegistration,
@@ -66,7 +70,8 @@ func (d *MetadataStoreMysql) CreateMidnightRegistration(
 }
 
 // CreateMidnightDeregistration inserts a mapping-validator deregistration row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightDeregistration(
 	txn types.Txn,
 	row *models.MidnightDeregistration,
@@ -204,6 +209,129 @@ func (d *MetadataStoreMysql) DeleteMidnightDeregistrationsByBlock(
 	return rows, nil
 }
 
+// FindMidnightAssetCreatesFrom returns cNIGHT create rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// A page may return more than limit rows: (block_number, tx_index) is not a
+// unique key (a single tx can write multiple rows), so a page that would
+// otherwise cut a shared key in half is extended to include the rest of
+// that key's rows. This keeps the (start_block, start_tx_index) cursor
+// gap-free across pages.
+func (d *MetadataStoreMysql) FindMidnightAssetCreatesFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightAssetCreate, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC, id ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightAssetCreate
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
+}
+
+// FindMidnightAssetSpendsFrom returns cNIGHT spend rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// See FindMidnightAssetCreatesFrom for why a page may return more than
+// limit rows.
+func (d *MetadataStoreMysql) FindMidnightAssetSpendsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightAssetSpend, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC, id ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightAssetSpend
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
+}
+
+// FindMidnightRegistrationsFrom returns registration rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// See FindMidnightAssetCreatesFrom for why a page may return more than
+// limit rows.
+func (d *MetadataStoreMysql) FindMidnightRegistrationsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightRegistration, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC, id ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightRegistration
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
+}
+
+// FindMidnightDeregistrationsFrom returns deregistration rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// See FindMidnightAssetCreatesFrom for why a page may return more than
+// limit rows.
+func (d *MetadataStoreMysql) FindMidnightDeregistrationsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightDeregistration, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC, id ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightDeregistration
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
+}
+
 func (d *MetadataStoreMysql) GetMidnightCandidates(
 	addr ledger.Address,
 	txn types.Txn,
@@ -323,6 +451,28 @@ func (d *MetadataStoreMysql) GetMidnightAriadneParamsByEpoch(
 	return &params, nil
 }
 
+// GetMidnightAriadneParamsAtOrBeforeEpoch returns the newest Ariadne params
+// row at or before epoch, or nil when none exists.
+func (d *MetadataStoreMysql) GetMidnightAriadneParamsAtOrBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightAriadneParams, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var params models.MidnightAriadneParams
+	result := db.Where("epoch <= ?", epoch).
+		Order("epoch DESC").First(&params)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &params, nil
+}
+
 func (d *MetadataStoreMysql) UpsertMidnightAriadneParams(
 	txn types.Txn,
 	params *models.MidnightAriadneParams,
@@ -425,4 +575,76 @@ func (d *MetadataStoreMysql) DeleteMidnightEpochCandidatesByBlock(
 	}
 	return db.Where("block_number = ?", blockNumber).
 		Delete(&models.MidnightEpochCandidates{}).Error
+}
+
+// GetMidnightEpochCandidatesByEpoch returns the candidate snapshot for one
+// epoch, or nil when none exists.
+func (d *MetadataStoreMysql) GetMidnightEpochCandidatesByEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightEpochCandidates, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var ec models.MidnightEpochCandidates
+	result := db.Where("epoch = ?", epoch).First(&ec)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &ec, nil
+}
+
+// InsertMidnightCommitteeCandidateRegistration inserts a candidate UTxO
+// provenance row. Idempotent on replay: GORM's DoNothing conflict clause
+// renders on MySQL as a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
+func (d *MetadataStoreMysql) InsertMidnightCommitteeCandidateRegistration(
+	txn types.Txn,
+	row *models.MidnightCommitteeCandidateRegistration,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
+}
+
+// DeleteMidnightCommitteeCandidateRegistrationsByBlock deletes candidate
+// registration rows written while applying blockNumber. Used during
+// rollback so a re-applied block at the same height starts clean.
+func (d *MetadataStoreMysql) DeleteMidnightCommitteeCandidateRegistrationsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightCommitteeCandidateRegistration{}).Error
+}
+
+// GetMidnightCommitteeCandidateRegistrationsByTxHashes returns every
+// registration row whose tx_hash is in txHashes, for the caller to match
+// against (tx_hash, output_index) pairs. A single IN query regardless of how
+// many candidates are being enriched avoids one round trip per candidate.
+func (d *MetadataStoreMysql) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+	txHashes [][]byte,
+	txn types.Txn,
+) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	if len(txHashes) == 0 {
+		return nil, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.MidnightCommitteeCandidateRegistration
+	if err := db.Where("tx_hash IN ?", txHashes).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }

@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
 	"time"
 
@@ -57,8 +58,10 @@ type EpochInfoProvider interface {
 	// for the normal nonce-ready event path instead.
 	NextEpochNonceReadyEpoch() (uint64, bool)
 
-	// SlotsPerEpoch returns the number of slots in an epoch.
-	SlotsPerEpoch() uint64
+	// EpochSlotRange returns the absolute slot range for an epoch, resolved
+	// against the ledger hard-fork summary so Byron prefixes and variable
+	// epoch lengths are respected.
+	EpochSlotRange(epoch uint64) (EpochSlotRange, error)
 
 	// EpochForSlot returns the epoch containing slot, resolved against
 	// the ledger hard-fork summary so era boundaries and variable epoch
@@ -78,10 +81,64 @@ type EpochInfoProvider interface {
 	ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode
 }
 
+// ActiveSlotCoeffRatProvider is an optional extension of EpochInfoProvider
+// for providers that can supply the active slot coefficient (f) as the exact
+// rational written in the Shelley genesis rather than a float64.
+//
+// It is a separate, optionally-implemented interface rather than a method on
+// EpochInfoProvider so existing implementations keep compiling. computeSchedule
+// prefers it whenever the provider satisfies it and returns a non-nil value,
+// and logs the coefficient actually used so a fallback to the float64 form is
+// visible in the "leader schedule calculated" record.
+//
+// The distinction matters because the reference node derives its leadership
+// threshold from the exact genesis rational. A float64 round trip of 1/20
+// yields 3602879701896397/2^56, which is strictly larger, so every per-slot
+// threshold is strictly larger and the resulting eligible-slot set is a strict
+// superset of the reference's. dingo's own header verification already uses the
+// exact rational, so the float64 form also let the forge path disagree with
+// dingo's own validation path. See Calculator.ActiveSlotCoeffRat.
+type ActiveSlotCoeffRatProvider interface {
+	// ActiveSlotCoeffRat returns the exact active slot coefficient, or nil
+	// when the genesis value is unavailable.
+	ActiveSlotCoeffRat() *big.Rat
+}
+
 // ScheduleStore persists computed schedules for later reuse.
 type ScheduleStore interface {
 	LoadSchedule(epoch uint64, poolId lcommon.PoolKeyHash) (*Schedule, error)
 	SaveSchedule(schedule *Schedule) error
+}
+
+// markSnapshotType names the stake snapshot generation the Praos leader check
+// reads, for the audit log only. StakeDistributionProvider is documented to
+// resolve the mark snapshot selected by praos.StakeSnapshotEpoch; the string is
+// duplicated here rather than imported from database/models to keep this
+// package free of a database dependency.
+const markSnapshotType = "mark"
+
+// consensusModeName renders a consensus mode for logging. gouroboros'
+// ConsensusMode is a bare int with no String method, and the numeric value is
+// not self-describing in an operator-facing audit record.
+func consensusModeName(mode consensus.ConsensusMode) string {
+	switch mode {
+	case consensus.ConsensusModeTPraos:
+		return "tpraos"
+	case consensus.ConsensusModeCPraos:
+		return "cpraos"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(mode))
+	}
+}
+
+// thresholdHex renders a leadership threshold for logging. The threshold is a
+// 256- or 512-bit integer, so hex keeps the record compact and directly
+// comparable against a certified-natural VRF value.
+func thresholdHex(threshold *big.Int) string {
+	if threshold == nil {
+		return ""
+	}
+	return threshold.Text(16)
 }
 
 // maxCachedSchedules is the number of epoch schedules to keep in memory.
@@ -546,6 +603,27 @@ func (e *Election) validatePersistedSchedule(
 		return false, "epoch nonce changed", nil
 	}
 
+	epochRange, err := e.epochProvider.EpochSlotRange(epoch)
+	if err != nil {
+		return false, "", fmt.Errorf("get epoch slot range: %w", err)
+	}
+	if epochRange.SlotCount == 0 {
+		return false, "epoch slot count is zero", nil
+	}
+	if epochRange.StartSlot > ^uint64(0)-epochRange.SlotCount {
+		return false, "", fmt.Errorf(
+			"epoch slot range overflows uint64: start=%d count=%d",
+			epochRange.StartSlot,
+			epochRange.SlotCount,
+		)
+	}
+	epochEndSlot := epochRange.StartSlot + epochRange.SlotCount
+	for _, slot := range schedule.LeaderSlotsSnapshot() {
+		if slot < epochRange.StartSlot || slot >= epochEndSlot {
+			return false, "leader slot outside epoch range", nil
+		}
+	}
+
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
@@ -675,16 +753,34 @@ func (e *Election) computeSchedule(
 		return nil, nil
 	}
 
-	calc := NewCalculator(
-		e.epochProvider.ActiveSlotCoeff(),
-		e.epochProvider.SlotsPerEpoch(),
-	)
+	epochRange, err := e.epochProvider.EpochSlotRange(currentEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get epoch slot range: %w", err)
+	}
+
+	calc := NewCalculator(e.epochProvider.ActiveSlotCoeff())
+	// Prefer the exact Shelley genesis rational over the float64 form; see
+	// ActiveSlotCoeffRatProvider.
+	if ratProvider, ok := e.epochProvider.(ActiveSlotCoeffRatProvider); ok {
+		if exactCoeff := ratProvider.ActiveSlotCoeffRat(); exactCoeff != nil {
+			calc.ActiveSlotCoeffRat = exactCoeff
+		}
+	}
 
 	mode := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
+
+	// Resolve the coefficient up front so an invalid genesis value fails here
+	// with a clear message instead of deep inside the VRF loop, and so the
+	// audit log below can report the exact value that was used.
+	activeSlotCoeff, err := calc.activeSlotCoeffRat()
+	if err != nil {
+		return nil, fmt.Errorf("resolve active slot coefficient: %w", err)
+	}
 
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
+		epochRange,
 		e.poolId,
 		e.poolVrfSkey,
 		poolStake,
@@ -699,19 +795,31 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("calculate schedule: %w", err)
 	}
 
+	// One O(1)-per-epoch record carrying every input to the leader check, so a
+	// schedule that disagrees with `cardano-cli query leadership-schedule` can
+	// be diffed against the reference node's `query stake-snapshot` and
+	// `query protocol-state` from logs alone, without re-running with extra
+	// instrumentation (dingo #2798). Never log per slot.
 	e.logger.Info(
 		"leader schedule calculated",
 		"component", "leader",
 		"epoch", currentEpoch,
+		"snapshot_epoch", snapshotEpoch,
+		"snapshot_type", markSnapshotType,
+		"epoch_start_slot", epochRange.StartSlot,
+		"epoch_slot_count", epochRange.SlotCount,
 		"epoch_nonce", hex.EncodeToString(epochNonce),
 		"pool_stake", poolStake,
 		"total_stake", totalStake,
 		"stake_ratio", schedule.StakeRatio(),
+		"active_slot_coeff", activeSlotCoeff.RatString(),
+		"consensus_mode", consensusModeName(mode),
+		"leader_threshold", thresholdHex(schedule.Threshold),
 		"leader_slots", schedule.SlotCount(),
 		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
 	)
 	if e.metrics != nil {
-		slotsChecked := e.epochProvider.SlotsPerEpoch()
+		slotsChecked := epochRange.SlotCount
 		slotsWon := uint64(len(schedule.LeaderSlotsSnapshot()))
 		slotsNotWon := uint64(0)
 		if slotsWon <= slotsChecked {

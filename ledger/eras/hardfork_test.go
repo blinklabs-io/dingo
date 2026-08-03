@@ -17,9 +17,11 @@ package eras_test
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
@@ -37,10 +39,10 @@ import (
 // pparams as belonging to the prior era. The chain then never
 // advances.
 //
-// The tests below cover the era transitions whose HardForkFunc takes
-// no genesis configuration. Shelley, Alonzo, and Conway are excluded
-// because they require ShelleyGenesis / AlonzoGenesis / ConwayGenesis
-// respectively to produce a valid result; their version-bump
+// The version-bump tests below cover the era transitions whose HardForkFunc
+// takes no genesis configuration. Shelley, Alonzo, and Conway are excluded
+// from those because they require ShelleyGenesis / AlonzoGenesis /
+// ConwayGenesis respectively to produce a valid result; their version-bump
 // postcondition is identical and is verified end-to-end by the eras
 // integration test.
 
@@ -95,4 +97,46 @@ func TestHardForkBabbageBumpsProtocolMajor(t *testing.T) {
 		"HardForkBabbage must bump ProtocolMajor to BabbageEraDesc.MinMajorVersion (%d), got %d",
 		eras.BabbageEraDesc.MinMajorVersion, pp.ProtocolMajor,
 	)
+}
+
+// TestHardForkBabbageDoesNotMutatePreviousCostModels verifies that the
+// Babbage upgrade does not modify CostModels owned by the previous era.
+func TestHardForkBabbageDoesNotMutatePreviousCostModels(t *testing.T) {
+	prev := &alonzo.AlonzoProtocolParameters{
+		ProtocolMajor: 6,
+		CostModels: map[uint][]int64{
+			0: {1, 2, 3},
+		},
+	}
+
+	got, err := eras.HardForkBabbage(nil, prev)
+	require.NoError(t, err)
+	pp := got.(*babbage.BabbageProtocolParameters)
+	pp.CostModels[0][0] = 9
+	pp.CostModels[2] = []int64{4}
+
+	require.Equal(t, []int64{1, 2, 3}, prev.CostModels[0])
+	require.NotContains(t, prev.CostModels, uint(1))
+	require.NotContains(t, prev.CostModels, uint(2))
+}
+
+// TestHardForkConwayDoesNotMutatePreviousCostModels verifies that the
+// Conway upgrade does not modify CostModels owned by the previous era.
+func TestHardForkConwayDoesNotMutatePreviousCostModels(t *testing.T) {
+	prev := &babbage.BabbageProtocolParameters{
+		ProtocolMajor: 8,
+		CostModels: map[uint][]int64{
+			0: {1, 2, 3},
+		},
+	}
+
+	got, err := eras.HardForkConway(&cardano.CardanoNodeConfig{}, prev)
+	require.NoError(t, err)
+	pp := got.(*conway.ConwayProtocolParameters)
+	pp.CostModels[0][0] = 9
+	pp.CostModels[2] = []int64{4}
+
+	require.Equal(t, []int64{1, 2, 3}, prev.CostModels[0])
+	require.NotContains(t, prev.CostModels, uint(1))
+	require.NotContains(t, prev.CostModels, uint(2))
 }

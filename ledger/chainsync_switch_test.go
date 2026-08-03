@@ -455,6 +455,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	ls.handleChainSwitchEvent(event.NewEvent(
 		chainselection.ChainSwitchEventType,
 		chainselection.ChainSwitchEvent{
@@ -511,6 +512,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 		ConnectionId: connId,
@@ -1717,6 +1719,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
 		ConnectionId: connId1,

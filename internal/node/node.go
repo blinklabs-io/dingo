@@ -28,8 +28,11 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo"
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -256,6 +259,26 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			return fmt.Errorf("invalid shutdown timeout: %w", err)
 		}
 	}
+	// Use the package-level default to avoid drift.
+	chainsyncStallTimeout := chainsync.DefaultStallTimeout
+	if cfg.Chainsync.StallTimeout != "" {
+		var err error
+		chainsyncStallTimeout, err = time.ParseDuration(
+			cfg.Chainsync.StallTimeout,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"invalid chainsync stall timeout: %w",
+				err,
+			)
+		}
+	}
+	chainsyncStrategy, err := chainsync.ParseHeaderSyncStrategy(
+		cfg.Chainsync.Strategy,
+	)
+	if err != nil {
+		return fmt.Errorf("invalid chainsync strategy: %w", err)
+	}
 
 	// Validate storage mode
 	storageMode := dingo.StorageMode(cfg.StorageMode)
@@ -270,46 +293,184 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.StorageModeAPI,
 		)
 	}
-	// Update storage mode in config if needed for dev mode
+	// Dev mode always uses API storage for full transaction metadata
 	if cfg.RunMode.IsDevMode() && !storageMode.IsAPI() {
 		logger.Info(
 			"dev mode: overriding storage mode to api",
 			"previous", string(storageMode),
 		)
-		cfg.StorageMode = string(dingo.StorageModeAPI)
 		storageMode = dingo.StorageModeAPI
 	}
+	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
+	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
+	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
-		"blockfrost", storageMode.IsAPI() && cfg.BlockfrostPort > 0,
-		"utxorpc", storageMode.IsAPI() && cfg.UtxorpcPort > 0,
-		"mesh", storageMode.IsAPI() && cfg.MeshPort > 0,
+		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
+		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
+		"mesh", storageMode.IsAPI() && meshPort > 0,
 		"midnight_indexing", storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
 	)
 
-	// Create config using the new unified approach - no more manual mapping!
-	dingoConfig, err := dingo.NewConfigFromInternal(
-		cfg,
-		logger,
-		nodeCfg,
-		config.GetTopologyConfig(),
-		prometheus.DefaultRegisterer,
+	d, err := dingo.New(
+		dingo.NewConfig(
+			dingo.WithIntersectTip(cfg.IntersectTip),
+			dingo.WithLogger(logger),
+			dingo.WithDatabasePath(cfg.DatabasePath),
+			dingo.WithPluginSelection(plugin.CapabilityStorageBlob, cfg.Plugins.Storage.Blob),
+			dingo.WithPluginSelection(plugin.CapabilityStorageMetadata, cfg.Plugins.Storage.Metadata),
+			dingo.WithPluginSelection(plugin.CapabilityMempool, cfg.Plugins.Mempool),
+			dingo.WithPluginSelection(plugin.CapabilityAPIBlockfrost, cfg.Plugins.API.Blockfrost),
+			dingo.WithPluginSelection(plugin.CapabilityAPIMesh, cfg.Plugins.API.Mesh),
+			dingo.WithPluginSelection(plugin.CapabilityAPIUtxorpc, cfg.Plugins.API.Utxorpc),
+			dingo.WithNetwork(cfg.Network),
+			dingo.WithNetworkMagic(cfg.NetworkMagic),
+			dingo.WithCardanoNodeConfig(nodeCfg),
+			dingo.WithListeners(listeners...),
+			dingo.WithOutboundSourcePort(cfg.RelayPort),
+			dingo.WithPeerSharing(peerSharing),
+			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
+			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
+			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
+			dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
+			dingo.WithBarkPort(cfg.BarkPort),
+			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
+				Enabled:   cfg.HistoryExpiry.Enabled,
+				Frequency: cfg.HistoryExpiry.Frequency,
+			}),
+			dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
+			dingo.WithOffchainMetadataConfig(
+				dingo.OffchainMetadataConfig{
+					Interval: cfg.OffchainMetadata.Interval,
+					RequestTimeout: cfg.OffchainMetadata.
+						RequestTimeout,
+					UserAgent: cfg.OffchainMetadata.UserAgent,
+					IPFSGatewayURL: cfg.OffchainMetadata.
+						IPFSGatewayURL,
+					BatchSize: cfg.OffchainMetadata.BatchSize,
+					MaxBytes:  cfg.OffchainMetadata.MaxBytes,
+					AllowPrivateAddresses: cfg.OffchainMetadata.
+						AllowPrivateAddresses,
+				},
+			),
+			dingo.WithMidnightConfig(dingo.MidnightConfig{
+				Port:                        cfg.Midnight.Port,
+				Host:                        cfg.Midnight.Host,
+				CNightPolicyID:              cfg.Midnight.CNightPolicyID,
+				CNightAssetName:             cfg.Midnight.CNightAssetName,
+				MappingValidatorAddress:     cfg.Midnight.MappingValidatorAddress,
+				AuthTokenPolicyID:           cfg.Midnight.AuthTokenPolicyID,
+				AuthTokenAssetName:          cfg.Midnight.AuthTokenAssetName,
+				CommitteeCandidateAddress:   cfg.Midnight.CommitteeCandidateAddress,
+				TechnicalCommitteeAddress:   cfg.Midnight.TechnicalCommitteeAddress,
+				TechnicalCommitteePolicyID:  cfg.Midnight.TechnicalCommitteePolicyID,
+				CouncilAddress:              cfg.Midnight.CouncilAddress,
+				CouncilPolicyID:             cfg.Midnight.CouncilPolicyID,
+				PermissionedCandidatePolicy: cfg.Midnight.PermissionedCandidatePolicy,
+			}),
+			dingo.WithValidateHistorical(cfg.ValidateHistorical),
+			dingo.WithStrictUtxoValidation(cfg.StrictUtxoValidation),
+			dingo.WithRunMode(string(cfg.RunMode)),
+			dingo.WithStartEra(string(cfg.StartEra)),
+			dingo.WithShutdownTimeout(shutdownTimeout),
+			// Enable metrics with default prometheus registry
+			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
+			dingo.WithTracing(cfg.Tracing),
+			dingo.WithTracingStdout(cfg.TracingStdout),
+			dingo.WithTopologyConfig(config.GetTopologyConfig()),
+			dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
+				WorkerPoolSize: cfg.DatabaseWorkers,
+				TaskQueueSize:  cfg.DatabaseQueueSize,
+				Disabled:       false,
+			}),
+			dingo.WithPeerTargets(
+				cfg.TargetNumberOfKnownPeers,
+				cfg.TargetNumberOfEstablishedPeers,
+				cfg.TargetNumberOfActivePeers,
+			),
+			dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
+			dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
+			dingo.WithGenesisCorroborationPeers(
+				cfg.GenesisBootstrap.CorroborationPeers,
+			),
+			dingo.WithBootstrapPromotionMinDiversityGroups(
+				cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+			),
+			dingo.WithActivePeersQuotas(
+				cfg.ActivePeersTopologyQuota,
+				cfg.ActivePeersGossipQuota,
+				cfg.ActivePeersLedgerQuota,
+			),
+			dingo.WithMinHotPeers(cfg.MinHotPeers),
+			dingo.WithReconcileInterval(cfg.ReconcileInterval),
+			dingo.WithInactivityTimeout(cfg.InactivityTimeout),
+			dingo.WithInboundPeerGovernance(
+				cfg.InboundWarmTarget,
+				cfg.InboundHotQuota,
+				cfg.InboundMinTenure,
+				cfg.InboundHotScoreThreshold,
+				cfg.InboundPruneAfter,
+				cfg.InboundDuplexOnlyForHot,
+				cfg.InboundCooldown,
+			),
+			dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
+			dingo.WithMaxInboundConns(cfg.MaxInboundConns),
+			dingo.WithCacheConfig(
+				cfg.Cache.BlockLRUEntries,
+				cfg.Cache.HotUtxoEntries,
+				cfg.Cache.HotTxEntries,
+				cfg.Cache.HotTxMaxBytes,
+			),
+			dingo.WithChainsyncMaxClients(
+				cfg.Chainsync.MaxClients,
+			),
+			dingo.WithChainsyncStallTimeout(
+				chainsyncStallTimeout,
+			),
+			dingo.WithChainsyncHeaderStrategy(
+				chainsyncStrategy,
+			),
+			dingo.WithBindAddr(cfg.BindAddr),
+			dingo.WithStorageMode(storageMode),
+			// CIP-23 minimum pool margin (consensus-affecting)
+			dingo.WithMinPoolMargin(cfg.MinPoolMargin),
+			// CIP-50 pledge-leverage staking rewards (consensus-affecting)
+			dingo.WithPledgeLeverage(
+				cfg.PledgeLeverageEnabled,
+				cfg.PledgeLeverage,
+			),
+			// CIP-0163 full-pot reward distribution (consensus-affecting)
+			dingo.WithFullPotRewards(cfg.FullPotRewardsEnabled),
+			dingo.WithUnsafeFullPotRewardsOnStandardNetworks(
+				cfg.UnsafeFullPotRewardsOnStandardNetworks,
+			),
+			// Block production (SPO mode)
+			dingo.WithBlockProducer(cfg.BlockProducer),
+			dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),
+			dingo.WithShelleyKESKey(cfg.ShelleyKESKey),
+			dingo.WithShelleyOperationalCertificate(
+				cfg.ShelleyOperationalCertificate,
+			),
+			dingo.WithForgeSyncToleranceSlots(
+				cfg.ForgeSyncToleranceSlots,
+			),
+			dingo.WithForgeStaleGapThresholdSlots(
+				cfg.ForgeStaleGapThresholdSlots,
+			),
+			dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
+			// CIP-0163 reward-account inactivity expiry (consensus-affecting)
+			dingo.WithDelegatorInactivity(
+				cfg.DelegatorInactivityEnabled,
+				cfg.DelegatorInactivity,
+			),
+			// Leios voting (experimental)
+			dingo.WithLeiosVoteSigningKeyFile(
+				cfg.LeiosVoteSigningKeyFile,
+			),
+			dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
+		),
 	)
-	if err != nil {
-		return err
-	}
-
-	// Apply runtime-only overrides that aren't in the internal config
-	opts := []dingo.ConfigOptionFunc{
-		dingo.WithListeners(listeners...),
-		dingo.WithPeerSharing(peerSharing),
-	}
-	for _, opt := range opts {
-		opt(&dingoConfig)
-	}
-
-	d, err := dingo.New(dingoConfig)
 	if err != nil {
 		return err
 	}
@@ -319,8 +480,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	metricsMux.Handle("/metrics", promhttp.Handler())
 	metricsAddr := fmt.Sprintf(
 		"%s:%d",
-		dingoConfig.BindAddr(),
-		dingoConfig.MetricsPort(),
+		cfg.BindAddr,
+		cfg.MetricsPort,
 	)
 	logger.Info(
 		"serving prometheus metrics on "+metricsAddr,
@@ -337,14 +498,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
 	var debugServer *http.Server
-	if dingoConfig.DebugPort() != 0 {
+	if cfg.DebugPort != 0 {
 		debugMux := http.NewServeMux()
 		debugMux.HandleFunc("/debug/pprof/", pprof.Index)
 		debugMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 		debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 		debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		debugAddr := fmt.Sprintf("%s:%d", dingoConfig.BindAddr(), dingoConfig.DebugPort())
+		debugAddr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.DebugPort)
 		logger.Info(
 			"serving pprof debug endpoints on "+debugAddr,
 			"component", "node",

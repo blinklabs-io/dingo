@@ -49,8 +49,11 @@ func (o *Ouroboros) leiosfetchServerConnOpts() []oleiosfetch.LeiosFetchOptionFun
 // connection down and fail the historical backfill. leios-notify is already set
 // to no timeout for the same reason (it long-polls for offers); leios-fetch
 // gets a generous but finite bound so a genuinely unresponsive request still
-// fails instead of hanging a fetch goroutine forever.
-const leiosFetchResponseTimeout = 60 * time.Second
+// fails instead of hanging a fetch goroutine forever. Keep this no greater than
+// the by-point backfill attempt budget: that path checks its deadline between
+// requests, so the protocol timeout is what bounds a request that receives no
+// response at all.
+const leiosFetchResponseTimeout = leiosBackfillPerAttemptTimeout
 
 func (o *Ouroboros) leiosfetchClientConnOpts() []oleiosfetch.LeiosFetchOptionFunc {
 	return []oleiosfetch.LeiosFetchOptionFunc{

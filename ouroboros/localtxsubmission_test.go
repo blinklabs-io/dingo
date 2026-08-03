@@ -17,12 +17,43 @@ package ouroboros
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(t *testing.T) {
+	o := &Ouroboros{
+		config: OuroborosConfig{
+			Logger: slog.New(slog.DiscardHandler),
+		},
+	}
+	ctx := olocaltxsubmission.CallbackContext{
+		ConnectionId: connection.ConnectionId{
+			LocalAddr:  &net.TCPAddr{},
+			RemoteAddr: &net.TCPAddr{},
+		},
+	}
+	tx := olocaltxsubmission.MsgSubmitTxTransaction{
+		EraId: uint16(gledger.EraIdConway),
+		Raw: cbor.Tag{
+			Number:  24,
+			Content: "not-bytes",
+		},
+	}
+
+	require.NotPanics(t, func() {
+		err := o.localtxsubmissionServerSubmitTx(ctx, tx)
+		require.Error(t, err)
+	})
+}
 
 func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(t *testing.T) {
 	for _, era := range []uint16{

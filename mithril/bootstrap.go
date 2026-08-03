@@ -39,6 +39,15 @@ const (
 	BackendV2 = "v2"
 )
 
+// AcceptedBackends returns the recognized Mithril artifact backends.
+// It is the single source for backend-name validation: cmd/dingo's
+// resolveMithrilBackend derives from it, and internal/config's
+// validation whitelist (which cannot import this package) verifies
+// parity against it.
+func AcceptedBackends() []string {
+	return []string{BackendV1, BackendV2}
+}
+
 // BootstrapConfig holds configuration for the Mithril bootstrap
 // process.
 type BootstrapConfig struct {
@@ -94,6 +103,12 @@ type BootstrapConfig struct {
 	// internally by downloadImmutables on a by-value copy of the config;
 	// callers do not populate it.
 	httpClient *http.Client
+	// StartImmutable is the lowest immutable file number to download and
+	// extract. Files below it are assumed already present (a Mithril v2
+	// catch-up sets this to the immutable-import marker so it only fetches the
+	// archives missing from the existing blob store). Zero downloads the full
+	// 0..N range, the normal bootstrap behaviour.
+	StartImmutable uint64
 	// OnChunkContiguous, when set, enables download<->processing
 	// pipelining: chunks are fetched in parallel (out of order) but this
 	// callback is invoked for each immutable file number in strict
@@ -245,6 +260,14 @@ func Bootstrap(
 			err,
 		)
 	}
+	if cfg.Network != "" && snapshot.Network != "" &&
+		cfg.Network != snapshot.Network {
+		return nil, fmt.Errorf(
+			"mithril snapshot network mismatch: requested=%s snapshot=%s",
+			cfg.Network,
+			snapshot.Network,
+		)
+	}
 
 	cfg.Logger.Info(
 		"found latest snapshot",
@@ -359,6 +382,13 @@ func Bootstrap(
 		cfg.Logger.Info(
 			"certificate chain verified",
 			"component", "mithril",
+		)
+		// The legacy v1 artifact has no signed ancillary manifest. It can
+		// authenticate its immutable tarball, but not the ledger state that
+		// would be imported with it, so it cannot satisfy the verified fast
+		// bootstrap trust boundary.
+		return nil, errors.New(
+			"verified Mithril v1 bootstrap is unsupported because it has no signed ancillary state; use the v2 backend",
 		)
 	}
 

@@ -22,35 +22,65 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
+
+var nodeLogName = regexp.MustCompile(`^p([0-9]+)(?:[._-].*)?\.log(?:\.[0-9]+)?$`)
 
 // fileState tracks the read position within a single log file so that
 // successive checks only process new lines.
 type fileState struct {
-	path   string
-	nodeID string
-	offset int64
+	path     string
+	nodeID   string
+	identity string
+	offset   int64
+	modTime  time.Time
+	warned   bool
+}
+
+type ingestionStats struct {
+	nodeFiles      map[string]struct{}
+	nodeReadable   map[string]struct{}
+	nodeBytes      int64
+	nodeEvents     int
+	openFailures   int
+	txpumpReadable bool
+	txpumpEvents   int
 }
 
 // Analyzer reads node log files, parses events, and reports Antithesis
 // assertions on each check interval.
 type Analyzer struct {
-	cfg       *Config
-	metrics   *Metrics
-	files     map[string]*fileState // keyed by file path
-	logger    *slog.Logger
-	setupDone bool
+	cfg                 *Config
+	metrics             *Metrics
+	files               map[string]*fileState // keyed by file path
+	filesByIdentity     map[string]*fileState
+	logger              *slog.Logger
+	setupDone           bool
+	setupComplete       func()
+	ingestion           ingestionStats
+	observabilityWarned bool
+	walkWarnings        map[string]struct{}
 }
 
 // NewAnalyzer creates an Analyzer with the given config and a fresh Metrics.
 func NewAnalyzer(cfg *Config, logger *slog.Logger) *Analyzer {
 	return &Analyzer{
-		cfg:     cfg,
-		metrics: NewMetrics(),
-		files:   make(map[string]*fileState),
-		logger:  logger,
+		cfg:             cfg,
+		metrics:         NewMetrics(),
+		files:           make(map[string]*fileState),
+		filesByIdentity: make(map[string]*fileState),
+		logger:          logger,
+		setupComplete:   SetupComplete,
+		ingestion: ingestionStats{
+			nodeFiles:    make(map[string]struct{}),
+			nodeReadable: make(map[string]struct{}),
+		},
+		walkWarnings: make(map[string]struct{}),
 	}
 }
 
@@ -75,6 +105,10 @@ func (a *Analyzer) Run(ctx context.Context) error {
 	case <-waitTimer.C:
 	}
 
+	// Signal readiness independently of observed workload. A test run can
+	// legitimately have no forged blocks yet, but Antithesis still needs this
+	// lifecycle event before it will begin fault injection.
+	a.signalSetupComplete()
 	a.logger.Info("initial wait complete; beginning analysis loop")
 
 	ticker := time.NewTicker(a.cfg.CheckInterval)
@@ -95,60 +129,153 @@ func (a *Analyzer) Run(ctx context.Context) error {
 func (a *Analyzer) check() {
 	a.readNewLines()
 	snap := a.metrics.Snapshot()
-	if !a.setupDone && snap.TotalBlocksForged > 0 {
-		SetupComplete()
-		a.logger.Info("setup complete signaled")
-		a.setupDone = true
-	}
+	a.reportObservability(snap)
 	a.reportSafetyAssertions(&snap)
-	a.reportLivenessAssertions(&snap)
+	if a.ingestion.nodeEvents > 0 {
+		a.reportLivenessAssertions(&snap)
+	}
 	a.reportReachable(&snap)
 }
 
-// readNewLines discovers log files matching p*.log and txpump.log in
-// cfg.LogDir, then reads any new lines since the last pass for each file.
+func (a *Analyzer) reportObservability(snap MetricsSnapshot) {
+	Always(len(a.ingestion.nodeReadable) > 0, "node-log-observability", map[string]interface{}{
+		"node_files":          len(a.ingestion.nodeFiles),
+		"readable_node_files": len(a.ingestion.nodeReadable),
+		"node_log_bytes":      a.ingestion.nodeBytes,
+		"node_events":         a.ingestion.nodeEvents,
+		"open_failures":       a.ingestion.openFailures,
+		"forged_blocks":       snap.TotalBlocksForged,
+		"txpump_readable":     a.ingestion.txpumpReadable,
+		"txpump_events":       a.ingestion.txpumpEvents,
+		"mempool_events":      snap.MempoolTxCount,
+	})
+	if a.ingestion.nodeEvents == 0 && !a.observabilityWarned {
+		a.logger.Warn("no node log events ingested; workload assertions are pending",
+			"node_files", len(a.ingestion.nodeFiles),
+			"readable_node_files", len(a.ingestion.nodeReadable),
+			"node_log_bytes", a.ingestion.nodeBytes,
+			"open_failures", a.ingestion.openFailures,
+		)
+		a.observabilityWarned = true
+	}
+}
+
+// signalSetupComplete emits the Antithesis readiness event once per analyzer.
+func (a *Analyzer) signalSetupComplete() {
+	if a.setupDone {
+		return
+	}
+	a.setupComplete()
+	a.logger.Info("setup complete signaled")
+	a.setupDone = true
+}
+
+// readNewLines discovers node and txpump logs anywhere below cfg.LogDir,
+// including numbered rotations, then reads new complete lines.
 func (a *Analyzer) readNewLines() {
-	// Node logs (p1.log, p2.log, ...)
-	pattern := filepath.Join(a.cfg.LogDir, "p*.log")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		a.logger.Warn("glob failed", "pattern", pattern, "err", err)
+	// Shared volumes may expose logs in a subdirectory and loggers may leave
+	// numbered rotations behind. Walk the volume and select only known names.
+	currentNodeFiles := make(map[string]struct{})
+	currentReadable := make(map[string]struct{})
+	a.ingestion.txpumpReadable = false
+	type logFile struct{ path, role, nodeID string }
+	var logFiles []logFile
+	_ = filepath.WalkDir(a.cfg.LogDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if _, warned := a.walkWarnings[path]; !warned {
+				a.logger.Warn("cannot inspect log path", "path", path, "err", walkErr)
+				a.walkWarnings[path] = struct{}{}
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		role, nodeID, ok := logRole(path)
+		if !ok {
+			return nil
+		}
+		if role == "node" {
+			currentNodeFiles[path] = struct{}{}
+		}
+		logFiles = append(logFiles, logFile{path: path, role: role, nodeID: nodeID})
+		return nil
+	})
+	// Prefer active files over rotations so a renamed active file is not used
+	// as the canonical state when both paths refer to the same inode.
+	sort.Slice(logFiles, func(i, j int) bool {
+		iRotated := isRotatedLog(logFiles[i].path)
+		jRotated := isRotatedLog(logFiles[j].path)
+		if iRotated != jRotated {
+			return !iRotated
+		}
+		return logFiles[i].path < logFiles[j].path
+	})
+	for _, logFile := range logFiles {
+		if a.readFile(logFile.path, logFile.role, logFile.nodeID) {
+			if logFile.role == "node" {
+				currentReadable[logFile.path] = struct{}{}
+			} else {
+				a.ingestion.txpumpReadable = true
+			}
+		}
 	}
-
-	// txpump transaction log
-	txpumpLog := filepath.Join(a.cfg.LogDir, "txpump.log")
-	if _, statErr := os.Stat(txpumpLog); statErr == nil {
-		matches = append(matches, txpumpLog)
-	}
-
-	for _, path := range matches {
-		a.readFile(path)
-	}
+	a.ingestion.nodeFiles = currentNodeFiles
+	a.ingestion.nodeReadable = currentReadable
 }
 
 // readFile reads new lines from a single log file starting from the last
 // known offset.
-func (a *Analyzer) readFile(path string) {
+func (a *Analyzer) readFile(path, role, nodeID string) bool {
 	state, ok := a.files[path]
 	if !ok {
-		nodeID := nodeIDFromPath(path)
 		state = &fileState{path: path, nodeID: nodeID}
 		a.files[path] = state
 	}
-
 	//nolint:gosec // log file path derived from config, not user input
 	f, err := os.Open(path)
 	if err != nil {
-		a.logger.Warn("cannot open log file", "path", path, "err", err)
-		return
+		a.ingestion.openFailures++
+		if !state.warned {
+			a.logger.Warn("cannot read log file", "path", path, "err", err)
+			state.warned = true
+		}
+		return false
 	}
 	defer f.Close() //nolint:errcheck // read-only open
-
-	// Fix 7: detect file truncation (e.g. log rotation) and reset.
 	info, err := f.Stat()
-	if err == nil && info.Size() < state.offset {
+	identity := fileIdentity(info)
+	if ok && state.identity != "" && state.identity != identity {
+		state = nil
+	}
+	if state == nil && identity != "" {
+		state = a.filesByIdentity[identity]
+	}
+	if state == nil {
+		state = &fileState{path: path, nodeID: nodeID}
+	}
+	if identity != "" {
+		if existing := a.filesByIdentity[identity]; existing != nil && existing != state {
+			// A rotated file is the same inode under a new path. It has already
+			// been consumed during this pass under the active path.
+			return true
+		}
+		state.identity = identity
+		a.filesByIdentity[identity] = state
+	}
+	state.path = path
+	state.nodeID = nodeID
+	a.files[path] = state
+	state.warned = false
+
+	// Detect file truncation (e.g. a logger restarting in place) and reset.
+	if err == nil && (info.Size() < state.offset ||
+		(!state.modTime.IsZero() && !info.ModTime().Equal(state.modTime) && info.Size() <= state.offset)) {
 		a.logger.Info("log file truncated, resetting offset", "path", path)
 		state.offset = 0
+	}
+	if err == nil {
+		state.modTime = info.ModTime()
 	}
 
 	if state.offset > 0 {
@@ -185,6 +312,11 @@ func (a *Analyzer) readFile(path string) {
 			if ev != nil {
 				ev.NodeID = state.nodeID
 				a.metrics.RecordEvent(ev)
+				if role == "node" {
+					a.ingestion.nodeEvents++
+				} else {
+					a.ingestion.txpumpEvents++
+				}
 			}
 		}
 		if readErr != nil {
@@ -192,6 +324,26 @@ func (a *Analyzer) readFile(path string) {
 		}
 	}
 	state.offset += bytesRead
+	if role == "node" {
+		a.ingestion.nodeBytes += bytesRead
+	}
+	return true
+}
+
+func fileIdentity(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)
+}
+
+func isRotatedLog(path string) bool {
+	base := filepath.Base(path)
+	return strings.Contains(base, ".log.")
 }
 
 // reportSafetyAssertions evaluates safety properties and fires assertions.
@@ -339,11 +491,21 @@ func (a *Analyzer) reportReachable(snap *MetricsSnapshot) {
 // For example "/logs/p1.log" returns "p1".
 func nodeIDFromPath(path string) string {
 	base := filepath.Base(path)
-	// Strip extension
-	if idx := strings.LastIndex(base, "."); idx > 0 {
-		base = base[:idx]
+	if match := nodeLogName.FindStringSubmatch(base); len(match) > 1 {
+		return "p" + match[1]
 	}
 	return base
+}
+
+func logRole(path string) (role, nodeID string, ok bool) {
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, "txpump.log") {
+		return "txpump", "txpump", true
+	}
+	if nodeID := nodeIDFromPath(path); nodeID != base {
+		return "node", nodeID, true
+	}
+	return "", "", false
 }
 
 // chainTipRange returns the minimum and maximum values in the map.

@@ -15,110 +15,50 @@ cardanoConfig: "./config/cardano/preview/config.json"
 
 # Global data directory for both blob and metadata storage plugins.
 # Can be overridden with CARDANO_DATABASE_PATH or --data-dir.
-# Plugin-specific data-dir settings below override this value.
 databasePath: ".dingo"
 
-# Database configuration
-database:
-  # Blob storage plugin configuration
-  blob:
-    # Plugin to use for blob storage (badger, gcs, s3)
-    # badger is always built; gcs and s3 require a build with
-    # -tags dingo_extra_plugins or an official release binary.
-    plugin: "badger"
-    # Configuration options for each plugin
-    badger:
-      # Data directory for BadgerDB storage
-      data-dir: ".dingo/badger"
-      # Block cache size in bytes.
-      # Leave unset to use the storage-mode default:
-      # - 0 when storageMode: "core"
-      # - 268435456 (256MB) when storageMode: "api"
-      # block-cache-size: 0
-      # Index cache size in bytes.
-      # Leave unset to use the runtime default (0 in both core and api modes).
-      # index-cache-size: 0
-      # Enable garbage collection (default: true)
-      gc: true
-      # Enable ZSTD compression.
-      # Leave unset to use the storage-mode default:
-      # - false when storageMode: "core"
-      # - true when storageMode: "api"
-      # compression: false
-      # ZSTD compression level used when compression is enabled.
-      # Higher levels give a better compression ratio at the cost of
-      # throughput. Badger recommends level 1 (default).
-      # compression-level: 1
-    gcs:
-      # Google Cloud Storage bucket name
-      bucket: ""
-      # Google Cloud project ID
-      project-id: ""
-      # Path prefix within the bucket
-      prefix: ""
-    s3:
-      # AWS Endpoint
-      endpoint: ""
-      # AWS S3 bucket name
-      bucket: ""
-      # AWS region
-      region: ""
-      # Path prefix within the bucket
-      prefix: ""
-      # AWS access key ID (optional - uses default credential chain if not set)
-      access-key-id: ""
-      # AWS secret access key (optional - uses default credential chain if not set)
-      secret-access-key: ""
-
-  # Metadata storage plugin configuration
-  metadata:
-    # Plugin to use for metadata storage (sqlite, postgres, mysql)
-    # sqlite is the default. postgres and mysql are still included in plain
-    # source builds on current main; issue #2586 tracks moving them behind
-    # -tags dingo_extra_plugins.
-    plugin: "sqlite"
-    # Configuration options for each plugin
-    sqlite:
-      # Path to SQLite database file
-      data-dir: ".dingo/metadata.db"
-    postgres:
-      # NOTE: These are example values for local development only.
-      # Do not use these credentials in production environments.
-      # Postgres host
-      host: "localhost"
-      # Postgres port
-      port: 5432
-      # Postgres user
-      user: "postgres"
-      # Postgres password (required - no default)
-      password: ""
-      # Postgres database name
-      database: "postgres"
-      # Postgres sslmode
-      ssl-mode: "disable"
-      # Postgres TimeZone
-      timezone: "UTC"
-      # Full Postgres DSN (overrides other options when set)
-      dsn: ""
-    mysql:
-      # NOTE: These are example values for local development only.
-      # Do not use these credentials in production environments.
-      # MySQL host
-      host: "localhost"
-      # MySQL port
-      port: 3306
-      # MySQL user
-      user: "root"
-      # MySQL password (required - no default)
-      password: ""
-      # MySQL database name
-      database: "mysql"
-      # MySQL TLS mode (mapped to tls= in DSN)
-      ssl-mode: ""
-      # MySQL time zone location
-      timezone: "UTC"
-      # Full MySQL DSN (overrides other options when set)
-      dsn: ""
+# Compiled-in plugin selection and provider configuration.
+plugins:
+  storage:
+    blob:
+      provider: "badger"
+      config:
+        # Optional Badger data directory. When unset, databasePath applies.
+        # dataDir: ".dingo"
+    metadata:
+      provider: "sqlite"
+      config:
+        # Optional SQLite data directory. When unset, databasePath applies.
+        # dataDir: ".dingo"
+  mempool:
+    # "fifo" preserves successful-admission order. "dag" additionally indexes
+    # transaction dependencies and uses deterministic topological ordering.
+    # "default" remains a compatibility alias for "fifo".
+    provider: "fifo"
+    config:
+      # Mempool capacity in bytes. Left commented out so the run-mode default
+      # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
+      # leios run mode. An explicit value here overrides both defaults, so a
+      # leios node would silently run with the smaller capacity — uncomment
+      # only to pin a specific size for every run mode.
+      # capacity: 1048576
+      # FIFO begins oldest-first eviction here. DAG never evicts and applies
+      # TxSubmission backpressure as it approaches rejectionWatermark.
+      evictionWatermark: 0.90
+      rejectionWatermark: 0.95
+  api:
+    blockfrost:
+      provider: "builtin"
+      config:
+        port: 3000
+    mesh:
+      provider: "builtin"
+      config:
+        port: 8080
+    utxorpc:
+      provider: "builtin"
+      config:
+        port: 9090
 
 # Path to the UNIX domain socket file used by the server
 # CLI: --socket-path
@@ -138,12 +78,14 @@ logging:
   format: text
   level: info
 
-# TLS certificate file path (for HTTPS)
+# TLS certificate file path for the built-in UTxO RPC listener.
+# Blockfrost and Mesh do not currently consume this setting; place public API
+# listeners behind a TLS-terminating and authenticating reverse proxy.
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
 tlsCertFilePath: ""
 
-# TLS key file path (for HTTPS)
+# TLS private key file path for the built-in UTxO RPC listener.
 #
 # Can be overridden with the TLS_KEY_FILE_PATH environment variable
 tlsKeyFilePath: ""
@@ -193,26 +135,21 @@ relayPort: 3001
 # - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
 #   redeemers). All APIs start automatically on their default ports.
 #
+# Storage mode also controls how long per-account reward history is kept: in
+# "core" mode, per-account reward rows (reward_account_output) are pruned to
+# the same trailing 4-epoch window as the rest of the reward-calculation
+# snapshot state; in "api" mode they are retained for the life of the
+# database so the Blockfrost account reward-history endpoint
+# (GET /accounts/{stake_address}/rewards) can answer for any epoch, at the
+# cost of unbounded growth in that table. See DATABASE.md's "Snapshot and
+# Reward-State Retention" section for detail.
+#
 # Can be overridden with DINGO_STORAGE_MODE
 # CLI: --storage-mode
 storageMode: "core"
 
-# API ports — only used when storageMode is "api".
-# In API mode, all APIs start on their default ports. Set a port to 0 to
-# disable an individual API.
-#
-# UTxO RPC gRPC API port (default: 9090)
-# Can be overridden with DINGO_UTXORPC_PORT
-# CLI: --utxorpc-port
-utxorpcPort: 9090
-# Blockfrost-compatible REST API port (default: 3000)
-# Can be overridden with DINGO_BLOCKFROST_PORT
-# CLI: --blockfrost-port
-blockfrostPort: 3000
-# Mesh (Coinbase Rosetta) REST API port (default: 8080)
-# Can be overridden with DINGO_MESH_PORT
-# CLI: --mesh-port
-meshPort: 8080
+# API ports are configured under plugins.api above. Set a port to 0 to
+# disable that API. APIs remain inactive outside API storage mode.
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
 # its configured local blob plugin but wraps it with Bark archive fallback for
@@ -246,12 +183,11 @@ historyExpiry:
 #
 # Data node (all APIs start on defaults automatically):
 #   storageMode: "api"
-#   # Override individual ports or set to 0 to disable:
-#   # blockfrostPort: 3100
-#   # meshPort: 0            # disable Mesh API
+#   # Override individual ports under plugins.api, or set a port to 0 to
+#   # disable that API.
 #   # With storageMode: "api", leave mode-sensitive Badger settings unset to keep:
-#   #   block-cache-size: 268435456
-#   #   index-cache-size: 0
+#   #   blockCacheSize: 268435456
+#   #   indexCacheSize: 0
 #   #   compression: true
 #
 # Validator / block producer (core storage, API ports ignored):
@@ -261,30 +197,33 @@ historyExpiry:
 #   shelleyKesKey: "/keys/kes.skey"
 #   shelleyOperationalCertificate: "/keys/opcert.cert"
 #   # With storageMode: "core", Badger blob defaults switch to mmap-only:
-#   #   block-cache-size: 0
-#   #   index-cache-size: 0
+#   #   blockCacheSize: 0
+#   #   indexCacheSize: 0
 #   #   compression: false
-#   # You can still override any of those explicitly under database.blob.badger.
+#   # You can still override them under plugins.storage.blob.config.
 #   # Optional forging tolerances (0 = defaults)
 #   forgeSyncToleranceSlots: 0
 #   forgeStaleGapThresholdSlots: 0
 #
 # Archive node (full immutable block history in object storage, Bark enabled):
 #   storageMode: "core"
-#   database:
-#     blob:
-#       plugin: "s3" # or "gcs"
-#       s3:
-#         bucket: "dingo-archive"
-#         region: "us-east-1"
-#         prefix: "preview"
+#   plugins:
+#     storage:
+#       blob:
+#         provider: "s3" # or "gcs"
+#         config:
+#           bucket: "dingo-archive"
+#           region: "us-east-1"
+#           prefix: "preview"
 #   barkPort: 9091
 #
 # History-expiry node (local blobs plus remote archive fallback):
 #   storageMode: "core"
-#   database:
-#     blob:
-#       plugin: "badger"
+#   plugins:
+#     storage:
+#       blob:
+#         provider: "badger"
+#         config: {}
 #   historyExpiry:
 #     enabled: true
 #     frequency: 1h
@@ -298,12 +237,7 @@ historyExpiry:
 # This is experimental and may break — use with caution
 intersectTip: false
 
-# Maximum total size (in bytes) of all transactions allowed in the mempool.
-# Transactions exceeding this limit will be rejected.
-# Default: 1048576 (1 MiB) for Praos modes; 26214400 (25 MiB) for Leios.
-# Leave commented to use the mode default; uncomment to override.
-# CLI: --mempool-capacity
-# mempoolCapacity: 1048576
+# Mempool capacity and watermarks are configured under plugins.mempool.
 
 # Forging tolerances (0 = defaults)
 # forgeSyncToleranceSlots controls how far the local chain can lag the upstream
@@ -332,8 +266,10 @@ startEra: ""
 
 # Leios voting (experimental, leios runMode only)
 #
-# leiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381 vote
-# signing key (32-byte scalar; the file must not be group/other readable).
+# leiosVoteSigningKeyFile is the path to a Cardano text-envelope BLS12-381
+# vote signing key generated by `cardano-cli dijkstra node key-gen-BLS`.
+# Legacy raw hex 32-byte scalar files are also accepted; the file must not
+# be group/other readable.
 # When set on a block producer whose pool is a member of the epoch's
 # stake-truncated voting committee, the node signs and emits one Leios
 # vote per observed endorser block.
@@ -357,18 +293,19 @@ startEra: ""
 # CLI: --immutable-db-path
 immutableDbPath: ""
 
-# Validate historical blocks during ledger processing (default: false)
-validateHistorical: false
+# Validate historical blocks during ledger processing (default: true).
+# Set false only when intentionally syncing from a non-genesis intersection
+# whose source does not provide the complete historical state.
+validateHistorical: true
 
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
-# Leave disabled when bootstrapping from a non-genesis chainsync intersect
-# point without a Mithril snapshot import, where pre-intersect UTxOs are
-# legitimately absent. (default: false)
+# A non-genesis chainsync intersection without a Mithril snapshot may set this
+# false when pre-intersect UTxOs are intentionally absent. (default: true)
 #
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
-strictUtxoValidation: false
+strictUtxoValidation: true
 
 # Peer targets - target number of peers in each state
 # These are goals the system works toward, not hard limits.
@@ -436,6 +373,14 @@ genesisBootstrap:
   # Minimum diversity groups to prefer while promoting peers during bootstrap.
   # 0 uses the peer-governor default.
   promotionMinDiversityGroups: 0
+  # Independent peers that must report the same recent blocks before a fast
+  # (shallow) block source may drive Genesis-mode chain selection. This is the
+  # Ouroboros Genesis trust control for biased fast-sync sources such as the
+  # Genesis Sync Accelerator: an uncorroborated or divergent fast source is
+  # denied selection and stalls rather than steering the local chain. Pair it
+  # with a trustable localRoots peer plus a ledger peer snapshot in the topology
+  # file. 0 disables corroboration (density-only Genesis selection).
+  corroborationPeers: 0
 
 # Midnight indexer configuration
 # Indexing is active only in API storage mode. Setting port to 0 disables
@@ -546,3 +491,82 @@ mithril:
   # Verify the Mithril certificate chain from snapshot back to genesis
   # Default: true
   verifyCertificates: true
+
+# ---
+# CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)
+#
+# Sets a floor on the pool margin (variable fee): a pool's effective margin in
+# the staking-reward split becomes max(pool.margin, minPoolMargin), and pool
+# registration certificates below the floor are rejected. Reward-account
+# registration and eligibility still apply: some or all of a pool allocation
+# can return to reserves when omitted by the reward prefilter, or go to treasury
+# when calculated for an account that cannot receive it. Expressed in basis
+# points (150 = 1.5%), range 0..10000. This changes the ledger reward calculation
+# and certificate validation, so it MUST only be enabled (nonzero) on a network
+# where every node also enables the same value (a devnet or custom network).
+# Enabling it off-consensus, e.g. on mainnet or the public testnets, will fork
+# this node. It takes effect only in the Dijkstra era and later. Disabled by
+# default.
+#
+# CLI: --min-pool-margin
+# Env: DINGO_MIN_POOL_MARGIN
+# minPoolMargin: 0        # basis points, 0..10000 (150 = 1.5%); 0 disables
+
+# ---
+# CIP-50 pledge-leverage staking rewards (experimental, consensus-affecting)
+#
+# Adds the CIP-50 leverage cap to the staking-reward formula: a pool's
+# reward-eligible stake is capped at L times its pledge, so a zero-pledge pool
+# earns nothing and an over-leveraged pool plateaus. This changes the ledger
+# reward calculation, so it MUST only be enabled on a network where every node
+# also enables it (a devnet or custom network). Enabling it off-consensus, e.g.
+# on mainnet or the public testnets, will fork this node off the network. It is
+# disabled by default.
+#
+# CLI: --pledge-leverage-enabled / --pledge-leverage
+# Env: DINGO_PLEDGE_LEVERAGE_ENABLED / DINGO_PLEDGE_LEVERAGE
+# pledgeLeverageEnabled: false
+# pledgeLeverage: 100        # L; integer in [1, 10000]
+
+# ---
+# CIP-0163 full-pot reward distribution (experimental, consensus-affecting)
+#
+# Distributes the available reward pot (after the treasury tax) across pool
+# totals instead of returning the saturation, pledge-influence, and performance
+# residual to reserves. The per-pool base rewards are scaled up with the
+# largest-remainder method so the pool totals sum to the available pot exactly;
+# the treasury tax is still taken first, and account eligibility plus per-pool
+# leader/member handling can still route some or all of a pool's allocation to
+# treasury or reserves, so not every lovelace necessarily reaches a delegator.
+# This changes the ledger reward calculation, so it can only be enabled without
+# the unsafe override on a devnet or custom network where every node enables it.
+# Enabling it off-consensus, e.g. on mainnet or the public testnets, will fork
+# this node off the network. Standard networks require the explicit unsafe
+# override below. It is disabled by default.
+#
+# CLI: --full-pot-rewards-enabled / --unsafe-full-pot-rewards-on-standard-networks
+# Env: DINGO_FULL_POT_REWARDS_ENABLED / DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS
+# fullPotRewardsEnabled: false
+# unsafeFullPotRewardsOnStandardNetworks: false
+
+# ---
+# CIP-0163 reward-account inactivity expiry (experimental, consensus-affecting)
+#
+# When enabled, a reward account that performs no witnessing action (reward
+# withdrawal, (re)delegation to a pool or DRep, stake-key (de)registration) for
+# delegatorInactivity epochs is treated as expired and ignored for pool leader
+# election, reward crediting, and governance tallying until it witnesses again.
+# This changes the ledger rules, so it MUST only be enabled on a network where
+# every node also enables it (a devnet or custom network). Enabling it
+# off-consensus, e.g. on mainnet or the public testnets, will fork this node off
+# the network. It is disabled by default.
+#
+# Mithril bootstrap ('dingo mithril sync') is NOT supported with this enabled:
+# reward-account expiration state is absent from Mithril ledger snapshots and
+# cannot be reconstructed after import, so a CIP-0163 node must sync from
+# genesis. The sync command and node startup both refuse the combination.
+#
+# CLI: --delegator-inactivity-enabled / --delegator-inactivity
+# Env: DINGO_DELEGATOR_INACTIVITY_ENABLED / DINGO_DELEGATOR_INACTIVITY
+# delegatorInactivityEnabled: false
+# delegatorInactivity: 90        # epochs; integer in [1, 10000]

@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,21 +18,26 @@ package mysql
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // TestTable is a simple table for testing concurrent transactions
@@ -44,6 +49,10 @@ type mockTransaction struct {
 	hash         lcommon.Blake2b256
 	certificates []lcommon.Certificate
 	isValid      bool
+	inputs       []lcommon.TransactionInput
+	collateral   []lcommon.TransactionInput
+	refInputs    []lcommon.TransactionInput
+	consumed     []lcommon.TransactionInput
 	withdrawals  map[*lcommon.Address]*big.Int
 }
 
@@ -96,11 +105,11 @@ func (m *mockTransaction) Outputs() []lcommon.TransactionOutput {
 }
 
 func (m *mockTransaction) Inputs() []lcommon.TransactionInput {
-	return nil
+	return m.inputs
 }
 
 func (m *mockTransaction) Collateral() []lcommon.TransactionInput {
-	return nil
+	return m.collateral
 }
 
 func (m *mockTransaction) Certificates() []lcommon.Certificate {
@@ -124,7 +133,7 @@ func (m *mockTransaction) Cbor() []byte {
 }
 
 func (m *mockTransaction) Consumed() []lcommon.TransactionInput {
-	return nil
+	return m.consumed
 }
 
 func (m *mockTransaction) Witnesses() lcommon.TransactionWitnessSet {
@@ -136,7 +145,7 @@ func (m *mockTransaction) ValidityIntervalStart() uint64 {
 }
 
 func (m *mockTransaction) ReferenceInputs() []lcommon.TransactionInput {
-	return nil
+	return m.refInputs
 }
 
 func (m *mockTransaction) TotalCollateral() *big.Int {
@@ -179,6 +188,49 @@ func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
 }
 
+type setTransactionSQLRecorder struct {
+	mu         sync.Mutex
+	statements []string
+}
+
+func (r *setTransactionSQLRecorder) LogMode(
+	gormlogger.LogLevel,
+) gormlogger.Interface {
+	return r
+}
+
+func (*setTransactionSQLRecorder) Info(context.Context, string, ...any) {}
+
+func (*setTransactionSQLRecorder) Warn(context.Context, string, ...any) {}
+
+func (*setTransactionSQLRecorder) Error(context.Context, string, ...any) {}
+
+func (r *setTransactionSQLRecorder) Trace(
+	_ context.Context,
+	_ time.Time,
+	fc func() (string, int64),
+	_ error,
+) {
+	sql, _ := fc()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statements = append(r.statements, sql)
+}
+
+func (r *setTransactionSQLRecorder) countUtxoLookupSelects() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, stmt := range r.statements {
+		normalized := strings.ToUpper(stmt)
+		if strings.Contains(normalized, "SELECT *") &&
+			strings.Contains(normalized, "FROM `UTXO`") {
+			count++
+		}
+	}
+	return count
+}
+
 // testHash32 creates a 32-byte test hash from a seed string.
 // Used for block hashes, transaction hashes, and other Blake2b256 values.
 func testHash32(seed string) []byte {
@@ -195,66 +247,35 @@ func testHash28(seed string) []byte {
 	return hash
 }
 
-// isMysqlConfigured checks if mysql is configured via cmdlineOptions or environment variables.
-// It first checks cmdlineOptions (the plugin's configured state), then falls back to environment variables.
+// isMysqlConfigured checks whether integration-test credentials are present.
 // Returns true if a password or DSN is configured, false otherwise.
 func isMysqlConfigured() bool {
-	// Check if cmdlineOptions has a password or DSN set
-	cmdlineOptionsMutex.RLock()
-	password := cmdlineOptions.password
-	dsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
-
-	if password != "" || dsn != "" {
-		return true
-	}
-
-	// Fall back to environment variables
 	return os.Getenv("MYSQL_PASSWORD") != "" || os.Getenv("MYSQL_DSN") != ""
 }
 
 // getTestMysqlOptions returns options for creating a test mysql store.
-// It uses cmdlineOptions if configured, otherwise falls back to environment variables.
+// It reads the standard MySQL integration-test environment variables.
 func getTestMysqlOptions() []MysqlOptionFunc {
-	cmdlineOptionsMutex.RLock()
-	host := cmdlineOptions.host
-	port := uint(cmdlineOptions.port)
-	user := cmdlineOptions.user
-	password := cmdlineOptions.password
-	database := cmdlineOptions.database
-	sslMode := cmdlineOptions.sslMode
-	timeZone := cmdlineOptions.timeZone
-	dsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
+	host, port, user := "localhost", uint(3306), "root"
+	password, database := os.Getenv("MYSQL_PASSWORD"), "dingo_test"
+	sslMode, timeZone, dsn := "", "UTC", os.Getenv("MYSQL_DSN")
 
-	// Override with environment variables if cmdlineOptions password is not set
-	if password == "" {
-		password = os.Getenv("MYSQL_PASSWORD")
-
-		// Also check for other env vars when using env-based config
-		if envHost := os.Getenv("MYSQL_HOST"); envHost != "" {
-			host = envHost
+	if envHost := os.Getenv("MYSQL_HOST"); envHost != "" {
+		host = envHost
+	}
+	if envPort := os.Getenv("MYSQL_PORT"); envPort != "" {
+		if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
+			port = uint(p)
 		}
-		if envPort := os.Getenv("MYSQL_PORT"); envPort != "" {
-			if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
-				port = uint(p)
-			}
-		}
-		if envUser := os.Getenv("MYSQL_USER"); envUser != "" {
-			user = envUser
-		}
-		if envDB := os.Getenv("MYSQL_DATABASE"); envDB != "" {
-			database = envDB
-		} else if database == "mysql" {
-			// Use a separate test database by default
-			database = "dingo_test"
-		}
-		if envSSL := os.Getenv("MYSQL_SSLMODE"); envSSL != "" {
-			sslMode = envSSL
-		}
-		if envDSN := os.Getenv("MYSQL_DSN"); envDSN != "" {
-			dsn = envDSN
-		}
+	}
+	if envUser := os.Getenv("MYSQL_USER"); envUser != "" {
+		user = envUser
+	}
+	if envDB := os.Getenv("MYSQL_DATABASE"); envDB != "" {
+		database = envDB
+	}
+	if envSSL := os.Getenv("MYSQL_SSLMODE"); envSSL != "" {
+		sslMode = envSSL
 	}
 
 	return []MysqlOptionFunc{
@@ -270,7 +291,7 @@ func getTestMysqlOptions() []MysqlOptionFunc {
 }
 
 // newTestMysqlStore creates a new mysql store for testing.
-// It skips the test if mysql is not configured (no password in cmdlineOptions or MYSQL_PASSWORD env var).
+// It skips the test if MySQL credentials are not configured.
 func newTestMysqlStore(t *testing.T) *MetadataStoreMysql {
 	t.Helper()
 
@@ -284,94 +305,6 @@ func newTestMysqlStore(t *testing.T) *MetadataStoreMysql {
 	store, err := NewWithOptions(opts...)
 	if err != nil {
 		t.Fatalf("failed to create mysql store: %v", err)
-	}
-
-	if err := store.Start(); err != nil {
-		t.Fatalf("failed to start mysql store: %v", err)
-	}
-
-	return store
-}
-
-// newTestMysqlStoreFromPlugin creates a mysql store using NewFromCmdlineOptions.
-// This tests the plugin registration path. Skips if not configured.
-func newTestMysqlStoreFromPlugin(t *testing.T) *MetadataStoreMysql {
-	t.Helper()
-
-	if !isMysqlConfigured() {
-		t.Skip(
-			"Skipping mysql integration test: mysql not configured (set MYSQL_PASSWORD or configure via cmdline options)",
-		)
-	}
-
-	// Capture original cmdlineOptions before any modifications
-	cmdlineOptionsMutex.RLock()
-	originalHost := cmdlineOptions.host
-	originalPort := cmdlineOptions.port
-	originalUser := cmdlineOptions.user
-	originalPassword := cmdlineOptions.password
-	originalDatabase := cmdlineOptions.database
-	originalSslMode := cmdlineOptions.sslMode
-	originalTimeZone := cmdlineOptions.timeZone
-	originalDsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
-
-	// Restore original cmdlineOptions after test setup
-	t.Cleanup(func() {
-		cmdlineOptionsMutex.Lock()
-		cmdlineOptions.host = originalHost
-		cmdlineOptions.port = originalPort
-		cmdlineOptions.user = originalUser
-		cmdlineOptions.password = originalPassword
-		cmdlineOptions.database = originalDatabase
-		cmdlineOptions.sslMode = originalSslMode
-		cmdlineOptions.timeZone = originalTimeZone
-		cmdlineOptions.dsn = originalDsn
-		cmdlineOptionsMutex.Unlock()
-	})
-
-	if originalPassword == "" && originalDsn == "" {
-		// Set cmdlineOptions from environment for this test
-		cmdlineOptionsMutex.Lock()
-		if envHost := os.Getenv("MYSQL_HOST"); envHost != "" {
-			cmdlineOptions.host = envHost
-		}
-		if envPort := os.Getenv("MYSQL_PORT"); envPort != "" {
-			if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
-				cmdlineOptions.port = p
-			}
-		}
-		if envUser := os.Getenv("MYSQL_USER"); envUser != "" {
-			cmdlineOptions.user = envUser
-		}
-		cmdlineOptions.password = os.Getenv("MYSQL_PASSWORD")
-		if envDB := os.Getenv("MYSQL_DATABASE"); envDB != "" {
-			cmdlineOptions.database = envDB
-		} else {
-			cmdlineOptions.database = "dingo_test"
-		}
-		if envSSL := os.Getenv("MYSQL_SSLMODE"); envSSL != "" {
-			cmdlineOptions.sslMode = envSSL
-		}
-		if envDSN := os.Getenv("MYSQL_DSN"); envDSN != "" {
-			cmdlineOptions.dsn = envDSN
-		}
-		cmdlineOptionsMutex.Unlock()
-	}
-
-	p := NewFromCmdlineOptions()
-	if p == nil {
-		t.Fatal("NewFromCmdlineOptions returned nil")
-	}
-
-	// Check if it's an error plugin
-	if _, ok := p.(*plugin.ErrorPlugin); ok {
-		t.Fatal("NewFromCmdlineOptions returned an error plugin")
-	}
-
-	store, ok := p.(*MetadataStoreMysql)
-	if !ok {
-		t.Fatalf("expected *MetadataStoreMysql, got %T", p)
 	}
 
 	if err := store.Start(); err != nil {
@@ -417,6 +350,136 @@ func TestMysqlMultipleTransaction(t *testing.T) {
 	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("goroutine error: %s", err)
+	}
+}
+
+// TestMysqlSetTransactionBatchesMultiInputUtxoLookups verifies multi-input,
+// collateral, and reference-input processing uses bounded UTxO SELECTs.
+func TestMysqlSetTransactionBatchesMultiInputUtxoLookups(t *testing.T) {
+	store := newTestMysqlStore(t)
+	defer store.Close() //nolint:errcheck
+	store.storageMode = types.StorageModeAPI
+
+	makeTxID := func(seed byte) []byte {
+		return bytes.Repeat([]byte{seed}, 32)
+	}
+	makeInput := func(seed byte, idx uint32) lcommon.TransactionInput {
+		return dbtestutil.NewMockInput(makeTxID(seed), idx)
+	}
+
+	// Seed UTxOs for regular inputs, collateral, and reference inputs.
+	utxos := make([]models.Utxo, 0, 7)
+	for i := 0; i < 7; i++ {
+		utxos = append(utxos, models.Utxo{
+			TxId:       makeTxID(byte(0x60 + i)),
+			OutputIdx:  uint32(i),
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{byte(0x10 + i)}, 28),
+			StakingKey: bytes.Repeat([]byte{byte(0x20 + i)}, 28),
+			Amount:     types.Uint64(1_000_000 + i),
+		})
+	}
+	if result := store.DB().Create(&utxos); result.Error != nil {
+		t.Fatalf("create utxos: %v", result.Error)
+	}
+
+	// Record SQL executed by SetTransaction so UTxO SELECTs can be counted.
+	recorder := &setTransactionSQLRecorder{}
+	store.db = store.DB().Session(&gorm.Session{Logger: recorder})
+
+	// Build a transaction containing multiple items in every input class.
+	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x91}, 32))
+	defer func() {
+		cleanupDB := store.DB()
+		for i := 0; i < 7; i++ {
+			seedTxID := makeTxID(byte(0x60 + i))
+			if result := cleanupDB.Model(&models.Utxo{}).
+				Where("tx_id = ?", seedTxID).
+				Updates(map[string]any{
+					"collateral_by_tx_id": nil,
+					"referenced_by_tx_id": nil,
+					"spent_at_tx_id":      nil,
+					"deleted_slot":        0,
+				}); result.Error != nil {
+				t.Errorf("cleanup utxo refs: %v", result.Error)
+			}
+			if result := cleanupDB.
+				Where("tx_id = ?", seedTxID).
+				Delete(&models.Utxo{}); result.Error != nil {
+				t.Errorf("cleanup utxo: %v", result.Error)
+			}
+		}
+		if result := cleanupDB.
+			Where("hash = ?", txHash.Bytes()).
+			Delete(&models.Transaction{}); result.Error != nil {
+			t.Errorf("cleanup transaction: %v", result.Error)
+		}
+	}()
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		inputs: []lcommon.TransactionInput{
+			makeInput(0x60, 0),
+			makeInput(0x61, 1),
+			makeInput(0x62, 2),
+		},
+		collateral: []lcommon.TransactionInput{
+			makeInput(0x63, 3),
+			makeInput(0x64, 4),
+		},
+		refInputs: []lcommon.TransactionInput{
+			makeInput(0x65, 5),
+			makeInput(0x66, 6),
+		},
+		consumed: []lcommon.TransactionInput{
+			makeInput(0x60, 0),
+			makeInput(0x61, 1),
+			makeInput(0x62, 2),
+		},
+	}
+	point := ocommon.NewPoint(200, bytes.Repeat([]byte{0x92}, 32))
+
+	// Process the transaction through the regular SetTransaction path.
+	if err := store.SetTransaction(tx, point, 0, nil, nil); err != nil {
+		t.Fatalf("set transaction: %v", err)
+	}
+
+	// Verify exactly one batch SELECT was used per input class.
+	if got := recorder.countUtxoLookupSelects(); got != 3 {
+		t.Fatalf("expected 3 batched UTxO SELECTs, got %d", got)
+	}
+
+	// Verify all regular inputs were marked as spent.
+	var spent int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("spent_at_tx_id = ?", txHash.Bytes()).
+		Count(&spent); result.Error != nil {
+		t.Fatalf("count spent utxos: %v", result.Error)
+	}
+	if spent != 3 {
+		t.Fatalf("expected 3 spent UTxOs, got %d", spent)
+	}
+
+	// Verify all collateral inputs were linked to the transaction.
+	var collateral int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("collateral_by_tx_id = ?", txHash.Bytes()).
+		Count(&collateral); result.Error != nil {
+		t.Fatalf("count collateral utxos: %v", result.Error)
+	}
+	if collateral != 2 {
+		t.Fatalf("expected 2 collateral UTxOs, got %d", collateral)
+	}
+
+	// Verify all reference inputs were linked to the transaction.
+	var referenced int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("referenced_by_tx_id = ?", txHash.Bytes()).
+		Count(&referenced); result.Error != nil {
+		t.Fatalf("count reference input utxos: %v", result.Error)
+	}
+	if referenced != 2 {
+		t.Fatalf("expected 2 reference input UTxOs, got %d", referenced)
 	}
 }
 
@@ -1181,11 +1244,15 @@ func TestMysqlRestoreAccountStateAtSlot(t *testing.T) {
 
 		stakingKey := testHash28("staking_key_new")
 
-		// Create account registered at slot 2000 (no prior registration)
+		// Create account registered at slot 2000 (no prior registration).
+		// CreatedSlot is set explicitly because the production insert paths
+		// always stamp it (SetAccount directly, saveAccount via the
+		// AccountCreatedSlotUnset sentinel) and raw DB().Create bypasses them.
 		account := models.Account{
-			StakingKey: stakingKey,
-			AddedSlot:  2000,
-			Active:     true,
+			StakingKey:  stakingKey,
+			AddedSlot:   2000,
+			CreatedSlot: 2000,
+			Active:      true,
 		}
 		pgStore.DB().Create(&account)
 
@@ -1485,4 +1552,255 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			}
 		},
 	)
+}
+
+// TestValidateDatabaseName verifies the conservative MySQL identifier allowlist.
+func TestValidateDatabaseName(t *testing.T) {
+	valid := []string{
+		"mydb",
+		"dingo",
+		"my_db",
+		"my-db",
+		"db123",
+		"UPPER",
+		"Mixed_Case-1",
+		strings.Repeat("a", 64),
+	}
+	for _, name := range valid {
+		if err := validateDatabaseName(name); err != nil {
+			t.Errorf("expected %q to be valid, got error: %v", name, err)
+		}
+	}
+
+	invalid := []struct {
+		name string
+		desc string
+	}{
+		{"", "empty name"},
+		{"`injected`", "backtick injection"},
+		{"db`drop", "embedded backtick"},
+		{"db name", "space in name"},
+		{"db;DROP TABLE x", "semicolon injection"},
+		{"db.name", "dot in name"},
+		{"db/name", "slash in name"},
+		{"db\\name", "backslash in name"},
+		{"db\x00name", "null byte"},
+		{strings.Repeat("a", 65), "over MySQL identifier length limit"},
+	}
+	for _, tc := range invalid {
+		if err := validateDatabaseName(tc.name); err == nil {
+			t.Errorf("expected %q (%s) to be invalid, but got no error", tc.name, tc.desc)
+		}
+	}
+}
+
+// TestNewWithOptionsRejectsInvalidDatabaseName verifies option-based config validation.
+func TestNewWithOptionsRejectsInvalidDatabaseName(t *testing.T) {
+	_, err := NewWithOptions(WithDatabase("`bad`"))
+	if err == nil {
+		t.Fatal("expected error for database name with backticks, got nil")
+	}
+
+	_, err = NewWithOptions(WithDatabase("bad name"))
+	if err == nil {
+		t.Fatal("expected error for database name with space, got nil")
+	}
+
+	_, err = NewWithOptions(WithDatabase("bad name"), WithDSN("   "))
+	if err == nil {
+		t.Fatal("expected error for bad database name with whitespace DSN, got nil")
+	}
+
+	_, err = NewWithOptions(WithDatabase("good_db"))
+	if err != nil {
+		t.Fatalf("expected valid database name to succeed, got: %v", err)
+	}
+}
+
+// TestNewRejectsInvalidDatabaseName verifies direct constructor config validation.
+func TestNewRejectsInvalidDatabaseName(t *testing.T) {
+	_, err := New(
+		"localhost",
+		3306,
+		"root",
+		"",
+		"`bad`",
+		"",
+		"UTC",
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error for database name with backticks, got nil")
+	}
+}
+
+// TestNewAllowsEmptyDatabaseNameDefault preserves the legacy empty-name default.
+func TestNewAllowsEmptyDatabaseNameDefault(t *testing.T) {
+	store, err := New(
+		"localhost",
+		3306,
+		"root",
+		"",
+		"",
+		"",
+		"UTC",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected empty database name to use default, got: %v", err)
+	}
+	if store.database != "mysql" {
+		t.Fatalf("expected default database name mysql, got %q", store.database)
+	}
+}
+
+// TestStartRejectsInvalidDatabaseNameFromDSN verifies DSN database validation.
+func TestStartRejectsInvalidDatabaseNameFromDSN(t *testing.T) {
+	store, err := NewWithOptions(
+		WithDSN("root:secret@tcp(localhost:3306)/bad`name?parseTime=true"),
+	)
+	if err != nil {
+		t.Fatalf("expected store creation to defer DSN database validation to start, got: %v", err)
+	}
+
+	err = store.Start()
+	if err == nil {
+		t.Fatal("expected error for DSN database name with backticks, got nil")
+	}
+	if !strings.Contains(err.Error(), "mysql config dsn") {
+		t.Fatalf("expected DSN config error, got: %v", err)
+	}
+}
+
+// TestMysqlRewardLiveStakeCreditDeltaIsExactAcrossTwoCredits proves the
+// AddAccountRewardByCredential delta-update path (a single UPDATE of
+// reward_stake/total_stake, added as an efficiency fix for the epoch-boundary
+// reward rollover which credits ~every delegator's account) computes exact
+// totals against real MySQL across two sequential credits, and leaves every
+// other reward_live_stake column untouched. reward_stake/total_stake are
+// stored as longtext/varchar decimal strings, so this also proves the
+// CAST(...AS UNSIGNED)/CAST(...AS CHAR) delta SQL round-trips correctly.
+func TestMysqlRewardLiveStakeCreditDeltaIsExactAcrossTwoCredits(t *testing.T) {
+	store := newTestMysqlStore(t)
+
+	poolA := bytes.Repeat([]byte{0x8a}, 28)
+	stakeA := bytes.Repeat([]byte{0x8b}, 28)
+	utxoHash := bytes.Repeat([]byte{0x8c}, 32)
+
+	cleanup := func() {
+		db := store.DB()
+		db.Where("credential_tag = ? AND staking_key = ?", 0, stakeA).
+			Delete(&models.RewardLiveStake{})
+		db.Where("credential_tag = ? AND staking_key = ?", 0, stakeA).
+			Delete(&models.AccountRewardDelta{})
+		db.Where("staking_key = ?", stakeA).
+			Delete(&models.Utxo{})
+		db.Where("staking_key = ?", stakeA).
+			Delete(&models.Account{})
+		db.Where("pool_key_hash = ?", poolA).
+			Delete(&models.PoolRegistration{})
+		db.Where("pool_key_hash = ?", poolA).
+			Delete(&models.Pool{})
+	}
+	cleanup()
+	t.Cleanup(func() {
+		cleanup()
+		_ = store.Close()
+	})
+
+	pool := models.Pool{PoolKeyHash: poolA}
+	require.NoError(t, store.DB().
+		Where("pool_key_hash = ?", poolA).
+		FirstOrCreate(&pool).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID:      pool.ID,
+		PoolKeyHash: poolA,
+		AddedSlot:   0,
+	}).Error)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey:    stakeA,
+		CredentialTag: 0,
+		Pool:          poolA,
+		Reward:        1_000,
+		Active:        true,
+		AddedSlot:     10,
+	}))
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId:          utxoHash,
+		OutputIdx:     0,
+		StakingKey:    stakeA,
+		CredentialTag: 0,
+		Amount:        2_000_000,
+		AddedSlot:     10,
+	}))
+
+	// Sanity: the row already exists before crediting, so both credits below
+	// exercise the delta-update path rather than falling back to a full
+	// refresh (which only happens when no row exists yet).
+	var seeded models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&seeded).Error)
+	require.Equal(t, types.Uint64(1_000), seeded.RewardStake)
+	require.Equal(t, types.Uint64(2_000_000), seeded.UtxoStake)
+	require.Equal(t, types.Uint64(2_001_000), seeded.TotalStake)
+
+	const credit1 = uint64(500_000_000)
+	const credit2 = uint64(123_456_789)
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, stakeA, credit1, 11, bytes.Repeat([]byte{0x01}, 32), nil,
+	))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, stakeA, credit2, 12, bytes.Repeat([]byte{0x02}, 32), nil,
+	))
+
+	wantReward := types.Uint64(1_000 + credit1 + credit2)
+	wantTotal := types.Uint64(2_000_000 + 1_000 + credit1 + credit2)
+
+	var got models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&got).Error)
+	require.Equal(
+		t, wantReward, got.RewardStake,
+		"reward_stake must equal the exact sum of both credits",
+	)
+	require.Equal(
+		t, wantTotal, got.TotalStake,
+		"total_stake must equal the exact sum of utxo_stake and both credits",
+	)
+	require.Equal(
+		t, types.Uint64(2_000_000), got.UtxoStake,
+		"utxo_stake must be untouched by the reward-credit delta",
+	)
+	require.Equal(
+		t, poolA, got.PoolKeyHash,
+		"pool delegation must be untouched by the reward-credit delta",
+	)
+	require.True(
+		t, got.Registered,
+		"registered flag must be untouched by the reward-credit delta",
+	)
+	require.Equal(
+		t, uint64(12), got.UpdatedSlot,
+		"updated_slot must reflect the latest credit's slot",
+	)
+
+	// Cross-check against ground truth: a full rebuild from source tables
+	// must land on the exact same totals the delta path produced.
+	txn, err := store.BeginTxn()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	require.NoError(t, store.RebuildRewardLiveStake(12, txn))
+	txnDB, err := store.resolveDB(txn)
+	require.NoError(t, err)
+	var rebuilt models.RewardLiveStake
+	require.NoError(t, txnDB.Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&rebuilt).Error)
+	require.Equal(t, wantReward, rebuilt.RewardStake)
+	require.Equal(t, wantTotal, rebuilt.TotalStake)
 }
