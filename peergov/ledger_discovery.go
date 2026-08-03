@@ -301,7 +301,7 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 	// dial is ever registered with that WaitGroup.
 	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound
 	if shouldConnect {
-		p.spawnOutboundConnection(newPeer)
+		p.spawnOutboundConnectionLocked(newPeer)
 	}
 	evt = &pendingEvent{
 		PeerAddedEventType,

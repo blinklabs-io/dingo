@@ -80,7 +80,7 @@ func databaseSnapshotCommand() *cobra.Command {
 			// outright mid-backup, leaving destDir existing-but-
 			// incomplete so a retry with the same --dir fails as
 			// already existing instead of cleanly resuming. See
-			// databaseRestoreCommand/databaseTruncateCommand above for
+			// databaseRestoreCommand/databaseTruncateCommand below for
 			// the same reasoning.
 			ctx, stop := signal.NotifyContext(
 				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,

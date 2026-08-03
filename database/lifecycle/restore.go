@@ -46,7 +46,16 @@ func checkNoDataDirOverride(pluginKind string, cfg map[string]any) error {
 	if !ok {
 		return nil
 	}
-	override, _ := raw.(string)
+	if raw == nil {
+		return nil
+	}
+	override, ok := raw.(string)
+	if !ok {
+		return fmt.Errorf(
+			"restore does not support a non-string %s provider dataDir override",
+			pluginKind,
+		)
+	}
 	if override == "" {
 		return nil
 	}

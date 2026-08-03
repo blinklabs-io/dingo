@@ -119,6 +119,15 @@ func (m *Manager) Start(ctx context.Context) error {
 	if !m.cfg.SnapshotEnabled {
 		return nil
 	}
+	if prefix := m.cfg.SnapshotCloudDestinationPrefix; prefix != "" &&
+		(prefix == "." || prefix == ".." ||
+			strings.ContainsAny(prefix, `/\`)) {
+		return fmt.Errorf(
+			"database lifecycle manager: invalid snapshot cloud destination "+
+				"prefix %q: must be one safe path segment",
+			prefix,
+		)
+	}
 	if ctx == nil {
 		return errors.New("database lifecycle manager: nil context")
 	}

@@ -264,6 +264,29 @@ func TestBackupToDoesNotRemoveConcurrentDestinationOnFailure(t *testing.T) {
 	)
 }
 
+func TestBackupToDoesNotReplaceConcurrentDestinationOnPublish(t *testing.T) {
+	srcDir := t.TempDir()
+	src, err := New(srcDir, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, src.Start())
+	defer src.Close() //nolint:errcheck
+
+	dstPath := filepath.Join(t.TempDir(), "out.sqlite")
+	orig := runVacuumInto
+	t.Cleanup(func() { runVacuumInto = orig })
+	runVacuumInto = func(_ context.Context, _ *gorm.DB, stagedPath string) error {
+		require.NoError(t, os.WriteFile(stagedPath, []byte("backup"), 0o600))
+		require.NoError(t, os.WriteFile(dstPath, []byte("concurrent"), 0o600))
+		return nil
+	}
+
+	err = src.BackupTo(context.Background(), dstPath)
+	require.Error(t, err)
+	data, readErr := os.ReadFile(dstPath)
+	require.NoError(t, readErr)
+	require.Equal(t, []byte("concurrent"), data)
+}
+
 // TestBackupToBeforeStartReturnsErrorNotPanic guards a real bug: BackupTo
 // called against a store that was constructed (via New) but never
 // Start()-ed used to dereference the nil *gorm.DB handle d.DB() returns

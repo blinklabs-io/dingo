@@ -504,6 +504,40 @@ func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
 	}
 }
 
+// TestSpawnOutboundConnectionLockedReservesBeforeScheduling verifies duplicate
+// close events cannot schedule parallel reconnect workers for the same peer.
+func TestSpawnOutboundConnectionLockedReservesBeforeScheduling(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	peer := &Peer{
+		Address:           "127.0.0.1:1",
+		NormalizedAddress: "127.0.0.1:1",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+	}
+	stopCh := make(chan struct{})
+	close(stopCh)
+
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.stopCh = stopCh
+	pg.spawnOutboundConnectionLocked(peer)
+	if !peer.Reconnecting {
+		pg.mu.Unlock()
+		t.Fatal("first spawn should reserve the peer before scheduling")
+	}
+	pg.spawnOutboundConnectionLocked(peer)
+	pg.mu.Unlock()
+
+	pg.wg.Wait()
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if peer.Reconnecting {
+		t.Fatal("reconnect reservation should clear when the worker exits")
+	}
+}
+
 // TestStop_WaitsForInFlightOutboundDial reproduces a dial launched via
 // startOutboundConnections (the same path Start uses) that is still in
 // flight when Stop is called, and asserts Stop's p.wg.Wait() actually

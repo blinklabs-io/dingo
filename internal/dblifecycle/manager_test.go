@@ -209,17 +209,17 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
 
-// managerFakeCloudDestination is a minimal stand-in for a real cloud
-// destination (S3/GCS), backed by an ordinary local directory — the same
-// pattern used elsewhere (database/lifecycle/destination_test.go,
-// bark/database_cloud_test.go), redeclared here since Go test binaries
-// are per-package and this scheme registration only needs to exist in
-// this one.
-type managerFakeCloudDestination struct {
+// directoryBackedCloudDestination contains the common filesystem behavior
+// used by the manager's cloud-destination test doubles. Specialized doubles
+// embed it and override only the operation whose failure they inject.
+type directoryBackedCloudDestination struct {
 	dir string
 }
 
-func (d *managerFakeCloudDestination) UploadDir(_ context.Context, localDir string) error {
+func (d *directoryBackedCloudDestination) UploadDir(
+	_ context.Context,
+	localDir string,
+) error {
 	if err := os.MkdirAll(d.dir, 0o755); err != nil {
 		return err
 	}
@@ -242,17 +242,20 @@ func (d *managerFakeCloudDestination) UploadDir(_ context.Context, localDir stri
 	return nil
 }
 
-func (d *managerFakeCloudDestination) DownloadDir(context.Context, string) error {
+func (d *directoryBackedCloudDestination) DownloadDir(
+	context.Context,
+	string,
+) error {
 	return errors.New("not implemented")
 }
 
-func (d *managerFakeCloudDestination) Delete(context.Context) error {
+func (d *directoryBackedCloudDestination) Delete(context.Context) error {
 	return os.RemoveAll(d.dir)
 }
 
 var (
-	_ lifecycle.CloudDestination = &managerFakeCloudDestination{}
-	_ lifecycle.CloudDeleter     = &managerFakeCloudDestination{}
+	_ lifecycle.CloudDestination = &directoryBackedCloudDestination{}
+	_ lifecycle.CloudDeleter     = &directoryBackedCloudDestination{}
 )
 
 var (
@@ -267,7 +270,7 @@ func init() {
 			managerFakeCloudMu.Lock()
 			base := managerFakeCloudDir
 			managerFakeCloudMu.Unlock()
-			return &managerFakeCloudDestination{
+			return &directoryBackedCloudDestination{
 				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
 			}, nil
 		},
@@ -909,52 +912,24 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 	)
 }
 
-// flakyDeleteCloudDestination mirrors managerFakeCloudDestination's
-// directory-backed UploadDir/DownloadDir (so this test's epoch snapshots
-// actually get mirrored for real), but Delete fails for as long as
+// flakyDeleteCloudDestination uses the shared directory-backed behavior, but
+// Delete fails for as long as
 // failDelete points at true, then succeeds once it's flipped to false —
 // simulating a transient cloud outage specifically on the delete path,
 // distinct from flakyCloudDestination's upload-path flakiness above.
 type flakyDeleteCloudDestination struct {
-	dir        string
+	*directoryBackedCloudDestination
 	failDelete *bool
 	mu         *sync.Mutex
 }
 
-func (d *flakyDeleteCloudDestination) UploadDir(_ context.Context, localDir string) error {
-	if err := os.MkdirAll(d.dir, 0o755); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(localDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(localDir, entry.Name()))
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(d.dir, entry.Name()), data, 0o600); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (d *flakyDeleteCloudDestination) DownloadDir(context.Context, string) error {
-	return errors.New("not implemented")
-}
-
-func (d *flakyDeleteCloudDestination) Delete(context.Context) error {
+func (d *flakyDeleteCloudDestination) Delete(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if *d.failDelete {
 		return errors.New("simulated transient cloud delete failure")
 	}
-	return os.RemoveAll(d.dir)
+	return d.directoryBackedCloudDestination.Delete(ctx)
 }
 
 var (
@@ -976,7 +951,9 @@ func init() {
 			base := flakyDeleteCloudBaseDir
 			flakyDeleteCloudMu.Unlock()
 			return &flakyDeleteCloudDestination{
-				dir:        filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+				directoryBackedCloudDestination: &directoryBackedCloudDestination{
+					dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+				},
 				failDelete: &flakyDeleteCloudFail,
 				mu:         &flakyDeleteCloudMu,
 			}, nil
@@ -998,57 +975,35 @@ func setFlakyDeleteCloudBackingDir(t *testing.T, dir string) {
 	})
 }
 
-// permanentUploadFailureCloudDestination behaves exactly like
-// managerFakeCloudDestination (a real, directory-backed upload) except
-// that UploadDir permanently fails whenever localDir's base name matches
+// permanentUploadFailureCloudDestination uses the shared directory-backed
+// behavior except that UploadDir permanently fails whenever localDir's base name matches
 // the currently configured target (see setPermanentUploadFailureTarget) —
 // simulating a snapshot whose cloud upload never completes, as opposed to
 // flakyCloudDestination's clears-after-one-retry failure above. The
 // target can be changed later to simulate the underlying outage finally
 // clearing for that specific snapshot.
 type permanentUploadFailureCloudDestination struct {
-	dir string
-	mu  *sync.Mutex
+	*directoryBackedCloudDestination
+	mu *sync.Mutex
 	// target, guarded by mu, names the one directory basename UploadDir
 	// currently fails for; every other directory uploads normally.
 	target *string
 }
 
-func (d *permanentUploadFailureCloudDestination) UploadDir(_ context.Context, localDir string) error {
+func (d *permanentUploadFailureCloudDestination) UploadDir(
+	ctx context.Context,
+	localDir string,
+) error {
 	d.mu.Lock()
 	target := *d.target
 	d.mu.Unlock()
 	if filepath.Base(localDir) == target {
 		return errors.New("simulated permanent cloud upload failure")
 	}
-	if err := os.MkdirAll(d.dir, 0o755); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(localDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(localDir, entry.Name()))
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(d.dir, entry.Name()), data, 0o600); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (d *permanentUploadFailureCloudDestination) DownloadDir(context.Context, string) error {
-	return errors.New("not implemented")
-}
-
-func (d *permanentUploadFailureCloudDestination) Delete(context.Context) error {
-	return os.RemoveAll(d.dir)
+	return d.directoryBackedCloudDestination.UploadDir(
+		ctx,
+		localDir,
+	)
 }
 
 var (
@@ -1070,7 +1025,9 @@ func init() {
 			base := permanentUploadFailureBaseDir
 			permanentUploadFailureMu.Unlock()
 			return &permanentUploadFailureCloudDestination{
-				dir:    filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+				directoryBackedCloudDestination: &directoryBackedCloudDestination{
+					dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+				},
 				mu:     &permanentUploadFailureMu,
 				target: &permanentUploadFailureTarget,
 			}, nil
@@ -1223,6 +1180,37 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(t *testing.T)
 		t, filepath.Join(cloudBackingDir, "shared-prefix", "epoch-5"),
 		"must not upload directly under the shared base destination, bypassing the per-node prefix",
 	)
+}
+
+func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
+	for _, prefix := range []string{"..", ".", "nodes/a", `nodes\a`} {
+		t.Run(prefix, func(t *testing.T) {
+			eb := event.NewEventBus(nil, nil)
+			t.Cleanup(eb.Stop)
+			m := dblifecycle.NewManager(
+				newManagerTestDB(t),
+				eb,
+				config.DatabaseLifecycleConfig{
+					SnapshotEnabled:                true,
+					SnapshotDir:                    t.TempDir(),
+					SnapshotCloudDestination:       "managerfaketest://bucket/prefix",
+					SnapshotCloudDestinationPrefix: prefix,
+				},
+				"badger",
+				"sqlite",
+				testDestinationRegistry,
+				nil,
+			)
+			t.Cleanup(func() {
+				_ = m.Stop()
+			})
+			require.ErrorContains(
+				t,
+				m.Start(context.Background()),
+				"safe path segment",
+			)
+		})
+	}
 }
 
 // TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix verifies

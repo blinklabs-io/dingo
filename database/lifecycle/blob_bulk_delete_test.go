@@ -551,6 +551,7 @@ func TestDeleteBlocksAfterSurfacesIteratorErrorPartwayThroughWalk(
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, sentinel)
+	require.Zero(t, blocksDeleted)
 
 	// A real (non-cloud) blob store's transaction rolls back on error, so
 	// nothing committed: all three blocks must survive even though the
@@ -565,7 +566,6 @@ func TestDeleteBlocksAfterSurfacesIteratorErrorPartwayThroughWalk(
 			id,
 		)
 	}
-	_ = blocksDeleted
 }
 
 // cloudLikeTxn wraps a real blob.BlobStore transaction so it behaves like
@@ -603,6 +603,10 @@ func (t *cloudLikeTxn) Rollback() error {
 		return t.real.Rollback()
 	}
 	return t.real.Commit()
+}
+
+func (t *cloudLikeTxn) RollbackIsNoop() bool {
+	return true
 }
 
 // cloudLikeBlobStore wraps a real blob.BlobStore and makes its

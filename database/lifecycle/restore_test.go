@@ -128,6 +128,36 @@ func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(t *testing
 	)
 }
 
+func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
+	src := newTestDB(t)
+	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
+	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+
+	targetDir := filepath.Join(t.TempDir(), "restored")
+	_, err = lifecycle.Restore(
+		context.Background(),
+		newTestStorageHost(t),
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
+		lifecycle.RestoreStorageConfig{
+			Metadata: map[string]any{"dataDir": 42},
+		},
+	)
+	require.ErrorContains(t, err, "non-string metadata provider dataDir")
+	require.NoDirExists(t, targetDir)
+}
+
 // TestManifestCheckPluginMatch verifies Manifest.CheckPluginMatch itself:
 // it accepts the plugins a snapshot was actually taken with, and rejects
 // any other combination. This is a unit test of the check in isolation —

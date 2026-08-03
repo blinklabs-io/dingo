@@ -217,8 +217,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for most, privateBindAddr for the private
-	// listener, midnight.host for Midnight, and all interfaces for bark
-	// (which is started without a host).
+	// listener, midnight.host for Midnight, and BarkHost for bark.
 	ports := []struct {
 		setting  string
 		host     string
@@ -230,7 +229,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
 		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
-		{"barkPort", "", c.BarkPort, serving, false},
+		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{"plugins.api.utxorpc.config.port", c.BindAddr, utxorpcPort, apiListeners, false},
 		{"plugins.api.blockfrost.config.port", c.BindAddr, blockfrostPort, apiListeners, false},
 		{"plugins.api.mesh.config.port", c.BindAddr, meshPort, apiListeners, false},
@@ -508,6 +507,16 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				"invalid databaseLifecycle.snapshotCloudDestination %q: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
 				dest,
 				u.Scheme,
+			))
+		}
+	}
+	if prefix := c.DatabaseLifecycle.SnapshotCloudDestinationPrefix; prefix != "" {
+		if prefix == "." || prefix == ".." ||
+			strings.ContainsAny(prefix, `/\`) {
+			errs = append(errs, fmt.Errorf(
+				"invalid databaseLifecycle.snapshotCloudDestinationPrefix %q: "+
+					"must be one path segment, not '.' or '..', and contain no '/' or '\\'",
+				prefix,
 			))
 		}
 	}

@@ -81,7 +81,7 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 
 	// VACUUM INTO targets a private, operation-owned temporary directory,
 	// not dstPath directly, and is only published to dstPath via the
-	// os.Rename below once it has fully succeeded -- matching
+	// os.Link below once it has fully succeeded -- matching
 	// database/lifecycle/manifest.go's WriteManifest write-to-temp-then-
 	// rename pattern. VACUUM INTO targeting dstPath directly, cleaned up
 	// with an unconditional os.Remove(dstPath) on failure, is a TOCTOU
@@ -90,9 +90,9 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 	// have that file silently deleted too, even though it has nothing to
 	// do with this failed operation. os.MkdirTemp's uniquely-named
 	// directory can't collide with anything another goroutine/process is
-	// doing, so a failure here only ever removes this attempt's own temp
-	// directory -- dstPath itself is never touched unless this call
-	// actually succeeds.
+	// doing. Publishing with a hard link is no-clobber: unlike Rename,
+	// Link fails if another creator populated dstPath after the initial
+	// existence check.
 	tmpDir, err := os.MkdirTemp(dstDir, ".backup-tmp-*")
 	if err != nil {
 		return fmt.Errorf(
@@ -110,7 +110,7 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 	if err := runVacuumInto(ctx, d.DB(), tmpPath); err != nil {
 		return fmt.Errorf("sqlite backup: VACUUM INTO %q: %w", dstPath, err)
 	}
-	if err := os.Rename(tmpPath, dstPath); err != nil {
+	if err := os.Link(tmpPath, dstPath); err != nil {
 		return fmt.Errorf(
 			"sqlite backup: publish %q: %w",
 			dstPath,
@@ -119,7 +119,7 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 	}
 	// A file's own fsync (already done implicitly by VACUUM INTO closing
 	// the destination file) does not guarantee its directory entry is
-	// persisted -- sync dstDir so the rename above is durable too, not
+	// persisted -- sync dstDir so the link above is durable too, not
 	// just atomic.
 	return fsyncdir.Sync(dstDir)
 }

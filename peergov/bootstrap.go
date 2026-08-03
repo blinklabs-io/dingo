@@ -337,7 +337,7 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 		for _, peer := range p.peers {
 			if peer != nil && peer.Source == PeerSourceTopologyBootstrapPeer &&
 				peer.State == PeerStateCold && peer.Connection == nil {
-				p.spawnOutboundConnection(peer)
+				p.spawnOutboundConnectionLocked(peer)
 			}
 		}
 	}

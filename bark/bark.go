@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -203,6 +204,10 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 	}, nil
 }
 
+func barkListenAddr(host string, port uint) string {
+	return net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10))
+}
+
 func (b *Bark) Start(ctx context.Context) error {
 	b.mu.Lock()
 	if b.server != nil {
@@ -249,21 +254,15 @@ func (b *Bark) Start(ctx context.Context) error {
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 		},
 	)
+	listenAddr := barkListenAddr(b.config.Host, b.config.Port)
 	var server *http.Server
 	if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
 		b.config.Logger.Info(
-			fmt.Sprintf("starting bark gRPC TLS listener on %s:%d",
-				b.config.Host,
-				b.config.Port,
-			),
+			fmt.Sprintf("starting bark gRPC TLS listener on %s", listenAddr),
 		)
 
 		server = &http.Server{
-			Addr: fmt.Sprintf(
-				"%s:%d",
-				b.config.Host,
-				b.config.Port,
-			),
+			Addr:              listenAddr,
 			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
 			WriteTimeout:      30 * time.Second,
@@ -271,17 +270,10 @@ func (b *Bark) Start(ctx context.Context) error {
 		}
 	} else {
 		b.config.Logger.Info(
-			fmt.Sprintf("starting bark gRPC listener on %s:%d",
-				b.config.Host,
-				b.config.Port,
-			),
+			fmt.Sprintf("starting bark gRPC listener on %s", listenAddr),
 		)
 		server = &http.Server{
-			Addr: fmt.Sprintf(
-				"%s:%d",
-				b.config.Host,
-				b.config.Port,
-			),
+			Addr:              listenAddr,
 			Handler:           handler,
 			Protocols:         unencryptedHTTP2Protocols(),
 			ReadHeaderTimeout: 60 * time.Second,

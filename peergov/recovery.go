@@ -105,6 +105,6 @@ func (p *PeerGovernor) redialDisconnectedPeersLocked() {
 			"address", peer.Address,
 			"source", peer.Source.String(),
 		)
-		p.spawnOutboundConnection(peer)
+		p.spawnOutboundConnectionLocked(peer)
 	}
 }

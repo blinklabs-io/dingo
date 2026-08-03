@@ -95,8 +95,12 @@ func DeleteBlocksAfter(
 		}
 		end := min(start+uint64(batchSize)-1, tipID)
 		var batchDeleted uint64
+		var batchIsIrreversible bool
 		txn := db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
+			if irreversible, ok := txn.Blob().(types.IrreversibleTxn); ok {
+				batchIsIrreversible = irreversible.RollbackIsNoop()
+			}
 			it := blob.NewIterator(
 				txn.Blob(),
 				types.BlobIteratorOptions{Prefix: indexPrefix},
@@ -191,17 +195,12 @@ func DeleteBlocksAfter(
 			return nil
 		})
 		if err != nil {
-			// batchDeleted blocks were actually issued to the blob store
-			// before this error, and must be counted as deleted even
-			// though the batch as a whole is reported as failed: a local
-			// badger store rolls its transaction back atomically on
-			// error, but a cloud store (GCS/S3) does not -- its Commit
-			// and Rollback are no-ops, so every Delete already issued is
-			// real and permanent regardless of what happens afterward
-			// (see BlobStoreGCS/BlobStoreS3's gcsTxn/s3Txn). Undercounting
-			// here would tell the caller fewer blocks are gone than
-			// actually are, which is most dangerous for exactly the
-			// backend where it happens. This is still safe to resume from:
+			// A failed Badger transaction rolls back the current batch, so
+			// only blocks from earlier committed batches are reported. GCS
+			// and S3 explicitly expose their transactions as irreversible:
+			// every Delete already issued is permanent even though the
+			// batch returns an error, so include that partial progress.
+			// This is still safe to resume from:
 			// finishPendingTruncate always retries the identical
 			// (afterID, tipID] range recorded in the pending-truncate
 			// marker, and redoing it is idempotent regardless of how far
@@ -211,7 +210,10 @@ func DeleteBlocksAfter(
 			// are already gone deletes harmlessly again (cloud DeleteBlock
 			// tolerates a missing object; badger's Delete tolerates a
 			// missing key).
-			return blocksDeleted + batchDeleted, err
+			if batchIsIrreversible {
+				return blocksDeleted + batchDeleted, err
+			}
+			return blocksDeleted, err
 		}
 		blocksDeleted += batchDeleted
 		start = end + 1

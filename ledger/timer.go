@@ -17,7 +17,6 @@ package ledger
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -47,17 +46,10 @@ type Scheduler struct {
 	updateIntervalChan chan time.Duration
 	tasks              []*ScheduledTask
 	interval           time.Duration
-	startOnce          sync.Once
-	stopOnce           sync.Once
-	// started is set once Start's startOnce.Do closure has actually created
-	// the ticker and worker pool. Stop consults it before ever touching
-	// stopOnce: without this check, a Stop() called before Start() has ever
-	// run would consume stopOnce for a no-op teardown, and a subsequent
-	// legitimate Start() would then create a ticker/worker pool that no
-	// later Stop() could ever tear down (stopOnce already fired) -- a
-	// goroutine leak.
-	started atomic.Bool
-	mutex   sync.Mutex
+	lifecycleMutex     sync.Mutex
+	started            bool
+	stopped            bool
+	mutex              sync.Mutex
 	// Worker pool fields
 	workerPoolSize int
 	taskQueue      chan func()
@@ -94,12 +86,15 @@ func NewSchedulerWithConfig(
 
 // Start the timer (run goroutine once)
 func (st *Scheduler) Start() {
-	st.startOnce.Do(func() {
-		st.ticker = time.NewTicker(st.interval)
-		st.startWorkerPool()
-		st.started.Store(true)
-		go st.run()
-	})
+	st.lifecycleMutex.Lock()
+	defer st.lifecycleMutex.Unlock()
+	if st.started || st.stopped {
+		return
+	}
+	st.ticker = time.NewTicker(st.interval)
+	st.startWorkerPool()
+	st.started = true
+	go st.run()
 }
 
 // startWorkerPool initializes the worker pool
@@ -219,32 +214,29 @@ func (st *Scheduler) ChangeInterval(newInterval time.Duration) error {
 	return nil
 }
 
-// Stop the timer (terminates). Safe to call more than once, or on a
-// Scheduler that was never Start-ed: only the first call that follows a
-// real Start() does anything.
+// Stop terminates the scheduler. Start and Stop share lifecycleMutex so a
+// shutdown racing startup either prevents startup or tears down everything
+// Start created before returning.
 func (st *Scheduler) Stop() {
-	if !st.started.Load() {
-		// Start has never (yet) created a ticker/worker pool for this
-		// Scheduler, so there is nothing to tear down. Return without
-		// touching stopOnce: if Stop() consumed it here, a Start() called
-		// afterwards would create a ticker and worker-pool goroutines that
-		// no later Stop() could ever shut down, since stopOnce would
-		// already be spent on this no-op.
+	st.lifecycleMutex.Lock()
+	defer st.lifecycleMutex.Unlock()
+	if st.stopped {
 		return
 	}
-	st.stopOnce.Do(func() {
-		close(st.quit)
-		// st.ticker is reassigned under st.mutex by run's interval-update
-		// case (ChangeInterval, called at era/epoch boundaries in a real
-		// running node) -- read it under the same lock rather than
-		// racing that write, then Stop the ticker itself outside the
-		// lock to keep the critical section to just the field access.
-		st.mutex.Lock()
-		ticker := st.ticker
-		st.mutex.Unlock()
-		if ticker != nil {
-			ticker.Stop()
-		}
-		st.stopWorkerPool()
-	})
+	st.stopped = true
+	if !st.started {
+		return
+	}
+	close(st.quit)
+	// st.ticker is reassigned under st.mutex by run's interval-update
+	// case (ChangeInterval, called at era/epoch boundaries in a real
+	// running node) -- read it under the same lock rather than racing
+	// that write.
+	st.mutex.Lock()
+	ticker := st.ticker
+	st.mutex.Unlock()
+	if ticker != nil {
+		ticker.Stop()
+	}
+	st.stopWorkerPool()
 }

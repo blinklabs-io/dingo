@@ -35,6 +35,11 @@ func newTestBark(t *testing.T, db *database.Database) *Bark {
 	return b
 }
 
+func TestBarkListenAddrSupportsIPv6(t *testing.T) {
+	require.Equal(t, "[::1]:9091", barkListenAddr("::1", 9091))
+	require.Equal(t, "127.0.0.1:9091", barkListenAddr("127.0.0.1", 9091))
+}
+
 // TestAcquireReturnsCurrentDB verifies the ordinary, uncontended path: a
 // database was set at construction time, so Acquire hands it back with a
 // working release func.

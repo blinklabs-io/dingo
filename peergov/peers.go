@@ -216,7 +216,7 @@ func (p *PeerGovernor) AddPeer(
 	shouldConnect := p.stopCh != nil && !p.config.DisableOutbound &&
 		source != PeerSourceInboundConn
 	if shouldConnect {
-		p.spawnOutboundConnection(newPeer)
+		p.spawnOutboundConnectionLocked(newPeer)
 	}
 	evt = &pendingEvent{
 		PeerAddedEventType,

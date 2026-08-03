@@ -285,59 +285,51 @@ func TestScheduler_StopWithoutStartIsSafe(t *testing.T) {
 	})
 }
 
-// TestScheduler_StopBeforeStartThenRestartCleansUpWorkerPool guards against
-// a goroutine leak: a Stop() called before Start() has ever run (a real,
-// supported pattern per TestScheduler_StopWithoutStartIsSafe -- e.g.
-// LedgerState.Close calling Scheduler.Stop unconditionally whenever
-// ls.Scheduler is non-nil) used to unconditionally fire stopOnce for a
-// no-op teardown. If Start() was then called afterward, it would create a
-// brand new ticker and worker-pool goroutines that no subsequent Stop()
-// could ever tear down, since stopOnce was already permanently consumed --
-// leaking every worker-pool goroutine Start() spawns. Verifies via
-// workerWg.Wait() (run in its own goroutine and signaled over a channel,
-// per this project's no-time.Sleep-for-sync convention) that the second
-// Stop() actually drains the worker pool Start() created.
-func TestScheduler_StopBeforeStartThenRestartCleansUpWorkerPool(t *testing.T) {
+// TestScheduler_StopBeforeStartPreventsLaterStart verifies that a shutdown
+// request is durable even if it wins a race with Start. This is the only way
+// Stop can guarantee a concurrent Start does not create workers after Stop
+// has already returned.
+func TestScheduler_StopBeforeStartPreventsLaterStart(t *testing.T) {
 	timer := NewScheduler(10 * time.Millisecond)
 
-	// Premature Stop(): nothing has been started yet.
 	timer.Stop()
-
-	// Now legitimately start the scheduler -- this creates a fresh ticker
-	// and worker-pool goroutines.
 	timer.Start()
 
-	// Register a task so we can confirm the scheduler is actually running
-	// (and not just a no-op left over from the premature Stop).
-	var counter atomic.Int32
-	timer.Register(1, func() {
-		counter.Add(1)
-	}, nil)
-	require.Eventually(t, func() bool {
-		return counter.Load() >= 1
-	}, 2*time.Second, 10*time.Millisecond,
-		"expected task to run after Start following a premature Stop",
-	)
+	require.Nil(t, timer.ticker)
+	require.Empty(t, timer.workers)
+	require.False(t, timer.started)
+}
 
-	// The real Stop() must actually tear down the worker pool this Start()
-	// created. Wait on workerWg from a separate goroutine and signal
-	// completion over a channel instead of sleeping.
-	timer.Stop()
+func TestScheduler_ConcurrentStartStopLeavesNoWorkers(t *testing.T) {
+	for range 100 {
+		timer := NewScheduler(time.Hour)
+		var callers sync.WaitGroup
+		callers.Add(2)
+		go func() {
+			defer callers.Done()
+			timer.Start()
+		}()
+		go func() {
+			defer callers.Done()
+			timer.Stop()
+		}()
+		callers.Wait()
+		timer.Stop()
 
-	done := make(chan struct{})
-	go func() {
-		timer.workerWg.Wait()
-		close(done)
-	}()
+		timer.lifecycleMutex.Lock()
+		require.True(t, timer.stopped)
+		timer.lifecycleMutex.Unlock()
 
-	select {
-	case <-done:
-		// Worker pool goroutines exited: no leak.
-	case <-time.After(2 * time.Second):
-		t.Fatal(
-			"worker pool goroutines from the post-premature-Stop Start() " +
-				"were never cleaned up (leaked)",
-		)
+		done := make(chan struct{})
+		go func() {
+			timer.workerWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("scheduler workers remained after concurrent Start/Stop")
+		}
 	}
 }
 

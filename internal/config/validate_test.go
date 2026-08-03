@@ -214,6 +214,14 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "bark on distinct bind address may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.1"
+				c.BarkHost = "127.0.0.2"
+				c.BarkPort = c.MetricsPort
+			},
+		},
+		{
 			// A wildcard bind address contends with every specific one.
 			name: "wildcard bind address collides with specific",
 			modify: func(c *Config) {
@@ -608,6 +616,36 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		prefix  string
+		wantErr bool
+	}{
+		{name: "empty", prefix: ""},
+		{name: "safe segment", prefix: "node-a"},
+		{name: "parent", prefix: "..", wantErr: true},
+		{name: "current directory", prefix: ".", wantErr: true},
+		{name: "forward slash", prefix: "nodes/a", wantErr: true},
+		{name: "backslash", prefix: `nodes\a`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotCloudDestinationPrefix = tt.prefix
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr {
+				require.ErrorContains(
+					t,
+					err,
+					"snapshotCloudDestinationPrefix",
+				)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
