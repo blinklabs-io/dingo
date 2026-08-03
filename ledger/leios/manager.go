@@ -444,11 +444,37 @@ func (m *VoteManager) Stop() error {
 func (m *VoteManager) EnableVoting(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
-) {
+) error {
+	if key == nil {
+		return errors.New("nil leios vote signing key")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
+		return fmt.Errorf("register local leios voting key: %w", err)
+	}
 	m.votingPool = slices.Clone(poolKeyHash[:])
 	m.votingKey = key
+	return nil
+}
+
+// ValidateVotingKey verifies that an operator-supplied voting key matches the
+// static registry shared with peers. It does not add a key to the registry.
+func (m *VoteManager) ValidateVotingKey(
+	poolKeyHash lcommon.PoolKeyHash,
+	key *VoteSigningKey,
+) error {
+	if key == nil {
+		return errors.New("nil leios vote signing key")
+	}
+	registered, ok := m.registry.PublicKeyFor(poolKeyHash[:])
+	if !ok {
+		return fmt.Errorf("no registered leios voting public key for pool %x", poolKeyHash)
+	}
+	if !registered.Equal(key.PublicKey()) {
+		return fmt.Errorf("configured leios voting key does not match registered public key for pool %x", poolKeyHash)
+	}
+	return nil
 }
 
 // CommitteeForEpoch returns the memoized voting committee for an epoch,
@@ -733,16 +759,24 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	verified := false
 	var pub *bls12381.G2Affine
 	if m.prototypeMode {
-		key, deriveErr := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
-		if deriveErr != nil {
-			m.rejectVote(
-				"signature",
-				lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
-				deriveErr,
-			)
-			return nil
+		// Prefer an explicitly registered key when present. This permits
+		// operators to use the BLS key carried by a Dijkstra pool
+		// registration while retaining the prototype-derived fallback for
+		// pools that have not registered one yet.
+		if registered, registeredOK := m.registry.PublicKeyFor(member.PoolKeyHash); registeredOK {
+			pub = registered
+		} else {
+			key, deriveErr := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+			if deriveErr != nil {
+				m.rejectVote(
+					"signature",
+					lcommon.LeiosVote{SlotNo: record.slot, VoterId: vote.VoterId},
+					deriveErr,
+				)
+				return nil
+			}
+			pub = key.PublicKey()
 		}
-		pub = key.PublicKey()
 	} else if registered, ok := m.registry.PublicKeyFor(member.PoolKeyHash); ok {
 		pub = registered
 	}
