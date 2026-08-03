@@ -1388,6 +1388,14 @@ rolled the applied chain back to its common ancestor, so permitted epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
 
+Genesis-overlay activity is resolved separately from the forward protocol-
+parameter forecast: header validation first uses the epoch containing the
+slot and reads that epoch's effective parameter row, so an epoch-boundary
+decentralization update cannot be mistaken for the prior epoch's overlay
+schedule. If the target epoch is not authoritative yet, blockfetch defers the
+stateful overlay decision until ledger apply; full historical validation and
+the normal leader checks remain enabled.
+
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
 already materialized epoch directly from the immutable epoch cache before
