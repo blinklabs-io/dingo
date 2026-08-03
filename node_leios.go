@@ -250,6 +250,12 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 		if err != nil {
 			return fmt.Errorf("load leios vote signing key: %w", err)
 		}
+		if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
+			return fmt.Errorf(
+				"validate configured leios vote signing key: %w; register the matching public key in leios-voter-public-keys on every peer",
+				err,
+			)
+		}
 	} else {
 		key, err = leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
 		if err != nil {

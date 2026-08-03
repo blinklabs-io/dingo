@@ -458,6 +458,25 @@ func (m *VoteManager) EnableVoting(
 	return nil
 }
 
+// ValidateVotingKey verifies that an operator-supplied voting key matches the
+// static registry shared with peers. It does not add a key to the registry.
+func (m *VoteManager) ValidateVotingKey(
+	poolKeyHash lcommon.PoolKeyHash,
+	key *VoteSigningKey,
+) error {
+	if key == nil {
+		return errors.New("nil leios vote signing key")
+	}
+	registered, ok := m.registry.PublicKeyFor(poolKeyHash[:])
+	if !ok {
+		return fmt.Errorf("no registered leios voting public key for pool %x", poolKeyHash)
+	}
+	if !registered.Equal(key.PublicKey()) {
+		return fmt.Errorf("configured leios voting key does not match registered public key for pool %x", poolKeyHash)
+	}
+	return nil
+}
+
 // CommitteeForEpoch returns the memoized voting committee for an epoch,
 // computing it from the stake snapshot on first use.
 func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {

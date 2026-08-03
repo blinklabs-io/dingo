@@ -1238,6 +1238,23 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 	))
 }
 
+func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
+	fixture := newManagerFixture(t)
+	member := fixture.members[3]
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	require.NoError(t, fixture.mgr.ValidateVotingKey(poolKeyHash, fixture.keys[member.VoterId]))
+
+	wrongKey, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
+	require.NoError(t, err)
+	assert.Error(t, fixture.mgr.ValidateVotingKey(poolKeyHash, wrongKey))
+
+	var missingPool lcommon.PoolKeyHash
+	missingPool[0] = 0xff
+	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
+}
+
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
 	fixture := newManagerFixture(t)
 	var poolKeyHash lcommon.PoolKeyHash
