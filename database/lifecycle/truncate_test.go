@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -677,6 +678,54 @@ func TestTruncateRejectsPendingMarkerAfterBlobTipAdvance(t *testing.T) {
 	tip, err := f.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, f.blocks[4].Slot, tip.Point.Slot)
+}
+
+// TestTruncateResumesWithStaleHighestIndexAfterPartialCloudDelete models a
+// cloud DeleteBlock failure after the block object is removed but before its
+// "bi" index is removed. Recovery must authenticate the remaining index
+// directly and retry cleanup instead of requiring the missing block object.
+func TestTruncateResumesWithStaleHighestIndexAfterPartialCloudDelete(
+	t *testing.T,
+) {
+	f := buildTestChain(t, 5)
+	target := f.blocks[1]
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
+	_, err := lifecycle.Truncate(ctx, f.db, target, 1, false, 0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	tip := f.blocks[4]
+	txn := f.db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return f.db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobKey(tip.Slot, tip.Hash),
+		)
+	}))
+
+	// The highest "bi" entry still exists, but resolving it through the
+	// deleted block object reproduces the state that previously blocked
+	// GetPendingTruncate before cleanup could retry.
+	_, err = f.db.BlockByIndex(tip.ID, nil)
+	require.Error(t, err)
+
+	blocksRemoved, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		models.Block{},
+		1,
+		false,
+		0,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), blocksRemoved)
+
+	for _, block := range f.blocks[2:] {
+		_, err := f.db.BlockByIndex(block.ID, nil)
+		require.Error(t, err)
+	}
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.Nil(t, pending)
 }
 
 // TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip verifies that marker

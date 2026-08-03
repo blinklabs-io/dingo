@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -63,6 +64,68 @@ func pendingTruncateChecksum(pending PendingTruncate) ([]byte, error) {
 	}
 	sum := sha256.Sum256(value)
 	return sum[:], nil
+}
+
+// latestIndexedBlobBlock returns the identity encoded by the highest "bi"
+// index entry without resolving the referenced block object. A cloud delete
+// is irreversible and removes several objects sequentially, so a failed
+// attempt can legitimately leave the highest index pointing at an already
+// deleted block object. Recovery must still be able to authenticate that
+// index and retry its idempotent cleanup.
+func latestIndexedBlobBlock(db *database.Database) (models.Block, error) {
+	blob := db.Blob()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	txn := db.BlobTxn(false)
+	var ret models.Block
+	err := txn.Do(func(txn *database.Txn) error {
+		blobTxn := txn.Blob()
+		if blobTxn == nil {
+			return types.ErrNilTxn
+		}
+		prefix := []byte(types.BlockBlobIndexKeyPrefix)
+		it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{
+			Reverse: true,
+			Prefix:  prefix,
+		})
+		if it == nil {
+			return errors.New("blob iterator is nil")
+		}
+		defer it.Close()
+		if err := it.Err(); err != nil {
+			return fmt.Errorf("blob iterator: %w", err)
+		}
+		seekKey := append(
+			append([]byte(nil), prefix...),
+			0xff,
+		)
+		for it.Seek(seekKey); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			if item == nil {
+				continue
+			}
+			id, ok := blockIndexID(item.Key())
+			if !ok {
+				continue
+			}
+			blockKey, err := item.ValueCopy(nil)
+			if err != nil {
+				return fmt.Errorf("read index entry at %d: %w", id, err)
+			}
+			slot, hash, err := types.ParseBlockBlobKey(blockKey)
+			if err != nil {
+				return fmt.Errorf("parse index entry at %d: %w", id, err)
+			}
+			ret = models.Block{ID: id, Slot: slot, Hash: hash}
+			return nil
+		}
+		if err := it.Err(); err != nil {
+			return fmt.Errorf("blob iterator: %w", err)
+		}
+		return models.ErrBlockNotFound
+	})
+	return ret, err
 }
 
 // GetPendingTruncate reports a previously-started truncate that still needs
@@ -148,20 +211,13 @@ func GetPendingTruncate(db *database.Database) (*PendingTruncate, error) {
 	// means blocks were appended after the marker was written. Resuming with
 	// pending.TipID would delete only the old range while metadata truncation
 	// removes state through the newer tip, orphaning those newer blobs.
-	recentBlocks, err := database.BlocksRecent(db, 1)
+	currentTip, err := latestIndexedBlobBlock(db)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"pending truncate marker: get current blob tip: %w",
 			err,
 		)
 	}
-	if len(recentBlocks) == 0 {
-		return nil, fmt.Errorf(
-			"pending truncate marker: get current blob tip: %w",
-			models.ErrBlockNotFound,
-		)
-	}
-	currentTip := recentBlocks[0]
 	if currentTip.ID > pending.TipID {
 		return nil, fmt.Errorf(
 			"invalid pending truncate marker: recorded blob tip "+

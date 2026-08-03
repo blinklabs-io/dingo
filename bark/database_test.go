@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1137,6 +1138,33 @@ func TestCancelOperationCancelsContextAndMarksCancelled(t *testing.T) {
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_CANCELLED,
 		progress.GetStatus(),
 	)
+}
+
+// TestCancelOperationMarksDriverCancellationErrorCancelled verifies that
+// storage-driver errors which do not wrap context.Canceled still reflect an
+// accepted cancellation request instead of being mislabeled as failures.
+func TestCancelOperationMarksDriverCancellationErrorCancelled(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	op, _, err := h.startOperation(databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT)
+	require.NoError(t, err)
+
+	_, err = h.CancelOperation(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
+			OperationId: op.id,
+		}),
+	)
+	require.NoError(t, err)
+
+	op.complete(errors.New("sqlite interrupted (9)"), 0)
+
+	progress := op.progress()
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_CANCELLED,
+		progress.GetStatus(),
+	)
+	require.Equal(t, "cancelled", progress.GetMessage())
 }
 
 // TestCancelOperationOnAlreadyCompletedOperationIsANoOp verifies that
