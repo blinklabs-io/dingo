@@ -64,6 +64,30 @@ const (
 	blockfetchMaxBatchHeadersWhenBehind = 500
 	blockfetchMinBatchGapSlots          = 64
 
+	// Maximum number of definitive failures to obtain one queued header range
+	// before the queue is dropped. Both failure shapes count against the same
+	// range, because a peer that rolled the queued block back can produce
+	// either one: a NoBlocks reply (surfacing synchronously as a
+	// GetBlockRange error) when its range server rejects the start point,
+	// or a StartBatch/BatchDone pair carrying no blocks. Transport, shutdown,
+	// and wiring errors from GetBlockRange do not count: they do not establish
+	// that the peer cannot serve the range.
+	//
+	// The count is keyed to the range start point rather than being a
+	// global consecutive streak, and it deliberately survives both
+	// deliveries for other ranges and header-queue churn. Failures against
+	// one unfetchable range are minutes apart, and in between the node
+	// fetches normally from other peers while forks, connection switches
+	// and header mismatches repeatedly clear and refill the queue with the
+	// same header. A global streak is reset by all of that, so it fires
+	// only when failures happen to land back to back: two identical DevNet
+	// runs produced 1 firing against 169 wedge events and 9 against 81.
+	// Keying by range makes the same bound deterministic. A miss on a
+	// different range starts its own count, so a peer that is briefly
+	// behind is not punished, and a delivered block for the stuck range
+	// discards its record entirely.
+	blockfetchMaxSameRangeFailures = 3
+
 	// Number of received blockfetch blocks to buffer before committing them.
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
@@ -869,6 +893,11 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 
 func (ls *LedgerState) clearQueuedHeaders() {
 	ls.chain.ClearHeaders()
+	// The blockfetch range-failure record is deliberately NOT cleared here.
+	// Fork resolution, connection switches and header mismatches clear the
+	// queue constantly, and the peer then re-offers the same unfetchable
+	// header; forgetting the record on every clear is what stopped the
+	// bound from ever being reached.
 	ls.headerPipelineConnId = ouroboros.ConnectionId{}
 	// Purge the header dedup cache for slots beyond the current
 	// block tip. Queued headers that were recorded in the dedup
@@ -2814,6 +2843,9 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
+	// If this block is the one a tracked range was failing to obtain, that
+	// range is fetchable after all and its failure record is stale.
+	ls.noteBlockfetchRangeProgress(e.Point)
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
 			return err
@@ -2879,6 +2911,107 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 	return ls.startQueuedBlockfetchLocked(connId)
 }
 
+// blockfetchNoBlocksErrorText is the error text emitted by the gouroboros
+// blockfetch client for MsgNoBlocks. That client currently exposes NoBlocks
+// as a plain error rather than a sentinel, so keep the classification at this
+// adapter boundary and do not treat every synchronous request error as a
+// range-unavailable result.
+const blockfetchNoBlocksErrorText = "block(s) not found"
+
+func isBlockfetchNoBlocksError(err error) bool {
+	return err != nil && strings.HasSuffix(
+		strings.TrimSpace(err.Error()),
+		blockfetchNoBlocksErrorText,
+	)
+}
+
+// blockfetchRangeFailureState counts definitive failures to obtain one
+// specific queued range, identified by its start point. Keying by point is
+// what lets the count survive the unrelated traffic that separates real
+// failures.
+type blockfetchRangeFailureState struct {
+	slot  uint64
+	hash  string
+	count int
+}
+
+func (s blockfetchRangeFailureState) matches(point ocommon.Point) bool {
+	return s.count > 0 &&
+		s.slot == point.Slot &&
+		s.hash == string(point.Hash)
+}
+
+// noteBlockfetchRangeProgress discards the failure record when the range it
+// was tracking has now been delivered. Earlier misses against a range that
+// turned out to be fetchable must not combine with a later unrelated miss, so
+// a peer that was only briefly behind is never punished. Deliveries for any
+// other range leave the record alone: they say nothing about whether the stuck
+// range can be obtained.
+func (ls *LedgerState) noteBlockfetchRangeProgress(point ocommon.Point) {
+	if ls.blockfetchRangeFailure.matches(point) {
+		ls.blockfetchRangeFailure = blockfetchRangeFailureState{}
+	}
+}
+
+// noteBlockfetchRangeUnavailable records one definitive failed attempt to
+// obtain the queued header range starting at start and, once that same range
+// has failed blockfetchMaxSameRangeFailures times, drops the queue and asks
+// for a fresh intersect. It reports whether it dropped the queue.
+//
+// Dropping the headers is the purpose rather than a side effect: while a
+// header sits at the head of the queue, Chain.AddBlock rejects every locally
+// forged block as not matching the first pending header, so a header whose
+// body no peer can serve halts block production until it is cleared. This
+// happens routinely after a tip slot battle, where two producers each roll
+// their own block back in favour of the other's and neither can then serve
+// the body the other queued.
+func (ls *LedgerState) noteBlockfetchRangeUnavailable(
+	connId ouroboros.ConnectionId,
+	start ocommon.Point,
+	reason string,
+) bool {
+	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
+		return false
+	}
+	if start.Slot == 0 && len(start.Hash) == 0 {
+		start, _ = ls.chain.HeaderRange(blockfetchBatchSize)
+	}
+	if ls.blockfetchRangeFailure.matches(start) {
+		ls.blockfetchRangeFailure.count++
+	} else {
+		ls.blockfetchRangeFailure = blockfetchRangeFailureState{
+			slot:  start.Slot,
+			hash:  string(start.Hash),
+			count: 1,
+		}
+	}
+	if ls.blockfetchRangeFailure.count < blockfetchMaxSameRangeFailures {
+		return false
+	}
+	ls.config.Logger.Warn(
+		"blockfetch could not obtain queued range, dropping queued headers and requesting chainsync re-sync",
+		"component", "ledger",
+		"connection_id", connId.String(),
+		"remaining_headers", ls.chain.HeaderCount(),
+		"range_start_slot", start.Slot,
+		"range_start_hash", hex.EncodeToString(start.Hash),
+		"range_failures", ls.blockfetchRangeFailure.count,
+		"reason", reason,
+	)
+	// Start a fresh count: the peer may re-offer the same header, and it
+	// must earn another full set of failures before the queue is dropped
+	// again rather than being dropped on every later miss.
+	ls.blockfetchRangeFailure = blockfetchRangeFailureState{}
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.clearQueuedHeaders()
+	ls.requestChainsyncResync(
+		connId,
+		event.ChainsyncResyncReasonBlockfetchRangeUnavailable,
+	)
+	return true
+}
+
 func (ls *LedgerState) startQueuedBlockfetchLocked(
 	connId ouroboros.ConnectionId,
 ) error {
@@ -2907,6 +3040,21 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	); err != nil {
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		// A peer whose range server rejects the start point answers
+		// NoBlocks, which gouroboros resolves into this synchronous error
+		// rather than a BatchDone event. Several callers only log what we
+		// return (notably the fork-resolution restarts), so genuine NoBlocks
+		// must be recorded here, at the single point every queued-range
+		// request passes through. Other synchronous errors are transport,
+		// shutdown, or wiring failures and must not poison this range's
+		// unavailable count.
+		if isBlockfetchNoBlocksError(err) {
+			ls.noteBlockfetchRangeUnavailable(
+				connId,
+				headerStart,
+				fmt.Sprintf("blockfetch request returned NoBlocks: %v", err),
+			)
+		}
 		return err
 	}
 	// Near tip: dispatch the same range to one shadow peer if any
@@ -4616,6 +4764,20 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 			"component", "ledger",
 			"remaining_headers", remainingHeaders,
 		)
+	}
+	// A batch that completed without delivering a block while headers stayed
+	// queued is one of the two shapes of "could not obtain the queued range"
+	// (the other is a NoBlocks reply, recorded in
+	// startQueuedBlockfetchLocked). Both feed the same streak.
+	if receivedBlockCount == 0 && remainingHeaders > 0 {
+		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
+		if ls.noteBlockfetchRangeUnavailable(
+			e.ConnectionId,
+			batchStart,
+			"batch completed without delivering a block",
+		) {
+			return nil
+		}
 	}
 	upstreamTipSlot := ls.UpstreamTipSlot()
 	if receivedBlockCount == 0 &&
