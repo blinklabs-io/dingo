@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"net/http"
 	"runtime"
 	"slices"
@@ -46,11 +47,6 @@ type ListenerConfig = connmanager.ListenerConfig
 
 // StorageMode controls how much data the metadata store persists.
 type StorageMode string
-
-const (
-	runModeServe = "serve"
-	runModeLeios = "leios"
-)
 
 const (
 	// StorageModeCore stores only consensus and chain state data.
@@ -594,12 +590,15 @@ func clonePluginConfig(in map[string]any) map[string]any {
 	}
 	return out
 }
+
 func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.GenesisBootstrap.CorroborationPeers = peers }
 }
+
 func WithMinPoolMargin(v uint) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.MinPoolMargin, c.minPoolMargin = v, v }
 }
+
 func WithPledgeLeverage(enabled bool, v uint) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
@@ -609,6 +608,7 @@ func WithPledgeLeverage(enabled bool, v uint) ConfigOptionFunc {
 		c.pledgeLeverageEnabled, c.pledgeLeverage = enabled, v
 	}
 }
+
 func WithFullPotRewards(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
@@ -618,6 +618,7 @@ func WithFullPotRewards(enabled bool) ConfigOptionFunc {
 		c.fullPotRewardsEnabled = enabled
 	}
 }
+
 func WithUnsafeFullPotRewardsOnStandardNetworks(enabled bool) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.UnsafeFullPotRewardsOnStandardNetworks = enabled }
 }
@@ -1481,6 +1482,9 @@ func pluginInt64(value any) int64 {
 	case int:
 		return int64(v)
 	case uint:
+		if v > math.MaxInt64 {
+			return math.MaxInt64
+		}
 		return int64(v)
 	case float64:
 		return int64(v)
@@ -1488,6 +1492,7 @@ func pluginInt64(value any) int64 {
 		return 0
 	}
 }
+
 func pluginFloat64(value any) float64 {
 	switch v := value.(type) {
 	case float64:
