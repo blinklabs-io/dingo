@@ -218,7 +218,9 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)
 	}
 	applyMidnightNetworkDefaults(cfg)
-	globalConfig = cfg
+	configMu.Lock()
+	globalConfig = cloneConfig(cfg)
+	configMu.Unlock()
 	// Topology is not resolved here: Network and Topology are final at
 	// this point, but the merged configuration has not been validated
 	// yet, so cmd/dingo loads topology once after ApplyDefaults and
@@ -235,7 +237,7 @@ func fieldByPath(v reflect.Value, path string) reflect.Value {
 }
 
 func defaultValue(field string) reflect.Value {
-	return fieldByPath(reflect.ValueOf(globalConfig).Elem(), field)
+	return fieldByPath(reflect.ValueOf(GetConfig()).Elem(), field)
 }
 
 func targetValue(cfg *Config, field string) reflect.Value {

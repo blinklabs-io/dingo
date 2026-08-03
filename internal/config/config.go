@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -743,6 +744,8 @@ type MithrilConfig struct {
 	VerifyCertificates bool `yaml:"verifyCertificates" envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
+var configMu sync.RWMutex
+
 var globalConfig = &Config{
 	Plugins:              defaultPluginsConfig(),
 	BindAddr:             "0.0.0.0",
@@ -806,7 +809,60 @@ var globalConfig = &Config{
 	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 }
 
+func clonePluginSelection(selection hostplugin.Selection) hostplugin.Selection {
+	clone := selection
+	if selection.Config == nil {
+		return clone
+	}
+	clone.Config = make(map[string]any, len(selection.Config))
+	for key, value := range selection.Config {
+		clone.Config[key] = value
+	}
+	return clone
+}
+
+func cloneConfig(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	clone.BarkBlockDownloadHosts = append(
+		[]string(nil),
+		cfg.BarkBlockDownloadHosts...,
+	)
+	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	if cfg.PeerSharing != nil {
+		peerSharing := *cfg.PeerSharing
+		clone.PeerSharing = &peerSharing
+	}
+	if cfg.LeiosVoterPublicKeys != nil {
+		clone.LeiosVoterPublicKeys = make(
+			map[string]string,
+			len(cfg.LeiosVoterPublicKeys),
+		)
+		for key, value := range cfg.LeiosVoterPublicKeys {
+			clone.LeiosVoterPublicKeys[key] = value
+		}
+	}
+	clone.Plugins.Storage.Blob = clonePluginSelection(
+		cfg.Plugins.Storage.Blob,
+	)
+	clone.Plugins.Storage.Metadata = clonePluginSelection(
+		cfg.Plugins.Storage.Metadata,
+	)
+	clone.Plugins.Mempool = clonePluginSelection(cfg.Plugins.Mempool)
+	clone.Plugins.API.Blockfrost = clonePluginSelection(
+		cfg.Plugins.API.Blockfrost,
+	)
+	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
+	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
+	return &clone
+}
+
 func LoadConfig(configFile string) (*Config, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg := cloneConfig(globalConfig)
 	midnightYAMLFields = nil
 
 	// Load config file as YAML if provided
@@ -840,7 +896,7 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
 		if _, wrapped := root["config"]; wrapped {
-			tempCfg := tempConfig{Config: globalConfig}
+			tempCfg := tempConfig{Config: cfg}
 			decoder := yaml.NewDecoder(bytes.NewReader(buf))
 			decoder.KnownFields(true)
 			if err := decoder.Decode(&tempCfg); err != nil && !errors.Is(err, io.EOF) {
@@ -852,19 +908,19 @@ func LoadConfig(configFile string) (*Config, error) {
 		} else {
 			decoder := yaml.NewDecoder(bytes.NewReader(buf))
 			decoder.KnownFields(true)
-			if err := decoder.Decode(globalConfig); err != nil && !errors.Is(err, io.EOF) {
+			if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 				return nil, fmt.Errorf("error parsing config file: %w", err)
 			}
 		}
 	}
 	// Process environment variables
-	err := envconfig.Process("cardano", globalConfig)
+	err := envconfig.Process("cardano", cfg)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
 	pluginEnviron := os.Environ()
 	if err := applyAPIPortCompatibilityEnvironment(
-		globalConfig,
+		cfg,
 		pluginEnviron,
 	); err != nil {
 		return nil, fmt.Errorf("process API port compatibility environment: %w", err)
@@ -873,12 +929,12 @@ func LoadConfig(configFile string) (*Config, error) {
 		capability hostplugin.Capability
 		selection  *hostplugin.Selection
 	}{
-		{hostplugin.CapabilityStorageBlob, &globalConfig.Plugins.Storage.Blob},
-		{hostplugin.CapabilityStorageMetadata, &globalConfig.Plugins.Storage.Metadata},
-		{hostplugin.CapabilityMempool, &globalConfig.Plugins.Mempool},
-		{hostplugin.CapabilityAPIBlockfrost, &globalConfig.Plugins.API.Blockfrost},
-		{hostplugin.CapabilityAPIMesh, &globalConfig.Plugins.API.Mesh},
-		{hostplugin.CapabilityAPIUtxorpc, &globalConfig.Plugins.API.Utxorpc},
+		{hostplugin.CapabilityStorageBlob, &cfg.Plugins.Storage.Blob},
+		{hostplugin.CapabilityStorageMetadata, &cfg.Plugins.Storage.Metadata},
+		{hostplugin.CapabilityMempool, &cfg.Plugins.Mempool},
+		{hostplugin.CapabilityAPIBlockfrost, &cfg.Plugins.API.Blockfrost},
+		{hostplugin.CapabilityAPIMesh, &cfg.Plugins.API.Mesh},
+		{hostplugin.CapabilityAPIUtxorpc, &cfg.Plugins.API.Utxorpc},
 	}
 	for _, item := range pluginSelections {
 		if err := hostplugin.ApplyEnvironment(item.capability, item.selection, pluginEnviron); err != nil {
@@ -898,7 +954,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	// they let a config loaded without CLI flags resolve its per-network
 	// values, and ApplyFlags compensates for a network change by
 	// clearing the previous network's defaults and reapplying.
-	applyMidnightNetworkDefaults(globalConfig)
+	applyMidnightNetworkDefaults(cfg)
 
 	// NOTE: Do not set a default CardanoConfig here. The network flag
 	// can be overridden after LoadConfig returns (see main.go
@@ -908,7 +964,8 @@ func LoadConfig(configFile string) (*Config, error) {
 	// which a CLI flag may still change, so cmd/dingo loads it once
 	// after the merged configuration has been defaulted and validated.
 
-	return globalConfig, nil
+	globalConfig = cloneConfig(cfg)
+	return cfg, nil
 }
 
 // applyAPIPortCompatibilityEnvironment maps the API port environment names
@@ -1066,13 +1123,15 @@ func pluginFloat64(value any) float64 {
 }
 
 func GetConfig() *Config {
-	return globalConfig
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return cloneConfig(globalConfig)
 }
 
 var globalTopologyConfig = &topology.TopologyConfig{}
 
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
-	tc, err := LoadTopologyConfigFor(globalConfig)
+	tc, err := LoadTopologyConfigFor(GetConfig())
 	if err != nil {
 		return nil, err
 	}
