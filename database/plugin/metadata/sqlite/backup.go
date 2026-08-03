@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 )
 
@@ -98,7 +99,7 @@ func backupSQLite(
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	tmpPath := filepath.Join(tmpDir, filepath.Base(dstPath))
 
-	backupDB, err := openSQLiteBackupDB(databasePath)
+	backupDB, err := openSQLiteBackupDB(ctx, databasePath)
 	if err != nil {
 		return fmt.Errorf("sqlite backup: open source: %w", err)
 	}
@@ -125,20 +126,20 @@ func backupSQLite(
 // deadlock a live snapshot when another metadata operation still owns that
 // connection. A dedicated connection preserves SQLite's WAL snapshot
 // semantics without contending with the pool's connection accounting.
-func openSQLiteBackupDB(databasePath string) (*sql.DB, error) {
+func openSQLiteBackupDB(ctx context.Context, databasePath string) (*sql.DB, error) {
 	dsn := sqliteFileURI(databasePath) +
 		"?_txlock=deferred" +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
 		"&_pragma=busy_timeout(30000)" +
 		"&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sqlstore.OpenDB("sqlite", dsn, "sqlite")
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
