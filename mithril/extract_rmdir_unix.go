@@ -36,7 +36,10 @@ import (
 // unlinkat with AT_REMOVEDIR is rmdir addressed relative to a directory
 // handle, which is exactly that. name is a single path component, so it cannot
 // traverse out of root even before the handle constrains it.
-func removeEmptyExtractDir(root *os.Root, name string) error {
+//
+// fullPath is unused here; the Windows implementation needs it because it has
+// no handle-relative removal to address the entry through.
+func removeEmptyExtractDir(root *os.Root, name, _ string) error {
 	dir, err := root.Open(".")
 	if err != nil {
 		return fmt.Errorf("opening extraction parent: %w", err)

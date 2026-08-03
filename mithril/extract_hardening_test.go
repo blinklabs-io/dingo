@@ -887,7 +887,7 @@ func TestRemoveEmptyExtractDirRefusesFile(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs"),
+	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs", filepath.Join(parent, "theirs")),
 		"a directory-only removal must refuse a file")
 
 	data, err := os.ReadFile(filepath.Join(parent, "theirs"))
@@ -910,7 +910,7 @@ func TestRemoveEmptyExtractDirRefusesPopulatedDir(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs"))
+	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs", filepath.Join(parent, "theirs")))
 
 	data, err := os.ReadFile(filepath.Join(dir, "keep.txt"))
 	require.NoError(t, err)
@@ -927,7 +927,7 @@ func TestRemoveEmptyExtractDirRemovesEmptyDir(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.NoError(t, removeEmptyExtractDir(parentRoot, "stale"))
+	require.NoError(t, removeEmptyExtractDir(parentRoot, "stale", filepath.Join(parent, "stale")))
 	_, statErr := os.Stat(dir)
 	assert.True(t, os.IsNotExist(statErr))
 }
@@ -953,4 +953,44 @@ func TestExtractArchiveRefusesConflictingDestinationOptions(t *testing.T) {
 	_, statErr := os.Stat(destDir)
 	assert.True(t, os.IsNotExist(statErr),
 		"a refused extraction must not create the destination")
+}
+
+// TestExtractPublishSurvivesDestinationToFileSubstitution is the regression
+// test for a destination that turns from a directory into a file between the
+// moment publication identifies it and the moment publication acts on it.
+//
+// The interleaving is staged rather than raced, because the window is interior
+// to publication and cannot be driven from outside it. The steps are the ones
+// publication takes, in order, with the substitution placed exactly where a
+// concurrent writer would land it: the destination is observed as a directory,
+// replaced with a file, and only then handed to the removal.
+//
+// The removal is what has to hold here. It cannot be told the destination
+// changed, so it must be incapable of acting on the thing it changed into.
+func TestExtractPublishSurvivesDestinationToFileSubstitution(t *testing.T) {
+	parent := t.TempDir()
+	destName := "extracted"
+	destPath := filepath.Join(parent, destName)
+
+	parentRoot, err := os.OpenRoot(parent)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parentRoot.Close() })
+
+	// As publication finds it: an empty directory, cleared to make way.
+	require.NoError(t, os.MkdirAll(destPath, 0o750))
+	info, err := parentRoot.Lstat(destName)
+	require.NoError(t, err)
+	require.True(t, info.IsDir(), "the check must see a directory")
+
+	// A concurrent writer takes the name for a file of their own.
+	require.NoError(t, os.Remove(destPath))
+	require.NoError(t, os.WriteFile(destPath, []byte("theirs"), 0o640))
+
+	// Publication proceeds on what it observed, which is no longer true.
+	require.Error(t, removeEmptyExtractDir(parentRoot, destName, destPath),
+		"removal must refuse what the destination became")
+
+	data, err := os.ReadFile(destPath)
+	require.NoError(t, err, "the substituted file must not be unlinked")
+	assert.Equal(t, "theirs", string(data))
 }

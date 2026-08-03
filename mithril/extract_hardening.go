@@ -476,7 +476,7 @@ func clearEmptyDestination(
 			ErrExtractDestinationNotEmpty, cleanDest,
 		)
 	}
-	if err := removeEmptyExtractDir(parentRoot, destName); err != nil {
+	if err := removeEmptyExtractDir(parentRoot, destName, cleanDest); err != nil {
 		return fmt.Errorf(
 			"%w: %s: %w", ErrExtractDestinationNotEmpty, cleanDest, err,
 		)

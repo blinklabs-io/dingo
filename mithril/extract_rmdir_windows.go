@@ -19,28 +19,31 @@ package mithril
 import (
 	"fmt"
 	"os"
+
+	"golang.org/x/sys/windows"
 )
 
-// removeEmptyExtractDir removes name from root only if it is an empty
-// directory, and reports an error for anything else.
+// removeEmptyExtractDir removes fullPath only if it is an empty directory, and
+// reports an error for anything else.
 //
-// Windows has no handle-relative removal to address the entry through, so the
-// type is established first and Root.Remove is asked to remove it. That leaves
-// the window Unix closes here: a writer who replaces the directory with a file
-// between the two has their file unlinked. Reaching it means winning a race
-// against a publication that is already refusing to proceed, and Windows is
-// not a deployment target for the node, so the check is where the guarantee
-// rests rather than the removal.
-func removeEmptyExtractDir(root *os.Root, name string) error {
-	info, err := root.Lstat(name)
+// RemoveDirectory is the directory-only removal here. It fails with
+// ERROR_DIRECTORY on a file and ERROR_DIR_NOT_EMPTY on a populated directory,
+// so no separate type check is needed and none is done: establishing the type
+// and then removing would let a writer swap a file in between and have it
+// unlinked, which is the whole reason this is not os.Root.Remove.
+//
+// Unlike the Unix path this addresses the entry by name rather than through
+// the parent handle, because Windows has no handle-relative removal. A
+// substituted parent could therefore redirect it, which Windows makes hard by
+// refusing to move a directory while handles are open beneath it — the parent
+// is held open for the whole extraction.
+func removeEmptyExtractDir(_ *os.Root, _, fullPath string) error {
+	path, err := windows.UTF16PtrFromString(fullPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving extraction destination: %w", err)
 	}
-	if !info.IsDir() {
-		return &os.PathError{Op: "rmdir", Path: name, Err: os.ErrInvalid}
-	}
-	if err := root.Remove(name); err != nil {
-		return fmt.Errorf("removing extraction destination: %w", err)
+	if err := windows.RemoveDirectory(path); err != nil {
+		return &os.PathError{Op: "rmdir", Path: fullPath, Err: err}
 	}
 	return nil
 }
