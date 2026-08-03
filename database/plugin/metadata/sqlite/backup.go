@@ -43,14 +43,16 @@ var runVacuumInto = func(ctx context.Context, db *sql.DB, dstPath string) error 
 // contents to dstPath (which must not already exist) using SQLite's
 // `VACUUM INTO` statement. This takes only a brief read lock under WAL
 // mode and does not require stopping concurrent writers.
-func backupSQLite(ctx context.Context, db *sql.DB, dataDir, dstPath string) error {
+func backupSQLite(
+	ctx context.Context,
+	databasePath string,
+	dataDir string,
+	dstPath string,
+) error {
 	if dataDir == "" {
 		return errors.New(
 			"sqlite backup: in-memory database has nothing to back up",
 		)
-	}
-	if db == nil {
-		return errors.New("sqlite backup: store is not open")
 	}
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf(
@@ -96,7 +98,12 @@ func backupSQLite(ctx context.Context, db *sql.DB, dataDir, dstPath string) erro
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	tmpPath := filepath.Join(tmpDir, filepath.Base(dstPath))
 
-	if err := runVacuumInto(ctx, db, tmpPath); err != nil {
+	backupDB, err := openSQLiteBackupDB(databasePath)
+	if err != nil {
+		return fmt.Errorf("sqlite backup: open source: %w", err)
+	}
+	defer backupDB.Close() //nolint:errcheck
+	if err := runVacuumInto(ctx, backupDB, tmpPath); err != nil {
 		return fmt.Errorf("sqlite backup: VACUUM INTO %q: %w", dstPath, err)
 	}
 	if err := os.Link(tmpPath, dstPath); err != nil {
@@ -111,6 +118,31 @@ func backupSQLite(ctx context.Context, db *sql.DB, dataDir, dstPath string) erro
 	// persisted -- sync dstDir so the link above is durable too, not
 	// just atomic.
 	return fsyncdir.Sync(dstDir)
+}
+
+// openSQLiteBackupDB opens a short-lived connection for VACUUM INTO. The
+// provider's write pool is deliberately single-connection; borrowing it can
+// deadlock a live snapshot when another metadata operation still owns that
+// connection. A dedicated connection preserves SQLite's WAL snapshot
+// semantics without contending with the pool's connection accounting.
+func openSQLiteBackupDB(databasePath string) (*sql.DB, error) {
+	dsn := sqliteFileURI(databasePath) +
+		"?_txlock=deferred" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=busy_timeout(30000)" +
+		"&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 // RestoreFrom replaces this store's on-disk database file with the backup

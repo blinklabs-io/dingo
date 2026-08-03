@@ -143,7 +143,7 @@ func openSQLStore(
 			return err
 		}
 		backupTo = func(ctx context.Context, dstPath string) error {
-			return backupSQLite(ctx, writeDB, dataDir, dstPath)
+			return backupSQLite(ctx, databasePath, dataDir, dstPath)
 		}
 		restoreFrom = func(ctx context.Context, srcPath string) error {
 			return restoreSQLite(ctx, dataDir, srcPath)
