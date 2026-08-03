@@ -1487,6 +1487,52 @@ The `ChainManager` (`chain/manager.go`) manages multiple chains:
     -------------------------------------------------
 ```
 
+#### Retained block cache and the rollback-target invariant
+
+`ChainManager.removeBlockByIndex` deletes a rolled-back block's row but first
+puts the block into the manager's LRU block cache, because ephemeral fork
+chains reconcile against the primary chain by walking prev-hash links
+(`Chain.reconcile`) and must still be able to resolve blocks the primary chain
+has abandoned. `ChainManager.blockByPoint` and `blockByHash` therefore answer
+from that cache *before* the database, so an abandoned block stays resolvable
+by point and by hash and still reports the block index it used to occupy.
+
+That retention is deliberate, but it means "resolvable" does not imply "on the
+chain". Rolling the primary chain back to such a point truncated the chain to a
+stale index that a competing fork had already taken over, leaving `currentTip`
+naming a block the chain no longer stores while the block physically at
+`tipBlockIndex` belonged to the other fork. Every block appended afterwards was
+then spliced onto a parent absent from the chain, which is how a spender reached
+the ledger whose producing block was never applied — unresolvable by
+`UtxoByRef`, by transaction metadata, and by the backward chain scan, and
+therefore not fixable by replaying (issue #3005).
+
+`Chain.rollbackPointBlock` closes this: both `Rollback` and `ValidateRollback`
+resolve the target through it, and it rejects any target the chain does not
+currently hold at the resolved index, returning
+`chain.ErrRollbackPointNotOnChain` (which wraps `models.ErrBlockNotFound`).
+Callers already treat "point not found" as a signal to re-intersect, so a peer
+offering a continuation from a fork the node abandoned gets a fresh chainsync
+intersection instead of a spliced chain. Each rejection logs `cross-fork splice
+prevented: rejecting rollback to a point this chain no longer holds` and
+increments `dingo_chain_rollback_point_not_on_chain_total`. The invariant this
+establishes is that `currentTip` always names the block stored at
+`tipBlockIndex`, which is what makes the prev-hash check in `addBlockLocked` /
+`addRawBlockLocked` meaningful.
+
+Two shapes are rejected. A resolved index at or below the tip that holds a
+*different* block is the splice above. A resolved index *ahead* of the tip is
+the issue #3035/#3040 shape: no chain block occupies it, so adopting the point
+raised `tipBlockIndex` past the last stored block and punched a hole that chain
+iteration stops at. Both are refused as not-on-chain, deliberately **not** as
+`ErrRollbackExceedsSecurityParam`: #3035 was a node permanently denying every
+peer because the ahead-of-tip case was misclassified as over-K, and an over-K
+rejection is unrecoverable where a not-found rejection re-intersects.
+`rollbackForkDepth` keeps the saturating arithmetic that fixed the underlying
+uint64 underflow — it is no longer reached with an above-tip index from either
+rollback entry point, and is unit-tested directly so the underflow cannot return
+through a future caller.
+
 ### Chain Selection (Ouroboros Praos)
 
 The `ChainSelector` (`chainselection/`) implements Ouroboros Praos rules:
@@ -1986,6 +2032,11 @@ paths finish bringing metadata to its common ancestor. Live at-tip recovery uses
 the same bounded event-aware helper; startup-only speculative-tail cleanup stays
 eventless because subscribers have not begun consuming live chain events.
 Rewinding metadata alone would replay the same corrupt chain indefinitely.
+The continuation audit is run only after a fetched body is accepted by the
+queued primary chain, so late bodies from an abandoned fetch cannot seed its
+producer window. Its diagnostic database probes are also capped per block
+while the blockfetch pipeline lock is held; this keeps the audit bounded and
+non-blocking for pathological transaction counts.
 The unresolved-producer fallback also tracks the applied ledger high-water
 mark across attempts. Different candidate continuations can move the failing
 block forward slightly while rebuilding to the same applied tip, so failure
@@ -2002,6 +2053,31 @@ step has already pruned the primary chain below the applied ledger tip, the
 primary-chain rewind is an already-held no-op while ChainSync refills it.
 Successful block application beyond the recorded high-water mark clears the
 hold and restores the normal fallback budget.
+
+That hold bounds the damage but cannot explain where an unresolvable producer
+came from, so a bounded diagnostic attributes it
+(`ledger/continuation_audit.go`). A local rollback — chainsync rollback via
+`rollbackChainAndState`, or a replay-recovery rewind — arms a
+`continuationAuditWindow` at the rollback point. While armed, every body
+delivered by blockfetch above that point is checked input by input: an input
+resolves when its producing transaction was created by a block already seen in
+the window (fetched and on the chain, not yet applied), when the ledger still
+holds the UTxO, or when transaction metadata records the producer. Anything
+left over logs `continuation block spends an input with no producer on the
+local applied chain` with the delivering peer, the block, the offending input,
+and the fork point the node had rolled back to, and increments
+`dingo_ledger_continuation_input_unresolved_total`. The audit never rejects a
+block; the splice it detects is prevented upstream in the chain layer, and
+bodies that still fail reach the ordinary validation and recovery guards
+unchanged. Arming on rollback is both the cost gate — a healthy node never runs
+the per-input probes on the steady-state blockfetch path — and what makes the
+check sound, since a rollback leaves the chain and the ledger at the same point
+so every later block arrives through the window. Each arming inspects at most
+`continuationAuditBlockBudget` bodies and retains at most
+`continuationAuditMaxProducedTxs` in-window producers. The audit is also skipped
+while block validation is off, which is how historical catch-up runs: the splice
+it diagnoses is a live tip-band failure, and bulk sync fetches far too many
+bodies per second to pay for the probes.
 
 When a block fails per-tx validation at tip,
 the node rewinds the primary chain and rolls the ledger back so ChainSelection

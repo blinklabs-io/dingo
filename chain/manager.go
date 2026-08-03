@@ -28,6 +28,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type ChainId uint64
@@ -46,7 +47,12 @@ type ChainManager struct {
 	chains              map[ChainId]*Chain
 	chainRollbackEvents map[ChainId][]uint64
 	blockCache          *blockCache
-	mutex               sync.RWMutex
+	// rollbackPointNotOnChain counts rollback targets rejected because the
+	// chain no longer holds the resolved block at its retained index. A
+	// non-zero value means a peer (or local recovery) tried to splice a
+	// continuation onto an abandoned fork; see Chain.rollbackPointBlock.
+	rollbackPointNotOnChain prometheus.Counter
+	mutex                   sync.RWMutex
 }
 
 func NewManager(
@@ -70,10 +76,27 @@ func NewManager(
 			registry,
 		),
 	}
+	if registry != nil {
+		cm.rollbackPointNotOnChain = promauto.With(registry).NewCounter(
+			prometheus.CounterOpts{
+				Name: "dingo_chain_rollback_point_not_on_chain_total",
+				Help: "rollback targets rejected because the chain no longer holds the resolved block at its retained index",
+			},
+		)
+	}
 	if err := cm.loadPrimaryChain(); err != nil {
 		return nil, err
 	}
 	return cm, nil
+}
+
+// recordRollbackPointNotOnChain increments the rejected-rollback-target
+// counter when metrics are registered.
+func (cm *ChainManager) recordRollbackPointNotOnChain() {
+	if cm == nil || cm.rollbackPointNotOnChain == nil {
+		return
+	}
+	cm.rollbackPointNotOnChain.Inc()
 }
 
 // SetLedger configures the Ouroboros security parameter K from the ledger.

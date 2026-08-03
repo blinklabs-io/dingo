@@ -54,6 +54,11 @@ type stateMetrics struct {
 	// to move the applied ledger tip forward and holds at that tip instead of
 	// pruning another security-parameter window. See issue #3005.
 	replayRecoveryNonConverging prometheus.Counter
+	// Incremented when the cross-fork continuation audit finds a freshly
+	// fetched body spending an input whose producing transaction is not on
+	// the local applied chain. A rising value means a peer is feeding the
+	// node a continuation from a fork it never applied. See issue #3005.
+	continuationInputUnresolved prometheus.Counter
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -163,6 +168,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_replay_recovery_nonconverging_total",
 			Help: "times unresolved-producer replay recovery held at the applied ledger tip because repeated recovery attempts made no forward progress",
+		},
+	)
+	m.continuationInputUnresolved = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_continuation_input_unresolved_total",
+			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
 		},
 	)
 }
