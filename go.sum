@@ -75,8 +75,6 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 h1:TngWCqHvy9oXAN6lEVMRuU21PR1EtLVZJmdB18Gu3Rw=
 github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5/go.mod h1:lmUJ/7eu/Q8D7ML55dXQrVaamCz2vxCfdQBasLZfHKk=
-github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251230134950-44c893854e3f h1:a5PUgHGinaD6XrLmIDLQmGHocjIjBsBAcR5gALjZvMU=
-github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251230134950-44c893854e3f/go.mod h1:ioLG6R+5bUSO1oeGSDxOV3FADARuMoytZCSX6MEMQkI=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
 github.com/andybalholm/brotli v1.1.1 h1:PR2pgnyFznKEugtsUo0xLdDop5SKXd5Qf5ysW+7XdTA=
@@ -133,12 +131,12 @@ github.com/blinklabs-io/bursa v0.16.0 h1:EyiEJIvRo5u2nxYQAILUNaCpubUuBrCgnWxIHI1
 github.com/blinklabs-io/bursa v0.16.0/go.mod h1:QushjySLaOipI158YageIEIRksjCxGpAwtM1WbYx4Qo=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
-github.com/blinklabs-io/gouroboros v0.190.0 h1:Yl+32qXBktWlCrtLMqK2o48au8XQ3wk9GWNSxsW90vs=
-github.com/blinklabs-io/gouroboros v0.190.0/go.mod h1:n1NCfwdivyiavSvEa+hZoNWWSUNc3m6Lqw4WH16GQbQ=
+github.com/blinklabs-io/gouroboros v0.191.2 h1:5ZQukN+ZRh/PXYkLtcNkU9oZKtdSL6+2TTgzEV2TX6c=
+github.com/blinklabs-io/gouroboros v0.191.2/go.mod h1:E9LvQXTSCuUsshd4bnc9/y3STzfDIKt8tiM7DM8/iLI=
 github.com/blinklabs-io/ouroboros-mock v0.15.0 h1:IB35erNGObqilpOLkrmdp0fH2aKKoVLW9pis7HkGve0=
 github.com/blinklabs-io/ouroboros-mock v0.15.0/go.mod h1:ysGU8dMjG8ShMQco/aarR1xIRH7GPCIdhrnkM+J4IVA=
-github.com/blinklabs-io/plutigo v0.1.17 h1:44JJf9Y4G7fminNJp4H6fBQbW8nzrevSlap9a1V0EHs=
-github.com/blinklabs-io/plutigo v0.1.17/go.mod h1:X+Ydplpgftjjq5Y1Oc3dRebGgdBSeAbOi1+ItJhQths=
+github.com/blinklabs-io/plutigo v0.2.0 h1:r0o/a+sbXL3IzTIOyrO7qybmd1cR8zQtz5mVbR1+1jI=
+github.com/blinklabs-io/plutigo v0.2.0/go.mod h1:VTjGe02bLFU+fvlpe/TXe2xaEUEQN/DcsOO+YA0rrfQ=
 github.com/blockfrost/blockfrost-go v0.4.0 h1:sJuxmtoWUJ3sXfqTuFhYcFMdDNdo938nSX/KcLcAPQ0=
 github.com/blockfrost/blockfrost-go v0.4.0/go.mod h1:XdD+mryM/Rd/MqW1MfSQ0+Xfu2YnOGuwqMpLQa0jHvM=
 github.com/btcsuite/btcd/btcec/v2 v2.5.0 h1:KioMXOWa76b86sTZZOmbzv/ldaQCmB8KFAyn5PbB8E8=
@@ -208,8 +206,6 @@ github.com/envoyproxy/go-control-plane/ratelimit v0.1.0/go.mod h1:Wk+tMFAFbCXaJP
 github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
 github.com/envoyproxy/protoc-gen-validate v1.3.3 h1:MVQghNeW+LZcmXe7SY1V36Z+WFMDjpqGAGacLe2T0ds=
 github.com/envoyproxy/protoc-gen-validate v1.3.3/go.mod h1:TsndJ/ngyIdQRhMcVVGDDHINPLWB7C82oDArY51KfB0=
-github.com/ethereum/go-ethereum v1.17.4 h1:uA4q+qiLp7QImBsjdRbINu8iX6OEVmj4DPc5/E5Fsxc=
-github.com/ethereum/go-ethereum v1.17.4/go.mod h1:qMdgwqqRAen+aT8P7KKQKi0Qt6RzG4cfejVAbCpJgqA=
 github.com/fatih/color v1.10.0/go.mod h1:ELkj/draVOlAH/xkhN6mQ50Qd0MPOk5AAr3maGEBuJM=
 github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=
 github.com/fatih/color v1.19.0/go.mod h1:zNk67I0ZUT1bEGsSGyCZYZNrHuTkJJB+r6Q9VuMi0LE=
@@ -321,8 +317,6 @@ github.com/hashicorp/hcl v1.0.1-vault-7 h1:ag5OxFVy3QYTFTJODRzTKVZ6xvdfLLCA1cy/Y
 github.com/hashicorp/hcl v1.0.1-vault-7/go.mod h1:XYhtn6ijBSAj6n4YqAaf7RBPS4I06AItNorpy+MoQNM=
 github.com/hashicorp/vault/api v1.23.0 h1:gXgluBsSECfRWTSW9niY2jwg2e9mMJc4WoHNv4g3h6A=
 github.com/hashicorp/vault/api v1.23.0/go.mod h1:zransKiB9ftp+kgY8ydjnvCU7Wk8i9L0DYWpXeMj9ko=
-github.com/holiman/uint256 v1.3.2 h1:a9EgMPSC1AAaj1SZL5zIQD3WbwTuHrMGOerLjGmM/TA=
-github.com/holiman/uint256 v1.3.2/go.mod h1:EOMSn4q6Nyt9P6efbI3bueV4e1b3dGlUCXeiRV4ng7E=
 github.com/huaweicloud/huaweicloud-sdk-go-v3 v0.1.202 h1:GLG7UGUNWcZ65fFYFwi/tbC7IdTG4JAKwc9H+8H5VzE=
 github.com/huaweicloud/huaweicloud-sdk-go-v3 v0.1.202/go.mod h1:M+yna96Fx9o5GbIUnF3OvVvQGjgfVSyeJbV9Yb1z/wI=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
