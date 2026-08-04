@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -171,6 +172,11 @@ func headerIssueNo(header ledger.BlockHeader) (uint64, bool) {
 		return uint64(h.Body.OpCert.SequenceNumber), true
 	case *conway.ConwayBlockHeader:
 		return uint64(h.Body.OpCert.SequenceNumber), true
+	case *dijkstra.DijkstraBlockHeader:
+		// Distinct concrete type embedding BabbageBlockHeader; a type switch
+		// won't fall through to the Babbage case, so it needs an explicit
+		// entry or the Dijkstra tiebreaker view is silently dropped.
+		return uint64(h.Body.OpCert.SequenceNumber), true
 	default:
 		return 0, false
 	}
@@ -204,6 +210,8 @@ func GetVRFOutput(header ledger.BlockHeader) []byte {
 	case *babbage.BabbageBlockHeader:
 		return h.Body.VrfResult.Output
 	case *conway.ConwayBlockHeader:
+		return h.Body.VrfResult.Output
+	case *dijkstra.DijkstraBlockHeader:
 		return h.Body.VrfResult.Output
 	default:
 		return nil
