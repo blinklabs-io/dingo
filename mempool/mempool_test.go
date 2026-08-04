@@ -17,6 +17,7 @@ package mempool
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -3831,4 +3832,133 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnStop(t *testing.T) {
 	assert.Nil(t, dingotestutil.RequireReceive(
 		t, got, 2*time.Second, "blocking NextTx released by shutdown",
 	), "shutdown returns nil rather than a transaction")
+}
+
+// blockingRejectingValidator blocks until released like
+// blockingSessionValidator, then reports one designated transaction invalid so
+// a test can observe whether revalidation actually published its result.
+type blockingRejectingValidator struct {
+	started    chan struct{}
+	release    chan struct{}
+	startOnce  sync.Once
+	rejectHash string
+}
+
+func newBlockingRejectingValidator(
+	rejectHash string,
+) *blockingRejectingValidator {
+	return &blockingRejectingValidator{
+		started:    make(chan struct{}),
+		release:    make(chan struct{}),
+		rejectHash: rejectHash,
+	}
+}
+
+func (v *blockingRejectingValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *blockingRejectingValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	return nil
+}
+
+func (v *blockingRejectingValidator) WithTxValidationSession(
+	fn func(
+		func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error,
+		func() bool,
+	) error,
+) error {
+	v.startOnce.Do(func() { close(v.started) })
+	validate := func(
+		tx gledger.Transaction,
+		_ map[string]struct{},
+		_ map[string]lcommon.Utxo,
+	) error {
+		<-v.release
+		if tx != nil && tx.Hash().String() == v.rejectHash {
+			return errors.New("simulated invalid transaction")
+		}
+		return nil
+	}
+	return fn(validate, func() bool { return true })
+}
+
+// TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget covers the
+// catch-up budget scaling with the observed backlog.
+//
+// Replay is bounded per round so the loop can observe new mutations, but with a
+// fixed round count the total budget is cap*rounds. A backlog larger than that
+// made every attempt bail with errRevalidationCatchup, and because
+// rebuildOverlay swallows that error and each attempt restarts from a fresh
+// journal, no progress ever carried across attempts: the revalidated pool was
+// never published, so invalid transactions were never removed and the DAG was
+// never rebuilt. That is precisely the sustained-load regime the enlarged
+// journal cap exists to buffer.
+func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
+	t *testing.T,
+) {
+	m := newTestMempool(t)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	invalidHash := m.Transactions()[0].Hash
+
+	validator := newBlockingRejectingValidator(invalidHash)
+	m.validator = validator
+	// One mutation per round, so the fixed budget would be
+	// maxRevalidationCatchupRounds mutations in total.
+	m.revalidationDeltaCap = 1
+	backlog := maxRevalidationCatchupRounds * 3
+
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(
+		t, validator.started, 2*time.Second, "revalidation start",
+	)
+
+	// Queue a backlog well past the fixed round budget. Removals of hashes
+	// absent from the pool are inert replays, so they exercise the budget
+	// without changing what the candidate should conclude.
+	m.mutationMutex.Lock()
+	for i := range backlog {
+		m.recordMutationLocked(mempoolMutation{
+			removed: map[string]struct{}{
+				fmt.Sprintf("absent-%d", i): {},
+			},
+		})
+	}
+	m.mutationMutex.Unlock()
+
+	close(validator.release)
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(
+			t, rebuildDone, 10*time.Second, "rebuild completion",
+		),
+	)
+
+	// Converged and published: the invalid transaction is gone.
+	assert.Empty(
+		t, m.Transactions(),
+		"revalidation must publish its result and drop the invalid tx "+
+			"even when the mutation backlog exceeds one round budget",
+	)
+	assert.Empty(t, m.overlay.applied)
 }

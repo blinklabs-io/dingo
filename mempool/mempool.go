@@ -1013,7 +1013,8 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 		}
 
 		appliedSeq := startSeq
-		for range maxRevalidationCatchupRounds {
+		catchupRounds := maxRevalidationCatchupRounds
+		for round := 0; round < catchupRounds; round++ {
 			m.mutationMutex.Lock()
 			if m.journalOverflow {
 				m.mutationMutex.Unlock()
@@ -1111,6 +1112,14 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 			}
 			m.mutationMutex.Unlock()
 
+			if requiredRounds :=
+				(len(delta)+m.revalidationDeltaCap-1)/m.revalidationDeltaCap +
+					maxRevalidationCatchupRounds; requiredRounds > catchupRounds {
+				// Scale the total budget to the observed backlog while keeping
+				// each replay round bounded. New mutations can extend this
+				// budget again until the journal overflows.
+				catchupRounds = requiredRounds
+			}
 			applyCount := len(delta)
 			if applyCount > m.revalidationDeltaCap {
 				// Bound the amount of replay work per round so that the
