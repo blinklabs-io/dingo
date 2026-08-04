@@ -318,8 +318,13 @@ type Txn interface {
 }
 
 // IrreversibleTxn identifies a transaction whose Rollback cannot undo writes
-// already issued to its backing store. Cloud object stores implement this
-// because each mutation is applied immediately.
+// already issued to its backing store.
+//
+// No current implementation reports true: the cloud plugins stage mutations and
+// apply them only in Commit, so their Rollback discards staged work with no
+// backing-store I/O. Callers must not infer "the store was mutated" from a
+// failed transaction; check errors.Is(err, ErrPartialCommit) instead, which is
+// the only case where a commit left the store partially applied.
 type IrreversibleTxn interface {
 	Txn
 	RollbackIsNoop() bool

@@ -698,6 +698,170 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	}
 }
 
+// TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation covers
+// issue #3005: in the steady-state, at-tip, validated block-application path,
+// a consumed input whose produced utxo row is absent from the metadata store
+// (the producer transaction row may still be present) must NOT be recovered
+// from the append-only blob store and persisted, even when that recovery would
+// succeed. The blob retains blocks from abandoned forks,
+// so recovering the producer would import a UTxO the applied chain never
+// produced and bake an input-conservation violation into the persisted chain.
+// With StrictAppliedInputConservation the ingest errors instead, so the block's
+// transaction aborts and the node stalls for resync rather than wedging past K.
+//
+// The fixture stages the producers so that recovery from the blob WOULD
+// otherwise succeed (blob offsets present, metadata Transaction rows present,
+// only the Utxo rows deleted), isolating the new refusal from the pre-existing
+// unrecoverable-input behavior in the sibling test below.
+func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
+	t *testing.T,
+) {
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+
+	// newRecoverableDB stages the fixture in a recovery-ready state: producer
+	// blocks and their metadata Transaction rows exist, the consumer block's
+	// offsets exist, and the producers' Utxo rows are deleted so the consumer's
+	// consumed inputs are absent from the metadata store but reconstructable
+	// from the blob.
+	newRecoverableDB := func(t *testing.T) *Database {
+		t.Helper()
+		db, err := newTestDatabase(t, &Config{
+			DataDir:              t.TempDir(),
+			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			StrictUtxoValidation: true,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		for _, p := range candidate.producers {
+			storeBlockOffsetsOnly(t, db, p.block)
+			metaTxn := db.MetadataTxn(true)
+			producer := p
+			require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+				return db.Metadata().SetGapBlockTransaction(
+					producer.tx,
+					producer.point,
+					0,
+					txn.Metadata(),
+				)
+			}))
+			metaTxn.Release()
+		}
+		storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+
+		refs := make([]models.UtxoId, 0, len(candidate.consumerTx.Consumed()))
+		for _, input := range candidate.consumerTx.Consumed() {
+			refs = append(refs, models.UtxoId{
+				Hash: input.Id().Bytes(),
+				Idx:  input.Index(),
+			})
+		}
+		metaTxn := db.MetadataTxn(true)
+		require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().DeleteUtxos(refs, txn.Metadata())
+		}))
+		metaTxn.Release()
+		return db
+	}
+
+	setConsumer := func(t *testing.T, db *Database, opts BatchedTxIngestOpts) error {
+		t.Helper()
+		return db.SetTransactionWithOpts(
+			candidate.consumerTx,
+			candidate.consumerPoint,
+			0,
+			0,
+			nil,
+			nil,
+			mustBlockOffsets(t, candidate.consumerBlock),
+			nil,
+			opts,
+		)
+	}
+
+	t.Run("flag off recovers from blob", func(t *testing.T) {
+		db := newRecoverableDB(t)
+		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{}))
+	})
+
+	t.Run("flag on refuses recovery past boundary", func(t *testing.T) {
+		db := newRecoverableDB(t)
+		// No mithril_ledger_slot recorded (0): every slot is past the boundary.
+		err := setConsumer(t, db, BatchedTxIngestOpts{
+			StrictAppliedInputConservation: true,
+		})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrUtxoNotFound)
+		// The block's transaction must not have persisted the recovered row.
+		for _, input := range candidate.consumerTx.Consumed() {
+			utxo, err := db.Metadata().GetUtxoIncludingSpent(
+				input.Id().Bytes(),
+				input.Index(),
+				nil,
+			)
+			require.NoError(t, err)
+			require.Nil(
+				t,
+				utxo,
+				"input %s must not be recovered/persisted under the gate",
+				input.String(),
+			)
+		}
+	})
+
+	t.Run("flag on tolerated at or below boundary", func(t *testing.T) {
+		db := newRecoverableDB(t)
+		require.NoError(t, db.SetSyncState(
+			mithrilLedgerSlotSyncKey,
+			fmt.Sprintf("%d", candidate.consumerPoint.Slot),
+			nil,
+		))
+		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{
+			StrictAppliedInputConservation: true,
+		}))
+	})
+
+	t.Run("flag on inert without StrictUtxoValidation", func(t *testing.T) {
+		db, err := newTestDatabase(t, &Config{
+			DataDir:              t.TempDir(),
+			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			StrictUtxoValidation: false,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		for _, p := range candidate.producers {
+			storeBlockOffsetsOnly(t, db, p.block)
+			metaTxn := db.MetadataTxn(true)
+			producer := p
+			require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+				return db.Metadata().SetGapBlockTransaction(
+					producer.tx,
+					producer.point,
+					0,
+					txn.Metadata(),
+				)
+			}))
+			metaTxn.Release()
+		}
+		storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+		refs := make([]models.UtxoId, 0, len(candidate.consumerTx.Consumed()))
+		for _, input := range candidate.consumerTx.Consumed() {
+			refs = append(refs, models.UtxoId{
+				Hash: input.Id().Bytes(),
+				Idx:  input.Index(),
+			})
+		}
+		metaTxn := db.MetadataTxn(true)
+		require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().DeleteUtxos(refs, txn.Metadata())
+		}))
+		metaTxn.Release()
+		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{
+			StrictAppliedInputConservation: true,
+		}))
+	})
+}
+
 // TestEnsureTransactionConsumedUtxosStrictValidation covers issue #396:
 // when a consumed UTxO cannot be recovered from either the metadata store
 // or the blob store, StrictUtxoValidation controls whether that is a hard

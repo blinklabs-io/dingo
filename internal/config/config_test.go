@@ -22,7 +22,10 @@ import (
 	"testing"
 	"time"
 
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/topology"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func resetGlobalConfig() {
@@ -1661,4 +1664,90 @@ func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 			cfg.LeiosVoterPublicKeys,
 		)
 	}
+}
+
+// GetConfig hands out snapshots, so nested plugin config values must be
+// duplicated. Copying only the top level would let a caller mutate a nested
+// mapping or sequence that globalConfig and every other snapshot still share.
+func TestClonePluginSelectionDeepCopiesNestedValues(t *testing.T) {
+	nestedMap := map[string]any{"inner": "original"}
+	nestedSlice := []any{"first"}
+	deeper := map[string]any{"list": []any{map[string]any{"k": "v"}}}
+	selection := hostplugin.Selection{
+		Provider: "builtin",
+		Config: map[string]any{
+			"scalar": 1,
+			"map":    nestedMap,
+			"slice":  nestedSlice,
+			"deep":   deeper,
+		},
+	}
+
+	clone := clonePluginSelection(selection)
+
+	// Mutating the clone must not reach the original.
+	clone.Config["map"].(map[string]any)["inner"] = "mutated"
+	clone.Config["slice"].([]any)[0] = "mutated"
+	clone.Config["deep"].(map[string]any)["list"].([]any)[0].(map[string]any)["k"] = "mutated"
+
+	assert.Equal(t, "original", nestedMap["inner"],
+		"nested map must not be shared with the clone")
+	assert.Equal(t, "first", nestedSlice[0],
+		"nested slice must not be shared with the clone")
+	assert.Equal(
+		t,
+		"v",
+		deeper["list"].([]any)[0].(map[string]any)["k"],
+		"deeply nested values must not be shared with the clone",
+	)
+	assert.Equal(t, 1, clone.Config["scalar"])
+}
+
+// A yaml.v2-style map[any]any value is deep-copied as well.
+func TestDeepCopyPluginValueHandlesInterfaceKeyedMaps(t *testing.T) {
+	original := map[any]any{"key": map[any]any{"inner": "original"}}
+
+	clone, ok := deepCopyPluginValue(original).(map[any]any)
+	require.True(t, ok)
+	inner, ok := clone["key"].(map[any]any)
+	require.True(t, ok)
+	inner["inner"] = "mutated"
+
+	assert.Equal(
+		t,
+		"original",
+		original["key"].(map[any]any)["inner"],
+	)
+}
+
+// GetConfig must not return a snapshot that shares nested plugin config values
+// with globalConfig.
+func TestGetConfigSnapshotDoesNotShareNestedPluginConfig(t *testing.T) {
+	configMu.Lock()
+	prev := globalConfig
+	globalConfig = cloneConfig(prev)
+	globalConfig.Plugins.Mempool.Config = map[string]any{
+		"nested": map[string]any{"inner": "original"},
+	}
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		globalConfig = prev
+		configMu.Unlock()
+	})
+
+	snapshot := GetConfig()
+	require.NotNil(t, snapshot)
+	nested, ok := snapshot.Plugins.Mempool.Config["nested"].(map[string]any)
+	require.True(t, ok)
+	nested["inner"] = "mutated"
+
+	configMu.RLock()
+	defer configMu.RUnlock()
+	assert.Equal(
+		t,
+		"original",
+		globalConfig.Plugins.Mempool.Config["nested"].(map[string]any)["inner"],
+		"mutating a snapshot must not reach globalConfig",
+	)
 }

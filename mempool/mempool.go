@@ -45,6 +45,7 @@ const (
 	DefaultTransactionTTL         = 5 * time.Minute
 	DefaultCleanupInterval        = 1 * time.Minute
 	DefaultRevalidationDeltaCap   = 64
+	DefaultConsumerCacheSize      = 1024
 	defaultRevalidationJournalCap = 65_536
 )
 
@@ -124,7 +125,10 @@ type MempoolConfig struct {
 	EvictionWatermark    float64
 	RejectionWatermark   float64
 	RevalidationDeltaCap int
-	CurrentSlotFunc      func() uint64 // returns current slot for early TX rejection
+	// ConsumerCacheSize bounds the number of transaction bodies retained per
+	// transaction-submission consumer. Zero uses DefaultConsumerCacheSize.
+	ConsumerCacheSize int
+	CurrentSlotFunc   func() uint64 // returns current slot for early TX rejection
 }
 
 type Mempool struct {
@@ -670,7 +674,7 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	if consumer := m.consumers[connId]; consumer != nil {
 		return consumer
 	}
-	consumer := newConsumer(m)
+	consumer := newConsumer(m, m.config.ConsumerCacheSize)
 	m.consumers[connId] = consumer
 	return consumer
 }

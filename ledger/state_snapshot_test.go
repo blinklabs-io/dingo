@@ -245,9 +245,10 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		nil,
 	))
 
-	// A pending update targeting the rollover's next epoch. Quorum defaults
-	// to 0 (no UpdateQuorum in the genesis JSON above), so a single proposal
-	// is enough for ComputeAndApplyPParamUpdates to apply it.
+	// A pending update submitted in the current epoch, which the rollover
+	// enacts as the next epoch's parameters (submission epoch e -> enacted
+	// for e+1). Quorum defaults to 0 (no UpdateQuorum in the genesis JSON
+	// above), so a single proposal is enough to apply it.
 	newMinFeeA := uint(99)
 	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
 		MinFeeA: &newMinFeeA,
@@ -257,7 +258,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		[]byte{0x01, 0x02, 0x03},
 		updateCbor,
 		currentEpoch.StartSlot+1,
-		currentEpoch.EpochId+1,
+		currentEpoch.EpochId, // submission epoch (enacted for EpochId+1)
 		nil,
 	))
 

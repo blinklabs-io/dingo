@@ -90,6 +90,26 @@ func BuildSummary(
 	}, nil
 }
 
+// SuccessorEra builds the era that follows a bounded era whose End is an
+// announced transition boundary. The successor has not started yet, so its own
+// end is the standard safe zone measured from its start — identical to what
+// BuildSummary computes for TransitionImpossible, and to what TransitionUnknown
+// computes while the tip is still below the era start. The bound always snaps up
+// to at least the next epoch boundary, so the successor covers the whole first
+// post-boundary epoch. A zero SafeZoneSlots means UnsafeIndefiniteSafeZone and
+// leaves the successor open, matching BuildSummary.
+//
+// Mirrors the recursion into the next era in
+// Ouroboros.Consensus.HardFork.Combinator.State.Infra.reconstructSummary.
+func SuccessorEra(start Bound, eraID uint, params EraParams) EraSummary {
+	return EraSummary{
+		EraID:  eraID,
+		Start:  start,
+		End:    applySafeZone(params, start, start.Slot),
+		Params: params,
+	}
+}
+
 // mkUpperBound computes a Bound at the start of hiEpoch, given the era's
 // lower bound lo and its params. Mirrors Haskell's mkUpperBound.
 func mkUpperBound(params EraParams, lo Bound, hiEpoch uint64) Bound {

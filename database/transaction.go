@@ -281,7 +281,10 @@ func (d *Database) SetTransactionWithOpts(
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 
 	if updateEpoch > 0 && tx.IsValid() {
@@ -334,7 +337,10 @@ func (d *Database) SetTransactionMetadataOnly(
 		certDeposits,
 		metadataTxn,
 	); err != nil {
-		return fmt.Errorf("set transaction metadata only: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -498,6 +504,10 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
+	// Read the Mithril trust boundary once: below it, absent producer rows are
+	// legitimately expected (the snapshot does not carry pre-boundary history);
+	// past it the node should hold complete producer history.
+	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
 		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
@@ -558,6 +568,29 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
 			continue
 		}
+		// Steady-state at-tip validated application (issue #3005): a consumed
+		// input whose producer row is absent from the metadata store must never
+		// be recovered from the append-only blob store here. The blob retains
+		// blocks from abandoned forks, so recovering the producer would import a
+		// UTxO the applied chain never produced and persist an
+		// input-conservation violation. Past the Mithril boundary the producer
+		// is guaranteed to already be applied and live, so an absent row means
+		// the applied ledger has diverged from the header chain. Abort the
+		// block's transaction so the inconsistent state is never persisted and
+		// the node stalls loudly for resync rather than baking in a fork that
+		// later requires a rollback deeper than the security parameter K.
+		if opts.StrictAppliedInputConservation &&
+			d.config.StrictUtxoValidation &&
+			point.Slot > mithrilBoundarySlot {
+			return fmt.Errorf(
+				"consumed utxo %s not present in applied ledger at slot %d: "+
+					"refusing to recover it from the blob store and persist an "+
+					"input-conservation violation (issue #3005): %w",
+				input.String(),
+				point.Slot,
+				ErrUtxoNotFound,
+			)
+		}
 		recoveredUtxo, err := d.recoverConsumedUtxo(
 			input,
 			txn,
@@ -570,7 +603,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// is recorded and we did not sync from genesis) the UTxO may
 			// legitimately predate the data we imported.
 			if d.config.StrictUtxoValidation &&
-				point.Slot > d.MithrilTrustBoundarySlot(txn) {
+				point.Slot > mithrilBoundarySlot {
 				return fmt.Errorf(
 					"consumed utxo %s not found at slot %d and could not be recovered: %w",
 					input.String(),
