@@ -78,6 +78,16 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
+	stateTableExists, err := r.stateTableExists(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if len(legacyTables) > 0 && !stateTableExists {
+		return fmt.Errorf(
+			"%w: existing metadata tables are from an unsupported database version; delete the metadata database and resync from genesis",
+			ErrLegacySchema,
+		)
+	}
 	if err := r.ensureStateTable(ctx, conn); err != nil {
 		return err
 	}
@@ -89,12 +99,6 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 
-	if len(states) == 0 && len(legacyTables) > 0 {
-		return fmt.Errorf(
-			"%w: existing metadata tables are from an unsupported database version; delete the metadata database and resync from genesis",
-			ErrLegacySchema,
-		)
-	}
 	target := r.Registry[len(r.Registry)-1].Version
 	current := 0
 	for _, migrationState := range states {
@@ -400,6 +404,29 @@ func (r *Runner) ensureStateTable(
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 	return nil
+}
+
+func (r *Runner) stateTableExists(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var query string
+	switch r.Dialect {
+	case "sqlite":
+		query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+	case "postgres":
+		query = "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'schema_migrations'"
+	case "mysql":
+		query = "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'"
+	default:
+		return false, fmt.Errorf("unsupported metadata dialect %q", r.Dialect)
+	}
+	var found int
+	err := conn.QueryRowContext(ctx, query).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect schema_migrations: %w", err)
+	}
+	return found != 0, nil
 }
 
 func (r *Runner) readStates(

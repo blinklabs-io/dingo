@@ -230,6 +230,11 @@ func TestRunnerRejectsUnversionedDatabase(t *testing.T) {
 	if err != nil {
 		require.Contains(t, err.Error(), "delete the metadata database")
 	}
+	var stateTables int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+	).Scan(&stateTables))
+	require.Zero(t, stateTables)
 }
 
 func TestValidateRegistryRequiresContiguousVersions(t *testing.T) {
