@@ -76,6 +76,12 @@ type LedgerDelta struct {
 	// reference ledger's ValidateNone closure apply; false for all ranking-block
 	// deltas so their behavior is unchanged.
 	skipConsumedInputRecovery bool
+	// strictConsumedInputs refuses to recover an absent consumed-input producer
+	// from the blob store and treats it as a hard error instead (issue #3005).
+	// Set only when the block is applied in the steady-state, at-tip, validated
+	// context, where every consumed input's producer must already be applied and
+	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.
+	strictConsumedInputs bool
 }
 
 func NewLedgerDelta(
@@ -90,6 +96,7 @@ func NewLedgerDelta(
 	delta.Offsets = nil // Reset offsets from previous use
 	delta.donation = 0
 	delta.skipConsumedInputRecovery = false
+	delta.strictConsumedInputs = false
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
 	delta.txSlicePtr = slicePtr          // Store original pointer
@@ -109,6 +116,7 @@ func (d *LedgerDelta) Release() {
 	d.Offsets = nil
 	d.donation = 0
 	d.skipConsumedInputRecovery = false
+	d.strictConsumedInputs = false
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
 }
@@ -176,7 +184,8 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			d.Offsets,
 			txn,
 			database.BatchedTxIngestOpts{
-				SkipConsumedInputRecovery: d.skipConsumedInputRecovery,
+				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+				StrictAppliedInputConservation: d.strictConsumedInputs,
 			},
 		)
 		// Return the map to pool

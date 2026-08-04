@@ -1527,9 +1527,21 @@ Genesis-overlay activity is resolved separately from the forward protocol-
 parameter forecast: header validation first uses the epoch containing the
 slot and reads that epoch's effective parameter row, so an epoch-boundary
 decentralization update cannot be mistaken for the prior epoch's overlay
-schedule. If the target epoch is not authoritative yet, blockfetch defers the
-stateful overlay decision until ledger apply; full historical validation and
-the normal leader checks remain enabled.
+schedule. When the target epoch's parameter row is not persisted yet (a
+from-genesis node still one epoch behind the header it is checking),
+`ProtocolParamsForSlot` forecasts it: for a slot one epoch ahead it applies,
+on top of any era `HardForkFunc`, the pending in-era protocol-parameter update
+the rollover will enact at that boundary. The forecast mirrors the rollover's
+enactment exactly — it selects the proposals submitted in the current epoch
+(Shelley update system: a proposal submitted in epoch `e` is enacted as epoch
+`e+1`'s parameters), applies the same `UpdateQuorum` rule, and reads the
+already-collected proposals — but is pure and read-only (it clones before the
+era update function, which mutates in place, and never writes). This yields the
+correct post-update decentralization for the next epoch's overlay check without
+requiring the epoch row first, which previously deadlocked a from-genesis sync
+at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
+decision until ledger apply when even the forecast cannot resolve it; full
+historical validation and the normal leader checks remain enabled.
 
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
@@ -2712,6 +2724,38 @@ pre-intersect UTxOs are intentionally absent. Gap-block ingestion
 (`ensureGapConsumedUtxos`, used while closing the range between the snapshot
 and the chain tip) is unconditionally strict already, since that range is
 always expected to be fully recoverable from the snapshot import.
+
+That default recovery is deliberately one-sided: it only fires when the produced
+`utxo` row is *absent* from the metadata store, and it rebuilds it from the
+blob store, which is append-only and retains blocks from abandoned forks. In
+steady-state, at-tip, validated block application that recovery must never run:
+every consumed input's producer is already applied and live in the metadata
+store. An absent metadata row alone does not prove divergence — it is also the
+normal state of an in-flight/intra-block producer whose row has not been flushed
+yet — but the guard runs only after the same-slot repair and the
+`HasInFlightProducer` intra-block check, so by the time it fires the row is
+absent *and* not in-flight/intra-block, which past the Mithril boundary means
+the applied ledger has diverged from the header chain (issue #3005). Recovering
+the producer from a fork block the applied chain never followed would then
+import a UTxO the chain never produced and persist an
+input-conservation violation — which, once it accumulates past the security
+parameter K, wedges the node behind the rollback-exceeds-K guard with no legal
+recovery. The ledger closes this by setting
+`BatchedTxIngestOpts.StrictAppliedInputConservation` on the delta apply whenever
+the block is validated and the node has reached tip
+(`shouldValidate && (reachedTip || reachesTip)`, `ledgerProcessBlock`, where
+`reachesTip` is the per-block at-tip signal that guards the transition batch —
+the first batch whose blocks cross the tip cutoff — since `reachedTip` is only
+stored true after that batch commits); with that flag and
+`StrictUtxoValidation` both set, `ensureTransactionConsumedUtxos` refuses to
+recover an absent producer past the Mithril boundary and instead errors, which
+aborts the block's transaction so the inconsistent state is never committed and
+the node stalls loudly for resync rather than baking in a beyond-K fork. The
+flag is left off for from-genesis bootstrap and Mithril gap-closure (both run
+before `reachedTip`) and for non-validated/trusted replay and Leios
+endorser-block apply, where an absent producer is legitimately recovered, so
+this is the primary #3005 prevention while the K-guard and the non-convergence
+recovery hold remain as backstops.
 
 Certified immutable blocks after the selected anchor remain in the primary
 chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal

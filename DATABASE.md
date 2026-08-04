@@ -265,7 +265,7 @@ erDiagram
 | `network_state` | `id`, `treasury`, `reserves`, `slot` | PK `id`; unique `slot` | Treasury/reserves at a slot. Genesis sync writes the slot-0 baseline with treasury `0` and reserves equal to `maxLovelaceSupply` minus the combined Byron and Shelley genesis UTxO values. Startup also adds that baseline to an older matching-genesis database when this table is empty. It does not rewrite a non-empty pot history; operators of a pre-feature from-genesis database that already contains later `network_state` rows must resync to reconstruct the correct history. Mithril import instead writes the certified `NewEpochState.AccountState` treasury/reserves at the imported tip. |
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. All donation sources applied under the same block slot, including Leios endorser-block effects recorded under a ranking block, are accumulated before this per-slot row is written. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
-| `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates by epoch. |
+| `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates. `epoch` is the SUBMISSION epoch carried by the on-chain `[proposed_updates, epoch]` structure (gouroboros `Update.Epoch`), stored verbatim at ingest. Per the Shelley update system a proposal submitted in epoch `e` is enacted as epoch `e+1`'s parameters at the `e -> e+1` boundary; enactment (`ComputeAndApplyPParamUpdates`) therefore filters by submission epoch `e` while writing the resulting `pparams` row for the enactment epoch `e+1`. |
 | `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. For new imports this is the selected ledger-state point at or below the certificate-backed ImmutableDB tip; the metadata `tip` remains at the same point so later raw blocks undergo ordinary ledger replay. Ancillary-only volatile state is never recorded as trusted. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. |
 | `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable, resumable one-time backfill progress keyed by `phase`. `metadata` tracks API-mode historical metadata backfill. `account_created_slot` records completion of the one-time `account.created_slot` stamp (`models.BackfillAccountCreatedSlot`); gating on this marker instead of on "the column was just added" makes that backfill crash-safe (an interrupted run leaves the marker absent, so the next startup retries the `created_slot = 0` guarded scan). |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. Catch-up imports leave `import_key` empty to force a full pass. |
@@ -801,6 +801,24 @@ pool, delegation, UTxO, or governance effects. This guarantee applies to newly
 replayed state; a database produced by an older version that already skipped a
 certified closure must be replayed from before the affected CertRB (normally by
 performing a clean metadata resync).
+
+`BatchedTxIngestOpts.StrictAppliedInputConservation` is the opposite-direction
+toggle on the same consumed-input path. When set (only by the ledger delta apply
+for a validated block once the node has reached tip), and with the database's
+`StrictUtxoValidation` also on, `ensureTransactionConsumedUtxos` refuses to
+recover a consumed input whose produced `utxo` row is absent from the metadata
+store past the `mithril_ledger_slot` boundary (the check keys on the produced
+UTxO row, not the producer `transaction` row, so it fires even when the producer
+transaction row is present): it errors (`ErrUtxoNotFound`) before consulting the
+append-only blob store, instead of rebuilding the row. This
+prevents a near-tip fork churn from importing a producer that lives only on an
+abandoned fork block the applied chain never followed, which would persist an
+input-conservation violation (a UTxO the applied chain never produced, and in
+the field a double-spend across two persisted blocks) and, once it accumulates
+past the security parameter K, wedge the node (issue #3005). The default is off,
+so every existing ingest path — bootstrap, gap-closure, historical/trusted
+replay, and the `SkipConsumedInputRecovery` Leios apply above — keeps its
+recovery behavior unchanged.
 
 ### Archive And History Expiry Contract
 
@@ -2423,12 +2441,22 @@ LIMIT 1;
 ```
 
 ```sql
--- For epoch 0, use WHERE epoch = 0. For later epochs:
+-- For epoch 0, use WHERE epoch = 0. For later epochs (sqlite/postgres;
+-- mysql omits the OR and matches only epoch = $1):
 SELECT *
 FROM pparam_update
 WHERE epoch IN ($1, $1 - 1)
 ORDER BY id DESC;
 ```
+
+Enactment and the forward forecast query this by the SUBMISSION epoch and keep
+only rows whose `epoch` equals it. To enact the parameters for epoch `E` (the
+`E-1 -> E` boundary), the caller passes submission epoch `E-1`
+(`ComputeAndApplyPParamUpdates`/`ApplyPParamUpdates` compute it internally as
+`epoch-1` from the target epoch; `ForecastPParamUpdates` likewise), because a
+proposal submitted in epoch `e` is enacted as epoch `e+1`'s parameters. Quorum
+is the count of distinct `genesis_hash` among the matching rows; the applied
+proposal is the most recent (`id DESC`).
 
 ```sql
 SELECT *
