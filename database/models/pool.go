@@ -49,6 +49,18 @@ type Pool struct {
 	Cost         types.Uint64
 }
 
+// PoolOpCertSequence records the operational-certificate issue number a pool
+// minted each of its blocks under. It takes a row per block for the life of
+// the chain and is pruned only by rollback, so reads over the whole table have
+// to be served from an index rather than from its rows.
+//
+// idx_pool_opcert_sequence_pool_sequence exists for one of those: the
+// highest-sequence-per-pool fold behind GetChainDepState's counters, which has
+// no slot bound to narrow it because every row it holds is at or below the tip.
+// Carrying the sequence beside the pool key hash lets that fold run without
+// reading a single row -- and lets MySQL skip through the index a pool at a
+// time rather than scanning it whole. Migration v2 declares it; the schema
+// lives in SQL rather than in tags on this struct.
 type PoolOpCertSequence struct {
 	PoolKeyHash []byte
 	ID          uint
