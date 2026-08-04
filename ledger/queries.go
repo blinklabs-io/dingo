@@ -715,6 +715,39 @@ func (ls *LedgerState) poolSnapshotStake(
 	return uint64(snapshot.TotalStake), nil
 }
 
+// markStakeForPools reads the mark snapshot for just the pools named, keyed by
+// pool key hash the way markStakeByPool keys the whole snapshot.
+//
+// A pool with no row in the snapshot is left out rather than reported with zero
+// stake. The two are different answers: the distribution describes the pools
+// the snapshot holds, so a caller naming one it does not hold has to see it
+// missing rather than be handed a fraction of zero for a pool the node will
+// never elect.
+func (ls *LedgerState) markStakeForPools(
+	epoch uint64,
+	poolIds []ledger.PoolId,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	byPool := make(map[string]uint64, len(poolIds))
+	for _, poolId := range poolIds {
+		hash := lcommon.PoolKeyHash(poolId).Bytes()
+		snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+			epoch,
+			snapshotTypeMark,
+			hash,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot == nil {
+			continue
+		}
+		byPool[string(hash)] = uint64(snapshot.TotalStake)
+	}
+	return byPool, nil
+}
+
 // totalActiveStake returns the total mark-snapshot stake at the given epoch,
 // clamped to a minimum of 1.
 //

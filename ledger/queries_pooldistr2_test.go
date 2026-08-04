@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
@@ -143,6 +144,135 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 	sum := new(big.Rat).Add(entryA.StakeFraction.Rat, entryB.StakeFraction.Rat)
 	assert.Equal(t, 0, sum.Cmp(big.NewRat(1, 1)),
 		"reported fractions must sum to one over the snapshot, got %s", sum)
+}
+
+// poolDistr2QueryFor wraps the leaf query with a pool filter, the form
+// cardano-cli sends when it wants specific pools rather than the whole
+// distribution.
+func poolDistr2QueryFor(
+	pools ...lcommon.PoolKeyHash,
+) *olocalstatequery.BlockQuery {
+	ids := make([]lcommon.PoolId, 0, len(pools))
+	for _, pkh := range pools {
+		ids = append(ids, lcommon.PoolId(pkh))
+	}
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyPoolDistr2Query{
+				Type:  olocalstatequery.QueryTypeShelleyPoolDistr2,
+				Pools: []cbor.SetType[lcommon.PoolId]{cbor.NewSetType(ids, false)},
+			},
+		},
+	}
+}
+
+// TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools covers a query
+// carrying a pool filter.
+//
+// The filter selects which pools are reported; it does not change what they are
+// a share of. TotalActiveStake stays the whole snapshot's total and each
+// fraction stays a share of it, so a filtered reply's fractions sum to less
+// than one -- renormalising them over the requested pools would tell a caller
+// their pool leads more slots than the node will grant it.
+func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
+	db := newTestDB(t)
+
+	vrfA := make([]byte, 32)
+	for i := range vrfA {
+		vrfA[i] = 0xAA
+	}
+	vrfB := make([]byte, 32)
+	for i := range vrfB {
+		vrfB[i] = 0xBB
+	}
+	poolA := make([]byte, 28)
+	for i := range poolA {
+		poolA[i] = 0x11
+	}
+	poolB := make([]byte, 28)
+	for i := range poolB {
+		poolB[i] = 0x22
+	}
+
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
+	pkhB := seedPoolDistr2Fixture(t, db, poolB, vrfB, 1_000_000, snapshotEpoch)
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(poolDistr2QueryFor(pkhA))
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
+	require.True(t, ok)
+
+	require.Len(t, distr.Pools, 1, "only the requested pool is reported")
+	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
+	require.True(t, ok, "the requested pool must be present")
+	assert.Equal(t, uint64(3_000_000), entryA.TotalPoolStake)
+	assert.Equal(t, vrfA, entryA.VrfHash[:])
+	_, ok = distr.Pools[lcommon.PoolId(pkhB)]
+	assert.False(t, ok, "an unrequested pool must not be reported")
+
+	assert.Equal(t, uint64(4_000_000), distr.TotalActiveStake,
+		"the total stays the whole snapshot's, not the filtered subset's")
+	require.NotNil(t, entryA.StakeFraction)
+	assert.Equal(t, 0, entryA.StakeFraction.Cmp(big.NewRat(3, 4)),
+		"the fraction stays a share of the whole snapshot, got %s",
+		entryA.StakeFraction.Rat)
+}
+
+// TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot covers a filter
+// naming a pool the snapshot has no row for.
+//
+// Absent from the distribution and holding zero stake in it are different
+// answers: the Haskell node restricts the distribution to the requested keys,
+// so a pool that is not in it comes back missing rather than at zero. Reporting
+// it at zero would also route a registered-but-unstaked pool into the
+// unregistered-pool check, turning a routine "not in this snapshot" into a
+// failed query.
+func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(t *testing.T) {
+	db := newTestDB(t)
+
+	vrfA := make([]byte, 32)
+	for i := range vrfA {
+		vrfA[i] = 0xAA
+	}
+	poolA := make([]byte, 28)
+	for i := range poolA {
+		poolA[i] = 0x11
+	}
+	// A pool with neither a registration nor a snapshot row -- the shape of a
+	// key a caller asks about that this chain knows nothing of.
+	unknown := make([]byte, 28)
+	for i := range unknown {
+		unknown[i] = 0x99
+	}
+	unknownPkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(unknown))
+
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
+
+	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh))
+	require.NoError(t, err,
+		"a pool the snapshot does not hold is omitted, not an error")
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
+	require.True(t, ok)
+
+	require.Len(t, distr.Pools, 1)
+	_, ok = distr.Pools[lcommon.PoolId(pkhA)]
+	assert.True(t, ok, "the pool the snapshot holds is still reported")
+	_, ok = distr.Pools[lcommon.PoolId(unknownPkh)]
+	assert.False(t, ok, "a pool absent from the snapshot is not reported")
 }
 
 // TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide covers an epoch whose

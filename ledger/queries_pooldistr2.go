@@ -60,7 +60,27 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
-	stakeByPool, err := ls.markStakeByPool(snapshotEpoch, true, metaTxn)
+	requested, all := q.PoolFilter()
+
+	// A filter is bounded by the caller, so only the pools it names are read;
+	// loading the whole snapshot to discard most of it is work the request did
+	// not ask for. This is the same split queryShelleyStakeSnapshots makes, and
+	// for the same reason -- the unfiltered path, which is the one
+	// cardano-cli's leadership schedule takes, still gets the single bulk read
+	// rather than one query per pool.
+	var (
+		stakeByPool map[string]uint64
+		err         error
+	)
+	if all {
+		stakeByPool, err = ls.markStakeByPool(snapshotEpoch, true, metaTxn)
+	} else {
+		stakeByPool, err = ls.markStakeForPools(
+			snapshotEpoch,
+			requested,
+			metaTxn,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -74,21 +94,12 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 		return nil, err
 	}
 
-	requested, all := q.PoolFilter()
-	wanted := make(map[lcommon.PoolKeyHash]struct{}, len(requested))
-	for _, pkh := range requested {
-		wanted[lcommon.PoolKeyHash(pkh)] = struct{}{}
-	}
-
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(stakeByPool))
 	for hash := range stakeByPool {
-		pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224([]byte(hash)))
-		if !all {
-			if _, ok := wanted[pkh]; !ok {
-				continue
-			}
-		}
-		keyHashes = append(keyHashes, pkh)
+		keyHashes = append(
+			keyHashes,
+			lcommon.PoolKeyHash(lcommon.NewBlake2b224([]byte(hash))),
+		)
 	}
 
 	// The VRF key hash lives on the pool registration rather than the
