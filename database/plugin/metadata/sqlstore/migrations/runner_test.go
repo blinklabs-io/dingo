@@ -227,7 +227,9 @@ func TestRunnerRejectsUnversionedDatabase(t *testing.T) {
 	require.NoError(t, err)
 	err = testRunner(db, testMigration(nil)).Run(context.Background())
 	require.ErrorIs(t, err, ErrLegacySchema)
-	require.Contains(t, err.Error(), "delete the metadata database")
+	if err != nil {
+		require.Contains(t, err.Error(), "delete the metadata database")
+	}
 }
 
 func TestValidateRegistryRequiresContiguousVersions(t *testing.T) {
