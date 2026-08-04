@@ -164,104 +164,8 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 		u.mu.Unlock()
 		return errors.New("server already started")
 	}
-	mux := http.NewServeMux()
-	compress1KB := connect.WithCompressMinBytes(1024)
-	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
-		&queryServiceServer{utxorpc: u},
-		compress1KB,
-	)
-	submitPath, submitHandler := submitconnect.NewSubmitServiceHandler(
-		&submitServiceServer{utxorpc: u},
-		compress1KB,
-	)
-	syncPath, syncHandler := syncconnect.NewSyncServiceHandler(
-		&syncServiceServer{utxorpc: u},
-		compress1KB,
-	)
-	watchPath, watchHandler := watchconnect.NewWatchServiceHandler(
-		&watchServiceServer{utxorpc: u},
-		compress1KB,
-	)
-	// v1beta uses the same wire-compatible messages as v1alpha, but with
-	// versioned protobuf descriptors. Reuse the handlers after rewriting only
-	// the service path so both API versions can share this listener. This also
-	// preserves streaming behavior without duplicating every service method.
-	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
-	betaQueryHandler := betaVersionedQueryHandler(
-		queryPath,
-		queryHandler,
-		betaQueryPath,
-		compress1KB,
-	)
-	betaSubmitPath := "/" + betasubmitconnect.SubmitServiceName + "/"
-	betaSubmitHandler := rewriteVersionHandler(
-		submitHandler,
-		betaSubmitPath,
-		submitPath,
-	)
-	betaSyncPath := "/" + betasyncconnect.SyncServiceName + "/"
-	betaSyncHandler := rewriteVersionHandler(
-		syncHandler,
-		betaSyncPath,
-		syncPath,
-	)
-	betaWatchPath := "/" + betawatchconnect.WatchServiceName + "/"
-	betaWatchHandler := rewriteVersionHandler(
-		watchHandler,
-		betaWatchPath,
-		watchPath,
-	)
-	mux.Handle(queryPath, queryHandler)
-	mux.Handle(submitPath, submitHandler)
-	mux.Handle(syncPath, syncHandler)
-	mux.Handle(watchPath, watchHandler)
-	mux.Handle(betaQueryPath, betaQueryHandler)
-	mux.Handle(betaSubmitPath, betaSubmitHandler)
-	mux.Handle(betaSyncPath, betaSyncHandler)
-	mux.Handle(betaWatchPath, betaWatchHandler)
-	mux.Handle(
-		grpchealth.NewHandler(
-			grpchealth.NewStaticChecker(
-				queryconnect.QueryServiceName,
-				betaqueryconnect.QueryServiceName,
-				submitconnect.SubmitServiceName,
-				betasubmitconnect.SubmitServiceName,
-				syncconnect.SyncServiceName,
-				betasyncconnect.SyncServiceName,
-				watchconnect.WatchServiceName,
-				betawatchconnect.WatchServiceName,
-			),
-			compress1KB,
-		),
-	)
-	mux.Handle(
-		grpcreflect.NewHandlerV1(
-			grpcreflect.NewStaticReflector(
-				queryconnect.QueryServiceName,
-				betaqueryconnect.QueryServiceName,
-				submitconnect.SubmitServiceName,
-				betasubmitconnect.SubmitServiceName,
-				syncconnect.SyncServiceName,
-				betasyncconnect.SyncServiceName,
-				watchconnect.WatchServiceName,
-				betawatchconnect.WatchServiceName,
-			),
-			compress1KB,
-		),
-	)
-	mux.Handle(
-		grpcreflect.NewHandlerV1Alpha(
-			grpcreflect.NewStaticReflector(
-				queryconnect.QueryServiceName,
-				submitconnect.SubmitServiceName,
-				syncconnect.SyncServiceName,
-				watchconnect.WatchServiceName,
-			),
-			compress1KB,
-		),
-	)
 	handler := httpcors.Handler(
-		mux,
+		u.newServeMux(),
 		httpcors.Config{
 			AllowedOrigins: u.config.CORSAllowedOrigins,
 		},
@@ -347,6 +251,100 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// newServeMux builds the complete routing table this listener serves: both API
+// versions of every service, health checking, and gRPC reflection. It is the
+// single wiring site, so tests can exercise the real routes rather than a
+// reconstruction of them.
+func (u *Utxorpc) newServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	compress1KB := connect.WithCompressMinBytes(1024)
+	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
+		&queryServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	submitPath, submitHandler := submitconnect.NewSubmitServiceHandler(
+		&submitServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	syncPath, syncHandler := syncconnect.NewSyncServiceHandler(
+		&syncServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	watchPath, watchHandler := watchconnect.NewWatchServiceHandler(
+		&watchServiceServer{utxorpc: u},
+		compress1KB,
+	)
+	// v1beta uses the same wire-compatible messages as v1alpha, but with
+	// versioned protobuf descriptors. Reuse the handlers after rewriting only
+	// the service path so both API versions can share this listener. This also
+	// preserves streaming behavior without duplicating every service method.
+	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
+	betaQueryHandler := betaVersionedQueryHandler(
+		queryPath,
+		queryHandler,
+		betaQueryPath,
+		compress1KB,
+	)
+	betaSubmitPath := "/" + betasubmitconnect.SubmitServiceName + "/"
+	betaSubmitHandler := rewriteVersionHandler(
+		submitHandler,
+		betaSubmitPath,
+		submitPath,
+	)
+	betaSyncPath := "/" + betasyncconnect.SyncServiceName + "/"
+	betaSyncHandler := rewriteVersionHandler(
+		syncHandler,
+		betaSyncPath,
+		syncPath,
+	)
+	betaWatchPath := "/" + betawatchconnect.WatchServiceName + "/"
+	betaWatchHandler := rewriteVersionHandler(
+		watchHandler,
+		betaWatchPath,
+		watchPath,
+	)
+	mux.Handle(queryPath, queryHandler)
+	mux.Handle(submitPath, submitHandler)
+	mux.Handle(syncPath, syncHandler)
+	mux.Handle(watchPath, watchHandler)
+	mux.Handle(betaQueryPath, betaQueryHandler)
+	mux.Handle(betaSubmitPath, betaSubmitHandler)
+	mux.Handle(betaSyncPath, betaSyncHandler)
+	mux.Handle(betaWatchPath, betaWatchHandler)
+	// One list drives health checking and both reflection versions so the
+	// served set cannot drift between them. The v1alpha reflection service is
+	// the older wire protocol, not an older API surface: clients that speak
+	// grpc.reflection.v1alpha.ServerReflection must still discover the v1beta
+	// services this listener serves.
+	serviceNames := servedServiceNames()
+	mux.Handle(
+		grpchealth.NewHandler(
+			grpchealth.NewStaticChecker(serviceNames...),
+			compress1KB,
+		),
+	)
+	reflector := grpcreflect.NewStaticReflector(serviceNames...)
+	mux.Handle(grpcreflect.NewHandlerV1(reflector, compress1KB))
+	mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector, compress1KB))
+	return mux
+}
+
+// servedServiceNames returns every gRPC service name this listener serves, in
+// both API versions. It is the single source of truth for the health checker
+// and for both reflection handlers.
+func servedServiceNames() []string {
+	return []string{
+		queryconnect.QueryServiceName,
+		betaqueryconnect.QueryServiceName,
+		submitconnect.SubmitServiceName,
+		betasubmitconnect.SubmitServiceName,
+		syncconnect.SyncServiceName,
+		betasyncconnect.SyncServiceName,
+		watchconnect.WatchServiceName,
+		betawatchconnect.WatchServiceName,
+	}
 }
 
 // rewriteVersionHandler adapts a v1beta service path to the corresponding
