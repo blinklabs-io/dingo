@@ -194,7 +194,7 @@ func translateMySQLReservedIdentifiers(query string) string {
 			if i+1 < len(query) && query[i+1] == '*' {
 				start := i
 				i += 2
-				for i+1 < len(query) && !(query[i] == '*' && query[i+1] == '/') {
+				for i+1 < len(query) && (query[i] != '*' || query[i+1] != '/') {
 					i++
 				}
 				if i+1 < len(query) {

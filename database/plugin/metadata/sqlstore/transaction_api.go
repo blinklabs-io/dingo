@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -256,9 +257,7 @@ DELETE FROM address_transaction WHERE transaction_id = ?`,
 	}
 	for start := 0; start < len(keys); start += parameterLimit / 2 {
 		end := start + parameterLimit/2
-		if end > len(keys) {
-			end = len(keys)
-		}
+		end = min(end, len(keys))
 		predicates := make([]string, 0, end-start)
 		args := make([]any, 0, (end-start)*2)
 		for _, key := range keys[start:end] {
@@ -271,26 +270,29 @@ FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 		if err != nil {
 			return fmt.Errorf("lookup input addresses for transaction %d: %w", transactionID, err)
 		}
-		for rows.Next() {
-			var (
-				txID    []byte
-				output  uint32
-				payment []byte
-				staking []byte
-				tag     uint8
-			)
-			if err := rows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
+		if err := func() (runErr error) {
+			defer func() {
+				runErr = errors.Join(runErr, rows.Close())
+			}()
+			for rows.Next() {
+				var (
+					txID    []byte
+					output  uint32
+					payment []byte
+					staking []byte
+					tag     uint8
+				)
+				if err := rows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
+					return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
+				}
+				add(payment, tag, staking)
 			}
-			add(payment, tag, staking)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("iterate input addresses for transaction %d: %w", transactionID, err)
-		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("close input addresses for transaction %d: %w", transactionID, err)
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterate input addresses for transaction %d: %w", transactionID, err)
+			}
+			return nil
+		}(); err != nil {
+			return err
 		}
 	}
 	for address := range addresses {
