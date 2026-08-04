@@ -611,6 +611,40 @@ func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 	assert.ErrorIs(t, err, hardfork.ErrPastHorizon)
 }
 
+// TestHeaderVerificationEpoch_PastHorizonDeferred verifies that a header past
+// the forecast horizon is classified as a deferred condition (not a hard
+// peer-fault rejection). This is what keeps chainsync/blockfetch from recycling
+// the honest peer that served the header: recycling on past-horizon starves the
+// peer pool during catch-up and deadlocks at epoch boundaries. The error must
+// still carry ErrPastHorizon so the no-apply-past-horizon guard is unchanged.
+func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       500,
+			StartSlot:     100_000,
+			SlotLength:    1_000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(200_000, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	// The forecast horizon ends at slot 532_000; a header past it must be
+	// classified deferred, and still carry ErrPastHorizon.
+	_, err := ls.headerVerificationEpoch(600_000, false)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred,
+		"past-horizon header must be deferred, not a peer-fault rejection")
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+}
+
 func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {
 	testCases := []struct {
 		name          string

@@ -1538,7 +1538,15 @@ successor stays open only when the resolved safe zone is zero
 (`UnsafeIndefiniteSafeZone`), the same rule `BuildSummary` applies to the
 current era. Where that live bound is finite, a header past it fails with
 `hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
-epoch/nonce cache. Candidate fork blockfetch begins after fork resolution has
+epoch/nonce cache. That past-horizon failure is classified as a deferred
+condition (wrapped in `errHeaderVerificationDeferred`), not a peer fault: during
+catch-up the header chain legitimately runs ahead of the applied tip and crosses
+epoch boundaries, so the block is kept queued for in-order re-verification once
+the applied tip advances into range, and the peer that served it is not
+recycled. Recycling honest peers on these benign past-horizon rejections would
+starve the peer pool the block and Leios endorser-block fetch depend on and
+deadlock catch-up at each epoch boundary. Candidate fork blockfetch begins after
+fork resolution has
 rolled the applied chain back to its common ancestor, so permitted epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
