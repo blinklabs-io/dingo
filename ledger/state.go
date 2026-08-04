@@ -592,6 +592,10 @@ type LedgerState struct {
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
+	// nowFunc overrides the wall clock used by the operational slot/time
+	// fallbacks. Nil outside tests, which inject a fixed clock so those
+	// fallbacks are deterministic.
+	nowFunc func() time.Time
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64

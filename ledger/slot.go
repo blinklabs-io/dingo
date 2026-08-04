@@ -69,7 +69,11 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 		// and the bounded Summary used by header validation are unaffected.
 		if errors.Is(sumErr, hardfork.ErrPastHorizon) {
 			if extrapolated, ok := currentEraTimeAtSlot(sum, slot); ok &&
-				isNearNow(extrapolated) {
+				withinOperationalWindow(
+					ls.now(),
+					extrapolated,
+					currentEraSlotLength(sum),
+				) {
 				return extrapolated, nil
 			}
 		}
@@ -94,7 +98,7 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	}
 	sum, err := ls.HardForkSummary()
 	if err != nil {
-		if isNearNow(t) {
+		if isNearNow(ls.now(), t) {
 			return nearNowSlot(shelleyGenesis), nil
 		}
 		return 0, errors.New("time not found in known epochs")
@@ -105,7 +109,8 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 		// downtime. Preserve its legacy current-era extrapolation without
 		// weakening the bounded Summary used by header validation and arbitrary
 		// time queries.
-		if errors.Is(sumErr, hardfork.ErrPastHorizon) && isNearNow(t) {
+		if errors.Is(sumErr, hardfork.ErrPastHorizon) &&
+			isNearNow(ls.now(), t) {
 			if currentSlot, ok := currentEraSlotAtTime(sum, t); ok {
 				return currentSlot, nil
 			}
@@ -201,11 +206,59 @@ func epochBoundaryInfo(epoch models.Epoch) models.Epoch {
 	}
 }
 
-func isNearNow(t time.Time) bool {
-	// time.Since(t) == now - t, so it is negative for future times. Guard both
-	// directions so arbitrary future times do not match the operational fallback.
-	d := time.Since(t)
-	return d >= -5*time.Second && d < 5*time.Second
+// now returns the ledger's wall clock. Tests inject a fixed clock so the
+// operational near-now fallbacks are deterministic rather than dependent on when
+// the suite happens to run.
+func (ls *LedgerState) now() time.Time {
+	if ls.nowFunc != nil {
+		return ls.nowFunc()
+	}
+	return time.Now()
+}
+
+// operationalWindow is the minimum tolerance for the near-now fallbacks. Eras
+// with a longer slot length widen it (see withinOperationalWindow).
+const operationalWindow = 5 * time.Second
+
+// isNearNow reports whether t is within the operational window of now.
+func isNearNow(now, t time.Time) bool {
+	return withinOperationalWindow(now, t, 0)
+}
+
+// withinOperationalWindow reports whether t is close enough to now to be an
+// operational timing query rather than an arbitrary one.
+//
+// The tolerance is at least operationalWindow but never less than one slot
+// length, because the slot clock's purpose is to resolve the *next* slot
+// boundary: that time is up to one slot length in the future, so a fixed 5s
+// window would reject it on any era with longer slots (Byron is 20s in real
+// Cardano shapes) and drop the clock back into the error-retry loop this
+// fallback exists to avoid. Times many slot lengths away are still rejected in
+// both directions.
+func withinOperationalWindow(
+	now, t time.Time,
+	slotLength time.Duration,
+) bool {
+	// One slot length covers the clock's next-boundary query exactly; the extra
+	// operationalWindow keeps the comparison off that exact edge and absorbs
+	// scheduling jitter between computing the slot and checking the window.
+	tolerance := operationalWindow
+	if slotLength > 0 {
+		tolerance = slotLength + operationalWindow
+	}
+	// now.Sub(t) is negative for future times. Guard both directions so
+	// arbitrary future times do not match the operational fallback.
+	d := now.Sub(t)
+	return d >= -tolerance && d < tolerance
+}
+
+// currentEraSlotLength returns the current era's slot length, or 0 when the
+// summary has no era to read it from.
+func currentEraSlotLength(sum *hardfork.Summary) time.Duration {
+	if sum == nil || len(sum.Eras) == 0 {
+		return 0
+	}
+	return sum.Eras[len(sum.Eras)-1].Params.SlotLength
 }
 
 func currentEraSlotAtTime(

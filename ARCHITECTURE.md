@@ -1577,7 +1577,11 @@ already materialized epoch directly from the immutable epoch cache before
 forecasting. The operational slot clock is the deliberate exception to
 wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
 extrapolate the current era while a stale node catches up, but arbitrary time
-queries and all header validation remain bounded. Both directions are needed
+queries and all header validation remain bounded. The accepted window is one
+slot length plus a fixed tolerance rather than a fixed 5s, because the clock
+resolves the *next* boundary -- up to one slot length ahead -- and a fixed
+window would reject that on any era with longer slots (Byron is 20s in real
+Cardano shapes). Both directions are needed
 because the clock's tick loop converts now to a slot and then that slot back to
 a time; with only the first, the clock could not resolve the next slot boundary
 and retried every 100ms for the whole catch-up instead of ticking.
