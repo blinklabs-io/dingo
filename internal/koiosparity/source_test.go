@@ -188,6 +188,47 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 	require.Equal(t, "999999", entry.MemberRewardTotal)
 }
 
+// TestDatabaseSourceGetPoolEpochDataMapPartialPresence covers the case where
+// only stakeEpoch's RewardPoolInput row exists for a pool (no paramEpoch row,
+// no RewardPoolOutput row yet) -- e.g. a pool captured at the stake snapshot
+// whose reward_pool_output hasn't been computed and written yet. Per
+// dingo_db.go's doc comment (~lines 89-134) and the fallback stub-
+// construction logic in source.go (~lines 211-241), each field group's
+// *Present flag must reflect only whether its own row actually exists, not
+// whether any row exists for the pool at all.
+func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
+	db := newTestDatabaseSourceDB(t)
+	gormDB := sourceGormDB(t, db)
+	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
+	require.Len(t, poolKeyHash, 28)
+
+	require.NoError(t, gormDB.Create(&models.RewardPoolInput{
+		Epoch:          10,
+		PoolKeyHash:    poolKeyHash,
+		DelegatedStake: types.Uint64(500_000),
+		DelegatorCount: 3,
+	}).Error)
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	m, err := source.GetPoolEpochDataMap(context.Background(), 10, 12)
+	require.NoError(t, err)
+	require.Len(t, m, 1)
+
+	var key string
+	for k := range m {
+		key = k
+	}
+	entry := m[key]
+	require.NotNil(t, entry)
+	require.True(t, entry.StakePresent)
+	require.Equal(t, "500000", entry.DelegatedStake)
+	require.Equal(t, uint64(3), entry.DelegatorCount)
+	require.False(t, entry.ParamsPresent)
+	require.False(t, entry.MemberRewardPresent)
+}
+
 func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)

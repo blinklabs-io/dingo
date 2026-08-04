@@ -273,6 +273,13 @@ func TestObserverDuplicateEventsAreIdempotent(t *testing.T) {
 	statuses, err := o.cache.GetStatusSummary("preview")
 	require.NoError(t, err)
 	require.Len(t, statuses, 1, "duplicate events for the same epoch must not create duplicate status rows")
+
+	// The two duplicate epoch.transition events collapse into a single
+	// o.pending[5] entry (see Observer.run's doc comment), so processEpoch
+	// -- and therefore OnResult -- must fire exactly once for epoch 5, not
+	// twice.
+	require.EqualValues(t, 1, resultCount.Load(),
+		"duplicate events for the same epoch must not invoke OnResult twice")
 }
 
 // TestObserverRestartResumesBacklogWithoutReprocessingOrSkipping verifies
@@ -367,7 +374,6 @@ func TestObserverRollbackReChecksSameEpoch(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
-	seedDingoEpochAggregate(t, source, 5, 1_000_000, 10, 20, 30)
 
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
 		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30"},
@@ -379,7 +385,18 @@ func TestObserverRollbackReChecksSameEpoch(t *testing.T) {
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 	eb.SubscribeFunc(event.EpochTransitionEventType, o.HandleEpochTransitionEvent)
+
+	// Start() before any reward state is committed, so its own
+	// GetLatestEpoch()-driven historical backfill (see Start's doc comment)
+	// has nothing to seed -- matching TestObserverCommitVisibilityAndEvent
+	// Ordering's identical reasoning. Otherwise Start would also enqueue
+	// epochs 0..3 (this fake Koios server has no reference for them) as
+	// backlog, and since processEpoch now reports every outcome via
+	// OnResult (including genuine fetch/check errors -- see reportError),
+	// those unrelated results could arrive on the same results channel
+	// ahead of the epoch-5 result this test actually asserts on.
 	require.NoError(t, o.Start(context.Background()))
+	seedDingoEpochAggregate(t, source, 5, 1_000_000, 10, 20, 30)
 
 	publishEpochTransition(eb, 5)
 	first := testutil.RequireReceive(t, results, 5*time.Second, "first pass result")

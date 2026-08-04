@@ -3268,12 +3268,27 @@ second sync:
     (`fetchEpoch`'s `end_time==0` rejection) — expected mainly near live
     chain tip. `fetchIfNeeded` retries this (and any other non-permanent
     error) a bounded number of times with a fixed delay before giving up; a
-    permanent error (`ErrKoiosPermanent`) is never retried.
-- **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`):
-  `Node.Run()` builds a `DatabaseSource` from its own `n.db`, constructs the
-  `Observer`, and subscribes it to `n.eventBus` before `n.ledgerState.Start`
-  (whose slot-clock/block-processing goroutines are what can first publish
-  `event.EpochTransitionEvent`). `Run()`'s own `started` stack registers
+    permanent error (`ErrKoiosPermanent`) is never retried. The pool universe
+    (`GetAllHistoricalPoolIDs`/`GetPoolFirstActiveEpochs`, via
+    `resolvePoolUniverse`) is resolved at most once across that whole retry
+    loop and reused via `FetchEpochWithPools`, rather than re-run on every
+    attempt the way the simpler `FetchEpochWithClient` primitive does — a
+    bounded retry loop hammering both full Koios scans on every attempt would
+    burn meaningfully more of the daily rate-limit/quota budget than the
+    per-epoch fetch itself does.
+- **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
+  `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
+  both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
+  `SetEpochBoundarySnapshotHook`) first, then builds a `DatabaseSource` from
+  its own `n.db`, constructs the `Observer`, and subscribes it to
+  `n.eventBus` — all of this before `n.ledgerState.Start` (whose slot-clock/
+  block-processing goroutines are what can first publish
+  `event.EpochTransitionEvent`). This ordering — hooks configured → observer
+  subscribed → ledger started — matters: an epoch boundary reached before the
+  snapshot hooks exist would fall back to the event-driven capture only, and
+  the observer would validate an epoch whose reward rows the snapshot manager
+  never got a chance to commit via those hooks, a false parity failure that
+  can trip strict mode. `Run()`'s own `started` stack registers
   `Observer.Stop` only for the startup-failure/panic rollback path (unwound
   if a later step in `Run()` fails); the path every real shutdown actually
   takes — `Node.Stop()`, SIGINT/SIGTERM, and `n.cancel()` (including the
@@ -3304,15 +3319,30 @@ second sync:
   permanent Dingo subsystem — SQLite (or whichever metadata backend the node
   itself runs) remains the only backend involved, since `DatabaseSource`
   reads the live node's own store rather than opening a second connection.
+  - **Live database Restore/Truncate.** `node_lifecycle.go`'s
+    `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
+    background goroutine has exited, same as `shutdown()`) and unsubscribes
+    its `event.EpochTransitionEventType` handler (`UnsubscribeAndWait`,
+    tracked via `n.koiosParitySubId`) before the in-flight `Restore`/
+    `Truncate` closes `n.db` out from under it — otherwise the observer would
+    keep running against a stale, soon-to-be-closed database, and its
+    subscription would leak on the never-recreated `n.eventBus`.
+    `reinitializeBackgroundManagers` rebuilds the snapshot-manager hooks,
+    then (if `KoiosParityConfig.Enabled`) calls the same
+    `startKoiosParityObserver` helper `Run()` uses to recreate the `Observer`
+    against the fresh `n.db` and resubscribe it, before restarting
+    `n.ledgerState` — mirroring `Run()`'s own hooks-then-observer-then-ledger
+    ordering above so a live rebuild cannot reintroduce the same race.
 - **Out of scope for #3098** (left for #3097/#3099, and explicitly not
   blocked by this design): per-account exact parity (`RewardParitySource`
   already exposes `GetRewardAccountOutputs` for this) and chunked/paginated/
-  resumable large-account Koios fetches. `Observer`'s per-epoch fetch
-  (`FetchEpochWithClient`) re-resolves the full historical pool ID list and
-  first-active-epoch map on every call rather than caching them across
-  epochs — a deliberate simplicity trade-off for this one-off validation use
-  case, not a resumability guarantee; #3099 owns making that path
-  chunked/paginated/resumable.
+  resumable large-account Koios fetches. `Observer.fetchIfNeeded` avoids
+  repeating the pool-universe scan across its own bounded retry loop (see
+  above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve or
+  reuse that universe only within a single `fetchIfNeeded` call, not across
+  distinct epochs or fetch runs — a deliberate simplicity trade-off for this
+  one-off validation use case, not a resumability guarantee; #3099 owns
+  making that path chunked/paginated/resumable across epochs.
 
 ### Bark (`bark/`)
 

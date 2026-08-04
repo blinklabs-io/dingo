@@ -125,7 +125,18 @@ func NewDatabaseSource(db *database.Database) (*DatabaseSource, error) {
 // GetLatestEpoch returns the highest epoch number Dingo has committed an
 // epoch_summary row for.
 func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
-	_ = ctx // no per-call context plumbing on database.Txn; kept for interface symmetry with DingoDB.
+	// database.Txn/the metadata store's MetadataStore accessors take no
+	// context.Context of their own (types.Txn is Commit/Rollback only, and
+	// every GetX(..., types.Txn) signature in
+	// database/plugin/metadata/store.go is context-free) — there is no
+	// context-aware transaction/accessor option to thread ctx into here, so
+	// a query already in flight cannot be interrupted mid-call. What this
+	// check does provide: bailing out before opening a new transaction if
+	// ctx is already done, so an Observer.Stop-driven shutdown racing this
+	// call doesn't start fresh DB work only to discard the result.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	txn := s.db.Transaction(false)
 	defer txn.Release()
 	summary, err := s.db.Metadata().GetLatestEpochSummary(txn.Metadata())
@@ -145,7 +156,12 @@ func (s *DatabaseSource) GetEpochData(
 	ctx context.Context,
 	epoch uint64,
 ) (*DingoEpochData, error) {
-	_ = ctx
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	txn := s.db.Transaction(false)
 	defer txn.Release()
 	meta := s.db.Metadata()
@@ -186,7 +202,12 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	ctx context.Context,
 	stakeEpoch, paramEpoch uint64,
 ) (map[string]*DingoPoolEpochData, error) {
-	_ = ctx
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	txn := s.db.Transaction(false)
 	defer txn.Release()
 	meta := s.db.Metadata()
@@ -249,7 +270,12 @@ func (s *DatabaseSource) GetRewardAccountOutputs(
 	ctx context.Context,
 	epoch uint64,
 ) ([]*models.RewardAccountOutput, error) {
-	_ = ctx
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	txn := s.db.Transaction(false)
 	defer txn.Release()
 	rows, err := s.db.Metadata().GetRewardAccountOutputs(epoch, txn.Metadata())

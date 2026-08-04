@@ -115,6 +115,14 @@ type Node struct {
 	chainsyncClientRemoveSubId     event.EventSubscriberId
 	connManagerRecycleSubId        event.EventSubscriberId
 	leiosVoteEmittedSubId          event.EventSubscriberId
+	// koiosParitySubId is tracked for the same reason: observer.
+	// HandleEpochTransitionEvent is bound to the *koiosparity.Observer
+	// instance startKoiosParityObserver creates, which a live database
+	// restore/truncate must tear down and rebuild (a stale observer would
+	// otherwise keep running against the pre-rebuild n.db) -- see
+	// node_lifecycle.go's quiesceForLiveLifecycleOp/
+	// reinitializeBackgroundManagers handling of it.
+	koiosParitySubId event.EventSubscriberId
 
 	// liveLifecycleMu serializes live database Restore/Truncate calls
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
@@ -838,40 +846,17 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}
 
-	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
-	// (and, critically, subscribed to event.EpochTransitionEventType) before
-	// n.ledgerState.Start below, whose slot-clock/block-processing
-	// goroutines are what can first publish that event — see
-	// startKoiosParityObserver's doc comment (node_koiosparity.go).
-	if n.config.koiosParity.Enabled {
-		if err := n.startKoiosParityObserver(); err != nil {
-			return fmt.Errorf("starting koios parity observer: %w", err)
-		}
-		started = append(started, func() {
-			stopCtx, cancel := context.WithTimeout(
-				context.Background(), n.configuredShutdownTimeout(),
-			)
-			defer cancel()
-			if err := n.koiosParityObserver.Stop(stopCtx); err != nil {
-				n.config.logger.Error(
-					"failed to stop koios parity observer during cleanup",
-					"error", err,
-				)
-			}
-		})
-	}
-
-	// Start ledger.
-	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to start ledger: %w", err)
-	}
-	started = append(started, func() { n.ledgerState.Close() })
-	// Register midnight indexer cleanup after LedgerState so it is torn down
-	// first (reverse order): midnight.Stop() → ledgerState.Close().
-	if n.midnightIndexer != nil {
-		started = append(started, func() { n.midnightIndexer.Stop() })
-	}
-	// Initialize and start snapshot manager for stake snapshot capture
+	// Initialize snapshot manager for stake snapshot capture and wire the
+	// authoritative epoch-boundary capture hooks before n.ledgerState.Start
+	// below, whose slot-clock/block-processing goroutines are what can
+	// first fire an epoch rollover: an epoch boundary reached before these
+	// hooks exist would fall back to the event-driven capture only, and — if
+	// the Koios parity observer is also enabled — race the observer's own
+	// event.EpochTransitionEvent subscription into validating an epoch whose
+	// reward rows the snapshot manager never got a chance to commit via
+	// these hooks. Configuring both before the observer is wired below (and
+	// both before Start) keeps the dependency ordering unambiguous: hooks
+	// configured → observer subscribed → ledger started.
 	n.snapshotMgr = snapshot.NewManager(
 		n.db,
 		n.eventBus,
@@ -904,6 +889,43 @@ func (n *Node) Run(ctx context.Context) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+
+	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
+	// (and, critically, subscribed to event.EpochTransitionEventType) before
+	// n.ledgerState.Start below, whose slot-clock/block-processing
+	// goroutines are what can first publish that event — see
+	// startKoiosParityObserver's doc comment (node_koiosparity.go). Wired
+	// after the snapshot-manager hooks immediately above, so an epoch
+	// boundary the observer reacts to always has its reward rows committed
+	// via those hooks first.
+	if n.config.koiosParity.Enabled {
+		if err := n.startKoiosParityObserver(); err != nil {
+			return fmt.Errorf("starting koios parity observer: %w", err)
+		}
+		started = append(started, func() {
+			stopCtx, cancel := context.WithTimeout(
+				context.Background(), n.configuredShutdownTimeout(),
+			)
+			defer cancel()
+			if err := n.koiosParityObserver.Stop(stopCtx); err != nil {
+				n.config.logger.Error(
+					"failed to stop koios parity observer during cleanup",
+					"error", err,
+				)
+			}
+		})
+	}
+
+	// Start ledger.
+	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to start ledger: %w", err)
+	}
+	started = append(started, func() { n.ledgerState.Close() })
+	// Register midnight indexer cleanup after LedgerState so it is torn down
+	// first (reverse order): midnight.Stop() → ledgerState.Close().
+	if n.midnightIndexer != nil {
+		started = append(started, func() { n.midnightIndexer.Stop() })
+	}
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {

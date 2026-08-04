@@ -267,6 +267,7 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 // interchangeably.
 func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
 	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
 	stakingKey := testPoolKeyHash(t, 0x11)
 	poolKeyHash := testPoolKeyHash(t, 0x22)
 	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
@@ -282,6 +283,7 @@ func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.Equal(t, types.Uint64(55), rows[0].Amount)
+	require.True(t, rows[0].Spendable)
 
 	rows, err = dingo.GetRewardAccountOutputs(context.Background(), 9)
 	require.NoError(t, err)

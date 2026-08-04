@@ -133,6 +133,13 @@ type Observer struct {
 	// failure. Only ever read/written from run's single goroutine (via
 	// processEpoch/fail/stopping), so it needs no lock of its own.
 	fatalFired bool
+
+	// started guards against calling Start more than once on the same
+	// Observer: a second call would silently overwrite o.cancel (orphaning
+	// the first run goroutine, which nothing would ever cancel/wait on
+	// again) and launch a second concurrent run goroutine racing the first
+	// over o.pending/o.cache. Checked and set under o.mu.
+	started bool
 }
 
 // NewObserver constructs an Observer. It opens (or creates) the Koios
@@ -186,7 +193,19 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 // Observer's HandleEpochTransitionEvent to event.EpochTransitionEventType
 // before or after calling Start; live events and the seeded backlog feed
 // the same pending set either way.
+//
+// Start may only be called once per Observer; a second call returns an
+// error rather than silently orphaning the first run goroutine (construct a
+// new Observer instead, e.g. via NewObserver, if a fresh Start is needed).
 func (o *Observer) Start(ctx context.Context) error {
+	o.mu.Lock()
+	if o.started {
+		o.mu.Unlock()
+		return errors.New("koiosparity: Observer.Start called more than once")
+	}
+	o.started = true
+	o.mu.Unlock()
+
 	latest, err := o.cfg.Source.GetLatestEpoch(ctx)
 	if err != nil {
 		o.cfg.Logger.Debug(
@@ -356,7 +375,12 @@ func (o *Observer) stopping() bool {
 // triggered here, once, on the first failure.
 func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	if err := o.fetchIfNeeded(ctx, epoch); err != nil {
-		o.fail(epoch, fmt.Errorf("fetch koios reference: %w", err))
+		if cancelled(ctx, err) {
+			o.cfg.Logger.Debug("koiosparity observer: fetch interrupted by shutdown",
+				"network", o.cfg.Network, "epoch", epoch, "error", err)
+			return
+		}
+		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
 
@@ -364,7 +388,12 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		ctx, o.cache, o.cfg.Source, o.cfg.Network, epoch, o.cfg.GraceHours, o.cfg.Logger,
 	)
 	if err != nil {
-		o.fail(epoch, fmt.Errorf("check: %w", err))
+		if cancelled(ctx, err) {
+			o.cfg.Logger.Debug("koiosparity observer: check interrupted by shutdown",
+				"network", o.cfg.Network, "epoch", epoch, "error", err)
+			return
+		}
+		o.reportError(epoch, fmt.Errorf("check: %w", err))
 		return
 	}
 	if o.cfg.OnResult != nil {
@@ -381,10 +410,71 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		"network", o.cfg.Network, "epoch", epoch)
 }
 
+// cancelled reports whether err is (or wraps) a context cancellation/
+// deadline error attributable to ctx itself having already been
+// cancelled/expired — i.e. a clean Observer.Stop-driven shutdown racing
+// fetchIfNeeded/CheckEpoch, not a genuine Koios/tool failure that merely
+// happens to surface as a context error. Mirrors check.go's own
+// shutdown-vs-failure distinction (its ctx.Err() check before consuming
+// errCh in Check). Only ctx.Err() != nil is treated as "shutdown in
+// progress" — a context.DeadlineExceeded bubbling up from some inner,
+// still-live context (e.g. a per-request Koios timeout) would not also
+// mark the outer ctx done, so it is correctly still treated as a real
+// failure.
+func cancelled(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+// reportError records a genuine (non-shutdown) per-epoch fetch/check
+// failure: it logs and, in strict mode, fires FatalFunc via fail, and
+// additionally invokes OnResult (when set) with a synthesized ERROR-status
+// result carrying err's text as a synthetic mismatch — otherwise these two
+// error branches in processEpoch would be invisible to OnResult callers,
+// unlike every other outcome (PASS/FAIL) processEpoch reports. Not
+// persisted to the cache: checkEpoch/CheckEpoch itself does not persist
+// check_epoch_status on this class of failure either (a fetch or query
+// error that occurs before any comparison could run), so this stays
+// consistent with that existing behavior.
+func (o *Observer) reportError(epoch uint64, err error) {
+	o.fail(epoch, err)
+	if o.cfg.OnResult != nil {
+		now := time.Now()
+		o.cfg.OnResult(&EpochCompareResult{
+			Network: o.cfg.Network,
+			Epoch:   epoch,
+			Status:  StatusError,
+			Mismatches: []CheckMismatch{{
+				Network:    o.cfg.Network,
+				Epoch:      epoch,
+				Field:      "observer_error",
+				DingoValue: fmt.Sprintf("error: %v", err),
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			}},
+		})
+	}
+}
+
 // fetchIfNeeded fetches Koios reference data for epoch only if it is not
 // already cached — a historical epoch's Koios reference never changes, so a
 // re-request (e.g. after a Dingo-side rollback re-signals the same epoch)
 // would just be wasted work.
+//
+// The pool universe (poolIDs/firstActiveEpochs) is resolved at most once
+// across this call's whole retry loop and reused via FetchEpochWithPools:
+// using the simpler FetchEpochWithClient here would re-run both full
+// /pool_list and /pool_updates scans on every one of cfg.FetchRetryAttempts
+// attempts, needlessly burning rate-limit/quota budget on a Koios backend
+// blip that has nothing to do with the pool universe at all. The resolution
+// itself still participates in the same retry/backoff loop as the per-epoch
+// fetch (rather than being resolved once, unconditionally, before the loop),
+// so a transient failure fetching the pool universe is retried exactly like
+// a transient per-epoch fetch failure would be, instead of failing the whole
+// call on the first attempt.
 func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 	uncached, err := o.cache.GetUncachedEpochs(o.cfg.Network, epoch, epoch)
 	if err != nil {
@@ -393,9 +483,32 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 	if len(uncached) == 0 {
 		return nil
 	}
+	var poolIDs []string
+	var firstActiveEpochs map[string]uint64
 	var lastErr error
 	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
-		_, err := FetchEpochWithClient(ctx, o.koios, o.cache, o.cfg.Network, epoch, o.cfg.Logger)
+		if poolIDs == nil {
+			poolIDs, firstActiveEpochs, err = resolvePoolUniverse(ctx, o.koios)
+			if err != nil {
+				if errors.Is(err, ErrKoiosPermanent) {
+					return err
+				}
+				lastErr = err
+				poolIDs = nil
+				if attempt == o.cfg.FetchRetryAttempts-1 {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(o.cfg.FetchRetryDelay):
+				}
+				continue
+			}
+		}
+		_, err := FetchEpochWithPools(
+			ctx, o.koios, o.cache, o.cfg.Network, epoch, poolIDs, firstActiveEpochs, o.cfg.Logger,
+		)
 		if err == nil {
 			return nil
 		}
