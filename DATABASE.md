@@ -45,22 +45,14 @@ columns, relationships, indexes, or migrations. There is no ORM,
 `AutoMigrate`, or provider-specific business-query implementation.
 
 The initial database schema release is `v1alpha1`, stored as integer version 1
-for migration ordering. A fresh database creates it from embedded DDL. An
-unversioned database is adopted only when it has the required transaction,
-UTxO, account, pool, DRep, certificate, tip, settings, and commit-timestamp
-columns for the final pre-cutover shape. Unknown or partial legacy layouts fail
-startup instead of being guessed at. SQLite adoption additionally repairs
-legacy indexes and foreign keys, purges cascade orphans, deduplicates rows
-needed by new uniqueness constraints, and resumes the account `created_slot`
-backfill from its durable checkpoint. PostgreSQL and MySQL adoption validates
-the complete table/column contract, repairs the reference-input association,
-and then applies idempotent v1alpha1 DDL, including any missing indexes. All
-three paths also normalize legacy NULL
-reward-delta hashes to the empty source hash, merges duplicate block-nonce rows
-only when their nonce values agree, and preserves checkpoint flags. Reference
-inputs are stored in the v1alpha1 `utxo_reference_input` association table so
-multiple transactions can reference one output; the legacy single-column
-marker is retained only for compatibility.
+for migration ordering. A fresh database creates it from embedded DDL. Existing
+unversioned metadata databases are intentionally rejected: the database/sql
+cutover is a clean break, so users must remove the metadata database and resync
+from genesis. This keeps startup deterministic and avoids carrying a large,
+fragile compatibility layer for obsolete schemas. Reference inputs are stored
+in the v1alpha1 `utxo_reference_input` association table so multiple
+transactions can reference one output; the legacy single-column marker is not
+used by the new store.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -325,7 +317,7 @@ erDiagram
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
 | `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates by epoch. |
 | `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. For new imports this is the selected ledger-state point at or below the certificate-backed ImmutableDB tip; the metadata `tip` remains at the same point so later raw blocks undergo ordinary ledger replay. Ancillary-only volatile state is never recorded as trusted. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. |
-| `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable application-level backfill progress keyed by `phase`; `metadata` tracks API-mode historical metadata backfill. Schema/data upgrade checkpoints belong to `schema_migrations` instead. The `account_created_slot` phase is resumed until complete during SQLite v1alpha1 adoption. |
+| `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable application-level backfill progress keyed by `phase`; `metadata` tracks API-mode historical metadata backfill. Schema/data upgrade checkpoints belong to `schema_migrations` instead. |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. Catch-up imports leave `import_key` empty to force a full pass. |
 
 Mithril v2 catch-up reconcile: when `dingo mithril sync` advances an existing
@@ -1230,11 +1222,11 @@ AND a.active = true
 
 Current live stake by pool reads the maintained `reward_live_stake.utxo_stake`
 value once per active credential, preserving exact decimal `uint64` arithmetic
-without materializing every live UTxO. During first adoption or an interrupted
-backfill, if any requested active credential lacks a current aggregate row, the
-store falls back to the canonical account/UTxO scan until
-`RebuildRewardLiveStake` completes; this preserves correctness while making
-steady-state ledger-peer and pool-detail requests proportional to credentials.
+without materializing every live UTxO. If a requested active credential lacks a
+current aggregate row, the store falls back to the canonical account/UTxO scan
+until `RebuildRewardLiveStake` completes; this preserves correctness while
+making steady-state ledger-peer and pool-detail requests proportional to
+credentials.
 
 ### `GetStakeByPoolsAtSlot`
 

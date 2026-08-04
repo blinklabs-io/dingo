@@ -89,7 +89,12 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 
-	legacy := len(states) == 0 && len(legacyTables) > 0
+	if len(states) == 0 && len(legacyTables) > 0 {
+		return fmt.Errorf(
+			"%w: existing metadata tables are from an unsupported database version; delete the metadata database and resync from genesis",
+			ErrLegacySchema,
+		)
+	}
 	target := r.Registry[len(r.Registry)-1].Version
 	current := 0
 	for _, migrationState := range states {
@@ -107,23 +112,6 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 		migrationState, exists := states[migration.Version]
 		if exists && migrationState.phase == PhaseComplete {
 			continue
-		}
-		if legacy && migration.Version == 1 {
-			if migration.Adopt == nil {
-				return fmt.Errorf(
-					"%w: version 1 has no adoption procedure",
-					ErrLegacySchema,
-				)
-			}
-			if err := migration.Adopt(ctx, conn, r.Dialect); err != nil {
-				return &UpgradeError{
-					Version: migration.Version,
-					Name:    migration.Name,
-					Phase:   PhaseExpand,
-					Err:     fmt.Errorf("adopt legacy schema: %w", err),
-				}
-			}
-			legacy = false
 		}
 		if err := r.runMigration(ctx, conn, migration, migrationState, exists); err != nil {
 			return err

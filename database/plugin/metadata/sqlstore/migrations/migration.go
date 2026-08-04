@@ -51,10 +51,6 @@ type BatchResult struct {
 // and returned cursor in the same transaction.
 type Backfill func(context.Context, Batch) (BatchResult, error)
 
-// Adoption validates and repairs a supported unversioned schema before version
-// 1 is recorded. Unknown or destructive differences must return a clear error.
-type Adoption func(context.Context, *sql.Conn, string) error
-
 // Migration is immutable after release. BackfillRevision must change whenever
 // the Go backfill behavior changes.
 type Migration struct {
@@ -63,7 +59,6 @@ type Migration struct {
 	BackfillRevision string
 	SQL              map[string]SQL
 	Backfill         Backfill
-	Adopt            Adoption
 	BatchSize        int
 }
 

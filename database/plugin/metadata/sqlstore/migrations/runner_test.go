@@ -220,33 +220,14 @@ func TestRunnerRejectsChecksumDrift(t *testing.T) {
 	)
 }
 
-func TestRunnerAdoptsUnversionedDatabase(t *testing.T) {
-	t.Parallel()
-	db := openTestDB(t)
-	_, err := db.Exec("CREATE TABLE legacy_tip (slot INTEGER NOT NULL)")
-	require.NoError(t, err)
-	adopted := false
-	migration := testMigration(nil)
-	migration.Adopt = func(
-		_ context.Context,
-		_ *sql.Conn,
-		dialect string,
-	) error {
-		adopted = true
-		require.Equal(t, "sqlite", dialect)
-		return nil
-	}
-	require.NoError(t, testRunner(db, migration).Run(context.Background()))
-	require.True(t, adopted)
-}
-
-func TestRunnerRejectsUnrecognizedLegacyDatabase(t *testing.T) {
+func TestRunnerRejectsUnversionedDatabase(t *testing.T) {
 	t.Parallel()
 	db := openTestDB(t)
 	_, err := db.Exec("CREATE TABLE mystery (id INTEGER)")
 	require.NoError(t, err)
 	err = testRunner(db, testMigration(nil)).Run(context.Background())
 	require.ErrorIs(t, err, ErrLegacySchema)
+	require.Contains(t, err.Error(), "delete the metadata database")
 }
 
 func TestValidateRegistryRequiresContiguousVersions(t *testing.T) {

@@ -65,52 +65,6 @@ func TestMySQLSQLStoreIntegration(t *testing.T) {
 	)
 }
 
-func TestPostgresSQLStoreAdoptsUnversionedSchema(t *testing.T) {
-	dsn := os.Getenv("DINGO_POSTGRES_DSN")
-	if dsn == "" {
-		dsn = "postgres://postgres:dingo@127.0.0.1:55432/dingo_test?sslmode=disable"
-	}
-	admin, err := sql.Open("pgx", dsn)
-	require.NoError(t, err)
-	require.NoError(t, admin.PingContext(context.Background()))
-	schema := fmt.Sprintf("sqlstore_adopt_%d", time.Now().UnixNano())
-	_, err = admin.Exec(`CREATE SCHEMA "` + schema + `"`)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
-		_ = admin.Close()
-	})
-	testSQLStoreAdoptionIntegration(
-		t,
-		"pgx",
-		postgresDSNWithSearchPath(t, dsn, schema),
-		"postgres",
-	)
-}
-
-func TestMySQLSQLStoreAdoptsUnversionedSchema(t *testing.T) {
-	dsn := os.Getenv("DINGO_MYSQL_DSN")
-	if dsn == "" {
-		dsn = "root:dingo@tcp(127.0.0.1:53306)/dingo_test?parseTime=true"
-	}
-	admin, err := sql.Open("mysql", dsn)
-	require.NoError(t, err)
-	require.NoError(t, admin.PingContext(context.Background()))
-	database := fmt.Sprintf("sqlstore_adopt_%d", time.Now().UnixNano())
-	_, err = admin.Exec("CREATE DATABASE `" + database + "`")
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
-		_ = admin.Close()
-	})
-	testSQLStoreAdoptionIntegration(
-		t,
-		"mysql",
-		mysqlDSNWithDatabase(t, dsn, database),
-		"mysql",
-	)
-}
-
 func postgresDSNWithSearchPath(t *testing.T, dsn, schema string) string {
 	t.Helper()
 	parsed, err := url.Parse(dsn)
@@ -127,59 +81,6 @@ func mysqlDSNWithDatabase(t *testing.T, dsn, database string) string {
 	require.NoError(t, err)
 	parsed.DBName = database
 	return parsed.FormatDSN()
-}
-
-func testSQLStoreAdoptionIntegration(t *testing.T, driver, dsn, dialectName string) {
-	t.Helper()
-	db, err := OpenDB(driver, dsn, dialectName)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	var registry []migrations.Migration
-	switch dialectName {
-	case "postgres":
-		registry, err = migrations.PostgresRegistry()
-	case "mysql":
-		registry, err = migrations.MySQLRegistry()
-	default:
-		t.Fatalf("unsupported adoption dialect %q", dialectName)
-	}
-	require.NoError(t, err)
-	for _, statement := range registry[0].SQL[dialectName].Expand {
-		_, err = db.Exec(statement)
-		require.NoError(t, err)
-	}
-	// The association table was introduced by the database/sql store. Verify
-	// adoption recreates it when opening a legacy schema that predates it.
-	_, err = db.Exec("DROP TABLE utxo_reference_input")
-	require.NoError(t, err)
-	var dialect Dialect
-	var locker migrations.Locker
-	if dialectName == "postgres" {
-		dialect = PostgresDialect()
-		locker = migrations.NewAdvisoryLocker("postgres", 0x64696e676f6d6574, time.Second)
-	} else {
-		dialect = MySQLDialect()
-		locker = migrations.NewAdvisoryLocker("mysql", 0x64696e676f6d6574, time.Second)
-	}
-	store, err := New(Config{
-		WriteDB:         db,
-		ReadDB:          db,
-		Dialect:         dialect,
-		Migrations:      registry,
-		MigrationLocker: locker,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	require.NoError(t, store.Start(context.Background()))
-	require.True(t, store.Ready())
-	var version int
-	require.NoError(t, db.QueryRow("SELECT version FROM schema_migrations WHERE version = 1").Scan(&version))
-	require.Equal(t, 1, version)
-	var associationTable string
-	require.NoError(t, db.QueryRow(
-		"SELECT table_name FROM information_schema.tables WHERE table_name = 'utxo_reference_input' LIMIT 1",
-	).Scan(&associationTable))
-	require.Equal(t, "utxo_reference_input", associationTable)
 }
 
 func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {

@@ -38,7 +38,7 @@ var mysqlIndexSortPatternDefault = regexp.MustCompile(`(?i)\s+(?:ASC|DESC)\b`)
 var mysqlIndexPrefixPatternDefault = regexp.MustCompile(`\(\d+\)?`)
 
 // isMySQLDDLAlreadyAppliedOnConn is deliberately driver-independent. The
-// default build cannot import go-sql-driver/mysql, but migration adoption still
+// default build cannot import go-sql-driver/mysql, but migration setup still
 // runs against MySQL in tagged integration tests. MySQL exposes duplicate
 // index errors as text through database/sql; verify that the named index is
 // present before treating the error as an idempotent replay.
