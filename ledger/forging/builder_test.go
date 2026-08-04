@@ -438,6 +438,7 @@ func TestBuildBlockMissingVRFKey(t *testing.T) {
 		chainTip:        chainTip,
 		epochNonce:      epochNonce,
 		creds:           creds,
+		kes:             creds,
 	}
 
 	// Build should fail with missing VRF key
@@ -493,6 +494,7 @@ func TestBuildBlockInvalidColdVKeySize(t *testing.T) {
 		chainTip:        chainTip,
 		epochNonce:      epochNonce,
 		creds:           creds,
+		kes:             creds,
 	}
 
 	// Build should fail with invalid cold vkey size
@@ -548,6 +550,7 @@ func TestBuildBlockInvalidVRFVKeySize(t *testing.T) {
 		chainTip:        chainTip,
 		epochNonce:      epochNonce,
 		creds:           creds,
+		kes:             creds,
 	}
 
 	// Build should fail with invalid VRF vkey size

@@ -509,9 +509,21 @@ type Config struct {
 	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                 envconfig:"SHELLEY_VRF_KEY"`
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                 envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
-	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// ShelleyKESAgentSocket, when set, sources the KES signing key from a
+	// running bursa KES agent over the given Unix-domain service socket
+	// instead of a local --shelley-kes-key file. The VRF key and operational
+	// certificate flags still apply. Mirrors cardano-node's
+	// --shelley-kes-agent-socket.
+	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket" envconfig:"SHELLEY_KES_AGENT_SOCKET"`
+	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
+	// agent pushes the evolving KES sign key and the node signs headers
+	// locally) or "sign" (the node forwards header bodies and the agent
+	// returns signatures; the key never enters the node). Defaults to
+	// "serve-key" when a socket is set.
+	ShelleyKESAgentMode         string `yaml:"shelleyKesAgentMode"           envconfig:"SHELLEY_KES_AGENT_MODE"`
+	ForgeSyncToleranceSlots     uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	ValidateForgedBlock         bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting

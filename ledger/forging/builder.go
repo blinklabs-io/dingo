@@ -98,6 +98,7 @@ type DefaultBlockBuilder struct {
 	chainTip        ChainTipProvider
 	epochNonce      EpochNonceProvider
 	creds           *PoolCredentials
+	kes             KESSigner
 	txValidator     TxValidator
 }
 
@@ -109,6 +110,12 @@ type BlockBuilderConfig struct {
 	ChainTip        ChainTipProvider
 	EpochNonce      EpochNonceProvider
 	Credentials     *PoolCredentials
+	// KESSigner sources KES signatures and the operational certificate for
+	// the block header. When nil, Credentials is used (the default local
+	// key-file path). Set to a KES-agent client to source the KES key from
+	// an external agent; the VRF key and pool ID still come from
+	// Credentials.
+	KESSigner KESSigner
 	// TxValidator optionally re-validates each transaction against
 	// the current ledger state before including it in a block.
 	// When nil, ledger-level re-validation is skipped (but
@@ -136,6 +143,10 @@ func NewDefaultBlockBuilder(cfg BlockBuilderConfig) (*DefaultBlockBuilder, error
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	kesSigner := cfg.KESSigner
+	if kesSigner == nil {
+		kesSigner = cfg.Credentials
+	}
 
 	return &DefaultBlockBuilder{
 		logger:          cfg.Logger,
@@ -144,6 +155,7 @@ func NewDefaultBlockBuilder(cfg BlockBuilderConfig) (*DefaultBlockBuilder, error
 		chainTip:        cfg.ChainTip,
 		epochNonce:      cfg.EpochNonce,
 		creds:           cfg.Credentials,
+		kes:             kesSigner,
 		txValidator:     cfg.TxValidator,
 	}, nil
 }
@@ -640,8 +652,8 @@ func (b *DefaultBlockBuilder) buildBlock(
 		praosVrf = lcommon.VrfResult{Output: vrfOutput, Proof: vrfProof}
 	}
 
-	// Get OpCert from credentials
-	opCert := b.creds.GetOpCert()
+	// Get OpCert from the KES signer (file credentials or the KES agent)
+	opCert := b.kes.GetOpCert()
 	if opCert == nil {
 		return nil, nil, errors.New("operational certificate not loaded")
 	}
@@ -766,7 +778,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 		return nil, nil, fmt.Errorf("failed to encode header body: %w", err)
 	}
 
-	signature, err := b.creds.KESSign(kesPeriod, headerBodyCbor)
+	signature, err := b.kes.KESSign(kesPeriod, headerBodyCbor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to sign block header: %w", err)
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -67,7 +68,19 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
 ) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
-	if err := creds.LoadFromFiles(
+	if n.kesAgentEnabled() {
+		// The KES signing key is sourced from an external KES agent, so only
+		// the VRF key and operational certificate are loaded from files. The
+		// KES verification key is taken from the operational certificate, so
+		// opcert validation, the KES-period check, and the ledger cross-check
+		// below are unchanged.
+		if err := creds.LoadVRFAndOpCert(
+			n.config.shelleyVRFKey,
+			n.config.shelleyOperationalCertificate,
+		); err != nil {
+			return nil, fmt.Errorf("load pool credentials: %w", err)
+		}
+	} else if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
 		n.config.shelleyKESKey,
 		n.config.shelleyOperationalCertificate,
@@ -213,14 +226,76 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
+// kesAgentEnabled reports whether the KES signing key should be sourced from
+// an external bursa KES agent rather than a local --shelley-kes-key file.
+func (n *Node) kesAgentEnabled() bool {
+	return n.config.shelleyKESAgentSocket != ""
+}
+
+// kesAgentMode returns the configured KES agent service mode, defaulting to
+// serve-key when a socket is set without an explicit mode.
+func (n *Node) kesAgentMode() string {
+	switch n.config.shelleyKESAgentMode {
+	case kesagent.ModeSign:
+		return kesagent.ModeSign
+	default:
+		return kesagent.ModeServeKey
+	}
+}
+
+// newKESAgentSigner builds and starts a KES agent client that satisfies
+// forging.KESSigner, sourcing the KES signing key from the agent while the
+// operational certificate (placed in the block header and used to vet the
+// agent's key) still comes from the local opcert file loaded into creds.
+func (n *Node) newKESAgentSigner(
+	ctx context.Context,
+	creds *forging.PoolCredentials,
+) (*kesagent.Client, error) {
+	opCert := creds.GetOpCert()
+	if opCert == nil {
+		return nil, errors.New(
+			"KES agent mode requires an operational certificate",
+		)
+	}
+	client, err := kesagent.New(kesagent.Config{
+		SocketPath: n.config.shelleyKESAgentSocket,
+		Mode:       n.kesAgentMode(),
+		OpCert:     opCert,
+		Logger:     n.config.logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create KES agent client: %w", err)
+	}
+	client.Start(ctx)
+	n.config.logger.Info(
+		"KES signing key sourced from agent",
+		"component", "node",
+		"socket", n.config.shelleyKESAgentSocket,
+		"mode", n.kesAgentMode(),
+	)
+	return client, nil
+}
+
 // initBlockForger initializes the block forger for production mode.
-// This requires VRF, KES, and OpCert key files to be configured.
+// This requires VRF and OpCert key files to be configured, plus either a local
+// KES key file or a KES agent socket (--shelley-kes-agent-socket).
 func (n *Node) initBlockForger(
 	ctx context.Context,
 	creds *forging.PoolCredentials,
 ) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
+	}
+	// Source the KES signing key from an external agent when configured;
+	// otherwise the forger and builder default to the file-based credentials.
+	var kesSigner forging.KESSigner
+	if n.kesAgentEnabled() {
+		client, err := n.newKESAgentSigner(ctx, creds)
+		if err != nil {
+			return err
+		}
+		n.kesAgentClient = client
+		kesSigner = client
 	}
 	// Create mempool adapter for the forging package.
 	mempoolAdapter := &forgingMempoolAdapter{source: n.mempool}
@@ -236,6 +311,7 @@ func (n *Node) initBlockForger(
 		ChainTip:        n.chainManager.PrimaryChain(),
 		EpochNonce:      epochNonceAdapter,
 		Credentials:     creds,
+		KESSigner:       kesSigner,
 		TxValidator:     n.ledgerState,
 	})
 	if err != nil {
@@ -333,6 +409,7 @@ func (n *Node) initBlockForger(
 		Mode:                            forging.ModeProduction,
 		Logger:                          n.config.logger,
 		Credentials:                     creds,
+		KESSigner:                       kesSigner,
 		LeaderChecker:                   election,
 		BlockBuilder:                    builder,
 		BlockBroadcaster:                broadcaster,

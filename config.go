@@ -170,6 +170,7 @@ type Config struct {
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
+	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
 	minPoolMargin                                                                       uint
@@ -545,6 +546,7 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
+	c.shelleyKESAgentSocket, c.shelleyKESAgentMode = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
@@ -1108,6 +1110,32 @@ func WithShelleyKESKey(path string) ConfigOptionFunc {
 func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyOperationalCertificate = path
+	}
+}
+
+// WithShelleyKESAgentSocket sources the KES signing key from a running bursa
+// KES agent over the given Unix-domain service socket instead of a local
+// --shelley-kes-key file (CARDANO_SHELLEY_KES_AGENT_SOCKET). The VRF key and
+// operational certificate flags still apply. Mirrors cardano-node's
+// --shelley-kes-agent-socket. When empty (default), the file-based KES key is
+// used and forging behavior is unchanged.
+func WithShelleyKESAgentSocket(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentSocket = path
+		c.shelleyKESAgentSocket = path
+	}
+}
+
+// WithShelleyKESAgentMode selects the KES agent service mode:
+// "serve-key" (default; the agent pushes the evolving KES sign key and the
+// node signs headers locally) or "sign" (the node forwards header bodies and
+// the agent returns signatures; the key never enters the node)
+// (CARDANO_SHELLEY_KES_AGENT_MODE). Only meaningful together with
+// WithShelleyKESAgentSocket.
+func WithShelleyKESAgentMode(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentMode = mode
+		c.shelleyKESAgentMode = mode
 	}
 }
 

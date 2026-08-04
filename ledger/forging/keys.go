@@ -203,6 +203,71 @@ func (pc *PoolCredentials) UpdateKESPeriod(period uint64) error {
 	return nil
 }
 
+// LoadVRFAndOpCert loads the VRF signing key and operational certificate from
+// files but leaves the KES signing key unset. It is used when the KES key is
+// sourced from an external KES agent rather than a local --shelley-kes-key
+// file: the agent holds and evolves the KES sign key, while the VRF key, the
+// operational certificate (and hence the pool ID and cold verification key)
+// still come from local files. The KES verification key is taken from the
+// operational certificate so opcert validation, the ledger cross-check, and
+// the block header still work unchanged. KESSign / UpdateKESPeriod on the
+// resulting credentials are unavailable (no local key); the forger routes
+// those through the agent-backed KESSigner instead.
+func (pc *PoolCredentials) LoadVRFAndOpCert(
+	vrfSKeyPath string,
+	opCertPath string,
+) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	// Load VRF signing key
+	vrfKey, err := bursa.LoadKeyFromFile(vrfSKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load VRF signing key: %w", err)
+	}
+	if len(vrfKey.SKey) != vrf.SeedSize {
+		return fmt.Errorf(
+			"invalid VRF key size: expected %d, got %d",
+			vrf.SeedSize,
+			len(vrfKey.SKey),
+		)
+	}
+	pc.vrfSKey = vrfKey.SKey
+	pc.vrfVKey = vrfKey.VKey
+
+	// Load operational certificate
+	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
+	if err != nil {
+		return fmt.Errorf("failed to load operational certificate: %w", err)
+	}
+	pc.opCert = &OpCert{
+		KESVKey:     opCertKey.VKey,
+		IssueNumber: opCertKey.OpCertIssueNumber,
+		KESPeriod:   opCertKey.OpCertKesPeriod,
+		Signature:   opCertKey.OpCertSignature,
+		ColdVKey:    opCertKey.OpCertColdVKey,
+	}
+	// The KES verification key is committed to by the opcert; the local KES
+	// signing key is intentionally left nil (held by the agent).
+	pc.kesVKey = pc.opCert.KESVKey
+	pc.kesSKey = nil
+
+	// Derive pool ID from cold verification key (Blake2b-224 hash)
+	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash(pc.opCert.ColdVKey))
+
+	return nil
+}
+
+// HasVRFAndOpCert reports whether the VRF key and operational certificate are
+// loaded, independent of whether a local KES signing key is present. The
+// forger uses this gate when the KES key is sourced from an external agent
+// (see LoadVRFAndOpCert); the fully local path uses IsLoaded.
+func (pc *PoolCredentials) HasVRFAndOpCert() bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.vrfSKey != nil && pc.opCert != nil
+}
+
 // VRFProve generates a VRF proof for leader election.
 // alpha should be MkInputVrf(slot, epochNonce).
 func (pc *PoolCredentials) VRFProve(alpha []byte) ([]byte, []byte, error) {

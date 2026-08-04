@@ -86,6 +86,68 @@ func newTestNodeForBP(
 	return &Node{config: cfg}
 }
 
+func TestKESAgentModeSelection(t *testing.T) {
+	// Absent socket: the file-based KES path is selected.
+	n := newTestNodeForBP(t, true, "", "", "", nil)
+	if n.kesAgentEnabled() {
+		t.Fatal("expected KES agent disabled when no socket is set")
+	}
+
+	// Socket set without a mode defaults to serve-key.
+	n.config.shelleyKESAgentSocket = "/run/kes-agent.sock"
+	if !n.kesAgentEnabled() {
+		t.Fatal("expected KES agent enabled when socket is set")
+	}
+	if got := n.kesAgentMode(); got != "serve-key" {
+		t.Fatalf("expected default mode serve-key, got %q", got)
+	}
+
+	// Explicit sign mode is honored.
+	n.config.shelleyKESAgentMode = "sign"
+	if got := n.kesAgentMode(); got != "sign" {
+		t.Fatalf("expected mode sign, got %q", got)
+	}
+}
+
+func TestValidateBlockProducerStartup_KESAgentPath(t *testing.T) {
+	// With the agent socket set, startup loads VRF + opcert from files (no
+	// local KES key) and still passes opcert / KES-period validation. The
+	// resulting credentials expose VRF + opcert but are not "fully loaded"
+	// (no local KES signing key).
+	vrf, _, opcert := devnetCredPaths()
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBP(t, true, vrf, "", opcert, cardanoCfg)
+	n.config.shelleyKESAgentSocket = "/run/kes-agent.sock"
+
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartupAtSlot (agent): %v", err)
+	}
+	if !creds.HasVRFAndOpCert() {
+		t.Error("expected VRF + opcert to be loaded for the agent path")
+	}
+	if creds.IsLoaded() {
+		t.Error("expected no local KES signing key on the agent path")
+	}
+	if creds.GetOpCert() == nil {
+		t.Error("expected an operational certificate for the agent path")
+	}
+
+	// The pool ID must match the fully-file-loaded credentials.
+	vrfFile, kesFile, opcertFile := devnetCredPaths()
+	nFile := newTestNodeForBP(t, true, vrfFile, kesFile, opcertFile, cardanoCfg)
+	credsFile, err := nFile.validateBlockProducerStartupAtSlot(0)
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartupAtSlot (file): %v", err)
+	}
+	if creds.GetPoolID().String() != credsFile.GetPoolID().String() {
+		t.Fatalf(
+			"pool ID mismatch: agent %s vs file %s",
+			creds.GetPoolID().String(), credsFile.GetPoolID().String(),
+		)
+	}
+}
+
 func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
 	vrf, kes, opcert := devnetCredPaths()
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))

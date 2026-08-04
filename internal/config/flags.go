@@ -162,6 +162,8 @@ var flagSpecs = []flagSpec{
 	stringFlag("ShelleyVRFKey", "shelley-vrf-key", "", "path to Shelley VRF signing key"),
 	stringFlag("ShelleyKESKey", "shelley-kes-key", "", "path to Shelley KES signing key"),
 	stringFlag("ShelleyOperationalCertificate", "shelley-opcert", "", "path to Shelley operational certificate"),
+	stringFlag("ShelleyKESAgentSocket", "shelley-kes-agent-socket", "", "path to a bursa KES agent service socket; sources the KES signing key from the agent instead of --shelley-kes-key (VRF key and opcert flags still apply)"),
+	stringFlag("ShelleyKESAgentMode", "shelley-kes-agent-mode", "", "KES agent service mode: serve-key (default) or sign"),
 	uint64Flag("SlotsPerKESPeriod", "slots-per-kes-period", "slots per KES period"),
 	uint64Flag("MaxKESEvolutions", "max-kes-evolutions", "maximum KES evolutions before certificate rotation"),
 	uint64Flag("ForgeSyncToleranceSlots", "forge-sync-tolerance-slots", "max slots behind tip before skipping block forging"),
