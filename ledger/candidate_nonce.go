@@ -156,10 +156,7 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 	// bound below is the earlier of the freeze cutoff and the fold's end.
 	// Folding to the epoch's end leaves this at the cutoff, which is what the
 	// boundary computation has always used.
-	candidateBound := cutoffSlot
-	if foldEndSlot < candidateBound {
-		candidateBound = foldEndSlot
-	}
+	candidateBound := min(cutoffSlot, foldEndSlot)
 
 	// Fast path: look up pre-stored evolving nonces from the
 	// block_nonce table. Each block's evolving nonce is stored
