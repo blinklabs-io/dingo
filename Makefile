@@ -101,13 +101,15 @@ sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 	git diff --exit-code -- database/plugin/metadata/sqlstore/internal/query
 
 gorm-check: ## Fail if the removed ORM returns to source or dependencies
-	@if ! command -v rg >/dev/null 2>&1; then \
-		echo 'gorm-check: rg (ripgrep) is required' >&2; \
-		exit 127; \
-	fi
 	@status=0; \
-	rg -n 'gorm\.io|github.com/glebarez/sqlite|otelgorm' \
-		--glob '*.go' --glob 'go.mod' --glob 'go.sum' . || status=$$?; \
+	if command -v rg >/dev/null 2>&1; then \
+		rg -n 'gorm\.io|github.com/glebarez/sqlite|otelgorm' \
+			--glob '*.go' --glob 'go.mod' --glob 'go.sum' . || status=$$?; \
+	else \
+		grep -RInE --exclude-dir=.git --exclude-dir=.worktrees \
+			--include='*.go' --include='go.mod' --include='go.sum' \
+			'gorm\.io|github.com/glebarez/sqlite|otelgorm' . || status=$$?; \
+	fi; \
 	case "$$status" in \
 		0) echo 'gorm-check: forbidden ORM reference found' >&2; exit 1 ;; \
 		1) exit 0 ;; \
