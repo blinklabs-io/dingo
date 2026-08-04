@@ -171,33 +171,39 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	// point-in-time answer and is intentionally bounded, live header
 	// verification must see the horizon extend at least one epoch past a known
 	// transition, because the rollover is deterministic within the stability
-	// window. Append the successor era as an open (unbounded) era starting at
-	// the announced boundary so the horizon covers the first post-boundary
-	// epoch. Use the next era's params from the shape; when the current era is
-	// the last modeled era (the transition re-arms an era the ledger already
+	// window. Append the successor era starting at the announced boundary so the
+	// horizon covers the first post-boundary epoch. hardfork.SuccessorEra bounds
+	// it by the successor's own safe zone measured from that boundary, which
+	// always snaps up to at least the next epoch boundary; the successor stays
+	// open only when the resolved safe zone is zero
+	// (UnsafeIndefiniteSafeZone), the same rule BuildSummary applies to the
+	// current era. Take the successor by shape order rather than EraID+1 so
+	// non-contiguous EraID values still resolve; when the current era is the
+	// last modeled era (the transition re-arms an era the ledger already
 	// occupies), reuse the current era's params — epoch length and slot length
 	// are constant across post-Byron eras, which is all SlotToEpoch needs.
-	// Mirrors the successor-era append in Haskell HFC reconstructSummary.
+	// Mirrors the successor-era recursion in Haskell HFC reconstructSummary.
 	if transitionInfo.State == hardfork.TransitionKnown && len(summary.Eras) > 0 {
 		bounded := summary.Eras[len(summary.Eras)-1]
 		if bounded.End != nil {
 			succEraID := bounded.EraID
 			succParams := bounded.Params
-			if next, ok := shape.EraForID(bounded.EraID + 1); ok {
+			if idx, ok := shape.EraIndex(bounded.EraID); ok &&
+				idx+1 < len(shape.Eras) {
+				next := shape.Eras[idx+1]
 				succEraID = next.EraID
 				succParams = next.Params
 			}
-			summary.Eras = append(summary.Eras, hardfork.EraSummary{
-				EraID: succEraID,
-				Start: *bounded.End,
-				End:   nil,
-				Params: hardfork.EraParams{
+			summary.Eras = append(summary.Eras, hardfork.SuccessorEra(
+				*bounded.End,
+				succEraID,
+				hardfork.EraParams{
 					EpochSize:     succParams.EpochSize,
 					SlotLength:    succParams.SlotLength,
 					SafeZoneSlots: succParams.SafeZoneSlots,
 					GenesisWindow: succParams.GenesisWindow,
 				},
-			})
+			))
 		}
 	}
 	return &summary, nil

@@ -200,3 +200,41 @@ func TestBuildSummary_RoundTripSlotTime(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(150_000), back)
 }
+
+// ------------------------------------------------------------- successor era
+
+// SuccessorEra bounds the era that follows an announced transition boundary by
+// that era's own safe zone, snapped up to an epoch boundary, so the successor
+// always covers the whole first post-boundary epoch and no more than the safe
+// zone allows.
+func TestSuccessorEra_BoundedBySafeZone(t *testing.T) {
+	// Boundary at the start of epoch 1 in a Shelley-shaped era.
+	start := hardfork.Bound{
+		RelativeTime: 432_000 * time.Second,
+		Slot:         432_000,
+		Epoch:        1,
+	}
+	succ := hardfork.SuccessorEra(start, 6, shelleyParams)
+	assert.Equal(t, uint(6), succ.EraID)
+	assert.Equal(t, start, succ.Start)
+	assert.Equal(t, shelleyParams, succ.Params)
+	// 432000 + 25920 lands inside epoch 1, so the bound snaps up to the start
+	// of epoch 2: the whole first post-boundary epoch is covered.
+	require.NotNil(t, succ.End)
+	assert.Equal(t, uint64(864_000), succ.End.Slot)
+	assert.Equal(t, uint64(2), succ.End.Epoch)
+	assert.Equal(t, 864_000*time.Second, succ.End.RelativeTime)
+}
+
+// A zero SafeZoneSlots is UnsafeIndefiniteSafeZone and leaves the successor
+// open, matching how BuildSummary treats the current era.
+func TestSuccessorEra_ZeroSafeZoneStaysOpen(t *testing.T) {
+	params := shelleyParams
+	params.SafeZoneSlots = 0
+	succ := hardfork.SuccessorEra(
+		hardfork.Bound{Slot: 432_000, Epoch: 1},
+		6,
+		params,
+	)
+	assert.Nil(t, succ.End)
+}
