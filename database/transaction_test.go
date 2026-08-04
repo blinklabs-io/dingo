@@ -461,9 +461,73 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T)
 	txn := db.Transaction(true)
 	defer txn.Release()
 
-	_, err = db.recoverConsumedUtxo(dbtestutil.NewMockInput(txId, 0), txn)
+	_, err = db.recoverConsumedUtxo(dbtestutil.NewMockInput(txId, 0), txn, false)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
+}
+
+// TestRecoveredProducerOnPrimaryChain verifies the membership check that gates
+// blob-recovery of consumed inputs (issue #3005 Mode B cross-fork splice). A
+// producer block that is present in the append-only blob store but is not the
+// block indexed on the applied primary chain at its height (an abandoned fork)
+// must be reported off-chain, so recoverConsumedUtxo refuses to resurrect it
+// for a validated block past the Mithril boundary.
+func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{
+		DataDir:              t.TempDir(),
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StrictUtxoValidation: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const height = uint64(100)
+	canonHash := bytes.Repeat([]byte{0x11}, 32)
+	forkHash := bytes.Repeat([]byte{0x22}, 32)
+	prevHash := bytes.Repeat([]byte{0x01}, 32)
+
+	create := func(slot uint64, hash []byte) {
+		t.Helper()
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(itxn *Txn) error {
+			return db.BlockCreate(models.Block{
+				ID:       height,
+				Slot:     slot,
+				Hash:     hash,
+				PrevHash: prevHash,
+				Number:   height,
+				Cbor:     []byte{0x80},
+			}, itxn)
+		}))
+		txn.Release()
+	}
+
+	check := func(slot uint64, hash []byte) bool {
+		t.Helper()
+		txn := db.Transaction(true)
+		defer txn.Release()
+		onChain, cErr := db.recoveredProducerOnPrimaryChain(txn, slot, hash)
+		require.NoError(t, cErr)
+		return onChain
+	}
+
+	// The block currently indexed at this height is on the primary chain.
+	create(1000, canonHash)
+	require.True(t, check(1000, canonHash),
+		"canonical producer must be reported on-chain")
+
+	// Index the same height to a different block: the earlier block remains
+	// retrievable by point (append-only blob) but is no longer the canonical
+	// block at its height, i.e. an abandoned fork.
+	create(2000, forkHash)
+	require.False(t, check(1000, canonHash),
+		"abandoned-fork producer (not indexed at its height) must be off-chain")
+	require.True(t, check(2000, forkHash),
+		"the newly indexed block is now the canonical producer")
+
+	// A producer absent from the store is off-chain.
+	require.False(t, check(3000, bytes.Repeat([]byte{0x33}, 32)),
+		"absent producer must be reported off-chain")
 }
 
 // TestSetTransactionRecoveryPopulatesProducerFK verifies that when

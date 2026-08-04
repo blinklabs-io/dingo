@@ -820,6 +820,22 @@ so every existing ingest path — bootstrap, gap-closure, historical/trusted
 replay, and the `SkipConsumedInputRecovery` Leios apply above — keeps its
 recovery behavior unchanged.
 
+`StrictAppliedInputConservation` is armed only at tip, so it does not cover a
+divergence baked in during catch-up (a validated block below the tip stability
+window). To close that gap, `recoverConsumedUtxo` applies a primary-chain
+membership check for every validated block past the `mithril_ledger_slot`
+boundary: after resolving the producer block that owns a blob-recovered UTxO, it
+refuses (`ErrUtxoNotFound`) if that block is not the block currently indexed on
+the applied primary chain at its height. The append-only blob store retains
+abandoned-fork blocks, so a producer present in the blob is not necessarily on
+the applied chain; the membership check (`BlockByPoint` locates the producer,
+`BlockByIndex` reveals which block is canonical at that height, mirroring
+`LedgerState.primaryChainContainsPoint`) refuses only the off-chain case, so a
+legitimate on-chain producer whose `utxo` row is merely absent is still
+recovered. This check is not applied below the boundary or on the Mithril
+gap-closure recovery path, where imported history need not carry a block-index
+entry for the producer.
+
 ### Archive And History Expiry Contract
 
 Archive nodes and history-expiry nodes use the same logical blob keys. The
