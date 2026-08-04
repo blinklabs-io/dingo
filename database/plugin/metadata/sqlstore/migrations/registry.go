@@ -424,7 +424,7 @@ func adoptSQLiteV1(
 	if dialect != "sqlite" {
 		return fmt.Errorf("SQLite version-1 adoption called for %q", dialect)
 	}
-	// The GORM provider performed these repairs before AutoMigrate created
+	// The legacy provider performed these repairs before schema creation ran
 	// v1's unique indexes and cascade foreign keys.  CREATE ... IF NOT EXISTS
 	// cannot repair an existing index or constraint, so keep the compatibility
 	// work in the adoption path while the migration lock is held.
@@ -788,7 +788,7 @@ func repairSQLiteV1Indexes(ctx context.Context, conn *sql.Conn) error {
 		}
 	}
 	// Every index below either changed uniqueness/columns or was superseded by
-	// a wider replacement in the final GORM schema. Drop it before v1 expand so
+	// a wider replacement in the final schema. Drop it before v1 expand so
 	// CREATE INDEX IF NOT EXISTS cannot preserve an incompatible definition.
 	for _, legacy := range []struct {
 		table string

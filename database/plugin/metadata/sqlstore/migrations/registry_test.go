@@ -185,7 +185,7 @@ DROP TABLE plutus_data;
 ALTER TABLE plutus_data_legacy RENAME TO plutus_data`)
 	require.NoError(t, err)
 	// Recreate the indexes and duplicate/orphan states emitted by supported
-	// pre-v1 GORM startup paths.
+	// pre-v1 legacy-provider startup paths.
 	for _, index := range []string{
 		"idx_pool_stake_epoch_pool", "idx_reward_live_stake_cred",
 		"idx_drep_credential", "idx_vote_unique",
