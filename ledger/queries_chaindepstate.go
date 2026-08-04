@@ -22,16 +22,68 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// chainDepStateVersionPraos is the `encodeVersion` tag the Haskell consensus
-// layer writes for the Praos serialisation, used from Babbage onwards. TPraos
-// (Shelley through Alonzo) uses 1 and a different layout; dingo serves the
-// Praos form because the eras it supports all run Praos.
-const chainDepStateVersionPraos = 0
+// The `encodeVersion` tags the Haskell consensus layer writes for the two
+// chain-dependent-state serialisations. The tag is not decoration: it selects
+// which record follows, and the two differ in nesting and arity, so emitting
+// the wrong one hands the client a payload that does not match what the
+// version promises.
+const (
+	chainDepStateVersionPraos  uint64 = 0
+	chainDepStateVersionTPraos uint64 = 1
+)
+
+// chainDepStateUsesTPraos reports whether an era serialises its
+// chain-dependent state as TPraos.
+//
+// Shelley through Alonzo run TPraos; Babbage onwards run Praos. dingo supports
+// all of them, and a node syncing from genesis spends a long stretch in the
+// TPraos eras while still answering queries.
+//
+// Byron is neither — it ran PBFT and has no chain-dependent state of this
+// shape — and this is a Shelley-family query, so it takes the modern layout
+// along with anything not enumerated. Eras are listed one by one rather than
+// compared by ordering so that adding one is a deliberate edit here; a new era
+// that forgot to be listed gets Praos, which is what every era since Babbage
+// has used.
+func chainDepStateUsesTPraos(eraId uint) bool {
+	switch eraId {
+	case shelley.EraIdShelley,
+		allegra.EraIdAllegra,
+		mary.EraIdMary,
+		alonzo.EraIdAlonzo:
+		return true
+	default:
+		return false
+	}
+}
+
+// tpraosPrtclState is the PrtclState record TPraos nests inside its
+// chain-dependent state. Praos carries these three fields flat; TPraos groups
+// them, which is the structural difference between the two layouts.
+type tpraosPrtclState struct {
+	cbor.StructAsArray
+	OpCertCounters map[lcommon.Blake2b224]uint64
+	EvolvingNonce  lcommon.Nonce
+	CandidateNonce lcommon.Nonce
+}
+
+// tpraosChainDepState mirrors ouroboros-consensus' TPraosState record: the
+// last slot beside the nested PrtclState. The epoch, previous-epoch, lab and
+// last-epoch-block nonces are Praos-only and have no place here.
+type tpraosChainDepState struct {
+	cbor.StructAsArray
+	LastSlot   olocalstatequery.WithOriginSlot
+	PrtclState tpraosPrtclState
+}
 
 // praosChainDepState mirrors ouroboros-consensus' PraosState record. Field
 // order is load-bearing: the Haskell decoder reads a fixed 8-element array, so
@@ -50,11 +102,12 @@ type praosChainDepState struct {
 }
 
 // versionedChainDepState is the `encodeVersion N` envelope both protocol
-// serialisations share: a 2-element array of version and payload.
+// serialisations share: a 2-element array of version and payload. The payload
+// is whichever of the two records the version names.
 type versionedChainDepState struct {
 	cbor.StructAsArray
 	Version uint64
-	Inner   praosChainDepState
+	Inner   any
 }
 
 // nonceFromBytes converts a stored nonce into its wire form. An absent or
@@ -104,11 +157,6 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		return nil, err
 	}
 
-	state := praosChainDepState{
-		LastSlot:       lastSlot,
-		OpCertCounters: counters,
-	}
-
 	// The epoch containing the tip, so the nonces belong to the same slot the
 	// reply reports. Resolving it from the slot rather than from an epoch
 	// number read elsewhere is what makes the pairing exact.
@@ -123,8 +171,14 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var carriedLabNonce []byte
+
+	var (
+		eraId                         uint
+		evolvingNonce, candidateNonce lcommon.Nonce
+		carriedLabNonce               []byte
+	)
 	if current != nil {
+		eraId = current.EraId
 		carriedLabNonce = current.LastEpochBlockNonce
 		// The epoch row's evolving and candidate nonces are the values the
 		// epoch OPENED with, and nothing rewrites them as blocks land. Both
@@ -132,7 +186,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		// chain as it stood at the boundary while the rest of this reply
 		// describes it at the tip. Recomputed here through the same function
 		// the consensus path uses at a boundary, stopped at the tip.
-		candidateNonce, evolvingNonce, err := ls.computeCandidateNonceAsOf(
+		candidate, evolving, err := ls.computeCandidateNonceAsOf(
 			txn,
 			current.EraId,
 			current.EvolvingNonce,
@@ -148,8 +202,36 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 				err,
 			)
 		}
-		state.EvolvingNonce = nonceFromBytes(evolvingNonce)
-		state.CandidateNonce = nonceFromBytes(candidateNonce)
+		evolvingNonce = nonceFromBytes(evolving)
+		candidateNonce = nonceFromBytes(candidate)
+	}
+
+	// The era at the tip decides the layout. Both records carry the last slot,
+	// the counters and these two nonces; the rest is Praos-only, so a TPraos
+	// reply is complete here and does not pay for reads it cannot report.
+	if chainDepStateUsesTPraos(eraId) {
+		return []any{
+			versionedChainDepState{
+				Version: chainDepStateVersionTPraos,
+				Inner: tpraosChainDepState{
+					LastSlot: lastSlot,
+					PrtclState: tpraosPrtclState{
+						OpCertCounters: counters,
+						EvolvingNonce:  evolvingNonce,
+						CandidateNonce: candidateNonce,
+					},
+				},
+			},
+		}, nil
+	}
+
+	state := praosChainDepState{
+		LastSlot:       lastSlot,
+		OpCertCounters: counters,
+		EvolvingNonce:  evolvingNonce,
+		CandidateNonce: candidateNonce,
+	}
+	if current != nil {
 		state.EpochNonce = nonceFromBytes(current.Nonce)
 		// The lab carried into this epoch: the parent hash of the last block
 		// of the previous one.

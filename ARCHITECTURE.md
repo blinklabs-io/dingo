@@ -1739,6 +1739,27 @@ and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
 
+`GetChainDepState` and `GetPoolDistr2` back `cardano-cli query
+leadership-schedule`, which reads the epoch nonce from the first and the stake
+distribution from the second.
+
+`GetChainDepState` serialises the consensus chain-dependent state, and which
+record it writes depends on the era at the acquired tip: Shelley through Alonzo
+take the TPraos layout (`encodeVersion 1` wrapping a nested `PrtclState`),
+Babbage onwards the Praos one (`encodeVersion 0` wrapping a flat eight-field
+record whose extra nonces TPraos does not carry). The version tag selects the
+shape rather than merely labelling it, so a node serving the wrong one during a
+sync through the TPraos eras hands the client a payload it cannot read as
+promised. Byron, which ran PBFT and has no state of this shape, takes the
+modern layout along with any era not explicitly listed.
+
+`GetPoolDistr2` reports each pool's share of the active stake from the mark
+snapshot at `praos.StakeSnapshotEpoch` — the snapshot leader election itself
+reads — rather than from live stake, so a schedule computed from it agrees with
+what the node will accept. Each pool's VRF key hash is resolved through
+`registeredPoolVrfKeyHash`, the same function header validation uses, so the
+key the reply names is the key a block must carry to be accepted.
+
 ## Chain Management
 
 The `ChainManager` (`chain/manager.go`) manages multiple chains:

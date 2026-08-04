@@ -123,16 +123,16 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 	// The epoch has to span the slot the reply reports, since the nonces are
 	// read from whichever epoch contains it.
 	require.NoError(t, db.Metadata().SetEpoch(
-		0,                   // slot
-		epochID,             // epoch
-		epochNonce,          // nonce
-		evolvingNonce,       // evolvingNonce
-		candidateNonce,      // candidateNonce
-		lastEpochBlockNonce, // lastEpochBlockNonce
-		0,                   // era
-		1,                   // slotLength
-		1000,                // lengthInSlots
-		nil,                 // txn
+		0,                     // slot
+		epochID,               // epoch
+		epochNonce,            // nonce
+		evolvingNonce,         // evolvingNonce
+		candidateNonce,        // candidateNonce
+		lastEpochBlockNonce,   // lastEpochBlockNonce
+		eras.ConwayEraDesc.Id, // era
+		1,                     // slotLength
+		1000,                  // lengthInSlots
+		nil,                   // txn
 	))
 
 	ls := newChainDepStateLedger(t, db)
@@ -184,6 +184,126 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 	}, *decoded.LabNonce)
 	assert.NotNil(t, decoded.OpCertCounters,
 		"counters must be a map even when no pool has minted")
+}
+
+// TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout covers a tip in
+// a TPraos era.
+//
+// The two protocols do not merely tag the reply differently, they serialise
+// different records: TPraos writes version 1 wrapping [lastSlot, [counters,
+// evolving, candidate]], where Praos writes version 0 wrapping a flat
+// eight-field array. Emitting the Praos form in a TPraos era hands the client
+// a payload whose nesting and arity do not match what the version promises.
+//
+// dingo supports Shelley through Alonzo, and a node syncing from genesis sits
+// in them for a long stretch, serving queries the whole time.
+func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(t *testing.T) {
+	db := newTestDB(t)
+
+	// Shelley's window is 3k/f = 3*6/0.4 = 45 slots, so with the epoch running
+	// [1000, 2000) the candidate freezes at slot 1955.
+	const (
+		epochStart    uint64 = 1000
+		epochLength   uint64 = 1000
+		preCutoffSlot uint64 = 1100
+		tipSlot       uint64 = 1960
+	)
+
+	checkpointEvolving := bytes.Repeat([]byte{0x81}, 32)
+	checkpointCandidate := bytes.Repeat([]byte{0x82}, 32)
+	preCutoffNonce := bytes.Repeat([]byte{0x83}, 32)
+	tipNonce := bytes.Repeat([]byte{0x84}, 32)
+	preCutoffHash := bytes.Repeat([]byte{0x85}, 32)
+	tipHash := bytes.Repeat([]byte{0x86}, 32)
+
+	poolKeyHash := bytes.Repeat([]byte{0x87}, 28)
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot:     preCutoffSlot,
+			Hash:     preCutoffHash,
+			PrevHash: bytes.Repeat([]byte{0x88}, 32),
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     tipSlot,
+			Hash:     tipHash,
+			PrevHash: preCutoffHash,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(tipHash, tipSlot, tipNonce, false, txn)
+	}))
+
+	require.NoError(t, db.Metadata().SetEpoch(
+		epochStart,                  // slot
+		1,                           // epoch
+		bytes.Repeat([]byte{4}, 32), // nonce
+		checkpointEvolving,          // evolvingNonce
+		checkpointCandidate,         // candidateNonce
+		bytes.Repeat([]byte{5}, 32), // lastEpochBlockNonce
+		eras.ShelleyEraDesc.Id,      // era
+		1,                           // slotLength
+		uint(epochLength),           // lengthInSlots
+		nil,                         // txn
+	))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, preCutoffSlot, nil))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, tipHash)},
+		nil,
+	))
+
+	ls := newChainDepStateLedger(t, db)
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded),
+		"the reply must decode with the client-side decoder")
+
+	assert.Equal(t, olocalstatequery.ChainDepStateProtocolTPraos,
+		decoded.Protocol,
+		"a Shelley-era tip serialises the TPraos layout")
+	// The Praos-only fields have no place in the TPraos record, and the
+	// decoder leaves them nil precisely so a caller can tell.
+	assert.Nil(t, decoded.EpochNonce,
+		"TPraos carries no epoch nonce")
+	assert.Nil(t, decoded.PreviousEpochNonce)
+	assert.Nil(t, decoded.LabNonce)
+	assert.Nil(t, decoded.LastEpochBlockNonce)
+
+	// The fields TPraos does carry still have to be right, and still have to
+	// be the tip's rather than the epoch's opening checkpoint.
+	require.True(t, decoded.LastSlot.HasSlot)
+	assert.Equal(t, tipSlot, decoded.LastSlot.Slot)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(tipNonce),
+	}, decoded.EvolvingNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(preCutoffNonce),
+	}, decoded.CandidateNonce)
+	counter, found := decoded.OpCertCounter(lcommon.NewBlake2b224(poolKeyHash))
+	assert.True(t, found, "counters survive into the TPraos record")
+	assert.Equal(t, uint64(3), counter)
 }
 
 // TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint covers
