@@ -52,7 +52,30 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	return sum.SlotToTime(slot)
+	when, sumErr := sum.SlotToTime(slot)
+	if sumErr != nil {
+		// The operational slot clock converts the next wall-clock slot on
+		// every tick. While the applied ledger is far behind the wall clock
+		// (from-genesis sync, `dingo load`, restart after downtime) that slot
+		// is past the forecast horizon by definition, and the bounded Summary
+		// is the wrong instrument: this is wall-clock arithmetic, not a
+		// consensus forecast. Without this the clock cannot resolve the next
+		// slot boundary, so it logs an error and retries every 100ms for the
+		// whole catch-up instead of ticking.
+		//
+		// Mirrors the current-era extrapolation TimeToSlot already applies for
+		// the same reason, and is gated the same way: only a slot whose
+		// extrapolated time is near now qualifies, so arbitrary future slots
+		// and the bounded Summary used by header validation are unaffected.
+		if errors.Is(sumErr, hardfork.ErrPastHorizon) {
+			if extrapolated, ok := currentEraTimeAtSlot(sum, slot); ok &&
+				isNearNow(extrapolated) {
+				return extrapolated, nil
+			}
+		}
+		return time.Time{}, sumErr
+	}
+	return when, nil
 }
 
 // TimeToSlot returns the slot containing the given wall-clock time.
@@ -206,6 +229,37 @@ func currentEraSlotAtTime(
 		return 0, false
 	}
 	return current.Start.Slot + slotsIntoEra, true
+}
+
+// currentEraTimeAtSlot extrapolates a slot's wall-clock start time from the
+// current era's parameters, ignoring the era's forecast horizon. It is the
+// inverse of currentEraSlotAtTime and carries the same caveat: the result is
+// only meaningful for operational near-now timing, because a slot past the
+// horizon may in reality fall in a later era with a different slot length.
+func currentEraTimeAtSlot(
+	sum *hardfork.Summary,
+	slot uint64,
+) (time.Time, bool) {
+	if sum == nil || len(sum.Eras) == 0 {
+		return time.Time{}, false
+	}
+	current := sum.Eras[len(sum.Eras)-1]
+	if slot < current.Start.Slot || current.Params.SlotLength <= 0 {
+		return time.Time{}, false
+	}
+	slotsIntoEra := slot - current.Start.Slot
+	// Keep the duration multiplication inside time.Duration's range.
+	maxSlots := uint64(math.MaxInt64) / uint64(current.Params.SlotLength)
+	if slotsIntoEra > maxSlots {
+		return time.Time{}, false
+	}
+	// slotsIntoEra is bounded above, so the conversion cannot overflow.
+	inEra := time.Duration(slotsIntoEra) * // #nosec G115
+		current.Params.SlotLength
+	if inEra > math.MaxInt64-current.Start.RelativeTime {
+		return time.Time{}, false
+	}
+	return sum.SystemStart.Add(current.Start.RelativeTime + inEra), true
 }
 
 // shelleySlotLengthMs returns the Shelley genesis slot length in milliseconds,

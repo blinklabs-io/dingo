@@ -22,7 +22,12 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSlotCalc(t *testing.T) {
@@ -319,4 +324,74 @@ func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
 	if epoch.EpochId != 5 {
 		t.Errorf("expected epoch 5, got %d", epoch.EpochId)
 	}
+}
+
+// TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon is the regression test
+// for the slot clock spinning on "failed to get next slot time" for the whole
+// of a from-genesis sync or a `dingo load`.
+//
+// The clock's tick loop calls TimeToSlot(now) and then SlotToTime(slot+1). The
+// first has a near-now current-era extrapolation for exactly this case; the
+// second did not, so on a ledger whose applied tip is still near genesis while
+// the wall clock is years ahead, every tick logged an error and retried after
+// 100ms instead of sleeping to the next slot boundary.
+func TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon(t *testing.T) {
+	cfg := newTestEraHistoryCfg(t)
+	systemStart := cfg.ShelleyGenesis().SystemStart
+
+	// An applied tip near genesis: the era's safe zone bounds the forecast
+	// horizon far below the current wall-clock slot.
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("tip"))},
+		config:     LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+	ls.publishSnapshotsLocked()
+
+	// The slot the clock is about to tick: 1s slots, so this is now+1.
+	nowSlot := uint64(time.Since(systemStart) / time.Second)
+	nextSlot := nowSlot + 1
+
+	// Confirm the premise: that slot really is past the bounded horizon, so
+	// this test would be vacuous if the era covered it.
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	_, horizonErr := sum.SlotToTime(nextSlot)
+	require.ErrorIs(t, horizonErr, hardfork.ErrPastHorizon,
+		"premise: the next wall-clock slot must be past the forecast horizon")
+
+	// SlotToTime must still resolve it, by extrapolating the current era.
+	when, err := ls.SlotToTime(nextSlot)
+	require.NoError(t, err,
+		"the slot clock must be able to resolve the next slot while behind")
+	assert.WithinDuration(t, time.Now(), when, 5*time.Second,
+		"the extrapolated next-slot time should be ~now")
+	// Consecutive slots stay one slot length apart.
+	next2, err := ls.SlotToTime(nextSlot + 1)
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, next2.Sub(when))
+
+	// An arbitrary future slot stays bounded: the escape hatch is only for
+	// near-now operational timing, not a general weakening of the horizon.
+	_, err = ls.SlotToTime(nextSlot + 1_000_000)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a far-future slot must still be past the horizon")
+
+	// Slot 0 keeps its genesis special case.
+	genesis, err := ls.SlotToTime(0)
+	require.NoError(t, err)
+	assert.Equal(t, systemStart, genesis)
+
+	// A slot inside the horizon is still answered by the bounded Summary,
+	// unchanged.
+	inHorizon, err := ls.SlotToTime(100)
+	require.NoError(t, err)
+	assert.Equal(t, systemStart.Add(100*time.Second), inHorizon)
 }

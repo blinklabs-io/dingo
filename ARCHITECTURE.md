@@ -1575,9 +1575,17 @@ Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
 already materialized epoch directly from the immutable epoch cache before
 forecasting. The operational slot clock is the deliberate exception to
-wall-clock forecast refusal: a near-now `TimeToSlot` call extrapolates the
-current era while a stale node catches up, but arbitrary time queries and all
-header validation remain bounded. Blockfrost epoch/era end timestamps are
+wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
+extrapolate the current era while a stale node catches up, but arbitrary time
+queries and all header validation remain bounded. Both directions are needed
+because the clock's tick loop converts now to a slot and then that slot back to
+a time; with only the first, the clock could not resolve the next slot boundary
+and retried every 100ms for the whole catch-up instead of ticking.
+`SlotToEpoch` is deliberately not extrapolated -- a tick's `Epoch` and
+`IsEpochStart` drive subscriber epoch-boundary work, so a fabricated epoch would
+be worse than no tick. While the applied era history does not reach the current
+slot the clock emits no tick and reports entering and leaving that state once
+each, rather than an error per slot. Blockfrost epoch/era end timestamps are
 calculated as interval endpoints from cached epoch durations rather than
 treating the exclusive end as a forecastable header slot.
 When the next-epoch nonce becomes stable before that header horizon opens,

@@ -15,11 +15,18 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -693,4 +700,92 @@ func TestSlotClockStopClosesSubscriberChannels(t *testing.T) {
 	clock.mu.RLock()
 	assert.Nil(t, clock.subscribers)
 	clock.mu.RUnlock()
+}
+
+// horizonBoundProvider resolves slot/time arithmetic but refuses to resolve an
+// epoch until it is armed, standing in for a node whose applied era history has
+// not yet reached the current wall-clock slot.
+type horizonBoundProvider struct {
+	*mockSlotTimeProvider
+	resolved atomic.Bool
+}
+
+func (p *horizonBoundProvider) SlotToEpoch(slot uint64) (EpochInfo, error) {
+	if !p.resolved.Load() {
+		return EpochInfo{}, fmt.Errorf(
+			"slot is outside the known epoch range: %w",
+			hardfork.ErrPastHorizon,
+		)
+	}
+	return p.mockSlotTimeProvider.SlotToEpoch(slot)
+}
+
+// A node syncing from genesis on a live network sits past the era horizon for
+// the whole catch-up. That state must not be reported as an error per slot (the
+// field-reported "failed to build slot tick" spam), and no tick may be emitted
+// with a fabricated epoch, since Epoch/IsEpochStart drive subscriber
+// epoch-boundary work.
+func TestSlotClockPastHorizonIsNotAnErrorAndResumes(t *testing.T) {
+	var logBuf bytes.Buffer
+	logMu := &sync.Mutex{}
+	provider := &horizonBoundProvider{
+		mockSlotTimeProvider: newMockSlotTimeProvider(
+			time.Now(), 20*time.Millisecond, 100,
+		),
+	}
+	cfg := DefaultSlotClockConfig()
+	cfg.Logger = slog.New(slog.NewTextHandler(
+		&lockedWriter{mu: logMu, w: &logBuf},
+		&slog.HandlerOptions{Level: slog.LevelInfo},
+	))
+
+	clock := NewSlotClock(provider, cfg)
+	ch := clock.Subscribe()
+	clock.Start(t.Context())
+	defer clock.Stop()
+
+	readLog := func() string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return logBuf.String()
+	}
+
+	// While past the horizon: the transition is announced once, no ticks.
+	require.Eventually(t, func() bool {
+		return strings.Contains(readLog(), "behind the wall clock")
+	}, 3*time.Second, 10*time.Millisecond,
+		"the clock should report the past-horizon state once")
+	testutil.RequireNoReceive(
+		t, ch, 100*time.Millisecond,
+		"no tick may be emitted while the epoch is unknowable",
+	)
+	assert.NotContains(t, readLog(), "level=ERROR",
+		"a past-horizon slot is expected during catch-up, not an error")
+	assert.Equal(t, 1,
+		strings.Count(readLog(), "behind the wall clock"),
+		"the transition should be reported once, not once per slot")
+
+	// Once era history covers the slot, ticks resume and that is announced.
+	provider.resolved.Store(true)
+	tick := testutil.RequireReceive(
+		t, ch, 3*time.Second, "tick after era history catches up",
+	)
+	assert.NotZero(t, tick.Slot)
+	require.Eventually(t, func() bool {
+		return strings.Contains(readLog(), "resuming slot ticks")
+	}, 3*time.Second, 10*time.Millisecond,
+		"recovery should be reported once")
+	assert.NotContains(t, readLog(), "level=ERROR")
+}
+
+// lockedWriter serializes writes from the clock goroutine against test reads.
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
