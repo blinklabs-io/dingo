@@ -35,9 +35,7 @@ import (
 
 var sharedMemoryDBSequence atomic.Uint64
 
-// NewSQLStore opens the direct database/sql SQLite implementation. Provider
-// registration switches to this constructor only after the full metadata
-// contract has moved to sqlstore.
+// NewSQLStore opens the shared database/sql SQLite implementation.
 func NewSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
