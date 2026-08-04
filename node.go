@@ -40,6 +40,7 @@ import (
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -83,6 +84,7 @@ type Node struct {
 	leiosPipelineManager             *leios.PipelineManager
 	bark                             *bark.Bark
 	historyExpiry                    *historyexpiry.Pruner
+	koiosParityObserver              *koiosparity.Observer
 	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	midnightIndexer                  *midnightindexer.Indexer
@@ -834,6 +836,29 @@ func (n *Node) Run(ctx context.Context) error {
 		if err := n.midnightIndexer.Start(); err != nil {
 			return fmt.Errorf("starting midnight indexer: %w", err)
 		}
+	}
+
+	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
+	// (and, critically, subscribed to event.EpochTransitionEventType) before
+	// n.ledgerState.Start below, whose slot-clock/block-processing
+	// goroutines are what can first publish that event — see
+	// startKoiosParityObserver's doc comment (node_koiosparity.go).
+	if n.config.koiosParity.Enabled {
+		if err := n.startKoiosParityObserver(); err != nil {
+			return fmt.Errorf("starting koios parity observer: %w", err)
+		}
+		started = append(started, func() {
+			stopCtx, cancel := context.WithTimeout(
+				context.Background(), n.configuredShutdownTimeout(),
+			)
+			defer cancel()
+			if err := n.koiosParityObserver.Stop(stopCtx); err != nil {
+				n.config.logger.Error(
+					"failed to stop koios parity observer during cleanup",
+					"error", err,
+				)
+			}
+		})
 	}
 
 	// Start ledger.

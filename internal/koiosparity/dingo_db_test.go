@@ -45,6 +45,7 @@ func openTestDingoDB(t *testing.T) (*DingoDB, *gorm.DB) {
 		&models.RewardAdaPots{},
 		&models.RewardPoolInput{},
 		&models.RewardPoolOutput{},
+		&models.RewardAccountOutput{},
 	))
 	return &DingoDB{db: db}, db
 }
@@ -256,6 +257,35 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, data)
 	require.Equal(t, "42000000", data.TotalActiveStake)
+}
+
+// TestDingoDBGetRewardAccountOutputs is a symmetry check with
+// DatabaseSource's equivalent test (source_test.go's
+// TestDatabaseSourceGetRewardAccountOutputs): both RewardParitySource
+// implementations must return the same committed reward_account_output rows
+// for an epoch, since #3097's per-account parity check will read either one
+// interchangeably.
+func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
+	dingo, gdb := openTestDingoDB(t)
+	stakingKey := testPoolKeyHash(t, 0x11)
+	poolKeyHash := testPoolKeyHash(t, 0x22)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       8,
+		StakingKey:  stakingKey,
+		PoolKeyHash: poolKeyHash,
+		RewardType:  "member",
+		Amount:      types.Uint64(55),
+		Spendable:   true,
+	}).Error)
+
+	rows, err := dingo.GetRewardAccountOutputs(context.Background(), 8)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, types.Uint64(55), rows[0].Amount)
+
+	rows, err = dingo.GetRewardAccountOutputs(context.Background(), 9)
+	require.NoError(t, err)
+	require.Empty(t, rows)
 }
 
 // TestPoolKeyHashRoundTrip is a sanity check that testPoolKeyHash produces a

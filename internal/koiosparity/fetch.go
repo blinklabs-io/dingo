@@ -320,6 +320,41 @@ loop:
 	return result, nil
 }
 
+// FetchEpochWithClient fetches and caches Koios reference data for exactly
+// one epoch using an already-open cache and Koios client, without reopening
+// the cache database or reconstructing a Koios client — the primitive Fetch's
+// per-epoch worker pool uses internally (fetchEpoch), exported so a
+// long-lived caller (the dingo #3098 in-process epoch observer, which fetches
+// one newly closed epoch at a time as epoch.transition events arrive rather
+// than batching a whole historical range) can reuse one cache handle and one
+// Koios client across many calls.
+//
+// Every request Koios needs beyond the target epoch's own history — the
+// full historical pool ID list and each pool's first-active epoch — is
+// re-resolved on every call rather than cached across epochs by this
+// function. That is a deliberate simplicity trade-off for the one-off
+// validation use case this serves; efficient reuse/pagination across many
+// FetchEpochWithClient calls is #3099's chunked/resumable fetch scope, not
+// this function's.
+func FetchEpochWithClient(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	logger *slog.Logger,
+) (int, error) {
+	poolIDs, err := koios.GetAllHistoricalPoolIDs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get historical pool IDs: %w", err)
+	}
+	firstActiveEpochs, err := koios.GetPoolFirstActiveEpochs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get pool first-active epochs: %w", err)
+	}
+	return fetchEpoch(ctx, koios, cache, network, epoch, poolIDs, firstActiveEpochs, logger)
+}
+
 // fetchEpoch fetches and caches one epoch's worth of Koios data.
 //
 // Pool rows are written before epoch info so the resume cursor

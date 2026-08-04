@@ -79,6 +79,35 @@ type HistoryExpiryConfig struct {
 	Frequency time.Duration
 }
 
+// KoiosParityConfig controls the optional in-process Koios reward-parity
+// observer (dingo #3098). When Enabled, Run() subscribes an observer to the
+// node's own EventBus (event.EpochTransitionEventType) that validates each
+// newly closed epoch's committed reward state directly against Koios
+// reference data as the node advances — see internal/koiosparity and
+// ARCHITECTURE.md's "Koios Parity Tracker" section. This is a one-off
+// validation aid, not a permanent subsystem; leave Enabled false for normal
+// node operation.
+type KoiosParityConfig struct {
+	// Enabled subscribes the observer to epoch.transition when true.
+	Enabled bool
+	// Network is the Koios network to validate against ("preview" or
+	// "preprod"). Empty defaults to this Config's own Network.
+	Network string
+	// CachePath is the Koios reference cache.db path. Empty defaults to
+	// {DatabasePath}/.koios/cache.db.
+	CachePath string
+	// APIKey is the Koios Bearer token for higher-rate-limit access.
+	APIKey string
+	// Strict stops/cancels the node on the first Koios/tool error or exact
+	// parity mismatch rather than logging it and continuing normal
+	// operation.
+	Strict bool
+	// GraceHours is the window after an epoch closes during which a missing
+	// Dingo-side row is treated as reference/sync lag rather than a
+	// failure. 0 selects the default (24).
+	GraceHours int
+}
+
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
 // Zero values use the internal fetcher defaults.
 type OffchainMetadataConfig struct {
@@ -147,6 +176,7 @@ type Config struct {
 	barkHost                                                                            string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
+	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
@@ -482,6 +512,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			Chainsync:          internalconfig.DefaultChainsyncConfig(),
 			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
 			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
+			KoiosParity:        internalconfig.DefaultKoiosParityConfig(),
 			Logging:            internalconfig.DefaultLoggingConfig(),
 			Midnight:           internalconfig.DefaultMidnightConfig(),
 			CORSAllowedOrigins: []string{"*"},
@@ -529,6 +560,14 @@ func (c *Config) syncCompatFields() {
 		c.cfg.Plugins.Mempool.Config["capacity"] = int64(internalconfig.DefaultMempoolCapacityLeios)
 	}
 	c.historyExpiry = HistoryExpiryConfig{Enabled: c.cfg.HistoryExpiry.Enabled, Frequency: c.cfg.HistoryExpiry.Frequency}
+	c.koiosParity = KoiosParityConfig{
+		Enabled:    c.cfg.KoiosParity.Enabled,
+		Network:    c.cfg.KoiosParity.Network,
+		CachePath:  c.cfg.KoiosParity.CachePath,
+		APIKey:     c.cfg.KoiosParity.APIKey,
+		Strict:     c.cfg.KoiosParity.Strict,
+		GraceHours: c.cfg.KoiosParity.GraceHours,
+	}
 	c.midnight = MidnightConfig{Port: c.cfg.Midnight.Port, Host: c.cfg.Midnight.Host, CNightPolicyID: c.cfg.Midnight.CNightPolicyID, CNightAssetName: c.cfg.Midnight.CNightAssetName, MappingValidatorAddress: c.cfg.Midnight.MappingValidatorAddress, AuthTokenPolicyID: c.cfg.Midnight.AuthTokenPolicyID, AuthTokenAssetName: c.cfg.Midnight.AuthTokenAssetName, CommitteeCandidateAddress: c.cfg.Midnight.CommitteeCandidateAddress, TechnicalCommitteeAddress: c.cfg.Midnight.TechnicalCommitteeAddress, TechnicalCommitteePolicyID: c.cfg.Midnight.TechnicalCommitteePolicyID, CouncilAddress: c.cfg.Midnight.CouncilAddress, CouncilPolicyID: c.cfg.Midnight.CouncilPolicyID, PermissionedCandidatePolicy: c.cfg.Midnight.PermissionedCandidatePolicy}
 	c.shutdownTimeout, c.chainsyncMaxClients = 0, c.cfg.Chainsync.MaxClients
 	if c.cfg.ShutdownTimeout != "" {
@@ -1216,6 +1255,26 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 		c.cfg.HistoryExpiry = internalconfig.HistoryExpiryConfig{
 			Enabled:   cfg.Enabled,
 			Frequency: cfg.Frequency,
+		}
+	}
+}
+
+// WithKoiosParity configures the optional in-process Koios reward-parity
+// observer (dingo #3098). See KoiosParityConfig's doc comment. This is how a
+// library caller (or internal/node's composition of a real dingo.yaml/env
+// config) enables live-driven parity validation for the node Run() starts —
+// the one-off validation run and a normal sync share the same process and
+// authoritative state path rather than requiring a second, separately
+// synced Dingo instance.
+func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
+			Enabled:    cfg.Enabled,
+			Network:    cfg.Network,
+			CachePath:  cfg.CachePath,
+			APIKey:     cfg.APIKey,
+			Strict:     cfg.Strict,
+			GraceHours: cfg.GraceHours,
 		}
 	}
 }

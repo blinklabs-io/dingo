@@ -357,6 +357,24 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	return m, nil
 }
 
+// GetRewardAccountOutputs returns every per-account reward calculation
+// output row Dingo committed for epoch, straight from reward_account_output.
+// Not yet consumed by any comparison — #3097 (per-account exact parity) is
+// what wires this up; it exists on DingoDB now so the standalone-CLI and
+// in-process (DatabaseSource) implementations of RewardParitySource stay
+// symmetric. ctx is forwarded to the DB driver so a cancelled context aborts
+// the query.
+func (d *DingoDB) GetRewardAccountOutputs(
+	ctx context.Context,
+	epoch uint64,
+) ([]*models.RewardAccountOutput, error) {
+	var rows []*models.RewardAccountOutput
+	if err := d.db.WithContext(ctx).Where("epoch = ?", epoch).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
+	}
+	return rows, nil
+}
+
 // PoolKeyHashHex converts a pool bech32 ID ("pool1…") to its lower-hex
 // 28-byte key hash. The hex string matches the keys in GetPoolEpochDataMap.
 func PoolKeyHashHex(bech32 string) (string, error) {
