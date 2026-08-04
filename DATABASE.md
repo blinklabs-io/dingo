@@ -828,11 +828,15 @@ boundary: after resolving the producer block that owns a blob-recovered UTxO, it
 refuses (`ErrUtxoNotFound`) if that block is not the block currently indexed on
 the applied primary chain at its height. The append-only blob store retains
 abandoned-fork blocks, so a producer present in the blob is not necessarily on
-the applied chain; the membership check (`BlockByPoint` locates the producer,
-`BlockByIndex` reveals which block is canonical at that height, mirroring
-`LedgerState.primaryChainContainsPoint`) refuses only the off-chain case, so a
-legitimate on-chain producer whose `utxo` row is merely absent is still
-recovered. This check is not applied below the boundary or on the Mithril
+the applied chain; the membership check (`BlockByIndex` reveals which block is
+canonical at the producer's height and a hash mismatch means it was abandoned,
+mirroring `LedgerState.primaryChainContainsPoint`) refuses only the off-chain
+case, so a legitimate on-chain producer whose `utxo` row is merely absent is
+still recovered. The producer's block ID comes from the recovery path that
+already loaded it — the blob's block metadata for offset-format entries, the
+resolved `models.Block` otherwise — so the check adds one `BlockByIndex` lookup
+rather than re-downloading the producer's full CBOR from cold storage once per
+recovered input. This check is not applied below the boundary or on the Mithril
 gap-closure recovery path, where imported history need not carry a block-index
 entry for the producer.
 

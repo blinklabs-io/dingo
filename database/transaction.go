@@ -759,21 +759,21 @@ func (d *Database) ensureGapConsumedUtxos(
 // chain at that height. The append-only blob store retains blocks from
 // abandoned forks, so a producer found in the blob is not necessarily on the
 // applied chain. Mirrors LedgerState.primaryChainContainsPoint at the database
-// layer (BlockByPoint locates the block, BlockByIndex reveals which block is
-// canonical at that height).
+// layer: BlockByIndex reveals which block is canonical at the producer's
+// height, and a hash mismatch means the producer was abandoned.
+//
+// The producer's block ID is supplied by the caller rather than resolved here.
+// Every recovery path has already loaded the producer -- from the blob's block
+// metadata in the offset case, or as a *models.Block in the others -- so
+// looking it up again by point would download the same full block CBOR from
+// cold cloud storage a second time, once per recovered input, on exactly the
+// Mithril catch-up path this check runs on.
 func (d *Database) recoveredProducerOnPrimaryChain(
 	txn *Txn,
-	slot uint64,
+	producerID uint64,
 	hash []byte,
 ) (bool, error) {
-	block, err := BlockByPointTxn(txn, ocommon.Point{Slot: slot, Hash: hash})
-	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	indexed, err := d.BlockByIndex(block.ID, txn)
+	indexed, err := d.BlockByIndex(producerID, txn)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return false, nil
@@ -794,11 +794,12 @@ func (d *Database) recoveredProducerOnPrimaryChain(
 // carry a block-index entry for the producer.
 func (d *Database) refuseOffPrimaryChainProducer(
 	txn *Txn,
+	producerID uint64,
 	slot uint64,
 	hash []byte,
 	input lcommon.TransactionInput,
 ) error {
-	onChain, err := d.recoveredProducerOnPrimaryChain(txn, slot, hash)
+	onChain, err := d.recoveredProducerOnPrimaryChain(txn, producerID, hash)
 	if err != nil {
 		return fmt.Errorf(
 			"check producer primary-chain membership for %s: %w",
@@ -850,7 +851,7 @@ func (d *Database) recoverConsumedUtxo(
 		if err != nil {
 			return nil, fmt.Errorf("decode utxo offset: %w", err)
 		}
-		blockCbor, _, err := blob.GetBlock(
+		blockCbor, producerMeta, err := blob.GetBlock(
 			blobTxn,
 			offset.BlockSlot,
 			offset.BlockHash[:],
@@ -871,7 +872,11 @@ func (d *Database) recoverConsumedUtxo(
 		addedSlot = offset.BlockSlot
 		if enforcePrimaryChain {
 			if err := d.refuseOffPrimaryChainProducer(
-				txn, offset.BlockSlot, offset.BlockHash[:], input,
+				txn,
+				producerMeta.ID,
+				offset.BlockSlot,
+				offset.BlockHash[:],
+				input,
 			); err != nil {
 				return nil, err
 			}
@@ -900,10 +905,11 @@ func (d *Database) recoverConsumedUtxo(
 		}
 		addedSlot = slot
 		if enforcePrimaryChain {
-			// The legacy metadata slot lookup does not yield the producer
-			// block hash, so resolve the producer block to check primary-chain
-			// membership. Legacy raw-CBOR blob entries do not occur past the
-			// Mithril boundary in practice, so this extra fetch is exceptional.
+			// The legacy metadata slot lookup yields neither the producer
+			// block hash nor its ID, so resolve the producer block to check
+			// primary-chain membership. Legacy raw-CBOR blob entries do not
+			// occur past the Mithril boundary in practice, so this extra
+			// lookup is exceptional.
 			prodBlock, bErr := utxoRecoveryBlockForTx(
 				txn.DB(), txn, ledgerInputIDBytes(input),
 			)
@@ -916,7 +922,7 @@ func (d *Database) recoverConsumedUtxo(
 				return nil, ErrUtxoNotFound
 			}
 			if err := d.refuseOffPrimaryChainProducer(
-				txn, prodBlock.Slot, prodBlock.Hash, input,
+				txn, prodBlock.ID, prodBlock.Slot, prodBlock.Hash, input,
 			); err != nil {
 				return nil, err
 			}
@@ -952,7 +958,7 @@ func (d *Database) recoverConsumedUtxo(
 		addedSlot = block.Slot
 		if enforcePrimaryChain {
 			if err := d.refuseOffPrimaryChainProducer(
-				txn, block.Slot, block.Hash, input,
+				txn, block.ID, block.Slot, block.Hash, input,
 			); err != nil {
 				return nil, err
 			}
