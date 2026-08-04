@@ -159,5 +159,46 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		return nil, err
 	}
 	summary.Transition = transitionInfo
+
+	// When a known transition is armed, BuildSummary bounds the current era at
+	// the announced epoch boundary (mkUpperBound) and appends no successor era.
+	// That leaves the summary's last era bounded, so eraForSlot / SlotToEpoch
+	// return ErrPastHorizon for every slot at or past the boundary. The header
+	// forecast-horizon gate in verify_header.go then hard-rejects the first
+	// header of the post-boundary epoch, and the node can never apply the block
+	// that would consume the transition and extend era history — a liveness
+	// deadlock at the boundary. Unlike the NtC era-history query, which serves a
+	// point-in-time answer and is intentionally bounded, live header
+	// verification must see the horizon extend at least one epoch past a known
+	// transition, because the rollover is deterministic within the stability
+	// window. Append the successor era as an open (unbounded) era starting at
+	// the announced boundary so the horizon covers the first post-boundary
+	// epoch. Use the next era's params from the shape; when the current era is
+	// the last modeled era (the transition re-arms an era the ledger already
+	// occupies), reuse the current era's params — epoch length and slot length
+	// are constant across post-Byron eras, which is all SlotToEpoch needs.
+	// Mirrors the successor-era append in Haskell HFC reconstructSummary.
+	if transitionInfo.State == hardfork.TransitionKnown && len(summary.Eras) > 0 {
+		bounded := summary.Eras[len(summary.Eras)-1]
+		if bounded.End != nil {
+			succEraID := bounded.EraID
+			succParams := bounded.Params
+			if next, ok := shape.EraForID(bounded.EraID + 1); ok {
+				succEraID = next.EraID
+				succParams = next.Params
+			}
+			summary.Eras = append(summary.Eras, hardfork.EraSummary{
+				EraID: succEraID,
+				Start: *bounded.End,
+				End:   nil,
+				Params: hardfork.EraParams{
+					EpochSize:     succParams.EpochSize,
+					SlotLength:    succParams.SlotLength,
+					SafeZoneSlots: succParams.SafeZoneSlots,
+					GenesisWindow: succParams.GenesisWindow,
+				},
+			})
+		}
+	}
 	return &summary, nil
 }

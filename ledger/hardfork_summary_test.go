@@ -191,11 +191,96 @@ func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 		time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC),
 		sum.SystemStart,
 	)
-	require.Len(t, sum.Eras, 1)
+	// A known transition bounds the current era at the announced epoch
+	// boundary and appends an open successor era so the header forecast
+	// horizon still covers the first post-boundary epoch (see HardForkSummary).
+	require.Len(t, sum.Eras, 2)
 	require.NotNil(t, sum.Eras[0].End)
 	assert.Zero(t, sum.Eras[0].Params.SafeZoneSlots)
 	assert.Equal(t, uint64(700), sum.Eras[0].End.Slot)
 	assert.Equal(t, uint64(7), sum.Eras[0].End.Epoch)
+	// The appended successor era is open (unbounded) and starts exactly at the
+	// announced boundary, so SlotToEpoch resolves slots in the first
+	// post-boundary epoch instead of returning ErrPastHorizon.
+	assert.Equal(t, *sum.Eras[0].End, sum.Eras[1].Start)
+	assert.Nil(t, sum.Eras[1].End)
+	info, err := sum.SlotToEpoch(700)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7), info.Epoch)
+}
+
+// TestHardForkSummary_KnownTransitionExtendsHeaderHorizon is a regression test
+// for the header forecast-horizon deadlock: a pending hard-fork initiation arms
+// TransitionKnown before an epoch boundary, BuildSummary bounds the current era
+// at that boundary, and the header verification gate then rejected the first
+// header of the post-boundary epoch as past-horizon, so the node could never
+// apply the block that would consume the transition and extend era history.
+// HardForkSummary must append an open successor era at the boundary so the
+// first post-boundary epoch stays within the forecast horizon. Reproduces the
+// musashi epoch 6 to 7 wedge in miniature.
+func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
+	const (
+		epochSize    = uint64(100)
+		startEpoch   = uint64(4)
+		startSlot    = uint64(400)
+		knownEpoch   = uint64(7)
+		boundarySlot = uint64(700) // first slot of epoch 7 (400 + (7-4)*100)
+	)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       startEpoch,
+			StartSlot:     startSlot,
+			SlotLength:    1_000,
+			LengthInSlots: 100,
+			EraId:         1,
+		}},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
+		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(688, []byte("tip"))},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	// A single modeled era: the ledger already occupies the last era, so the
+	// appended successor era reuses the current era's params.
+	shape := hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     epochSize,
+				SlotLength:    time.Second,
+				SafeZoneSlots: 0,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+
+	// The first block of the post-boundary epoch, and slots within it, must
+	// resolve to that epoch rather than returning ErrPastHorizon.
+	for _, slot := range []uint64{
+		boundarySlot,
+		boundarySlot + 10,
+		boundarySlot + epochSize - 1,
+	} {
+		info, err := sum.SlotToEpoch(slot)
+		require.NoErrorf(t, err, "slot %d must be within horizon", slot)
+		assert.Equalf(t, knownEpoch, info.Epoch, "slot %d epoch", slot)
+	}
+
+	// The successor era is open and reuses the current (last modeled) era's
+	// params; the bounded era still ends exactly at the announced boundary.
+	require.Len(t, sum.Eras, 2)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(t, boundarySlot, sum.Eras[0].End.Slot)
+	assert.Equal(t, *sum.Eras[0].End, sum.Eras[1].Start)
+	assert.Nil(t, sum.Eras[1].End)
+	assert.Equal(t, sum.Eras[0].EraID, sum.Eras[1].EraID)
+	assert.Equal(t, sum.Eras[0].Params.EpochSize, sum.Eras[1].Params.EpochSize)
+	assert.Equal(t, sum.Eras[0].Params.SlotLength, sum.Eras[1].Params.SlotLength)
 }
 
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {

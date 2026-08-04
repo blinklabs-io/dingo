@@ -1505,13 +1505,20 @@ Before resolving or eagerly forecasting an epoch for a live header,
 The in-memory summary uses the same configured era safe zone and
 `TransitionInfo` as the NtC era-history query: an unknown transition is bounded
 from the applied tip by the era's stability window (`3k/f` for Shelley and
-later), a known transition is bounded at the announced era boundary, and an
-impossible transition keeps the same rolling safe-zone bound so live slot
-processing can cross a confirmed same-era epoch boundary. (The point-in-time
-NtC query may conservatively stop its reported range at that confirmed
-boundary.) A header at or past the live bound fails with
-`hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
-epoch/nonce cache. Candidate fork blockfetch begins after fork resolution has
+later) and an impossible transition keeps the same rolling safe-zone bound so
+live slot processing can cross a confirmed same-era epoch boundary. A known
+transition is bounded at the announced era boundary for the point-in-time NtC
+query, but the live summary appends an open successor era starting at that
+boundary so the header horizon extends one epoch past the transition. This is
+required for liveness: the rollover into the first post-boundary epoch is
+deterministic within the stability window, so its header can be verified, and
+without the extra epoch the gate would reject that first header and the node
+could never apply the block that consumes the transition and extends era
+history (a boundary deadlock). The successor era uses the next era's params from
+the configured shape, falling back to the current era's params when the ledger
+already occupies the last modeled era. A header past this extended live bound
+fails with `hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the
+forecasted epoch/nonce cache. Candidate fork blockfetch begins after fork resolution has
 rolled the applied chain back to its common ancestor, so permitted epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
