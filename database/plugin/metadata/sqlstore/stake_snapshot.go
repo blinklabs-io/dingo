@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
@@ -157,6 +158,109 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 		ret = append(ret, snapshot)
 	}
 	return ret, nil
+}
+
+// poolStakeSnapshotColumns is the projection poolStakeSnapshotFromSQLite
+// expects, in the order it scans them.
+const poolStakeSnapshotColumns = `id, epoch, snapshot_type, pool_key_hash,
+total_stake, stake_denominator, delegator_count, captured_slot,
+calculation_version, reward_account_auto_vote,
+reward_account_auto_vote_resolved`
+
+// GetPoolStakeSnapshotsForPools returns the snapshot rows for just the pools
+// named, for a caller that wants a bounded subset rather than a whole epoch.
+//
+// A named pool with no row is simply absent from the result: the snapshot
+// holds a row per pool with stake, so a pool it does not hold has no stake in
+// that snapshot rather than a stake of zero.
+//
+// The read is chunked over the dialect's parameter limit rather than issued
+// per pool, so a large filter costs a bounded number of round trips instead of
+// one per pool named.
+func (s *Store) GetPoolStakeSnapshotsForPools(
+	epoch uint64,
+	snapshotType string,
+	poolKeyHashes [][]byte,
+	txn types.Txn,
+) ([]*models.PoolStakeSnapshot, error) {
+	ret := []*models.PoolStakeSnapshot{}
+	if len(poolKeyHashes) == 0 {
+		return ret, nil
+	}
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	// Two parameters are spent on the epoch and snapshot type before any pool
+	// key hash is bound.
+	chunkSize := max(s.dialect.ParameterLimit()-2, 1)
+	for start := 0; start < len(poolKeyHashes); start += chunkSize {
+		end := min(start+chunkSize, len(poolKeyHashes))
+		chunk := poolKeyHashes[start:end]
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, sqlEpoch, snapshotType)
+		placeholders := make([]string, 0, len(chunk))
+		for _, hash := range chunk {
+			placeholders = append(placeholders, "?")
+			args = append(args, hash)
+		}
+		query := "SELECT " + poolStakeSnapshotColumns +
+			" FROM pool_stake_snapshot" +
+			" WHERE epoch = ? AND snapshot_type = ?" +
+			" AND pool_key_hash IN (" +
+			strings.Join(placeholders, ",") + ") ORDER BY id"
+		chunkRows, err := s.scanPoolStakeSnapshots(db, query, args)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, chunkRows...)
+	}
+	return ret, nil
+}
+
+func (s *Store) scanPoolStakeSnapshots(
+	db queryer,
+	query string,
+	args []any,
+) ([]*models.PoolStakeSnapshot, error) {
+	rows, err := db.QueryContext(
+		context.Background(),
+		s.dialect.Rebind(query),
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pool stake snapshots for pools: %w", err)
+	}
+	defer rows.Close()
+	ret := []*models.PoolStakeSnapshot{}
+	for rows.Next() {
+		var row sqlitequery.PoolStakeSnapshot
+		if err := rows.Scan(
+			&row.ID,
+			&row.Epoch,
+			&row.SnapshotType,
+			&row.PoolKeyHash,
+			&row.TotalStake,
+			&row.StakeDenominator,
+			&row.DelegatorCount,
+			&row.CapturedSlot,
+			&row.CalculationVersion,
+			&row.RewardAccountAutoVote,
+			&row.RewardAccountAutoVoteResolved,
+		); err != nil {
+			return nil, err
+		}
+		snapshot, err := poolStakeSnapshotFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, snapshot)
+	}
+	return ret, rows.Err()
 }
 
 func (s *Store) GetTotalActiveStake(

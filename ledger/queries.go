@@ -723,27 +723,32 @@ func (ls *LedgerState) poolSnapshotStake(
 // the snapshot holds, so a caller naming one it does not hold has to see it
 // missing rather than be handed a fraction of zero for a pool the node will
 // never elect.
+//
+// The rows come back in one bounded read rather than a query per pool. Both
+// costs are worth avoiding here: reading the whole snapshot to discard most of
+// it does work the request did not ask for, while a per-pool loop lets the
+// caller's filter length decide how many round trips the node makes.
 func (ls *LedgerState) markStakeForPools(
 	epoch uint64,
 	poolIds []ledger.PoolId,
 	txn types.Txn,
 ) (map[string]uint64, error) {
-	byPool := make(map[string]uint64, len(poolIds))
+	hashes := make([][]byte, 0, len(poolIds))
 	for _, poolId := range poolIds {
-		hash := lcommon.PoolKeyHash(poolId).Bytes()
-		snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
-			epoch,
-			snapshotTypeMark,
-			hash,
-			txn,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if snapshot == nil {
-			continue
-		}
-		byPool[string(hash)] = uint64(snapshot.TotalStake)
+		hashes = append(hashes, lcommon.PoolKeyHash(poolId).Bytes())
+	}
+	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsForPools(
+		epoch,
+		snapshotTypeMark,
+		hashes,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	byPool := make(map[string]uint64, len(snapshots))
+	for _, snapshot := range snapshots {
+		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
 	return byPool, nil
 }

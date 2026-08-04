@@ -1666,6 +1666,17 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.PoolStakeSnapshot, error)
 
+	// GetPoolStakeSnapshotsForPools retrieves the snapshot rows for just the
+	// pools named, for a caller wanting a bounded subset rather than a whole
+	// epoch. A pool the snapshot has no row for is absent from the result.
+	// The read is chunked rather than issued once per pool named.
+	GetPoolStakeSnapshotsForPools(
+		uint64, // epoch
+		string, // snapshotType
+		[][]byte, // poolKeyHashes
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
 	// GetTotalActiveStake returns the sum of all pool stakes for an epoch.
 	GetTotalActiveStake(
 		uint64, // epoch

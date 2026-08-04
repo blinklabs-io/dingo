@@ -1763,11 +1763,14 @@ reads — rather than from live stake, so a schedule computed from it agrees wit
 what the node will accept. Each pool's VRF key hash is resolved through
 `registeredPoolVrfKeyHash`, the same function header validation uses, so the
 key the reply names is the key a block must carry to be accepted. A query
-carrying a pool filter reads only the snapshot rows for the pools it names, the
-same split `GetStakeSnapshots` makes; the unfiltered form — the one
-`leadership-schedule` sends — takes the single bulk read instead. A requested
-pool with no row in the snapshot is omitted rather than reported at zero stake,
-matching the node's restriction of the distribution to the requested keys.
+carrying a pool filter reads only the snapshot rows for the pools it names,
+through `GetPoolStakeSnapshotsForPools`; the unfiltered form — the one
+`leadership-schedule` sends — takes the whole-epoch read instead. Neither is a
+query per pool: the filtered read is chunked over the backend's parameter
+limit, so what the caller's filter length decides is how many rows come back,
+not how many round trips the node makes. A requested pool with no row in the
+snapshot is omitted rather than reported at zero stake, matching the node's
+restriction of the distribution to the requested keys.
 
 ## Chain Management
 
