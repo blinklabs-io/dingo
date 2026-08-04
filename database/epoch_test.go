@@ -218,8 +218,8 @@ func TestGetEpochBySlot_IsBoundedQuery(t *testing.T) {
 
 // TestGetEpochBySlot_NotFoundReturnsNilError confirms the metadata store
 // reports "no matching epoch" as (nil, nil), matching the nil check the
-// fixed EpochBySlot relies on (as opposed to gorm.ErrRecordNotFound
-// leaking out, which would need its own translation).
+// fixed EpochBySlot relies on rather than leaking a driver-specific
+// sql.ErrNoRows value to callers.
 func TestGetEpochBySlot_NotFoundReturnsNilError(t *testing.T) {
 	db := openTestDB(t)
 	seedEpoch(t, db, 0, 0, 100)

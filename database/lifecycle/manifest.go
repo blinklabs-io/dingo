@@ -103,9 +103,8 @@ type Manifest struct {
 	MetadataPlugin string `json:"metadataPlugin"`
 
 	// DingoVersion records the dingo build that produced the backup, so
-	// a restore across incompatible dingo versions is at least
-	// detectable rather than failing GORM AutoMigrate in a confusing
-	// way partway through.
+// a restore across incompatible dingo versions is at least detectable rather
+// than failing schema migration in a confusing way partway through.
 	DingoVersion string `json:"dingoVersion"`
 
 	// BlobBytes/MetadataBytes are informational (display, progress),

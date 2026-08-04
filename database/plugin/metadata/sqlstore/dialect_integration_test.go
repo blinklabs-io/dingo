@@ -6,15 +6,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 )
@@ -34,8 +34,12 @@ func TestPostgresSQLStoreIntegration(t *testing.T) {
 		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
 		_ = admin.Close()
 	})
-	dsn += "&options=-csearch_path%3D" + schema
-	testSQLStoreIntegration(t, "pgx", dsn, "postgres")
+	testSQLStoreIntegration(
+		t,
+		"pgx",
+		postgresDSNWithSearchPath(t, dsn, schema),
+		"postgres",
+	)
 }
 
 func TestMySQLSQLStoreIntegration(t *testing.T) {
@@ -53,8 +57,12 @@ func TestMySQLSQLStoreIntegration(t *testing.T) {
 		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
 		_ = admin.Close()
 	})
-	dsn = strings.Replace(dsn, "/dingo_test?", "/"+database+"?", 1)
-	testSQLStoreIntegration(t, "mysql", dsn, "mysql")
+	testSQLStoreIntegration(
+		t,
+		"mysql",
+		mysqlDSNWithDatabase(t, dsn, database),
+		"mysql",
+	)
 }
 
 func TestPostgresSQLStoreAdoptsUnversionedSchema(t *testing.T) {
@@ -72,7 +80,12 @@ func TestPostgresSQLStoreAdoptsUnversionedSchema(t *testing.T) {
 		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
 		_ = admin.Close()
 	})
-	testSQLStoreAdoptionIntegration(t, "pgx", dsn+"&options=-csearch_path%3D"+schema, "postgres")
+	testSQLStoreAdoptionIntegration(
+		t,
+		"pgx",
+		postgresDSNWithSearchPath(t, dsn, schema),
+		"postgres",
+	)
 }
 
 func TestMySQLSQLStoreAdoptsUnversionedSchema(t *testing.T) {
@@ -90,7 +103,30 @@ func TestMySQLSQLStoreAdoptsUnversionedSchema(t *testing.T) {
 		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
 		_ = admin.Close()
 	})
-	testSQLStoreAdoptionIntegration(t, "mysql", strings.Replace(dsn, "/dingo_test?", "/"+database+"?", 1), "mysql")
+	testSQLStoreAdoptionIntegration(
+		t,
+		"mysql",
+		mysqlDSNWithDatabase(t, dsn, database),
+		"mysql",
+	)
+}
+
+func postgresDSNWithSearchPath(t *testing.T, dsn, schema string) string {
+	t.Helper()
+	parsed, err := url.Parse(dsn)
+	require.NoError(t, err)
+	query := parsed.Query()
+	query.Set("options", "-csearch_path="+schema)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func mysqlDSNWithDatabase(t *testing.T, dsn, database string) string {
+	t.Helper()
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	require.NoError(t, err)
+	parsed.DBName = database
+	return parsed.FormatDSN()
 }
 
 func testSQLStoreAdoptionIntegration(t *testing.T, driver, dsn, dialectName string) {

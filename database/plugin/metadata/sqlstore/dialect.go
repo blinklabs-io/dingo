@@ -31,7 +31,6 @@ type Dialect interface {
 	QuoteIdentifier(string) string
 	BooleanLiteral(bool) string
 	ParameterLimit() int
-	SupportsReturning() bool
 	BeginOptions(readOnly bool) *sql.TxOptions
 	SetBulkMode(context.Context, Execer) error
 	RestoreNormalMode(context.Context, Execer) error
@@ -50,7 +49,6 @@ type dialect struct {
 	name              string
 	quote             byte
 	parameterLimit    int
-	supportsReturning bool
 	rebind            func(string) string
 	beginOptions      func(bool) *sql.TxOptions
 	setBulk           func(context.Context, Execer) error
@@ -80,10 +78,6 @@ func (d dialect) BooleanLiteral(value bool) string {
 
 func (d dialect) ParameterLimit() int {
 	return d.parameterLimit
-}
-
-func (d dialect) SupportsReturning() bool {
-	return d.supportsReturning
 }
 
 func (d dialect) BeginOptions(readOnly bool) *sql.TxOptions {
@@ -177,7 +171,6 @@ func SQLiteDialect() Dialect {
 		name:              "sqlite",
 		quote:             '"',
 		parameterLimit:    999,
-		supportsReturning: true,
 		rebind:            identity,
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			return &sql.TxOptions{ReadOnly: readOnly}
@@ -204,7 +197,6 @@ func PostgresDialect() Dialect {
 		name:              "postgres",
 		quote:             '"',
 		parameterLimit:    65535,
-		supportsReturning: true,
 		rebind:            rebindPostgres,
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			if !readOnly {
@@ -233,7 +225,6 @@ func MySQLDialect() Dialect {
 		name:              "mysql",
 		quote:             '`',
 		parameterLimit:    65535,
-		supportsReturning: false,
 		rebind:            identity,
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			if !readOnly {

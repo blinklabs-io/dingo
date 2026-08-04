@@ -102,18 +102,13 @@ sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 
 gorm-check: ## Fail if the removed ORM returns to source or dependencies
 	@status=0; \
-	if command -v rg >/dev/null 2>&1; then \
-		rg -n 'gorm\.io|github.com/glebarez/sqlite|otelgorm' \
-			--glob '*.go' --glob 'go.mod' --glob 'go.sum' . || status=$$?; \
-	else \
-		grep -RInE --exclude-dir=.git --exclude-dir=.worktrees \
-			--include='*.go' --include='go.mod' --include='go.sum' \
-			'gorm\.io|github.com/glebarez/sqlite|otelgorm' . || status=$$?; \
-	fi; \
+	grep -RInE --exclude-dir=.git --exclude-dir=.worktrees \
+		--include='*.go' --include='go.mod' --include='go.sum' \
+		'gorm\.io|github.com/glebarez/sqlite|otelgorm' . || status=$$?; \
 	case "$$status" in \
 		0) echo 'gorm-check: forbidden ORM reference found' >&2; exit 1 ;; \
 		1) exit 0 ;; \
-		*) echo "gorm-check: rg failed with status $$status" >&2; exit "$$status" ;; \
+		*) echo "gorm-check: scanner failed with status $$status" >&2; exit "$$status" ;; \
 	esac
 
 $(PROTOC):
