@@ -667,9 +667,14 @@ reads within the same transaction: `Get` and every typed getter (`GetBlock`,
 matches badger instead of returning pre-transaction state, and a staged delete
 reads as `ErrBlobKeyNotFound`. `GetBlockURL` is the exception — a signed URL
 names a bucket object, so a block staged but not yet committed is reported as
-not found rather than signed into a URL that would 404. Cloud iterators list
-bucket keys as of iterator creation and skip keys the transaction has staged for
-deletion; keys staged for writing are not listed until commit.
+not found rather than signed into a URL that would 404. Cloud iterators enumerate
+bucket keys and skip keys the transaction has staged for deletion; keys staged
+for writing are not listed until commit. Enumeration is not a point-in-time
+snapshot in either direction: forward iterators page the listing lazily, so a
+later page reflects the bucket when that page is fetched, while reverse iterators
+spool their key records up front and so do reflect iterator-creation time. Item
+values still resolve through the transaction, so a value read after the listing
+observes staged changes regardless of when the key was enumerated.
 
 Commit applies changes in a stable key order. Before applying anything it builds
 a compensation log recording each key's prior state, probing existence with
