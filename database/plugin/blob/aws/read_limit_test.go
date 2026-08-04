@@ -29,14 +29,14 @@ func TestReadBlobBodyWithLimit(t *testing.T) {
 func TestS3TransactionStagesAndRollsBack(t *testing.T) {
 	txn := &s3Txn{pending: make(map[string]s3PendingChange)}
 	txn.stageSet([]byte("key"), []byte("value"))
-	value, ok := txn.stagedValue([]byte("key"))
-	if !ok || string(value) != "value" {
-		t.Fatalf("staged value = %q, %v", value, ok)
+	value, deleted, staged := txn.stagedValue([]byte("key"))
+	if !staged || deleted || string(value) != "value" {
+		t.Fatalf("staged value = %q, deleted=%v, staged=%v", value, deleted, staged)
 	}
 	txn.stageDelete([]byte("key"))
-	value, ok = txn.stagedValue([]byte("key"))
-	if !ok || value != nil {
-		t.Fatalf("staged delete = %q, %v", value, ok)
+	value, deleted, staged = txn.stagedValue([]byte("key"))
+	if !staged || !deleted || value != nil {
+		t.Fatalf("staged delete = %q, deleted=%v, staged=%v", value, deleted, staged)
 	}
 	if err := txn.Rollback(); err != nil {
 		t.Fatal(err)

@@ -234,15 +234,19 @@ func stagedDeleted(txn types.Txn, key string) bool {
 	return staged && change.deleted
 }
 
-func (t *gcsTxn) stagedValue(key []byte) ([]byte, bool) {
+// stagedValue reports this transaction's staged state for key. deleted is
+// reported separately from value because a staged zero-length write is a real
+// value, not a deletion: collapsing the two on a nil value would make Set of an
+// empty blob read back as missing until commit.
+func (t *gcsTxn) stagedValue(key []byte) (value []byte, deleted, staged bool) {
 	change, ok := t.pending[string(key)]
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
 	if change.deleted {
-		return nil, true
+		return nil, true, true
 	}
-	return append([]byte(nil), change.value...), true
+	return append([]byte{}, change.value...), false, true
 }
 
 func (d *BlobStoreGCS) readObject(
@@ -258,6 +262,26 @@ func (d *BlobStoreGCS) readObject(
 	}
 	defer r.Close()
 	return readBlobObject(r)
+}
+
+// spoolPriorValue streams key's current object into the compensation log. The
+// reader is copied straight to disk rather than through readBlobObject: that cap
+// bounds memory for ordinary reads, and applying it here would make an object
+// larger than the cap impossible to overwrite or delete inside a transaction.
+func (d *BlobStoreGCS) spoolPriorValue(
+	ctx context.Context,
+	comp *compensate.Log,
+	key []byte,
+) error {
+	r, err := d.object(key).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return types.ErrBlobKeyNotFound
+		}
+		return err
+	}
+	defer r.Close()
+	return comp.RecordValueFrom(string(key), r)
 }
 
 func (d *BlobStoreGCS) writeObject(
@@ -308,8 +332,8 @@ func (d *BlobStoreGCS) resolveKey(
 	t *gcsTxn,
 	key []byte,
 ) ([]byte, error) {
-	if value, staged := t.stagedValue(key); staged {
-		if value == nil {
+	if value, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return nil, types.ErrBlobKeyNotFound
 		}
 		return value, nil
@@ -364,8 +388,8 @@ func (d *BlobStoreGCS) Delete(txn types.Txn, key []byte) error {
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	if value, staged := t.stagedValue(key); staged {
-		if value == nil {
+	if _, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return types.ErrBlobKeyNotFound
 		}
 		t.stageDelete(key)
@@ -883,10 +907,9 @@ func (t *gcsTxn) Commit() error {
 			comp.RecordMissing(key)
 			continue
 		}
-		value, err := t.store.readObject(ctx, []byte(key))
-		if err != nil {
+		if err := t.store.spoolPriorValue(ctx, comp, []byte(key)); err != nil {
 			if errors.Is(err, types.ErrBlobKeyNotFound) {
-				// Raced with an external delete between probe and read; the
+				// Raced with an external delete between probe and spool; the
 				// undo for this key is a delete either way.
 				comp.RecordMissing(key)
 				continue
@@ -897,10 +920,6 @@ func (t *gcsTxn) Commit() error {
 				key,
 				err,
 			)
-		}
-		if err := comp.RecordValue(key, value); err != nil {
-			t.finished = true
-			return fmt.Errorf("commit GCS blob transaction: %w", err)
 		}
 	}
 
@@ -1257,8 +1276,8 @@ func (d *BlobStoreGCS) GetBlockURL(
 	// A signed URL points at a bucket object, so it cannot represent a write
 	// this transaction has staged but not committed. Reject that explicitly
 	// rather than handing back a URL that would 404.
-	if value, staged := t.stagedValue(key); staged {
-		if value == nil {
+	if _, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return types.SignedURL{}, types.BlockMetadata{},
 				fmt.Errorf("gcs: block deleted in this transaction: %w",
 					types.ErrBlobKeyNotFound)

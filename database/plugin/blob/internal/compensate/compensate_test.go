@@ -16,7 +16,9 @@ package compensate
 
 import (
 	"errors"
+	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -209,4 +211,88 @@ func TestClosedLogReportsErrors(t *testing.T) {
 		func(string, []byte) error { return nil },
 		func(string) error { return nil },
 	))
+}
+
+// RecordValueFrom streams without buffering and without a size cap, so an
+// object larger than the plugins' 256 MiB read limit can still be compensated —
+// which is what makes it possible to overwrite or delete such an object inside a
+// transaction.
+func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
+	log := newTestLog(t)
+
+	// Exceed the plugins' bounded-read limit without allocating it: a repeating
+	// reader of known length stands in for a large object.
+	const size = int64(256<<20) + 1024
+	require.NoError(t, log.RecordValueFrom("huge", &patternReader{remaining: size}))
+	assert.Equal(t, 1, log.Len())
+
+	info, err := os.Stat(log.file.Name())
+	require.NoError(t, err)
+	assert.Equal(t, size, info.Size())
+
+	// The spooled bytes are restored intact.
+	var restoredLen int64
+	var mismatch bool
+	require.NoError(t, log.Undo(
+		1,
+		func(_ string, value []byte) error {
+			restoredLen = int64(len(value))
+			for i, b := range value {
+				if b != byte(i%251) {
+					mismatch = true
+					break
+				}
+			}
+			return nil
+		},
+		func(string) error { return nil },
+	))
+	assert.Equal(t, size, restoredLen)
+	assert.False(t, mismatch, "spooled bytes must round-trip unchanged")
+}
+
+// Mixing buffered and streamed entries must not overlap their spool regions.
+func TestRecordValueAndRecordValueFromShareSpoolCorrectly(t *testing.T) {
+	log := newTestLog(t)
+	require.NoError(t, log.RecordValue("a", []byte("first")))
+	require.NoError(t, log.RecordValueFrom("b", strings.NewReader("second")))
+	require.NoError(t, log.RecordValue("c", []byte("third")))
+
+	got := map[string]string{}
+	require.NoError(t, log.Undo(
+		3,
+		func(key string, value []byte) error {
+			got[key] = string(value)
+			return nil
+		},
+		func(string) error { return nil },
+	))
+	assert.Equal(
+		t,
+		map[string]string{"a": "first", "b": "second", "c": "third"},
+		got,
+	)
+}
+
+// patternReader yields `remaining` bytes of a repeating pattern without holding
+// them in memory, standing in for a very large cloud object.
+type patternReader struct {
+	remaining int64
+	pos       int64
+}
+
+func (r *patternReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := range n {
+		p[i] = byte((r.pos + i) % 251)
+	}
+	r.pos += n
+	r.remaining -= n
+	return int(n), nil
 }

@@ -676,11 +676,20 @@ spool their key records up front and so do reflect iterator-creation time. Item
 values still resolve through the transaction, so a value read after the listing
 observes staged changes regardless of when the key was enumerated.
 
+A staged zero-length write is a value, not a deletion: `Set` with an empty slice
+reads back as an empty blob inside the transaction and the key is still listed by
+iterators.
+
 Commit applies changes in a stable key order. Before applying anything it builds
 a compensation log recording each key's prior state, probing existence with
 `HeadObject`/`Attrs` and downloading a prior value only for the keys the commit
-overwrites or deletes. Retained prior values are spooled to a temporary file, so
-a multi-key block commit does not hold object payloads in memory. If a cloud
+overwrites or deletes. Retained prior values are streamed straight to a temporary
+file, so a multi-key block commit does not hold object payloads in memory. That
+streaming path deliberately bypasses the 256 MiB read cap — the cap bounds memory
+for ordinary reads, and applying it to compensation would make an object larger
+than the cap impossible to overwrite or delete inside a transaction. Spool disk
+use is therefore bounded by the total size of the objects a single commit
+replaces. If a cloud
 operation fails partway, the already-applied changes are reversed on a fresh
 context (reusing the commit context would make every restore fail instantly when
 the commit failed because that context expired). Every entry is attempted even
@@ -689,7 +698,9 @@ partially applied and `Commit` returns an error wrapping
 `types.ErrPartialCommit`, so callers do not treat it as a clean abort.
 
 Cloud object reads are capped at 256 MiB. Existence checks use object metadata
-rather than a bounded read, so a blob larger than that cap is still deletable.
+rather than a bounded read, and commit compensation streams prior values to disk
+uncapped, so an oversized blob can be both staged for deletion and committed —
+only reading its value back through `Get` hits the cap.
 Forward cloud iterators page keys directly; reverse iterators spool only their
 key records to a temporary file so bucket size does not determine iterator heap
 usage.

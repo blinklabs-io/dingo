@@ -79,14 +79,47 @@ func (l *Log) RecordValue(key string, value []byte) error {
 			err,
 		)
 	}
+	l.record(key, int64(written))
+	return nil
+}
+
+// RecordValueFrom streams key's prior bytes from r into the spool instead of
+// buffering them first. Callers pass the raw object reader, deliberately not a
+// size-capped one: the cap on ordinary reads exists to bound memory, and this
+// path never holds the value in memory, so applying it here would make an
+// object larger than the cap impossible to overwrite or delete inside a
+// transaction. Spool space is bounded by the size of the objects a single commit
+// replaces.
+func (l *Log) RecordValueFrom(key string, r io.Reader) error {
+	if l.file == nil {
+		return errors.New("compensation log: closed")
+	}
+	written, err := io.Copy(
+		io.NewOffsetWriter(l.file, l.size),
+		r,
+	)
+	if err != nil {
+		// Leave l.size past the partial write: the bytes are unusable, and
+		// advancing avoids a later entry overlapping them.
+		l.size += written
+		return fmt.Errorf(
+			"compensation log: spool prior value for %q: %w",
+			key,
+			err,
+		)
+	}
+	l.record(key, written)
+	return nil
+}
+
+func (l *Log) record(key string, length int64) {
 	l.entries = append(l.entries, entry{
 		key:     key,
 		existed: true,
 		offset:  l.size,
-		length:  int64(written),
+		length:  length,
 	})
-	l.size += int64(written)
-	return nil
+	l.size += length
 }
 
 // Len returns the number of recorded entries. Entry i corresponds to the i'th

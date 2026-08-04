@@ -230,15 +230,19 @@ func stagedDeleted(txn types.Txn, key string) bool {
 	return staged && change.deleted
 }
 
-func (t *s3Txn) stagedValue(key []byte) ([]byte, bool) {
+// stagedValue reports this transaction's staged state for key. deleted is
+// reported separately from value because a staged zero-length write is a real
+// value, not a deletion: collapsing the two on a nil value would make Set of an
+// empty blob read back as missing until commit.
+func (t *s3Txn) stagedValue(key []byte) (value []byte, deleted, staged bool) {
 	change, ok := t.pending[string(key)]
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
 	if change.deleted {
-		return nil, true
+		return nil, true, true
 	}
-	return append([]byte(nil), change.value...), true
+	return append([]byte{}, change.value...), false, true
 }
 
 func (d *BlobStoreS3) deleteObject(ctx context.Context, key string) error {
@@ -261,8 +265,8 @@ func (d *BlobStoreS3) resolveKey(
 	t *s3Txn,
 	key []byte,
 ) ([]byte, error) {
-	if value, staged := t.stagedValue(key); staged {
-		if value == nil {
+	if value, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return nil, types.ErrBlobKeyNotFound
 		}
 		return value, nil
@@ -310,8 +314,8 @@ func (d *BlobStoreS3) Delete(txn types.Txn, key []byte) error {
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	if value, staged := t.stagedValue(key); staged {
-		if value == nil {
+	if _, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return types.ErrBlobKeyNotFound
 		}
 		t.stageDelete(key)
@@ -842,10 +846,9 @@ func (t *s3Txn) Commit() error {
 			comp.RecordMissing(key)
 			continue
 		}
-		value, err := t.store.getInternal(ctx, key)
-		if err != nil {
-			if isS3NotFound(err) {
-				// Raced with an external delete between probe and read; the
+		if err := t.store.spoolPriorValue(ctx, comp, key); err != nil {
+			if errors.Is(err, types.ErrBlobKeyNotFound) {
+				// Raced with an external delete between probe and spool; the
 				// undo for this key is a delete either way.
 				comp.RecordMissing(key)
 				continue
@@ -856,10 +859,6 @@ func (t *s3Txn) Commit() error {
 				key,
 				err,
 			)
-		}
-		if err := comp.RecordValue(key, value); err != nil {
-			t.finished = true
-			return fmt.Errorf("commit S3 blob transaction: %w", err)
 		}
 	}
 
@@ -1216,6 +1215,30 @@ func (d *BlobStoreS3) getInternal(
 	return data, nil
 }
 
+// spoolPriorValue streams key's current object into the compensation log. The
+// body is copied straight to disk rather than through readBlobBody: that cap
+// bounds memory for ordinary reads, and applying it here would make an object
+// larger than the cap impossible to overwrite or delete inside a transaction.
+func (d *BlobStoreS3) spoolPriorValue(
+	ctx context.Context,
+	comp *compensate.Log,
+	key string,
+) error {
+	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &d.bucket,
+		Key:    new(d.fullKey(key)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return types.ErrBlobKeyNotFound
+		}
+		d.logger.Errorf("s3 get %q failed: %v", key, err)
+		return err
+	}
+	defer out.Body.Close()
+	return comp.RecordValueFrom(key, out.Body)
+}
+
 // Put writes a value to key.
 func (d *BlobStoreS3) Put(ctx context.Context, key string, value []byte) error {
 	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
@@ -1306,8 +1329,8 @@ func (d *BlobStoreS3) GetBlockURL(
 	// A signed URL points at a bucket object, so it cannot represent a write
 	// this transaction has staged but not committed. Reject that explicitly
 	// rather than handing back a URL that would 404.
-	if value, staged := t.stagedValue(key); staged {
-		if value == nil {
+	if _, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return types.SignedURL{}, types.BlockMetadata{},
 				fmt.Errorf("s3: block deleted in this transaction: %w",
 					types.ErrBlobKeyNotFound)

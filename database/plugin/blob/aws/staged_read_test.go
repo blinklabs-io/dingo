@@ -84,3 +84,32 @@ func TestStagedDeletedFiltersIteratorKeys(t *testing.T) {
 		t.Fatal("a nil transaction should not filter listings")
 	}
 }
+
+// A zero-length write is a real value, not a deletion. Collapsing the two would
+// make Set of an empty blob read back as ErrBlobKeyNotFound until commit.
+func TestResolveKeyServesStagedEmptyValue(t *testing.T) {
+	st := &BlobStoreS3{}
+	txn := &s3Txn{store: st, pending: make(map[string]s3PendingChange)}
+	txn.stageSet([]byte("key"), []byte{})
+
+	value, deleted, staged := txn.stagedValue([]byte("key"))
+	if !staged || deleted {
+		t.Fatalf("empty write should be staged and not deleted, got deleted=%v staged=%v", deleted, staged)
+	}
+	if value == nil || len(value) != 0 {
+		t.Fatalf("staged empty value = %v, want an empty non-nil slice", value)
+	}
+
+	got, err := st.resolveKey(context.Background(), txn, []byte("key"))
+	if err != nil {
+		t.Fatalf("resolveKey on a staged empty value: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("resolveKey = %q, want empty", got)
+	}
+
+	// Iterators must still list it: it is a write, not a delete.
+	if stagedDeleted(txn, "key") {
+		t.Fatal("a staged empty value must not be filtered from listings")
+	}
+}

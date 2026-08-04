@@ -17,6 +17,7 @@ package peergov
 import (
 	"io"
 	"log/slog"
+	"math"
 	"testing"
 	"time"
 )
@@ -369,6 +370,46 @@ func TestGetEMAAlpha(t *testing.T) {
 // the unknown-latency penalty. Every other component decays to its 0.5-score
 // baseline, so aging out a quiet peer's history must not actively demote it.
 func TestStaleLatencyDecaysTowardNeutralNotPenalty(t *testing.T) {
+	// Assert the decay formula itself, in both directions, rather than only
+	// which side of neutral the result lands on: a peer whose latency never
+	// decayed would still sit on the correct side, so that alone cannot catch a
+	// regression that stops decaying. After n half-lives the remaining distance
+	// to neutral must be distance * 2^-n.
+	const tolerance = 0.01 // ms
+	for _, tc := range []struct {
+		name      string
+		start     float64
+		halfLives float64
+	}{
+		{"fast, one half-life", 10, 1},
+		{"fast, ten half-lives", 10, 10},
+		{"slow, one half-life", 2_000, 1},
+		{"slow, ten half-lives", 2_000, 10},
+	} {
+		peer := &Peer{
+			BlockFetchLatencyMs:   tc.start,
+			BlockFetchLatencyInit: true,
+			ScoreLastUpdate: time.Now().Add(
+				-time.Duration(tc.halfLives * float64(scoreDecayHalfLife)),
+			),
+		}
+		peer.decayScoreMetrics(time.Now())
+
+		want := neutralLatencyMs +
+			(tc.start-neutralLatencyMs)*math.Pow(0.5, tc.halfLives)
+		if math.Abs(peer.BlockFetchLatencyMs-want) > tolerance {
+			t.Fatalf(
+				"%s: latency = %v, want %v (decayed from %v toward neutral %v)",
+				tc.name, peer.BlockFetchLatencyMs, want, tc.start,
+				neutralLatencyMs,
+			)
+		}
+		// Explicitly reject the no-decay regression.
+		if peer.BlockFetchLatencyMs == tc.start {
+			t.Fatalf("%s: latency did not decay at all (still %v)", tc.name, tc.start)
+		}
+	}
+
 	fast := &Peer{
 		BlockFetchLatencyMs:   10,
 		BlockFetchLatencyInit: true,
@@ -379,20 +420,6 @@ func TestStaleLatencyDecaysTowardNeutralNotPenalty(t *testing.T) {
 		t.Fatalf(
 			"fast history must not decay past neutral %v, got %v",
 			neutralLatencyMs, fast.BlockFetchLatencyMs,
-		)
-	}
-
-	// Symmetry: a slow peer's stale history improves toward the same baseline.
-	slow := &Peer{
-		BlockFetchLatencyMs:   2_000,
-		BlockFetchLatencyInit: true,
-		ScoreLastUpdate:       time.Now().Add(-10 * scoreDecayHalfLife),
-	}
-	slow.decayScoreMetrics(time.Now())
-	if slow.BlockFetchLatencyMs < neutralLatencyMs {
-		t.Fatalf(
-			"slow history must not decay below neutral %v, got %v",
-			neutralLatencyMs, slow.BlockFetchLatencyMs,
 		)
 	}
 
