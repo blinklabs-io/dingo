@@ -37,6 +37,14 @@ const (
 
 	// Minimal latency (ms) used to normalize inverse latency. Avoid div-by-zero.
 	minLatencyMs = 1.0
+	// Score-neutral latency (ms): the value that maps to a latency component
+	// score of 0.5, matching the conservative default applied to the other
+	// components. It normalizes the inverse-latency mapping and is the decay
+	// target for a stale latency EMA.
+	neutralLatencyMs = 200.0
+	// Latency assumed for a peer that has never reported one. Unlike a stale
+	// observation, absent information is deliberately penalized.
+	unknownLatencyMs = 1000.0
 	// EMA smoothing factor (alpha) used when updating observed metrics.
 	defaultEMAAlpha = 0.2
 	// Reference header rate (headers/sec) for normalization. A peer matching this
@@ -135,13 +143,13 @@ func (p *Peer) UpdatePeerScore() {
 	// Normalize metrics
 	latencyMs := p.BlockFetchLatencyMs
 	if !p.BlockFetchLatencyInit || latencyMs <= 0 {
-		latencyMs = 1000.0 // unknown => penalize with high latency
+		latencyMs = unknownLatencyMs // unknown => penalize with high latency
 	}
 
 	// Map latency in ms to a bounded 0..1 latency score where lower latency
 	// yields a higher score. The chosen mapping gives reasonable spacing for
 	// latencies in the 10ms..2000ms range without requiring external scaling.
-	latencyScore := 1.0 / (1.0 + latencyMs/200.0)
+	latencyScore := 1.0 / (1.0 + latencyMs/neutralLatencyMs)
 
 	success := p.BlockFetchSuccessRate
 	stability := p.ConnectionStability
@@ -224,8 +232,12 @@ func (p *Peer) decayScoreMetrics(now time.Time) {
 	}
 	factor := math.Exp(-math.Ln2 * elapsed.Seconds() / scoreDecayHalfLife.Seconds())
 	if p.BlockFetchLatencyInit {
-		p.BlockFetchLatencyMs = 1000 +
-			(p.BlockFetchLatencyMs-1000)*factor
+		// Decay toward the score-neutral latency, not the unknown-latency
+		// penalty: every other component decays to its 0.5-score baseline, and
+		// aging out stale history must not actively demote a peer that was
+		// simply quiet.
+		p.BlockFetchLatencyMs = neutralLatencyMs +
+			(p.BlockFetchLatencyMs-neutralLatencyMs)*factor
 	}
 	if p.BlockFetchSuccessInit {
 		p.BlockFetchSuccessRate = 0.5 +
@@ -240,6 +252,24 @@ func (p *Peer) decayScoreMetrics(now time.Time) {
 			(p.HeaderArrivalRate-referenceHeaderRate)*factor
 	}
 	p.ScoreLastUpdate = now
+}
+
+// agePeerScoresLocked decays stale EMAs and recomputes composite scores for
+// every observed peer. Decay otherwise runs only when a fresh observation
+// arrives, so a peer that goes quiet would keep its last favorable score
+// forever and outrank active peers in churn and quota decisions. Called at the
+// start of each scoring cycle; the caller must hold p.mu.
+func (p *PeerGovernor) agePeerScoresLocked(now time.Time) {
+	for _, peer := range p.peers {
+		// A peer with no observations at all keeps its initial score, so
+		// never-observed peers still rank below observed ones instead of
+		// jumping to the conservative default.
+		if peer == nil || peer.ScoreLastUpdate.IsZero() {
+			continue
+		}
+		peer.decayScoreMetrics(now)
+		peer.UpdatePeerScore()
+	}
 }
 
 func ema(prev, observed, alpha float64) float64 {

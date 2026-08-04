@@ -27,6 +27,8 @@ import (
 func (p *PeerGovernor) reconcile(ctx context.Context) {
 	p.mu.Lock()
 	now := time.Now()
+	// Age stale scores before any ranking decision reads them.
+	p.agePeerScoresLocked(now)
 	debugEnabled := p.config.Logger.Enabled(
 		ctx,
 		slog.LevelDebug,

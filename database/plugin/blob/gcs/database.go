@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -221,6 +222,18 @@ func (t *gcsTxn) stageDelete(key []byte) {
 	t.pending[string(key)] = gcsPendingChange{deleted: true}
 }
 
+// stagedDeleted reports whether the transaction has staged a delete for key.
+// Iterators skip such keys: listing one would surface a key whose value reads
+// back as missing, since the value path resolves staged changes.
+func stagedDeleted(txn types.Txn, key string) bool {
+	t, ok := txn.(*gcsTxn)
+	if !ok || t.finished || t.pending == nil {
+		return false
+	}
+	change, staged := t.pending[key]
+	return staged && change.deleted
+}
+
 func (t *gcsTxn) stagedValue(key []byte) ([]byte, bool) {
 	change, ok := t.pending[string(key)]
 	if !ok {
@@ -270,21 +283,38 @@ func (d *BlobStoreGCS) deleteObject(
 	return err
 }
 
-// Get retrieves a value from GCS within a transaction
-func (d *BlobStoreGCS) Get(txn types.Txn, key []byte) ([]byte, error) {
-	if err := d.validateTxn(txn); err != nil {
-		return nil, err
+// objectExists reports whether key has an object, without downloading it. Used
+// where only presence matters, so object size never determines memory use and a
+// blob larger than the read cap stays deletable.
+func (d *BlobStoreGCS) objectExists(
+	ctx context.Context,
+	key []byte,
+) (bool, error) {
+	if _, err := d.object(key).Attrs(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
-	t := txn.(*gcsTxn)
+	return true, nil
+}
+
+// resolveKey reads key through the transaction: a value staged by this
+// transaction wins over the bucket, and a staged delete reads as missing. Every
+// typed getter goes through this so a read-after-write inside one transaction
+// behaves like the badger plugin instead of returning pre-transaction state.
+func (d *BlobStoreGCS) resolveKey(
+	ctx context.Context,
+	t *gcsTxn,
+	key []byte,
+) ([]byte, error) {
 	if value, staged := t.stagedValue(key); staged {
 		if value == nil {
 			return nil, types.ErrBlobKeyNotFound
 		}
 		return value, nil
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
-	ciphertext, err := d.readObject(ctx, key)
+	value, err := d.readObject(ctx, key)
 	if err != nil {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			return nil, types.ErrBlobKeyNotFound
@@ -298,7 +328,18 @@ func (d *BlobStoreGCS) Get(txn types.Txn, key []byte) ([]byte, error) {
 		d.logger.Errorf("%v", wrappedErr)
 		return nil, wrappedErr
 	}
-	return ciphertext, nil
+	return value, nil
+}
+
+// Get retrieves a value from GCS within a transaction
+func (d *BlobStoreGCS) Get(txn types.Txn, key []byte) ([]byte, error) {
+	if err := d.validateTxn(txn); err != nil {
+		return nil, err
+	}
+	t := txn.(*gcsTxn) // safe after validateTxn
+	ctx, cancel := d.opContext()
+	defer cancel()
+	return d.resolveKey(ctx, t, key)
 }
 
 // Set stores a key-value pair in GCS within a transaction
@@ -332,8 +373,14 @@ func (d *BlobStoreGCS) Delete(txn types.Txn, key []byte) error {
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
-	if _, err := d.readObject(ctx, key); err != nil {
+	// Probe with object metadata rather than a bounded read: a blob larger
+	// than the read cap must still be deletable.
+	exists, err := d.objectExists(ctx, key)
+	if err != nil {
 		return err
+	}
+	if !exists {
+		return types.ErrBlobKeyNotFound
 	}
 	t.stageDelete(key)
 	return nil
@@ -415,23 +462,30 @@ func (it *gcsStreamIterator) advance() {
 	if it.err != nil || it.iter == nil {
 		return
 	}
-	objAttrs, err := it.iter.Next()
-	if errors.Is(err, iterator.Done) {
-		it.valid = false
+	for {
+		objAttrs, err := it.iter.Next()
+		if errors.Is(err, iterator.Done) {
+			it.valid = false
+			return
+		}
+		if err != nil {
+			it.err = err
+			it.valid = false
+			return
+		}
+		key, err := it.store.externalKey(objAttrs.Name)
+		if err != nil {
+			it.err = err
+			it.valid = false
+			return
+		}
+		if stagedDeleted(it.txn, key) {
+			continue
+		}
+		it.key = key
+		it.valid = true
 		return
 	}
-	if err != nil {
-		it.err = err
-		it.valid = false
-		return
-	}
-	it.key, err = it.store.externalKey(objAttrs.Name)
-	if err != nil {
-		it.err = err
-		it.valid = false
-		return
-	}
-	it.valid = true
 }
 
 func (it *gcsStreamIterator) Rewind() { it.reset(nil) }
@@ -476,14 +530,20 @@ type gcsReverseIterator struct {
 }
 
 func (it *gcsReverseIterator) advance() {
-	key, valid, err := it.keys.nextReverse()
-	if err != nil {
-		it.err = err
-		it.valid = false
+	for {
+		key, valid, err := it.keys.nextReverse()
+		if err != nil {
+			it.err = err
+			it.valid = false
+			return
+		}
+		if valid && stagedDeleted(it.txn, key) {
+			continue
+		}
+		it.key = key
+		it.valid = valid
 		return
 	}
-	it.key = key
-	it.valid = valid
 }
 
 func (it *gcsReverseIterator) Rewind() {
@@ -585,71 +645,30 @@ func (d *BlobStoreGCS) GetBlock(
 	if err := d.validateTxn(txn); err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
+	t := txn.(*gcsTxn) // safe after validateTxn
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.BlockBlobKey(slot, hash)
-	r, err := d.object(key).NewReader(ctx)
+	cborData, err := d.resolveKey(ctx, t, key)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
-		}
-		wrappedErr := fmt.Errorf(
-			"read object %q from bucket %q: %w",
-			string(key),
-			d.bucketName,
-			err,
-		)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, types.BlockMetadata{}, wrappedErr
-	}
-	defer r.Close()
-	cborData, err := readBlobObject(r)
-	if err != nil {
-		wrappedErr := fmt.Errorf(
-			"read object %q from bucket %q: %w",
-			string(key),
-			d.bucketName,
-			err,
-		)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, types.BlockMetadata{}, wrappedErr
+		return nil, types.BlockMetadata{}, err
 	}
 	if types.IsBlockTombstone(cborData) {
 		return nil, types.BlockMetadata{},
 			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
-	r, err = d.object(metadataKey).NewReader(ctx)
+	metadataBytes, err := d.resolveKey(ctx, t, metadataKey)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			// Block content exists but metadata is missing - this indicates a partial write
 			d.logger.Warningf(
 				"block content exists but metadata is missing, possible partial write: key=%s metadataKey=%s",
 				string(key),
 				string(metadataKey),
 			)
-			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
 		}
-		wrappedErr := fmt.Errorf(
-			"read object %q from bucket %q: %w",
-			string(metadataKey),
-			d.bucketName,
-			err,
-		)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, types.BlockMetadata{}, wrappedErr
-	}
-	defer r.Close()
-	metadataBytes, err := readBlobObject(r)
-	if err != nil {
-		wrappedErr := fmt.Errorf(
-			"read object %q from bucket %q: %w",
-			string(metadataKey),
-			d.bucketName,
-			err,
-		)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, types.BlockMetadata{}, wrappedErr
+		return nil, types.BlockMetadata{}, err
 	}
 	var tmpMetadata types.BlockMetadata
 	if _, err := cbor.Decode(metadataBytes, &tmpMetadata); err != nil {
@@ -745,36 +764,11 @@ func (d *BlobStoreGCS) GetUtxo(
 	if err := d.validateTxn(txn); err != nil {
 		return nil, err
 	}
+	t := txn.(*gcsTxn) // safe after validateTxn
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.UtxoBlobKey(txId, outputIdx)
-	r, err := d.object(key).NewReader(ctx)
-	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, types.ErrBlobKeyNotFound
-		}
-		wrappedErr := fmt.Errorf(
-			"read object %q from bucket %q: %w",
-			string(key),
-			d.bucketName,
-			err,
-		)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, wrappedErr
-	}
-	defer r.Close()
-	ciphertext, err := readBlobObject(r)
-	if err != nil {
-		wrappedErr := fmt.Errorf(
-			"read object %q from bucket %q: %w",
-			string(key),
-			d.bucketName,
-			err,
-		)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, wrappedErr
-	}
-	return ciphertext, nil
+	return d.resolveKey(ctx, t, key)
 }
 
 // DeleteUtxo removes a UTxO's data
@@ -821,26 +815,11 @@ func (d *BlobStoreGCS) GetTx(
 	if err := d.validateTxn(txn); err != nil {
 		return nil, fmt.Errorf("GetTx validateTxn failed: %w", err)
 	}
+	t := txn.(*gcsTxn) // safe after validateTxn
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.TxBlobKey(txHash)
-	r, err := d.object(key).NewReader(ctx)
-	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil, types.ErrBlobKeyNotFound
-		}
-		wrappedErr := fmt.Errorf("gcs read %q failed: %w", string(key), err)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, wrappedErr
-	}
-	defer r.Close()
-	ciphertext, err := readBlobObject(r)
-	if err != nil {
-		wrappedErr := fmt.Errorf("gcs read body %q failed: %w", string(key), err)
-		d.logger.Errorf("%v", wrappedErr)
-		return nil, wrappedErr
-	}
-	return ciphertext, nil
+	return d.resolveKey(ctx, t, key)
 }
 
 // DeleteTx removes a transaction's offset data
@@ -871,45 +850,60 @@ func (t *gcsTxn) Commit() error {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	type original struct {
-		key     string
-		value   []byte
-		existed bool
+
+	// Build the compensation log before applying anything. Existence is probed
+	// with object metadata rather than a full read, and a prior value is
+	// downloaded only for the keys this commit overwrites or deletes -- spooled
+	// to disk, so a multi-key block commit does not retain object payloads in
+	// memory.
+	comp, err := compensate.NewLog("dingo-gcs-commit-")
+	if err != nil {
+		t.finished = true
+		return err
 	}
-	originals := make([]original, 0, len(keys))
+	defer func() {
+		if closeErr := comp.Close(); closeErr != nil {
+			t.store.logger.Errorf(
+				"failed to release GCS commit compensation log: %v",
+				closeErr,
+			)
+		}
+	}()
 	for _, key := range keys {
-		value, err := t.store.readObject(ctx, []byte(key))
-		if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
+		exists, err := t.store.objectExists(ctx, []byte(key))
+		if err != nil {
 			t.finished = true
-			return err
+			return fmt.Errorf(
+				"commit GCS blob transaction: probe %q: %w",
+				key,
+				err,
+			)
 		}
-		originals = append(originals, original{
-			key:     key,
-			value:   value,
-			existed: err == nil,
-		})
-	}
-	restore := func(items []original) {
-		for i := len(items) - 1; i >= 0; i-- {
-			item := items[i]
-			var err error
-			if item.existed {
-				err = t.store.writeObject(ctx, []byte(item.key), item.value)
-			} else {
-				err = t.store.deleteObject(ctx, []byte(item.key))
-				if errors.Is(err, types.ErrBlobKeyNotFound) {
-					err = nil
-				}
+		if !exists {
+			comp.RecordMissing(key)
+			continue
+		}
+		value, err := t.store.readObject(ctx, []byte(key))
+		if err != nil {
+			if errors.Is(err, types.ErrBlobKeyNotFound) {
+				// Raced with an external delete between probe and read; the
+				// undo for this key is a delete either way.
+				comp.RecordMissing(key)
+				continue
 			}
-			if err != nil {
-				t.store.logger.Errorf(
-					"failed to restore GCS transaction key %q: %v",
-					item.key,
-					err,
-				)
-			}
+			t.finished = true
+			return fmt.Errorf(
+				"commit GCS blob transaction: read prior value of %q: %w",
+				key,
+				err,
+			)
+		}
+		if err := comp.RecordValue(key, value); err != nil {
+			t.finished = true
+			return fmt.Errorf("commit GCS blob transaction: %w", err)
 		}
 	}
+
 	for i, key := range keys {
 		change := t.pending[key]
 		var err error
@@ -922,9 +916,41 @@ func (t *gcsTxn) Commit() error {
 			err = t.store.writeObject(ctx, []byte(key), change.value)
 		}
 		if err != nil {
-			restore(originals[:i])
 			t.finished = true
-			return fmt.Errorf("commit GCS blob transaction: %w", err)
+			commitErr := fmt.Errorf("commit GCS blob transaction: %w", err)
+			// Compensate on a fresh context. Reusing the commit context would
+			// make every restore fail instantly when the commit failed because
+			// that context expired, which is exactly when compensation matters.
+			undoCtx, undoCancel := t.store.opContext()
+			defer undoCancel()
+			undoErr := comp.Undo(
+				i,
+				func(key string, value []byte) error {
+					return t.store.writeObject(undoCtx, []byte(key), value)
+				},
+				func(key string) error {
+					delErr := t.store.deleteObject(undoCtx, []byte(key))
+					if errors.Is(delErr, types.ErrBlobKeyNotFound) {
+						return nil
+					}
+					return delErr
+				},
+			)
+			if undoErr == nil {
+				return commitErr
+			}
+			// The bucket is left partially applied. Report it as such instead
+			// of only logging, so callers do not treat this as a clean abort.
+			t.store.logger.Errorf(
+				"failed to compensate GCS blob transaction: %v",
+				undoErr,
+			)
+			return fmt.Errorf(
+				"%w: %w (compensation failed: %w)",
+				types.ErrPartialCommit,
+				commitErr,
+				undoErr,
+			)
 		}
 	}
 	t.finished = true
@@ -1224,43 +1250,46 @@ func (d *BlobStoreGCS) GetBlockURL(
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("gcs: invalid transaction: %w", err)
 	}
+	t := txn.(*gcsTxn) // safe after validateTxn
 
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 
-	_, err := d.object(key).Attrs(ctx)
-	if errors.Is(err, storage.ErrObjectNotExist) {
-		return types.SignedURL{}, types.BlockMetadata{},
-			fmt.Errorf("gcs: block not found: %w", types.ErrBlobKeyNotFound)
+	// A signed URL points at a bucket object, so it cannot represent a write
+	// this transaction has staged but not committed. Reject that explicitly
+	// rather than handing back a URL that would 404.
+	if value, staged := t.stagedValue(key); staged {
+		if value == nil {
+			return types.SignedURL{}, types.BlockMetadata{},
+				fmt.Errorf("gcs: block deleted in this transaction: %w",
+					types.ErrBlobKeyNotFound)
+		}
+		return types.SignedURL{}, types.BlockMetadata{}, fmt.Errorf(
+			"gcs: block staged in this transaction is not signable until commit: %w",
+			types.ErrBlobKeyNotFound,
+		)
 	}
+
+	exists, err := d.objectExists(ctx, key)
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("gcs: failed getting object attributes: %w", err)
 	}
+	if !exists {
+		return types.SignedURL{}, types.BlockMetadata{},
+			fmt.Errorf("gcs: block not found: %w", types.ErrBlobKeyNotFound)
+	}
 
 	metadataKey := types.BlockBlobMetadataKey(key)
-	r, err := d.object(metadataKey).NewReader(ctx)
+	metadataBytes, err := d.resolveKey(ctx, t, metadataKey)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotExist) {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			// Block content exists but metadata is missing - this indicates a partial write
 			d.logger.Warningf(
 				"block content exists but metadata is missing, possible partial write: key=%s metadataKey=%s",
 				string(key),
 				string(metadataKey),
 			)
-			return types.SignedURL{}, types.BlockMetadata{}, types.ErrBlobKeyNotFound
 		}
-		wrappedErr := fmt.Errorf(
-			"read object %q from bucket %q: %w",
-			string(metadataKey),
-			d.bucketName,
-			err,
-		)
-		d.logger.Errorf("%v", wrappedErr)
-		return types.SignedURL{}, types.BlockMetadata{}, wrappedErr
-	}
-	defer r.Close()
-	metadataBytes, err := readBlobObject(r)
-	if err != nil {
 		wrappedErr := fmt.Errorf(
 			"read object %q from bucket %q: %w",
 			string(metadataKey),

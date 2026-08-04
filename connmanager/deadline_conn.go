@@ -21,19 +21,21 @@ import (
 
 const socketIdleTimeout = 2 * time.Minute
 
-// deadlineConn refreshes the socket deadline for every operation. A single
-// SetDeadline call would be an absolute deadline and would eventually close
-// healthy long-lived Ouroboros connections.
+// deadlineConn bounds how long a single socket write may block. Nothing below
+// the Ouroboros muxer sets a write deadline, so a peer that stops reading can
+// wedge a protocol goroutine in Write forever. Each Write refreshes the
+// deadline just before the syscall, because one SetWriteDeadline call would be
+// an absolute deadline and would eventually kill healthy long-lived sessions.
+//
+// Read deadlines are deliberately left alone. The muxer sets its own read
+// deadline immediately before each segment read as slowloris protection
+// (muxer.segmentReadTimeout), which bounds a whole segment. Refreshing the read
+// deadline per Read call would override that protocol-managed deadline and let
+// a peer dribbling bytes below the timeout hold a segment read open
+// indefinitely, so the read half of a dead socket is upstream's to bound.
 type deadlineConn struct {
 	net.Conn
 	timeout time.Duration
-}
-
-func (c *deadlineConn) Read(p []byte) (int, error) {
-	if err := c.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
-		return 0, err
-	}
-	return c.Conn.Read(p)
 }
 
 func (c *deadlineConn) Write(p []byte) (int, error) {
@@ -43,6 +45,30 @@ func (c *deadlineConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
+// Unwrap returns the wrapped connection. Helpers that need the concrete socket
+// type — SO_LINGER via enableTCPLingerZero, Unix peer credentials — must reach
+// through this wrapper rather than silently no-op on the type assertion.
+func (c *deadlineConn) Unwrap() net.Conn { return c.Conn }
+
+// unwrapConn walks any chain of Unwrap-able wrappers down to the base
+// connection.
+func unwrapConn(conn net.Conn) net.Conn {
+	for {
+		u, ok := conn.(interface{ Unwrap() net.Conn })
+		if !ok {
+			return conn
+		}
+		inner := u.Unwrap()
+		if inner == nil {
+			return conn
+		}
+		conn = inner
+	}
+}
+
+// withSocketDeadlines adds a write-idle deadline to TCP bearers. Unix bearers
+// are left untouched: NtC clients are local, and the concrete *net.UnixConn is
+// still needed for peer credentials.
 func withSocketDeadlines(conn net.Conn) net.Conn {
 	if _, ok := conn.(*net.TCPConn); !ok {
 		return conn

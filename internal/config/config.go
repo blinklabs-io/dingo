@@ -884,6 +884,39 @@ var globalConfig = &Config{
 	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 }
 
+// deepCopyPluginValue duplicates the reference-typed values a YAML plugin
+// config can hold. A nested `plugins.*.config` mapping or sequence decodes into
+// a map or slice, and GetConfig hands out snapshots, so copying only the top
+// level would leave those nested values shared between every snapshot and
+// globalConfig.
+func deepCopyPluginValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(typed))
+		for key, inner := range typed {
+			clone[key] = deepCopyPluginValue(inner)
+		}
+		return clone
+	case map[any]any:
+		clone := make(map[any]any, len(typed))
+		for key, inner := range typed {
+			clone[key] = deepCopyPluginValue(inner)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(typed))
+		for i, inner := range typed {
+			clone[i] = deepCopyPluginValue(inner)
+		}
+		return clone
+	default:
+		// Scalars are copied by assignment. A plugin config value of some
+		// other reference type would still be shared, but YAML decoding only
+		// produces scalars, maps, and sequences.
+		return value
+	}
+}
+
 func clonePluginSelection(selection hostplugin.Selection) hostplugin.Selection {
 	clone := selection
 	if selection.Config == nil {
@@ -891,7 +924,7 @@ func clonePluginSelection(selection hostplugin.Selection) hostplugin.Selection {
 	}
 	clone.Config = make(map[string]any, len(selection.Config))
 	for key, value := range selection.Config {
-		clone.Config[key] = value
+		clone.Config[key] = deepCopyPluginValue(value)
 	}
 	return clone
 }

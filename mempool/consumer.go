@@ -21,7 +21,6 @@ import (
 type MempoolConsumer struct {
 	mempool     *Mempool
 	cache       map[string]*MempoolTransaction
-	cacheOrder  []string
 	cacheLimit  int
 	nextTxIdx   int
 	cacheMutex  sync.Mutex
@@ -45,6 +44,21 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 	}
 
 	for {
+		// Stop handing out transactions once the body cache is full. NextTx is
+		// what puts a tx id on the wire, and the body is served to the peer
+		// later from this cache only. Dropping a cached body to make room would
+		// silently omit a tx the peer legitimately asked for, so bound the
+		// cache by declining to advertise instead. The peer's acknowledgement
+		// clears the cache and reopens the window. The protocol window
+		// (txsubmissionRequestTxIdsCount) is far below the default limit, so
+		// this is a backstop against an aggressive peer, not a normal path.
+		m.cacheMutex.Lock()
+		cacheFull := len(m.cache) >= m.cacheLimit
+		m.cacheMutex.Unlock()
+		if cacheFull {
+			return nil
+		}
+
 		m.mempool.RLock()
 		m.nextTxIdxMu.Lock()
 
@@ -63,15 +77,7 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 
 				// Add transaction to cache (outside of locks)
 				m.cacheMutex.Lock()
-				if _, exists := m.cache[cachedTx.Hash]; !exists {
-					m.cacheOrder = append(m.cacheOrder, cachedTx.Hash)
-				}
 				m.cache[cachedTx.Hash] = cachedTx
-				for len(m.cacheOrder) > m.cacheLimit {
-					evictHash := m.cacheOrder[0]
-					m.cacheOrder = m.cacheOrder[1:]
-					delete(m.cache, evictHash)
-				}
 				m.cacheMutex.Unlock()
 
 				return nextTx
@@ -132,7 +138,6 @@ func (m *MempoolConsumer) ClearCache() {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
 		m.cache = make(map[string]*MempoolTransaction)
-		m.cacheOrder = nil
 	}
 }
 
@@ -141,11 +146,5 @@ func (m *MempoolConsumer) RemoveTxFromCache(hash string) {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
 		delete(m.cache, hash)
-		for i, cachedHash := range m.cacheOrder {
-			if cachedHash == hash {
-				m.cacheOrder = append(m.cacheOrder[:i], m.cacheOrder[i+1:]...)
-				break
-			}
-		}
 	}
 }

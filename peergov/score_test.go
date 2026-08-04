@@ -15,6 +15,8 @@
 package peergov
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -360,5 +362,108 @@ func TestGetEMAAlpha(t *testing.T) {
 	p5 := &Peer{EMAAlpha: 1.0}
 	if alpha := p5.getEMAAlpha(); alpha != 1.0 {
 		t.Fatalf("expected alpha 1.0, got %v", alpha)
+	}
+}
+
+// A stale latency EMA must decay toward the score-neutral latency, not toward
+// the unknown-latency penalty. Every other component decays to its 0.5-score
+// baseline, so aging out a quiet peer's history must not actively demote it.
+func TestStaleLatencyDecaysTowardNeutralNotPenalty(t *testing.T) {
+	fast := &Peer{
+		BlockFetchLatencyMs:   10,
+		BlockFetchLatencyInit: true,
+		ScoreLastUpdate:       time.Now().Add(-10 * scoreDecayHalfLife),
+	}
+	fast.decayScoreMetrics(time.Now())
+	if fast.BlockFetchLatencyMs > neutralLatencyMs {
+		t.Fatalf(
+			"fast history must not decay past neutral %v, got %v",
+			neutralLatencyMs, fast.BlockFetchLatencyMs,
+		)
+	}
+
+	// Symmetry: a slow peer's stale history improves toward the same baseline.
+	slow := &Peer{
+		BlockFetchLatencyMs:   2_000,
+		BlockFetchLatencyInit: true,
+		ScoreLastUpdate:       time.Now().Add(-10 * scoreDecayHalfLife),
+	}
+	slow.decayScoreMetrics(time.Now())
+	if slow.BlockFetchLatencyMs < neutralLatencyMs {
+		t.Fatalf(
+			"slow history must not decay below neutral %v, got %v",
+			neutralLatencyMs, slow.BlockFetchLatencyMs,
+		)
+	}
+
+	// After full decay the latency component is score-neutral (0.5), matching
+	// the conservative default used for the other components.
+	fast.BlockFetchLatencyMs = neutralLatencyMs
+	fast.UpdatePeerScore()
+	latencyScore := 1.0 / (1.0 + fast.BlockFetchLatencyMs/neutralLatencyMs)
+	if latencyScore != 0.5 {
+		t.Fatalf("neutral latency should score 0.5, got %v", latencyScore)
+	}
+}
+
+// agePeerScoresLocked must decay a quiet peer's score so churn and quota
+// ranking never read a favorable score that predates the decay window.
+func TestAgePeerScoresLockedDecaysQuietPeers(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus: newMockEventBus(),
+	})
+	quiet := &Peer{
+		BlockFetchLatencyMs:     minLatencyMs,
+		BlockFetchSuccessRate:   1,
+		ConnectionStability:     1,
+		HeaderArrivalRate:       10,
+		BlockFetchLatencyInit:   true,
+		BlockFetchSuccessInit:   true,
+		ConnectionStabilityInit: true,
+		HeaderArrivalRateInit:   true,
+		ScoreLastUpdate:         time.Now().Add(-4 * scoreDecayHalfLife),
+	}
+	quiet.UpdatePeerScore()
+	before := quiet.PerformanceScore
+	pg.peers = []*Peer{quiet}
+
+	pg.agePeerScoresLocked(time.Now())
+
+	if quiet.PerformanceScore >= before {
+		t.Fatalf(
+			"a quiet peer's score should decay from %v, got %v",
+			before, quiet.PerformanceScore,
+		)
+	}
+	if quiet.BlockFetchSuccessRate >= 1 {
+		t.Fatalf(
+			"stale success rate should decay toward neutral, got %v",
+			quiet.BlockFetchSuccessRate,
+		)
+	}
+}
+
+// A peer that has never reported an observation keeps its initial score, so it
+// still ranks below observed peers instead of jumping to the conservative
+// default (which sits above the default MinScoreThreshold).
+func TestAgePeerScoresLockedSkipsNeverObservedPeers(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus: newMockEventBus(),
+	})
+	fresh := &Peer{}
+	pg.peers = []*Peer{nil, fresh}
+
+	pg.agePeerScoresLocked(time.Now())
+
+	if fresh.PerformanceScore != 0 {
+		t.Fatalf(
+			"never-observed peer should keep its initial score, got %v",
+			fresh.PerformanceScore,
+		)
+	}
+	if !fresh.ScoreLastUpdate.IsZero() {
+		t.Fatal("aging must not stamp a never-observed peer as observed")
 	}
 }

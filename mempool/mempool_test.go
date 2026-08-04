@@ -1210,17 +1210,41 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, m.Start(context.Background()))
-	defer m.Stop(context.Background())
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
 
 	txs := addMockTransactions(t, m, 3)
 	consumer := m.AddConsumer(newTestConnectionId(0))
 	require.NotNil(t, consumer)
-	for range txs {
-		require.NotNil(t, consumer.NextTx(false))
-	}
 
-	assert.Nil(t, consumer.GetTxFromCache(txs[0].Hash))
+	// The cache fills to its limit and then stops handing out transactions.
+	// Advertising a third tx would require dropping a body the peer may still
+	// request, so NextTx declines instead.
+	require.NotNil(t, consumer.NextTx(false))
+	require.NotNil(t, consumer.NextTx(false))
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"a full body cache must stop advertising rather than drop a body",
+	)
+	assert.Len(t, consumer.cache, 2)
+
+	// Every advertised tx still has its body available to serve.
+	assert.NotNil(t, consumer.GetTxFromCache(txs[0].Hash))
 	assert.NotNil(t, consumer.GetTxFromCache(txs[1].Hash))
+
+	// Serving (or the peer acknowledging) frees a slot and the window reopens,
+	// so the third tx is advertised rather than lost.
+	consumer.RemoveTxFromCache(txs[0].Hash)
+	third := consumer.NextTx(false)
+	require.NotNil(t, third)
+	assert.Equal(t, txs[2].Hash, third.Hash)
 	assert.NotNil(t, consumer.GetTxFromCache(txs[2].Hash))
 	assert.Len(t, consumer.cache, 2)
 }

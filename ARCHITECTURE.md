@@ -355,10 +355,16 @@ point.
 
 Connection lifecycle, protocol multiplexing, and peer governance.
 
-The connection manager wraps TCP bearers with idle-aware read and write
-deadlines at both accept and dial boundaries. Each socket operation refreshes
-its corresponding two-minute deadline, so stalled peers cannot hold protocol
-goroutines forever while healthy long-lived Ouroboros sessions are unaffected.
+The connection manager wraps TCP bearers with an idle-aware write deadline at
+both accept and dial boundaries, for NtC and N2N alike. Each write refreshes the
+two-minute deadline just before the syscall, so a peer that stops reading cannot
+hold a protocol goroutine in `Write` forever while healthy long-lived Ouroboros
+sessions are unaffected. Read deadlines stay with the muxer, which sets its own
+per-segment deadline as slowloris protection; refreshing a read deadline per
+`Read` would override that protocol-managed bound and let a peer dribbling bytes
+keep a segment read open indefinitely. Helpers needing the concrete socket type
+(SO_LINGER, Unix peer credentials) unwrap through the wrapper, so wrapping an
+accepted connection never silently disables them.
 
 ```mermaid
 graph TB
@@ -2379,9 +2385,16 @@ available. Exiting bootstrap preserves bootstrap peer identity for recovery and
 lowers bootstrap chain-selection priority instead of making connected bootstrap
 ChainSync streams ineligible.
 
-Peer performance EMAs decay toward neutral baselines after inactivity, with a
-five-minute half-life. A peer's old successful history therefore cannot absorb
-an unbounded run of new failures before churn policy reacts.
+Peer performance EMAs decay toward score-neutral baselines after inactivity,
+with a five-minute half-life. Latency decays toward the neutral 200 ms rather
+than the 1000 ms penalty applied to a never-measured peer, so aging out stale
+history does not itself demote a peer that was merely quiet. Decay runs both
+when a fresh observation arrives and at the start of each scoring cycle
+(reconcile and both churn tickers), so a peer that goes silent cannot hold a
+stale favorable score while ranking against active peers. A peer with no
+observations at all keeps its initial score and continues to rank below observed
+peers. A peer's old successful history therefore cannot absorb an unbounded run
+of new failures before churn policy reacts.
 
 ## Transaction Mempool
 
@@ -2443,11 +2456,17 @@ them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 `dingo_metrics_mempool_info{implementation="fifo|dag"}` identifies the
 selected backend.
 
-Each transaction-submission consumer retains a bounded FIFO cache of transaction
+Each transaction-submission consumer retains a bounded cache of transaction
 bodies (1,024 entries by default; `MempoolConfig.ConsumerCacheSize` can lower or
-raise it for embedded users). Explicit cache removal and clearing preserve the
-same per-consumer semantics while preventing an idle connection from growing
-memory without limit.
+raise it for embedded users). The bound is enforced by declining to advertise,
+not by eviction: `NextTx` returns nil once the cache is full, because a body is
+only ever served to the peer from this cache and dropping one already advertised
+would silently omit a transaction the peer legitimately requested. Serving a
+body or the peer acknowledging its ids frees slots and reopens the window. The
+protocol request window is far below the default limit, so this bounds an
+aggressive peer rather than affecting normal relay. Explicit cache removal and
+clearing preserve the same per-consumer semantics while preventing an idle
+connection from growing memory without limit.
 
 Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
 clearing transaction and consumer state; later transaction admission returns

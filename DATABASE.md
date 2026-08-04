@@ -661,13 +661,33 @@ an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
 its writer closes successfully.
 
 GCS and S3 blob transactions stage object mutations in memory until `Commit`;
-`Rollback` discards all staged writes and deletes. Commit applies changes in a
-stable key order and makes a best-effort attempt to restore prior object values
-when a later cloud operation fails. Compensation failures are logged but not
-retried, so a failed restore can leave the bucket in a partially applied state.
-Cloud object reads are capped at 256 MiB. Forward cloud iterators page keys directly;
-reverse iterators spool only their key records to a temporary file so bucket
-size does not determine iterator heap usage.
+`Rollback` discards all staged writes and deletes. Staged changes are visible to
+reads within the same transaction: `Get` and every typed getter (`GetBlock`,
+`GetUtxo`, `GetTx`) resolve through the staging map first, so a read-after-write
+matches badger instead of returning pre-transaction state, and a staged delete
+reads as `ErrBlobKeyNotFound`. `GetBlockURL` is the exception — a signed URL
+names a bucket object, so a block staged but not yet committed is reported as
+not found rather than signed into a URL that would 404. Cloud iterators list
+bucket keys as of iterator creation and skip keys the transaction has staged for
+deletion; keys staged for writing are not listed until commit.
+
+Commit applies changes in a stable key order. Before applying anything it builds
+a compensation log recording each key's prior state, probing existence with
+`HeadObject`/`Attrs` and downloading a prior value only for the keys the commit
+overwrites or deletes. Retained prior values are spooled to a temporary file, so
+a multi-key block commit does not hold object payloads in memory. If a cloud
+operation fails partway, the already-applied changes are reversed on a fresh
+context (reusing the commit context would make every restore fail instantly when
+the commit failed because that context expired). Every entry is attempted even
+after an individual failure. When compensation itself fails the bucket is left
+partially applied and `Commit` returns an error wrapping
+`types.ErrPartialCommit`, so callers do not treat it as a clean abort.
+
+Cloud object reads are capped at 256 MiB. Existence checks use object metadata
+rather than a bounded read, so a blob larger than that cap is still deletable.
+Forward cloud iterators page keys directly; reverse iterators spool only their
+key records to a temporary file so bucket size does not determine iterator heap
+usage.
 
 S3 has two prefix input forms with deliberately different compatibility contracts. `New` normalizes a non-empty prefix parsed from `s3://<bucket>/<prefix>` to end in `/`, so `s3://bucket/foo` produces object names such as `foo/<hex-key>`. `WithPrefix`, used by the `plugins.storage` config `prefix` field, preserves the configured value verbatim: `foo` produces `foo<hex-key>`, while `foo/` produces `foo/<hex-key>`. An empty prefix in either form adds nothing. Keeping the option form literal preserves the object-key layout of existing deployments.
 
