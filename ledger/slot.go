@@ -109,8 +109,11 @@ func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {
 		// downtime. Preserve its legacy current-era extrapolation without
 		// weakening the bounded Summary used by header validation and arbitrary
 		// time queries.
+		// Same slot-length-aware window as SlotToTime: these two are inverses,
+		// so a fixed tolerance here would reject the very boundary time
+		// SlotToTime just handed out on an era with slots longer than it.
 		if errors.Is(sumErr, hardfork.ErrPastHorizon) &&
-			isNearNow(ls.now(), t) {
+			withinOperationalWindow(ls.now(), t, currentEraSlotLength(sum)) {
 			if currentSlot, ok := currentEraSlotAtTime(sum, t); ok {
 				return currentSlot, nil
 			}

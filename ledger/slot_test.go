@@ -445,9 +445,20 @@ func TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras(t *testing.T) {
 	assert.Greater(t, when.Sub(now), operationalWindow,
 		"premise: the next boundary is beyond the fixed near-now window")
 
-	// Still bounded: many slot lengths ahead is rejected.
+	// The inverse must accept the same boundary: SlotToTime and TimeToSlot are
+	// a pair, so a fixed window on the reverse direction would reject the very
+	// time SlotToTime just returned.
+	backSlot, err := ls.TimeToSlot(when)
+	require.NoError(t, err,
+		"TimeToSlot must accept the boundary SlotToTime returned")
+	assert.Equal(t, nextSlot, backSlot, "the pair must round-trip")
+
+	// Still bounded in both directions: many slot lengths away is rejected.
 	_, err = ls.SlotToTime(nextSlot + 100)
 	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	_, err = ls.TimeToSlot(now.Add(100 * byronSlotLength))
+	require.Error(t, err,
+		"a time many slot lengths ahead must still be refused")
 }
 
 // The window scales with slot length but stays a bounded operational window.
