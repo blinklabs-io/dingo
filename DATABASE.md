@@ -660,6 +660,56 @@ Plugins whose writes are already durable on commit implement `Sync` as a no-op:
 an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
 its writer closes successfully.
 
+GCS and S3 blob transactions stage object mutations in memory until `Commit`;
+`Rollback` discards all staged writes and deletes with no bucket I/O, so these
+transactions are reversible and report `RollbackIsNoop() == false` — they
+reported true when `Set`/`Delete` wrote through immediately. Callers must not
+infer "the bucket was mutated" from a failed transaction; only a commit that
+wraps `types.ErrPartialCommit` left it partially applied. Staged changes are visible to
+reads within the same transaction: `Get` and every typed getter (`GetBlock`,
+`GetUtxo`, `GetTx`) resolve through the staging map first, so a read-after-write
+matches badger instead of returning pre-transaction state, and a staged delete
+reads as `ErrBlobKeyNotFound`. `GetBlockURL` is the exception — a signed URL
+names a bucket object, so a block staged but not yet committed is reported as
+not found rather than signed into a URL that would 404. Cloud iterators enumerate
+bucket keys and skip keys the transaction has staged for deletion; keys staged
+for writing are not listed until commit. Enumeration is not a point-in-time
+snapshot in either direction: forward iterators page the listing lazily, so a
+later page reflects the bucket when that page is fetched, while reverse iterators
+spool their key records up front and so do reflect iterator-creation time. Item
+values still resolve through the transaction, so a value read after the listing
+observes staged changes regardless of when the key was enumerated.
+
+A staged zero-length write is a value, not a deletion: `Set` with an empty slice
+reads back as an empty blob inside the transaction and the key is still listed by
+iterators.
+
+Commit applies changes in a stable key order. Before applying anything it builds
+a compensation log recording each key's prior state, probing existence with
+`HeadObject`/`Attrs` and downloading a prior value only for the keys the commit
+overwrites or deletes. Retained prior values are streamed straight to a temporary
+file, and streamed back out of it when compensation restores them, so neither
+capturing nor restoring a prior value holds an object payload in memory. That
+streaming path deliberately bypasses the 256 MiB read cap — the cap bounds memory
+for ordinary reads, and applying it to compensation would make an object larger
+than the cap impossible to overwrite or delete inside a transaction. Spool disk
+use is therefore bounded by the total size of the objects a single commit
+replaces. If a cloud
+operation fails partway, the already-applied changes are reversed on a fresh
+context (reusing the commit context would make every restore fail instantly when
+the commit failed because that context expired). Every entry is attempted even
+after an individual failure. When compensation itself fails the bucket is left
+partially applied and `Commit` returns an error wrapping
+`types.ErrPartialCommit`, so callers do not treat it as a clean abort.
+
+Cloud object reads are capped at 256 MiB. Existence checks use object metadata
+rather than a bounded read, and commit compensation streams prior values to disk
+uncapped, so an oversized blob can be both staged for deletion and committed —
+only reading its value back through `Get` hits the cap.
+Forward cloud iterators page keys directly; reverse iterators spool only their
+key records to a temporary file so bucket size does not determine iterator heap
+usage.
+
 S3 has two prefix input forms with deliberately different compatibility contracts. `New` normalizes a non-empty prefix parsed from `s3://<bucket>/<prefix>` to end in `/`, so `s3://bucket/foo` produces object names such as `foo/<hex-key>`. `WithPrefix`, used by the `plugins.storage` config `prefix` field, preserves the configured value verbatim: `foo` produces `foo<hex-key>`, while `foo/` produces `foo/<hex-key>`. An empty prefix in either form adds nothing. Keeping the option form literal preserves the object-key layout of existing deployments.
 
 ```mermaid

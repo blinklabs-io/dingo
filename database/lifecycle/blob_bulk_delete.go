@@ -48,8 +48,17 @@ func blockIndexID(key []byte) (id uint64, ok bool) {
 // index, distinct from the chain's Number/height field) falls in
 // (afterID, tipID], deleting bp/bi/bh keys and their metadata companion via
 // BlobStore.DeleteBlock. Deletes are batched batchSize per blob transaction
-// instead of one transaction per block. Returns the number of blocks
-// actually found and deleted, which may be far fewer than tipID-afterID:
+// instead of one transaction per block.
+//
+// On success the returned count is the number of blocks actually found and
+// deleted. On error it is a lower bound: batches that committed are counted,
+// and a batch whose transaction failed is counted only where the store reports
+// its writes cannot be rolled back (types.IrreversibleTxn). A commit that
+// applied part of a batch and could not compensate (types.ErrPartialCommit)
+// contributes nothing, because how much of it survived is not reported. Either
+// way the caller retries the identical range, which is idempotent.
+//
+// The count may be far fewer than tipID-afterID:
 // IDs are assigned sequentially by BlockCreate for any chain built
 // entirely through it, but a chain bootstrapped/drained from a Mithril
 // snapshot can leave large gaps of never-imported IDs in that range (see
@@ -98,6 +107,10 @@ func DeleteBlocksAfter(
 		var batchIsIrreversible bool
 		txn := db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
+			// A store whose Rollback genuinely cannot undo issued writes
+			// still reports it here. The cloud plugins no longer do: they
+			// stage mutations and apply them in Commit, so their Rollback
+			// discards staged work with no bucket I/O.
 			if irreversible, ok := txn.Blob().(types.IrreversibleTxn); ok {
 				batchIsIrreversible = irreversible.RollbackIsNoop()
 			}
@@ -195,21 +208,35 @@ func DeleteBlocksAfter(
 			return nil
 		})
 		if err != nil {
-			// A failed Badger transaction rolls back the current batch, so
-			// only blocks from earlier committed batches are reported. GCS
-			// and S3 explicitly expose their transactions as irreversible:
-			// every Delete already issued is permanent even though the
-			// batch returns an error, so include that partial progress.
-			// This is still safe to resume from:
-			// finishPendingTruncate always retries the identical
-			// (afterID, tipID] range recorded in the pending-truncate
-			// marker, and redoing it is idempotent regardless of how far
-			// a previous attempt got -- an already-removed "bi" entry
-			// simply will not be found by the next attempt's iterator, and
-			// a still-present one whose referenced bp/bh/metadata objects
-			// are already gone deletes harmlessly again (cloud DeleteBlock
-			// tolerates a missing object; badger's Delete tolerates a
-			// missing key).
+			// Report only blocks that were genuinely removed, which takes
+			// two independent checks.
+			//
+			// A store that reports RollbackIsNoop cannot undo the deletes it
+			// already issued, so they count even though the batch failed.
+			// The cloud plugins no longer report that -- they stage and
+			// apply in Commit, so a callback error means nothing reached the
+			// bucket and the old unconditional "cloud is irreversible"
+			// assumption would over-report.
+			//
+			// A Commit whose own compensation could not fully undo what it
+			// applied (signalled by wrapping types.ErrPartialCommit) leaves
+			// an unknown subset of this batch removed. That subset is not
+			// batchDeleted, so this deliberately does not add it: the count
+			// stays a lower bound rather than claiming a number the commit
+			// cannot report. Establishing the exact figure would mean
+			// plumbing per-key applied progress out of the plugin and
+			// mapping keys back to blocks, for a value the only caller
+			// discards on error.
+			//
+			// Either way this is safe to resume from: finishPendingTruncate
+			// always retries the identical (afterID, tipID] range recorded
+			// in the pending-truncate marker, and redoing it is idempotent
+			// regardless of how far a previous attempt got -- an
+			// already-removed "bi" entry simply will not be found by the
+			// next attempt's iterator, and a still-present one whose
+			// referenced bp/bh/metadata objects are already gone deletes
+			// harmlessly again (cloud DeleteBlock tolerates a missing
+			// object; badger's Delete tolerates a missing key).
 			if batchIsIrreversible {
 				return blocksDeleted + batchDeleted, err
 			}
