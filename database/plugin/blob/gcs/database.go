@@ -296,6 +296,22 @@ func (d *BlobStoreGCS) writeObject(
 	return w.Close()
 }
 
+// writeObjectStream writes key from a reader. Compensation uses this so
+// restoring a large prior value streams out of the spool file instead of being
+// materialized in memory.
+func (d *BlobStoreGCS) writeObjectStream(
+	ctx context.Context,
+	key []byte,
+	body io.Reader,
+) error {
+	w := d.object(key).NewWriter(ctx)
+	if _, err := io.Copy(w, body); err != nil {
+		_ = w.Close()
+		return err
+	}
+	return w.Close()
+}
+
 func (d *BlobStoreGCS) deleteObject(
 	ctx context.Context,
 	key []byte,
@@ -944,8 +960,8 @@ func (t *gcsTxn) Commit() error {
 			defer undoCancel()
 			undoErr := comp.Undo(
 				i,
-				func(key string, value []byte) error {
-					return t.store.writeObject(undoCtx, []byte(key), value)
+				func(key string, value *io.SectionReader, _ int64) error {
+					return t.store.writeObjectStream(undoCtx, []byte(key), value)
 				},
 				func(key string) error {
 					delErr := t.store.deleteObject(undoCtx, []byte(key))

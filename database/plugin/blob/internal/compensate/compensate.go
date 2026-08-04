@@ -130,8 +130,12 @@ func (l *Log) Len() int {
 }
 
 // Undo reverses the first n recorded changes, most recent first. Restoring an
-// object that existed calls put with its prior bytes; one that did not exist
-// calls del.
+// object that existed calls put with a reader over its spooled prior bytes and
+// their length; one that did not exist calls del. put receives a reader rather
+// than a []byte so a large prior value is streamed back out of the spool instead
+// of being materialized — otherwise spooling the capture side would still leave
+// the restore side able to exhaust memory. The reader is an *io.SectionReader,
+// so it also satisfies io.ReadSeeker for SDKs that need to rewind.
 //
 // Every entry is attempted even after a failure, so a single unreachable key
 // does not abandon the rest of the compensation. The returned error joins all
@@ -139,7 +143,7 @@ func (l *Log) Len() int {
 // callers must surface that rather than reporting a clean rollback.
 func (l *Log) Undo(
 	n int,
-	put func(key string, value []byte) error,
+	put func(key string, value *io.SectionReader, size int64) error,
 	del func(key string) error,
 ) error {
 	if n > len(l.entries) {
@@ -158,12 +162,12 @@ func (l *Log) Undo(
 			}
 			continue
 		}
-		value, err := l.readValue(item)
+		reader, err := l.valueReader(item)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		if err := put(item.key, value); err != nil {
+		if err := put(item.key, reader, item.length); err != nil {
 			errs = append(errs, fmt.Errorf(
 				"restore prior value of %q: %w",
 				item.key,
@@ -174,25 +178,14 @@ func (l *Log) Undo(
 	return errors.Join(errs...)
 }
 
-func (l *Log) readValue(item entry) ([]byte, error) {
+func (l *Log) valueReader(item entry) (*io.SectionReader, error) {
 	if l.file == nil {
 		return nil, fmt.Errorf(
 			"compensation log: closed before restoring %q",
 			item.key,
 		)
 	}
-	value := make([]byte, item.length)
-	if _, err := io.ReadFull(
-		io.NewSectionReader(l.file, item.offset, item.length),
-		value,
-	); err != nil {
-		return nil, fmt.Errorf(
-			"compensation log: read spooled value for %q: %w",
-			item.key,
-			err,
-		)
-	}
-	return value, nil
+	return io.NewSectionReader(l.file, item.offset, item.length), nil
 }
 
 // Close releases and removes the spool file. It is safe to call more than once.

@@ -684,7 +684,8 @@ Commit applies changes in a stable key order. Before applying anything it builds
 a compensation log recording each key's prior state, probing existence with
 `HeadObject`/`Attrs` and downloading a prior value only for the keys the commit
 overwrites or deletes. Retained prior values are streamed straight to a temporary
-file, so a multi-key block commit does not hold object payloads in memory. That
+file, and streamed back out of it when compensation restores them, so neither
+capturing nor restoring a prior value holds an object payload in memory. That
 streaming path deliberately bypasses the 256 MiB read cap — the cap bounds memory
 for ordinary reads, and applying it to compensation would make an object larger
 than the cap impossible to overwrite or delete inside a transaction. Spool disk

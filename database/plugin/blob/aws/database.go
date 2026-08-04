@@ -883,8 +883,8 @@ func (t *s3Txn) Commit() error {
 			defer undoCancel()
 			undoErr := comp.Undo(
 				i,
-				func(key string, value []byte) error {
-					return t.store.Put(undoCtx, key, value)
+				func(key string, value *io.SectionReader, size int64) error {
+					return t.store.putStream(undoCtx, key, value, size)
 				},
 				func(key string) error {
 					delErr := t.store.deleteObject(undoCtx, key)
@@ -1237,6 +1237,28 @@ func (d *BlobStoreS3) spoolPriorValue(
 	}
 	defer out.Body.Close()
 	return comp.RecordValueFrom(key, out.Body)
+}
+
+// putStream writes key from a reader of known length. Compensation uses this so
+// restoring a large prior value streams out of the spool file instead of being
+// materialized in memory. The reader is seekable, which the SDK needs to retry
+// or re-sign a request body.
+func (d *BlobStoreS3) putStream(
+	ctx context.Context,
+	key string,
+	body io.ReadSeeker,
+	size int64,
+) error {
+	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        &d.bucket,
+		Key:           new(d.fullKey(key)),
+		Body:          body,
+		ContentLength: &size,
+	})
+	if err != nil {
+		d.logger.Errorf("s3 put %q failed: %v", key, err)
+	}
+	return err
 }
 
 // Put writes a value to key.

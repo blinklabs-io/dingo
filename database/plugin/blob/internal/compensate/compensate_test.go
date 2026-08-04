@@ -16,6 +16,7 @@ package compensate
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -51,8 +52,15 @@ func TestUndoReversesRecordedChanges(t *testing.T) {
 	var calls []undoCall
 	require.NoError(t, log.Undo(
 		log.Len(),
-		func(key string, value []byte) error {
-			calls = append(calls, undoCall{key: key, value: string(value)})
+		func(key string, value *io.SectionReader, size int64) error {
+			got, err := io.ReadAll(value)
+			if err != nil {
+				return err
+			}
+			if int64(len(got)) != size {
+				return fmt.Errorf("size %d does not match %d bytes read", size, len(got))
+			}
+			calls = append(calls, undoCall{key: key, value: string(got)})
 			return nil
 		},
 		func(key string) error {
@@ -79,7 +87,7 @@ func TestUndoOnlyReversesAppliedPrefix(t *testing.T) {
 	var deleted []string
 	require.NoError(t, log.Undo(
 		2,
-		func(string, []byte) error { return nil },
+		func(string, *io.SectionReader, int64) error { return nil },
 		func(key string) error {
 			deleted = append(deleted, key)
 			return nil
@@ -101,7 +109,7 @@ func TestUndoContinuesAfterFailureAndJoinsErrors(t *testing.T) {
 	var attempted []string
 	err := log.Undo(
 		log.Len(),
-		func(key string, _ []byte) error {
+		func(key string, _ *io.SectionReader, _ int64) error {
 			attempted = append(attempted, key)
 			if key == "third" {
 				return putErr
@@ -147,9 +155,10 @@ func TestRecordValueSpoolsToDiskAndCloseRemovesIt(t *testing.T) {
 	var restored []byte
 	require.NoError(t, log.Undo(
 		1,
-		func(_ string, value []byte) error {
-			restored = value
-			return nil
+		func(_ string, value *io.SectionReader, _ int64) error {
+			got, err := io.ReadAll(value)
+			restored = got
+			return err
 		},
 		func(string) error { return nil },
 	))
@@ -188,7 +197,7 @@ func TestUndoClampsOversizedPrefix(t *testing.T) {
 	var deleted []string
 	require.NoError(t, log.Undo(
 		99,
-		func(string, []byte) error { return nil },
+		func(string, *io.SectionReader, int64) error { return nil },
 		func(key string) error {
 			deleted = append(deleted, key)
 			return nil
@@ -208,7 +217,7 @@ func TestClosedLogReportsErrors(t *testing.T) {
 	assert.Error(t, log.RecordValue("other", []byte("value")))
 	assert.Error(t, log.Undo(
 		1,
-		func(string, []byte) error { return nil },
+		func(string, *io.SectionReader, int64) error { return nil },
 		func(string) error { return nil },
 	))
 }
@@ -235,13 +244,29 @@ func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
 	var mismatch bool
 	require.NoError(t, log.Undo(
 		1,
-		func(_ string, value []byte) error {
-			restoredLen = int64(len(value))
-			for i, b := range value {
-				if b != byte(i%251) {
-					mismatch = true
+		func(_ string, value *io.SectionReader, size int64) error {
+			// Read in chunks: the point of the streaming signature is that a
+			// restore never has to materialize the whole object.
+			buf := make([]byte, 64*1024)
+			var off int64
+			for {
+				n, readErr := value.Read(buf)
+				for i := range n {
+					if buf[i] != byte((off+int64(i))%251) {
+						mismatch = true
+					}
+				}
+				off += int64(n)
+				if readErr == io.EOF {
 					break
 				}
+				if readErr != nil {
+					return readErr
+				}
+			}
+			restoredLen = off
+			if off != size {
+				return fmt.Errorf("size %d does not match %d bytes read", size, off)
 			}
 			return nil
 		},
@@ -261,9 +286,10 @@ func TestRecordValueAndRecordValueFromShareSpoolCorrectly(t *testing.T) {
 	got := map[string]string{}
 	require.NoError(t, log.Undo(
 		3,
-		func(key string, value []byte) error {
-			got[key] = string(value)
-			return nil
+		func(key string, value *io.SectionReader, _ int64) error {
+			b, err := io.ReadAll(value)
+			got[key] = string(b)
+			return err
 		},
 		func(string) error { return nil },
 	))
@@ -295,4 +321,39 @@ func (r *patternReader) Read(p []byte) (int, error) {
 	r.pos += n
 	r.remaining -= n
 	return int(n), nil
+}
+
+// Undo hands out a reader, not a []byte, so restoring a prior value larger than
+// the plugins' bounded-read cap streams out of the spool instead of allocating
+// the whole object. Spooling the capture side alone would still leave the
+// restore side able to exhaust memory on a failed multi-key commit.
+func TestUndoStreamsRestoreWithoutMaterializing(t *testing.T) {
+	log := newTestLog(t)
+	const size = int64(256<<20) + 4096
+	require.NoError(t, log.RecordValueFrom("huge", &patternReader{remaining: size}))
+
+	var reportedSize, streamed int64
+	require.NoError(t, log.Undo(
+		1,
+		func(_ string, value *io.SectionReader, sz int64) error {
+			reportedSize = sz
+			// A SectionReader also satisfies io.ReadSeeker, which the AWS SDK
+			// needs in order to re-sign or retry a request body.
+			var _ io.ReadSeeker = value
+			buf := make([]byte, 32*1024)
+			for {
+				n, err := value.Read(buf)
+				streamed += int64(n)
+				if err == io.EOF {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+			}
+		},
+		func(string) error { return nil },
+	))
+	assert.Equal(t, size, reportedSize, "put receives the spooled length")
+	assert.Equal(t, size, streamed, "the whole value is readable in chunks")
 }
