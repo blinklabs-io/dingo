@@ -500,9 +500,77 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
 	txn := db.Transaction(true)
 	defer txn.Release()
 
-	_, err = db.recoverConsumedUtxo(dbtestutil.NewMockInput(txId, 0), txn)
+	_, err = db.recoverConsumedUtxo(dbtestutil.NewMockInput(txId, 0), txn, false)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
+}
+
+// TestRecoveredProducerOnPrimaryChain verifies the membership check that gates
+// blob-recovery of consumed inputs (issue #3005 Mode B cross-fork splice). A
+// producer block that is present in the append-only blob store but is not the
+// block indexed on the applied primary chain at its height (an abandoned fork)
+// must be reported off-chain, so recoverConsumedUtxo refuses to resurrect it
+// for a validated block past the Mithril boundary.
+func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{
+		DataDir:              t.TempDir(),
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StrictUtxoValidation: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const height = uint64(100)
+	canonHash := bytes.Repeat([]byte{0x11}, 32)
+	forkHash := bytes.Repeat([]byte{0x22}, 32)
+	prevHash := bytes.Repeat([]byte{0x01}, 32)
+
+	create := func(slot uint64, hash []byte) {
+		t.Helper()
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(itxn *Txn) error {
+			return db.BlockCreate(models.Block{
+				ID:       height,
+				Slot:     slot,
+				Hash:     hash,
+				PrevHash: prevHash,
+				Number:   height,
+				Cbor:     []byte{0x80},
+			}, itxn)
+		}))
+		txn.Release()
+	}
+
+	// The producer's block ID is supplied by the caller (every recovery path
+	// has already loaded the producer), so the check is by ID and hash.
+	check := func(producerID uint64, hash []byte) bool {
+		t.Helper()
+		txn := db.Transaction(true)
+		defer txn.Release()
+		onChain, cErr := db.recoveredProducerOnPrimaryChain(
+			txn, producerID, hash,
+		)
+		require.NoError(t, cErr)
+		return onChain
+	}
+
+	// The block currently indexed at this height is on the primary chain.
+	create(1000, canonHash)
+	require.True(t, check(height, canonHash),
+		"canonical producer must be reported on-chain")
+
+	// Index the same height to a different block: the earlier block remains
+	// retrievable by point (append-only blob) but is no longer the canonical
+	// block at its height, i.e. an abandoned fork.
+	create(2000, forkHash)
+	require.False(t, check(height, canonHash),
+		"abandoned-fork producer (not indexed at its height) must be off-chain")
+	require.True(t, check(height, forkHash),
+		"the newly indexed block is now the canonical producer")
+
+	// A producer at a height the chain never indexed is off-chain.
+	require.False(t, check(height+1, canonHash),
+		"producer at an unindexed height must be reported off-chain")
 }
 
 // TestSetTransactionRecoveryPopulatesProducerFK verifies that when
@@ -933,4 +1001,110 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 			require.NoError(t, setTransaction(t, db))
 		},
 	)
+}
+
+// TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer is the end-to-end guard
+// for the Mode B cross-fork splice (issue #3005): it drives recoverConsumedUtxo
+// itself, with a real offset-format blob entry, rather than only the membership
+// helper. The append-only blob store keeps abandoned-fork blocks, so an
+// offset-format UTxO can still resolve to a producer the applied chain
+// abandoned; recovering it for a validated block past the Mithril boundary would
+// splice in a UTxO the chain never produced.
+//
+// The three cases pin that the gate is what decides: a canonical producer gets
+// past it, an abandoned one is refused with ErrUtxoNotFound, and with the gate
+// off the same abandoned producer gets past it again. "Past the gate" is
+// observed as the later, unrelated output-decode failure, so the test needs no
+// fabricated ledger CBOR.
+func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{
+		DataDir:              t.TempDir(),
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StrictUtxoValidation: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const (
+		producerID   = uint64(500)
+		producerSlot = uint64(1_000)
+	)
+	txId := randomHash(t)
+	producerHash := randomHash(t)
+	// Block CBOR whose bytes at [1,4) stand in for the output payload. The
+	// content only has to be sliceable; the refusal happens before any decode.
+	blockCbor := []byte{0x80, 0xa1, 0xb2, 0xc3, 0xd4}
+	payloadOffset, payloadLength := uint32(1), uint32(3)
+
+	createBlock := func(hash []byte, slot uint64) {
+		t.Helper()
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(itxn *Txn) error {
+			return db.BlockCreate(models.Block{
+				ID:       producerID,
+				Slot:     slot,
+				Hash:     hash,
+				PrevHash: randomHash(t),
+				Number:   producerID,
+				Cbor:     blockCbor,
+				Type:     1,
+			}, itxn)
+		}))
+		txn.Release()
+	}
+
+	// The producer block, canonical at its height, plus an offset-format blob
+	// entry for the consumed input pointing into it.
+	createBlock(producerHash, producerSlot)
+	var producerHashArr [32]byte
+	copy(producerHashArr[:], producerHash)
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(itxn *Txn) error {
+		return db.Blob().SetUtxo(
+			itxn.Blob(), txId, 0,
+			EncodeUtxoOffset(&CborOffset{
+				BlockSlot:  producerSlot,
+				BlockHash:  producerHashArr,
+				ByteOffset: payloadOffset,
+				ByteLength: payloadLength,
+			}),
+		)
+	}))
+
+	recover := func(enforcePrimaryChain bool) error {
+		t.Helper()
+		txn := db.Transaction(true)
+		defer txn.Release()
+		_, rErr := db.recoverConsumedUtxo(
+			dbtestutil.NewMockInput(txId, 0), txn, enforcePrimaryChain,
+		)
+		return rErr
+	}
+
+	// Canonical producer: the gate allows it through, and recovery proceeds to
+	// the output decode.
+	err = recover(true)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrUtxoNotFound,
+		"a canonical producer must not be refused by the primary-chain gate")
+	require.ErrorContains(t, err, "decode transaction output",
+		"recovery should reach the decode step for a canonical producer")
+
+	// Index a different block at the producer's height: the producer is still
+	// in the blob and still resolvable by the offset, but is now an abandoned
+	// fork.
+	createBlock(randomHash(t), producerSlot+1)
+
+	err = recover(true)
+	require.ErrorIs(t, err, ErrUtxoNotFound,
+		"an abandoned-fork producer must be refused past the trust boundary")
+	require.ErrorContains(t, err, "not on the applied primary chain")
+
+	// With the gate off (below the boundary, or the Mithril gap-closure path)
+	// the same producer is recovered as before.
+	err = recover(false)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrUtxoNotFound,
+		"the gate must be the only thing refusing this producer")
+	require.ErrorContains(t, err, "decode transaction output")
 }
