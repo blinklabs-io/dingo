@@ -46,14 +46,14 @@ type Execer interface {
 }
 
 type dialect struct {
-	name              string
-	quote             byte
-	parameterLimit    int
-	rebind            func(string) string
-	beginOptions      func(bool) *sql.TxOptions
-	setBulk           func(context.Context, Execer) error
-	restore           func(context.Context, Execer) error
-	analyze           func(context.Context, Execer) error
+	name           string
+	quote          byte
+	parameterLimit int
+	rebind         func(string) string
+	beginOptions   func(bool) *sql.TxOptions
+	setBulk        func(context.Context, Execer) error
+	restore        func(context.Context, Execer) error
+	analyze        func(context.Context, Execer) error
 }
 
 func (d dialect) Name() string {
@@ -168,10 +168,10 @@ var mysqlForeignKeyIndexes = map[string]map[string]bool{
 // SQLiteDialect returns the capabilities used by the pure-Go SQLite driver.
 func SQLiteDialect() Dialect {
 	return dialect{
-		name:              "sqlite",
-		quote:             '"',
-		parameterLimit:    999,
-		rebind:            identity,
+		name:           "sqlite",
+		quote:          '"',
+		parameterLimit: 999,
+		rebind:         identity,
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			return &sql.TxOptions{ReadOnly: readOnly}
 		},
@@ -194,10 +194,10 @@ func SQLiteDialect() Dialect {
 // PostgresDialect returns PostgreSQL database/sql capabilities.
 func PostgresDialect() Dialect {
 	return dialect{
-		name:              "postgres",
-		quote:             '"',
-		parameterLimit:    65535,
-		rebind:            rebindPostgres,
+		name:           "postgres",
+		quote:          '"',
+		parameterLimit: 65535,
+		rebind:         rebindPostgres,
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			if !readOnly {
 				return nil
@@ -222,10 +222,10 @@ func PostgresDialect() Dialect {
 // MySQLDialect returns MySQL database/sql capabilities.
 func MySQLDialect() Dialect {
 	return dialect{
-		name:              "mysql",
-		quote:             '`',
-		parameterLimit:    65535,
-		rebind:            identity,
+		name:           "mysql",
+		quote:          '`',
+		parameterLimit: 65535,
+		rebind:         identity,
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			if !readOnly {
 				return nil
