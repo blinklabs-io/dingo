@@ -14,7 +14,10 @@
 
 package migrations
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	ErrEmptyRegistry   = errors.New("metadata migration registry is empty")
@@ -43,25 +46,15 @@ type UpgradeError struct {
 }
 
 func (e *UpgradeError) Error() string {
-	return "metadata migration " + e.Name + " (version " +
-		itoa(e.Version) + ") failed in " + string(e.Phase) + ": " +
-		e.Err.Error()
+	return fmt.Sprintf(
+		"metadata migration %s (version %d) failed in %s: %v",
+		e.Name,
+		e.Version,
+		e.Phase,
+		e.Err,
+	)
 }
 
 func (e *UpgradeError) Unwrap() error {
 	return e.Err
-}
-
-func itoa(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	var buffer [20]byte
-	position := len(buffer)
-	for value > 0 {
-		position--
-		buffer[position] = byte('0' + value%10)
-		value /= 10
-	}
-	return string(buffer[position:])
 }

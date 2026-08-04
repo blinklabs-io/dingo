@@ -40,10 +40,7 @@ func (s *Store) SaveRewardAdaPots(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	epoch, err := checkedInt64(pots.Epoch)
 	if err != nil {
 		return err
@@ -78,10 +75,7 @@ func (s *Store) GetRewardAdaPots(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -131,10 +125,7 @@ func (s *Store) SaveRewardSnapshot(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	params, err := rewardSnapshotParams(snapshot)
 	if err != nil {
 		return err
@@ -169,10 +160,7 @@ func (s *Store) ClaimFallbackRewardSnapshot(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			id, err := queries.InsertRewardSnapshot(
 				context.Background(),
 				sqlitequery.InsertRewardSnapshotParams(params),
@@ -240,10 +228,7 @@ func (s *Store) ClaimFallbackRewardSnapshotGuard(
 	if err != nil {
 		return false, 0, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return false, 0, err
-	}
+	queries := s.operationalQueries(db)
 	guard := &models.RewardSnapshot{
 		Epoch:        epoch,
 		SnapshotType: snapshotType,
@@ -300,10 +285,7 @@ func (s *Store) ReleaseFallbackRewardSnapshotGuard(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	rows, err := queries.ReleaseFallbackRewardSnapshotGuard(
 		context.Background(),
 		int64(guardID),
@@ -329,10 +311,7 @@ func (s *Store) GetRewardSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -391,10 +370,7 @@ func (s *Store) GetRewardPoolInputs(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -452,10 +428,7 @@ func (s *Store) GetRewardStakeInputs(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -559,10 +532,7 @@ func (s *Store) GetRewardPoolOutputs(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -736,10 +706,7 @@ func (s *Store) GetRewardAccountOutputs(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -890,10 +857,7 @@ func (s *Store) DeleteRewardStateAfterSlot(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			q, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			q := s.operationalQueries(db)
 			if err := q.DeleteRewardAdaPotsAfterSlot(
 				context.Background(),
 				sqlSlot,
@@ -993,10 +957,7 @@ func (s *Store) saveRewardRows(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			for index := range count {
 				if err := save(queries, index); err != nil {
 					return err
@@ -1025,10 +986,7 @@ func (s *Store) deleteRewardPair(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			return deleteFn(queries, sqlValue)
 		},
 	)

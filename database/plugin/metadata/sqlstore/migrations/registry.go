@@ -27,7 +27,7 @@ import (
 //go:embed v1/*/*.sql
 var migrationSQL embed.FS
 
-const InitialSchemaRelease = "v1alpha1"
+const initialSchemaRelease = "v1alpha1"
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
 func SQLiteRegistry() ([]Migration, error) {
@@ -62,7 +62,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 	}
 	return []Migration{{
 		Version:          1,
-		Name:             InitialSchemaRelease,
+		Name:             initialSchemaRelease,
 		BackfillRevision: "none",
 		SQL: map[string]SQL{
 			dialect: sqlForDialect,
@@ -260,20 +260,8 @@ func splitSQL(content string) ([]string, error) {
 		blockComment bool
 	)
 	flush := func() {
-		statement := string(current)
+		statement := strings.TrimSpace(string(current))
 		current = nil
-		for len(statement) > 0 &&
-			(statement[0] == ' ' || statement[0] == '\n' ||
-				statement[0] == '\r' || statement[0] == '\t') {
-			statement = statement[1:]
-		}
-		for len(statement) > 0 {
-			last := statement[len(statement)-1]
-			if last != ' ' && last != '\n' && last != '\r' && last != '\t' {
-				break
-			}
-			statement = statement[:len(statement)-1]
-		}
 		if statement != "" {
 			statements = append(statements, statement)
 		}

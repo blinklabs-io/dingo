@@ -35,10 +35,7 @@ func (s *Store) GetAssetByPolicyAndName(
 	if err != nil {
 		return models.Asset{}, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return models.Asset{}, err
-	}
+	q := s.operationalQueries(db)
 	row, err := q.GetAssetByPolicyAndName(
 		context.Background(),
 		sqlitequery.GetAssetByPolicyAndNameParams{
@@ -123,10 +120,7 @@ func (s *Store) GetAssetMintBurnInfo(
 	if err != nil {
 		return nil, 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, 0, err
-	}
+	q := s.operationalQueries(db)
 	row, err := q.GetAssetMintBurnInfo(
 		context.Background(),
 		sqlitequery.GetAssetMintBurnInfoParams{

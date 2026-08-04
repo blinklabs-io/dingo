@@ -51,10 +51,7 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			q, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			q := s.operationalQueries(db)
 			params, err := createUtxoParams(utxo)
 			if err != nil {
 				return err
@@ -485,10 +482,7 @@ func (s *Store) importUtxos(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			q, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			q := s.operationalQueries(db)
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
 			for i := range utxos {
@@ -736,10 +730,7 @@ func (s *Store) getUtxo(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	params := sqlitequery.GetLiveUtxoParams{
 		TxID: txID,
 		OutputIdx: sql.NullInt64{
@@ -780,10 +771,7 @@ func (s *Store) GetUtxosAddedAfterSlot(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -821,10 +809,7 @@ func (s *Store) getUtxoRefsBySlot(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -863,10 +848,7 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -1171,10 +1153,7 @@ func (s *Store) GetUtxosByAssets(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	var rows []sqlitequery.Utxo
 	if assetName == nil {
 		rows, err = q.GetLiveUtxosByAssetPolicy(

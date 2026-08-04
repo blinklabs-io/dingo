@@ -31,8 +31,8 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-func (s *Store) sqliteQueries(db queryer) (*sqlitequery.Queries, error) { //nolint:unparam
-	return sqlitequery.New(newDialectQueryer(db, s.dialect.Name())), nil
+func (s *Store) operationalQueries(db queryer) *sqlitequery.Queries {
+	return sqlitequery.New(newDialectQueryer(db, s.dialect.Name()))
 }
 
 func (s *Store) GetTip(txn types.Txn) (ochainsync.Tip, error) {
@@ -41,10 +41,7 @@ func (s *Store) GetTip(txn types.Txn) (ochainsync.Tip, error) {
 	if err != nil {
 		return tip, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return tip, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetTip(context.Background())
 	if errors.Is(err, sql.ErrNoRows) {
 		return tip, nil
@@ -63,10 +60,7 @@ func (s *Store) SetTip(tip ochainsync.Tip, txn types.Txn) error {
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	slot, err := checkedInt64(tip.Point.Slot)
 	if err != nil {
 		return fmt.Errorf("set tip slot: %w", err)
@@ -100,10 +94,7 @@ func (s *Store) SetNetworkState(
 	if err != nil {
 		return fmt.Errorf("set network state: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return fmt.Errorf("set network state: %w", err)
@@ -130,10 +121,7 @@ func (s *Store) DeleteNetworkStateAfterSlot(
 	if err != nil {
 		return fmt.Errorf("delete network state after slot: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -154,10 +142,7 @@ func (s *Store) GetNetworkState(
 	if err != nil {
 		return nil, fmt.Errorf("get network state: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetLatestNetworkState(context.Background())
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -186,10 +171,7 @@ func (s *Store) GetSyncState(key string, txn types.Txn) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get sync state: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return "", err
-	}
+	queries := s.operationalQueries(db)
 	value, err := queries.GetSyncState(context.Background(), key)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -208,10 +190,7 @@ func (s *Store) SetSyncState(
 	if err != nil {
 		return fmt.Errorf("set sync state: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	if err := queries.SetSyncState(
 		context.Background(),
 		sqlitequery.SetSyncStateParams{SyncKey: key, Value: value},
@@ -226,10 +205,7 @@ func (s *Store) DeleteSyncState(key string, txn types.Txn) error {
 	if err != nil {
 		return fmt.Errorf("delete sync state: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	if err := queries.DeleteSyncState(context.Background(), key); err != nil {
 		return fmt.Errorf("delete sync state: %w", err)
 	}
@@ -241,10 +217,7 @@ func (s *Store) ClearSyncState(txn types.Txn) error {
 	if err != nil {
 		return fmt.Errorf("clear sync state: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	if err := queries.ClearSyncState(context.Background()); err != nil {
 		return fmt.Errorf("clear sync state: %w", err)
 	}
@@ -259,10 +232,7 @@ func (s *Store) GetEpoch(
 	if err != nil {
 		return nil, fmt.Errorf("get epoch: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	id, err := checkedInt64(epochID)
 	if err != nil {
 		return nil, err
@@ -299,10 +269,7 @@ func (s *Store) GetEpochsByEra(
 	if err != nil {
 		return nil, fmt.Errorf("get epochs by era: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEraID, err := checkedInt64(uint64(eraID))
 	if err != nil {
 		return nil, err
@@ -337,10 +304,7 @@ func (s *Store) GetEpochs(txn types.Txn) ([]models.Epoch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get epochs: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	rows, err := queries.GetEpochs(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("get epochs: %w", err)
@@ -371,10 +335,7 @@ func (s *Store) GetEpochBySlot(
 	if err != nil {
 		return nil, fmt.Errorf("get epoch by slot: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -414,10 +375,7 @@ func (s *Store) DeleteEpochsAfterSlot(slot uint64, txn types.Txn) error {
 	if err != nil {
 		return fmt.Errorf("delete epochs after slot: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -441,10 +399,7 @@ func (s *Store) SetEpoch(
 	if err != nil {
 		return fmt.Errorf("set epoch: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -507,10 +462,7 @@ func (s *Store) SetBlockNonce(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	slot, err := checkedInt64(slotNumber)
 	if err != nil {
 		return err
@@ -537,10 +489,7 @@ func (s *Store) GetBlockNonce(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	slot, err := checkedInt64(point.Slot)
 	if err != nil {
 		return nil, err
@@ -567,10 +516,7 @@ func (s *Store) GetBlockNoncesInSlotRange(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	start, err := checkedInt64(startSlot)
 	if err != nil {
 		return nil, err
@@ -611,10 +557,7 @@ func (s *Store) GetLastBlockNonceInRange(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	start, err := checkedInt64(startSlot)
 	if err != nil {
 		return nil, err
@@ -679,10 +622,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlot(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	slot, err := checkedInt64(slotNumber)
 	if err != nil {
 		return err
@@ -701,10 +641,7 @@ func (s *Store) DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	slot, err := checkedInt64(slotNumber)
 	if err != nil {
 		return err
@@ -723,10 +660,7 @@ func (s *Store) DeleteBlockNoncesAfterPoint(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	slot, err := checkedInt64(point.Slot)
 	if err != nil {
 		return err
@@ -755,10 +689,7 @@ func (s *Store) GetDatum(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetDatum(context.Background(), hash[:])
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -784,10 +715,7 @@ func (s *Store) SetDatum(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	slot, err := checkedInt64(addedSlot)
 	if err != nil {
 		return err
@@ -813,10 +741,7 @@ func (s *Store) GetScript(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetScript(context.Background(), hash[:])
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -842,10 +767,7 @@ func (s *Store) GetPParams(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -885,10 +807,7 @@ func (s *Store) GetPParamUpdates(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -936,10 +855,7 @@ func (s *Store) SetPParams(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -977,10 +893,7 @@ func (s *Store) SetPParamUpdate(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1014,10 +927,7 @@ func (s *Store) DeletePParamsAfterSlot(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1036,10 +946,7 @@ func (s *Store) DeletePParamUpdatesAfterSlot(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1058,10 +965,7 @@ func (s *Store) AddNetworkDonation(
 	if err != nil {
 		return fmt.Errorf("add network donation: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1119,10 +1023,7 @@ func (s *Store) DeleteNetworkDonationsAfterSlot(
 	if err != nil {
 		return fmt.Errorf("delete network donations after slot: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1148,10 +1049,7 @@ func (s *Store) GetImportCheckpoint(
 	if err != nil {
 		return nil, fmt.Errorf("get import checkpoint: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetImportCheckpoint(
 		context.Background(),
 		importKey,
@@ -1180,10 +1078,7 @@ func (s *Store) SetImportCheckpoint(
 	if err != nil {
 		return fmt.Errorf("set import checkpoint: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	if err := queries.SetImportCheckpoint(
 		context.Background(),
 		sqlitequery.SetImportCheckpointParams{

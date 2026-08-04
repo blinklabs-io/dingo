@@ -29,7 +29,6 @@ type Dialect interface {
 	Name() string
 	Rebind(string) string
 	QuoteIdentifier(string) string
-	BooleanLiteral(bool) string
 	ParameterLimit() int
 	BeginOptions(readOnly bool) *sql.TxOptions
 	SetBulkMode(context.Context, Execer) error
@@ -67,13 +66,6 @@ func (d dialect) Rebind(query string) string {
 func (d dialect) QuoteIdentifier(identifier string) string {
 	q := string(d.quote)
 	return q + strings.ReplaceAll(identifier, q, q+q) + q
-}
-
-func (d dialect) BooleanLiteral(value bool) string {
-	if value {
-		return "TRUE"
-	}
-	return "FALSE"
 }
 
 func (d dialect) ParameterLimit() int {

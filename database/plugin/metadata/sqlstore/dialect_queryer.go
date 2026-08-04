@@ -31,6 +31,9 @@ type dialectQueryer struct {
 }
 
 func newDialectQueryer(db queryer, dialect string) queryer {
+	if dialect == "sqlite" {
+		return db
+	}
 	if wrapped, ok := db.(dialectQueryer); ok && wrapped.dialect == dialect {
 		return db
 	}
@@ -159,8 +162,8 @@ func hasReturningID(query string) bool {
 func translateMySQLReturning(query string) (string, bool) {
 	base := strings.TrimSpace(returningIDPattern.ReplaceAllString(query, ""))
 	base = mysqlIntegerCastPattern.ReplaceAllString(base, "AS SIGNED")
-	doNothing := regexp.MustCompile(`(?is)ON\s+CONFLICT(?:\s*\([^)]*\))?\s+DO\s+NOTHING`).MatchString(base)
-	isUpsert := regexp.MustCompile(`(?is)ON\s+CONFLICT(?:\s*\([^)]*\))?\s+DO\s+UPDATE`).MatchString(base)
+	doNothing := mysqlDoNothingPattern.MatchString(base)
+	isUpsert := mysqlUpdatePattern.MatchString(base)
 	return translateMySQLUpsertWithID(base, isUpsert), doNothing
 }
 

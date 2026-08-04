@@ -201,11 +201,6 @@ func (s *Store) Ready() bool {
 	return s.ready.Load()
 }
 
-// Dialect returns the backend capability implementation.
-func (s *Store) Dialect() Dialect {
-	return s.dialect
-}
-
 // WritePoolStats exposes database/sql pool telemetry without exposing the
 // underlying database handle.
 func (s *Store) WritePoolStats() sql.DBStats {
@@ -222,56 +217,34 @@ func (s *Store) ReadPoolStats() sql.DBStats {
 // returned transaction because the historical MetadataStore contract cannot
 // return an error from this method.
 func (s *Store) Transaction() types.Txn {
-	if !s.ready.Load() {
-		return &sqlTxn{
-			owner:    s,
-			beginErr: errors.New("sqlstore: store is not ready"),
-		}
-	}
-	tx, err := s.beginWriteTx(context.Background())
-	return &sqlTxn{owner: s, tx: tx, beginErr: err}
+	return s.transaction(false)
 }
 
 // ReadTransaction begins a repeatable, read-only transaction on the read pool.
 func (s *Store) ReadTransaction() types.Txn {
+	return s.transaction(true)
+}
+
+func (s *Store) transaction(readOnly bool) types.Txn {
 	if !s.ready.Load() {
 		return &sqlTxn{
 			owner:    s,
 			beginErr: errors.New("sqlstore: store is not ready"),
 		}
-	}
-	tx, err := s.readDB.BeginTx(
-		context.Background(),
-		s.dialect.BeginOptions(true),
-	)
-	return &sqlTxn{owner: s, tx: tx, beginErr: err}
-}
-
-// BeginTxn is the error-returning form used by new internal callers.
-func (s *Store) BeginTxn(
-	ctx context.Context,
-	readOnly bool,
-) (types.Txn, error) {
-	if !s.ready.Load() {
-		return nil, errors.New("sqlstore: store is not ready")
-	}
-	db := s.writeDB
-	if readOnly {
-		db = s.readDB
 	}
 	var (
 		tx  *sql.Tx
 		err error
 	)
-	if !readOnly {
-		tx, err = s.beginWriteTx(ctx)
+	if readOnly {
+		tx, err = s.readDB.BeginTx(
+			context.Background(),
+			s.dialect.BeginOptions(true),
+		)
 	} else {
-		tx, err = db.BeginTx(ctx, s.dialect.BeginOptions(readOnly))
+		tx, err = s.beginWriteTx(context.Background())
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &sqlTxn{owner: s, tx: tx}, nil
+	return &sqlTxn{owner: s, tx: tx, beginErr: err}
 }
 
 // Close closes each owned pool exactly once.
@@ -303,23 +276,20 @@ func (s *Store) CloseContext(ctx context.Context) error {
 			select {
 			case <-s.maintenanceDone:
 			case <-ctx.Done():
-				closeErrors := []error{ctx.Err()}
-				if s.readDB != s.writeDB {
-					closeErrors = append(closeErrors, s.readDB.Close())
-				}
-				closeErrors = append(closeErrors, s.writeDB.Close())
-				s.closeErr = errors.Join(closeErrors...)
+				s.closeErr = errors.Join(ctx.Err(), s.closePools())
 				return
 			}
 		}
-		var closeErrors []error
-		if s.readDB != s.writeDB {
-			closeErrors = append(closeErrors, s.readDB.Close())
-		}
-		closeErrors = append(closeErrors, s.writeDB.Close())
-		s.closeErr = errors.Join(closeErrors...)
+		s.closeErr = s.closePools()
 	})
 	return s.closeErr
+}
+
+func (s *Store) closePools() error {
+	if s.readDB == s.writeDB {
+		return s.writeDB.Close()
+	}
+	return errors.Join(s.readDB.Close(), s.writeDB.Close())
 }
 
 func (s *Store) startMaintenance() {

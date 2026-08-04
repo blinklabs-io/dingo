@@ -36,10 +36,7 @@ func (s *Store) CreateDrep(txn types.Txn, drep *models.Drep) error {
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	params, err := drepParams(drep)
 	if err != nil {
 		return err
@@ -71,10 +68,7 @@ func (s *Store) ImportDrep(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			q, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			q := s.operationalQueries(db)
 			params, err := drepParams(drep)
 			if err != nil {
 				return err
@@ -310,10 +304,7 @@ func (s *Store) GetDrep(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	var row sqlitequery.Drep
 	if includeInactive {
 		row, err = q.GetDrepByHash(context.Background(), credential)
@@ -339,10 +330,7 @@ func (s *Store) GetDrepByCredential(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	params := sqlitequery.GetActiveDrepByCredentialParams{
 		CredentialTag: int64(credentialTag),
 		Credential:    credential,
@@ -375,10 +363,7 @@ func (s *Store) GetActiveDreps(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	rows, err := q.GetActiveDreps(context.Background())
 	if err != nil {
 		return nil, err
@@ -406,10 +391,7 @@ func (s *Store) SetDrep(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -437,10 +419,7 @@ func (s *Store) InsertDrepIfAbsent(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -467,10 +446,7 @@ func (s *Store) GetDRepDelegators(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	rows, err := q.GetDRepDelegators(
 		context.Background(),
 		sqlitequery.GetDRepDelegatorsParams{
@@ -642,10 +618,7 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	activity, err := checkedInt64(activityEpoch)
 	if err != nil {
 		return err
@@ -680,10 +653,7 @@ func (s *Store) GetExpiredDReps(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	epochValue, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -711,10 +681,7 @@ func (s *Store) GetDrepLastRegistrationSlot(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
+	q := s.operationalQueries(db)
 	slot, err := q.GetDrepLastRegistrationSlot(
 		context.Background(),
 		sqlitequery.GetDrepLastRegistrationSlotParams{

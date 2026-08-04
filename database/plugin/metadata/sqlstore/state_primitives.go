@@ -35,10 +35,7 @@ func (s *Store) GetBackfillCheckpoint(
 	if err != nil {
 		return nil, fmt.Errorf("get backfill checkpoint: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetBackfillCheckpoint(context.Background(), phase)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -68,10 +65,7 @@ func (s *Store) SetBackfillCheckpoint(
 	if err != nil {
 		return fmt.Errorf("set backfill checkpoint: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	lastSlot, err := checkedInt64(checkpoint.LastSlot)
 	if err != nil {
 		return fmt.Errorf("set backfill checkpoint last slot: %w", err)
@@ -114,10 +108,7 @@ func (s *Store) GetConstitution(
 	if err != nil {
 		return nil, fmt.Errorf("get constitution: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetConstitution(context.Background())
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -139,10 +130,7 @@ func (s *Store) SetConstitution(
 	if err != nil {
 		return fmt.Errorf("set constitution: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	addedSlot, err := checkedInt64(constitution.AddedSlot)
 	if err != nil {
 		return fmt.Errorf("set constitution added slot: %w", err)
@@ -180,10 +168,7 @@ func (s *Store) DeleteConstitutionsAfterSlot(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			if err := queries.DeleteConstitutionsAddedAfterSlot(
 				context.Background(),
 				sqlSlot,
@@ -213,10 +198,7 @@ func (s *Store) SetCommitteeMembers(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			for _, member := range members {
 				if member == nil {
 					return errors.New("committee member is nil")
@@ -283,10 +265,7 @@ func (s *Store) setCommitteeQuorum(
 	if err != nil {
 		return fmt.Errorf("set committee quorum: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return fmt.Errorf("set committee quorum: %w", err)
@@ -310,10 +289,7 @@ func (s *Store) GetCommitteeQuorum(
 	if err != nil {
 		return nil, fmt.Errorf("get committee quorum: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	value, err := queries.GetCommitteeQuorum(context.Background())
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -357,10 +333,7 @@ func (s *Store) getCommitteeMembers(
 	if err != nil {
 		return nil, fmt.Errorf("get committee members: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	var rows []sqlitequery.CommitteeMember
 	if includeDeleted {
 		rows, err = queries.GetCommitteeMembersIncludeDeleted(
@@ -395,10 +368,7 @@ func (s *Store) SoftDeleteCommitteeMembers(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			for _, hash := range coldCredHashes {
 				if err := queries.SoftDeleteCommitteeMember(
 					context.Background(),
@@ -430,10 +400,7 @@ func (s *Store) SoftDeleteAllCommitteeMembers(
 	if err != nil {
 		return fmt.Errorf("soft delete all committee members: %w", err)
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return fmt.Errorf("soft delete all committee members: %w", err)
@@ -459,10 +426,7 @@ func (s *Store) DeleteCommitteeMembersAfterSlot(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			if err := queries.DeleteCommitteeMembersAddedAfterSlot(
 				context.Background(),
 				sqlSlot,

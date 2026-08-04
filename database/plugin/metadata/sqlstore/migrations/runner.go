@@ -74,7 +74,7 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 		runErr = errors.Join(runErr, release())
 	}()
 
-	legacyTables, err := r.userTables(ctx, conn)
+	hasUserTables, err := r.hasUserTables(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
-	if len(legacyTables) > 0 && !stateTableExists {
+	if hasUserTables && !stateTableExists {
 		return fmt.Errorf(
 			"%w: existing metadata tables are from an unsupported database version; delete the metadata database and resync from genesis",
 			ErrLegacySchema,
@@ -240,7 +240,7 @@ func (r *Runner) runBackfill(
 		if result.Done {
 			nextPhase = PhaseContract
 		}
-		if err := r.setPhaseTx(
+		if err := r.setPhase(
 			ctx,
 			tx,
 			migration.Version,
@@ -332,39 +332,34 @@ func (r *Runner) validateDatabase(states map[int]state) error {
 	return nil
 }
 
-func (r *Runner) userTables(
+func (r *Runner) hasUserTables(
 	ctx context.Context,
 	conn *sql.Conn,
-) ([]string, error) {
+) (bool, error) {
 	var query string
 	switch r.Dialect {
 	case "sqlite":
-		query = "SELECT name FROM sqlite_master WHERE type = 'table' " +
-			"AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'"
+		query = "SELECT 1 FROM sqlite_master WHERE type = 'table' " +
+			"AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' LIMIT 1"
 	case "postgres":
-		query = "SELECT table_name FROM information_schema.tables " +
+		query = "SELECT 1 FROM information_schema.tables " +
 			"WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' " +
-			"AND table_name <> 'schema_migrations'"
+			"AND table_name <> 'schema_migrations' LIMIT 1"
 	case "mysql":
-		query = "SELECT table_name FROM information_schema.tables " +
-			"WHERE table_schema = DATABASE() AND table_name <> 'schema_migrations'"
+		query = "SELECT 1 FROM information_schema.tables " +
+			"WHERE table_schema = DATABASE() AND table_name <> 'schema_migrations' LIMIT 1"
 	default:
-		return nil, fmt.Errorf("unsupported metadata dialect %q", r.Dialect)
+		return false, fmt.Errorf("unsupported metadata dialect %q", r.Dialect)
 	}
-	rows, err := conn.QueryContext(ctx, query)
+	var found int
+	err := conn.QueryRowContext(ctx, query).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect metadata tables: %w", err)
+		return false, fmt.Errorf("inspect metadata tables: %w", err)
 	}
-	defer rows.Close()
-	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return nil, err
-		}
-		tables = append(tables, table)
-	}
-	return tables, rows.Err()
+	return found != 0, nil
 }
 
 func (r *Runner) ensureStateTable(
@@ -511,38 +506,19 @@ func (r *Runner) setDirty(
 	return err
 }
 
-func (r *Runner) setPhase(
-	ctx context.Context,
-	conn *sql.Conn,
-	version int,
-	phase Phase,
-	cursor string,
-	dirty bool,
-) error {
-	_, err := conn.ExecContext(
-		ctx,
-		r.rebind(
-			"UPDATE schema_migrations SET phase = ?, "+r.cursorColumn()+" = ?, dirty = ?, "+
-				"updated_at = ? WHERE version = ?",
-		),
-		phase,
-		cursor,
-		dirty,
-		r.Now().UnixMilli(),
-		version,
-	)
-	return err
+type stateExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-func (r *Runner) setPhaseTx(
+func (r *Runner) setPhase(
 	ctx context.Context,
-	tx *sql.Tx,
+	exec stateExecer,
 	version int,
 	phase Phase,
 	cursor string,
 	dirty bool,
 ) error {
-	_, err := tx.ExecContext(
+	_, err := exec.ExecContext(
 		ctx,
 		r.rebind(
 			"UPDATE schema_migrations SET phase = ?, "+r.cursorColumn()+" = ?, dirty = ?, "+

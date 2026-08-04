@@ -43,10 +43,7 @@ func (s *Store) CreateAccount(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			q, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			q := s.operationalQueries(db)
 			params, err := accountParams(account)
 			if err != nil {
 				return err
@@ -83,10 +80,7 @@ func (s *Store) ImportAccount(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	params, err := accountParams(account)
 	if err != nil {
 		return err
@@ -112,10 +106,7 @@ func (s *Store) GetAccountByCredential(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	params := sqlitequery.GetActiveAccountByCredentialParams{
 		CredentialTag: int64(credentialTag),
 		StakingKey:    stakeKey,

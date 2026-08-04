@@ -38,10 +38,7 @@ func (s *Store) SavePoolStakeSnapshot(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	params, err := poolStakeSnapshotParams(snapshot)
 	if err != nil {
 		return err
@@ -68,10 +65,7 @@ func (s *Store) SavePoolStakeSnapshots(
 		context.Background(),
 		txn,
 		func(db queryer) error {
-			queries, err := s.sqliteQueries(db)
-			if err != nil {
-				return err
-			}
+			queries := s.operationalQueries(db)
 			for _, snapshot := range snapshots {
 				if snapshot == nil {
 					return errors.New("pool stake snapshot is nil")
@@ -108,10 +102,7 @@ func (s *Store) GetPoolStakeSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -142,10 +133,7 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -180,10 +168,7 @@ func (s *Store) GetTotalActiveStake(
 	if err != nil {
 		return 0, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return 0, err
@@ -228,10 +213,7 @@ func (s *Store) SaveEpochSummary(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	epoch, err := checkedInt64(summary.Epoch)
 	if err != nil {
 		return err
@@ -278,10 +260,7 @@ func (s *Store) GetEpochSummary(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -303,10 +282,7 @@ func (s *Store) GetLatestEpochSummary(
 	if err != nil {
 		return nil, err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	queries := s.operationalQueries(db)
 	row, err := queries.GetLatestEpochSummary(context.Background())
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -326,10 +302,7 @@ func (s *Store) DeletePoolStakeSnapshotsForEpoch(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return err
@@ -408,10 +381,7 @@ func (s *Store) deleteSnapshotsByEpoch(
 	if err != nil {
 		return err
 	}
-	queries, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	queries := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return err

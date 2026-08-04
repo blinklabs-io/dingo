@@ -40,10 +40,7 @@ func (s *Store) GetTransactionByHash(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	row, err := q.GetTransactionByHash(context.Background(), hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -69,10 +66,7 @@ func (s *Store) GetTransactionSlotByHash(
 	if err != nil {
 		return 0, false, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, false, err
-	}
+	q := s.operationalQueries(db)
 	slot, err := q.GetTransactionSlotByHash(context.Background(), hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
@@ -91,10 +85,7 @@ func (s *Store) GetTransactionIDByHash(
 	if err != nil {
 		return 0, false, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, false, err
-	}
+	q := s.operationalQueries(db)
 	id, err := q.GetTransactionIDByHash(context.Background(), hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
@@ -113,10 +104,7 @@ func (s *Store) GetTransactionMetadataByHash(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	metadata, err := q.GetTransactionMetadataByHash(
 		context.Background(),
 		hash,
@@ -162,10 +150,7 @@ func (s *Store) GetTransactionsByBlockHash(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	rows, err := q.GetTransactionsByBlockHash(
 		context.Background(),
 		blockHash,
@@ -247,10 +232,7 @@ func (s *Store) GetTransactionHashesAfterSlot(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	value, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -276,10 +258,7 @@ func (s *Store) CountTransactionsByPaymentCred(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
+	q := s.operationalQueries(db)
 	count, err := q.CountTransactionsByPaymentCred(
 		context.Background(),
 		paymentKey,
@@ -298,10 +277,7 @@ func (s *Store) CountTransactionsByMetadataLabel(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
+	q := s.operationalQueries(db)
 	count, err := q.CountTransactionsByMetadataLabel(
 		context.Background(),
 		validString(strconv.FormatUint(label, 10)),
@@ -328,10 +304,7 @@ func (s *Store) CountTransactionsInSlotRange(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
+	q := s.operationalQueries(db)
 	start, err := checkedInt64(startSlot)
 	if err != nil {
 		return 0, err
@@ -365,10 +338,7 @@ func (s *Store) GetBlockSlotRangeStats(
 	if err != nil {
 		return metadata.SlotRangeStats{}, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return metadata.SlotRangeStats{}, err
-	}
+	q := s.operationalQueries(db)
 	start, err := checkedInt64(startSlot)
 	if err != nil {
 		return metadata.SlotRangeStats{}, err
@@ -405,10 +375,7 @@ func (s *Store) DeleteAddressTransactionsAfterSlot(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	value, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -430,10 +397,7 @@ func (s *Store) DeleteTransactionMetadataLabelsAfterSlot(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	value, err := checkedInt64(slot)
 	if err != nil {
 		return err

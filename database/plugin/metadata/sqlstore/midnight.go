@@ -163,10 +163,7 @@ func (s *Store) CreateMidnightAssetCreate(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	params, err := midnightAssetCreateParams(row)
 	if err != nil {
 		return err
@@ -186,10 +183,7 @@ func (s *Store) CreateMidnightAssetSpend(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	params, err := midnightAssetSpendParams(row)
 	if err != nil {
 		return err
@@ -209,10 +203,7 @@ func (s *Store) CreateMidnightRegistration(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	params, err := midnightRegistrationParams(row)
 	if err != nil {
 		return err
@@ -232,10 +223,7 @@ func (s *Store) CreateMidnightDeregistration(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	params, err := midnightDeregistrationParams(row)
 	if err != nil {
 		return err
@@ -248,10 +236,7 @@ func (s *Store) FindUnspentMidnightAssetCreates() (
 	[]models.MidnightAssetCreate,
 	error,
 ) {
-	q, err := s.sqliteQueries(newDialectQueryer(s.readDB, s.dialect.Name()))
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(s.readDB)
 	rows, err := q.FindUnspentMidnightAssetCreates(context.Background())
 	if err != nil {
 		return nil, err
@@ -263,10 +248,7 @@ func (s *Store) FindUnspentMidnightRegistrations() (
 	[]models.MidnightRegistration,
 	error,
 ) {
-	q, err := s.sqliteQueries(newDialectQueryer(s.readDB, s.dialect.Name()))
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(s.readDB)
 	rows, err := q.FindUnspentMidnightRegistrations(context.Background())
 	if err != nil {
 		return nil, err
@@ -282,10 +264,7 @@ func (s *Store) DeleteMidnightAssetCreatesByBlock(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightAssetCreatesByBlock(
 		context.Background(),
 		sqlBlock,
@@ -313,10 +292,7 @@ func (s *Store) DeleteMidnightAssetSpendsByBlock(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightAssetSpendsByBlock(
 		context.Background(),
 		sqlBlock,
@@ -344,10 +320,7 @@ func (s *Store) DeleteMidnightRegistrationsByBlock(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightRegistrationsByBlock(
 		context.Background(),
 		sqlBlock,
@@ -375,10 +348,7 @@ func (s *Store) DeleteMidnightDeregistrationsByBlock(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	rows, err := q.GetMidnightDeregistrationsByBlock(
 		context.Background(),
 		sqlBlock,
@@ -409,10 +379,7 @@ func (s *Store) InsertMidnightGovernanceDatum(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	outputIndex, err := checkedInt64(uint64(datum.OutputIndex))
 	if err != nil {
 		return err
@@ -459,10 +426,7 @@ func (s *Store) GetLatestMidnightGovernanceDatum(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	sqlBlock, err := checkedInt64(blockNumber)
 	if err != nil {
 		return nil, err
@@ -544,10 +508,7 @@ func (s *Store) UpsertMidnightAriadneParams(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	epoch, err := checkedInt64(params.Epoch)
 	if err != nil {
 		return err
@@ -592,10 +553,7 @@ func (s *Store) CreateMidnightAriadneRollback(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	blockNumber, err := checkedInt64(rollback.BlockNumber)
 	if err != nil {
 		return err
@@ -624,10 +582,7 @@ func (s *Store) FindMidnightAriadneRollbacksByBlock(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	sqlBlock, err := checkedInt64(blockNumber)
 	if err != nil {
 		return nil, err
@@ -695,10 +650,7 @@ func (s *Store) UpsertMidnightEpochCandidates(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	epoch, err := checkedInt64(epochCandidates.Epoch)
 	if err != nil {
 		return err
@@ -745,10 +697,7 @@ func (s *Store) GetMidnightEpochCandidatesByEpoch(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
 		return nil, err
@@ -782,10 +731,7 @@ func (s *Store) InsertMidnightCommitteeCandidateRegistration(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	outputIndex, err := checkedInt64(uint64(row.OutputIndex))
 	if err != nil {
 		return err
@@ -912,10 +858,7 @@ func (s *Store) deleteMidnightByUint64(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	return deleteFn(q, sqlValue)
 }
 
@@ -927,10 +870,7 @@ func (s *Store) getMidnightAriadneParams(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	row, err := get(q)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

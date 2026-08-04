@@ -622,10 +622,7 @@ WHERE id = ?`,
 		return err
 	}
 	utxo.ID = uint(id)
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = utxo.ID

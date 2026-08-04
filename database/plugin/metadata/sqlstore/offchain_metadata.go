@@ -93,10 +93,7 @@ func (s *Store) EnsureOffchainMetadataPointers(
 	if err != nil {
 		return 0, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return 0, err
-	}
+	q := s.operationalQueries(db)
 	created := 0
 	seen := make(map[string]struct{})
 	for _, source := range offchainPointerSources {
@@ -193,10 +190,7 @@ func (s *Store) GetOffchainMetadataFetchBatch(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	claimUntil := now.Add(offchainFetchClaimLease)
 	ret := make([]models.OffchainMetadata, 0, limit)
 	for len(ret) < limit {
@@ -275,10 +269,7 @@ func (s *Store) SetOffchainMetadataFetchResult(
 	if err != nil {
 		return err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return err
-	}
+	q := s.operationalQueries(db)
 	fetchAttempts, err := checkedInt64(uint64(doc.FetchAttempts))
 	if err != nil {
 		return err
@@ -329,10 +320,7 @@ func (s *Store) GetOffchainMetadata(
 	if err != nil {
 		return nil, err
 	}
-	q, err := s.sqliteQueries(db)
-	if err != nil {
-		return nil, err
-	}
+	q := s.operationalQueries(db)
 	row, err := q.GetOffchainMetadata(
 		context.Background(),
 		sqlitequery.GetOffchainMetadataParams{
