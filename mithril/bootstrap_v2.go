@@ -212,6 +212,14 @@ func bootstrapV2(
 					truncateDigest(artifact.Hash),
 				),
 			)
+			// ledgerDir binds its answer to the tree it read, and verification
+			// then resolves that name again rather than inheriting a handle
+			// from it. That is deliberate: a handle outliving the check would
+			// verify a tree the caller no longer names, since what is loaded
+			// downstream is opened by name. Re-resolving keeps the thing
+			// verified and the thing used the same, so a directory substituted
+			// after the cache check is what verification sees — and it carries
+			// no manifest this node's ancillary key signed.
 			if cachedDir := ledgerDir(candidateDir); cachedDir != "" {
 				if err := verifyAncillaryExtraction(
 					cfg, cachedDir,

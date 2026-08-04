@@ -24,6 +24,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -920,6 +922,73 @@ func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("ledger state data"), data)
 	assert.Equal(t, candidateArchive, result.AncillaryArchivePath)
+}
+
+// TestVerifyAncillaryExtractionSeesTheTreeAtTheName stages a substitution of
+// the ancillary cache directory after ledgerDir has read and bound it, and
+// before the verification that decides whether it is reused.
+//
+// No handle crosses that boundary — ledgerDir closes its own, and verification
+// opens the name again — so verification is about whatever the name holds when
+// it runs, which is the same tree the caller then uses. A replacement cannot
+// pass on the strength of the tree it displaced: it has to carry a manifest
+// this node's ancillary key signed, and it does not.
+func TestVerifyAncillaryExtractionSeesTheTreeAtTheName(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	cfg := BootstrapConfig{
+		VerifyCertificateChain:   true,
+		AncillaryVerificationKey: mithrilJSONHexKey(t, pub),
+		Logger:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	downloadDir := t.TempDir()
+	candidateDir := filepath.Join(downloadDir, "ancillary-abc123")
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(candidateDir, "ledger", "100"), 0o750,
+	))
+	state := []byte("ledger state data")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(candidateDir, "ledger", "100", "state"), state, 0o640,
+	))
+	digest := sha256.Sum256(state)
+	manifest := ancillaryManifest{
+		Data: map[string]string{
+			"ledger/100/state": hex.EncodeToString(digest[:]),
+		},
+	}
+	manifest.Signature = hex.EncodeToString(
+		ed25519.Sign(priv, manifest.computeHash()),
+	)
+	manifestJSON, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(candidateDir, ancillaryManifestFilename),
+		manifestJSON,
+		0o640,
+	))
+
+	cachedDir := ledgerDir(candidateDir)
+	require.Equal(t, candidateDir, cachedDir,
+		"the cached tree is reusable as it stands")
+	require.NoError(t, verifyAncillaryExtraction(cfg, cachedDir))
+
+	// A writer takes the name for ledger state of their own.
+	theirs := filepath.Join(downloadDir, "theirs", "ledger", "100")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(theirs, "state"), []byte("theirs"), 0o640,
+	))
+	requireDirectorySwap(
+		t, candidateDir, filepath.Join(downloadDir, "moved-aside"),
+	)
+	requireDirectorySwap(
+		t, filepath.Join(downloadDir, "theirs"), candidateDir,
+	)
+
+	require.Error(t, verifyAncillaryExtraction(cfg, cachedDir),
+		"verification must be about the tree the name holds now, "+
+			"not the one it held when the cache check ran")
 }
 
 func TestBootstrapV2Resume(t *testing.T) {
