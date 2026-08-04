@@ -505,6 +505,79 @@ func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
 	}
 }
 
+// TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound is the negative
+// half of TestHardForkSummary_KnownTransitionCoversStabilityWindow: the
+// successor era extends the horizon but must not make it unbounded. With the
+// same shape (boundary at slot 600, safe zone 250), the successor's safe zone
+// snaps up to the start of epoch 9, so slot 900 and beyond are past-horizon
+// again. Without this, an accidentally open successor would still satisfy the
+// in-window assertions.
+func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(t *testing.T) {
+	const (
+		epochSize  = uint64(100)
+		safeZone   = uint64(250)
+		startEpoch = uint64(5)
+		startSlot  = uint64(500)
+		knownEpoch = uint64(6)
+		tipSlot    = uint64(560)
+		// 600 + 250 = 850 lands mid-epoch 8, so the successor's bound snaps up
+		// to the start of epoch 9 at slot 900.
+		succEndSlot = uint64(900)
+	)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       startEpoch,
+			StartSlot:     startSlot,
+			SlotLength:    1_000,
+			LengthInSlots: 100,
+			EraId:         1,
+		}},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
+		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	shape := hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     epochSize,
+				SlotLength:    time.Second,
+				SafeZoneSlots: safeZone,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+
+	// The successor is bounded, and its bound is where the horizon ends.
+	require.Len(t, sum.Eras, 2)
+	require.NotNil(t, sum.Eras[1].End)
+	assert.Equal(t, succEndSlot, sum.Eras[1].End.Slot)
+
+	// The last slot inside the window still resolves...
+	info, err := sum.SlotToEpoch(succEndSlot - 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(8), info.Epoch)
+
+	// ...and the bound itself, plus anything past it, does not.
+	for _, slot := range []uint64{
+		succEndSlot,
+		succEndSlot + 1,
+		succEndSlot + epochSize,
+		succEndSlot + 10*epochSize,
+	} {
+		_, err := sum.SlotToEpoch(slot)
+		require.ErrorIsf(t, err, hardfork.ErrPastHorizon,
+			"slot %d must be past horizon", slot)
+	}
+}
+
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
