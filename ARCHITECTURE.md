@@ -1750,8 +1750,12 @@ Babbage onwards the Praos one (`encodeVersion 0` wrapping a flat eight-field
 record whose extra nonces TPraos does not carry). The version tag selects the
 shape rather than merely labelling it, so a node serving the wrong one during a
 sync through the TPraos eras hands the client a payload it cannot read as
-promised. Byron, which ran PBFT and has no state of this shape, takes the
-modern layout along with any era not explicitly listed.
+promised. Which era is which is not restated for the wire: the layout is chosen
+from `consensusModeForEraID`, the same mapping `ConsensusModeForEpoch` uses to
+decide how leader eligibility is checked, so the protocol the reply names and
+the protocol the node elects under cannot disagree. Byron, which ran PBFT and
+has no state of this shape, maps to CPraos there and so takes the modern layout,
+along with any era not explicitly listed.
 
 `GetPoolDistr2` reports each pool's share of the active stake from the mark
 snapshot at `praos.StakeSnapshotEpoch` — the snapshot leader election itself

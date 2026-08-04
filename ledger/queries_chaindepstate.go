@@ -22,11 +22,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger/allegra"
-	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/mary"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
@@ -48,22 +45,15 @@ const (
 // all of them, and a node syncing from genesis spends a long stretch in the
 // TPraos eras while still answering queries.
 //
-// Byron is neither — it ran PBFT and has no chain-dependent state of this
-// shape — and this is a Shelley-family query, so it takes the modern layout
-// along with anything not enumerated. Eras are listed one by one rather than
-// compared by ordering so that adding one is a deliberate edit here; a new era
-// that forgot to be listed gets Praos, which is what every era since Babbage
-// has used.
+// The answer is taken from consensusModeForEraID rather than from an era list
+// of this query's own. The two would be answering the same question — which
+// protocol the era runs — and a second list is a second place for a new era to
+// go unlisted, from which the wire layout and the protocol the node actually
+// elects leaders under can disagree. Byron is neither TPraos nor Praos (it ran
+// PBFT and has no chain-dependent state of this shape), and maps to CPraos
+// there, so it takes the modern layout along with every era since Babbage.
 func chainDepStateUsesTPraos(eraId uint) bool {
-	switch eraId {
-	case shelley.EraIdShelley,
-		allegra.EraIdAllegra,
-		mary.EraIdMary,
-		alonzo.EraIdAlonzo:
-		return true
-	default:
-		return false
-	}
+	return consensusModeForEraID(eraId) == consensus.ConsensusModeTPraos
 }
 
 // tpraosPrtclState is the PrtclState record TPraos nests inside its

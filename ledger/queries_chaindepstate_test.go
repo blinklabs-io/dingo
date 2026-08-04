@@ -28,6 +28,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -304,6 +305,62 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(t *testing.T) 
 	counter, found := decoded.OpCertCounter(lcommon.NewBlake2b224(poolKeyHash))
 	assert.True(t, found, "counters survive into the TPraos record")
 	assert.Equal(t, uint64(3), counter)
+}
+
+// TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode pins the
+// layout choice to the consensus mode, for every era this build knows.
+//
+// The two cases above cover one era each, which is enough to show both layouts
+// are reachable but not that the choice between them tracks anything. The era
+// list that decides the layout and the one that decides how leader eligibility
+// is checked describe the same fact -- which protocol an era runs -- so an era
+// that is TPraos for consensus and Praos on the wire is a contradiction, not a
+// difference of opinion. Walking the whole era table is what makes a new era
+// added to one list and forgotten in the other fail here rather than in the
+// field.
+func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(t *testing.T) {
+	for _, era := range eras.ErasWithDijkstra {
+		t.Run(era.Name, func(t *testing.T) {
+			db := newTestDB(t)
+			// A single epoch in this era, spanning the slot the reply
+			// reports. The nonces are immaterial here; the version tag is
+			// what is under test.
+			require.NoError(t, db.Metadata().SetEpoch(
+				0,      // slot
+				0,      // epoch
+				nil,    // nonce
+				nil,    // evolvingNonce
+				nil,    // candidateNonce
+				nil,    // lastEpochBlockNonce
+				era.Id, // era
+				1,      // slotLength
+				1000,   // lengthInSlots
+				nil,    // txn
+			))
+
+			ls := newChainDepStateLedger(t, db)
+
+			result, err := ls.Query(chainDepStateQuery())
+			require.NoError(t, err)
+			arr, ok := result.([]any)
+			require.True(t, ok)
+			require.Len(t, arr, 1)
+			encoded, err := cbor.Encode(arr[0])
+			require.NoError(t, err)
+			var decoded olocalstatequery.DebugChainDepStateResult
+			require.NoError(t, decoded.UnmarshalCBOR(encoded),
+				"every era's reply must decode with the client-side decoder")
+
+			want := olocalstatequery.ChainDepStateProtocolPraos
+			if consensusModeForEraID(era.Id) ==
+				consensus.ConsensusModeTPraos {
+				want = olocalstatequery.ChainDepStateProtocolTPraos
+			}
+			assert.Equal(t, want, decoded.Protocol,
+				"the serialised layout must name the protocol the era's "+
+					"leader election is checked under")
+		})
+	}
 }
 
 // TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint covers
