@@ -6372,12 +6372,29 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if len(shape.Eras) == 0 {
 		return currentPParams
 	}
+	pparams := currentPParams
+	// Before walking any era hard fork, apply the pending in-era
+	// protocol-parameter update that the rollover will enact at the next
+	// epoch boundary (into currentEpoch+1). This mirrors the rollover
+	// order in processEpochRollover, where ComputeAndApplyPParamUpdates
+	// runs in the current era BEFORE the hard-fork transition. Without
+	// it, a normal-boundary update (e.g. the preview epoch 1->2
+	// decentralization decrease, which is not an era fork) is never
+	// reflected in the forecast, so the genesis-overlay check sees the
+	// stale pre-boundary value for the next epoch. The forecast reads
+	// the already-collected proposals, so it does not depend on the
+	// target epoch's pparams row being persisted yet (it is not, during
+	// from-genesis before the node has ticked into that epoch).
+	if updated := ls.forecastPendingPParamUpdate(
+		currentEra, currentEpoch.EpochId+1, pparams,
+	); updated != nil {
+		pparams = updated
+	}
 	// Walk forward from the current era, applying each successor's
 	// HardForkFunc whose triggerEpoch <= slotEpoch. The single-step
 	// case (one fork between currentEpoch and slotEpoch) is the
 	// nominal path; the loop also tolerates multi-step jumps so the
 	// helper stays sound if a caller skips ahead.
-	pparams := currentPParams
 	eraID := currentEra.Id
 	for {
 		entry, ok := shape.EraForID(eraID)
@@ -6417,6 +6434,61 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 		eraID = nextID
 	}
 	return pparams
+}
+
+// forecastPendingPParamUpdate returns the protocol parameters produced by
+// applying the pending proposed protocol-parameter update that the epoch
+// rollover will enact into targetEpoch, computed in era. It is a pure
+// forecast: the era update function (which mutates its concrete pointer in
+// place) only ever sees an independently cloned copy, so the shared
+// snapshot is never touched, and it performs no writes. It returns nil when
+// there is nothing to apply — no DB, missing era update funcs, or no
+// proposal meeting quorum for targetEpoch — in which case the caller keeps
+// the era-fork-only forecast, identical to prior behavior.
+func (ls *LedgerState) forecastPendingPParamUpdate(
+	era eras.EraDesc,
+	targetEpoch uint64,
+	pparams lcommon.ProtocolParameters,
+) lcommon.ProtocolParameters {
+	if ls.db == nil ||
+		pparams == nil ||
+		era.DecodePParamsUpdateFunc == nil ||
+		era.PParamsUpdateFunc == nil {
+		return nil
+	}
+	// Quorum is the Shelley-genesis updateQuorum, exactly as the rollover
+	// uses when enacting the same proposals (processEpochRollover).
+	updateQuorum := 0
+	if ls.config.CardanoNodeConfig != nil {
+		if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
+			updateQuorum = shelleyGenesis.UpdateQuorum
+		}
+	}
+	// Era update functions mutate their concrete pparams pointer in place.
+	// Hand ForecastPParamUpdates a clone function so it clones only when it
+	// is actually going to enact an update; the common no-op forecast then
+	// leaves the shared snapshot's currentPParams untouched.
+	updated, err := ls.db.ForecastPParamUpdates(
+		targetEpoch,
+		updateQuorum,
+		pparams,
+		era.DecodePParamsUpdateFunc,
+		era.PParamsUpdateFunc,
+		func(pp lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error) {
+			return cloneProtocolParametersForEra(era, pp)
+		},
+		nil,
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"forecastPendingPParamUpdate: forecast failed",
+			"target_epoch", targetEpoch,
+			"era", era.Id,
+			"error", err,
+		)
+		return nil
+	}
+	return updated
 }
 
 // CurrentEpoch returns the current epoch number.

@@ -1520,9 +1520,21 @@ Genesis-overlay activity is resolved separately from the forward protocol-
 parameter forecast: header validation first uses the epoch containing the
 slot and reads that epoch's effective parameter row, so an epoch-boundary
 decentralization update cannot be mistaken for the prior epoch's overlay
-schedule. If the target epoch is not authoritative yet, blockfetch defers the
-stateful overlay decision until ledger apply; full historical validation and
-the normal leader checks remain enabled.
+schedule. When the target epoch's parameter row is not persisted yet (a
+from-genesis node still one epoch behind the header it is checking),
+`ProtocolParamsForSlot` forecasts it: for a slot one epoch ahead it applies,
+on top of any era `HardForkFunc`, the pending in-era protocol-parameter update
+the rollover will enact at that boundary. The forecast mirrors the rollover's
+enactment exactly — it selects the proposals submitted in the current epoch
+(Shelley update system: a proposal submitted in epoch `e` is enacted as epoch
+`e+1`'s parameters), applies the same `UpdateQuorum` rule, and reads the
+already-collected proposals — but is pure and read-only (it clones before the
+era update function, which mutates in place, and never writes). This yields the
+correct post-update decentralization for the next epoch's overlay check without
+requiring the epoch row first, which previously deadlocked a from-genesis sync
+at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
+decision until ledger apply when even the forecast cannot resolve it; full
+historical validation and the normal leader checks remain enabled.
 
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
