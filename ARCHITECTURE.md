@@ -2459,9 +2459,12 @@ selected backend.
 Each transaction-submission consumer retains a bounded cache of transaction
 bodies (1,024 entries by default; `MempoolConfig.ConsumerCacheSize` can lower or
 raise it for embedded users). The bound is enforced by declining to advertise,
-not by eviction: `NextTx` returns nil once the cache is full, because a body is
-only ever served to the peer from this cache and dropping one already advertised
-would silently omit a transaction the peer legitimately requested. Serving a
+not by eviction: a body is only ever served to the peer from this cache, and
+dropping one already advertised would silently omit a transaction the peer
+legitimately requested. A non-blocking `NextTx` returns nil once the cache is
+full; a blocking one parks until a slot frees rather than answering empty, since
+the peer's pull loop has no backoff for an empty reply and would spin
+request/reply without pacing. Shutdown releases a parked waiter. Serving a
 body or the peer acknowledging its ids frees slots and reopens the window. The
 protocol request window is far below the default limit, so this bounds an
 aggressive peer rather than affecting normal relay. Explicit cache removal and

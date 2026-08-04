@@ -113,3 +113,25 @@ func TestResolveKeyServesStagedEmptyValue(t *testing.T) {
 		t.Fatal("a staged empty value must not be filtered from listings")
 	}
 }
+
+// RollbackIsNoop must report false now that mutations are staged and applied
+// only in Commit: Rollback discards the staged work without issuing any GCS
+// request. It reported true when Set/Delete wrote through immediately, and
+// database/lifecycle/blob_bulk_delete.go reads this flag to decide whether a
+// failed batch's deletes are permanent — reporting true made a truncate count
+// blocks it never removed.
+func TestRollbackIsNoopReportsFalse(t *testing.T) {
+	txn := &gcsTxn{pending: make(map[string]gcsPendingChange)}
+	if txn.RollbackIsNoop() {
+		t.Fatal("staged transactions are reversible: Rollback issues no requests")
+	}
+
+	// Rollback really does discard staged work rather than applying it.
+	txn.stageSet([]byte("key"), []byte("value"))
+	if err := txn.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if txn.pending != nil {
+		t.Fatal("rollback should discard pending changes")
+	}
+}

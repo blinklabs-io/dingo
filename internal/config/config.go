@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -948,9 +949,7 @@ func cloneConfig(cfg *Config) *Config {
 			map[string]string,
 			len(cfg.LeiosVoterPublicKeys),
 		)
-		for key, value := range cfg.LeiosVoterPublicKeys {
-			clone.LeiosVoterPublicKeys[key] = value
-		}
+		maps.Copy(clone.LeiosVoterPublicKeys, cfg.LeiosVoterPublicKeys)
 	}
 	clone.Plugins.Storage.Blob = clonePluginSelection(
 		cfg.Plugins.Storage.Blob,

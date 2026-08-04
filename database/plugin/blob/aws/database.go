@@ -323,11 +323,15 @@ func (d *BlobStoreS3) Delete(txn types.Txn, key []byte) error {
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
-	if _, err := d.getInternal(ctx, string(key)); err != nil {
-		if isS3NotFound(err) {
-			return types.ErrBlobKeyNotFound
-		}
+	// Probe with object metadata rather than a bounded read: a blob larger
+	// than the read cap must still be deletable, and an ordinary delete
+	// should not pay for a full GET. Matches the GCS plugin.
+	exists, err := d.objectExists(ctx, string(key))
+	if err != nil {
 		return err
+	}
+	if !exists {
+		return types.ErrBlobKeyNotFound
 	}
 	t.stageDelete(key)
 	return nil
@@ -924,8 +928,11 @@ func (t *s3Txn) Rollback() error {
 	return nil
 }
 
+// RollbackIsNoop reports false: this transaction stages mutations and applies
+// them only in Commit, so Rollback discards the staged work without issuing any
+// S3 request. It reported true when Set/Delete wrote through immediately.
 func (t *s3Txn) RollbackIsNoop() bool {
-	return true
+	return false
 }
 
 type s3Iterator struct {

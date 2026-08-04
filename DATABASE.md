@@ -661,7 +661,11 @@ an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
 its writer closes successfully.
 
 GCS and S3 blob transactions stage object mutations in memory until `Commit`;
-`Rollback` discards all staged writes and deletes. Staged changes are visible to
+`Rollback` discards all staged writes and deletes with no bucket I/O, so these
+transactions are reversible and report `RollbackIsNoop() == false` — they
+reported true when `Set`/`Delete` wrote through immediately. Callers must not
+infer "the bucket was mutated" from a failed transaction; only a commit that
+wraps `types.ErrPartialCommit` left it partially applied. Staged changes are visible to
 reads within the same transaction: `Get` and every typed getter (`GetBlock`,
 `GetUtxo`, `GetTx`) resolve through the staging map first, so a read-after-write
 matches badger instead of returning pre-transaction state, and a staged delete

@@ -98,6 +98,10 @@ func DeleteBlocksAfter(
 		var batchIsIrreversible bool
 		txn := db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
+			// A store whose Rollback genuinely cannot undo issued writes
+			// still reports it here. The cloud plugins no longer do: they
+			// stage mutations and apply them in Commit, so their Rollback
+			// discards staged work with no bucket I/O.
 			if irreversible, ok := txn.Blob().(types.IrreversibleTxn); ok {
 				batchIsIrreversible = irreversible.RollbackIsNoop()
 			}
@@ -195,22 +199,33 @@ func DeleteBlocksAfter(
 			return nil
 		})
 		if err != nil {
-			// A failed Badger transaction rolls back the current batch, so
-			// only blocks from earlier committed batches are reported. GCS
-			// and S3 explicitly expose their transactions as irreversible:
-			// every Delete already issued is permanent even though the
-			// batch returns an error, so include that partial progress.
-			// This is still safe to resume from:
-			// finishPendingTruncate always retries the identical
-			// (afterID, tipID] range recorded in the pending-truncate
-			// marker, and redoing it is idempotent regardless of how far
-			// a previous attempt got -- an already-removed "bi" entry
-			// simply will not be found by the next attempt's iterator, and
-			// a still-present one whose referenced bp/bh/metadata objects
-			// are already gone deletes harmlessly again (cloud DeleteBlock
-			// tolerates a missing object; badger's Delete tolerates a
-			// missing key).
-			if batchIsIrreversible {
+			// Report only blocks that were genuinely removed, which takes
+			// two independent checks.
+			//
+			// A store that reports RollbackIsNoop cannot undo the deletes it
+			// already issued, so they count even though the batch failed.
+			// The cloud plugins no longer report that -- they stage and
+			// apply in Commit, so a callback error means nothing reached the
+			// bucket and the old unconditional "cloud is irreversible"
+			// assumption would over-report.
+			//
+			// The remaining way a store is left partially mutated is a
+			// Commit whose own compensation could not fully undo what it had
+			// applied. The cloud plugins signal that by wrapping
+			// types.ErrPartialCommit, and Txn.Do plus Txn.Commit both wrap
+			// with %w, so errors.Is sees through to it.
+			//
+			// Either way this is safe to resume from: finishPendingTruncate
+			// always retries the identical (afterID, tipID] range recorded
+			// in the pending-truncate marker, and redoing it is idempotent
+			// regardless of how far a previous attempt got -- an
+			// already-removed "bi" entry simply will not be found by the
+			// next attempt's iterator, and a still-present one whose
+			// referenced bp/bh/metadata objects are already gone deletes
+			// harmlessly again (cloud DeleteBlock tolerates a missing
+			// object; badger's Delete tolerates a missing key).
+			if batchIsIrreversible ||
+				errors.Is(err, types.ErrPartialCommit) {
 				return blocksDeleted + batchDeleted, err
 			}
 			return blocksDeleted, err

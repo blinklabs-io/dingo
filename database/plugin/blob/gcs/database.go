@@ -1001,8 +1001,11 @@ func (t *gcsTxn) Rollback() error {
 	return nil
 }
 
+// RollbackIsNoop reports false: this transaction stages mutations and applies
+// them only in Commit, so Rollback discards the staged work without issuing any
+// GCS request. It reported true when Set/Delete wrote through immediately.
 func (t *gcsTxn) RollbackIsNoop() bool {
-	return true
+	return false
 }
 
 type gcsIterator struct {
