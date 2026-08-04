@@ -49,6 +49,17 @@ func TestTranslateMySQLReservedIdentifiers(t *testing.T) {
 	)
 }
 
+func TestTranslateMySQLReservedIdentifiersPreservesLiteralsAndComments(t *testing.T) {
+	t.Parallel()
+	query := `SELECT '"not an identifier"', "transaction" -- "comment"
+FROM "transaction" /* "comment" */`
+	require.Equal(
+		t,
+		"SELECT '\"not an identifier\"', `transaction` -- \"comment\"\nFROM `transaction` /* \"comment\" */",
+		translateMySQLReservedIdentifiers(query),
+	)
+}
+
 func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	t.Parallel()
 	dialect := MySQLDialect()

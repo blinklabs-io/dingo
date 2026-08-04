@@ -32,10 +32,6 @@ type RewardAdaPots struct {
 	CapturedSlot uint64
 }
 
-func (RewardAdaPots) TableName() string {
-	return "reward_ada_pots"
-}
-
 // RewardSnapshot captures reward-calculation snapshot metadata for an epoch.
 type RewardSnapshot struct {
 	ID               uint
@@ -59,10 +55,6 @@ type RewardSnapshot struct {
 	CalculationVersion uint
 }
 
-func (RewardSnapshot) TableName() string {
-	return "reward_snapshot"
-}
-
 // RewardPoolInput captures per-pool inputs needed by reward calculation.
 type RewardPoolInput struct {
 	Margin                     *types.Rat
@@ -82,10 +74,6 @@ type RewardPoolInput struct {
 	BoundarySlot               uint64
 }
 
-func (RewardPoolInput) TableName() string {
-	return "reward_pool_input"
-}
-
 // RewardStakeInput captures per-credential stake at the reward snapshot.
 type RewardStakeInput struct {
 	PoolKeyHash   []byte
@@ -98,10 +86,6 @@ type RewardStakeInput struct {
 	Registered    bool
 	CapturedSlot  uint64
 	BoundarySlot  uint64
-}
-
-func (RewardStakeInput) TableName() string {
-	return "reward_stake_input"
 }
 
 // RewardLiveStake is the live per-stake-credential aggregate maintained for a
@@ -129,10 +113,6 @@ type RewardLiveStake struct {
 	CalculationVersion uint
 }
 
-func (RewardLiveStake) TableName() string {
-	return "reward_live_stake"
-}
-
 // RewardPoolOutput captures per-pool reward calculation output for an epoch.
 type RewardPoolOutput struct {
 	ApparentPerformance *types.Rat
@@ -150,10 +130,6 @@ type RewardPoolOutput struct {
 	BoundarySlot        uint64
 }
 
-func (RewardPoolOutput) TableName() string {
-	return "reward_pool_output"
-}
-
 // RewardAccountOutput captures per-account reward calculation output.
 type RewardAccountOutput struct {
 	StakingKey    []byte
@@ -169,8 +145,4 @@ type RewardAccountOutput struct {
 	Guarded      bool
 	CapturedSlot uint64
 	BoundarySlot uint64
-}
-
-func (RewardAccountOutput) TableName() string {
-	return "reward_account_output"
 }

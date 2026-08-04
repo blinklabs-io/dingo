@@ -46,7 +46,3 @@ type Transaction struct {
 	BlockIndex    uint32
 	Valid         bool
 }
-
-func (Transaction) TableName() string {
-	return "transaction"
-}

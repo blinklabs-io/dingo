@@ -228,7 +228,7 @@ func TestRunnerRejectsUnversionedDatabase(t *testing.T) {
 	err = testRunner(db, testMigration(nil)).Run(context.Background())
 	require.ErrorIs(t, err, ErrLegacySchema)
 	if err != nil {
-		require.Contains(t, err.Error(), "delete the metadata database")
+		require.Contains(t, err.Error(), "delete the data directory")
 	}
 	var stateTables int
 	require.NoError(t, db.QueryRow(

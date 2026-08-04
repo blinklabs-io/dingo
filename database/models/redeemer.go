@@ -24,7 +24,3 @@ type Redeemer struct {
 	Index         uint32
 	Tag           uint8
 }
-
-func (Redeemer) TableName() string {
-	return "redeemer"
-}

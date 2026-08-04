@@ -122,10 +122,6 @@ type Account struct {
 	ExpirationEpoch uint64
 }
 
-func (a *Account) TableName() string {
-	return "account"
-}
-
 // AccountInactivityActivation records the exact reward-account credentials
 // stamped by the one-time CIP-0163 activation. Membership cannot be inferred
 // from CreatedSlot alone because an account may have existed but been inactive
@@ -133,10 +129,6 @@ func (a *Account) TableName() string {
 type AccountInactivityActivation struct {
 	CredentialTag uint8
 	StakingKey    []byte
-}
-
-func (AccountInactivityActivation) TableName() string {
-	return "account_inactivity_activation"
 }
 
 type StakeCredentialRef struct {
@@ -211,12 +203,6 @@ type AccountWithdrawalWitness struct {
 	AddedSlot     uint64
 }
 
-func (AccountWithdrawalWitness) TableName() string { return "account_withdrawal_witness" }
-
-func (AccountRewardDelta) TableName() string {
-	return "account_reward_delta"
-}
-
 // String returns the bech32-encoded representation of the Account's StakingKey
 // with the "stake" human-readable part. Returns an error if the StakingKey is
 // empty or if encoding fails.
@@ -245,10 +231,6 @@ type Deregistration struct {
 	Amount        types.Uint64
 }
 
-func (Deregistration) TableName() string {
-	return "deregistration"
-}
-
 type Registration struct {
 	StakingKey    []byte
 	CredentialTag uint8
@@ -256,10 +238,6 @@ type Registration struct {
 	CertificateID uint
 	AddedSlot     uint64
 	DepositAmount types.Uint64
-}
-
-func (Registration) TableName() string {
-	return "registration"
 }
 
 type StakeDelegation struct {
@@ -271,20 +249,12 @@ type StakeDelegation struct {
 	AddedSlot     uint64
 }
 
-func (StakeDelegation) TableName() string {
-	return "stake_delegation"
-}
-
 type StakeDeregistration struct {
 	StakingKey    []byte
 	CredentialTag uint8
 	CertificateID uint
 	ID            uint
 	AddedSlot     uint64
-}
-
-func (StakeDeregistration) TableName() string {
-	return "stake_deregistration"
 }
 
 type StakeRegistration struct {
@@ -294,10 +264,6 @@ type StakeRegistration struct {
 	ID            uint
 	AddedSlot     uint64
 	DepositAmount types.Uint64
-}
-
-func (StakeRegistration) TableName() string {
-	return "stake_registration"
 }
 
 type StakeRegistrationDelegation struct {
@@ -310,10 +276,6 @@ type StakeRegistrationDelegation struct {
 	DepositAmount types.Uint64
 }
 
-func (StakeRegistrationDelegation) TableName() string {
-	return "stake_registration_delegation"
-}
-
 type StakeVoteDelegation struct {
 	StakingKey    []byte
 	CredentialTag uint8
@@ -323,10 +285,6 @@ type StakeVoteDelegation struct {
 	CertificateID uint
 	ID            uint
 	AddedSlot     uint64
-}
-
-func (StakeVoteDelegation) TableName() string {
-	return "stake_vote_delegation"
 }
 
 type StakeVoteRegistrationDelegation struct {
@@ -341,10 +299,6 @@ type StakeVoteRegistrationDelegation struct {
 	DepositAmount types.Uint64
 }
 
-func (StakeVoteRegistrationDelegation) TableName() string {
-	return "stake_vote_registration_delegation"
-}
-
 type VoteDelegation struct {
 	StakingKey    []byte
 	CredentialTag uint8
@@ -353,10 +307,6 @@ type VoteDelegation struct {
 	CertificateID uint
 	ID            uint
 	AddedSlot     uint64
-}
-
-func (VoteDelegation) TableName() string {
-	return "vote_delegation"
 }
 
 type VoteRegistrationDelegation struct {
@@ -368,8 +318,4 @@ type VoteRegistrationDelegation struct {
 	ID            uint
 	AddedSlot     uint64
 	DepositAmount types.Uint64
-}
-
-func (VoteRegistrationDelegation) TableName() string {
-	return "vote_registration_delegation"
 }

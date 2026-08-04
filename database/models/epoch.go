@@ -44,7 +44,3 @@ type Epoch struct {
 	SlotLength    uint
 	LengthInSlots uint
 }
-
-func (Epoch) TableName() string {
-	return "epoch"
-}

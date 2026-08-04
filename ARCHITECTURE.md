@@ -57,8 +57,8 @@ surface. Concrete SQL handles are not exposed; repository tests use internal
 fixtures when schema seeding or assertions require raw SQL.
 
 Startup reserves the write connection, acquires the backend migration lock,
-rejects unversioned metadata tables (users must delete the database and
-resync), and validates/resumes versioned expand/backfill/contract work before
+rejects unversioned metadata tables (users must delete the data directory,
+including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
 advertising readiness. The initial schema release is `v1alpha1` (integer
 migration version 1); subsequent schema work advances the ordered migration
 registry. It then checks the read pool. File-backed SQLite uses a

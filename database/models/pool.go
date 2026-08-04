@@ -49,19 +49,11 @@ type Pool struct {
 	Cost         types.Uint64
 }
 
-func (p *Pool) TableName() string {
-	return "pool"
-}
-
 type PoolOpCertSequence struct {
 	PoolKeyHash []byte
 	ID          uint
 	Slot        uint64
 	Sequence    uint64
-}
-
-func (PoolOpCertSequence) TableName() string {
-	return "pool_opcert_sequence"
 }
 
 type PoolRegistration struct {
@@ -84,19 +76,11 @@ type PoolRegistration struct {
 	DepositAmount              types.Uint64
 }
 
-func (PoolRegistration) TableName() string {
-	return "pool_registration"
-}
-
 type PoolRegistrationOwner struct {
 	KeyHash            []byte
 	ID                 uint
 	PoolRegistrationID uint
 	PoolID             uint
-}
-
-func (PoolRegistrationOwner) TableName() string {
-	return "pool_registration_owner"
 }
 
 type PoolRegistrationRelay struct {
@@ -107,10 +91,6 @@ type PoolRegistrationRelay struct {
 	PoolRegistrationID uint
 	PoolID             uint
 	Port               uint
-}
-
-func (PoolRegistrationRelay) TableName() string {
-	return "pool_registration_relay"
 }
 
 // PoolRetiringRow is one pending-retirement entry returned by
@@ -139,8 +119,4 @@ type PoolRetirementRefund struct {
 	RewardAccount              []byte
 	RewardAccountCredentialTag uint8
 	DepositAmount              types.Uint64
-}
-
-func (PoolRetirement) TableName() string {
-	return "pool_retirement"
 }

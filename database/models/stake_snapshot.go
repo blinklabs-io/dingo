@@ -109,11 +109,6 @@ type PoolStakeSnapshot struct {
 	RewardAccountAutoVoteResolved bool
 }
 
-// TableName returns the table name
-func (PoolStakeSnapshot) TableName() string {
-	return "pool_stake_snapshot"
-}
-
 // EpochSummary captures network-wide aggregate statistics at epoch boundary.
 type EpochSummary struct {
 	ID               uint
@@ -124,9 +119,4 @@ type EpochSummary struct {
 	EpochNonce       []byte
 	BoundarySlot     uint64
 	SnapshotReady    bool
-}
-
-// TableName returns the table name
-func (EpochSummary) TableName() string {
-	return "epoch_summary"
 }

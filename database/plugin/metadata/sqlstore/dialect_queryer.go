@@ -136,15 +136,82 @@ func (q dialectQueryer) translate(query string) string {
 // code. Shared SQL uses double quotes only for identifiers; values use the
 // standard single-quoted spelling.
 func translateMySQLReservedIdentifiers(query string) string {
-	return mysqlQuotedIdentifierPattern.ReplaceAllStringFunc(query, func(
-		quoted string,
-	) string {
-		inner := quoted[1 : len(quoted)-1]
-		return "`" + strings.ReplaceAll(inner, `""`, "``") + "`"
-	})
+	var translated strings.Builder
+	translated.Grow(len(query))
+	for i := 0; i < len(query); {
+		switch query[i] {
+		case '\'':
+			// Single-quoted strings are values, not identifiers. Copy the
+			// complete literal without translating double quotes inside it.
+			start := i
+			i++
+			for i < len(query) {
+				if query[i] != '\'' {
+					i++
+					continue
+				}
+				i++
+				if i < len(query) && query[i] == '\'' {
+					i++
+					continue
+				}
+				break
+			}
+			translated.WriteString(query[start:i])
+		case '"':
+			i++
+			var identifier strings.Builder
+			for i < len(query) {
+				if query[i] != '"' {
+					identifier.WriteByte(query[i])
+					i++
+					continue
+				}
+				i++
+				if i < len(query) && query[i] == '"' {
+					identifier.WriteString("``")
+					i++
+					continue
+				}
+				break
+			}
+			translated.WriteByte('`')
+			translated.WriteString(identifier.String())
+			translated.WriteByte('`')
+		case '-':
+			if i+1 < len(query) && query[i+1] == '-' {
+				start := i
+				i += 2
+				for i < len(query) && query[i] != '\n' {
+					i++
+				}
+				translated.WriteString(query[start:i])
+			} else {
+				translated.WriteByte(query[i])
+				i++
+			}
+		case '/':
+			if i+1 < len(query) && query[i+1] == '*' {
+				start := i
+				i += 2
+				for i+1 < len(query) && !(query[i] == '*' && query[i+1] == '/') {
+					i++
+				}
+				if i+1 < len(query) {
+					i += 2
+				}
+				translated.WriteString(query[start:i])
+			} else {
+				translated.WriteByte(query[i])
+				i++
+			}
+		default:
+			translated.WriteByte(query[i])
+			i++
+		}
+	}
+	return translated.String()
 }
-
-var mysqlQuotedIdentifierPattern = regexp.MustCompile(`"(?:""|[^"])*"`)
 
 func rebindPostgresQuery(query string) string {
 	return PostgresDialect().Rebind(query)

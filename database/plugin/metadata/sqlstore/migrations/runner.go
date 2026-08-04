@@ -84,7 +84,7 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 	}
 	if hasUserTables && !stateTableExists {
 		return fmt.Errorf(
-			"%w: existing metadata tables are from an unsupported database version; delete the metadata database and resync from genesis",
+			"%w: existing metadata tables are from an unsupported database version; delete the data directory (metadata and blob stores) and resync from genesis",
 			ErrLegacySchema,
 		)
 	}

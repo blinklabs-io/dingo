@@ -29,19 +29,9 @@ type CommitteeMember struct {
 	DeletedSlot  *uint64 // For rollback support
 }
 
-// TableName returns the table name for CommitteeMember.
-func (CommitteeMember) TableName() string {
-	return "committee_member"
-}
-
 // CommitteeQuorum records the quorum threshold enacted with a committee.
 type CommitteeQuorum struct {
 	Quorum    *types.Rat
 	ID        uint
 	AddedSlot uint64
-}
-
-// TableName returns the table name for CommitteeQuorum.
-func (CommitteeQuorum) TableName() string {
-	return "committee_quorum"
 }

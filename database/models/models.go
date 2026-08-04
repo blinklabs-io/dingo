@@ -23,10 +23,6 @@ type ImportCheckpoint struct {
 	Phase     string // last completed phase
 }
 
-func (ImportCheckpoint) TableName() string {
-	return "import_checkpoint"
-}
-
 // Import phases in execution order.
 const (
 	ImportPhaseUTxO      = "utxo"

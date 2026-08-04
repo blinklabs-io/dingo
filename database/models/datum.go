@@ -21,18 +21,10 @@ type Datum struct {
 	AddedSlot uint64
 }
 
-func (Datum) TableName() string {
-	return "datum"
-}
-
 // PlutusData represents a Plutus data value in the witness set
 type PlutusData struct {
 	Transaction   *Transaction
 	Data          []byte
 	ID            uint
 	TransactionID uint
-}
-
-func (PlutusData) TableName() string {
-	return "plutus_data"
 }

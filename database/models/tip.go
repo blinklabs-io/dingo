@@ -20,7 +20,3 @@ type Tip struct {
 	Slot        uint64
 	BlockNumber uint64
 }
-
-func (Tip) TableName() string {
-	return "tip"
-}

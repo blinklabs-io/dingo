@@ -44,11 +44,6 @@ type Constitution struct {
 	DeletedSlot *uint64
 }
 
-// TableName returns the table name
-func (Constitution) TableName() string {
-	return "constitution"
-}
-
 // GovernanceProposal represents a governance action submitted to the chain.
 // Proposals have a lifecycle: submitted -> (ratified) -> (enacted) or expired.
 type GovernanceProposal struct {
@@ -80,11 +75,6 @@ type GovernanceProposal struct {
 	DeletedSlot   *uint64
 }
 
-// TableName returns the table name
-func (GovernanceProposal) TableName() string {
-	return "governance_proposal"
-}
-
 // GovernanceVote represents a vote cast by a Constitutional Committee member,
 // DRep, or Stake Pool Operator on a governance proposal.
 type GovernanceVote struct {
@@ -102,11 +92,6 @@ type GovernanceVote struct {
 	DeletedSlot     *uint64
 }
 
-// TableName returns the table name
-func (GovernanceVote) TableName() string {
-	return "governance_vote"
-}
-
 // ResignCommitteeCold represents a resignation certificate for a
 // Constitutional Committee cold credential.
 type ResignCommitteeCold struct {
@@ -116,9 +101,4 @@ type ResignCommitteeCold struct {
 	ID             uint
 	CertificateID  uint
 	AddedSlot      uint64
-}
-
-// TableName returns the table name
-func (ResignCommitteeCold) TableName() string {
-	return "resign_committee_cold"
 }

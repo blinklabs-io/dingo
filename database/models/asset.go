@@ -31,10 +31,6 @@ type Asset struct {
 	Amount      types.Uint64
 }
 
-func (Asset) TableName() string {
-	return "asset"
-}
-
 // AssetMintBurn records a single asset mint or burn event: one row per
 // (transaction, asset) pair for every transaction that mints or burns the
 // asset. Quantity is a signed decimal string (positive for a mint, negative
@@ -52,10 +48,6 @@ type AssetMintBurn struct {
 	Slot        uint64
 	Quantity    string
 	TxIndex     uint32
-}
-
-func (AssetMintBurn) TableName() string {
-	return "asset_mint_burn"
 }
 
 // ConvertMintToAssetMintBurnModels converts a transaction's mint field into a

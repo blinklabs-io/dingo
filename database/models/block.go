@@ -41,8 +41,3 @@ func (b Block) Decode() (ledger.Block, error) {
 	}
 	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
 }
-
-// TableName overrides default table name
-func (Block) TableName() string {
-	return "block"
-}

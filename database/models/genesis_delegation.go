@@ -27,7 +27,3 @@ type GenesisDelegation struct {
 	CertIndex           uint
 	CertificateID       uint
 }
-
-func (GenesisDelegation) TableName() string {
-	return "genesis_delegation"
-}

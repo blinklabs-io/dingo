@@ -33,7 +33,3 @@ type KeyWitness struct {
 	TransactionID uint
 	Type          uint8
 }
-
-func (KeyWitness) TableName() string {
-	return "key_witness"
-}

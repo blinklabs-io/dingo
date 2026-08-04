@@ -50,18 +50,10 @@ type MIRReward struct {
 	Amount        uint64
 }
 
-func (MoveInstantaneousRewards) TableName() string {
-	return "move_instantaneous_rewards"
-}
-
 type MoveInstantaneousRewardsReward struct {
 	Credential    []byte
 	CredentialTag uint8
 	Amount        types.Uint64
 	ID            uint
 	MIRID         uint
-}
-
-func (MoveInstantaneousRewardsReward) TableName() string {
-	return "move_instantaneous_rewards_reward"
 }

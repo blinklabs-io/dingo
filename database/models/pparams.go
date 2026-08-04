@@ -22,18 +22,10 @@ type PParams struct {
 	EraId     uint
 }
 
-func (PParams) TableName() string {
-	return "pparams"
-}
-
 type PParamUpdate struct {
 	GenesisHash []byte
 	Cbor        []byte
 	ID          uint
 	AddedSlot   uint64
 	Epoch       uint64
-}
-
-func (PParamUpdate) TableName() string {
-	return "pparam_update"
 }

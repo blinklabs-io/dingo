@@ -30,7 +30,3 @@ type AddressTransaction struct {
 	// TxIndex is queried as part of the stake-position ordering.
 	TxIndex uint32
 }
-
-func (AddressTransaction) TableName() string {
-	return "address_transaction"
-}

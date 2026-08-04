@@ -91,6 +91,36 @@ func TestTransactionSavepointAndCommit(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestSQLiteBulkModeKeepsPlannerAndWritersAvailable(t *testing.T) {
+	store := newTestStore(t)
+	store.writeDB.SetMaxOpenConns(1)
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.NoError(t, store.UpdatePlannerStats())
+
+	first := store.Transaction()
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		second := store.Transaction()
+		close(secondStarted)
+		secondDone <- second.Commit()
+	}()
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second writer bypassed SQLite pool serialization")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.NoError(t, first.Commit())
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second writer remained blocked after first commit")
+	}
+	require.NoError(t, <-secondDone)
+	require.NoError(t, store.RestoreNormalPragmas())
+}
+
 func TestSumUint64RowsPreservesFullRange(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

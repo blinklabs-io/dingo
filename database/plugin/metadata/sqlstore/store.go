@@ -78,6 +78,7 @@ type Store struct {
 	closed            atomic.Bool
 	startMu           sync.Mutex
 	bulkMu            sync.RWMutex
+	bulkConnMu        sync.Mutex
 	bulkConn          *sql.Conn
 
 	closeOnce sync.Once
@@ -233,8 +234,9 @@ func (s *Store) transaction(readOnly bool) types.Txn {
 		}
 	}
 	var (
-		tx  *sql.Tx
-		err error
+		tx      *sql.Tx
+		release func()
+		err     error
 	)
 	if readOnly {
 		tx, err = s.readDB.BeginTx(
@@ -242,9 +244,9 @@ func (s *Store) transaction(readOnly bool) types.Txn {
 			s.dialect.BeginOptions(true),
 		)
 	} else {
-		tx, err = s.beginWriteTx(context.Background())
+		tx, release, err = s.beginWriteTx(context.Background())
 	}
-	return &sqlTxn{owner: s, tx: tx, beginErr: err}
+	return &sqlTxn{owner: s, tx: tx, release: release, beginErr: err}
 }
 
 // Close closes each owned pool exactly once.
@@ -358,12 +360,6 @@ func (s *Store) dbFromTxn(txn types.Txn) (queryer, error) {
 		if err := s.ensureReady(); err != nil {
 			return nil, err
 		}
-		s.bulkMu.RLock()
-		bulkConn := s.bulkConn
-		s.bulkMu.RUnlock()
-		if bulkConn != nil {
-			return newDialectQueryer(bulkConn, s.dialect.Name()), nil
-		}
 		return newDialectQueryer(s.writeDB, s.dialect.Name()), nil
 	}
 	sqlTransaction, ok := txn.(*sqlTxn)
@@ -406,24 +402,36 @@ func (s *Store) withWriteTransaction(
 		}
 		return fn(db)
 	}
-	sqlTransaction, err := s.beginWriteTx(ctx)
+	sqlTransaction, release, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
+	sqlTxnState := &sqlTxn{owner: s, tx: sqlTransaction, release: release}
 	if err := fn(newDialectQueryer(sqlTransaction, s.dialect.Name())); err != nil {
-		return errors.Join(err, sqlTransaction.Rollback())
+		return errors.Join(err, sqlTxnState.Rollback())
 	}
-	return sqlTransaction.Commit()
+	return sqlTxnState.Commit()
 }
 
-func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, error) {
+func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 	s.bulkMu.RLock()
-	defer s.bulkMu.RUnlock()
 	conn := s.bulkConn
 	if conn != nil {
-		return conn.BeginTx(ctx, s.dialect.BeginOptions(false))
+		s.bulkConnMu.Lock()
+		tx, err := conn.BeginTx(ctx, s.dialect.BeginOptions(false))
+		if err != nil {
+			s.bulkConnMu.Unlock()
+			s.bulkMu.RUnlock()
+			return nil, nil, err
+		}
+		return tx, func() {
+			s.bulkConnMu.Unlock()
+			s.bulkMu.RUnlock()
+		}, nil
 	}
-	return s.writeDB.BeginTx(ctx, s.dialect.BeginOptions(false))
+	tx, err := s.writeDB.BeginTx(ctx, s.dialect.BeginOptions(false))
+	s.bulkMu.RUnlock()
+	return tx, nil, err
 }
 
 type queryer interface {
@@ -436,6 +444,7 @@ type queryer interface {
 type sqlTxn struct {
 	owner    *Store
 	tx       *sql.Tx
+	release  func()
 	beginErr error
 
 	mu       sync.Mutex
@@ -452,6 +461,7 @@ func (t *sqlTxn) Commit() error {
 		return nil
 	}
 	t.finished = true
+	defer t.releaseConnection()
 	if t.tx == nil {
 		return nil
 	}
@@ -468,10 +478,18 @@ func (t *sqlTxn) Rollback() error {
 		return nil
 	}
 	t.finished = true
+	defer t.releaseConnection()
 	if t.tx == nil {
 		return nil
 	}
 	return t.tx.Rollback()
+}
+
+func (t *sqlTxn) releaseConnection() {
+	if t.release != nil {
+		t.release()
+		t.release = nil
+	}
 }
 
 func (t *sqlTxn) SavePoint(name string) error {
@@ -516,6 +534,9 @@ func (s *Store) SetBulkLoadPragmas() error {
 	if s.bulkConn != nil {
 		return nil
 	}
+	if s.dialect.Name() == "sqlite" {
+		return s.dialect.SetBulkMode(context.Background(), s.writeDB)
+	}
 	conn, err := s.writeDB.Conn(context.Background())
 	if err != nil {
 		return err
@@ -554,5 +575,12 @@ func (s *Store) restoreNormalPragmas(ctx context.Context) error {
 
 // UpdatePlannerStats refreshes backend planner statistics.
 func (s *Store) UpdatePlannerStats() error {
-	return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+	s.bulkMu.RLock()
+	defer s.bulkMu.RUnlock()
+	if s.bulkConn == nil {
+		return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+	}
+	s.bulkConnMu.Lock()
+	defer s.bulkConnMu.Unlock()
+	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
 }

@@ -24,7 +24,3 @@ type Script struct {
 	CreatedSlot uint64
 	Type        uint8
 }
-
-func (Script) TableName() string {
-	return "script"
-}

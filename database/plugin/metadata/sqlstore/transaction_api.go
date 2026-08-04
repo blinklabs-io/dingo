@@ -16,10 +16,9 @@ package sqlstore
 
 import (
 	"context"
-	"database/sql"
 	"encoding/hex"
-	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
@@ -131,6 +130,7 @@ func (s *Store) applyTransactionAPIDetails(
 		slot,
 		index,
 		produced,
+		s.dialect.ParameterLimit(),
 	); err != nil {
 		return err
 	}
@@ -205,6 +205,7 @@ func indexTransactionAddresses(
 	slot uint64,
 	index uint32,
 	produced []models.Utxo,
+	parameterLimit int,
 ) error {
 	if _, err := db.ExecContext(context.Background(), `
 DELETE FROM address_transaction WHERE transaction_id = ?`,
@@ -236,26 +237,61 @@ DELETE FROM address_transaction WHERE transaction_id = ?`,
 	allInputs = append(allInputs, transaction.Inputs()...)
 	allInputs = append(allInputs, transaction.Collateral()...)
 	allInputs = append(allInputs, transaction.ReferenceInputs()...)
+	type inputKey struct {
+		txID  string
+		index uint32
+	}
+	keys := make([]inputKey, 0, len(allInputs))
+	seen := make(map[inputKey]struct{}, len(allInputs))
 	for _, input := range allInputs {
-		var (
-			payment []byte
-			staking []byte
-			tag     uint8
-		)
-		err := db.QueryRowContext(context.Background(), `
-SELECT payment_key, credential_tag, staking_key
-FROM utxo WHERE tx_id = ? AND output_idx = ?`,
-			input.Id().Bytes(),
-			input.Index(),
-		).Scan(&payment, &tag, &staking)
-		if err != nil {
-			// Missing input history is valid during gap ingestion.
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			return fmt.Errorf("lookup input address for transaction %d: %w", transactionID, err)
+		key := inputKey{txID: string(input.Id().Bytes()), index: input.Index()}
+		if _, ok := seen[key]; ok {
+			continue
 		}
-		add(payment, tag, staking)
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	if parameterLimit < 2 {
+		parameterLimit = 2
+	}
+	for start := 0; start < len(keys); start += parameterLimit / 2 {
+		end := start + parameterLimit/2
+		if end > len(keys) {
+			end = len(keys)
+		}
+		predicates := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*2)
+		for _, key := range keys[start:end] {
+			predicates = append(predicates, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, []byte(key.txID), key.index)
+		}
+		rows, err := db.QueryContext(context.Background(), `
+SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
+FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
+		if err != nil {
+			return fmt.Errorf("lookup input addresses for transaction %d: %w", transactionID, err)
+		}
+		for rows.Next() {
+			var (
+				txID    []byte
+				output  uint32
+				payment []byte
+				staking []byte
+				tag     uint8
+			)
+			if err := rows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
+			}
+			add(payment, tag, staking)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("iterate input addresses for transaction %d: %w", transactionID, err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close input addresses for transaction %d: %w", transactionID, err)
+		}
 	}
 	for address := range addresses {
 		if _, err := db.ExecContext(context.Background(), `

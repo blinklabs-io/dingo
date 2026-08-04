@@ -24,19 +24,9 @@ type NetworkState struct {
 	Slot     uint64
 }
 
-// TableName returns the table name for NetworkState.
-func (NetworkState) TableName() string {
-	return "network_state"
-}
-
 // SyncState stores ephemeral key-value pairs used during
 // one-time sync/load operations. Cleaned up after completion.
 type SyncState struct {
 	Key   string
 	Value string
-}
-
-// TableName returns the table name for SyncState.
-func (SyncState) TableName() string {
-	return "sync_state"
 }

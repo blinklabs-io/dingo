@@ -336,10 +336,6 @@ type UtxoWithOrderingQuery struct {
 	AssetName         []byte
 }
 
-func (u *Utxo) TableName() string {
-	return "utxo"
-}
-
 func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
 	return ledger.NewTransactionOutputFromCbor(u.Cbor)
 }

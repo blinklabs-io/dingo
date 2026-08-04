@@ -29,10 +29,6 @@ type Certificate struct {
 	CertType      uint
 }
 
-func (Certificate) TableName() string {
-	return "certs"
-}
-
 func (c Certificate) Type() uint {
 	return c.CertType
 }

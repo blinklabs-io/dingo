@@ -30,7 +30,3 @@ type AuthCommitteeHot struct {
 	CertificateID uint
 	AddedSlot     uint64
 }
-
-func (AuthCommitteeHot) TableName() string {
-	return "auth_committee_hot"
-}

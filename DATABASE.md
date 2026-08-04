@@ -47,8 +47,8 @@ columns, relationships, indexes, or migrations. There is no ORM,
 The initial database schema release is `v1alpha1`, stored as integer version 1
 for migration ordering. A fresh database creates it from embedded DDL. Existing
 unversioned metadata databases are intentionally rejected: the database/sql
-cutover is a clean break, so users must remove the metadata database and resync
-from genesis. This keeps startup deterministic and avoids carrying a large,
+cutover is a clean break, so users must remove the data directory (metadata and
+blob stores) and resync from genesis. This keeps startup deterministic and avoids carrying a large,
 fragile compatibility layer for obsolete schemas. Reference inputs are stored
 in the v1alpha1 `utxo_reference_input` association table so multiple
 transactions can reference one output; the legacy single-column marker is not

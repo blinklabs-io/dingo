@@ -30,7 +30,3 @@ type WitnessScripts struct {
 	TransactionID uint
 	Type          uint8
 }
-
-func (WitnessScripts) TableName() string {
-	return "witness_scripts"
-}

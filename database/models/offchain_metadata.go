@@ -67,7 +67,3 @@ type OffchainMetadata struct {
 	FetchAttempts  uint
 	LastHTTPStatus uint
 }
-
-func (OffchainMetadata) TableName() string {
-	return "offchain_metadata"
-}

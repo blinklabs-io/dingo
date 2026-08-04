@@ -29,7 +29,3 @@ type BackfillCheckpoint struct {
 	UpdatedAt  time.Time
 	Completed  bool
 }
-
-func (BackfillCheckpoint) TableName() string {
-	return "backfill_checkpoint"
-}
