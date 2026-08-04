@@ -48,8 +48,19 @@ func newReflectionTestServer(t *testing.T) (*httptest.Server, *http.Client) {
 	srv := httptest.NewUnstartedServer(u.newServeMux())
 	srv.Config.Protocols = unencryptedHTTP2Protocols()
 	srv.Start()
-	t.Cleanup(srv.Close)
-	return srv, newConnectH2CClient()
+	httpClient := newConnectH2CClient()
+	t.Cleanup(func() {
+		// Shut down under a deadline rather than calling Close directly:
+		// httptest.Server.Close waits without one, so a held-open HTTP/2
+		// connection could hang the test instead of failing it. Dropping the
+		// client's keep-alive connection first lets the drain finish promptly.
+		httpClient.CloseIdleConnections()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, srv.Config.Shutdown(ctx))
+		srv.Close()
+	})
+	return srv, httpClient
 }
 
 // listServices drives one ServerReflectionInfo bidi stream and returns the
