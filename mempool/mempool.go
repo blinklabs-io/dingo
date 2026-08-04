@@ -1112,9 +1112,8 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 			}
 			m.mutationMutex.Unlock()
 
-			if requiredRounds :=
-				(len(delta)+m.revalidationDeltaCap-1)/m.revalidationDeltaCap +
-					maxRevalidationCatchupRounds; requiredRounds > catchupRounds {
+			if requiredRounds := (len(delta)+m.revalidationDeltaCap-1)/m.revalidationDeltaCap +
+				maxRevalidationCatchupRounds; requiredRounds > catchupRounds {
 				// Scale the total budget to the observed backlog while keeping
 				// each replay round bounded. New mutations can extend this
 				// budget again until the journal overflows.
