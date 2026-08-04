@@ -2516,7 +2516,15 @@ revalidation does not hold that gate while it validates the whole pool. Both
 backends briefly snapshot their live state, build a private candidate while
 admissions and removals continue, and replay concurrent changes from a monotonic
 mutation journal. Bounded catch-up loops apply large deltas off the gate and
-leave only a limited residual for the final critical section.
+leave only a limited residual for the final critical section. Each round replays
+at most `revalidationDeltaCap` mutations so the loop can observe and reconcile
+new ones, and the total round budget scales with the observed backlog rather
+than being fixed: a fixed budget capped one pass at
+`revalidationDeltaCap x rounds` mutations, and because every attempt restarts
+from a fresh journal, a sustained backlog past that ceiling made each pass give
+up without ever publishing -- no invalid-transaction removal and no DAG rebuild
+-- which is the load the enlarged journal exists to buffer. The journal cap
+remains the ultimate bound: once it overflows the candidate is abandoned.
 
 The shared bounded journal aborts a candidate instead of growing without limit,
 and `plugins.mempool.config.revalidationDeltaCap` controls the residual mutation

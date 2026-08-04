@@ -1119,12 +1119,9 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 				// budget again until the journal overflows.
 				catchupRounds = requiredRounds
 			}
-			applyCount := len(delta)
-			if applyCount > m.revalidationDeltaCap {
-				// Bound the amount of replay work per round so that the
-				// catch-up loop can observe and reconcile new mutations.
-				applyCount = m.revalidationDeltaCap
-			}
+			// Bound the amount of replay work per round so that the
+			// catch-up loop can observe and reconcile new mutations.
+			applyCount := min(len(delta), m.revalidationDeltaCap)
 			for _, mutation := range delta[:applyCount] {
 				if mutation.stopped {
 					return ErrMempoolStopped
