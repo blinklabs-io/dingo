@@ -54,6 +54,13 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
+	betaquery "github.com/utxorpc/go-codegen/utxorpc/v1beta/query"
+	betaqueryconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/query/queryconnect"
+	betasubmit "github.com/utxorpc/go-codegen/utxorpc/v1beta/submit"
+	betasubmitconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/submit/submitconnect"
+	betasync "github.com/utxorpc/go-codegen/utxorpc/v1beta/sync"
+	betasyncconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/sync/syncconnect"
+	betawatchconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/watch/watchconnect"
 	"golang.org/x/net/http2"
 )
 
@@ -126,6 +133,17 @@ func testUtxorpcHTTPHandler(u *Utxorpc) http.Handler {
 	mux.Handle(sp, sh)
 	mux.Handle(yp, yh)
 	mux.Handle(wp, wh)
+	// v1beta routes mirror production wiring in Start: the beta services reuse
+	// the alpha handlers via path rewriting, and the query service additionally
+	// serves the beta-only ReadState method.
+	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
+	mux.Handle(betaQueryPath, betaVersionedQueryHandler(qp, qh, betaQueryPath, compress1KB))
+	betaSubmitPath := "/" + betasubmitconnect.SubmitServiceName + "/"
+	mux.Handle(betaSubmitPath, rewriteVersionHandler(sh, betaSubmitPath, sp))
+	betaSyncPath := "/" + betasyncconnect.SyncServiceName + "/"
+	mux.Handle(betaSyncPath, rewriteVersionHandler(yh, betaSyncPath, yp))
+	betaWatchPath := "/" + betawatchconnect.WatchServiceName + "/"
+	mux.Handle(betaWatchPath, rewriteVersionHandler(wh, betaWatchPath, wp))
 	return mux
 }
 
@@ -1017,5 +1035,99 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, txHash, outTx.Hash().Bytes())
+	cancel()
+}
+
+// --- v1beta serving/routing tests ------------------------------------------
+
+// TestConnect_Beta_ReadParams drives a real v1beta QueryService call through
+// betaVersionedQueryHandler and asserts it is rewritten onto the shared v1alpha
+// handler, returning the same ledger-backed response as the v1alpha service.
+func TestConnect_Beta_ReadParams(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := cli.ReadParams(
+		ctx,
+		connect.NewRequest(&betaquery.ReadParamsRequest{}),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, out.Msg.GetValues())
+	require.NotNil(t, out.Msg.GetValues().GetCardano())
+	require.NotNil(t, out.Msg.GetLedgerTip())
+	tip := h.LS.Tip()
+	require.Equal(t, tip.Point.Slot, out.Msg.GetLedgerTip().GetSlot())
+	require.Equal(t, tip.Point.Hash, out.Msg.GetLedgerTip().GetHash())
+	require.Equal(t, tip.BlockNumber, out.Msg.GetLedgerTip().GetHeight())
+}
+
+// TestConnect_Beta_ReadState_Unimplemented exercises the beta-only ReadState
+// routing branch inside betaVersionedQueryHandler, which must not be rewritten
+// onto the alpha handler and must report Unimplemented.
+func TestConnect_Beta_ReadState_Unimplemented(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := cli.ReadState(
+		ctx,
+		connect.NewRequest(&betaquery.ReadStateRequest{}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnimplemented, connect.CodeOf(err))
+}
+
+// TestConnect_Beta_ReadTip drives a real v1beta SyncService call to confirm a
+// non-query service is served through rewriteVersionHandler onto v1alpha.
+func TestConnect_Beta_ReadTip(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 15})
+	cli := betasyncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := cli.ReadTip(ctx, connect.NewRequest(&betasync.ReadTipRequest{}))
+	require.NoError(t, err)
+	require.NotNil(t, out.Msg.GetTip())
+	tip := h.LS.Tip()
+	require.Equal(t, tip.Point.Slot, out.Msg.GetTip().GetSlot())
+	require.Equal(t, tip.Point.Hash, out.Msg.GetTip().GetHash())
+	require.Equal(t, tip.BlockNumber, out.Msg.GetTip().GetHeight())
+}
+
+// TestConnect_Beta_WaitForTx_EmptyRefsClosesStream exercises a versioned
+// streaming handler served through rewriteVersionHandler: an empty-ref
+// beta WaitForTx must open and cleanly close without frames, like v1alpha.
+func TestConnect_Beta_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+	cli := betasubmitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	stream, err := cli.WaitForTx(
+		ctx,
+		connect.NewRequest(&betasubmit.WaitForTxRequest{}),
+	)
+	require.NoError(t, err)
+	require.False(
+		t,
+		stream.Receive(),
+		"no refs means the handler returns without frames",
+	)
+	require.NoError(t, stream.Err())
 	cancel()
 }
