@@ -32,6 +32,44 @@ dependency bundles, preserving `CARDANO_DATABASE_PATH` and `--data-dir` as a
 shortcut for both stores. Local providers can independently override that
 fallback through their typed `dataDir` configuration.
 
+### Shared metadata SQL store
+
+The shared `database/plugin/metadata/sqlstore` package is the composition
+boundary for relational metadata. It owns
+`database/sql` pools, store-owned transactions, savepoints, readiness, and
+business orchestration. A small dialect capability handles placeholder
+rebinding, identifier quoting, parameter limits, read-only isolation, bulk
+session tuning, and planner statistics. Generated query packages remain
+internal so generated row types cannot leak into ledger or API packages.
+
+The SQLite provider is a thin factory around the pure-Go driver. It configures
+one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
+locking, query tracing, and daily `VACUUM`. The tagged PostgreSQL/MySQL
+factories configure their direct drivers, pools, advisory migration locks, and
+repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
+business behavior is implemented once in `sqlstore` and dialect translation is
+limited to SQL mechanics.
+
+The public compatibility interface is decomposing into narrow
+`LifecycleStore`, `SettingsStore`, `TransactionStore`, and `SlotRangeStore`
+capabilities so components need not inherit the full historical metadata
+surface. Concrete SQL handles are not exposed; repository tests use internal
+fixtures when schema seeding or assertions require raw SQL.
+
+Startup reserves the write connection, acquires the backend migration lock,
+rejects unversioned metadata tables (users must delete the data directory,
+including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
+advertising readiness. The initial schema release is `v1alpha1` (integer
+migration version 1); subsequent schema work advances the ordered migration
+registry. It then checks the read pool. File-backed SQLite uses a
+cross-process lock file; isolated in-memory databases use a process lock. A
+failed or interrupted phase leaves readiness false and carries the migration
+version and phase in the returned error. Backfill data and its opaque cursor
+checkpoint commit atomically in one transaction. Shutdown serializes with
+startup and passes its lifecycle context through maintenance cancellation;
+bulk-load tuning is scoped to a dedicated write connection and restored before
+the connection is released.
+
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
 ## Table of Contents
@@ -177,8 +215,8 @@ graph LR
     db_blob["database/plugin/blob"]
     db_blob_impl["database/plugin/blob/{aws,badger,gcs}"]
     db_meta["database/plugin/metadata"]
-    db_meta_impl["database/plugin/metadata/{mysql,postgres,sqlite}"]
-    db_meta_util["database/plugin/metadata/{importutil,labelcodec}"]
+    db_meta_impl["database/plugin/metadata/{sqlite,sqlstore}"]
+    db_meta_util["database/plugin/metadata/{deferred,labelcodec}"]
     db_immutable["database/immutable"]
     cardano_cfg["config/cardano"]
     ev["event"]
@@ -518,8 +556,9 @@ dingo/
 │       │   └── gcs/     # Google Cloud Storage
 │       └── metadata/    # Metadata contract and providers
 │           ├── sqlite/  # SQLite (default)
-│           ├── postgres/# PostgreSQL (tag-gated)
-│           └── mysql/   # MySQL (tag-gated)
+│           ├── sqlstore/# Shared database/sql behavior and migrations
+│           ├── postgres/# PostgreSQL adapter (tag-gated)
+│           └── mysql/   # MySQL adapter (tag-gated)
 ├── plugin/              # Generic instance-owned provider host
 ├── internal/plugins/    # Explicit compiled-in provider composition
 ├── event/               # Event bus for decoupled communication
@@ -899,18 +938,18 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     |   (blocks, UTxOs, txs)     |  (indexes, state)|
     -------------------------------------------------
     | Plugins:                    | Plugins:          |
-    |  - Badger (default)         |  - SQLite (default)|
-    |  - AWS S3 (tag-gated)       |  - PostgreSQL (tag-gated)|
-    |  - Google Cloud Storage (tag-gated)|  - MySQL (tag-gated)|
+    |  - Badger (default)         |  - SQLite|
+    |  - AWS S3 (tag-gated)       |            |
+    |  - Google Cloud Storage (tag-gated)|     |
     -------------------------------------------------
 ```
 
 Badger and SQLite are always compiled into Dingo. The non-default blob plugins
-(`s3` and `gcs`) and metadata plugins (`postgres` and `mysql`) are compiled
-only when the `dingo_extra_plugins` build tag is enabled; project builds, CI,
-and release binaries opt into that tag, while a plain `go build ./cmd/dingo`
-omits the cloud blob SDKs and SQL driver dependencies for non-default metadata
-stores.
+(`s3` and `gcs`) and PostgreSQL/MySQL metadata providers are compiled only when
+the `dingo_extra_plugins` build tag is enabled; project builds and CI still
+compile that boundary, while a plain `go build ./cmd/dingo` omits the cloud
+SDKs and non-default SQL drivers. Every compiled metadata provider passes the
+readiness gate after its dialect-specific migration completes.
 
 ### Cross-Store Commit Ordering
 
@@ -2846,8 +2885,8 @@ bootstrap boundary escapes it), wedging the node at the tip of the following
 epoch. For an empty closing epoch (no blocks of its own) the previous carried
 nonce is passed through unchanged.
 
-In API storage mode, the SQLite metadata plugin can defer selected query indexes
-during bulk load. Deferred indexes are classified as critical or lazy in
+In API storage mode, the shared SQL metadata providers can defer selected query
+indexes during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries
 and rollback predicates, while lazy indexes cover secondary query paths. The
 metadata plugin exposes `BuildCriticalDeferredIndexes` for the critical subset
@@ -2856,7 +2895,9 @@ critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the marker is
 cleared only after the full manifest has been rebuilt. Core-mode startup still
-repairs the full manifest synchronously before serving.
+repairs the full manifest synchronously before serving. On MySQL, InnoDB
+requires indexes supporting foreign-key child columns, so the dialect leaves
+those indexes in place while deferring the remaining manifest entries.
 
 ## External Interfaces
 
@@ -3009,9 +3050,9 @@ process; it is a standalone binary built from `cmd/koios-parity/`.
 
 ```
 internal/koiosparity/      # shared library
-  cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
+  cache.go                 # SQLite cache schema + CRUD (database/sql)
   koios_client.go          # Koios v1 REST client with pagination + retry
-  dingo_db.go              # read-only GORM access to Dingo's metadata database
+  dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
   check.go                 # parity check orchestration (pool-level comparison)
@@ -3893,10 +3934,10 @@ rows (including `RewardAccountOutput`) above the rollback slot in every mode.
 
 ### Reward Metadata State
 
-The metadata plugins persist ADA pots, reward snapshot metadata, per-pool
-inputs, and a live per-credential stake aggregate. SQLite, MySQL, and
-PostgreSQL share reward-state query behavior through
-`database/plugin/metadata/internal/`.
+The shared metadata store persists ADA pots, reward snapshot metadata,
+per-pool inputs, and a live per-credential stake aggregate. Reward-state query
+behavior lives in `database/plugin/metadata/sqlstore` and is exercised through
+the SQLite contract suite.
 
 `RewardLiveStake` supplies the credential-level input bundle for reward
 snapshots; the leader-election Mark snapshot remains on its independent,
@@ -4277,8 +4318,8 @@ row/unique-key lock remains held until commit. This lets the fallback persist
 those rows without leaving a durable `reward_snapshot` row that falsely implies
 reward inputs exist. Because the marker or temporary guard is the first row both
 paths write, they acquire the `reward_snapshot` key/row lock in the same order,
-which keeps a concurrent authoritative-vs-fallback capture both race-free and
-deadlock-free on MySQL/Postgres; SQLite is already serial.
+which keeps a concurrent authoritative-vs-fallback capture race-free; SQLite
+serializes writers.
 `handleEpochTransition`'s pre-check that skips the fallback when an
 authoritative row exists is a best-effort optimization — the transactional
 marker/guard claim, not that read, is what closes the race.
@@ -4288,8 +4329,7 @@ consensus-critical epoch-boundary code (it changes the Mark `PoolStakeSnapshot`
 that leader election reads, and the exact SNAP-point placement affects
 Shelley-era replay once the reward-calculation consumer lands). It must be run
 through the DevNet harness (`internal/test/devnet/`) against cardano-node before
-merge; unit and conformance tests do not exercise the concurrent MySQL/Postgres
-capture paths.
+merge; unit and conformance tests do not exercise full multi-node timing.
 
 ### Epoch Boundary State Transitions
 

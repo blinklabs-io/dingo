@@ -172,6 +172,7 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	)
 	_ = txn3.Rollback()
 	txn3.Release()
+	require.Error(t, metaErr)
 	assertProductionWrap(t, metaErr, inner, "block idx", idxStr, slotStr, txHashStr)
 	// The "only" wrap has a distinguishing marker in addition to the shared
 	// tx/idx/slot fields — pin it too so the two block-idx sites can't

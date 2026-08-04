@@ -16,10 +16,11 @@ package database
 
 import (
 	"bytes"
+	"database/sql"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -48,7 +49,7 @@ func exactAddressTestPointer(
 func seedExactAddressUtxo(
 	t *testing.T,
 	db *Database,
-	store *sqliteplugin.MetadataStoreSqlite,
+	raw *sql.DB,
 	addr lcommon.Address,
 	slot uint64,
 	hashByte byte,
@@ -56,12 +57,15 @@ func seedExactAddressUtxo(
 	t.Helper()
 	txID := uint(slot)
 	txHash := bytes.Repeat([]byte{hashByte}, 32)
-	require.NoError(t, store.DB().Create(&models.Transaction{
-		ID:         txID,
-		Hash:       txHash,
-		Slot:       slot,
-		BlockIndex: 0,
-	}).Error)
+	_, err := raw.Exec(`
+INSERT INTO "transaction" (
+    id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
+) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
+		txID,
+		txHash,
+		slot,
+	)
+	require.NoError(t, err)
 	row := models.Utxo{
 		TransactionID: &txID,
 		TxId:          txHash,
@@ -73,29 +77,51 @@ func seedExactAddressUtxo(
 	if stake := addr.StakeKeyHash(); stake != lcommon.NewBlake2b224(nil) {
 		row.StakingKey = stake.Bytes()
 	}
-	require.NoError(t, store.DB().Create(&row).Error)
-	require.NoError(t, store.DB().Create(&models.AddressTransaction{
-		PaymentKey:    row.PaymentKey,
-		StakingKey:    row.StakingKey,
-		CredentialTag: row.CredentialTag,
-		TransactionID: txID,
-		Slot:          slot,
-	}).Error)
-	raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+	_, err = raw.Exec(`
+INSERT INTO utxo (
+    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, FALSE)`,
+		txID,
+		row.TxId,
+		row.PaymentKey,
+		row.StakingKey,
+		row.CredentialTag,
+		row.AddedSlot,
+		strconv.FormatUint(uint64(row.Amount), 10),
+		row.OutputIdx,
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO address_transaction (
+    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
+) VALUES (?, ?, ?, ?, ?, 0)`,
+		row.PaymentKey,
+		row.StakingKey,
+		row.CredentialTag,
+		txID,
+		slot,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 		OutputAddress: addr,
 		OutputAmount:  uint64(row.Amount),
 	})
 	require.NoError(t, err)
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
-		return db.Blob().SetUtxo(txn.Blob(), row.TxId, row.OutputIdx, raw)
+		return db.Blob().SetUtxo(
+			txn.Blob(),
+			row.TxId,
+			row.OutputIdx,
+			encoded,
+		)
 	}))
 	return row
 }
 
 func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	db := openTestDB(t)
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok)
+	raw := rawSQLiteMetadataFixture(t, db)
 
 	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
 	stake := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
@@ -133,7 +159,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		seeded[i] = seedExactAddressUtxo(
 			t,
 			db,
-			store,
+			raw,
 			rows[i].addr,
 			rows[i].slot,
 			rows[i].hash,

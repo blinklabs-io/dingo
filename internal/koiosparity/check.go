@@ -16,14 +16,13 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 // CheckConfig holds parameters for a parity check run.
@@ -370,7 +369,7 @@ func checkEpoch(
 		dingoEpochPots = nil
 	}
 	koiosTotals, totalsErr := cache.GetTotals(network, epoch)
-	if totalsErr != nil && !errors.Is(totalsErr, gorm.ErrRecordNotFound) {
+	if totalsErr != nil && !errors.Is(totalsErr, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get koios totals: %w", totalsErr)
 	}
 	allMismatches = append(allMismatches,

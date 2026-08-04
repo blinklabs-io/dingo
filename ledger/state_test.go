@@ -4352,9 +4352,7 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 	}
 	ls.metrics.init(prometheus.NewRegistry())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	processCtx, processCancel := context.WithCancel(ctx)
+	processCtx, processCancel := context.WithCancel(t.Context())
 	ls.processBlocksCancel = processCancel
 	ls.processBlocksWG.Add(1)
 	stopped := make(chan struct{})

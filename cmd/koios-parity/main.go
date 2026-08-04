@@ -274,7 +274,7 @@ func dsnFromMetadataConfig(plugin string, cfg map[string]any) string {
 		// (Config{Host: "localhost", Port: 3306, User: "root", Database:
 		// "dingo", TimeZone: "UTC"}). The DSN itself is built with
 		// go-sql-driver/mysql's own Config/FormatDSN — the same type
-		// database/plugin/metadata/mysql's Start() feeds to gorm — rather
+		// database/plugin/metadata/mysql's provider uses — rather
 		// than hand-formatting the connection string, so query-parameter
 		// encoding (parseTime, allowNativePasswords, loc, tls) stays
 		// byte-for-byte consistent with the real provider.

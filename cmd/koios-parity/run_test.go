@@ -145,8 +145,8 @@ func (f *fakeReportWriteCloser) Close() error { return f.closeErr }
 // create/build are injected specifically so this (and the two tests below)
 // can force each failure mode deterministically — reproducing a genuine
 // BuildJSONReport/WriteJSONReport/Close failure through a live runCommand +
-// cache round-trip is not practical, since AutoMigrate repairs any missing
-// cache table on the very next open.
+// cache round-trip is not practical, since the metadata migration repairs any
+// missing cache table on the very next open.
 func TestWriteParityReportBuildFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "report.json")

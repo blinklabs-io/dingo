@@ -1215,18 +1215,10 @@ func smallEpochGenesisCfgForLifecycleTest(t *testing.T) *cardano.CardanoNodeConf
 // A tight back-to-back loop of AddBlock calls that crosses more than one
 // epoch boundary fires several epoch-transition EventBus events with no
 // synchronization between them, each spawning its own concurrent async
-// handler (reward precompute, the stake/reward snapshot manager, the
-// automatic database-lifecycle snapshot manager) against the shared
-// sqlite/GORM connection pool. Under -race plus a constrained GOMAXPROCS
-// (matching CI's runners), this can pile up enough concurrent first-time
-// statement preparations to hit a real, pre-existing GORM+SQLite
-// connection-pool contention issue (unrelated to database/lifecycle —
-// confirmed via `git diff` that none of the files on that call path belong
-// to this feature) that manifests as an effectively unbounded hang, since
-// nothing on that path is given a context deadline. Adding blocks one at a
-// time — which also more accurately simulates blocks actually arriving
-// live, one at a time, rather than as an instantaneous burst — keeps each
-// epoch transition's async work serialized instead of overlapping.
+// handler (reward precompute, stake/reward snapshots, and automatic database
+// lifecycle snapshots). Adding blocks one at a time both keeps this test
+// deterministic and more accurately simulates blocks arriving live instead
+// of as an instantaneous burst.
 func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 	t.Helper()
 	for _, b := range blocks {

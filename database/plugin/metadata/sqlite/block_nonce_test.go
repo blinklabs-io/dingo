@@ -22,7 +22,7 @@ import (
 )
 
 func TestGetLatestBlockNonce(t *testing.T) {
-	store := setupTestDB(t)
+	store, _ := newSharedSQLStore(t)
 
 	row, ok, err := store.GetLatestBlockNonce(nil)
 	require.NoError(t, err)

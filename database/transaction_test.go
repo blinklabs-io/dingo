@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	metadataSqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -151,7 +152,11 @@ func (m *mockBlobStore) SetUtxo(types.Txn, []byte, uint32, []byte) error {
 	return nil
 }
 
-func (m *mockBlobStore) GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([]byte, error) {
+func (m *mockBlobStore) GetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
 	if m.utxoData != nil {
 		if data, ok := m.utxoData[fmt.Sprintf("%x:%d", txId, outputIdx)]; ok {
 			return data, nil
@@ -160,7 +165,11 @@ func (m *mockBlobStore) GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([
 	return nil, types.ErrBlobKeyNotFound
 }
 
-func (m *mockBlobStore) DeleteUtxo(txn types.Txn, txId []byte, outputIdx uint32) error {
+func (m *mockBlobStore) DeleteUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) error {
 	mockTxn, ok := txn.(*mockBlobTxn)
 	if !ok {
 		return types.ErrTxnWrongType
@@ -342,7 +351,9 @@ func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
 
 // TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata injects a transaction blob deletion failure.
 // It verifies the failure is logged while rollback metadata cleanup still succeeds.
-func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
+func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(
+	t *testing.T,
+) {
 	var logs bytes.Buffer
 	logger := slog.New(
 		slog.NewJSONHandler(
@@ -351,9 +362,16 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testin
 		),
 	)
 	txHash := bytes.Repeat([]byte{0x11}, 32)
-	sqliteStore, err := metadataSqlite.New("", logger, nil)
+	dataDir := t.TempDir()
+	sqliteStore, err := metadataSqlite.NewSQLStore(
+		metadataSqlite.Config{DataDir: dataDir},
+		metadata.ProviderDependencies{Logger: logger},
+	)
 	require.NoError(t, err)
-	require.NoError(t, sqliteStore.Start())
+	require.NoError(t, sqliteStore.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, sqliteStore.Close())
+	})
 	store := &mockBlobStore{
 		deleteTxErrs: map[string]error{
 			string(txHash): errors.New("delete tx blob failed"),
@@ -363,23 +381,27 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testin
 		blob:     store,
 		metadata: sqliteStore,
 		logger:   logger,
-		config:   &Config{Logger: logger},
+		config:   &Config{DataDir: dataDir, Logger: logger},
 	}
 	defer func() {
 		require.NoError(t, db.Close())
 	}()
-	require.NoError(t, sqliteStore.DB().Create(&models.Transaction{
-		Hash:  txHash,
-		Slot:  200,
-		Valid: true,
-	}).Error)
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err = raw.Exec(
+		`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, ?, ?)`,
+		txHash,
+		200,
+		true,
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, db.TransactionsDeleteRolledback(100, nil))
 
 	var count int64
-	require.NoError(t, sqliteStore.DB().Model(&models.Transaction{}).
-		Where("hash = ?", txHash).
-		Count(&count).Error)
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+		txHash,
+	).Scan(&count))
 	require.Zero(t, count)
 	require.Contains(t, logs.String(), "\"level\":\"WARN\"")
 	require.Contains(t, logs.String(), "failed to delete TX blob data")
@@ -398,36 +420,51 @@ func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
 		),
 	)
 	txID := bytes.Repeat([]byte{0x22}, 32)
-	sqliteStore, err := metadataSqlite.New("", logger, nil)
+	dataDir := t.TempDir()
+	sqliteStore, err := metadataSqlite.NewSQLStore(
+		metadataSqlite.Config{DataDir: dataDir},
+		metadata.ProviderDependencies{Logger: logger},
+	)
 	require.NoError(t, err)
-	require.NoError(t, sqliteStore.Start())
+	require.NoError(t, sqliteStore.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, sqliteStore.Close())
+	})
 	store := &mockBlobStore{
 		deleteUtxoErrs: map[string]error{
-			fmt.Sprintf("%x:%d", txID, 0): errors.New("delete utxo blob failed"),
+			fmt.Sprintf("%x:%d", txID, 0): errors.New(
+				"delete utxo blob failed",
+			),
 		},
 	}
 	db := &Database{
 		blob:     store,
 		metadata: sqliteStore,
 		logger:   logger,
-		config:   &Config{Logger: logger},
+		config:   &Config{DataDir: dataDir, Logger: logger},
 	}
 	defer func() {
 		require.NoError(t, db.Close())
 	}()
-	require.NoError(t, sqliteStore.DB().Create(&models.Utxo{
-		TxId:      txID,
-		OutputIdx: 0,
-		AddedSlot: 200,
-		Amount:    1,
-	}).Error)
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err = raw.Exec(`
+INSERT INTO utxo (tx_id, output_idx, added_slot, amount)
+VALUES (?, ?, ?, ?)`,
+		txID,
+		0,
+		200,
+		"1",
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, db.UtxosDeleteRolledback(100, nil))
 
 	var count int64
-	require.NoError(t, sqliteStore.DB().Model(&models.Utxo{}).
-		Where("tx_id = ? AND output_idx = ?", txID, 0).
-		Count(&count).Error)
+	require.NoError(t, raw.QueryRow(`
+SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+		txID,
+		0,
+	).Scan(&count))
 	require.Zero(t, count)
 	require.Contains(t, logs.String(), "\"level\":\"WARN\"")
 	require.Contains(t, logs.String(), "failed to delete UTxO blob data")
@@ -435,7 +472,9 @@ func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
 	require.Contains(t, logs.String(), "\"total\":1")
 }
 
-func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T) {
+func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
+	t *testing.T,
+) {
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	defer func() {
@@ -538,9 +577,8 @@ func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
 // ensureTransactionConsumedUtxos has to recover a missing UTxO row for
 // a consumed input, the recovered row carries the producer transaction
 // FK. Without this FK, SetUtxosNotDeletedAfterSlot would reanimate the
-// row during a rollback but joins on utxo.transaction_id and GORM
-// Preload("Outputs") through the producer Transaction would silently
-// drop it.
+// row during a rollback, but joins on utxo.transaction_id would silently drop
+// it from producer-transaction output lookups.
 func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
@@ -904,8 +942,10 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 	newTestDB := func(t *testing.T, strict bool) *Database {
 		t.Helper()
 		db, err := newTestDatabase(t, &Config{
-			DataDir:              t.TempDir(),
-			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			DataDir: t.TempDir(),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			StrictUtxoValidation: strict,
 		})
 
@@ -946,18 +986,21 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 		require.ErrorIs(t, err, ErrUtxoNotFound)
 	})
 
-	t.Run("enabled skips at or below the recorded boundary", func(t *testing.T) {
-		db := newTestDB(t, true)
-		require.NoError(
-			t,
-			db.SetSyncState(
-				mithrilLedgerSlotSyncKey,
-				fmt.Sprintf("%d", candidate.consumerPoint.Slot),
-				nil,
-			),
-		)
-		require.NoError(t, setTransaction(t, db))
-	})
+	t.Run(
+		"enabled skips at or below the recorded boundary",
+		func(t *testing.T) {
+			db := newTestDB(t, true)
+			require.NoError(
+				t,
+				db.SetSyncState(
+					mithrilLedgerSlotSyncKey,
+					fmt.Sprintf("%d", candidate.consumerPoint.Slot),
+					nil,
+				),
+			)
+			require.NoError(t, setTransaction(t, db))
+		},
+	)
 }
 
 // TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer is the end-to-end guard

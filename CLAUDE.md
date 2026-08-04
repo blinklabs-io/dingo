@@ -17,7 +17,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 ## Documentation
 
 - Treat `DATABASE.md` and `ARCHITECTURE.md` as part of the change bar, like tests. Before finishing any code change, decide whether either document needs an update; update it in the same change when it does.
-- Update `DATABASE.md` for any change to GORM models, migrated tables, table relationships, SQL query/API surfaces in `metadata.MetadataStore`, blob-store key layout, CBOR/offset encodings, storage plugins, pruning/tombstone behavior, or anything external Postgres/MySQL/SQLite/blob users rely on.
+- Update `DATABASE.md` for any change to metadata schemas, table relationships, SQL query/API surfaces in `metadata.MetadataStore`, blob-store key layout, CBOR/offset encodings, storage plugins, pruning/tombstone behavior, or anything external Postgres/MySQL/SQLite/blob users rely on.
 - Update `ARCHITECTURE.md` for any change to component responsibilities, package boundaries, startup/composition, EventBus topics/payloads, plugin interfaces, lifecycle/concurrency behavior, or cross-component flows among ledger, database, mempool, networking, API, and node wiring.
 - In final responses, report documentation status the same way tests are reported: either list the docs updated or explicitly state that `DATABASE.md`/`ARCHITECTURE.md` were checked and not affected.
 

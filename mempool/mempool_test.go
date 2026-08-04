@@ -224,6 +224,15 @@ func newTestMempool(t *testing.T) *Mempool {
 	return m
 }
 
+func mustAddConsumer(t *testing.T, m *Mempool, connID ouroboros.ConnectionId) *MempoolConsumer {
+	t.Helper()
+	consumer := m.AddConsumer(connID)
+	if consumer == nil {
+		t.Fatal("expected mempool consumer")
+	}
+	return consumer
+}
+
 // newTestMempoolWithValidator creates a mempool with a specific validator
 func newTestMempoolWithValidator(
 	t *testing.T,
@@ -310,7 +319,7 @@ func TestMempool_Stop(t *testing.T) {
 		LocalAddr:  localAddr,
 		RemoteAddr: remoteAddr,
 	}
-	consumer := m.AddConsumer(connId)
+	consumer := mustAddConsumer(t, m, connId)
 	if consumer == nil {
 		t.Fatal("failed to add consumer")
 	}
@@ -626,7 +635,7 @@ func TestMempool_ConsumerCreatedDuringTxAddition(t *testing.T) {
 	for i := range 10 {
 		time.Sleep(5 * time.Millisecond) // Stagger consumer creation
 		connId := newTestConnectionId(i)
-		consumers[i] = m.AddConsumer(connId)
+		consumers[i] = mustAddConsumer(t, m, connId)
 		require.NotNil(t, consumers[i], "consumer %d should not be nil", i)
 	}
 
@@ -669,7 +678,7 @@ func TestMempool_MultipleConsumers_IndependentProgress(t *testing.T) {
 	consumers := make([]*MempoolConsumer, 3)
 	for i := range 3 {
 		connId := newTestConnectionId(i)
-		consumers[i] = m.AddConsumer(connId)
+		consumers[i] = mustAddConsumer(t, m, connId)
 		require.NotNil(t, consumers[i])
 	}
 
@@ -773,7 +782,7 @@ func TestMempool_RemoveTx_BeforeConsumerReaches(t *testing.T) {
 
 	// Create consumer (nextTxIdx=0)
 	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
+	consumer := mustAddConsumer(t, m, connId)
 
 	// Remove B (tx-hash-1) before consumer reaches it
 	m.RemoveTransaction("tx-hash-1")
@@ -802,7 +811,7 @@ func TestMempool_RemoveTx_AfterConsumerPasses(t *testing.T) {
 
 	// Create consumer
 	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
+	consumer := mustAddConsumer(t, m, connId)
 
 	// Consumer gets A (nextTxIdx=1)
 	tx := consumer.NextTx(false)
@@ -831,7 +840,7 @@ func TestMempool_RemoveTx_ConsumerAtBoundary(t *testing.T) {
 
 	// Create consumer
 	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
+	consumer := mustAddConsumer(t, m, connId)
 
 	// Consumer gets all transactions
 	for range 3 {
@@ -873,7 +882,7 @@ func TestMempool_RemoveAllTxs(t *testing.T) {
 
 	// Create consumer and get some transactions
 	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
+	consumer := mustAddConsumer(t, m, connId)
 
 	// Get 2 transactions
 	for range 2 {
@@ -2262,7 +2271,7 @@ func TestMempool_RemoveTransaction_ConsumerIndexAdjustment(t *testing.T) {
 
 	// Create consumer
 	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
+	consumer := mustAddConsumer(t, m, connId)
 
 	// Consumer reads transactions 0, 1, 2 (nextTxIdx = 3)
 	for i := range 3 {

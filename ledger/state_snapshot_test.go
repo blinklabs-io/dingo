@@ -93,7 +93,7 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 		EraId:     ^uint(0),
 	}
 
-	err := ls.setEpochCache(nil, []models.Epoch{invalidEpoch})
+	err := ls.setEpochCache(&database.Txn{}, []models.Epoch{invalidEpoch})
 	require.ErrorContains(t, err, "unknown era ID")
 
 	// The deferred publication must expose the mutation through the atomic
@@ -295,6 +295,9 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 		)
 		return rolloverErr
 	}))
+	if result == nil {
+		t.Fatal("epoch rollover returned no result")
+	}
 
 	updatedShelley, ok := result.NewCurrentPParams.(*shelley.ShelleyProtocolParameters)
 	require.True(t, ok)
@@ -338,9 +341,7 @@ func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 	// an accidental return to independently-read live fields fail logically as
 	// well as through the race detector.
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -367,7 +368,7 @@ func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	// Publish many generations while all readers are active. The existing
@@ -406,9 +407,7 @@ func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
 	done := make(chan struct{})
 
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -428,7 +427,7 @@ func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	for generation := 1; generation <= generations; generation++ {

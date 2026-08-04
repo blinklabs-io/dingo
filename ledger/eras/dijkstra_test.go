@@ -55,6 +55,10 @@ func TestHardForkDijkstraSkipsEmptyGenesis(t *testing.T) {
 		uint(dijkstra.MinProtocolVersionDijkstra),
 		dijkstraPParams.ProtocolVersion.Major,
 	)
+	if dijkstraPParams.CostModels == nil || prev.CostModels == nil ||
+		dijkstraPParams.CostModels[0] == nil || prev.CostModels[0] == nil {
+		t.Fatal("expected cost models")
+	}
 	dijkstraPParams.CostModels[0][0] = 9
 	require.Equal(t, []int64{1, 2, 3}, prev.CostModels[0])
 }

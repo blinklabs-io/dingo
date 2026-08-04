@@ -131,7 +131,7 @@ func (u *Uint64) Scan(val any) error {
 // until the UTxO is spent/referenced.
 //
 // Without a custom driver.Valuer, an empty/nil []byte can be bound by some
-// GORM + SQLite driver versions as an empty blob instead of SQL NULL. SQLite
+// SQLite drivers as an empty blob instead of SQL NULL. SQLite
 // enforces FK constraints against an empty blob (no transaction has an empty
 // hash), so such a row fails with SQLITE_CONSTRAINT_FOREIGNKEY (787).
 // This affects every UTxO not yet spent/referenced, including all genesis

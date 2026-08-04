@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -27,12 +28,19 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-type MetadataStore interface {
-	// Database management methods
+// ErrNotFound is the storage-neutral form of sql.ErrNoRows. Store
+// implementations should use it internally and translate it to a
+// model-specific error when the public method contract requires one.
+var ErrNotFound = errors.New("metadata not found")
 
+// LifecycleStore is the narrow lifecycle capability used by composition code.
+type LifecycleStore interface {
 	// Close closes the metadata store and releases all resources.
 	Close() error
+}
 
+// SettingsStore owns singleton metadata about database and node state.
+type SettingsStore interface {
 	// GetCommitTimestamp retrieves the last commit timestamp from the database.
 	GetCommitTimestamp() (int64, error)
 
@@ -52,7 +60,10 @@ type MetadataStore interface {
 	// currently unset so callers like checkNodeSettings can perform
 	// a one-time network backfill.
 	SetNodeSettings(*types.NodeSettings) error
+}
 
+// TransactionStore creates backend-owned read and write snapshots.
+type TransactionStore interface {
 	// Transaction creates a new metadata transaction on the write
 	// connection pool. Use ReadTransaction for read-only access to
 	// avoid contending with writers.
@@ -63,6 +74,40 @@ type MetadataStore interface {
 	// on the write connection, which is critical for operations like
 	// FindIntersect that must complete within protocol timeouts.
 	ReadTransaction() types.Txn
+}
+
+// SlotRangeStats is the canonical block coverage for an inclusive slot range.
+// A zero Count means FirstSlot and LastSlot are also zero.
+type SlotRangeStats struct {
+	Count     int
+	FirstSlot uint64
+	LastSlot  uint64
+}
+
+// SlotRangeStore exposes the small aggregate surface used by API adapters.
+// Keeping these queries here avoids leaking a concrete SQL or ORM handle out
+// of a metadata provider.
+type SlotRangeStore interface {
+	CountTransactionsInSlotRange(
+		startSlot uint64,
+		endSlot uint64,
+		txn types.Txn,
+	) (int, error)
+
+	GetBlockSlotRangeStats(
+		startSlot uint64,
+		endSlot uint64,
+		txn types.Txn,
+	) (SlotRangeStats, error)
+}
+
+// MetadataStore composes domain capabilities for legacy callers. New
+// components should depend on the smallest domain interface they consume.
+// Additional domain interfaces are extracted as their SQL ports land.
+type MetadataStore interface {
+	LifecycleStore
+	SettingsStore
+	TransactionStore
 
 	// Ledger state methods
 
@@ -188,7 +233,10 @@ type MetadataStore interface {
 	CreateMidnightRegistration(types.Txn, *models.MidnightRegistration) error
 
 	// CreateMidnightDeregistration inserts a mapping-validator deregistration row.
-	CreateMidnightDeregistration(types.Txn, *models.MidnightDeregistration) error
+	CreateMidnightDeregistration(
+		types.Txn,
+		*models.MidnightDeregistration,
+	) error
 
 	// FindUnspentMidnightAssetCreates returns cNIGHT UTxO create rows that
 	// have no matching spend row. Used to restore the in-memory tracked-UTxO
@@ -203,22 +251,34 @@ type MetadataStore interface {
 	// DeleteMidnightAssetCreatesByBlock removes all cNIGHT create rows for
 	// the given block number and returns them so the caller can update the
 	// in-memory tracked-UTxO set. Used during chain rollback.
-	DeleteMidnightAssetCreatesByBlock(types.Txn, uint64) ([]models.MidnightAssetCreate, error)
+	DeleteMidnightAssetCreatesByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightAssetCreate, error)
 
 	// DeleteMidnightAssetSpendsByBlock removes all cNIGHT spend rows for the
 	// given block number and returns them so the caller can restore the
 	// in-memory tracked-UTxO set. Used during chain rollback.
-	DeleteMidnightAssetSpendsByBlock(types.Txn, uint64) ([]models.MidnightAssetSpend, error)
+	DeleteMidnightAssetSpendsByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightAssetSpend, error)
 
 	// DeleteMidnightRegistrationsByBlock removes all registration rows for
 	// the given block number and returns them so the caller can update the
 	// in-memory tracked-UTxO set. Used during chain rollback.
-	DeleteMidnightRegistrationsByBlock(types.Txn, uint64) ([]models.MidnightRegistration, error)
+	DeleteMidnightRegistrationsByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightRegistration, error)
 
 	// DeleteMidnightDeregistrationsByBlock removes all deregistration rows
 	// for the given block number and returns them so the caller can restore
 	// the in-memory tracked-UTxO set. Used during chain rollback.
-	DeleteMidnightDeregistrationsByBlock(types.Txn, uint64) ([]models.MidnightDeregistration, error)
+	DeleteMidnightDeregistrationsByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightDeregistration, error)
 
 	// FindMidnightAssetCreatesFrom returns cNIGHT create rows ordered by
 	// (block_number, tx_index) ascending, starting strictly after
@@ -604,10 +664,9 @@ type MetadataStore interface {
 	RebuildRewardLiveStake(uint64, types.Txn) error
 
 	// RewardLiveStakeNeedsBackfill reports whether the reward_live_stake
-	// aggregate needs a one-time RebuildRewardLiveStake pass: true when any
-	// canonical account or live-UTxO credential is missing from the aggregate.
-	// This detects both empty and partially populated upgraded databases without
-	// misfiring on a legitimately fresh, empty database.
+	// aggregate needs a RebuildRewardLiveStake pass. It compares calculation
+	// versions, credentials, stake values, registration, and delegation state
+	// with canonical account and live-UTxO metadata.
 	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
 
 	// StaleConsensusStakeSnapshotsExist reports whether persisted Mark/Set/Go
@@ -1515,19 +1574,20 @@ type MetadataStore interface {
 	SaveRewardAccountOutputs([]*models.RewardAccountOutput, types.Txn) error
 
 	// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
-	GetRewardAccountOutputs(uint64, types.Txn) ([]*models.RewardAccountOutput, error)
+	GetRewardAccountOutputs(
+		uint64,
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
 
 	// GetRewardAccountOutputsByCredential retrieves reward account output
 	// rows for a stake credential tag/hash pair across every epoch that has
 	// not yet been pruned, paginated and ordered by epoch. Used by the
 	// Blockfrost account reward-history endpoint.
 	//
-	// Only spendable rows (spendable = true) are returned. A row with
-	// spendable = false was never credited to the account -- crediting skips
-	// it and adds the amount to the epoch's unspendable total instead -- so
-	// returning it would report a reward the account never received. See
-	// rewardstate.GetAccountOutputsByCredential for the full rationale,
-	// including a known gap for CIP-0163-guarded rows (dingo #3021).
+	// Only credited rows (spendable = true and guarded = false) are returned.
+	// Either excluded state records a reward that never reached the account:
+	// deregistration routes non-spendable value to the unspendable total,
+	// while CIP-0163 expiry leaves guarded value undistributed.
 	GetRewardAccountOutputsByCredential(
 		uint8, // credentialTag
 		[]byte, // stakingKey
@@ -1540,7 +1600,7 @@ type MetadataStore interface {
 	// CountRewardAccountOutputsByCredential retrieves the total count of
 	// reward account output rows for a stake credential tag/hash pair.
 	//
-	// Counts only spendable rows, matching
+	// Counts only spendable, unguarded rows, matching
 	// GetRewardAccountOutputsByCredential's filter. The two must agree, or
 	// pagination advertises pages of rewards that were never paid.
 	CountRewardAccountOutputsByCredential(
@@ -2062,23 +2122,56 @@ type MetadataStore interface {
 	DiskSize() (int64, error)
 
 	// Midnight indexer methods
-	InsertMidnightGovernanceDatum(types.Txn, *models.MidnightGovernanceDatum) error
+	InsertMidnightGovernanceDatum(
+		types.Txn,
+		*models.MidnightGovernanceDatum,
+	) error
 	DeleteMidnightGovernanceDatumsByBlock(types.Txn, uint64) error
-	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
-	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
-	GetMidnightAriadneParamsByEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
-	GetMidnightAriadneParamsAtOrBeforeEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
+	GetLatestMidnightGovernanceDatum(
+		string,
+		uint64,
+		types.Txn,
+	) (*models.MidnightGovernanceDatum, error)
+	GetLatestMidnightAriadneParams(
+		types.Txn,
+	) (*models.MidnightAriadneParams, error)
+	GetMidnightAriadneParamsByEpoch(
+		uint64,
+		types.Txn,
+	) (*models.MidnightAriadneParams, error)
+	GetMidnightAriadneParamsAtOrBeforeEpoch(
+		uint64,
+		types.Txn,
+	) (*models.MidnightAriadneParams, error)
 	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
 	DeleteMidnightAriadneParamsByEpoch(types.Txn, uint64) error
-	CreateMidnightAriadneRollback(types.Txn, *models.MidnightAriadneRollback) error
-	FindMidnightAriadneRollbacksByBlock(types.Txn, uint64) ([]models.MidnightAriadneRollback, error)
+	CreateMidnightAriadneRollback(
+		types.Txn,
+		*models.MidnightAriadneRollback,
+	) error
+	FindMidnightAriadneRollbacksByBlock(
+		types.Txn,
+		uint64,
+	) ([]models.MidnightAriadneRollback, error)
 	DeleteMidnightAriadneRollbacksByBlock(types.Txn, uint64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
-	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
+	UpsertMidnightEpochCandidates(
+		types.Txn,
+		*models.MidnightEpochCandidates,
+	) error
 	DeleteMidnightEpochCandidatesByBlock(types.Txn, uint64) error
-	GetMidnightEpochCandidatesByEpoch(uint64, types.Txn) (*models.MidnightEpochCandidates, error)
-	InsertMidnightCommitteeCandidateRegistration(types.Txn, *models.MidnightCommitteeCandidateRegistration) error
-	DeleteMidnightCommitteeCandidateRegistrationsByBlock(types.Txn, uint64) error
+	GetMidnightEpochCandidatesByEpoch(
+		uint64,
+		types.Txn,
+	) (*models.MidnightEpochCandidates, error)
+	InsertMidnightCommitteeCandidateRegistration(
+		types.Txn,
+		*models.MidnightCommitteeCandidateRegistration,
+	) error
+	DeleteMidnightCommitteeCandidateRegistrationsByBlock(
+		types.Txn,
+		uint64,
+	) error
 	GetMidnightCommitteeCandidateRegistrationsByTxHashes(
 		[][]byte,
 		types.Txn,

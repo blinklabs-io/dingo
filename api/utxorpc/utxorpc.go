@@ -378,6 +378,18 @@ func betaVersionedQueryHandler(
 	betaPath string,
 	options connect.HandlerOption,
 ) http.Handler {
+	queryFile := betaquery.File_utxorpc_v1beta_query_query_proto
+	if queryFile == nil {
+		panic("utxorpc: missing v1beta query descriptor")
+	}
+	queryService := queryFile.Services().ByName("QueryService")
+	if queryService == nil {
+		panic("utxorpc: missing v1beta QueryService descriptor")
+	}
+	readStateMethod := queryService.Methods().ByName("ReadState")
+	if readStateMethod == nil {
+		panic("utxorpc: missing v1beta QueryService.ReadState descriptor")
+	}
 	readStateHandler := connect.NewUnaryHandler(
 		betaqueryconnect.QueryServiceReadStateProcedure,
 		func(
@@ -389,10 +401,7 @@ func betaVersionedQueryHandler(
 				errors.New("utxorpc.v1beta.query.QueryService.ReadState is not implemented"),
 			)
 		},
-		connect.WithSchema(
-			betaquery.File_utxorpc_v1beta_query_query_proto.Services().
-				ByName("QueryService").Methods().ByName("ReadState"),
-		),
+		connect.WithSchema(readStateMethod),
 		connect.WithHandlerOptions(options),
 	)
 	// Build the rewrite handler once and reuse it across requests, matching
