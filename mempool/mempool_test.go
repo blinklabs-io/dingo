@@ -1199,6 +1199,56 @@ func TestMempoolConsumer_Cache(t *testing.T) {
 	assert.Equal(t, txs[0].Hash, mempoolTx.Hash)
 }
 
+func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1024 * 1024,
+		ConsumerCacheSize: 2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
+
+	txs := addMockTransactions(t, m, 3)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	require.NotNil(t, consumer)
+
+	// The cache fills to its limit and then stops handing out transactions.
+	// Advertising a third tx would require dropping a body the peer may still
+	// request, so NextTx declines instead.
+	require.NotNil(t, consumer.NextTx(false))
+	require.NotNil(t, consumer.NextTx(false))
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"a full body cache must stop advertising rather than drop a body",
+	)
+	assert.Len(t, consumer.cache, 2)
+
+	// Every advertised tx still has its body available to serve.
+	assert.NotNil(t, consumer.GetTxFromCache(txs[0].Hash))
+	assert.NotNil(t, consumer.GetTxFromCache(txs[1].Hash))
+
+	// Serving (or the peer acknowledging) frees a slot and the window reopens,
+	// so the third tx is advertised rather than lost.
+	consumer.RemoveTxFromCache(txs[0].Hash)
+	third := consumer.NextTx(false)
+	require.NotNil(t, third)
+	assert.Equal(t, txs[2].Hash, third.Hash)
+	assert.NotNil(t, consumer.GetTxFromCache(txs[2].Hash))
+	assert.Len(t, consumer.cache, 2)
+}
+
 func TestMempoolConsumer_ClearCache(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
@@ -3659,4 +3709,126 @@ func TestStopReturnsErrorWhenCtxFiresBeforeWorkersDrain(t *testing.T) {
 	err := m.Stop(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "before background workers drained")
+}
+
+// A blocking NextTx must wait when the body cache is full, not answer empty.
+// Returning nil would have the peer immediately re-request (its pull loop has no
+// backoff for an empty reply), producing an unpaced request/reply spin exactly
+// in the aggressive-peer case the cache bound exists to contain.
+func TestMempoolConsumer_BlockingNextTxWaitsForCacheSlot(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1024 * 1024,
+		ConsumerCacheSize: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
+
+	txs := addMockTransactions(t, m, 2)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	require.NotNil(t, consumer)
+
+	// Fill the single cache slot.
+	first := consumer.NextTx(false)
+	require.NotNil(t, first)
+	require.Nil(t, consumer.NextTx(false), "non-blocking still returns nil")
+
+	// A blocking call must park rather than return.
+	got := make(chan *MempoolTransaction, 1)
+	go func() { got <- consumer.NextTx(true) }()
+	dingotestutil.RequireNoReceive(
+		t, got, 100*time.Millisecond,
+		"blocking NextTx must not answer while the cache is full",
+	)
+
+	// Serving the cached body frees the slot and releases the waiter.
+	consumer.RemoveTxFromCache(txs[0].Hash)
+	second := dingotestutil.RequireReceive(
+		t, got, 2*time.Second, "blocking NextTx after a slot freed",
+	)
+	require.NotNil(t, second)
+	assert.Equal(t, txs[1].Hash, second.Hash)
+}
+
+// ClearCache (the ack path) also releases a parked blocking NextTx.
+func TestMempoolConsumer_ClearCacheReleasesBlockingNextTx(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1024 * 1024,
+		ConsumerCacheSize: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
+
+	addMockTransactions(t, m, 2)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	require.NotNil(t, consumer)
+	require.NotNil(t, consumer.NextTx(false))
+
+	got := make(chan *MempoolTransaction, 1)
+	go func() { got <- consumer.NextTx(true) }()
+	dingotestutil.RequireNoReceive(
+		t, got, 100*time.Millisecond, "cache is full",
+	)
+
+	consumer.ClearCache()
+	require.NotNil(t, dingotestutil.RequireReceive(
+		t, got, 2*time.Second, "blocking NextTx after ClearCache",
+	))
+}
+
+// Shutdown must release a blocking NextTx parked on a full cache, so Stop is
+// never held up by a waiter that no slot will ever free.
+func TestMempoolConsumer_BlockingNextTxReleasedOnStop(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1024 * 1024,
+		ConsumerCacheSize: 1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+
+	addMockTransactions(t, m, 2)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	require.NotNil(t, consumer)
+	require.NotNil(t, consumer.NextTx(false))
+
+	got := make(chan *MempoolTransaction, 1)
+	go func() { got <- consumer.NextTx(true) }()
+	dingotestutil.RequireNoReceive(
+		t, got, 100*time.Millisecond, "cache is full",
+	)
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, m.Stop(stopCtx))
+
+	assert.Nil(t, dingotestutil.RequireReceive(
+		t, got, 2*time.Second, "blocking NextTx released by shutdown",
+	), "shutdown returns nil rather than a transaction")
 }

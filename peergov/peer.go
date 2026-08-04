@@ -128,6 +128,9 @@ type Peer struct {
 
 	// EMA configuration (0 means use default)
 	EMAAlpha float64
+	// ScoreLastUpdate records when scoring metrics were last observed. It is
+	// used to decay stale EMA values toward neutral values.
+	ScoreLastUpdate time.Time
 
 	// Topology valency configuration (only used for topology-sourced peers)
 	// Valency is the target number of hot connections from this peer's group
