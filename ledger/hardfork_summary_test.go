@@ -431,6 +431,80 @@ func TestHardForkSummary_KnownTransitionSuccessorByShapeOrder(t *testing.T) {
 	assert.Equal(t, 2*time.Second, sum.Eras[1].Params.SlotLength)
 }
 
+// TestHardForkSummary_KnownTransitionCoversStabilityWindow probes whether the
+// successor era appended for a known transition covers the full deterministic
+// forecast window from the tip, not merely the first post-boundary epoch. This
+// is the scenario where a coverage gap would hide: chainsync verifies headers
+// ahead of the applied tip, so a header several epochs past the boundary but
+// still within one stability window of the tip must resolve. Because the
+// successor's own safe zone is measured from the announced boundary (which is
+// at or ahead of the tip), one successor already reaches at least tip+safeZone,
+// so there is no gap; a slot beyond the deterministic window is still rejected.
+func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
+	const (
+		epochSize  = uint64(100)
+		safeZone   = uint64(250) // spans 2.5 epochs
+		startEpoch = uint64(5)
+		startSlot  = uint64(500)
+		knownEpoch = uint64(6)   // boundary at slot 600
+		boundary   = uint64(600) // first slot of epoch 6
+		tipSlot    = uint64(560) // in epoch 5, before the boundary
+	)
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       startEpoch,
+			StartSlot:     startSlot,
+			SlotLength:    1_000,
+			LengthInSlots: 100,
+			EraId:         1,
+		}},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
+		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	shape := hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     epochSize,
+				SlotLength:    time.Second,
+				SafeZoneSlots: safeZone,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+
+	// Every slot from the boundary through the deterministic window
+	// (tip+safeZone = 810) must resolve, including slots several epochs past the
+	// boundary — this is the chainsync-ahead-of-applied-tip case. A single
+	// boundary-snapped successor must cover all of it, with no transient
+	// past-horizon rejection at the intervening epoch boundaries (700, 800).
+	window := tipSlot + safeZone // 810
+	for _, tc := range []struct {
+		slot  uint64
+		epoch uint64
+	}{
+		{boundary, 6}, // first post-boundary epoch
+		{699, 6},      // end of epoch 6
+		{700, 7},      // next boundary, one epoch past the transition
+		{800, 8},      // epoch 8 start, two epochs past the transition
+		{window, 8},   // edge of the deterministic window (810, epoch 8)
+	} {
+		info, err := sum.SlotToEpoch(tc.slot)
+		require.NoErrorf(
+			t, err, "slot %d within deterministic window must resolve", tc.slot,
+		)
+		assert.Equalf(t, tc.epoch, info.Epoch, "slot %d epoch", tc.slot)
+	}
+}
+
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
