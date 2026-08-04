@@ -457,8 +457,8 @@ func TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras(t *testing.T) {
 	_, err = ls.SlotToTime(nextSlot + 100)
 	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
 	_, err = ls.TimeToSlot(now.Add(100 * byronSlotLength))
-	require.Error(t, err,
-		"a time many slot lengths ahead must still be refused")
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a time many slot lengths ahead must still be refused as past-horizon")
 }
 
 // The window scales with slot length but stays a bounded operational window.
