@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dingo
+      POSTGRES_DB: dingo_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dingo_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: dingo
+      MYSQL_DATABASE: dingo_test
+    ports:
+      - "53306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -pdingo"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

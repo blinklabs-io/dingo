@@ -100,6 +100,11 @@ jobs:
         run: make sql-check
       - name: gorm-dependency-absence
         run: make gorm-check
+      - name: sqlstore-database-integration
+        env:
+          DINGO_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/dingo_test?sslmode=disable
+          DINGO_MYSQL_DSN: root:mysql@tcp(127.0.0.1:3306)/dingo_test?parseTime=true
+        run: go test -tags 'dingo_extra_plugins dingo_db_integration' ./database/plugin/metadata/sqlstore -timeout 10m
       - name: go-test
         # Keep PR feedback fast by omitting race instrumentation. Release
         # validation runs in the publish workflow before draft creation.
