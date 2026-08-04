@@ -1031,6 +1031,50 @@ func TestOpenVerifiedDirOpensRealDir(t *testing.T) {
 	assert.True(t, os.SameFile(opened, want))
 }
 
+// TestVettedPathNamesInspectedDirectory pins the ordinary case: the name is
+// returned when it denotes the directory the handle inspected.
+func TestVettedPathNamesInspectedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "immutable"), 0o750))
+
+	root, err := openVerifiedDir(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	assert.Equal(t, dir, vettedPath(root, dir, "."))
+	assert.Equal(t,
+		filepath.Join(dir, "immutable"), vettedPath(root, dir, "immutable"),
+	)
+}
+
+// TestVettedPathRefusesSwappedDirectory covers the handoff a directory handle
+// cannot make on its own.
+//
+// A handle refers to a directory; the name it was opened under refers to
+// whatever currently occupies that name. Callers that must hand back a name —
+// the immutable DB is opened by one further downstream — otherwise discard
+// everything the handle established, because the name can have been repointed
+// at a tree of somebody else's since.
+func TestVettedPathRefusesSwappedDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "extracted")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "immutable"), 0o750))
+
+	root, err := openVerifiedDir(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	theirs := filepath.Join(parent, "theirs")
+	require.NoError(t, os.MkdirAll(filepath.Join(theirs, "immutable"), 0o750))
+	requireDirectorySwap(t, dir, filepath.Join(parent, "moved-aside"))
+	requireDirectorySwap(t, theirs, dir)
+
+	assert.Empty(t, vettedPath(root, dir, "."),
+		"the name no longer denotes the inspected directory")
+	assert.Empty(t, vettedPath(root, dir, "immutable"),
+		"a name below it resolves into the replacement")
+}
+
 // TestOpenVerifiedDirAllowsSymlinkedAncestor keeps the boundary where the rest
 // of the package puts it: the directories above a candidate belong to the
 // operator, and rejecting them would break ordinary layouts rather than

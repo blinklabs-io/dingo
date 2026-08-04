@@ -248,6 +248,36 @@ func openVerifiedDir(dir string) (*os.Root, error) {
 	return openVerifiedRoot(parentRoot, filepath.Base(clean))
 }
 
+// vettedPath returns dir joined with rel, but only while that name still
+// denotes the directory rel names through root.
+//
+// A handle refers to a directory; the name it was opened under refers to
+// whatever occupies that name at the moment it is resolved. The cache-reuse
+// lookups resolve everything through a handle and then have to hand back a
+// name, because the immutable DB is opened by name further downstream and no
+// handle survives that boundary. Without this, the handoff discards what the
+// handle established: a directory swapped in behind the name is returned as a
+// cached snapshot, having been vetted under that name rather than as itself.
+//
+// What this cannot do is bind the consumer's own open. A swap after the name is
+// returned is outside anything a pathname can express; refusing here is what
+// produces the backstop for it, since re-extraction from the certified archive
+// replaces whatever is at the name.
+func vettedPath(root *os.Root, dir, rel string) string {
+	inspected, err := root.Stat(rel)
+	if err != nil {
+		return ""
+	}
+	name := filepath.Join(dir, rel)
+	// Resolved the way the consumer will resolve it, so the comparison answers
+	// the question the consumer is about to ask.
+	named, err := os.Stat(name)
+	if err != nil || !os.SameFile(inspected, named) {
+		return ""
+	}
+	return name
+}
+
 // dirIsEmpty reports whether dir exists and contains no entries. A missing
 // directory counts as empty.
 func dirIsEmpty(dir string) (bool, error) {

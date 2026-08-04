@@ -951,6 +951,79 @@ func TestFindImmutableDirRefusesSymlinkedExtractDir(t *testing.T) {
 		"a symlinked extraction directory is not a cached snapshot")
 }
 
+// TestFindImmutableDirRefusesSwappedExtractDir covers the extraction directory
+// being replaced after it has been opened and vetted.
+//
+// The lookup ends by handing back a pathname, and whoever loads the chain
+// resolves that name again — a handle cannot be carried across that boundary,
+// because the immutable DB is opened by name. So a directory swapped in behind
+// the name is read in place of the tree that was inspected, unless the name is
+// confirmed to still denote that tree before it is returned.
+//
+// The layout below is only reachable through the top-level enumeration, which
+// is the second half of the same problem: enumerating the pathname lists the
+// replacement's entries, and a name taken from there is checked against the
+// tree that was opened while resolving into the replacement.
+func TestFindImmutableDirRefusesSwappedExtractDir(t *testing.T) {
+	parent := t.TempDir()
+	extractDir := filepath.Join(parent, "immutable-abc123")
+	ours := filepath.Join(extractDir, "snapshot-data", "immutable")
+	require.NoError(t, os.MkdirAll(ours, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(ours, "00000.chunk"), []byte("ours"), 0o640,
+	))
+
+	root, err := openVerifiedDir(extractDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	// A writer with access to the download directory puts a tree of their own
+	// under the same name and layout, as one could between the open and the
+	// read.
+	theirs := filepath.Join(parent, "theirs", "snapshot-data", "immutable")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(theirs, "00000.chunk"), []byte("theirs"), 0o640,
+	))
+	requireDirectorySwap(t, extractDir, filepath.Join(parent, "moved-aside"))
+	requireDirectorySwap(t, filepath.Join(parent, "theirs"), extractDir)
+
+	assert.Empty(t, findImmutableDirIn(root, extractDir),
+		"a swapped extraction directory is not the tree that was inspected")
+}
+
+// TestChunkDirUnderReturnsVerifiedPath pins the v2 handoff: the path is
+// produced by the lookup that verified it rather than assembled by the caller,
+// so the two cannot disagree.
+func TestChunkDirUnderReturnsVerifiedPath(t *testing.T) {
+	extractDir := t.TempDir()
+	immutable := filepath.Join(extractDir, "immutable")
+	require.NoError(t, os.MkdirAll(immutable, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(immutable, "00000.chunk"), []byte("data"), 0o640,
+	))
+
+	assert.Equal(t, immutable, chunkDirUnder(extractDir, "immutable"))
+}
+
+// TestChunkDirUnderRefusesSymlinkedBase keeps the v2 lookup on the same footing
+// as the v1 one: the extraction directory is derived inside the download
+// directory, so a symlink there is planted content rather than a layout choice.
+func TestChunkDirUnderRefusesSymlinkedBase(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside", "immutable")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outside, "00000.chunk"), []byte("theirs"), 0o640,
+	))
+
+	extractDir := filepath.Join(root, "immutable-abc123")
+	requireSymlinkSupport(t, "outside", extractDir)
+
+	assert.Empty(t, chunkDirUnder(extractDir, "immutable"),
+		"a symlinked extraction directory holds no cached snapshot")
+}
+
 // hasChunkFiles reports whether dir holds chunk files.
 //
 // Test-only. The production lookups resolve a candidate through a handle on

@@ -749,6 +749,10 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 // the chain from a directory somebody else chose. Reporting the snapshot as
 // absent instead re-extracts it from the verified archive, which discards the
 // tampered tree.
+//
+// The same holds for a tree substituted while the lookup runs: the path handed
+// back is confirmed to name the directory that was inspected, so a snapshot is
+// only ever reported where the inspection and the answer are about one tree.
 func findImmutableDir(extractDir string) string {
 	// The extraction directory is checked before it is read, not after. It is
 	// derived inside the download directory rather than chosen by the
@@ -760,8 +764,19 @@ func findImmutableDir(extractDir string) string {
 		return ""
 	}
 	defer root.Close()
+	return findImmutableDirIn(root, extractDir)
+}
+
+// findImmutableDirIn is findImmutableDir with the extraction directory already
+// open, so that every read — the layout enumeration as much as the per-
+// candidate checks — resolves through the one handle that was vetted.
+//
+// Taking the handle as a parameter is also what lets a test place a directory
+// swap between the open and the reads, which is the window the enumeration and
+// the returned path were exposed to.
+func findImmutableDirIn(root *os.Root, extractDir string) string {
 	if hasChunkFilesIn(root, ".") {
-		return extractDir
+		return vettedPath(root, extractDir, ".")
 	}
 	chunkDir := func(rel string) string {
 		if err := assertNoSymlinkComponents(root, rel); err != nil {
@@ -773,7 +788,7 @@ func findImmutableDir(extractDir string) string {
 		if !hasChunkFilesIn(root, rel) {
 			return ""
 		}
-		return filepath.Join(extractDir, rel)
+		return vettedPath(root, extractDir, rel)
 	}
 
 	// Check common subdirectory layouts
@@ -785,7 +800,12 @@ func findImmutableDir(extractDir string) string {
 	// Check for a single top-level directory. ReadDir reports a symlink as
 	// its own type rather than the directory it points at, so one is never
 	// collected here.
-	entries, err := os.ReadDir(extractDir)
+	//
+	// Read through the handle rather than by pathname: enumerating the pathname
+	// again would list the entries of a directory swapped in behind it, while
+	// the names taken from there are checked against the tree that was opened.
+	// A candidate passing that pair of reads is a path into the replacement.
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return ""
 	}
@@ -1035,25 +1055,33 @@ func VerifyCertificateChainWithMode(
 	)
 }
 
-// hasChunkFilesUnder reports whether rel, beneath base, is a directory holding
-// chunk files, with both base and rel verified rather than only the last one.
+// chunkDirUnder returns the path of rel beneath base when rel is a directory
+// holding chunk files, with both base and rel verified rather than only the
+// last one, and "" when it is not.
 //
 // Verifying only the last component is enough when the one above it is the
 // operator's. Where that one is itself derived content — the extraction
 // directory holding `immutable`, say — it has to be vetted too, or a symlink
 // one level up carries the whole lookup.
-func hasChunkFilesUnder(base, rel string) bool {
+//
+// The path is returned by the lookup rather than assembled by the caller so the
+// two cannot disagree: a caller that builds the name itself is naming whatever
+// occupies it now, not what was verified a moment ago.
+func chunkDirUnder(base, rel string) string {
 	baseRoot, err := openVerifiedDir(base)
 	if err != nil {
-		return false
+		return ""
 	}
 	defer baseRoot.Close()
 	root, err := openVerifiedRoot(baseRoot, rel)
 	if err != nil {
-		return false
+		return ""
 	}
 	defer root.Close()
-	return hasChunkFilesIn(root, ".")
+	if !hasChunkFilesIn(root, ".") {
+		return ""
+	}
+	return vettedPath(baseRoot, base, rel)
 }
 
 // hasChunkFilesIn reports whether rel, resolved through root, is a directory

@@ -2614,6 +2614,23 @@ its parent and read through that handle. Directories *above* a candidate are
 the operator's and resolve normally, which is where extraction draws the same
 line.
 
+Reading through the handle is half of it. These lookups end by handing back a
+pathname — the immutable DB is opened by name further downstream, and no handle
+survives that boundary — and a name refers to whatever occupies it at the moment
+it is resolved. A tree swapped in behind the name would otherwise be returned as
+a cached snapshot on the strength of an inspection that was about a different
+directory. So before a path is returned it is resolved the way its consumer will
+resolve it and compared against the handle that vetted it; a mismatch reports the
+snapshot as absent, and the path is produced by the lookup that verified it
+rather than assembled by the caller, so the two cannot disagree.
+`findImmutableDir` reads its layout enumeration through the same handle for the
+same reason: names taken from a re-walked pathname would be checked against the
+tree that was opened while resolving into the replacement.
+
+What this cannot do is bind the consumer's own open, and no pathname can. The
+backstop for a swap after the lookup returns is the one already in place —
+re-extraction from the certified archive replaces whatever is at the name.
+
 ### Catch-up vs bootstrap dispatch
 
 `mithril.Sync` (the `dingo mithril sync` entry point) selects what to do from

@@ -279,11 +279,11 @@ func bootstrapV2(
 	// the directory it is handed against its own parent, which here is the
 	// extraction directory — itself derived inside the download directory and
 	// no more trustworthy than what it contains.
-	immutableDir := filepath.Join(extractDir, "immutable")
-	if !hasChunkFilesUnder(extractDir, "immutable") {
+	immutableDir := chunkDirUnder(extractDir, "immutable")
+	if immutableDir == "" {
 		return nil, fmt.Errorf(
 			"immutable DB directory not found at %s after download",
-			immutableDir,
+			filepath.Join(extractDir, "immutable"),
 		)
 	}
 
