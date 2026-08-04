@@ -46,7 +46,7 @@ const (
 	DefaultCleanupInterval        = 1 * time.Minute
 	DefaultRevalidationDeltaCap   = 64
 	DefaultConsumerCacheSize      = 1024
-	defaultRevalidationJournalCap = 65_536
+	defaultRevalidationJournalCap = 1 << 20
 )
 
 type AddTransactionEvent struct {
@@ -931,6 +931,10 @@ var errRevalidationJournalOverflow = errors.New(
 	"mempool: revalidation mutation journal overflow",
 )
 
+var errRevalidationCatchup = errors.New(
+	"mempool: revalidation could not catch up with mutations",
+)
+
 // rebuildOverlay re-validates all pending TXs against a stable ledger snapshot
 // in a private overlay. Admissions and removals continue against the live
 // overlay and are replayed from an ordered journal before the candidate is
@@ -949,6 +953,11 @@ func (m *Mempool) rebuildOverlay() error {
 		events, err := m.rebuildOverlayAttempt()
 		if errors.Is(err, errValidationSnapshotChanged) && attempt == 0 {
 			continue
+		}
+		if errors.Is(err, errRevalidationCatchup) {
+			// The live pool is unchanged. A later chain update will retry
+			// revalidation after mutation pressure subsides.
+			return nil
 		}
 		if err != nil {
 			return err
@@ -1104,9 +1113,9 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 
 			applyCount := len(delta)
 			if applyCount > m.revalidationDeltaCap {
-				// Drain the excess off-lock, leaving at most the configured
-				// residual for the next catch-up/finalization pass.
-				applyCount -= m.revalidationDeltaCap
+				// Bound the amount of replay work per round so that the
+				// catch-up loop can observe and reconcile new mutations.
+				applyCount = m.revalidationDeltaCap
 			}
 			for _, mutation := range delta[:applyCount] {
 				if mutation.stopped {
@@ -1126,9 +1135,7 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 				appliedSeq = mutation.seq
 			}
 		}
-		return errors.New(
-			"mempool: revalidation could not catch up with mutations",
-		)
+		return errRevalidationCatchup
 	})
 	if err != nil {
 		finishJournal()

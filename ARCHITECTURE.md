@@ -772,6 +772,12 @@ When `Node.Run()` is called, components are initialized in this order:
 26. Wait for shutdown signal
 ```
 
+Mempool revalidation uses a private candidate overlay while admissions and
+removals continue on the live pool. Mutations are recorded in an ordered
+journal and replayed in bounded batches before the candidate is published. A
+busy pass that cannot catch up leaves the live pool unchanged and is retried
+after a later chain update; it is not a failed admission or a partial swap.
+
 ### Shutdown Flow
 
 Graceful shutdown proceeds in phases:
