@@ -494,14 +494,14 @@ func Bootstrap(
 				downloadDir,
 				"ancillary-"+snapshotCacheKey,
 			)
-			if hasLedgerFiles(candidateDir) {
+			if cachedDir := ledgerDir(candidateDir); cachedDir != "" {
 				cfg.Logger.Info(
 					"ancillary data already "+
 						"extracted, skipping",
 					"component", "mithril",
-					"path", candidateDir,
+					"path", cachedDir,
 				)
-				ancillaryDir = candidateDir
+				ancillaryDir = cachedDir
 				// Only set archive path if the file still
 				// exists (it may have been cleaned up after
 				// a prior successful extraction).
@@ -782,13 +782,19 @@ func findImmutableDirIn(root *os.Root, extractDir string) string {
 		if err := assertNoSymlinkComponents(root, rel); err != nil {
 			return ""
 		}
-		// Read through the same handle the check used. Re-opening by pathname
-		// would resolve the candidate a second time, which is a fresh chance
-		// for it to be something other than what was just vetted.
-		if !hasChunkFilesIn(root, rel) {
+		// The candidate is opened once, then read and bound through that one
+		// handle. Resolving rel again for each step would be a fresh chance
+		// for it to be something other than what the previous step saw, and
+		// the answer would then be about whichever tree held the name last.
+		candidate, err := openVerifiedRoot(root, rel)
+		if err != nil {
 			return ""
 		}
-		return vettedPath(root, extractDir, rel)
+		defer candidate.Close()
+		if !hasChunkFilesIn(candidate, ".") {
+			return ""
+		}
+		return vettedPath(candidate, extractDir, rel)
 	}
 
 	// Check common subdirectory layouts
@@ -1081,7 +1087,7 @@ func chunkDirUnder(base, rel string) string {
 	if !hasChunkFilesIn(root, ".") {
 		return ""
 	}
-	return vettedPath(baseRoot, base, rel)
+	return vettedPath(root, base, rel)
 }
 
 // hasChunkFilesIn reports whether rel, resolved through root, is a directory
@@ -1131,6 +1137,29 @@ func hasLedgerFiles(dir string) bool {
 	}
 	defer root.Close()
 	return hasLedgerFilesIn(root)
+}
+
+// ledgerDir returns dir when it holds ledger state files, and "" when it does
+// not or when the name no longer denotes the directory that was read.
+//
+// This is hasLedgerFiles for the callers that go on to *use* the directory
+// rather than merely assert something about it: the "already extracted,
+// skipping" fast paths, which take the answer as licence to skip extraction and
+// hand the path on as the node's ledger state. Returning the path from the
+// lookup that read it keeps the two from being about different trees, the same
+// way chunkDirUnder does for the immutable side. It matters at least as much
+// here, because an unverified bootstrap has nothing downstream that would
+// re-check what the path names.
+func ledgerDir(dir string) string {
+	root, err := openVerifiedDir(dir)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	if !hasLedgerFilesIn(root) {
+		return ""
+	}
+	return vettedPath(root, dir, ".")
 }
 
 // hasLedgerFilesIn is hasLedgerFiles resolved through an open handle on the

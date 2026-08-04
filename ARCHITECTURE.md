@@ -2619,13 +2619,23 @@ pathname — the immutable DB is opened by name further downstream, and no handl
 survives that boundary — and a name refers to whatever occupies it at the moment
 it is resolved. A tree swapped in behind the name would otherwise be returned as
 a cached snapshot on the strength of an inspection that was about a different
-directory. So before a path is returned it is resolved the way its consumer will
-resolve it and compared against the handle that vetted it; a mismatch reports the
-snapshot as absent, and the path is produced by the lookup that verified it
-rather than assembled by the caller, so the two cannot disagree.
-`findImmutableDir` reads its layout enumeration through the same handle for the
-same reason: names taken from a re-walked pathname would be checked against the
-tree that was opened while resolving into the replacement.
+directory. So each candidate is opened once and then read *and* bound through
+that one handle: before the path is returned it is resolved the way its consumer
+will resolve it and compared against the directory that was read, and a mismatch
+reports the snapshot as absent. Comparing a fresh resolution of the name against
+another fresh resolution would not do — a candidate replaced after it was read
+appears on both sides, the two agree, and a tree that was never inspected is
+returned.
+
+The path is produced by the lookup that read it rather than assembled by the
+caller, so the two cannot be about different trees. This holds for the immutable
+side (`findImmutableDir`, and the v2 `<extract>/immutable` check) and the
+ancillary one (the "already extracted, skipping" check) alike; it matters at
+least as much for ancillary, because an unverified bootstrap has nothing
+downstream that re-checks what that path names. `findImmutableDir` also reads its
+layout enumeration through the handle, for the same reason: names taken from a
+re-walked pathname would be checked against the tree that was opened while
+resolving into the replacement.
 
 What this cannot do is bind the consumer's own open, and no pathname can. The
 backstop for a swap after the lookup returns is the one already in place —

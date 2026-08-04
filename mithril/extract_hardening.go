@@ -249,7 +249,8 @@ func openVerifiedDir(dir string) (*os.Root, error) {
 }
 
 // vettedPath returns dir joined with rel, but only while that name still
-// denotes the directory rel names through root.
+// denotes the directory the inspected handle refers to. rel names the directory
+// for the consumer; the handle, not the name, is what says which one it is.
 //
 // A handle refers to a directory; the name it was opened under refers to
 // whatever occupies that name at the moment it is resolved. The cache-reuse
@@ -259,12 +260,18 @@ func openVerifiedDir(dir string) (*os.Root, error) {
 // handle established: a directory swapped in behind the name is returned as a
 // cached snapshot, having been vetted under that name rather than as itself.
 //
+// The comparison is against the handle on the directory that was read, not
+// against a fresh resolution of rel through its parent. Re-resolving would
+// compare two readings of one name with each other: a candidate replaced after
+// it was read appears on both sides, the two agree, and a tree that was never
+// inspected is returned.
+//
 // What this cannot do is bind the consumer's own open. A swap after the name is
 // returned is outside anything a pathname can express; refusing here is what
 // produces the backstop for it, since re-extraction from the certified archive
 // replaces whatever is at the name.
-func vettedPath(root *os.Root, dir, rel string) string {
-	inspected, err := root.Stat(rel)
+func vettedPath(inspected *os.Root, dir, rel string) string {
+	read, err := inspected.Stat(".")
 	if err != nil {
 		return ""
 	}
@@ -272,7 +279,7 @@ func vettedPath(root *os.Root, dir, rel string) string {
 	// Resolved the way the consumer will resolve it, so the comparison answers
 	// the question the consumer is about to ask.
 	named, err := os.Stat(name)
-	if err != nil || !os.SameFile(inspected, named) {
+	if err != nil || !os.SameFile(read, named) {
 		return ""
 	}
 	return name

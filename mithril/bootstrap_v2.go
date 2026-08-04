@@ -212,9 +212,9 @@ func bootstrapV2(
 					truncateDigest(artifact.Hash),
 				),
 			)
-			if hasLedgerFiles(candidateDir) {
+			if cachedDir := ledgerDir(candidateDir); cachedDir != "" {
 				if err := verifyAncillaryExtraction(
-					cfg, candidateDir,
+					cfg, cachedDir,
 				); err != nil {
 					cfg.Logger.Warn(
 						"cached ancillary data failed "+
@@ -245,9 +245,9 @@ func bootstrapV2(
 						"ancillary data already "+
 							"extracted, skipping",
 						"component", "mithril",
-						"path", candidateDir,
+						"path", cachedDir,
 					)
-					ancillaryDir = candidateDir
+					ancillaryDir = cachedDir
 					if _, err := os.Stat(candidateArchive); err == nil {
 						ancillaryArchivePath = candidateArchive
 					}

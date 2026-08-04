@@ -1032,19 +1032,21 @@ func TestOpenVerifiedDirOpensRealDir(t *testing.T) {
 }
 
 // TestVettedPathNamesInspectedDirectory pins the ordinary case: the name is
-// returned when it denotes the directory the handle inspected.
+// returned when it denotes the directory the handle refers to.
 func TestVettedPathNamesInspectedDirectory(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "immutable"), 0o750))
+	candidate := filepath.Join(dir, "immutable")
+	require.NoError(t, os.MkdirAll(candidate, 0o750))
 
 	root, err := openVerifiedDir(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = root.Close() })
+	candidateRoot, err := openVerifiedDir(candidate)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = candidateRoot.Close() })
 
 	assert.Equal(t, dir, vettedPath(root, dir, "."))
-	assert.Equal(t,
-		filepath.Join(dir, "immutable"), vettedPath(root, dir, "immutable"),
-	)
+	assert.Equal(t, candidate, vettedPath(candidateRoot, dir, "immutable"))
 }
 
 // TestVettedPathRefusesSwappedDirectory covers the handoff a directory handle
@@ -1071,8 +1073,83 @@ func TestVettedPathRefusesSwappedDirectory(t *testing.T) {
 
 	assert.Empty(t, vettedPath(root, dir, "."),
 		"the name no longer denotes the inspected directory")
-	assert.Empty(t, vettedPath(root, dir, "immutable"),
-		"a name below it resolves into the replacement")
+}
+
+// TestVettedPathRefusesCandidateSwappedAfterInspection covers the substitution
+// of the candidate itself rather than the directory above it.
+//
+// Binding through the parent handle instead would compare two fresh
+// resolutions of one name against each other: both would see the replacement,
+// both would agree, and a tree that was never inspected would be returned. The
+// comparison has to be against the directory that was read.
+//
+// The interleaving is staged rather than raced, because the window is interior
+// to the lookup and cannot be driven from outside it. The steps below are the
+// ones `chunkDirUnder` takes, in order, with the substitution placed exactly
+// where a concurrent writer would land it: the candidate is opened, its chunk
+// files are read, and only then is the name bound.
+func TestVettedPathRefusesCandidateSwappedAfterInspection(t *testing.T) {
+	base := t.TempDir()
+	ours := filepath.Join(base, "immutable")
+	require.NoError(t, os.MkdirAll(ours, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(ours, "00000.chunk"), []byte("ours"), 0o640,
+	))
+
+	baseRoot, err := openVerifiedDir(base)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = baseRoot.Close() })
+	candidate, err := openVerifiedRoot(baseRoot, "immutable")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = candidate.Close() })
+	require.True(t, hasChunkFilesIn(candidate, "."),
+		"the read must see our tree, as the lookup would")
+
+	// A writer takes the name for a tree of their own.
+	theirs := filepath.Join(base, "theirs")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(theirs, "00000.chunk"), []byte("theirs"), 0o640,
+	))
+	requireDirectorySwap(t, ours, filepath.Join(base, "moved-aside"))
+	requireDirectorySwap(t, theirs, ours)
+
+	assert.Empty(t, vettedPath(candidate, base, "immutable"),
+		"a tree that was never inspected must not be returned")
+}
+
+// TestLedgerDir holds the ancillary fast path to the same rule as the immutable
+// one: it returns the directory it inspected rather than a bool the caller then
+// pairs with a name of its own. Nothing downstream re-checks an unverified
+// bootstrap's ledger state, so what that path names is what gets loaded.
+func TestLedgerDir(t *testing.T) {
+	t.Run("returns the inspected directory", func(t *testing.T) {
+		dir := t.TempDir()
+		state := filepath.Join(dir, "ledger", "42")
+		require.NoError(t, os.MkdirAll(state, 0o750))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(state, "state"), []byte("ours"), 0o640,
+		))
+
+		assert.Equal(t, dir, ledgerDir(dir))
+	})
+
+	t.Run("refuses a tree without ledger state", func(t *testing.T) {
+		assert.Empty(t, ledgerDir(t.TempDir()))
+	})
+
+	t.Run("refuses a symlinked directory", func(t *testing.T) {
+		parent := t.TempDir()
+		outside := filepath.Join(parent, "outside", "ledger", "42")
+		require.NoError(t, os.MkdirAll(outside, 0o750))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(outside, "state"), []byte("theirs"), 0o640,
+		))
+		candidate := filepath.Join(parent, "ancillary-abc123")
+		requireSymlinkSupport(t, "outside", candidate)
+
+		assert.Empty(t, ledgerDir(candidate))
+	})
 }
 
 // TestOpenVerifiedDirAllowsSymlinkedAncestor keeps the boundary where the rest
