@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1020,8 +1021,10 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 				m.mutationMutex.Unlock()
 				return errRevalidationJournalOverflow
 			}
-			delta := mutationsAfter(m.mutationJournal, appliedSeq)
-			if len(delta) == 0 {
+			delta, pending := mutationWindow(
+				m.mutationJournal, appliedSeq, m.revalidationDeltaCap,
+			)
+			if pending == 0 {
 				m.RLock()
 				liveOrder := slices.Clone(m.transactions)
 				liveSeq := m.mutationSeq
@@ -1112,17 +1115,18 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 			}
 			m.mutationMutex.Unlock()
 
-			if requiredRounds := (len(delta)+m.revalidationDeltaCap-1)/m.revalidationDeltaCap +
-				maxRevalidationCatchupRounds; requiredRounds > catchupRounds {
-				// Scale the total budget to the observed backlog while keeping
-				// each replay round bounded. New mutations can extend this
-				// budget again until the journal overflows.
+			// Scale the total budget to the observed backlog while keeping
+			// each replay round bounded. New mutations can extend this budget
+			// again until the journal overflows.
+			if requiredRounds := catchupBudget(
+				round, pending, m.revalidationDeltaCap,
+			); requiredRounds > catchupRounds {
 				catchupRounds = requiredRounds
 			}
-			// Bound the amount of replay work per round so that the
-			// catch-up loop can observe and reconcile new mutations.
-			applyCount := min(len(delta), m.revalidationDeltaCap)
-			for _, mutation := range delta[:applyCount] {
+			// delta is already bounded to revalidationDeltaCap by
+			// mutationWindow, so the loop can observe and reconcile mutations
+			// that arrive while it replays.
+			for _, mutation := range delta {
 				if mutation.stopped {
 					return ErrMempoolStopped
 				}
@@ -1149,18 +1153,51 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 	return events, nil
 }
 
-func mutationsAfter(
+// mutationWindow returns up to limit mutations recorded after seq, together
+// with the total number pending after seq. The returned window is never nil.
+//
+// Only the window is cloned. A caller that applies at most limit entries per
+// round must not pay a scan of the whole journal plus a clone of its entire
+// remaining suffix on every round: the journal holds up to
+// defaultRevalidationJournalCap entries and this runs under mutationMutex,
+// where that copy blocks admissions and removals. Journal seqs increase
+// monotonically (recordMutationLocked appends with an incrementing seq), so the
+// window start is a binary search.
+func mutationWindow(
 	journal []mempoolMutation,
 	seq uint64,
-) []mempoolMutation {
-	idx := len(journal)
-	for i := range journal {
-		if journal[i].seq > seq {
-			idx = i
-			break
-		}
+	limit int,
+) (window []mempoolMutation, pending int) {
+	if limit < 1 {
+		limit = 1
 	}
-	return slices.Clone(journal[idx:])
+	idx := sort.Search(len(journal), func(i int) bool {
+		return journal[i].seq > seq
+	})
+	pending = len(journal) - idx
+	end := min(idx+limit, len(journal))
+	window = slices.Clone(journal[idx:end])
+	if window == nil {
+		// slices.Clone yields nil for an empty result. Return an empty slice
+		// instead so the window is never nil, which keeps callers (and
+		// nilaway) from having to distinguish the two.
+		window = []mempoolMutation{}
+	}
+	return window, pending
+}
+
+// catchupBudget returns the total round budget needed to drain pending
+// mutations at deltaCap per round, given the loop is already at round.
+//
+// Rounds already spent must be included. Without them, a backlog arriving late
+// in an already-enlarged budget computes a total no larger than the current one,
+// so the budget does not grow and the loop bails with errRevalidationCatchup
+// even though the work would have fit.
+func catchupBudget(round, pending, deltaCap int) int {
+	if deltaCap < 1 {
+		deltaCap = 1
+	}
+	return round + (pending+deltaCap-1)/deltaCap + maxRevalidationCatchupRounds
 }
 
 func (m *Mempool) revalidateAppliedTx(

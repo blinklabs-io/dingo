@@ -3962,3 +3962,72 @@ func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
 	)
 	assert.Empty(t, m.overlay.applied)
 }
+
+// catchupBudget must include rounds already spent. Without that term, a backlog
+// arriving late in an already-enlarged budget computes a total no larger than
+// the current one, so the budget never grows and the loop bails with
+// errRevalidationCatchup even though the work would have fit.
+func TestCatchupBudgetAccountsForRoundsAlreadySpent(t *testing.T) {
+	const deltaCap = 64
+
+	// A backlog seen at round 0 needs its own rounds plus the base budget.
+	atStart := catchupBudget(0, 10_000, deltaCap)
+	assert.Equal(t, 157+maxRevalidationCatchupRounds, atStart)
+
+	// The same backlog seen deep into an enlarged budget needs strictly more,
+	// because the earlier rounds are gone.
+	deepIn := catchupBudget(150, 10_000, deltaCap)
+	assert.Greater(t, deepIn, atStart,
+		"a late backlog must demand more total rounds than an early one")
+	assert.Equal(t, 150+157+maxRevalidationCatchupRounds, deepIn)
+
+	// The regression: a budget already enlarged for the first backlog must be
+	// exceeded by the same backlog arriving near its end, or the loop bails.
+	assert.Greater(t, deepIn, atStart,
+		"the recomputed budget must exceed the one already in effect")
+
+	// Degenerate caps do not divide by zero or stall.
+	assert.Positive(t, catchupBudget(0, 10, 0))
+	assert.Equal(t, maxRevalidationCatchupRounds, catchupBudget(0, 0, deltaCap))
+}
+
+// mutationWindow must bound what it clones. Cloning the whole remaining suffix
+// each round, under mutationMutex, made a large journal quadratic in scans and
+// allocations and blocked admissions and removals.
+func TestMutationWindowClonesOnlyTheBoundedWindow(t *testing.T) {
+	journal := make([]mempoolMutation, 0, 1000)
+	for i := 1; i <= 1000; i++ {
+		journal = append(journal, mempoolMutation{seq: uint64(i)})
+	}
+
+	window, pending := mutationWindow(journal, 0, 10)
+	assert.Len(t, window, 10, "the window is bounded by limit")
+	assert.Equal(t, 1000, pending, "pending reports the whole backlog")
+	assert.Equal(t, uint64(1), window[0].seq)
+	assert.Equal(t, uint64(10), window[9].seq)
+
+	// Resuming after the applied prefix skips it without rescanning from 0.
+	window, pending = mutationWindow(journal, 500, 10)
+	assert.Len(t, window, 10)
+	assert.Equal(t, 500, pending)
+	assert.Equal(t, uint64(501), window[0].seq)
+
+	// A tail shorter than the limit returns just the tail.
+	window, pending = mutationWindow(journal, 995, 10)
+	assert.Len(t, window, 5)
+	assert.Equal(t, 5, pending)
+
+	// Fully drained.
+	window, pending = mutationWindow(journal, 1000, 10)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+
+	// A degenerate limit still makes progress rather than returning nothing.
+	window, _ = mutationWindow(journal, 0, 0)
+	assert.Len(t, window, 1)
+
+	// The window is a copy: mutating it must not touch the journal.
+	window, _ = mutationWindow(journal, 0, 3)
+	window[0].seq = 9999
+	assert.Equal(t, uint64(1), journal[0].seq)
+}
