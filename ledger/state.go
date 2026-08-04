@@ -3912,6 +3912,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						tmpPoint,
 						next,
 						shouldValidateBlock,
+						// wantEnableValidation is the same flag that stores
+						// reachedTip after this batch commits; passing it here
+						// guards the transition batch too (issue #3005 P1).
+						wantEnableValidation,
 						skipPhase2Validation,
 						expectedPrevHash,
 						parentEnvelope,
@@ -4118,11 +4122,34 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	}
 }
 
+// strictConsumedInputsEnabled decides whether a validated block's delta apply
+// must refuse to recover an absent consumed-input producer from the append-only
+// blob store and error instead (issue #3005). It is enabled only for validated
+// block application once the node is at tip, so from-genesis bootstrap and
+// Mithril gap-closure — where absent producer rows are legitimately recovered —
+// are unaffected.
+//
+// reachedTip alone is insufficient: it is stored true only after the transition
+// batch (the first batch whose blocks cross the tip cutoff) has committed, so a
+// guard keyed on reachedTip.Load() would leave that transition batch unguarded.
+// reachesTip is the caller's per-block at-tip signal — the same
+// wantEnableValidation flag that stores reachedTip once the batch commits — so
+// the transition batch is guarded too. That flag is set only for a block at or
+// past the tip cutoff while syncing, so it never fires during historical
+// catch-up or on Mithril gap blocks.
+func (ls *LedgerState) strictConsumedInputsEnabled(
+	shouldValidate bool,
+	reachesTip bool,
+) bool {
+	return shouldValidate && (ls.reachedTip.Load() || reachesTip)
+}
+
 func (ls *LedgerState) ledgerProcessBlock(
 	txn *database.Txn,
 	point ocommon.Point,
 	block ledger.Block,
 	shouldValidate bool,
+	reachesTip bool,
 	skipPhase2Validation bool,
 	expectedPrevHash []byte,
 	parent envelopeParent,
@@ -4344,6 +4371,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Process transactions
 	var delta *LedgerDelta
+	// Steady-state, at-tip, validated application refuses to recover an absent
+	// consumed-input producer from the blob store and treats it as a hard error
+	// instead (issue #3005). See strictConsumedInputsEnabled for why the
+	// per-block reachesTip signal is required in addition to reachedTip.
+	strictConsumedInputs := ls.strictConsumedInputsEnabled(
+		shouldValidate,
+		reachesTip,
+	)
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[string]lcommon.Utxo)
@@ -4355,6 +4390,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			delta.strictConsumedInputs = strictConsumedInputs
 			if !shouldValidate && blockDonation > 0 {
 				delta.donate(blockDonation)
 				blockDonation = 0
