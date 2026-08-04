@@ -881,7 +881,7 @@ func TestDeleteBlocksAfterHonestlyReportsProgressOnCloudLikeMidBatchFailureAndRe
 // path rather than the irreversible-store path.
 type partialCommitTxn struct {
 	real      types.Txn
-	armed     *atomic.Bool
+	store     *partialCommitBlobStore
 	readWrite bool
 	finished  bool
 }
@@ -894,7 +894,7 @@ func (t *partialCommitTxn) Commit() error {
 	if err := t.real.Commit(); err != nil {
 		return err
 	}
-	if !t.readWrite || !t.armed.Load() {
+	if !t.readWrite || !t.store.shouldFail() {
 		return nil
 	}
 	// Applied, then failed to fully compensate.
@@ -921,15 +921,26 @@ func (t *partialCommitTxn) RollbackIsNoop() bool { return false }
 // transaction type.
 type partialCommitBlobStore struct {
 	*cloudLikeBlobStore
-	// armed gates the injected failure so test setup (BlockCreate) can commit
-	// normally; the truncate under test runs with it armed.
-	armed atomic.Bool
+	// armed gates the injected failure so test setup (BlockCreate) commits
+	// normally. Once armed, failAfter read-write commits succeed and every
+	// later one reports a partial commit, so a test can let one delete batch
+	// land cleanly before the next fails.
+	armed     atomic.Bool
+	failAfter int64
+	commits   atomic.Int64
+}
+
+func (c *partialCommitBlobStore) shouldFail() bool {
+	if !c.armed.Load() {
+		return false
+	}
+	return c.commits.Add(1) > c.failAfter
 }
 
 func (c *partialCommitBlobStore) NewTransaction(readWrite bool) types.Txn {
 	return &partialCommitTxn{
 		real:      c.BlobStore.NewTransaction(readWrite),
-		armed:     &c.armed,
+		store:     c,
 		readWrite: readWrite,
 	}
 }
@@ -977,31 +988,33 @@ func newPartialCommitTestDB(
 	return db, blobStore
 }
 
-// TestDeleteBlocksAfterCountsPartialCommitProgress covers the accounting path
-// that replaces the old "cloud transactions are always irreversible"
-// assumption. Now that the cloud plugins stage mutations, a failed batch
-// callback reaches the bucket not at all — so the only failure that leaves
-// blocks genuinely removed is a Commit whose compensation could not undo what
-// it applied, reported by wrapping types.ErrPartialCommit. Those blocks must
-// still be counted, or a truncate under-reports real progress.
-func TestDeleteBlocksAfterCountsPartialCommitProgress(t *testing.T) {
+// TestDeleteBlocksAfterDoesNotClaimExactCountOnPartialCommit pins the lower-bound
+// contract for the returned count. A commit that applied part of a batch and
+// could not compensate leaves an unknown subset removed, so that batch must
+// contribute nothing rather than have its full staged count claimed — while
+// batches that did commit are still reported. Guards both directions: an
+// over-claim (adding the failed batch) and an under-claim (dropping the clean
+// one).
+func TestDeleteBlocksAfterDoesNotClaimExactCountOnPartialCommit(t *testing.T) {
 	db, blobStore := newPartialCommitTestDB(t)
-	const numBlocks = 3
+	const numBlocks = 4
 	for id := uint64(1); id <= numBlocks; id++ {
 		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
 	}
-	// Only the truncate below commits with the injected failure.
+
+	// batchSize 2 gives two delete batches: the first commits cleanly, the
+	// second reports a partial commit.
+	blobStore.failAfter = 1
+	blobStore.commits.Store(0)
 	blobStore.armed.Store(true)
 
-	// One batch covering everything; the callback succeeds and the commit
-	// reports a partial application.
 	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
-		context.Background(), db, 0, numBlocks, 0,
+		context.Background(), db, 0, numBlocks, 2,
 	)
 	require.ErrorIs(t, err, types.ErrPartialCommit)
 	require.Equal(
-		t, uint64(numBlocks), blocksDeleted,
-		"a commit that applied changes and failed to compensate must have "+
-			"its progress counted, not reported as zero",
+		t, uint64(2), blocksDeleted,
+		"the committed batch counts; the partially applied one contributes "+
+			"nothing because how much of it survived is not reported",
 	)
 }

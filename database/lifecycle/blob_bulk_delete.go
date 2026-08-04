@@ -48,8 +48,17 @@ func blockIndexID(key []byte) (id uint64, ok bool) {
 // index, distinct from the chain's Number/height field) falls in
 // (afterID, tipID], deleting bp/bi/bh keys and their metadata companion via
 // BlobStore.DeleteBlock. Deletes are batched batchSize per blob transaction
-// instead of one transaction per block. Returns the number of blocks
-// actually found and deleted, which may be far fewer than tipID-afterID:
+// instead of one transaction per block.
+//
+// On success the returned count is the number of blocks actually found and
+// deleted. On error it is a lower bound: batches that committed are counted,
+// and a batch whose transaction failed is counted only where the store reports
+// its writes cannot be rolled back (types.IrreversibleTxn). A commit that
+// applied part of a batch and could not compensate (types.ErrPartialCommit)
+// contributes nothing, because how much of it survived is not reported. Either
+// way the caller retries the identical range, which is idempotent.
+//
+// The count may be far fewer than tipID-afterID:
 // IDs are assigned sequentially by BlockCreate for any chain built
 // entirely through it, but a chain bootstrapped/drained from a Mithril
 // snapshot can leave large gaps of never-imported IDs in that range (see
@@ -209,11 +218,15 @@ func DeleteBlocksAfter(
 			// bucket and the old unconditional "cloud is irreversible"
 			// assumption would over-report.
 			//
-			// The remaining way a store is left partially mutated is a
-			// Commit whose own compensation could not fully undo what it had
-			// applied. The cloud plugins signal that by wrapping
-			// types.ErrPartialCommit, and Txn.Do plus Txn.Commit both wrap
-			// with %w, so errors.Is sees through to it.
+			// A Commit whose own compensation could not fully undo what it
+			// applied (signalled by wrapping types.ErrPartialCommit) leaves
+			// an unknown subset of this batch removed. That subset is not
+			// batchDeleted, so this deliberately does not add it: the count
+			// stays a lower bound rather than claiming a number the commit
+			// cannot report. Establishing the exact figure would mean
+			// plumbing per-key applied progress out of the plugin and
+			// mapping keys back to blocks, for a value the only caller
+			// discards on error.
 			//
 			// Either way this is safe to resume from: finishPendingTruncate
 			// always retries the identical (afterID, tipID] range recorded
@@ -224,8 +237,7 @@ func DeleteBlocksAfter(
 			// referenced bp/bh/metadata objects are already gone deletes
 			// harmlessly again (cloud DeleteBlock tolerates a missing
 			// object; badger's Delete tolerates a missing key).
-			if batchIsIrreversible ||
-				errors.Is(err, types.ErrPartialCommit) {
+			if batchIsIrreversible {
 				return blocksDeleted + batchDeleted, err
 			}
 			return blocksDeleted, err
