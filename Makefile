@@ -37,7 +37,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check gorm-check test-db-integration test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check gorm-check test bench bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -115,15 +115,6 @@ gorm-check: ## Fail if the removed ORM returns to source or dependencies
 		1) exit 0 ;; \
 		*) echo "gorm-check: rg failed with status $$status" >&2; exit "$$status" ;; \
 	esac
-
-test-db-integration: ## Run PostgreSQL/MySQL metadata integration tests in Docker
-	@set -eu; \
-	compose='database/plugin/metadata/sqlstore/compose.yaml'; \
-	trap 'docker compose -f "$$compose" down -v --remove-orphans' EXIT; \
-	docker compose -f "$$compose" up -d --wait; \
-	DINGO_POSTGRES_DSN='postgres://postgres:dingo@127.0.0.1:55432/dingo_test?sslmode=disable' \
-	DINGO_MYSQL_DSN='root:dingo@tcp(127.0.0.1:53306)/dingo_test?parseTime=true' \
-	go test -tags 'dingo_extra_plugins dingo_db_integration' ./database/plugin/metadata/sqlstore -timeout 10m
 
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
