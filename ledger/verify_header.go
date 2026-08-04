@@ -320,8 +320,21 @@ func (ls *LedgerState) headerVerificationEpoch(
 		}
 		if _, err := summary.SlotToEpoch(blockSlot); err != nil {
 			if errors.Is(err, hardfork.ErrPastHorizon) {
+				// A header past the forecast horizon cannot be verified yet:
+				// the applied ledger has not advanced far enough to know its
+				// epoch and nonce. This is a deferred condition, not a peer
+				// fault. Classify it as deferred so the block stays queued for
+				// in-order re-verification once the applied tip advances into
+				// range (preserving the no-apply-past-horizon guard), instead
+				// of being treated as a crypto failure that recycles the honest
+				// peer. Recycling on past-horizon starves the peer pool the
+				// block and Leios endorser-block fetch depend on and deadlocks
+				// catch-up at epoch boundaries; the chainsync recycle paths skip
+				// deferred errors.
 				return models.Epoch{}, fmt.Errorf(
-					"block header verification rejected at slot %d: %w",
+					"%w: block header verification deferred past era horizon "+
+						"at slot %d: %w",
+					errHeaderVerificationDeferred,
 					blockSlot,
 					err,
 				)
