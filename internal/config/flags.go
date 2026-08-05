@@ -104,6 +104,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag("BarkBlockDownloadHosts", "bark-block-download-hosts", "allowed HTTPS hostnames for Bark block downloads"),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag("BarkHost", "bark-host", "", "Bark RPC listen address (defaults to loopback-only when the database lifecycle service is enabled, all interfaces otherwise)"),
+	stringFlag("BarkClientCAFilePath", "bark-client-ca-file-path", "", "path to a PEM CA bundle; client certs verified against it authenticate Bark's destructive DatabaseService RPCs (required whenever the database lifecycle service is enabled)"),
 
 	// History expiry
 	boolFlag("HistoryExpiry.Enabled", "history-expiry-enabled", "enable local immutable block history expiry"),

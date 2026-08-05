@@ -166,12 +166,28 @@ barkPort: 0
 # Interface Bark binds to. Left empty (the default), Bark binds to all
 # interfaces UNLESS the database lifecycle service is also enabled (see
 # databaseLifecycle.snapshotDir below), in which case it defaults to
-# loopback-only (127.0.0.1) instead: that service's Restore/Truncate RPCs are
-# destructive and unauthenticated, so exposing them beyond the local host is
-# an explicit, deliberate choice an operator must opt into here.
+# loopback-only (127.0.0.1) instead: exposing that service's destructive
+# RPCs beyond the local host is an explicit, deliberate choice an operator
+# must opt into here. Bind address is a network control independent of
+# barkClientCaFilePath below (the identity control) -- narrowing this is
+# defense in depth, not a substitute for configuring a client CA.
 # Can be overridden with DINGO_BARK_HOST
 # CLI: --bark-host
 barkHost: ""
+
+# PEM CA bundle Bark verifies client certificates (mTLS) against. Required
+# whenever the database lifecycle service is enabled (barkPort set alongside
+# databaseLifecycle.snapshotDir below): its destructive DatabaseService RPCs
+# (CreateSnapshot, DeleteSnapshot, VerifySnapshot, Restore, Truncate,
+# CancelOperation) refuse any caller whose connection didn't present a
+# certificate verified against this CA -- Dingo refuses to start rather than
+# mount them unauthenticated. Also requires tlsCertFilePath/tlsKeyFilePath
+# above to be set. Read-only RPCs (status/catalog/Archive) never require a
+# client certificate. dingoctl's --client-cert/--client-key/--ca-cert flags
+# are the client side of this.
+# Can be overridden with DINGO_BARK_CLIENT_CA_FILE_PATH
+# CLI: --bark-client-ca-file-path
+barkClientCaFilePath: ""
 
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
@@ -599,7 +615,11 @@ databaseLifecycle:
   # snapshotEnabled is true, and required for bark's DatabaseService to be
   # mounted at all (it's silently skipped, leaving only bark's Archive
   # service, if this is empty). Every snapshot is always written here,
-  # regardless of whether snapshotCloudDestination is also set.
+  # regardless of whether snapshotCloudDestination is also set. Setting
+  # this alongside barkPort also requires barkClientCaFilePath (and
+  # tlsCertFilePath/tlsKeyFilePath) above -- Dingo refuses to start
+  # otherwise, since the DatabaseService's destructive RPCs must not be
+  # mounted without a way to authenticate callers.
   # CLI: --db-snapshot-dir
   snapshotDir: ""
   # Optional cloud destination to additionally mirror every snapshot to,

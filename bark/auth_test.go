@@ -1,0 +1,131 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package bark
+
+import (
+	"context"
+	"testing"
+
+	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
+	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestDestructiveDatabaseProcedures_MatchesDocumentedSet pins the exact set
+// of DatabaseService RPCs newOperatorAuthInterceptor treats as destructive,
+// so a future addition to the proto's method list doesn't silently join
+// this set (or leave it out) without a test noticing.
+func TestDestructiveDatabaseProcedures_MatchesDocumentedSet(t *testing.T) {
+	want := []string{
+		databaseconnect.DatabaseServiceCreateSnapshotProcedure,
+		databaseconnect.DatabaseServiceDeleteSnapshotProcedure,
+		databaseconnect.DatabaseServiceVerifySnapshotProcedure,
+		databaseconnect.DatabaseServiceRestoreProcedure,
+		databaseconnect.DatabaseServiceTruncateProcedure,
+		databaseconnect.DatabaseServiceCancelOperationProcedure,
+	}
+	assert.Len(t, destructiveDatabaseProcedures, len(want))
+	for _, procedure := range want {
+		assert.Truef(t, destructiveDatabaseProcedures[procedure],
+			"expected %q to be classified as destructive", procedure)
+	}
+}
+
+// newTestLifecycleService builds a minimal, never-actually-called
+// dblifecycle.Service — enough to make BarkConfig.Lifecycle non-nil for the
+// Start-time validation tests below, which never get far enough to invoke
+// it.
+func newTestLifecycleService(t *testing.T) *dblifecycle.Service {
+	t.Helper()
+	return dblifecycle.NewService(&config.Config{
+		DatabasePath: t.TempDir(),
+		Plugins: config.PluginsConfig{
+			Storage: config.StoragePluginsConfig{
+				Blob:     plugin.Selection{Provider: "badger"},
+				Metadata: plugin.Selection{Provider: "sqlite"},
+			},
+		},
+	}, testDestinationRegistry, nil)
+}
+
+// TestStart_RejectsLifecycleWithoutClientCA pins bark#2988's fail-closed
+// invariant: Start refuses to mount a DatabaseService (Lifecycle set)
+// without a configured client CA, rather than silently serving its
+// destructive RPCs to anonymous callers. This lives at Start, not NewBark —
+// see Start's doc comment for why.
+func TestStart_RejectsLifecycleWithoutClientCA(t *testing.T) {
+	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
+
+	b, err := NewBark(BarkConfig{
+		DB:              newTestDB(t),
+		Lifecycle:       newTestLifecycleService(t),
+		SnapshotDir:     t.TempDir(),
+		Host:            "127.0.0.1",
+		Port:            freeTCPPort(t),
+		TlsCertFilePath: serverCertPath,
+		TlsKeyFilePath:  serverKeyPath,
+		// TlsClientCAFilePath deliberately left unset.
+	})
+	require.NoError(t, err)
+
+	err = b.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TlsClientCAFilePath is required")
+}
+
+// TestStart_RejectsLifecycleWithoutTLS pins the companion half of the same
+// invariant: a configured client CA alone isn't enough — mTLS has no
+// meaning without the server's own TLS listener underneath it.
+func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
+	_, _, caCertPath := writeTestCA(t)
+
+	b, err := NewBark(BarkConfig{
+		DB:                  newTestDB(t),
+		Lifecycle:           newTestLifecycleService(t),
+		SnapshotDir:         t.TempDir(),
+		Host:                "127.0.0.1",
+		Port:                freeTCPPort(t),
+		TlsClientCAFilePath: caCertPath,
+		// TlsCertFilePath/TlsKeyFilePath deliberately left unset.
+	})
+	require.NoError(t, err)
+
+	err = b.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TlsCertFilePath and TlsKeyFilePath are required")
+}
+
+// TestStart_RejectsClientCAWithoutTLS_NoLifecycle exercises startServer's
+// own, Lifecycle-independent guard: even a bark instance with no
+// DatabaseService at all (Archive-only) must not silently ignore a
+// misconfigured TlsClientCAFilePath set without TLS cert/key.
+func TestStart_RejectsClientCAWithoutTLS_NoLifecycle(t *testing.T) {
+	_, _, caCertPath := writeTestCA(t)
+
+	b, err := NewBark(BarkConfig{
+		DB:                  newTestDB(t),
+		Host:                "127.0.0.1",
+		Port:                freeTCPPort(t),
+		TlsClientCAFilePath: caCertPath,
+	})
+	require.NoError(t, err)
+
+	err = b.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TlsClientCAFilePath requires tls cert and key")
+}

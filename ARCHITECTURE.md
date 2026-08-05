@@ -3389,21 +3389,72 @@ bark#16/PR#28) alongside the Archive service, when `node.go`'s `Run()`
 constructs a `dblifecycle.Service` bound to the node via `SetLiveNode` and a
 `databaseLifecycle.snapshotDir` is configured — this is what a remote
 `dingoctl` (see dingoctl#5) drives to trigger a live Snapshot/Restore/Truncate
-without SSH access to the node. These RPCs carry no authentication of their
-own, so `Run()`'s `effectiveBarkHost` defaults Bark's bind address to
-loopback-only (`127.0.0.1`) whenever this service is mounted, instead of
-bark.go's own empty-`Host` default (`0.0.0.0`, all interfaces) — an operator
-must set `--bark-host`/`DINGO_BARK_HOST` explicitly to widen that, at which
-point it is a deliberate choice made behind their own network/auth controls,
-not an accidental default. A node using Bark only for the read-only Archive
-service (no `snapshotDir` configured) is unaffected and keeps the previous
-all-interfaces default. Every mutating RPC
+without SSH access to the node. `Run()`'s `effectiveBarkHost` additionally
+defaults Bark's bind address to loopback-only (`127.0.0.1`) whenever this
+service is mounted, instead of bark.go's own empty-`Host` default
+(`0.0.0.0`, all interfaces) — an operator must set `--bark-host`/
+`DINGO_BARK_HOST` explicitly to widen that. A node using Bark only for the
+read-only Archive service (no `snapshotDir` configured) is unaffected and
+keeps the previous all-interfaces default. Every mutating RPC
 (CreateSnapshot/Restore/Truncate/VerifySnapshot) returns an `operation_id`
 immediately while the actual work runs in a detached goroutine; a single
 in-memory job tracker (`databaseServiceHandler`) enforces the service's
 documented "one operation at a time" invariant (a second call while one is
 running gets `FAILED_PRECONDITION`) and is the backing store for
 `GetOperationHistory` (in-memory only — does not survive a bark restart).
+
+**Authentication** (`bark/auth.go`, dingo#2988). Bind address alone doesn't
+authenticate a caller, so the DatabaseService's destructive RPCs
+(`CreateSnapshot`, `DeleteSnapshot`, `VerifySnapshot`, `Restore`, `Truncate`,
+`CancelOperation` — everything except the read-only status/catalog RPCs and
+the entirely-read-only `ArchiveService`) additionally require mTLS client
+certificate authentication, independent of bind address. `BarkConfig.
+TlsClientCAFilePath` supplies a PEM CA bundle; `startServer` loads it into an
+`x509.CertPool` and sets the listener's `ClientAuth` to
+`tls.VerifyClientCertIfGiven` — "if given," not "required," because
+read-only RPCs on the same listener must keep working for a caller with no
+client cert at all. Go's TLS stack still fully chain-verifies any certificate
+that *is* presented against `ClientCAs` during the handshake itself, before
+any HTTP request is processed, so a certificate signed by an untrusted CA
+never reaches the request layer regardless of which RPC it's calling.
+
+Because Connect's `AnyRequest`/`StreamingHandlerConn` don't expose the
+underlying `tls.ConnectionState`, `peerCertContextMiddleware` wraps the mux
+(alongside the existing `httpcors.Handler` wrap) and stashes whether the
+connection presented a verified client certificate — plus, for audit
+logging, its Subject Common Name and a SHA-256 fingerprint — into the
+request context. `newOperatorAuthInterceptor`, wired via
+`connect.WithInterceptors` when `databaseconnect.NewDatabaseServiceHandler`
+is constructed, checks the called procedure's name against a fixed
+destructive-procedure set and rejects with `connect.CodeUnauthenticated` if
+the context shows no verified certificate; every destructive call, accepted
+or rejected, is logged with the caller's certificate identity (or its
+absence), since `GetOperationHistory` has no notion of caller identity of
+its own. Because this all sits beneath `*http.Server`, one check covers
+Connect, gRPC, and gRPC-Web alike — they're just HTTP requests distinguished
+by content type once they reach the generated handler, not separate code
+paths needing separate wiring. The interceptor implements the full
+`connect.Interceptor` interface (including the no-op-today
+`WrapStreamingHandler`/`WrapStreamingClient` paths) so the same
+interceptor and destructive-procedure-set pattern is reusable for bark#17's
+proposed `LifecycleService`, which calls for the identical "no anonymous
+calls" requirement.
+
+`Start` (not `NewBark`) fails closed: mounting `Lifecycle` without
+`TlsClientCAFilePath` (or without `TlsCertFilePath`/`TlsKeyFilePath` — mTLS
+has no meaning without the server's own TLS listener underneath it) is
+refused rather than silently serving those RPCs unauthenticated. The check
+lives at `Start`, not construction, because a `databaseServiceHandler` built
+via `newDatabaseServiceHandler` and exercised through direct in-process Go
+calls — as most of this package's own handler-level tests do — never goes
+through `Start`'s mux/interceptor wiring and so is never actually
+network-reachable in the first place; `internal/config/validate.go` also
+checks the same invariant upfront (`barkPort` + `databaseLifecycle.
+snapshotDir` set without `barkClientCaFilePath`), so a misconfigured `dingo`
+invocation fails fast at the CLI rather than deep inside `Node.Run()`.
+`dingoctl`'s existing `--client-cert`/`--client-key`/`--ca-cert` flags
+(`dingoctl/internal/client/tls.go`) are the client side of this — no new
+dingoctl plumbing was needed.
 
 There is no separate snapshot catalog store: a `CreateSnapshot`-generated
 `snapshot_id` is literally its directory name under `SnapshotDir`, and

@@ -287,6 +287,24 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
+	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
+	// whenever bark is enabled with a snapshot directory configured —
+	// exactly node.go's Run() gating for lifecycleEnabled. Those RPCs must
+	// never be reachable without a way to authenticate callers, regardless
+	// of bind address (BarkHost/effectiveBarkHost is a network control, not
+	// an identity one), so a client CA is required upfront here rather than
+	// left to fail deep inside bark.NewBark at startup.
+	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
+		c.BarkClientCAFilePath == "" {
+		errs = append(errs, errors.New(
+			"barkClientCaFilePath is required when bark is enabled "+
+				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
+				"destructive DatabaseService RPCs must not be mounted "+
+				"without a way to authenticate callers",
+		))
+	}
+
 	// Mempool
 	mempoolCapacity, evictionWatermark, rejectionWatermark := c.MempoolSettings()
 	if mempoolCapacity < 0 {

@@ -412,14 +412,24 @@ type Config struct {
 	BarkPort               uint          `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
-	// service (Restore/Truncate — destructive, unauthenticated RPCs) is
-	// mounted, rather than bark's own all-interfaces "0.0.0.0" default;
-	// set explicitly to widen that on purpose.
-	BarkHost           string   `yaml:"barkHost" envconfig:"DINGO_BARK_HOST"`
-	CORSAllowedOrigins []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort        uint     `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort          uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip       bool     `yaml:"intersectTip"                                                     split_words:"true"`
+	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
+	// see its own doc comment) is mounted, rather than bark's own
+	// all-interfaces "0.0.0.0" default; set explicitly to widen that on
+	// purpose.
+	BarkHost string `yaml:"barkHost" envconfig:"DINGO_BARK_HOST"`
+	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
+	// certificates (mTLS) against. Required whenever the database lifecycle
+	// service is mounted (databaseLifecycle.snapshotDir set alongside
+	// barkPort): its destructive DatabaseService RPCs (CreateSnapshot,
+	// DeleteSnapshot, VerifySnapshot, Restore, Truncate, CancelOperation)
+	// refuse any caller whose connection didn't present a certificate
+	// verified against this CA — see bark.NewBark and bark/auth.go. Also
+	// requires TlsCertFilePath/TlsKeyFilePath to be set.
+	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath" envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort          uint     `yaml:"metricsPort"                                                      split_words:"true"`
+	DebugPort            uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip         bool     `yaml:"intersectTip"                                                     split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.
@@ -838,6 +848,7 @@ var globalConfig = &Config{
 	BarkBaseUrl:          "",
 	BarkPort:             0,
 	BarkHost:             "",
+	BarkClientCAFilePath: "",
 	CORSAllowedOrigins:   []string{"*"},
 	Topology:             "",
 	TlsCertFilePath:      "",

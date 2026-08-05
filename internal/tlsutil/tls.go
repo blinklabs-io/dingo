@@ -14,7 +14,12 @@
 
 package tlsutil
 
-import "crypto/tls"
+import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"os"
+)
 
 // ServerConfig applies the minimum TLS version policy for server connections.
 func ServerConfig(config *tls.Config) *tls.Config {
@@ -55,4 +60,21 @@ func ServerConfig(config *tls.Config) *tls.Config {
 		}
 	}
 	return config
+}
+
+// LoadClientCAPool reads a PEM-encoded CA bundle from path and returns an
+// x509.CertPool built from it, for use as a tls.Config's ClientCAs — the
+// trust anchor against which a server verifies client (mTLS) certificates.
+// Returns an error if the file can't be read or contains no valid PEM
+// certificates, rather than silently returning an empty (trust-nobody) pool.
+func LoadClientCAPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading client CA file %q: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no valid PEM certificates found in client CA file %q", path)
+	}
+	return pool, nil
 }
