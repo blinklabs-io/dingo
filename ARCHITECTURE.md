@@ -1767,8 +1767,9 @@ carrying a pool filter reads only the snapshot rows for the pools it names,
 through `GetPoolStakeSnapshotsForPools`; the unfiltered form — the one
 `leadership-schedule` sends — takes the whole-epoch read instead. Neither is a
 query per pool: the filtered read is chunked over the backend's parameter
-limit, so what the caller's filter length decides is how many rows come back,
-not how many round trips the node makes. A requested pool with no row in the
+limit, as is the `GetPools` VRF-key lookup that follows it, so what the
+caller's filter length decides is how many rows come back, not how many round
+trips the node makes. A requested pool with no row in the
 snapshot is omitted rather than reported at zero stake, matching the node's
 restriction of the distribution to the requested keys.
 

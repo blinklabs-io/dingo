@@ -95,13 +95,15 @@ func TestGetPoolStakeSnapshotsForPoolsReturnsOnlyRequested(t *testing.T) {
 }
 
 // TestGetPoolStakeSnapshotsForPoolsChunksBeyondParameterLimit covers a filter
-// longer than a single statement can bind.
+// spanning more than one chunk.
 //
-// SQLite caps a statement at 999 parameters and two are spent before the first
-// pool key hash, so a filter naming more than 997 pools has to be split. The
-// point of the split is that the cost stays a bounded number of round trips
-// rather than one per pool; a boundary off by one would silently drop or
-// duplicate the pools either side of it, which is what this pins.
+// The store contracts to 999 parameters per statement on SQLite and spends two
+// before the first pool key hash, so a filter naming more than 997 pools is
+// split. What this pins is the merge across that split: every requested pool
+// comes back exactly once, where an off-by-one would drop or duplicate the
+// pools either side of it. It does not rest on the driver rejecting a longer
+// statement -- SQLite itself accepts 32766 bound parameters, so a set this
+// size would be accepted chunked or not.
 func TestGetPoolStakeSnapshotsForPoolsChunksBeyondParameterLimit(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)

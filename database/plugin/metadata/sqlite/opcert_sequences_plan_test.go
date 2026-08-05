@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,15 +29,6 @@ import (
 // mentions it, since which index answers a statement is the planner's choice,
 // and that choice is exactly what this test checks.
 const poolOpCertSequenceIndex = "idx_pool_opcert_sequence_pool_sequence"
-
-// latestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
-// issues. Restated here because the store builds it inline; the assertion
-// below is only meaningful while the two agree, so a change to the store's
-// SQL that this misses would show up as a plan that no longer reads the index.
-const latestPoolOpCertSequencesSQL = `
-SELECT pool_key_hash, MAX(sequence)
-FROM pool_opcert_sequence
-GROUP BY pool_key_hash`
 
 // TestLatestPoolOpCertSequencesReadsIndexOnly pins the read plan of the
 // op-cert counter aggregate.
@@ -50,7 +42,9 @@ GROUP BY pool_key_hash`
 // aggregate run without touching a single row.
 //
 // The plan is asserted rather than the index's mere existence: an index no
-// planner chooses is a write cost with no read benefit.
+// planner chooses is a write cost with no read benefit. It is EXPLAINed from
+// the store's own exported statement rather than a copy of it, so the plan
+// pinned here is the plan of the query that actually runs.
 func TestLatestPoolOpCertSequencesReadsIndexOnly(t *testing.T) {
 	t.Parallel()
 	store, db := newSharedSQLStore(t)
@@ -67,7 +61,7 @@ func TestLatestPoolOpCertSequencesReadsIndexOnly(t *testing.T) {
 	require.NoError(t, store.UpdatePoolOpCertSequence(pkhB, 1, 15, nil))
 
 	rows, err := db.Query(
-		"EXPLAIN QUERY PLAN " + latestPoolOpCertSequencesSQL,
+		"EXPLAIN QUERY PLAN " + sqlstore.LatestPoolOpCertSequencesSQL,
 	)
 	require.NoError(t, err)
 	defer rows.Close()

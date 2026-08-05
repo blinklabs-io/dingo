@@ -272,30 +272,45 @@ func (s *Store) GetPools(
 	for i := range poolKeyHashes {
 		hashes[i] = poolKeyHashes[i].Bytes()
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	// Chunked over the same bound loadPoolsAssociations below uses. Callers
+	// name every pool on the chain -- the pool distribution behind
+	// leadership-schedule and the peer snapshot both do -- so the list length
+	// is the chain's pool count rather than anything this code picks.
+	//
+	// ParameterLimit is the conservative figure the store contracts to, not
+	// each driver's true ceiling: SQLite has allowed 32766 bound parameters
+	// since 3.32 and PostgreSQL/MySQL allow 65535, so at Cardano's few
+	// thousand registered pools an unchunked list happens to fit today. It
+	// stays chunked because that headroom is a property of the deployment
+	// rather than of this query, and exceeding it fails the read outright
+	// instead of degrading.
+	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(hashes))
+		rows, err := db.QueryContext(context.Background(), `
 SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
        latest_op_cert_sequence, reward_account_credential_tag, id,
        pledge, cost
 FROM pool
-WHERE pool_key_hash IN (`+bindPlaceholders(len(hashes))+`)`,
-		hashes...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		pool, err := scanPool(rows)
+WHERE pool_key_hash IN (`+bindPlaceholders(end-start)+`)`,
+			hashes[start:end]...,
+		)
 		if err != nil {
-			rows.Close()
 			return nil, err
 		}
-		ret = append(ret, *pool)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		for rows.Next() {
+			pool, err := scanPool(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret = append(ret, *pool)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.loadPoolsAssociations(db, ret); err != nil {
 		return nil, err
@@ -364,6 +379,18 @@ WHERE pool_key_hash = ?`,
 	return uint64(sequence), count > 0, err
 }
 
+// LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
+// issues.
+//
+// Exported so a test can pin its query plan against the statement the store
+// actually runs. The index this reads is only worth its write cost while the
+// planner chooses it, and a test EXPLAINing a hand-copied statement would keep
+// passing against the copy after the store's own SQL moved off the index.
+const LatestPoolOpCertSequencesSQL = `
+SELECT pool_key_hash, MAX(sequence)
+FROM pool_opcert_sequence
+GROUP BY pool_key_hash`
+
 // LatestPoolOpCertSequences returns the highest observed op-cert sequence for
 // every pool that has issued a block, keyed by pool key hash.
 //
@@ -378,10 +405,10 @@ func (s *Store) LatestPoolOpCertSequences(
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
-SELECT pool_key_hash, MAX(sequence)
-FROM pool_opcert_sequence
-GROUP BY pool_key_hash`)
+	rows, err := db.QueryContext(
+		context.Background(),
+		LatestPoolOpCertSequencesSQL,
+	)
 	if err != nil {
 		return nil, err
 	}
