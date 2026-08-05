@@ -29,11 +29,19 @@ func mmapReadOnly(path string) ([]byte, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() {
-		if file != nil {
-			_ = file.Close()
-		}
-	}()
+	defer func() { _ = file.Close() }()
+	return mmapFile(file)
+}
+
+// mmapFile maps an already-open file read-only.
+//
+// Taking the file rather than a path is what lets a caller map a file it
+// resolved through a directory handle: the bytes then come from the file it
+// opened, not from whatever occupies that name by the time the mapping runs.
+//
+// The caller keeps ownership of file and may close it as soon as this returns —
+// the mapping keeps the pages alive independently of the descriptor.
+func mmapFile(file *os.File) ([]byte, func(), error) {
 	info, err := file.Stat()
 	if err != nil {
 		return nil, nil, err
@@ -61,12 +69,6 @@ func mmapReadOnly(path string) ([]byte, func(), error) {
 	}
 	if data == nil {
 		return nil, nil, errors.New("mmap returned nil data")
-	}
-	mappedFile := file
-	file = nil
-	if err := mappedFile.Close(); err != nil {
-		_ = unix.Munmap(data)
-		return nil, nil, err
 	}
 	return data, func() {
 		_ = unix.Munmap(data)

@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"os"
 	"slices"
 	"sort"
 	"time"
@@ -105,6 +106,15 @@ type RawLedgerState struct {
 	// format). When set, UTxOs are streamed from this file instead
 	// of from UTxOData.
 	UTxOTablePath string
+	// UTxOTableFile, when set, is an already-open handle on the UTxO table
+	// that the import reads instead of resolving UTxOTablePath.
+	//
+	// A caller that vetted the snapshot tree needs this: resolving the
+	// pathname here would read whatever occupies that name at import time,
+	// which need not be the file the caller checked. UTxOTablePath stays set
+	// alongside it for messages. The caller keeps ownership and must hold the
+	// file open for the duration of the import.
+	UTxOTableFile *os.File
 	// UTxOHD indicates that the snapshot used the UTxO-HD ledger
 	// state wrapper. These snapshots keep the real UTxO set in an
 	// external table file and the inline UTxO field is only a
@@ -748,7 +758,22 @@ func importUTxOs(
 	}
 
 	var err error
-	if cfg.State.UTxOTablePath != "" {
+	switch {
+	case cfg.State.UTxOTableFile != nil:
+		// UTxO-HD format, read through the handle the caller vetted the tree
+		// with rather than by re-resolving UTxOTablePath.
+		_, err = parseUTxOsFromOpenFileWithProgress(
+			cfg.State.UTxOTableFile,
+			batchCallback,
+			reportProgress,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"parsing UTxOs from file %s: %w",
+				cfg.State.UTxOTablePath, err,
+			)
+		}
+	case cfg.State.UTxOTablePath != "":
 		// UTxO-HD format: stream from tvar file
 		_, err = parseUTxOsFromFileWithProgress(
 			cfg.State.UTxOTablePath,
@@ -761,7 +786,7 @@ func importUTxOs(
 				cfg.State.UTxOTablePath, err,
 			)
 		}
-	} else {
+	default:
 		// Legacy format: decode from inline CBOR
 		_, err = parseUTxOsStreamingWithProgress(
 			cfg.State.UTxOData,

@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -571,7 +572,30 @@ func parseUTxOsFromFileWithProgress(
 		return 0, fmt.Errorf("reading tvar file: %w", err)
 	}
 	defer cleanup()
+	return parseUTxOsFromMapped(data, callback, progress)
+}
 
+// parseUTxOsFromOpenFileWithProgress is parseUTxOsFromFileWithProgress reading
+// an already-open file, for callers that resolved it through a directory handle
+// and must not have the name resolved again here. The caller closes f.
+func parseUTxOsFromOpenFileWithProgress(
+	f *os.File,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
+	data, cleanup, err := mmapFile(f)
+	if err != nil {
+		return 0, fmt.Errorf("reading tvar file: %w", err)
+	}
+	defer cleanup()
+	return parseUTxOsFromMapped(data, callback, progress)
+}
+
+func parseUTxOsFromMapped(
+	data []byte,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
 	// Parse outer array header using StreamDecoder
 	decoder, err := cbor.NewStreamDecoder(data)
 	if err != nil {
