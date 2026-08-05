@@ -261,13 +261,15 @@ func ValidateTxAlonzo(
 	}
 	// Evaluate scripts
 	var txInfoV1 script.TxInfoV1
-	txInfoV1, err = script.NewTxInfoV1FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return err
+	if txHasRedeemers(tx) {
+		txInfoV1, err = script.NewTxInfoV1FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return err
+		}
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key
@@ -395,13 +397,16 @@ func EvaluateTxAlonzo(
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
-	txInfoV1, err := script.NewTxInfoV1FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	var txInfoV1 script.TxInfoV1
+	if txHasRedeemers(tx) {
+		txInfoV1, err = script.NewTxInfoV1FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key
