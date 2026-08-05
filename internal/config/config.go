@@ -569,15 +569,15 @@ type Config struct {
 	// CIP-50 pledge-leverage staking rewards. Consensus-affecting; defaults
 	// off. PledgeLeverageEnabled turns on the L*pledge reward cap and
 	// PledgeLeverage is L in [1, 10000]. Enable only on a network where every
-	// node also enables it. See
-	// docs/plans/2026-07-19-cip50-pledge-leverage-design.md.
+	// node also enables it. See ARCHITECTURE.md ("Reward Calculation And
+	// Precomputation").
 	PledgeLeverageEnabled bool `yaml:"pledgeLeverageEnabled" envconfig:"DINGO_PLEDGE_LEVERAGE_ENABLED"`
 	PledgeLeverage        uint `yaml:"pledgeLeverage"        envconfig:"DINGO_PLEDGE_LEVERAGE"`
 	// CIP-0163 full-pot reward distribution. Consensus-affecting; defaults
 	// off. When enabled the entire epoch reward pot is distributed to eligible
 	// pools and delegators instead of returning the residual to reserves.
 	// Enable only on a network where every node also enables it. See
-	// docs/plans/2026-07-19-cip163-full-pot-distribution-design.md.
+	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
 	FullPotRewardsEnabled bool `yaml:"fullPotRewardsEnabled" envconfig:"DINGO_FULL_POT_REWARDS_ENABLED"`
 	// UnsafeFullPotRewardsOnStandardNetworks is an explicit unsafe override
 	// for running CIP-0163 full-pot rewards on predefined public networks.

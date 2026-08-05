@@ -3354,7 +3354,7 @@ second sync:
 - **`RewardParitySource`** (`internal/koiosparity/source.go`) is the
   interface `check.go`'s comparison functions (`checkEpoch`/`CheckEpoch`)
   consume instead of a concrete `*DingoDB`. `DingoDB` (the standalone CLI's
-  read-only GORM connection to a separate database file) and
+  read-only `database/sql` connection to a separate database file) and
   `DatabaseSource` (below) both implement it, so the comparison logic itself
   is identical regardless of which one backs a given run.
 - **`DatabaseSource`** (same file) is the narrow, in-process adapter: it

@@ -17,7 +17,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Block production with VRF leader election and stake snapshots
 - Multi-peer chain selection with density comparison and VRF tie-breaking
 - Client connectivity for wallets and applications
-- Pluggable storage backends (Badger, SQLite, GCS, S3)
+- Pluggable storage backends (Badger, SQLite, GCS, S3, PostgreSQL, MySQL)
 - Tiered storage modes ("core" for consensus, "api" for full indexing)
 - Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
@@ -224,7 +224,7 @@ takes precedence.
 
 | Interface | Port Env Var | Default | Protocol | Role |
 |-----------|--------------|---------|----------|------|
-| UTxO RPC | `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT` | 9090 | gRPC | General-purpose client API |
+| UTxO RPC | `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT` | 9090 | gRPC | General-purpose client API (v1alpha and v1beta) |
 | Blockfrost | `DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT` | 3000 | REST | General-purpose client API |
 | Mesh (Rosetta) | `DINGO_PLUGINS_API_MESH_CONFIG_PORT` | 8080 | REST | General-purpose client API |
 | Bark | `DINGO_BARK_PORT` | disabled | Connect/gRPC | Dingo-to-Dingo C2/archive protocol |
@@ -435,6 +435,35 @@ Bootstrapping requires temporary disk space for both the downloaded snapshot and
 
 These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
 
+## Database Maintenance
+
+`dingo database` provides offline snapshot, restore, and truncate operations.
+Each subcommand operates directly against the configured data directory and
+must not be run while a `dingo` node process has that directory open. All three
+honor SIGINT and SIGTERM so an interrupt unwinds cleanly instead of leaving a
+partial result behind.
+
+```bash
+# Capture a point-in-time snapshot. --dir must not already exist.
+./dingo database snapshot --dir /backups/dingo-preview-2026-08-05
+
+# Restore the configured data directory from a snapshot directory.
+./dingo database restore /backups/dingo-preview-2026-08-05
+
+# Rewind to a target point. Pass exactly one of --slot, --hash, --block-number.
+./dingo database truncate --slot 12345678
+```
+
+Truncate makes the target block the new chain tip and removes every block and
+metadata row added after it. Unlike a normal chain rollback it does not reject
+a target beyond the security parameter, because it exists for disaster-recovery
+scenarios (see CIP-0135) where the chain must be rewound further than Ouroboros
+Praos allows. The resulting database is resync-ready from the target point.
+
+The same operations are also exposed remotely through the Bark
+`DatabaseService`. Bark has no built-in authentication, so do not expose its
+port outside a trusted network.
+
 ## Database Plugins
 
 Dingo supports pluggable storage backends for both blob storage (blocks, transactions) and metadata storage. This allows you to choose the best storage solution for your use case.
@@ -456,6 +485,18 @@ Metadata Storage Plugins:
 - `sqlite` - SQLite relational database (default)
 - `postgres` - PostgreSQL metadata store (requires `dingo_extra_plugins`)
 - `mysql` - MySQL metadata store (requires `dingo_extra_plugins`)
+
+Mempool Plugins:
+- `fifo` - First-in, first-out transaction pool (default)
+- `dag` - Dependency-graph transaction pool that makes transaction
+  dependencies explicit. Ledger validation remains the source of truth for
+  both providers; the DAG backend changes ordering and selection, not
+  validation.
+
+API Plugins:
+- `blockfrost` - Blockfrost-compatible REST API
+- `mesh` - Mesh (Coinbase Rosetta) REST API
+- `utxorpc` - UTxO RPC gRPC API (serves both v1alpha and v1beta)
 
 ### Plugin Selection
 
@@ -581,7 +622,7 @@ You can see all available plugins and their descriptions:
 
 ## Plugin Development
 
-For information on developing custom storage plugins, see [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md).
+For information on developing custom storage plugins, see [database/plugin/PLUGIN_DEVELOPMENT.md](database/plugin/PLUGIN_DEVELOPMENT.md).
 
 ## Features
 
@@ -653,17 +694,26 @@ validation record.
   - [x] Consumer tracking
   - [x] Transaction purging on chain update
   - [x] Watermark-based eviction and rejection
+  - [x] Selectable backend: FIFO (default) or DAG
 - [x] Database Recovery
-  - [x] Chain rollback support (SQLite metadata store)
+  - [x] Chain rollback support
   - [x] State restoration on rollback
   - [x] WAL mode for crash recovery
   - [x] Automatic rollback on transaction error
+  - [x] Cross-store commit fence with durable blob sync and commit timestamps
+  - [x] Partial-commit and blob-only timestamp divergence detection
+  - [x] Startup chain/ledger tip reconciliation and orphaned-blob cleanup
+  - [x] Recovery ordering ahead of history expiry
+- [x] Database Lifecycle
+  - [x] Offline snapshot, restore, and truncate (`dingo database`)
+  - [x] Remote operation through the Bark `DatabaseService`
 - [x] Stake Snapshots
   - [x] Mark/Set/Go rotation at epoch boundaries
   - [x] Genesis snapshot capture
 - [x] API Servers
-  - [x] UTxO RPC (gRPC)
-  - [ ] WIP Blockfrost-compatible REST API
+  - [x] UTxO RPC (gRPC), serving v1alpha and v1beta
+  - [ ] WIP Blockfrost-compatible REST API (required endpoint families are
+        implemented; compatibility hardening and reward parity are ongoing)
   - [x] Mesh (Coinbase Rosetta) API
 - [x] Mithril Bootstrap
   - [x] Built-in Mithril client
@@ -699,13 +749,26 @@ make build
 go run ./cmd/dingo/
 ```
 
+`make build` builds every command under `cmd/`: the `dingo` node itself and
+`koios-parity`, which compares Dingo ledger state against Koios for a given
+network and epoch.
+
+Metadata storage uses typed `database/sql` code generated by
+[sqlc](https://sqlc.dev) from `sqlc.yaml`. Regenerate it with `make sql` after
+changing a query, and `make sql-check` fails when the checked-in output is
+stale. The former ORM has been removed; `make gorm-check` fails if it returns
+to the source tree or the dependency graph.
+
 ### Testing
 
 ```bash
 make test                                    # All tests with race detection
 go test -v -race -run TestName ./package/    # Single test
 make bench                                   # Benchmarks
+make bench-mempool                           # Compare FIFO and DAG mempools
 make docs-parity                             # Docs agree with go.mod, Makefile, compose
+make sql-check                               # Generated sqlc output is current
+make gorm-check                              # The removed ORM has not returned
 ```
 
 ### Profiling
