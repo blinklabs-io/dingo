@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -24,6 +25,27 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 )
+
+// leiosFetchRequestContext returns a context bounding a single leios-fetch
+// client request. gouroboros no longer applies a protocol-level timeout to the
+// block and block-txs states, because a timeout there fires SendError and
+// tears down the whole multiplexed connection (killing the chainsync/blockfetch
+// on the same bearer). Each request must therefore carry its own deadline. When
+// an attempt deadline is set (the by-point backfill path) the request is bounded
+// by it; otherwise (tip-driven fetches) it falls back to
+// leiosFetchResponseTimeout. On expiry the request returns a normal error and
+// the caller fails over to another peer, leaving the shared connection intact.
+func leiosFetchRequestContext(
+	deadline time.Time,
+) (context.Context, context.CancelFunc) {
+	if !deadline.IsZero() {
+		return context.WithDeadline(context.Background(), deadline)
+	}
+	return context.WithTimeout(
+		context.Background(),
+		leiosFetchResponseTimeout,
+	)
+}
 
 // leiosBackfillConnCursor rotates the starting connection across backfill
 // requests so concurrent fetches spread over the available relay connections
@@ -192,7 +214,9 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	}()
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
-		resp, err := client.BlockRequest(point)
+		reqCtx, cancel := leiosFetchRequestContext(deadline)
+		resp, err := client.BlockRequest(reqCtx, point)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("manifest fetch: %w", err)
 		}

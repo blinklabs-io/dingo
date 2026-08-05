@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -226,6 +227,7 @@ type dribbleBlockTxsRequester struct {
 }
 
 func (r *dribbleBlockTxsRequester) BlockTxsRequest(
+	_ context.Context,
 	point ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
