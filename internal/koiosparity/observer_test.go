@@ -275,6 +275,17 @@ func TestObserverDuplicateEventsAreIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, statuses, 1, "duplicate events for the same epoch must not create duplicate status rows")
 
+	// processEpoch (observer.go) writes the CheckEpochStatus row via
+	// CheckEpoch *before* invoking OnResult, so the GetStatusSummary wait
+	// above can observe the settled PASS row and proceed before OnResult has
+	// actually been called -- resultCount.Load() would then legitimately
+	// still be 0 here. Wait for OnResult to have fired at least once before
+	// asserting the bounds below, rather than trusting the status-row wait
+	// to imply it already has.
+	testutil.WaitForCondition(t, func() bool {
+		return resultCount.Load() >= 1
+	}, 5*time.Second, "OnResult should have fired at least once for epoch 5")
+
 	// The two duplicate epoch.transition events collapse into a single
 	// o.pending[5] entry (see Observer.run's doc comment) only when run's
 	// batch-processing goroutine happens not to drain between the two
