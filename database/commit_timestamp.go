@@ -46,10 +46,6 @@ func (b *Database) checkCommitTimestamp() error {
 			metadataErr,
 		)
 	}
-	// No timestamp in the database
-	if metadataTimestamp <= 0 {
-		return nil
-	}
 	// Get value from blob
 	blobTimestamp, blobErr := b.Blob().GetCommitTimestamp()
 	if blobErr != nil {
