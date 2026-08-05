@@ -180,32 +180,17 @@ func (ls *LedgerState) applyEndorserBlock(
 	if err != nil {
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
-	// Persist the endorser-block blob. Which transaction it is committed in
-	// depends on the apply path.
-	//
-	// On the Haskell-conformant path (Musashi, LeiosApplyEndorserBlockTxs
-	// false) the blob is committed in its own blob transaction (nil txn). The
-	// shared block-processing transaction covers up to a full 50-block chunk,
-	// and every certified endorser block in that chunk would otherwise pile its
-	// blob (plus one DOFF-offset entry per endorser transaction and per produced
-	// output) into that single transaction; on a dense Leios backlog the
-	// accumulated writes exceed Badger's per-transaction budget and the next Set
-	// fails with ErrTxnTooBig, wedging the chunk permanently. This path applies
-	// the endorser transactions without validation and never reads the blob back
-	// within the chunk, so an independent commit is safe: the blob is
-	// content-addressed by (ebSlot, ebHash), carries ID=0, is off the chain
-	// index, and is idempotent; the endorser transactions' DOFF ledger effects
-	// still go into the shared transaction under rbPoint (so a rollback of the
-	// ranking block removes them), and a blob orphaned by a crash or rollback is
-	// harmless and overwritten identically on re-apply.
-	//
-	// On the CIP-conformant path (LeiosApplyEndorserBlockTxs true) the endorser
-	// transactions are validated, and a later block in the same chunk that spends
-	// an endorser-block-produced output reads the blob back through the shared
-	// transaction. A separately committed blob is not visible to that
-	// transaction's start-of-transaction snapshot, so the blob must stay in the
-	// shared transaction to be resolvable via read-your-writes. This keeps the
-	// pre-existing behavior for that path unchanged.
+	// Persist the endorser-block blob. Which transaction commits it depends on
+	// the apply path (see DATABASE.md, "Leios endorser-block storage", for the
+	// full rationale):
+	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
+	//     in its own blob transaction (nil txn) to avoid overflowing the shared
+	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
+	//     the blob is never read back within the chunk, so an independent commit
+	//     is safe.
+	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
+	//     the shared txn so a later block spending an endorser-produced output can
+	//     resolve it via read-your-writes.
 	blobTxn := txn
 	if !ls.config.LeiosApplyEndorserBlockTxs {
 		blobTxn = nil
