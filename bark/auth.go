@@ -99,22 +99,19 @@ func certFingerprint(cert *x509.Certificate) string {
 // r.TLS here — rather than duplicating a per-framing check inside each
 // protocol's own request handling — covers all three with one code path.
 //
-// r.TLS.PeerCertificates is only ever non-empty here if the certificate
-// chained to the listener's configured ClientCAs: Go's TLS stack performs
-// that verification during the handshake itself (see bark.go's
-// tls.VerifyClientCertIfGiven), before any HTTP request — let alone this
-// middleware — ever runs.
+// r.TLS.PeerCertificates alone is NOT a trustworthy signal: it holds
+// whatever certificate the client presented, verified or not — Go's
+// tls.VerifyClientCertIfGiven (see bark.go's startServer) does not abort
+// the handshake on a failed client-cert verification the way
+// RequireAndVerifyClientCert would, so a self-signed or wrong-CA
+// certificate still reaches this middleware with a non-empty
+// PeerCertificates. r.TLS.VerifiedChains is the actual verification
+// signal: it is only non-empty when the presented chain resolved to a
+// trusted root in the listener's configured ClientCAs, which is exactly
+// what this function keys off of.
 func peerCertContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var id peerIdentity
-		// r.TLS.PeerCertificates is whatever the client presented,
-		// regardless of whether it verified — populated even for a
-		// self-signed or wrong-CA certificate, since
-		// tls.VerifyClientCertIfGiven does not abort the handshake on a
-		// failed client-cert verification the way RequireAndVerifyClientCert
-		// would. VerifiedChains is the actual signal: non-empty only when
-		// the presented chain resolved to a trusted root in the listener's
-		// configured ClientCAs.
 		if r.TLS != nil && len(r.TLS.VerifiedChains) > 0 {
 			leaf := r.TLS.VerifiedChains[0][0]
 			id = peerIdentity{
