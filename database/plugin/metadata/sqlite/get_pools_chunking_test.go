@@ -46,7 +46,13 @@ func TestGetPoolsChunksBeyondParameterLimit(t *testing.T) {
 	for i := range poolCount {
 		raw := make([]byte, 28)
 		binary.BigEndian.PutUint32(raw, uint32(i)+1)
+		// NewBlake2b224 copies 28 bytes into the fixed-width type; despite the
+		// name it does not hash them, so the key requested below is the same
+		// key stored as pool_key_hash. Asserted rather than assumed, because
+		// the alternative reading makes every row silently fail to match and
+		// this test would then be reporting the wrong thing.
 		pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(raw))
+		require.Equal(t, raw, pkh.Bytes())
 		hashes = append(hashes, pkh)
 
 		vrf := make([]byte, 32)
