@@ -2614,32 +2614,42 @@ its parent and read through that handle. Directories *above* a candidate are
 the operator's and resolve normally, which is where extraction draws the same
 line.
 
-Reading through the handle is half of it. These lookups end by handing back a
-pathname — the immutable DB is opened by name further downstream, and no handle
-survives that boundary — and a name refers to whatever occupies it at the moment
-it is resolved. A tree swapped in behind the name would otherwise be returned as
-a cached snapshot on the strength of an inspection that was about a different
-directory. So each candidate is opened once and then read *and* bound through
-that one handle: before the path is returned it is resolved the way its consumer
-will resolve it and compared against the directory that was read, and a mismatch
-reports the snapshot as absent. Comparing a fresh resolution of the name against
-another fresh resolution would not do — a candidate replaced after it was read
-appears on both sides, the two agree, and a tree that was never inspected is
-returned.
+Reading through the handle is half of it. A name refers to whatever occupies it
+at the moment it is resolved, so a lookup that ends by handing back a pathname
+discards everything the handle established: the consumer resolves that name
+afresh, and a tree swapped in behind it is read as though it were the one that
+was inspected. Each candidate is therefore opened once and then read *and*
+returned through that one handle — the immutable lookups
+(`findImmutableDir`, the v2 `<extract>/immutable` check) return a `vettedDir`,
+which carries the open handle alongside the name. Comparing a fresh resolution
+of the name against another fresh resolution would not do — a candidate replaced
+after it was read appears on both sides, the two agree, and a tree that was never
+inspected is returned. `findImmutableDir` reads its layout enumeration through
+the handle for the same reason: names taken from a re-walked pathname would be
+checked against the tree that was opened while resolving into the replacement.
 
-The path is produced by the lookup that read it rather than assembled by the
-caller, so the two cannot be about different trees. This holds for the immutable
-side (`findImmutableDir`, and the v2 `<extract>/immutable` check) and the
-ancillary one (the "already extracted, skipping" check) alike; it matters at
-least as much for ancillary, because an unverified bootstrap has nothing
-downstream that re-checks what that path names. `findImmutableDir` also reads its
-layout enumeration through the handle, for the same reason: names taken from a
-re-walked pathname would be checked against the tree that was opened while
-resolving into the replacement.
+The handle then travels to the consumer rather than stopping at the package
+boundary. `BootstrapResult.ImmutableRoot` holds it from the lookup until
+`Cleanup` (or `CloseImmutableRoot`), and `immutable.NewFromRoot` /
+`node.WithImmutableRoot` open the ImmutableDB through it, so the trust-boundary
+tip read, the catch-up divergence check, and the blob copy all read the directory
+the bootstrap vetted. The v2 pipelined copy reads through the same handle
+extraction is writing through. `ImmutableDir` is carried alongside for messages;
+it is not what the load resolves.
 
-What this cannot do is bind the consumer's own open, and no pathname can. The
-backstop for a swap after the lookup returns is the one already in place —
-re-extraction from the certified archive replaces whatever is at the name.
+A result carrying no handle is refused rather than opened by name
+(`openBootstrappedImmutable`). Both bootstrap paths set one, so its absence
+means the result did not come from a vetted lookup, and a fallback would be
+invisible — the load would succeed, having read a directory nothing vetted.
+
+The ancillary side deliberately stops at the name. Its consumer is the
+ledger-state importer, which discovers and opens files by pathname and cannot
+take a handle, and the tree is re-verified against the signed ancillary manifest
+at that same name. Carrying a handle past the lookup there would verify a tree
+the importer does not read, which is worse than binding neither — the check and
+the load have to be about one directory. So `ledgerDir` returns a name that was
+confirmed to denote the tree it inspected, and nothing stronger; the
+`so the two cannot disagree` guarantee above is about the immutable lookups.
 
 ### Catch-up vs bootstrap dispatch
 

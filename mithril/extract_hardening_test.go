@@ -1031,51 +1031,62 @@ func TestOpenVerifiedDirOpensRealDir(t *testing.T) {
 	assert.True(t, os.SameFile(opened, want))
 }
 
-// TestVettedPathNamesInspectedDirectory pins the ordinary case: the name is
-// returned when it denotes the directory the handle refers to.
-func TestVettedPathNamesInspectedDirectory(t *testing.T) {
+// TestVettedNamesInspectedDirectory pins the ordinary case: the inspected
+// directory is returned, under the name that denotes it, with the handle still
+// open so the consumer reads that directory rather than that name.
+func TestVettedNamesInspectedDirectory(t *testing.T) {
 	dir := t.TempDir()
 	candidate := filepath.Join(dir, "immutable")
 	require.NoError(t, os.MkdirAll(candidate, 0o750))
 
 	root, err := openVerifiedDir(dir)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = root.Close() })
+	self := vetted(root, dir, ".")
+	require.NotNil(t, self)
+	t.Cleanup(self.Close)
+	assert.Equal(t, dir, self.Path())
+
 	candidateRoot, err := openVerifiedDir(candidate)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = candidateRoot.Close() })
+	child := vetted(candidateRoot, dir, "immutable")
+	require.NotNil(t, child)
+	t.Cleanup(child.Close)
+	assert.Equal(t, candidate, child.Path())
 
-	assert.Equal(t, dir, vettedPath(root, dir, "."))
-	assert.Equal(t, candidate, vettedPath(candidateRoot, dir, "immutable"))
+	// The handle survives the handoff, which is the whole point of it: a
+	// consumer given only Path would resolve the name again.
+	opened, err := child.Root().Stat(".")
+	require.NoError(t, err)
+	want, err := os.Lstat(candidate)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(opened, want))
 }
 
-// TestVettedPathRefusesSwappedDirectory covers the handoff a directory handle
-// cannot make on its own.
+// TestVettedRefusesSwappedDirectory covers a name that stopped denoting the
+// directory it was inspected under.
 //
 // A handle refers to a directory; the name it was opened under refers to
-// whatever currently occupies that name. Callers that must hand back a name —
-// the immutable DB is opened by one further downstream — otherwise discard
-// everything the handle established, because the name can have been repointed
-// at a tree of somebody else's since.
-func TestVettedPathRefusesSwappedDirectory(t *testing.T) {
+// whatever currently occupies that name. The two disagreeing is evidence of
+// interference, and the lookup refuses rather than reporting a cached snapshot
+// under a name somebody else has taken.
+func TestVettedRefusesSwappedDirectory(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "extracted")
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "immutable"), 0o750))
 
 	root, err := openVerifiedDir(dir)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = root.Close() })
 
 	theirs := filepath.Join(parent, "theirs")
 	require.NoError(t, os.MkdirAll(filepath.Join(theirs, "immutable"), 0o750))
 	requireDirectorySwap(t, dir, filepath.Join(parent, "moved-aside"))
 	requireDirectorySwap(t, theirs, dir)
 
-	assert.Empty(t, vettedPath(root, dir, "."),
+	assert.Nil(t, vetted(root, dir, "."),
 		"the name no longer denotes the inspected directory")
 }
 
-// TestVettedPathRefusesCandidateSwappedAfterInspection covers the substitution
+// TestVettedRefusesCandidateSwappedAfterInspection covers the substitution
 // of the candidate itself rather than the directory above it.
 //
 // Binding through the parent handle instead would compare two fresh
@@ -1088,7 +1099,7 @@ func TestVettedPathRefusesSwappedDirectory(t *testing.T) {
 // ones `chunkDirUnder` takes, in order, with the substitution placed exactly
 // where a concurrent writer would land it: the candidate is opened, its chunk
 // files are read, and only then is the name bound.
-func TestVettedPathRefusesCandidateSwappedAfterInspection(t *testing.T) {
+func TestVettedRefusesCandidateSwappedAfterInspection(t *testing.T) {
 	base := t.TempDir()
 	ours := filepath.Join(base, "immutable")
 	require.NoError(t, os.MkdirAll(ours, 0o750))
@@ -1101,7 +1112,6 @@ func TestVettedPathRefusesCandidateSwappedAfterInspection(t *testing.T) {
 	t.Cleanup(func() { _ = baseRoot.Close() })
 	candidate, err := openVerifiedRoot(baseRoot, "immutable")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = candidate.Close() })
 	require.True(t, hasChunkFilesIn(candidate, "."),
 		"the read must see our tree, as the lookup would")
 
@@ -1114,7 +1124,7 @@ func TestVettedPathRefusesCandidateSwappedAfterInspection(t *testing.T) {
 	requireDirectorySwap(t, ours, filepath.Join(base, "moved-aside"))
 	requireDirectorySwap(t, theirs, ours)
 
-	assert.Empty(t, vettedPath(candidate, base, "immutable"),
+	assert.Nil(t, vetted(candidate, base, "immutable"),
 		"a tree that was never inspected must not be returned")
 }
 

@@ -116,12 +116,18 @@ type BootstrapConfig struct {
 	// callback is invoked for each immutable file number in strict
 	// contiguous order (0,1,2,...) as soon as that prefix is fully
 	// downloaded. immutableDir is the directory the chunks are extracted
-	// into. It lets the caller copy blocks into the blob store while later
-	// chunks are still downloading. When nil, downloads run to completion
-	// before any processing (legacy behaviour). The callback runs on a
-	// single consumer goroutine and serializes processing, so it needs no
-	// internal locking.
-	OnChunkContiguous func(immutableDir string, num uint64) error
+	// into, and immutableRoot is the open handle extraction writes through —
+	// read through the handle, since the name can be repointed while the
+	// download runs and the handle cannot. It lets the caller copy blocks into
+	// the blob store while later chunks are still downloading. When nil,
+	// downloads run to completion before any processing (legacy behaviour).
+	// The callback runs on a single consumer goroutine and serializes
+	// processing, so it needs no internal locking.
+	OnChunkContiguous func(
+		immutableDir string,
+		immutableRoot *os.Root,
+		num uint64,
+	) error
 }
 
 // VerificationMode selects the level of Mithril certificate verification.
@@ -158,8 +164,25 @@ type BootstrapResult struct {
 	// Snapshot is the snapshot that was downloaded and extracted.
 	Snapshot *SnapshotListItem
 	// ImmutableDir is the path to the extracted ImmutableDB
-	// directory.
+	// directory. It is the name the directory was vetted under; use
+	// ImmutableRoot to read it.
 	ImmutableDir string
+	// ImmutableRoot is an open handle on ImmutableDir, held from the moment
+	// the directory was vetted until Cleanup closes it.
+	//
+	// The load path opens the ImmutableDB through this handle rather than
+	// through ImmutableDir. The directory sits in a download area, so between
+	// vetting it and reading it a concurrent writer could put a different tree
+	// at that name; resolving the name at load time would then read the
+	// replacement, with the vetting having been about something else. The
+	// handle refers to the directory that was vetted, and keeps referring to it
+	// however the name is repointed.
+	//
+	// Both bootstrap paths set it. A result without it did not come from a
+	// vetted lookup, and loading refuses rather than falling back to the
+	// pathname — a silent fallback would reinstate exactly the open this
+	// replaces.
+	ImmutableRoot *os.Root
 	// ExtractDir is the root directory where the archive was
 	// extracted. Contains db/immutable/, db/ledger/, etc.
 	ExtractDir string
@@ -539,12 +562,16 @@ func Bootstrap(
 	}
 
 	// Step 4: Extract main archive (skip if already extracted)
-	immutableDir := findImmutableDir(extractDir)
-	if immutableDir != "" {
+	//
+	// The handle findImmutableDir opened is held from here until Cleanup, so
+	// the tree that is loaded is the tree this lookup accepted. Closed on every
+	// error path below, since the result that would own it is never returned.
+	immutableTree := findImmutableDir(extractDir)
+	if immutableTree != nil {
 		cfg.Logger.Info(
 			"snapshot already extracted, skipping",
 			"component", "mithril",
-			"immutable_dir", immutableDir,
+			"immutable_dir", immutableTree.Path(),
 		)
 	} else {
 		// Replace: a previous run may have left a partial extraction
@@ -560,8 +587,8 @@ func Bootstrap(
 			)
 		}
 
-		immutableDir = findImmutableDir(extractDir)
-		if immutableDir == "" {
+		immutableTree = findImmutableDir(extractDir)
+		if immutableTree == nil {
 			return nil, fmt.Errorf(
 				"immutable DB directory not found in "+
 					"extracted archive at %s",
@@ -569,6 +596,11 @@ func Bootstrap(
 			)
 		}
 	}
+	defer func() {
+		if !success {
+			immutableTree.Close()
+		}
+	}()
 
 	// Wait for ancillary download to finish (also deferred above
 	// for the error-return path; calling Wait twice is safe).
@@ -577,14 +609,15 @@ func Bootstrap(
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
-		"immutable_dir", immutableDir,
+		"immutable_dir", immutableTree.Path(),
 		"ancillary_dir", ancillaryDir,
 	)
 
 	success = true
 	result := &BootstrapResult{
 		Snapshot:             snapshot,
-		ImmutableDir:         immutableDir,
+		ImmutableDir:         immutableTree.Path(),
+		ImmutableRoot:        immutableTree.Root(),
 		ExtractDir:           extractDir,
 		AncillaryDir:         ancillaryDir,
 		ArchivePath:          archivePath,
@@ -691,6 +724,9 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Released before the directories go, so Windows — which refuses to remove
+	// a directory with an open handle beneath it — can remove the tree.
+	r.CloseImmutableRoot()
 	paths := []string{
 		r.ArchivePath,
 		r.ExtractDir,
@@ -736,6 +772,18 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	}
 }
 
+// CloseImmutableRoot releases the ImmutableDB directory handle. It is
+// idempotent, and callers that do not clean up (CleanupAfterLoad off, which
+// keeps the extracted tree for a later run) still owe this call once loading is
+// done — the handle is a descriptor held for the lifetime of the result.
+func (r *BootstrapResult) CloseImmutableRoot() {
+	if r == nil || r.ImmutableRoot == nil {
+		return
+	}
+	_ = r.ImmutableRoot.Close()
+	r.ImmutableRoot = nil
+}
+
 // findImmutableDir looks for the ImmutableDB directory in the
 // extracted archive. It checks several common layouts:
 //   - extractDir itself (contains .chunk files)
@@ -750,10 +798,11 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 // absent instead re-extracts it from the verified archive, which discards the
 // tampered tree.
 //
-// The same holds for a tree substituted while the lookup runs: the path handed
-// back is confirmed to name the directory that was inspected, so a snapshot is
-// only ever reported where the inspection and the answer are about one tree.
-func findImmutableDir(extractDir string) string {
+// The same holds for a tree substituted while the lookup runs: the handle the
+// tree was inspected through is what is handed back, so the snapshot that gets
+// loaded is the one that was inspected and not whatever later holds its name.
+// The caller must Close the result.
+func findImmutableDir(extractDir string) *vettedDir {
 	// The extraction directory is checked before it is read, not after. It is
 	// derived inside the download directory rather than chosen by the
 	// operator, so a symlink there is planted content like anything else
@@ -761,9 +810,8 @@ func findImmutableDir(extractDir string) string {
 	// follow it and report a cached snapshot this node never extracted.
 	root, err := openVerifiedDir(extractDir)
 	if err != nil {
-		return ""
+		return nil
 	}
-	defer root.Close()
 	return findImmutableDirIn(root, extractDir)
 }
 
@@ -771,30 +819,34 @@ func findImmutableDir(extractDir string) string {
 // open, so that every read — the layout enumeration as much as the per-
 // candidate checks — resolves through the one handle that was vetted.
 //
+// It takes ownership of root, which is either carried by the returned vettedDir
+// (when the extraction directory is itself the answer) or closed.
+//
 // Taking the handle as a parameter is also what lets a test place a directory
 // swap between the open and the reads, which is the window the enumeration and
 // the returned path were exposed to.
-func findImmutableDirIn(root *os.Root, extractDir string) string {
+func findImmutableDirIn(root *os.Root, extractDir string) *vettedDir {
 	if hasChunkFilesIn(root, ".") {
-		return vettedPath(root, extractDir, ".")
+		return vetted(root, extractDir, ".")
 	}
-	chunkDir := func(rel string) string {
+	defer root.Close()
+	chunkDir := func(rel string) *vettedDir {
 		if err := assertNoSymlinkComponents(root, rel); err != nil {
-			return ""
+			return nil
 		}
-		// The candidate is opened once, then read and bound through that one
-		// handle. Resolving rel again for each step would be a fresh chance
-		// for it to be something other than what the previous step saw, and
-		// the answer would then be about whichever tree held the name last.
+		// The candidate is opened once, then read and handed on through that
+		// one handle. Resolving rel again for each step would be a fresh
+		// chance for it to be something other than what the previous step saw,
+		// and the answer would then be about whichever tree held the name last.
 		candidate, err := openVerifiedRoot(root, rel)
 		if err != nil {
-			return ""
+			return nil
 		}
-		defer candidate.Close()
 		if !hasChunkFilesIn(candidate, ".") {
-			return ""
+			_ = candidate.Close()
+			return nil
 		}
-		return vettedPath(candidate, extractDir, rel)
+		return vetted(candidate, extractDir, rel)
 	}
 
 	// Check common subdirectory layouts
@@ -813,7 +865,7 @@ func findImmutableDirIn(root *os.Root, extractDir string) string {
 	// A candidate passing that pair of reads is a path into the replacement.
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
-		return ""
+		return nil
 	}
 	var dirs []string
 	for _, e := range entries {
@@ -830,12 +882,12 @@ func findImmutableDirIn(root *os.Root, extractDir string) string {
 	}
 
 	for _, c := range candidates {
-		if dir := chunkDir(c); dir != "" {
+		if dir := chunkDir(c); dir != nil {
 			return dir
 		}
 	}
 
-	return ""
+	return nil
 }
 
 // VerifyCertificateChain walks the Mithril certificate chain from
@@ -1061,33 +1113,34 @@ func VerifyCertificateChainWithMode(
 	)
 }
 
-// chunkDirUnder returns the path of rel beneath base when rel is a directory
-// holding chunk files, with both base and rel verified rather than only the
-// last one, and "" when it is not.
+// chunkDirUnder returns rel beneath base when rel is a directory holding chunk
+// files, with both base and rel verified rather than only the last one, and nil
+// when it is not. The caller must Close the result.
 //
 // Verifying only the last component is enough when the one above it is the
 // operator's. Where that one is itself derived content — the extraction
 // directory holding `immutable`, say — it has to be vetted too, or a symlink
 // one level up carries the whole lookup.
 //
-// The path is returned by the lookup rather than assembled by the caller so the
-// two cannot disagree: a caller that builds the name itself is naming whatever
-// occupies it now, not what was verified a moment ago.
-func chunkDirUnder(base, rel string) string {
+// The directory is returned by the lookup that inspected it, as the handle it
+// was inspected through, rather than as a name the caller reassembles. A caller
+// that builds the name itself is naming whatever occupies it now, not what was
+// verified a moment ago — and so is a caller handed only a name.
+func chunkDirUnder(base, rel string) *vettedDir {
 	baseRoot, err := openVerifiedDir(base)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer baseRoot.Close()
 	root, err := openVerifiedRoot(baseRoot, rel)
 	if err != nil {
-		return ""
+		return nil
 	}
-	defer root.Close()
 	if !hasChunkFilesIn(root, ".") {
-		return ""
+		_ = root.Close()
+		return nil
 	}
-	return vettedPath(root, base, rel)
+	return vetted(root, base, rel)
 }
 
 // hasChunkFilesIn reports whether rel, resolved through root, is a directory
@@ -1146,20 +1199,29 @@ func hasLedgerFiles(dir string) bool {
 // rather than merely assert something about it: the "already extracted,
 // skipping" fast paths, which take the answer as licence to skip extraction and
 // hand the path on as the node's ledger state. Returning the path from the
-// lookup that read it keeps the two from being about different trees, the same
-// way chunkDirUnder does for the immutable side. It matters at least as much
-// here, because an unverified bootstrap has nothing downstream that would
-// re-check what the path names.
+// lookup that read it keeps the two from being about different trees.
+//
+// Unlike the immutable side, the answer here is a name and the handle is
+// dropped. That is deliberate rather than an omission: the ancillary tree is
+// consumed by the ledger-state importer, which discovers and opens files by
+// pathname and has no way to take a handle, and it is re-verified against the
+// signed ancillary manifest at that same name. A handle carried past this point
+// would bind the verification to a tree the importer does not read, which is
+// worse than binding neither — the check and the load have to be about one
+// directory. See vettedDir for what carrying the handle buys where the consumer
+// can accept one.
 func ledgerDir(dir string) string {
 	root, err := openVerifiedDir(dir)
 	if err != nil {
 		return ""
 	}
-	defer root.Close()
 	if !hasLedgerFilesIn(root) {
+		_ = root.Close()
 		return ""
 	}
-	return vettedPath(root, dir, ".")
+	d := vetted(root, dir, ".")
+	defer d.Close()
+	return d.Path()
 }
 
 // hasLedgerFilesIn is hasLedgerFiles resolved through an open handle on the

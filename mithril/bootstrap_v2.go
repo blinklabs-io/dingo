@@ -283,17 +283,27 @@ func bootstrapV2(
 			err,
 		)
 	}
-	// Both components are checked, not just the last one. hasChunkFiles vets
+	// Both components are checked, not just the last one. chunkDirUnder vets
 	// the directory it is handed against its own parent, which here is the
 	// extraction directory — itself derived inside the download directory and
 	// no more trustworthy than what it contains.
-	immutableDir := chunkDirUnder(extractDir, "immutable")
-	if immutableDir == "" {
+	//
+	// The handle it opened is held until Cleanup, so the load reads the tree
+	// this lookup accepted rather than whatever holds its name by then. Closed
+	// on every error path below, since the result that would own it is never
+	// returned.
+	immutableTree := chunkDirUnder(extractDir, "immutable")
+	if immutableTree == nil {
 		return nil, fmt.Errorf(
 			"immutable DB directory not found at %s after download",
 			filepath.Join(extractDir, "immutable"),
 		)
 	}
+	defer func() {
+		if !success {
+			immutableTree.Close()
+		}
+	}()
 
 	// Wait for ancillary download to finish (also deferred above
 	// for the error-return path; calling Wait twice is safe).
@@ -320,7 +330,7 @@ func bootstrapV2(
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
-		"immutable_dir", immutableDir,
+		"immutable_dir", immutableTree.Path(),
 		"ancillary_dir", ancillaryDir,
 	)
 
@@ -340,7 +350,8 @@ func bootstrapV2(
 				CardanoNodeVersion: artifact.CardanoNodeVersion,
 			},
 		},
-		ImmutableDir:         immutableDir,
+		ImmutableDir:         immutableTree.Path(),
+		ImmutableRoot:        immutableTree.Root(),
 		ExtractDir:           extractDir,
 		AncillaryDir:         ancillaryDir,
 		AncillaryArchivePath: ancillaryArchivePath,
@@ -766,7 +777,9 @@ func downloadImmutables(
 		dlCtx, cancelDownloads = context.WithCancelCause(ctx)
 		defer cancelDownloads(nil)
 		seqProcess := func(num uint64) error {
-			if err := cfg.OnChunkContiguous(immutableDir, num); err != nil {
+			if err := cfg.OnChunkContiguous(
+				immutableDir, immutableRoot, num,
+			); err != nil {
 				copyErr = err
 				cancelDownloads(err)
 				return err

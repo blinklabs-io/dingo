@@ -541,14 +541,15 @@ func TestFindImmutableDir(t *testing.T) {
 			tt.setup(t, baseDir)
 
 			result := findImmutableDir(baseDir)
+			t.Cleanup(result.Close)
 			switch tt.expected {
 			case "":
-				require.Empty(t, result)
+				require.Nil(t, result)
 			case "ROOT":
-				require.Equal(t, baseDir, result)
+				require.Equal(t, baseDir, result.Path())
 			default:
 				expected := filepath.Join(baseDir, tt.expected)
-				require.Equal(t, expected, result)
+				require.Equal(t, expected, result.Path())
 			}
 		})
 	}
@@ -947,7 +948,7 @@ func TestFindImmutableDirRefusesSymlinkedExtractDir(t *testing.T) {
 	extractDir := filepath.Join(root, "immutable-abc123")
 	requireSymlinkSupport(t, "outside", extractDir)
 
-	assert.Empty(t, findImmutableDir(extractDir),
+	assert.Nil(t, findImmutableDir(extractDir),
 		"a symlinked extraction directory is not a cached snapshot")
 }
 
@@ -975,7 +976,6 @@ func TestFindImmutableDirRefusesSwappedExtractDir(t *testing.T) {
 
 	root, err := openVerifiedDir(extractDir)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = root.Close() })
 
 	// A writer with access to the download directory puts a tree of their own
 	// under the same name and layout, as one could between the open and the
@@ -988,7 +988,7 @@ func TestFindImmutableDirRefusesSwappedExtractDir(t *testing.T) {
 	requireDirectorySwap(t, extractDir, filepath.Join(parent, "moved-aside"))
 	requireDirectorySwap(t, filepath.Join(parent, "theirs"), extractDir)
 
-	assert.Empty(t, findImmutableDirIn(root, extractDir),
+	assert.Nil(t, findImmutableDirIn(root, extractDir),
 		"a swapped extraction directory is not the tree that was inspected")
 }
 
@@ -1003,7 +1003,10 @@ func TestChunkDirUnderReturnsVerifiedPath(t *testing.T) {
 		filepath.Join(immutable, "00000.chunk"), []byte("data"), 0o640,
 	))
 
-	assert.Equal(t, immutable, chunkDirUnder(extractDir, "immutable"))
+	found := chunkDirUnder(extractDir, "immutable")
+	require.NotNil(t, found)
+	t.Cleanup(found.Close)
+	assert.Equal(t, immutable, found.Path())
 }
 
 // TestChunkDirUnderRefusesSymlinkedBase keeps the v2 lookup on the same footing
@@ -1020,7 +1023,7 @@ func TestChunkDirUnderRefusesSymlinkedBase(t *testing.T) {
 	extractDir := filepath.Join(root, "immutable-abc123")
 	requireSymlinkSupport(t, "outside", extractDir)
 
-	assert.Empty(t, chunkDirUnder(extractDir, "immutable"),
+	assert.Nil(t, chunkDirUnder(extractDir, "immutable"),
 		"a symlinked extraction directory holds no cached snapshot")
 }
 

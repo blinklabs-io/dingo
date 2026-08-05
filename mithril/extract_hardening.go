@@ -248,17 +248,56 @@ func openVerifiedDir(dir string) (*os.Root, error) {
 	return openVerifiedRoot(parentRoot, filepath.Base(clean))
 }
 
-// vettedPath returns dir joined with rel, but only while that name still
-// denotes the directory the inspected handle refers to. rel names the directory
-// for the consumer; the handle, not the name, is what says which one it is.
+// vettedDir is a directory that was inspected through an open handle, carrying
+// that handle rather than only the name it was inspected under.
 //
-// A handle refers to a directory; the name it was opened under refers to
-// whatever occupies that name at the moment it is resolved. The cache-reuse
-// lookups resolve everything through a handle and then have to hand back a
-// name, because the immutable DB is opened by name further downstream and no
-// handle survives that boundary. Without this, the handoff discards what the
-// handle established: a directory swapped in behind the name is returned as a
-// cached snapshot, having been vetted under that name rather than as itself.
+// A handle refers to a directory. The name it was opened under refers to
+// whatever occupies that name at the moment it is resolved — which is not the
+// same thing, and stops being the same thing the instant somebody else can
+// write to the enclosing directory. Everything the cache-reuse lookups
+// establish is established through the handle, so handing back only the name
+// would discard it at the boundary: the consumer resolves the name afresh and
+// reads whatever is there by then.
+//
+// So the handle is what travels. Path is for messages and for the consumers
+// that have no way to take a handle; Root is what the ImmutableDB is opened
+// through, and the answer the lookup gave stays true for as long as it is held.
+//
+// Close it when the tree is no longer needed. Holding it open costs one
+// descriptor and is what keeps the reads bound to the inspected directory.
+type vettedDir struct {
+	root *os.Root
+	path string
+}
+
+// Path is the name the directory was inspected under. Reopening it is a fresh
+// resolution and carries none of the vetting — use Root for reads.
+func (d *vettedDir) Path() string {
+	if d == nil {
+		return ""
+	}
+	return d.path
+}
+
+// Root is the handle the directory was inspected through.
+func (d *vettedDir) Root() *os.Root {
+	if d == nil {
+		return nil
+	}
+	return d.root
+}
+
+func (d *vettedDir) Close() {
+	if d == nil || d.root == nil {
+		return
+	}
+	_ = d.root.Close()
+}
+
+// vetted pairs an inspected directory handle with dir joined with rel, but only
+// while that name still denotes the directory the handle refers to. It takes
+// ownership of inspected: the handle is either carried by the returned
+// vettedDir or closed.
 //
 // The comparison is against the handle on the directory that was read, not
 // against a fresh resolution of rel through its parent. Re-resolving would
@@ -266,23 +305,25 @@ func openVerifiedDir(dir string) (*os.Root, error) {
 // it was read appears on both sides, the two agree, and a tree that was never
 // inspected is returned.
 //
-// What this cannot do is bind the consumer's own open. A swap after the name is
-// returned is outside anything a pathname can express; refusing here is what
-// produces the backstop for it, since re-extraction from the certified archive
-// replaces whatever is at the name.
-func vettedPath(inspected *os.Root, dir, rel string) string {
+// The name is checked even though the handle is what the reads use, because
+// consumers that cannot take a handle still resolve it — and a name that
+// already disagrees with the inspected tree is evidence of interference, not a
+// detail to paper over.
+func vetted(inspected *os.Root, dir, rel string) *vettedDir {
 	read, err := inspected.Stat(".")
 	if err != nil {
-		return ""
+		_ = inspected.Close()
+		return nil
 	}
 	name := filepath.Join(dir, rel)
-	// Resolved the way the consumer will resolve it, so the comparison answers
-	// the question the consumer is about to ask.
+	// Resolved the way a pathname consumer would resolve it, so the comparison
+	// answers the question such a consumer would be asking.
 	named, err := os.Stat(name)
 	if err != nil || !os.SameFile(read, named) {
-		return ""
+		_ = inspected.Close()
+		return nil
 	}
-	return name
+	return &vettedDir{root: inspected, path: name}
 }
 
 // dirIsEmpty reports whether dir exists and contains no entries. A missing
