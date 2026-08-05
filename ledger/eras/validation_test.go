@@ -280,7 +280,11 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		babbage.UtxoValidatePlutusScripts,
 		"babbage.UtxoValidatePlutusScripts",
 	)
-	require.Len(t, babbageUtxoValidationRules, len(babbage.UtxoValidationRules)-1)
+	require.Len(
+		t,
+		babbageUtxoValidationRules,
+		len(babbage.UtxoValidationRules)-1,
+	)
 	requireIndexedRulesExcludeFunc(
 		t,
 		babbageUtxoValidationRules,
@@ -557,7 +561,9 @@ func TestValidateTxPlutusConwayMissingScriptWitnessFails(t *testing.T) {
 	assert.Equal(t, scriptHash, missing.ScriptHash)
 }
 
-func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(t *testing.T) {
+func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(
+	t *testing.T,
+) {
 	var scriptHash lcommon.ScriptHash
 	scriptHash[0] = 0xaa
 	addr, err := lcommon.NewAddressFromParts(
@@ -620,7 +626,9 @@ func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(t *testi
 	}
 }
 
-func TestValidateTxPlutusConwayNativeScriptWitnessWithoutRedeemerPasses(t *testing.T) {
+func TestValidateTxPlutusConwayNativeScriptWitnessWithoutRedeemerPasses(
+	t *testing.T,
+) {
 	nativeScript := lcommon.NativeScript{}
 	scriptHash := nativeScript.Hash()
 	addr, err := lcommon.NewAddressFromParts(
@@ -726,7 +734,9 @@ func TestValidateTxPlutusConwayMissingRedeemerForScriptRefFails(t *testing.T) {
 	}
 }
 
-func TestValidateTxPlutusConwayRegistrationCertificateMissingRedeemerFails(t *testing.T) {
+func TestValidateTxPlutusConwayRegistrationCertificateMissingRedeemerFails(
+	t *testing.T,
+) {
 	plutusScript := lcommon.PlutusV2Script([]byte{0x03, 0x04})
 	scriptHash := plutusScript.Hash()
 	tx := &mockConwayFeeTx{
@@ -870,7 +880,9 @@ func TestValidateTxPlutusConwayNonSpendMissingScriptWitnessFails(t *testing.T) {
 	}
 }
 
-func TestValidateTxPlutusConwayUnusedReferenceScriptWithoutRedeemerPasses(t *testing.T) {
+func TestValidateTxPlutusConwayUnusedReferenceScriptWithoutRedeemerPasses(
+	t *testing.T,
+) {
 	plutusScript := lcommon.PlutusV2Script([]byte{0x01, 0x02})
 	scriptHash := plutusScript.Hash()
 	addr, err := lcommon.NewAddressFromParts(
@@ -978,8 +990,20 @@ func requireRuleIndexResolvesToFunc(
 	name string,
 ) {
 	t.Helper()
-	require.GreaterOrEqual(t, index, 0, "%s rule index must be non-negative", name)
-	require.Less(t, index, len(rules), "%s rule index must be within upstream rules", name)
+	require.GreaterOrEqual(
+		t,
+		index,
+		0,
+		"%s rule index must be non-negative",
+		name,
+	)
+	require.Less(
+		t,
+		index,
+		len(rules),
+		"%s rule index must be within upstream rules",
+		name,
+	)
 	require.Equal(
 		t,
 		utxoValidationRulePtr(want),
@@ -1014,7 +1038,12 @@ func requireIndexedRulesExcludeFunc(
 	t.Helper()
 	wantPtr := utxoValidationRulePtr(want)
 	for _, rule := range rules {
-		require.NotEqual(t, wantPtr, utxoValidationRulePtr(rule.validationFunc), message)
+		require.NotEqual(
+			t,
+			wantPtr,
+			utxoValidationRulePtr(rule.validationFunc),
+			message,
+		)
 	}
 }
 
@@ -2785,7 +2814,12 @@ func TestCheckPoolMarginFloor(t *testing.T) {
 
 	// multiple certs: one below floor rejects the whole set.
 	require.Error(t, checkPoolMarginFloor(
-		[]lcommon.Certificate{cip23PoolCert(5, 100), cip23PoolCert(1, 1000)}, floor))
+		[]lcommon.Certificate{
+			cip23PoolCert(5, 100),
+			cip23PoolCert(1, 1000),
+		},
+		floor,
+	))
 
 	// empty cert set: accepted.
 	require.NoError(t, checkPoolMarginFloor(nil, floor))

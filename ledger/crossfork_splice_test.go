@@ -397,7 +397,11 @@ func TestContinuationAuditIgnoresAbandonedFetchedBodies(t *testing.T) {
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	assert.Equal(t, 0, window.blocksSeen)
-	assert.NotContains(t, logBuf.String(), "no producer on the local applied chain")
+	assert.NotContains(
+		t,
+		logBuf.String(),
+		"no producer on the local applied chain",
+	)
 }
 
 // findLogRecord returns the first JSON log record whose message matches msg.

@@ -59,7 +59,8 @@ var cloudCredentialsTestRegistry = func() *lifecycle.DestinationRegistry {
 // the same name exactly, since that package's unexported helper can't be
 // imported from here.
 func hasS3Credentials() bool {
-	if os.Getenv("AWS_ACCESS_KEY_ID") != "" && os.Getenv("AWS_SECRET_ACCESS_KEY") != "" {
+	if os.Getenv("AWS_ACCESS_KEY_ID") != "" &&
+		os.Getenv("AWS_SECRET_ACCESS_KEY") != "" {
 		return true
 	}
 	home := os.Getenv("HOME")
@@ -133,22 +134,42 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 	require.NoError(t, db.BlockCreate(testBlock(2, 0x02), nil))
 
-	snapshotID := fmt.Sprintf("dingo-lifecycle-cloud-test-%d", time.Now().UnixNano())
+	snapshotID := fmt.Sprintf(
+		"dingo-lifecycle-cloud-test-%d",
+		time.Now().UnixNano(),
+	)
 	baseURI := fmt.Sprintf("%s://%s/dingo-lifecycle-cloud-test", scheme, bucket)
 	snapshotURI := lifecycle.JoinCloudURI(baseURI, snapshotID)
 	localDir := filepath.Join(t.TempDir(), snapshotID)
 
 	t.Cleanup(func() {
-		_, _ = lifecycle.DeleteCloudSnapshot(context.Background(), cloudCredentialsTestRegistry, snapshotURI)
+		_, _ = lifecycle.DeleteCloudSnapshot(
+			context.Background(),
+			cloudCredentialsTestRegistry,
+			snapshotURI,
+		)
 	})
 
 	manifest, err := lifecycle.SnapshotToCloud(
-		ctx, cloudCredentialsTestRegistry, db, localDir, lifecycle.TriggerManual, "test", "badger", "sqlite", baseURI,
-		"", "",
+		ctx,
+		cloudCredentialsTestRegistry,
+		db,
+		localDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
+		baseURI,
+		"",
+		"",
 	)
 	require.NoError(t, err, "SnapshotToCloud (local write + cloud upload)")
 
-	entries, ok, err := lifecycle.ListCloudSnapshots(ctx, cloudCredentialsTestRegistry, baseURI)
+	entries, ok, err := lifecycle.ListCloudSnapshots(
+		ctx,
+		cloudCredentialsTestRegistry,
+		baseURI,
+	)
 	require.NoError(t, err, "ListCloudSnapshots")
 	require.True(t, ok, "cloud destination must report listing support")
 	found := false
@@ -159,9 +180,18 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 			break
 		}
 	}
-	require.True(t, found, "uploaded snapshot %q not found in cloud listing", snapshotID)
+	require.True(
+		t,
+		found,
+		"uploaded snapshot %q not found in cloud listing",
+		snapshotID,
+	)
 
-	fetched, ok, err := lifecycle.FetchCloudManifest(ctx, cloudCredentialsTestRegistry, snapshotURI)
+	fetched, ok, err := lifecycle.FetchCloudManifest(
+		ctx,
+		cloudCredentialsTestRegistry,
+		snapshotURI,
+	)
 	require.NoError(t, err, "FetchCloudManifest")
 	require.True(t, ok, "cloud destination must report manifest-fetch support")
 	require.Equal(t, manifest.Checksum, fetched.Checksum)
@@ -172,13 +202,20 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	// downloaded data, not just a local round-trip.
 	restoredDir := filepath.Join(t.TempDir(), "restored")
 	restoreMan, err := lifecycle.Restore(
-		ctx, newTestStorageHost(t), cloudCredentialsTestRegistry, snapshotURI, restoredDir,
+		ctx,
+		newTestStorageHost(t),
+		cloudCredentialsTestRegistry,
+		snapshotURI,
+		restoredDir,
 		lifecycle.RestoreStorageConfig{},
 	)
 	require.NoError(t, err, "Restore from cloud URI")
 	require.Equal(t, manifest.CommitTimestamp, restoreMan.CommitTimestamp)
 
-	restored, err := dbtest.NewDatabase(t, &database.Config{DataDir: restoredDir})
+	restored, err := dbtest.NewDatabase(
+		t,
+		&database.Config{DataDir: restoredDir},
+	)
 	require.NoError(t, err)
 	block1, err := restored.BlockByIndex(1, nil)
 	require.NoError(t, err)
@@ -187,10 +224,18 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), block2.ID)
 
-	deleted, err := lifecycle.DeleteCloudSnapshot(ctx, cloudCredentialsTestRegistry, snapshotURI)
+	deleted, err := lifecycle.DeleteCloudSnapshot(
+		ctx,
+		cloudCredentialsTestRegistry,
+		snapshotURI,
+	)
 	require.NoError(t, err, "DeleteCloudSnapshot")
 	require.True(t, deleted, "cloud destination must report delete support")
 
-	_, _, err = lifecycle.FetchCloudManifest(ctx, cloudCredentialsTestRegistry, snapshotURI)
+	_, _, err = lifecycle.FetchCloudManifest(
+		ctx,
+		cloudCredentialsTestRegistry,
+		snapshotURI,
+	)
 	require.Error(t, err, "manifest must no longer be fetchable after delete")
 }

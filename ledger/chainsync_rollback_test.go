@@ -151,7 +151,11 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	)
 	assert.Equal(t, fixture.connId, e.ConnectionId)
 	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.activeBlockfetchConnId)
-	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.selectedBlockfetchConnId)
+	assert.Equal(
+		t,
+		ouroboros.ConnectionId{},
+		fixture.ls.selectedBlockfetchConnId,
+	)
 	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.shadowBlockfetchConnId)
 	assert.Nil(t, fixture.ls.chainsyncBlockfetchReadyChan)
 	assert.Nil(t, fixture.ls.chainsyncBlockfetchTimeoutTimer)
@@ -621,8 +625,10 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 				"observed-predecessor-second-" + testCase.name,
 			)
 			firstHeader := mockHeader{
-				hash:        lcommon.NewBlake2b256(firstHash),
-				prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+				hash: lcommon.NewBlake2b256(firstHash),
+				prevHash: lcommon.NewBlake2b256(
+					fixture.currentTip.Point.Hash,
+				),
 				blockNumber: fixture.currentTip.BlockNumber + 1,
 				slot:        fixture.currentTip.Point.Slot + 1,
 			}
@@ -753,8 +759,10 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 
 	forkHash := testHashBytes("lookup-error-fork-block")
 	header := mockHeader{
-		hash:        lcommon.NewBlake2b256(forkHash),
-		prevHash:    lcommon.NewBlake2b256(testHashBytes("lookup-error-ancestor")),
+		hash: lcommon.NewBlake2b256(forkHash),
+		prevHash: lcommon.NewBlake2b256(
+			testHashBytes("lookup-error-ancestor"),
+		),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
@@ -798,8 +806,10 @@ func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupErr
 
 	forkHash := testHashBytes("handler-lookup-error-fork-block")
 	header := mockHeader{
-		hash:        lcommon.NewBlake2b256(forkHash),
-		prevHash:    lcommon.NewBlake2b256(testHashBytes("handler-lookup-error-ancestor")),
+		hash: lcommon.NewBlake2b256(forkHash),
+		prevHash: lcommon.NewBlake2b256(
+			testHashBytes("handler-lookup-error-ancestor"),
+		),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
@@ -1321,7 +1331,9 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	fixture.ls.blockfetchRequestRangeCleanup()
 }
 
-func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(t *testing.T) {
+func TestRecoverAfterLocalRollbackResetsStateWithoutTrackedClients(
+	t *testing.T,
+) {
 	fixture := newChainsyncRollbackFixture(t)
 
 	header := mockHeader{
@@ -1417,7 +1429,9 @@ func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRol
 	fixture := newChainsyncRollbackFixture(t)
 
 	queuedHeader := mockHeader{
-		hash:        lcommon.NewBlake2b256(testHashBytes("rollback-stale-queued")),
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("rollback-stale-queued"),
+		),
 		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
@@ -1808,7 +1822,9 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
-func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(t *testing.T) {
+func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
+	t *testing.T,
+) {
 	fixture := newChainsyncRollbackFixture(t)
 
 	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
@@ -2010,7 +2026,10 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		ancestorTip:   ancestorTip,
 		currentTip:    currentTip,
 		ancestorNonce: ancestorNonce,
-		forkPoint:     ocommon.NewPoint(currentBlock.Slot+10, testHashBytes("fork-point")),
+		forkPoint: ocommon.NewPoint(
+			currentBlock.Slot+10,
+			testHashBytes("fork-point"),
+		),
 	}
 }
 

@@ -38,7 +38,8 @@ func addRunFlags(cmd *cobra.Command) {
 		"pools absent from Koios in epochs fetched within this window → reference_lag")
 	cmd.Flags().Bool("skip-fetch", false, "skip Koios fetch phase")
 	cmd.Flags().Bool("skip-check", false, "skip compare phase")
-	cmd.Flags().Bool("all", false, "re-check all cached epochs (not just unchecked/stale)")
+	cmd.Flags().
+		Bool("all", false, "re-check all cached epochs (not just unchecked/stale)")
 }
 
 func runCommand(cmd *cobra.Command, _ []string) error {
@@ -126,19 +127,25 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	dir := resolveReportDir(reportDir)
 	reportPath := fmt.Sprintf("%s/report-%s-%s.json",
 		dir, network, time.Now().Format("2006-01-02"))
-	reportErr := writeParityReport(logger, dir, reportPath, func(path string) (io.WriteCloser, error) {
-		return os.Create(path)
-	}, func() (*koiosparity.JSONReport, error) {
-		return koiosparity.BuildJSONReport(
-			network,
-			time.Now().UTC().Format(time.RFC3339),
-			fetchedEpochs,
-			statuses,
-			func(epoch uint64) ([]koiosparity.CheckMismatch, error) {
-				return cache.GetMismatches(network, epoch, "")
-			},
-		)
-	})
+	reportErr := writeParityReport(
+		logger,
+		dir,
+		reportPath,
+		func(path string) (io.WriteCloser, error) {
+			return os.Create(path)
+		},
+		func() (*koiosparity.JSONReport, error) {
+			return koiosparity.BuildJSONReport(
+				network,
+				time.Now().UTC().Format(time.RFC3339),
+				fetchedEpochs,
+				statuses,
+				func(epoch uint64) ([]koiosparity.CheckMismatch, error) {
+					return cache.GetMismatches(network, epoch, "")
+				},
+			)
+		},
+	)
 
 	// A FAIL or ERROR epoch must surface as a non-zero exit so automation can't
 	// mistake an incomplete or failed parity check for success; propagated via
@@ -154,7 +161,9 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	// other: a report-output failure must surface even when the check itself
 	// passed, and a real check FAIL/ERROR must still surface even when the
 	// report happened to write successfully.
-	checkErr := checkResultErr(koiosparity.EffectiveCheckOutcome(statuses, 0, 0))
+	checkErr := checkResultErr(
+		koiosparity.EffectiveCheckOutcome(statuses, 0, 0),
+	)
 	return errors.Join(reportErr, checkErr)
 }
 
@@ -184,13 +193,25 @@ func writeParityReport(
 	build func() (*koiosparity.JSONReport, error),
 ) error {
 	if mkErr := os.MkdirAll(dir, 0o750); mkErr != nil {
-		logger.Warn("koios-parity: could not create report dir", "path", dir, "error", mkErr)
+		logger.Warn(
+			"koios-parity: could not create report dir",
+			"path",
+			dir,
+			"error",
+			mkErr,
+		)
 		return fmt.Errorf("create report dir %s: %w", dir, mkErr)
 	}
 
 	f, openErr := create(path)
 	if openErr != nil {
-		logger.Warn("koios-parity: could not create report file", "path", path, "error", openErr)
+		logger.Warn(
+			"koios-parity: could not create report file",
+			"path",
+			path,
+			"error",
+			openErr,
+		)
 		return fmt.Errorf("create report file %s: %w", path, openErr)
 	}
 
@@ -199,24 +220,54 @@ func writeParityReport(
 		logger.Warn("koios-parity: could not build report", "error", buildErr)
 		reportErr := fmt.Errorf("build report: %w", buildErr)
 		if closeErr := f.Close(); closeErr != nil {
-			logger.Warn("koios-parity: could not close report file", "path", path, "error", closeErr)
-			reportErr = errors.Join(reportErr, fmt.Errorf("close report file %s: %w", path, closeErr))
+			logger.Warn(
+				"koios-parity: could not close report file",
+				"path",
+				path,
+				"error",
+				closeErr,
+			)
+			reportErr = errors.Join(
+				reportErr,
+				fmt.Errorf("close report file %s: %w", path, closeErr),
+			)
 		}
 		return reportErr
 	}
 
 	if writeErr := koiosparity.WriteJSONReport(f, report); writeErr != nil {
-		logger.Warn("koios-parity: could not write report", "path", path, "error", writeErr)
+		logger.Warn(
+			"koios-parity: could not write report",
+			"path",
+			path,
+			"error",
+			writeErr,
+		)
 		reportErr := fmt.Errorf("write report %s: %w", path, writeErr)
 		if closeErr := f.Close(); closeErr != nil {
-			logger.Warn("koios-parity: could not close report file", "path", path, "error", closeErr)
-			reportErr = errors.Join(reportErr, fmt.Errorf("close report file %s: %w", path, closeErr))
+			logger.Warn(
+				"koios-parity: could not close report file",
+				"path",
+				path,
+				"error",
+				closeErr,
+			)
+			reportErr = errors.Join(
+				reportErr,
+				fmt.Errorf("close report file %s: %w", path, closeErr),
+			)
 		}
 		return reportErr
 	}
 
 	if closeErr := f.Close(); closeErr != nil {
-		logger.Warn("koios-parity: could not close report file", "path", path, "error", closeErr)
+		logger.Warn(
+			"koios-parity: could not close report file",
+			"path",
+			path,
+			"error",
+			closeErr,
+		)
 		return fmt.Errorf("close report file %s: %w", path, closeErr)
 	}
 

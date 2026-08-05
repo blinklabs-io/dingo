@@ -126,7 +126,10 @@ func backupSQLite(
 // deadlock a live snapshot when another metadata operation still owns that
 // connection. A dedicated connection preserves SQLite's WAL snapshot
 // semantics without contending with the pool's connection accounting.
-func openSQLiteBackupDB(ctx context.Context, databasePath string) (*sql.DB, error) {
+func openSQLiteBackupDB(
+	ctx context.Context,
+	databasePath string,
+) (*sql.DB, error) {
 	dsn := sqliteFileURI(databasePath) +
 		"?_txlock=deferred" +
 		"&_pragma=journal_mode(WAL)" +
@@ -245,7 +248,11 @@ func copyFile(ctx context.Context, srcPath, dstPath string) error {
 // bytes.Reader in tests -- rather than a real filesystem copy racing a
 // concurrent cancellation's wall-clock timing, which a fast/cached copy
 // can simply outrun before the cancellation ever lands.
-func copyReaderToFile(ctx context.Context, src io.Reader, dstPath string) (retErr error) {
+func copyReaderToFile(
+	ctx context.Context,
+	src io.Reader,
+	dstPath string,
+) (retErr error) {
 	dst, err := os.OpenFile(
 		dstPath,
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL,

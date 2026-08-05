@@ -117,7 +117,9 @@ type BlockBuilderConfig struct {
 }
 
 // NewDefaultBlockBuilder creates a new DefaultBlockBuilder.
-func NewDefaultBlockBuilder(cfg BlockBuilderConfig) (*DefaultBlockBuilder, error) {
+func NewDefaultBlockBuilder(
+	cfg BlockBuilderConfig,
+) (*DefaultBlockBuilder, error) {
 	if cfg.Mempool == nil {
 		return nil, errors.New("mempool provider is required")
 	}
@@ -451,9 +453,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 			if normalizeErr != nil {
 				b.logger.Debug(
 					"failed to encode Dijkstra transaction block form, skipping",
-					"component", "forging",
-					"tx_hash", mempoolTx.Hash,
-					"error", normalizeErr,
+					"component",
+					"forging",
+					"tx_hash",
+					mempoolTx.Hash,
+					"error",
+					normalizeErr,
 				)
 				continue
 			}
@@ -462,7 +467,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 				0,
 				len(transactions)+1,
 			)
-			candidateTransactions = append(candidateTransactions, transactions...)
+			candidateTransactions = append(
+				candidateTransactions,
+				transactions...)
 			candidateTransactions = append(
 				candidateTransactions,
 				blockTxCbor,
@@ -554,7 +561,10 @@ func (b *DefaultBlockBuilder) buildBlock(
 		leiosCert,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to compute block body hash: %w", err)
+		return nil, nil, fmt.Errorf(
+			"failed to compute block body hash: %w",
+			err,
+		)
 	}
 	if actualBlockBodySize > maxBlockSize {
 		return nil, nil, fmt.Errorf(
@@ -610,21 +620,41 @@ func (b *DefaultBlockBuilder) buildBlock(
 		nonceVrf, leaderVrf lcommon.VrfResult
 	)
 	if limits.era.isTPraos() {
-		nonceInput, err := vrf.MkSeedTPraos(int64(slot), epochNonce, vrf.SeedEta()) // #nosec G115 -- validated above
+		nonceInput, err := vrf.MkSeedTPraos(
+			int64(slot),
+			epochNonce,
+			vrf.SeedEta(),
+		) // #nosec G115 -- validated above
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create TPraos nonce VRF input: %w", err)
+			return nil, nil, fmt.Errorf(
+				"failed to create TPraos nonce VRF input: %w",
+				err,
+			)
 		}
 		nonceProof, nonceOutput, err := b.creds.VRFProve(nonceInput)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to generate TPraos nonce VRF proof: %w", err)
+			return nil, nil, fmt.Errorf(
+				"failed to generate TPraos nonce VRF proof: %w",
+				err,
+			)
 		}
-		leaderInput, err := vrf.MkSeedTPraos(int64(slot), epochNonce, vrf.SeedL()) // #nosec G115 -- validated above
+		leaderInput, err := vrf.MkSeedTPraos(
+			int64(slot),
+			epochNonce,
+			vrf.SeedL(),
+		) // #nosec G115 -- validated above
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create TPraos leader VRF input: %w", err)
+			return nil, nil, fmt.Errorf(
+				"failed to create TPraos leader VRF input: %w",
+				err,
+			)
 		}
 		leaderProof, leaderOutput, err := b.creds.VRFProve(leaderInput)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to generate TPraos leader VRF proof: %w", err)
+			return nil, nil, fmt.Errorf(
+				"failed to generate TPraos leader VRF proof: %w",
+				err,
+			)
 		}
 		nonceVrf = lcommon.VrfResult{Output: nonceOutput, Proof: nonceProof}
 		leaderVrf = lcommon.VrfResult{Output: leaderOutput, Proof: leaderProof}
@@ -693,21 +723,25 @@ func (b *DefaultBlockBuilder) buildBlock(
 	var headerBody any
 	if limits.era.isTPraos() {
 		headerBody = tpraosHeaderBody{
-			BlockNumber:          nextBlockNumber,
-			Slot:                 slot,
-			PrevHash:             prevHash,
-			IssuerVkey:           issuerVKeyArray,
-			VrfKey:               vrfVKey,
-			NonceVrf:             nonceVrf,
-			LeaderVrf:            leaderVrf,
-			BlockBodySize:        actualBlockBodySize,
-			BlockBodyHash:        bodyHash,
-			OpCertHotVkey:        opCert.KESVKey,
-			OpCertSequenceNumber: uint32(opCert.IssueNumber), // #nosec G115 -- validated above
-			OpCertKesPeriod:      uint32(opCert.KESPeriod),   // #nosec G115 -- validated above
-			OpCertSignature:      opCert.Signature,
-			ProtoMajorVersion:    limits.protoMajor,
-			ProtoMinorVersion:    dingoversion.BlockHeaderProtocolMinor,
+			BlockNumber:   nextBlockNumber,
+			Slot:          slot,
+			PrevHash:      prevHash,
+			IssuerVkey:    issuerVKeyArray,
+			VrfKey:        vrfVKey,
+			NonceVrf:      nonceVrf,
+			LeaderVrf:     leaderVrf,
+			BlockBodySize: actualBlockBodySize,
+			BlockBodyHash: bodyHash,
+			OpCertHotVkey: opCert.KESVKey,
+			OpCertSequenceNumber: uint32(
+				opCert.IssueNumber,
+			), // #nosec G115 -- validated above
+			OpCertKesPeriod: uint32(
+				opCert.KESPeriod,
+			), // #nosec G115 -- validated above
+			OpCertSignature:   opCert.Signature,
+			ProtoMajorVersion: limits.protoMajor,
+			ProtoMinorVersion: dingoversion.BlockHeaderProtocolMinor,
 		}
 	} else if limits.era == eraDijkstra {
 		leiosAnnouncement, err := dijkstraLeiosAnnouncementForHeader(leios)

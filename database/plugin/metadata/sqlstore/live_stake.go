@@ -174,7 +174,10 @@ WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
 				if !raw.Valid || raw.String == "" {
 					continue
 				}
-				amount, err := parseUint64("reward live stake UTxO amount", raw.String)
+				amount, err := parseUint64(
+					"reward live stake UTxO amount",
+					raw.String,
+				)
 				if err != nil {
 					utxoRows.Close()
 					return err
@@ -182,7 +185,11 @@ WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
 				ref := credentialKey{tag: tag, key: string(key)}
 				if ^uint64(0)-utxoStakes[ref] < amount {
 					utxoRows.Close()
-					return fmt.Errorf("reward live stake UTxO overflow for credential %d:%x", tag, key)
+					return fmt.Errorf(
+						"reward live stake UTxO overflow for credential %d:%x",
+						tag,
+						key,
+					)
 				}
 				utxoStakes[ref] += amount
 			}
@@ -283,16 +290,25 @@ LEFT JOIN latest_delegation
 					&credential.delegationSlot, &credential.delegationBlock, &credential.delegationCert,
 				); err != nil {
 					_ = rows.Close()
-					return fmt.Errorf("scan reward live stake credential: %w", err)
+					return fmt.Errorf(
+						"scan reward live stake credential: %w",
+						err,
+					)
 				}
 				credentials = append(credentials, credential)
 			}
 			if err := rows.Err(); err != nil {
 				_ = rows.Close()
-				return fmt.Errorf("iterate reward live stake credentials: %w", err)
+				return fmt.Errorf(
+					"iterate reward live stake credentials: %w",
+					err,
+				)
 			}
 			if err := rows.Close(); err != nil {
-				return fmt.Errorf("close reward live stake credentials: %w", err)
+				return fmt.Errorf(
+					"close reward live stake credentials: %w",
+					err,
+				)
 			}
 			values := make([]rewardLiveStakeRow, 0, len(credentials))
 			for _, credential := range credentials {
@@ -303,13 +319,20 @@ LEFT JOIN latest_delegation
 				utxoStake := utxoStakes[ref]
 				rewardStake := uint64(0)
 				if credential.reward.Valid && credential.reward.String != "" {
-					rewardStake, err = parseUint64("reward live stake reward", credential.reward.String)
+					rewardStake, err = parseUint64(
+						"reward live stake reward",
+						credential.reward.String,
+					)
 					if err != nil {
 						return err
 					}
 				}
 				if ^uint64(0)-utxoStake < rewardStake {
-					return fmt.Errorf("reward live stake overflow for credential %d:%x", tag, key)
+					return fmt.Errorf(
+						"reward live stake overflow for credential %d:%x",
+						tag,
+						key,
+					)
 				}
 				total := utxoStake + rewardStake
 				registered := credential.active.Valid && credential.active.Bool
@@ -433,8 +456,10 @@ func (s *Store) RewardLiveStakeNeedsBackfill(
 		key string
 	}
 	utxoStakes := make(map[credentialKey]uint64)
-	utxoRows, err := db.QueryContext(context.Background(),
-		`SELECT credential_tag, staking_key, amount FROM utxo WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`)
+	utxoRows, err := db.QueryContext(
+		context.Background(),
+		`SELECT credential_tag, staking_key, amount FROM utxo WHERE deleted_slot = 0 AND staking_key IS NOT NULL AND LENGTH(staking_key) > 0`,
+	)
 	if err != nil {
 		return false, fmt.Errorf("load reward live stake UTxOs: %w", err)
 	}
@@ -501,7 +526,10 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 		utxoStake := utxoStakes[ref]
 		rewardStake := uint64(0)
 		if reward.Valid && reward.String != "" {
-			rewardStake, err = parseUint64("reward live stake reward", reward.String)
+			rewardStake, err = parseUint64(
+				"reward live stake reward",
+				reward.String,
+			)
 			if err != nil {
 				return false, err
 			}
@@ -510,22 +538,41 @@ LEFT JOIN reward_live_stake ON reward_live_stake.credential_tag = canonical.cred
 			return false, errors.New("reward live stake overflow")
 		}
 		total := utxoStake + rewardStake
-		if !id.Valid || !version.Valid || uint64(version.Int64) != uint64(models.RewardStakeCalculationVersion) || !storedUtxo.Valid || !storedReward.Valid || !storedTotal.Valid {
+		if !id.Valid || !version.Valid ||
+			uint64(
+				version.Int64,
+			) != uint64(
+				models.RewardStakeCalculationVersion,
+			) ||
+			!storedUtxo.Valid ||
+			!storedReward.Valid ||
+			!storedTotal.Valid {
 			return true, nil
 		}
-		storedUtxoValue, err := parseUint64("stored UTxO stake", storedUtxo.String)
+		storedUtxoValue, err := parseUint64(
+			"stored UTxO stake",
+			storedUtxo.String,
+		)
 		if err != nil {
 			return false, err
 		}
-		storedRewardValue, err := parseUint64("stored reward stake", storedReward.String)
+		storedRewardValue, err := parseUint64(
+			"stored reward stake",
+			storedReward.String,
+		)
 		if err != nil {
 			return false, err
 		}
-		storedTotalValue, err := parseUint64("stored total stake", storedTotal.String)
+		storedTotalValue, err := parseUint64(
+			"stored total stake",
+			storedTotal.String,
+		)
 		if err != nil {
 			return false, err
 		}
-		if storedUtxoValue != utxoStake || storedRewardValue != rewardStake || storedTotalValue != total || registered.Bool != active.Bool {
+		if storedUtxoValue != utxoStake || storedRewardValue != rewardStake ||
+			storedTotalValue != total ||
+			registered.Bool != active.Bool {
 			return true, nil
 		}
 		if active.Bool && len(pool) > 0 && string(pool) != string(storedPool) {

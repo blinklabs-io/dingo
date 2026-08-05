@@ -137,7 +137,10 @@ func testUtxorpcHTTPHandler(u *Utxorpc) http.Handler {
 	// the alpha handlers via path rewriting, and the query service additionally
 	// serves the beta-only ReadState method.
 	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
-	mux.Handle(betaQueryPath, betaVersionedQueryHandler(qp, qh, betaQueryPath, compress1KB))
+	mux.Handle(
+		betaQueryPath,
+		betaVersionedQueryHandler(qp, qh, betaQueryPath, compress1KB),
+	)
 	betaSubmitPath := "/" + betasubmitconnect.SubmitServiceName + "/"
 	mux.Handle(betaSubmitPath, rewriteVersionHandler(sh, betaSubmitPath, sp))
 	betaSyncPath := "/" + betasyncconnect.SyncServiceName + "/"
@@ -147,7 +150,10 @@ func testUtxorpcHTTPHandler(u *Utxorpc) http.Handler {
 	return mux
 }
 
-func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpcConnectHarness {
+func newUtxorpcConnectHarness(
+	t *testing.T,
+	opts utxorpcHarnessOptions,
+) *utxorpcConnectHarness {
 	t.Helper()
 	if opts.numBlocks < 2 {
 		opts.numBlocks = 2
@@ -295,7 +301,10 @@ func indexFixtureTransactionsForReadTx(
 
 // --- fixture helpers --------------------------------------------------------
 
-func firstTxInFixtureBlocks(t *testing.T, numBlocks int) ([]byte, []byte, models.Block) {
+func firstTxInFixtureBlocks(
+	t *testing.T,
+	numBlocks int,
+) ([]byte, []byte, models.Block) {
 	t.Helper()
 	blocks := loadTestChainBlocks(t, numBlocks)
 	for _, mb := range blocks {
@@ -316,10 +325,17 @@ func firstTxInFixtureBlocks(t *testing.T, numBlocks int) ([]byte, []byte, models
 
 func TestConnect_ReadParams(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadParams(ctx, connect.NewRequest(&query.ReadParamsRequest{}))
+	out, err := cli.ReadParams(
+		ctx,
+		connect.NewRequest(&query.ReadParamsRequest{}),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, out.Msg.GetValues())
 	require.NotNil(t, out.Msg.GetValues().GetCardano())
@@ -332,10 +348,17 @@ func TestConnect_ReadParams(t *testing.T) {
 
 func TestConnect_ReadEraSummary(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadEraSummary(ctx, connect.NewRequest(&query.ReadEraSummaryRequest{}))
+	out, err := cli.ReadEraSummary(
+		ctx,
+		connect.NewRequest(&query.ReadEraSummaryRequest{}),
+	)
 	require.NoError(t, err)
 	s := out.Msg.GetCardano()
 	require.NotNil(t, s)
@@ -346,10 +369,17 @@ func TestConnect_ReadEraSummary(t *testing.T) {
 
 func TestConnect_ReadGenesis(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadGenesis(ctx, connect.NewRequest(&query.ReadGenesisRequest{}))
+	out, err := cli.ReadGenesis(
+		ctx,
+		connect.NewRequest(&query.ReadGenesisRequest{}),
+	)
 	require.NoError(t, err)
 	require.NotEmpty(t, out.Msg.GetCaip2())
 	require.Equal(t, "cardano:preview", out.Msg.GetCaip2())
@@ -358,7 +388,11 @@ func TestConnect_ReadGenesis(t *testing.T) {
 
 func TestConnect_ReadTip(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 15})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := cli.ReadTip(ctx, connect.NewRequest(&sync.ReadTipRequest{}))
@@ -373,7 +407,11 @@ func TestConnect_ReadTip(t *testing.T) {
 
 func TestConnect_FetchBlock(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 12})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	tip := h.LS.Tip()
@@ -395,7 +433,11 @@ func TestConnect_FetchBlock(t *testing.T) {
 
 func TestConnect_DumpHistory(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 25})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	blocks := loadTestChainBlocks(t, 25)
@@ -440,7 +482,11 @@ func TestConnect_DumpHistory(t *testing.T) {
 
 func TestConnect_DumpHistory_StartTokenNotOnChain(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 10})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -472,7 +518,11 @@ func TestConnect_DumpHistory_MaxItemsExceeded(t *testing.T) {
 		numBlocks:       10,
 		maxHistoryItems: 50,
 	})
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_, err := cli.DumpHistory(
@@ -490,7 +540,11 @@ func TestConnect_DumpHistory_MaxItemsExceeded(t *testing.T) {
 
 func TestConnect_SearchUtxos(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := cli.SearchUtxos(
@@ -504,7 +558,11 @@ func TestConnect_SearchUtxos(t *testing.T) {
 	require.NotEmpty(t, out.Msg.GetItems(), "fixture should expose live UTxOs")
 	require.LessOrEqual(t, len(out.Msg.GetItems()), 5)
 	require.NotNil(t, out.Msg.GetItems()[0].GetTxoRef())
-	require.NotEmpty(t, out.Msg.GetNextToken(), "pagination token expected for maxItems=5")
+	require.NotEmpty(
+		t,
+		out.Msg.GetNextToken(),
+		"pagination token expected for maxItems=5",
+	)
 
 	out2, err := cli.SearchUtxos(
 		ctx,
@@ -527,7 +585,11 @@ func TestConnect_SearchUtxos(t *testing.T) {
 
 func TestConnect_ReadUtxos(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	searchOut, err := cli.SearchUtxos(
@@ -558,7 +620,11 @@ func TestConnect_ReadUtxos(t *testing.T) {
 
 func TestConnect_ReadData_EmptyKeys(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := cli.ReadData(ctx, connect.NewRequest(&query.ReadDataRequest{}))
@@ -572,10 +638,18 @@ func TestConnect_ReadData_EmptyKeys(t *testing.T) {
 
 func TestConnect_ReadTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
-	cli := queryconnect.NewQueryServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	require.NotEmpty(t, h.IndexedTxHashes, "harness must index fixture transactions")
+	require.NotEmpty(
+		t,
+		h.IndexedTxHashes,
+		"harness must index fixture transactions",
+	)
 	txHash := h.IndexedTxHashes[len(h.IndexedTxHashes)-1]
 	out, err := cli.ReadTx(
 		ctx,
@@ -585,9 +659,14 @@ func TestConnect_ReadTx(t *testing.T) {
 	require.NotNil(t, out.Msg.GetTx())
 	require.NotNil(t, out.Msg.GetTx().GetCardano())
 	require.NotEmpty(t, out.Msg.GetTx().GetNativeBytes())
-	txType, err := gledger.DetermineTransactionType(out.Msg.GetTx().GetNativeBytes())
+	txType, err := gledger.DetermineTransactionType(
+		out.Msg.GetTx().GetNativeBytes(),
+	)
 	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(txType, out.Msg.GetTx().GetNativeBytes())
+	tx, err := gledger.NewTransactionFromCbor(
+		txType,
+		out.Msg.GetTx().GetNativeBytes(),
+	)
 	require.NoError(t, err)
 	require.Equal(t, txHash, tx.Hash().Bytes())
 	rec, err := h.LS.TransactionByHash(txHash)
@@ -602,7 +681,11 @@ func TestConnect_ReadTx(t *testing.T) {
 func TestConnect_SubmitTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := cli.SubmitTx(
@@ -633,22 +716,40 @@ func TestConnect_SubmitTx(t *testing.T) {
 
 func TestConnect_ReadMempool(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, err := cli.ReadMempool(ctx, connect.NewRequest(&submit.ReadMempoolRequest{}))
+	out, err := cli.ReadMempool(
+		ctx,
+		connect.NewRequest(&submit.ReadMempoolRequest{}),
+	)
 	require.NoError(t, err)
 	require.Empty(t, out.Msg.GetItems())
 }
 
 func TestConnect_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	stream, err := cli.WaitForTx(ctx, connect.NewRequest(&submit.WaitForTxRequest{}))
+	stream, err := cli.WaitForTx(
+		ctx,
+		connect.NewRequest(&submit.WaitForTxRequest{}),
+	)
 	require.NoError(t, err)
-	require.False(t, stream.Receive(), "no refs means the handler returns without frames")
+	require.False(
+		t,
+		stream.Receive(),
+		"no refs means the handler returns without frames",
+	)
 	require.NoError(t, stream.Err())
 	cancel()
 }
@@ -718,7 +819,11 @@ func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
 		numBlocks:     5,
 		serverTimeout: 25 * time.Millisecond,
 	})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -732,7 +837,11 @@ func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
 	select {
 	case result := <-resultCh:
 		require.Nil(t, result.resp)
-		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(result.err))
+		require.Equal(
+			t,
+			connect.CodeDeadlineExceeded,
+			connect.CodeOf(result.err),
+		)
 		require.ErrorContains(t, result.err, "wait for tx timed out")
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
@@ -745,7 +854,11 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 		numBlocks:     5,
 		serverTimeout: time.Hour,
 	})
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -756,7 +869,10 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 			Ref: [][]byte{bytes.Repeat([]byte{0xbb}, 32)},
 		},
 	)
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
 	defer waitCancel()
 	waitForEventSubscriber(t, waitCtx, h.EB, ledger.BlockfetchEventType)
 
@@ -774,7 +890,11 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 func TestConnect_EvalTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := cli.EvalTx(
@@ -795,7 +915,10 @@ func TestConnect_EvalTx(t *testing.T) {
 	}
 }
 
-func followTipStreamErr(t *testing.T, stream *connect.ServerStreamForClient[sync.FollowTipResponse]) string {
+func followTipStreamErr(
+	t *testing.T,
+	stream *connect.ServerStreamForClient[sync.FollowTipResponse],
+) string {
 	t.Helper()
 	if err := stream.Err(); err != nil {
 		return err.Error()
@@ -812,7 +935,11 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	roll := ocommon.NewPoint(inter.Slot, inter.Hash)
 	require.NoError(t, h.LS.Chain().ValidateRollback(roll))
 
-	cli := syncconnect.NewSyncServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
@@ -859,7 +986,11 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	require.Equal(t, rollbackBlock.Number, reset.Reset_.GetHeight())
 	rollbackTime, err := h.LS.SlotToTime(roll.Slot)
 	require.NoError(t, err)
-	require.Equal(t, uint64(rollbackTime.UnixMilli()), reset.Reset_.GetTimestamp())
+	require.Equal(
+		t,
+		uint64(rollbackTime.UnixMilli()),
+		reset.Reset_.GetTimestamp(),
+	)
 	cancel()
 }
 
@@ -893,7 +1024,11 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	emptyChild := blocks[cut-1]
 	require.Equal(t, emptyChild.Slot, h.LS.Tip().Point.Slot)
 
-	cli := watchconnect.NewWatchServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := watchconnect.NewWatchServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	stream, err := cli.WatchTx(
@@ -928,7 +1063,11 @@ func TestConnect_WaitForTx_ConfirmsOnBlockfetchEvent(t *testing.T) {
 	blk, err := gledger.NewBlockFromCbor(mb.Type, mb.Cbor)
 	require.NoError(t, err)
 
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
@@ -974,7 +1113,11 @@ func TestConnect_WaitForTx_ConfirmsOnBlockfetchEvent(t *testing.T) {
 	require.NotNil(t, resp)
 	require.Equal(t, submit.Stage_STAGE_CONFIRMED, resp.GetStage())
 	require.Equal(t, txHash, resp.GetRef())
-	require.False(t, stream.Receive(), "handler returns after confirming all refs")
+	require.False(
+		t,
+		stream.Receive(),
+		"handler returns after confirming all refs",
+	)
 	require.NoError(t, stream.Err())
 	cancel()
 }
@@ -985,7 +1128,11 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	txType, err := gledger.DetermineTransactionType(txCbor)
 	require.NoError(t, err)
 
-	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	cli := submitconnect.NewSubmitServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
@@ -1027,7 +1174,9 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 	require.NotNil(t, resp.GetTx())
 	require.Equal(t, submit.Stage_STAGE_MEMPOOL, resp.GetTx().GetStage())
 	require.True(t, bytes.Equal(txCbor, resp.GetTx().GetNativeBytes()))
-	outTxType, err := gledger.DetermineTransactionType(resp.GetTx().GetNativeBytes())
+	outTxType, err := gledger.DetermineTransactionType(
+		resp.GetTx().GetNativeBytes(),
+	)
 	require.NoError(t, err)
 	outTx, err := gledger.NewTransactionFromCbor(
 		outTxType,

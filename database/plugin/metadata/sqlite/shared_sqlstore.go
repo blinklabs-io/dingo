@@ -219,7 +219,8 @@ func sqliteFileURI(databasePath string) string {
 		}
 	}
 	path := filepath.ToSlash(databasePath)
-	if filepath.VolumeName(databasePath) != "" && !strings.HasPrefix(path, "/") {
+	if filepath.VolumeName(databasePath) != "" &&
+		!strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
 	return (&url.URL{Scheme: "file", Path: path}).String()

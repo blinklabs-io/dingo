@@ -102,7 +102,12 @@ func BuildStatusSummary(
 }
 
 // PrintStatus writes a human-readable status summary to w.
-func PrintStatus(w io.Writer, s StatusSummary, verbose bool, statuses []CheckEpochStatus) {
+func PrintStatus(
+	w io.Writer,
+	s StatusSummary,
+	verbose bool,
+	statuses []CheckEpochStatus,
+) {
 	fmt.Fprintf(w, "%s parity status\n", s.Network)
 	if s.TotalFetched > 0 {
 		fmt.Fprintf(w, "  cache:    epochs %d–%d fetched (%d total)\n",
@@ -117,9 +122,16 @@ func PrintStatus(w io.Writer, s StatusSummary, verbose bool, statuses []CheckEpo
 		if !s.LastCheck.IsZero() {
 			lastCheck = s.LastCheck.Format("2006-01-02")
 		}
-		fmt.Fprintf(w, "  checked:  epochs %d–%d (PASS %d / FAIL %d / ERROR %d, last check %s)\n",
-			s.CheckedMin, s.CheckedMax,
-			s.PassCount, s.FailCount, s.ErrorCount, lastCheck)
+		fmt.Fprintf(
+			w,
+			"  checked:  epochs %d–%d (PASS %d / FAIL %d / ERROR %d, last check %s)\n",
+			s.CheckedMin,
+			s.CheckedMax,
+			s.PassCount,
+			s.FailCount,
+			s.ErrorCount,
+			lastCheck,
+		)
 	} else {
 		fmt.Fprintf(w, "  checked:  none\n")
 	}
@@ -140,8 +152,11 @@ func PrintStatus(w io.Writer, s StatusSummary, verbose bool, statuses []CheckEpo
 			if st.Status != StatusFail {
 				continue
 			}
-			fmt.Fprintf(w, "  epoch %d: %d mismatches (only_koios=%d only_dingo=%d)\n",
-				st.Epoch, st.MismatchCount,
+			fmt.Fprintf(
+				w,
+				"  epoch %d: %d mismatches (only_koios=%d only_dingo=%d)\n",
+				st.Epoch,
+				st.MismatchCount,
 				len(UnmarshalPoolList(st.OnlyKoiosPools)),
 				len(UnmarshalPoolList(st.OnlyDingoPools)),
 			)
@@ -223,7 +238,11 @@ func BuildJSONReport(
 		if getMismatches != nil {
 			mismatches, err := getMismatches(st.Epoch)
 			if err != nil {
-				return nil, fmt.Errorf("get mismatches for epoch %d: %w", st.Epoch, err)
+				return nil, fmt.Errorf(
+					"get mismatches for epoch %d: %w",
+					st.Epoch,
+					err,
+				)
 			}
 			for _, m := range mismatches {
 				entry.Mismatches = append(entry.Mismatches, JSONMismatch{
@@ -254,7 +273,13 @@ func WriteJSONReport(w io.Writer, report *JSONReport) error {
 }
 
 // PrintExplain writes a human-readable per-epoch mismatch breakdown to w.
-func PrintExplain(w io.Writer, network string, epoch uint64, mismatches []CheckMismatch, poolFilter string) {
+func PrintExplain(
+	w io.Writer,
+	network string,
+	epoch uint64,
+	mismatches []CheckMismatch,
+	poolFilter string,
+) {
 	if poolFilter != "" {
 		fmt.Fprintf(w, "%s epoch %d — pool %s\n", network, epoch, poolFilter)
 	} else {

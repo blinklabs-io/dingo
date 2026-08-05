@@ -258,11 +258,13 @@ func (c *ConnectionManager) startListener(
 						event.NewEvent(
 							InboundConnectionEventType,
 							InboundConnectionEvent{
-								ConnectionId:         oConn.Id(),
-								LocalAddr:            conn.LocalAddr(),
-								RemoteAddr:           conn.RemoteAddr(),
-								NormalizedRemoteAddr: NormalizePeerAddr(peerAddr),
-								IsNtC:                true,
+								ConnectionId: oConn.Id(),
+								LocalAddr:    conn.LocalAddr(),
+								RemoteAddr:   conn.RemoteAddr(),
+								NormalizedRemoteAddr: NormalizePeerAddr(
+									peerAddr,
+								),
+								IsNtC: true,
 							},
 						),
 					)

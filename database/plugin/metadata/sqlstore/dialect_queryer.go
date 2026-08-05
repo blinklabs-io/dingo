@@ -218,7 +218,9 @@ func rebindPostgresQuery(query string) string {
 }
 
 var (
-	returningIDPattern      = regexp.MustCompile(`(?is)\s+RETURNING\s+id\s*;?\s*$`)
+	returningIDPattern = regexp.MustCompile(
+		`(?is)\s+RETURNING\s+id\s*;?\s*$`,
+	)
 	mysqlIntegerCastPattern = regexp.MustCompile(`(?i)\bAS\s+INTEGER\b`)
 )
 

@@ -121,7 +121,9 @@ func LoadConfig() (*Config, error) {
 		path = defaultTestnetYAMLPath
 	}
 
-	data, err := os.ReadFile(path) //nolint:gosec // trusted config path supplied by the test runner
+	data, err := os.ReadFile(
+		path,
+	) //nolint:gosec // trusted config path supplied by the test runner
 	if err != nil {
 		return nil, fmt.Errorf(
 			"erastest.LoadConfig: reading %s: %w", path, err,
@@ -141,7 +143,8 @@ func LoadConfig() (*Config, error) {
 	if len(docs) < 4 {
 		return nil, fmt.Errorf(
 			"erastest.LoadConfig: expected at least 4 YAML documents in %s, got %d",
-			path, len(docs),
+			path,
+			len(docs),
 		)
 	}
 

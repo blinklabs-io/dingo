@@ -413,7 +413,9 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 			chainselection.ChainSwitchEvent{
 				PreviousConnectionId: connA,
 				NewConnectionId:      connB,
-				NewTip:               ochainsync.Tip{Point: ocommon.NewPoint(200, []byte("hash-b"))},
+				NewTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(200, []byte("hash-b")),
+				},
 			},
 		),
 	)
@@ -1252,7 +1254,9 @@ func TestChainsyncStallRecyclerExitsOnCancel(t *testing.T) {
 // lifecycle op) and confirms the recycler still reaches its
 // cancellation-aware tick loop and exits promptly once cancelled --
 // proving the startup read never blocked on the held mutex.
-func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.T) {
+func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(
+	t *testing.T,
+) {
 	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
 
 	n := &Node{
@@ -1346,7 +1350,9 @@ func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(t *testing.
 // SnapshotMuHolds below for the companion case: Snapshot deliberately
 // does NOT hold this same mutex (see snapshotMu's doc comment, node.go),
 // so an in-progress Snapshot must not skip ticks the way this does.
-func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(t *testing.T) {
+func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(
+	t *testing.T,
+) {
 	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
 
 	bus := event.NewEventBus(nil, nil)
@@ -1401,13 +1407,19 @@ func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(t *testing.T)
 	// which is what "no tick went through while the mutex is held"
 	// actually means.
 	require.Never(
-		t, isStalled, 150*time.Millisecond, 5*time.Millisecond,
+		t,
+		isStalled,
+		150*time.Millisecond,
+		5*time.Millisecond,
 		"a tick must not reach CheckStalledClients while liveLifecycleMu is held",
 	)
 
 	n.liveLifecycleMu.Unlock()
 	require.Eventually(
-		t, isStalled, time.Second, 5*time.Millisecond,
+		t,
+		isStalled,
+		time.Second,
+		5*time.Millisecond,
 		"ticks must resume and mark the stalled client once the mutex is released",
 	)
 }
@@ -1426,7 +1438,9 @@ func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(t *testing.T)
 // Snapshot) across several tick intervals and confirms ticks proceed
 // normally regardless -- the mirror image of the require.Never assertion
 // above, which uses liveLifecycleMu instead.
-func TestChainsyncStallRecyclerDoesNotSkipTicksWhileSnapshotMuHolds(t *testing.T) {
+func TestChainsyncStallRecyclerDoesNotSkipTicksWhileSnapshotMuHolds(
+	t *testing.T,
+) {
 	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
 
 	bus := event.NewEventBus(nil, nil)

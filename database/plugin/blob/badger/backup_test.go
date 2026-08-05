@@ -134,7 +134,10 @@ func TestRestoreRejectsOversizedRecordLength(t *testing.T) {
 	// front, Badger's Load would try to allocate a buffer of this size
 	// before ever noticing the payload is missing.
 	var buf bytes.Buffer
-	require.NoError(t, binary.Write(&buf, binary.LittleEndian, uint64(maxLoadRecordSize)+1))
+	require.NoError(
+		t,
+		binary.Write(&buf, binary.LittleEndian, uint64(maxLoadRecordSize)+1),
+	)
 
 	t.Run("seekable input", func(t *testing.T) {
 		db, err := New(WithDataDir(t.TempDir()))
@@ -219,7 +222,9 @@ func TestBackupCancelledMidStreamStopsBeforeCompleting(t *testing.T) {
 	err = db.Backup(ctx, instrumented)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(
-		t, 1, instrumented.count,
+		t,
+		1,
+		instrumented.count,
 		"a second Write must never reach the instrumented writer once ctx is cancelled",
 	)
 }
@@ -265,7 +270,12 @@ func TestRestoreCancelledMidStreamStopsBeforeCompleting(t *testing.T) {
 
 	var buf bytes.Buffer
 	require.NoError(t, src.Backup(context.Background(), &buf))
-	require.Greater(t, buf.Len(), 32<<10, "backup must exceed Load's 16KB read-ahead buffer")
+	require.Greater(
+		t,
+		buf.Len(),
+		32<<10,
+		"backup must exceed Load's 16KB read-ahead buffer",
+	)
 
 	dst, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
@@ -276,7 +286,9 @@ func TestRestoreCancelledMidStreamStopsBeforeCompleting(t *testing.T) {
 	err = dst.Restore(ctx, instrumented)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(
-		t, 1, instrumented.count,
+		t,
+		1,
+		instrumented.count,
 		"a second Read must never reach the instrumented reader once ctx is cancelled",
 	)
 }
@@ -302,7 +314,10 @@ func (c *cancelAfterNSeekableReads) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-func (c *cancelAfterNSeekableReads) Seek(offset int64, whence int) (int64, error) {
+func (c *cancelAfterNSeekableReads) Seek(
+	offset int64,
+	whence int,
+) (int64, error) {
 	return c.r.Seek(offset, whence)
 }
 
@@ -317,7 +332,9 @@ func (c *cancelAfterNSeekableReads) Seek(offset int64, whence int) (int64, error
 // Restore take the seekable branch directly (skipping the buffering
 // spool), and cancels after its first Read -- a second Read must never
 // reach it.
-func TestRestoreCancelledDuringRecordSizeValidationStopsBeforeCompleting(t *testing.T) {
+func TestRestoreCancelledDuringRecordSizeValidationStopsBeforeCompleting(
+	t *testing.T,
+) {
 	src, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
 	defer src.Close()
@@ -335,7 +352,9 @@ func TestRestoreCancelledDuringRecordSizeValidationStopsBeforeCompleting(t *test
 	var buf bytes.Buffer
 	require.NoError(t, src.Backup(context.Background(), &buf))
 	require.Greater(
-		t, buf.Len(), 4<<10,
+		t,
+		buf.Len(),
+		4<<10,
 		"backup must exceed validateLoadRecordSizes's bufio.Reader default buffer size",
 	)
 

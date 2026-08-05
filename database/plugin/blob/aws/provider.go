@@ -33,10 +33,24 @@ type Config struct {
 }
 
 func RegisterProvider(host *plugin.Host) error {
-	return plugin.Register(host, plugin.Descriptor{Capability: plugin.CapabilityStorageBlob, Name: "s3", Description: "AWS S3 blob store"},
+	return plugin.Register(
+		host,
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityStorageBlob,
+			Name:        "s3",
+			Description: "AWS S3 blob store",
+		},
 		func() Config { return Config{} },
 		func(_ context.Context, cfg Config, deps blob.ProviderDependencies) (*BlobStoreS3, plugin.Instance, error) {
-			store, err := NewWithOptions(WithEndpoint(cfg.Endpoint), WithBucket(cfg.Bucket), WithRegion(cfg.Region), WithPrefix(cfg.Prefix), WithTimeout(cfg.Timeout), WithLogger(deps.Logger), WithPromRegistry(deps.PromRegistry))
+			store, err := NewWithOptions(
+				WithEndpoint(cfg.Endpoint),
+				WithBucket(cfg.Bucket),
+				WithRegion(cfg.Region),
+				WithPrefix(cfg.Prefix),
+				WithTimeout(cfg.Timeout),
+				WithLogger(deps.Logger),
+				WithPromRegistry(deps.PromRegistry),
+			)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -49,5 +63,6 @@ func RegisterProvider(host *plugin.Host) error {
 				},
 				StopFunc: func(context.Context) error { return store.Stop() }, //nolint:contextcheck
 			}, nil
-		})
+		},
+	)
 }

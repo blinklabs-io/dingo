@@ -259,7 +259,10 @@ func mithrilShowCommand() *cobra.Command {
 				"Immutable File Number: %d\n",
 				snapshot.Beacon.ImmutableFileNumber,
 			)
-			fmt.Printf("Size:                  %s\n", mithril.HumanBytes(snapshot.Size))
+			fmt.Printf(
+				"Size:                  %s\n",
+				mithril.HumanBytes(snapshot.Size),
+			)
 			fmt.Printf(
 				"Certificate Hash:      %s\n",
 				snapshot.CertificateHash,
@@ -534,7 +537,8 @@ func runMithrilSync(
 		case mithril.PhaseIndexRebuild:
 			// SyncProgress carries the rebuild duration as Description = d.String(),
 			// which is guaranteed round-trippable by time.ParseDuration.
-			if d, err := time.ParseDuration(p.Description); err == nil && d > 0 {
+			if d, err := time.ParseDuration(p.Description); err == nil &&
+				d > 0 {
 				metrics.recordIndexRebuildDuration(d)
 			}
 		case mithril.PhasePostLedger:

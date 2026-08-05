@@ -438,7 +438,10 @@ func (n *Node) Run(ctx context.Context) error {
 		dbNeedsRecovery = true
 	}
 	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
-		return fmt.Errorf("check for interrupted database truncate: %w", pendingErr)
+		return fmt.Errorf(
+			"check for interrupted database truncate: %w",
+			pendingErr,
+		)
 	} else if pending != nil {
 		return fmt.Errorf(
 			"database truncate was interrupted after it started (target slot %d, target id %d); rerun the truncate operation before starting the node",
@@ -1449,7 +1452,8 @@ func (n *Node) Run(ctx context.Context) error {
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
 				"bark database lifecycle service (Restore/Truncate) defaults to a loopback-only bind since no --bark-host was set; these RPCs are unauthenticated, so widen this only behind your own trusted network/auth controls",
-				"component", "bark",
+				"component",
+				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{
@@ -1740,16 +1744,20 @@ func (n *Node) backfillRewardLiveStake() error {
 		if err != nil {
 			return fmt.Errorf("check reward live stake backfill: %w", err)
 		}
-		staleSnapshots, err := n.db.Metadata().StaleConsensusStakeSnapshotsExist(
-			txn.Metadata(),
-		)
+		staleSnapshots, err := n.db.Metadata().
+			StaleConsensusStakeSnapshotsExist(
+				txn.Metadata(),
+			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
 		}
 		if needed {
 			tip, err := n.db.GetTip(txn)
 			if err != nil {
-				return fmt.Errorf("get tip for reward live stake backfill: %w", err)
+				return fmt.Errorf(
+					"get tip for reward live stake backfill: %w",
+					err,
+				)
 			}
 			n.config.logger.Info(
 				"rebuilding reward live stake aggregate",

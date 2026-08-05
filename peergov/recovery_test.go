@@ -104,7 +104,9 @@ func TestPeerGovernor_GossipChurn_LastEligibleUpstreamSkipLogThrottled(
 	assert.NotNil(t, pg.peers[0].Connection)
 }
 
-func TestPeerGovernor_GossipChurn_KeepsOneUpstreamWhenChurningAll(t *testing.T) {
+func TestPeerGovernor_GossipChurn_KeepsOneUpstreamWhenChurningAll(
+	t *testing.T,
+) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -455,12 +457,17 @@ func TestPeerGovernor_Reconcile_RedialsDisconnectedTopologyPeer(t *testing.T) {
 
 	pg.reconcile(t.Context())
 
-	require.Eventually(t, func() bool {
-		pg.mu.Lock()
-		defer pg.mu.Unlock()
-		return pg.peers[0].Reconnecting || pg.peers[0].ReconnectCount > 0
-	}, 5*time.Second, 10*time.Millisecond,
-		"reconcile must spawn an outbound connection attempt for a disconnected topology peer")
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			return pg.peers[0].Reconnecting || pg.peers[0].ReconnectCount > 0
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"reconcile must spawn an outbound connection attempt for a disconnected topology peer",
+	)
 }
 
 func TestPeerGovernor_Reconcile_RedialsGossipPeerWhenNoUpstream(t *testing.T) {
@@ -489,10 +496,15 @@ func TestPeerGovernor_Reconcile_RedialsGossipPeerWhenNoUpstream(t *testing.T) {
 
 	pg.reconcile(t.Context())
 
-	require.Eventually(t, func() bool {
-		pg.mu.Lock()
-		defer pg.mu.Unlock()
-		return pg.peers[0].Reconnecting || pg.peers[0].ReconnectCount > 0
-	}, 5*time.Second, 10*time.Millisecond,
-		"reconcile must redial a known gossip peer when the node has no upstream left")
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			return pg.peers[0].Reconnecting || pg.peers[0].ReconnectCount > 0
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"reconcile must redial a known gossip peer when the node has no upstream left",
+	)
 }

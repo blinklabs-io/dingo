@@ -1660,7 +1660,16 @@ func newReplayRecoveryAuditLedger(
 		{Point: ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash), BlockNumber: parentBlock.BlockNumber},
 		ledgerTip,
 	} {
-		require.NoError(t, db.SetBlockNonce(tip.Point.Hash, tip.Point.Slot, []byte("nonce"), false, nil))
+		require.NoError(
+			t,
+			db.SetBlockNonce(
+				tip.Point.Hash,
+				tip.Point.Slot,
+				[]byte("nonce"),
+				false,
+				nil,
+			),
+		)
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
@@ -1702,14 +1711,20 @@ func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
 		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
 		TxHash:     testHashBytes("audit-held-failing-tx"),
 		Inputs: []lcommon.TransactionInput{
-			&replayRecoveryInput{txId: testHashBytes("missing-held-audit-producer")},
+			&replayRecoveryInput{
+				txId: testHashBytes("missing-held-audit-producer"),
+			},
 		},
 		Cause: errors.New("bad input"),
 	})
 	require.NoError(t, err)
 	require.True(t, recovered)
 	assert.Less(t, ls.chain.Tip().Point.Slot, ls.Tip().Point.Slot)
-	assert.Equal(t, ocommon.Point{Slot: 140, Hash: testHashBytes("audit-ledger-tip")}, ls.Tip().Point)
+	assert.Equal(
+		t,
+		ocommon.Point{Slot: 140, Hash: testHashBytes("audit-ledger-tip")},
+		ls.Tip().Point,
+	)
 	assert.Nil(t, ls.continuationAudit.Load())
 }
 

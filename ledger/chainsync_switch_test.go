@@ -57,14 +57,17 @@ type mockHeader struct {
 	slot        uint64
 }
 
-func (m mockHeader) Hash() lcommon.Blake2b256          { return m.hash }
-func (m mockHeader) PrevHash() lcommon.Blake2b256      { return m.prevHash }
-func (m mockHeader) BlockNumber() uint64               { return m.blockNumber }
-func (m mockHeader) SlotNumber() uint64                { return m.slot }
-func (m mockHeader) IssuerVkey() lcommon.IssuerVkey    { return lcommon.IssuerVkey{} }
-func (m mockHeader) BlockBodySize() uint64             { return 0 }
-func (m mockHeader) Era() lcommon.Era                  { return babbage.EraBabbage }
-func (m mockHeader) Cbor() []byte                      { return nil }
+func (m mockHeader) Hash() lcommon.Blake2b256     { return m.hash }
+func (m mockHeader) PrevHash() lcommon.Blake2b256 { return m.prevHash }
+func (m mockHeader) BlockNumber() uint64          { return m.blockNumber }
+func (m mockHeader) SlotNumber() uint64           { return m.slot }
+
+func (m mockHeader) IssuerVkey() lcommon.IssuerVkey { return lcommon.IssuerVkey{} }
+func (m mockHeader) BlockBodySize() uint64          { return 0 }
+
+func (m mockHeader) Era() lcommon.Era { return babbage.EraBabbage }
+func (m mockHeader) Cbor() []byte     { return nil }
+
 func (m mockHeader) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
@@ -228,7 +231,10 @@ func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
 					ConnectionId: connId2,
 					Point:        ocommon.Point{Slot: 2, Hash: []byte("hdr-2")},
 					Tip: ochainsync.Tip{
-						Point:       ocommon.Point{Slot: 2, Hash: []byte("hdr-2")},
+						Point: ocommon.Point{
+							Slot: 2,
+							Hash: []byte("hdr-2"),
+						},
 						BlockNumber: 2,
 					},
 					BlockHeader: mockHeader{
@@ -380,7 +386,9 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 	)
 }
 
-func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(t *testing.T) {
+func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
+	t *testing.T,
+) {
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -733,7 +741,9 @@ func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 				fixture.activeConnId,
 			) &&
 				fixture.ls.chain.HeaderCount() == 1 &&
-				len(fixture.ls.bufferedHeaderEvents[connIdKey(fixture.activeConnId)]) == 0
+				len(
+					fixture.ls.bufferedHeaderEvents[connIdKey(fixture.activeConnId)],
+				) == 0
 		},
 		2*time.Second,
 		"expected buffered active headers to replay after fallback handoff",
@@ -827,7 +837,9 @@ func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 // which fails the test outright if that race still exists; there is
 // nothing else to assert; a clean run (no race detected) is the pass
 // condition.
-func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(t *testing.T) {
+func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(
+	t *testing.T,
+) {
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1962,7 +1974,11 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 
 	ls.handleBlockfetchTimeoutLocked(connId1)
 
-	require.Equal(t, []ouroboros.ConnectionId{connId2, connId3}, requestedConnIds)
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{connId2, connId3},
+		requestedConnIds,
+	)
 	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 	assert.Equal(t, 1, testChain.HeaderCount())

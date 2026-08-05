@@ -130,7 +130,11 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 		var elems []cbor.RawMessage
 		if _, err := cbor.Decode(txCbor, &elems); err != nil {
-			return 0, 0, fmt.Errorf("decode endorser tx %d envelope: %w", i, err)
+			return 0, 0, fmt.Errorf(
+				"decode endorser tx %d envelope: %w",
+				i,
+				err,
+			)
 		}
 		if len(elems) < 2 {
 			return 0, 0, fmt.Errorf(
@@ -201,7 +205,11 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 	}
 
-	delta := NewLedgerDelta(rbPoint, uint(dijkstra.EraIdDijkstra), rbBlockNumber)
+	delta := NewLedgerDelta(
+		rbPoint,
+		uint(dijkstra.EraIdDijkstra),
+		rbBlockNumber,
+	)
 	defer delta.Release()
 	delta.Offsets = offsets
 	if ls.config.LeiosApplyEndorserBlockTxs {
@@ -324,7 +332,9 @@ func buildEndorserBlockBlob(
 	writeRange := func(b []byte) (uint32, uint32, error) {
 		off := buf.Len()
 		if off > math.MaxUint32 || len(b) > math.MaxUint32 {
-			return 0, 0, errors.New("endorser block blob offset out of uint32 range")
+			return 0, 0, errors.New(
+				"endorser block blob offset out of uint32 range",
+			)
 		}
 		buf.Write(b)
 		//nolint:gosec // bounds checked above
@@ -348,7 +358,10 @@ func buildEndorserBlockBlob(
 			if len(outCbor) == 0 {
 				enc, err := cbor.Encode(utxo.Output)
 				if err != nil {
-					return nil, nil, fmt.Errorf("encode endorser output: %w", err)
+					return nil, nil, fmt.Errorf(
+						"encode endorser output: %w",
+						err,
+					)
 				}
 				outCbor = enc
 			}
@@ -890,9 +903,12 @@ func (ls *LedgerState) waitForEndorserBlock(
 		case <-waitCtx.Done():
 			ls.config.Logger.Info(
 				"endorser block not fetched within diffusion window; proceeding without it",
-				"component", "ledger",
-				"slot", rbSlot,
-				"eb_hash", ebHash.String(),
+				"component",
+				"ledger",
+				"slot",
+				rbSlot,
+				"eb_hash",
+				ebHash.String(),
 			)
 			return
 		case <-ticker.C:

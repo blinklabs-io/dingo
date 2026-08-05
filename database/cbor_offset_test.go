@@ -419,7 +419,11 @@ func TestEncodeUtxoOffset(t *testing.T) {
 	assert.Len(t, encoded, CborOffsetSize, "encoded should be 52 bytes")
 
 	// Verify magic prefix
-	assert.True(t, bytes.Equal(encoded[0:4], offsetMagic[:]), "should have DOFF magic prefix")
+	assert.True(
+		t,
+		bytes.Equal(encoded[0:4], offsetMagic[:]),
+		"should have DOFF magic prefix",
+	)
 
 	// Verify it decodes correctly
 	decoded, err := DecodeUtxoOffset(encoded)
@@ -517,7 +521,11 @@ func TestEncodeTxOffset(t *testing.T) {
 	assert.Len(t, encoded, CborOffsetSize, "encoded should be 52 bytes")
 
 	// Verify magic prefix
-	assert.True(t, bytes.Equal(encoded[0:4], offsetMagic[:]), "should have DOFF magic prefix")
+	assert.True(
+		t,
+		bytes.Equal(encoded[0:4], offsetMagic[:]),
+		"should have DOFF magic prefix",
+	)
 
 	// Verify it decodes correctly
 	decoded, err := DecodeTxOffset(encoded)
@@ -708,15 +716,60 @@ func TestTxCborPartsEncodeDecode(t *testing.T) {
 			require.NotNil(t, decoded, "decoded should not be nil")
 
 			// Verify round-trip
-			assert.Equal(t, original.BlockSlot, decoded.BlockSlot, "BlockSlot mismatch")
-			assert.Equal(t, original.BlockHash, decoded.BlockHash, "BlockHash mismatch")
-			assert.Equal(t, original.BodyOffset, decoded.BodyOffset, "BodyOffset mismatch")
-			assert.Equal(t, original.BodyLength, decoded.BodyLength, "BodyLength mismatch")
-			assert.Equal(t, original.WitnessOffset, decoded.WitnessOffset, "WitnessOffset mismatch")
-			assert.Equal(t, original.WitnessLength, decoded.WitnessLength, "WitnessLength mismatch")
-			assert.Equal(t, original.MetadataOffset, decoded.MetadataOffset, "MetadataOffset mismatch")
-			assert.Equal(t, original.MetadataLength, decoded.MetadataLength, "MetadataLength mismatch")
-			assert.Equal(t, original.IsValid, decoded.IsValid, "IsValid mismatch")
+			assert.Equal(
+				t,
+				original.BlockSlot,
+				decoded.BlockSlot,
+				"BlockSlot mismatch",
+			)
+			assert.Equal(
+				t,
+				original.BlockHash,
+				decoded.BlockHash,
+				"BlockHash mismatch",
+			)
+			assert.Equal(
+				t,
+				original.BodyOffset,
+				decoded.BodyOffset,
+				"BodyOffset mismatch",
+			)
+			assert.Equal(
+				t,
+				original.BodyLength,
+				decoded.BodyLength,
+				"BodyLength mismatch",
+			)
+			assert.Equal(
+				t,
+				original.WitnessOffset,
+				decoded.WitnessOffset,
+				"WitnessOffset mismatch",
+			)
+			assert.Equal(
+				t,
+				original.WitnessLength,
+				decoded.WitnessLength,
+				"WitnessLength mismatch",
+			)
+			assert.Equal(
+				t,
+				original.MetadataOffset,
+				decoded.MetadataOffset,
+				"MetadataOffset mismatch",
+			)
+			assert.Equal(
+				t,
+				original.MetadataLength,
+				decoded.MetadataLength,
+				"MetadataLength mismatch",
+			)
+			assert.Equal(
+				t,
+				original.IsValid,
+				decoded.IsValid,
+				"IsValid mismatch",
+			)
 		})
 	}
 }
@@ -757,7 +810,12 @@ func TestDecodeTxCborPartsInvalidSize(t *testing.T) {
 			decoded, err := DecodeTxCborParts(tc.data)
 			assert.Error(t, err, "decode should return error for invalid size")
 			assert.Nil(t, decoded, "decoded should be nil on error")
-			assert.Contains(t, err.Error(), "69", "error message should mention expected size")
+			assert.Contains(
+				t,
+				err.Error(),
+				"69",
+				"error message should mention expected size",
+			)
 		})
 	}
 }
@@ -773,7 +831,12 @@ func TestDecodeTxCborPartsInvalidMagic(t *testing.T) {
 	decoded, err := DecodeTxCborParts(data)
 	assert.Error(t, err, "decode should return error for invalid magic")
 	assert.Nil(t, decoded, "decoded should be nil on error")
-	assert.Contains(t, err.Error(), "magic", "error message should mention magic")
+	assert.Contains(
+		t,
+		err.Error(),
+		"magic",
+		"error message should mention magic",
+	)
 }
 
 func TestIsTxCborPartsStorage(t *testing.T) {
@@ -787,11 +850,19 @@ func TestIsTxCborPartsStorage(t *testing.T) {
 		expected bool
 	}{
 		{name: "valid 69 bytes with magic", data: validData, expected: true},
-		{name: "69 bytes but wrong magic", data: make([]byte, 69), expected: false},
+		{
+			name:     "69 bytes but wrong magic",
+			data:     make([]byte, 69),
+			expected: false,
+		},
 		{name: "too short - 68 bytes", data: make([]byte, 68), expected: false},
 		{name: "too long - 70 bytes", data: make([]byte, 70), expected: false},
 		{name: "empty", data: []byte{}, expected: false},
-		{name: "52 bytes (CborOffset size)", data: make([]byte, 52), expected: false},
+		{
+			name:     "52 bytes (CborOffset size)",
+			data:     make([]byte, 52),
+			expected: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -844,16 +915,36 @@ func TestTxCborPartsReassembleTxCbor(t *testing.T) {
 		// Verify structure: 0x84 (4-element array) + body + witness + true + metadata
 		assert.Equal(t, byte(0x84), result[0], "should be 4-element array")
 		// Body should follow array header
-		assert.True(t, bytes.Equal(result[1:1+len(bodyCbor)], bodyCbor), "body mismatch")
+		assert.True(
+			t,
+			bytes.Equal(result[1:1+len(bodyCbor)], bodyCbor),
+			"body mismatch",
+		)
 		// Witness should follow body
 		witnessStart := 1 + len(bodyCbor)
-		assert.True(t, bytes.Equal(result[witnessStart:witnessStart+len(witnessCbor)], witnessCbor), "witness mismatch")
+		assert.True(
+			t,
+			bytes.Equal(
+				result[witnessStart:witnessStart+len(witnessCbor)],
+				witnessCbor,
+			),
+			"witness mismatch",
+		)
 		// IsValid (true = 0xf5) should follow witness
 		isValidIdx := witnessStart + len(witnessCbor)
-		assert.Equal(t, byte(0xf5), result[isValidIdx], "is_valid should be true (0xf5)")
+		assert.Equal(
+			t,
+			byte(0xf5),
+			result[isValidIdx],
+			"is_valid should be true (0xf5)",
+		)
 		// Metadata should follow is_valid
 		metaStart := isValidIdx + 1
-		assert.True(t, bytes.Equal(result[metaStart:], metadataCbor), "metadata mismatch")
+		assert.True(
+			t,
+			bytes.Equal(result[metaStart:], metadataCbor),
+			"metadata mismatch",
+		)
 	})
 
 	t.Run("invalid transaction without metadata", func(t *testing.T) {
@@ -874,9 +965,19 @@ func TestTxCborPartsReassembleTxCbor(t *testing.T) {
 		assert.Equal(t, byte(0x84), result[0], "should be 4-element array")
 		// IsValid (false = 0xf4)
 		isValidIdx := 1 + len(bodyCbor) + len(witnessCbor)
-		assert.Equal(t, byte(0xf4), result[isValidIdx], "is_valid should be false (0xf4)")
+		assert.Equal(
+			t,
+			byte(0xf4),
+			result[isValidIdx],
+			"is_valid should be false (0xf4)",
+		)
 		// Null (0xf6) for no metadata
-		assert.Equal(t, byte(0xf6), result[isValidIdx+1], "metadata should be null (0xf6)")
+		assert.Equal(
+			t,
+			byte(0xf6),
+			result[isValidIdx+1],
+			"metadata should be null (0xf6)",
+		)
 	})
 
 	t.Run("body out of bounds", func(t *testing.T) {

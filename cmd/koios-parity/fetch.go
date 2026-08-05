@@ -34,9 +34,12 @@ Does not contact Dingo. Safe to interrupt and resume.`,
 
 	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
 	cmd.Flags().Int("concurrency", 5, "parallel fetch workers")
-	cmd.Flags().Uint64("from-epoch", 0, "start epoch (gaps in [from, through] are filled; add --force-refresh to overwrite cached rows)")
-	cmd.Flags().Uint64("through-epoch", 0, "stop at this epoch (default: tip-1)")
-	cmd.Flags().Bool("force-refresh", false, "re-fetch and overwrite all epochs in [from-epoch, through-epoch], not just missing ones")
+	cmd.Flags().
+		Uint64("from-epoch", 0, "start epoch (gaps in [from, through] are filled; add --force-refresh to overwrite cached rows)")
+	cmd.Flags().
+		Uint64("through-epoch", 0, "stop at this epoch (default: tip-1)")
+	cmd.Flags().
+		Bool("force-refresh", false, "re-fetch and overwrite all epochs in [from-epoch, through-epoch], not just missing ones")
 
 	return cmd
 }
@@ -53,7 +56,9 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	forceRefresh, _ := cmd.Flags().GetBool("force-refresh")
 
 	if forceRefresh && !cmd.Flags().Changed("from-epoch") {
-		return errors.New("--force-refresh requires an explicit --from-epoch to prevent accidental full historical re-fetch")
+		return errors.New(
+			"--force-refresh requires an explicit --from-epoch to prevent accidental full historical re-fetch",
+		)
 	}
 
 	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
@@ -77,11 +82,16 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		result.FromEpoch, result.ThroughEpoch,
 	)
 	if len(result.FailedEpochs) > 0 {
-		fmt.Printf("warning: %d epoch(s) hit a transient fetch failure and remain uncached: %v\n"+
-			"  they will be retried automatically on the next `fetch` run\n",
-			len(result.FailedEpochs), result.FailedEpochs,
+		fmt.Printf(
+			"warning: %d epoch(s) hit a transient fetch failure and remain uncached: %v\n"+
+				"  they will be retried automatically on the next `fetch` run\n",
+			len(result.FailedEpochs),
+			result.FailedEpochs,
 		)
-		return fmt.Errorf("%d epoch(s) failed transiently; rerun fetch to retry", len(result.FailedEpochs))
+		return fmt.Errorf(
+			"%d epoch(s) failed transiently; rerun fetch to retry",
+			len(result.FailedEpochs),
+		)
 	}
 	return nil
 }

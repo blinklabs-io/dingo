@@ -51,7 +51,10 @@ func TestResolveKeyReportsStagedDeleteAsMissing(t *testing.T) {
 
 	_, err := store.resolveKey(context.Background(), txn, []byte("key"))
 	if !errors.Is(err, types.ErrBlobKeyNotFound) {
-		t.Fatalf("resolveKey on a staged delete = %v, want ErrBlobKeyNotFound", err)
+		t.Fatalf(
+			"resolveKey on a staged delete = %v, want ErrBlobKeyNotFound",
+			err,
+		)
 	}
 }
 
@@ -94,7 +97,11 @@ func TestResolveKeyServesStagedEmptyValue(t *testing.T) {
 
 	value, deleted, staged := txn.stagedValue([]byte("key"))
 	if !staged || deleted {
-		t.Fatalf("empty write should be staged and not deleted, got deleted=%v staged=%v", deleted, staged)
+		t.Fatalf(
+			"empty write should be staged and not deleted, got deleted=%v staged=%v",
+			deleted,
+			staged,
+		)
 	}
 	if value == nil || len(value) != 0 {
 		t.Fatalf("staged empty value = %v, want an empty non-nil slice", value)
@@ -123,7 +130,9 @@ func TestResolveKeyServesStagedEmptyValue(t *testing.T) {
 func TestRollbackIsNoopReportsFalse(t *testing.T) {
 	txn := &s3Txn{pending: make(map[string]s3PendingChange)}
 	if txn.RollbackIsNoop() {
-		t.Fatal("staged transactions are reversible: Rollback issues no requests")
+		t.Fatal(
+			"staged transactions are reversible: Rollback issues no requests",
+		)
 	}
 
 	// Rollback really does discard staged work rather than applying it.

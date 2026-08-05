@@ -43,7 +43,9 @@ type rebuildableRegisterer struct {
 	collectors []prometheus.Collector
 }
 
-func newRebuildableRegisterer(inner prometheus.Registerer) *rebuildableRegisterer {
+func newRebuildableRegisterer(
+	inner prometheus.Registerer,
+) *rebuildableRegisterer {
 	return &rebuildableRegisterer{inner: inner}
 }
 

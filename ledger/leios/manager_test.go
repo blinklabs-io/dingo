@@ -1244,7 +1244,13 @@ func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
 
-	require.NoError(t, fixture.mgr.ValidateVotingKey(poolKeyHash, fixture.keys[member.VoterId]))
+	require.NoError(
+		t,
+		fixture.mgr.ValidateVotingKey(
+			poolKeyHash,
+			fixture.keys[member.VoterId],
+		),
+	)
 
 	wrongKey, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
 	require.NoError(t, err)

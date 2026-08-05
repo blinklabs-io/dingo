@@ -469,10 +469,16 @@ func (m *VoteManager) ValidateVotingKey(
 	}
 	registered, ok := m.registry.PublicKeyFor(poolKeyHash[:])
 	if !ok {
-		return fmt.Errorf("no registered leios voting public key for pool %x", poolKeyHash)
+		return fmt.Errorf(
+			"no registered leios voting public key for pool %x",
+			poolKeyHash,
+		)
 	}
 	if !registered.Equal(key.PublicKey()) {
-		return fmt.Errorf("configured leios voting key does not match registered public key for pool %x", poolKeyHash)
+		return fmt.Errorf(
+			"configured leios voting key does not match registered public key for pool %x",
+			poolKeyHash,
+		)
 	}
 	return nil
 }

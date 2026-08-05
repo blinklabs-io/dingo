@@ -24,12 +24,22 @@ func TestAccountExpiredAtEpoch(t *testing.T) {
 		{0, 0, false},   // unset => active
 		{0, 100, false}, // unset => active regardless of epoch
 		{10, 9, false},  // exp >= cur => active
-		{10, 10, false}, // boundary: exp == cur => active (CIP: expired is < cur)
-		{10, 11, true},  // exp < cur => expired
+		{
+			10,
+			10,
+			false,
+		}, // boundary: exp == cur => active (CIP: expired is < cur)
+		{10, 11, true}, // exp < cur => expired
 	}
 	for _, c := range cases {
 		if got := accountExpiredAtEpoch(c.exp, c.cur); got != c.expired {
-			t.Fatalf("accountExpiredAtEpoch(%d,%d)=%v want %v", c.exp, c.cur, got, c.expired)
+			t.Fatalf(
+				"accountExpiredAtEpoch(%d,%d)=%v want %v",
+				c.exp,
+				c.cur,
+				got,
+				c.expired,
+			)
 		}
 	}
 }

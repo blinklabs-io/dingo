@@ -38,6 +38,7 @@ import (
 var benchmarkDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 const storageModeBenchmarkStartSlot = 10000
+
 const storageModeBenchmarkSkippedInputHash = "e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6"
 const storageModeBenchmarkSkippedInputIndex = 3
 const blockProcessingBenchmarkFixtureBlockCount = 4096
@@ -533,7 +534,8 @@ func BenchmarkAccountLookupByStakeKeyNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.Metadata().GetAccountByCredential(0, testStakeKey, false, nil)
+		_, err := db.Metadata().
+			GetAccountByCredential(0, testStakeKey, false, nil)
 		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -1186,7 +1188,8 @@ func BenchmarkStakeRegistrationLookupsNoData(b *testing.B) {
 	// Benchmark lookup (on empty database for now)
 	for i := 0; b.Loop(); i++ {
 		stakeKey := testStakeKeys[i%len(testStakeKeys)]
-		_, err := db.Metadata().GetStakeRegistrationsByCredential(0, stakeKey, nil)
+		_, err := db.Metadata().
+			GetStakeRegistrationsByCredential(0, stakeKey, nil)
 		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -1263,7 +1266,8 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		stakeKey := testStakeKeys[i%len(testStakeKeys)]
-		_, err := db.Metadata().GetStakeRegistrationsByCredential(0, stakeKey, nil)
+		_, err := db.Metadata().
+			GetStakeRegistrationsByCredential(0, stakeKey, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -2650,7 +2654,9 @@ func loadBlockProcessingFixture(
 			b.Fatal(err)
 		}
 		if block == nil {
-			b.Skip("insufficient blocks available for throughput benchmark seed")
+			b.Skip(
+				"insufficient blocks available for throughput benchmark seed",
+			)
 		}
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
@@ -2877,7 +2883,9 @@ func storageModeBenchmarkCanIngestBlock(
 	for _, tx := range block.block.Transactions() {
 		skipInputs := func(inputs []lcommon.TransactionInput) bool {
 			for _, input := range inputs {
-				if input.Id().String() == storageModeBenchmarkSkippedInputHash &&
+				if input.Id().
+					String() ==
+					storageModeBenchmarkSkippedInputHash &&
 					input.Index() == storageModeBenchmarkSkippedInputIndex {
 					return true
 				}
@@ -3021,7 +3029,9 @@ func loadStorageModeBenchmarkFixture(
 			block: ledgerBlock,
 			point: point,
 			model: models.Block{
-				ID:       uint64(len(ret.seedBlocks) + len(ret.measureBlocks) + 1),
+				ID: uint64(
+					len(ret.seedBlocks) + len(ret.measureBlocks) + 1,
+				),
 				Slot:     point.Slot,
 				Hash:     point.Hash,
 				Number:   ledgerBlock.BlockNumber(),
@@ -3205,7 +3215,10 @@ func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
 			defer dbtest.CloseDatabase(db)
 
 			if _, err := ingestStorageModeBenchmarkBlocks(db, fixture.seedBlocks); err != nil {
-				b.Fatalf("seed steady-state storage mode benchmark blocks: %v", err)
+				b.Fatalf(
+					"seed steady-state storage mode benchmark blocks: %v",
+					err,
+				)
 			}
 
 			totalBlocks := 0

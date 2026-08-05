@@ -156,7 +156,9 @@ func persistGovernanceProposals(
 
 	for i, proposal := range proposals {
 		govAction := proposal.GovAction()
-		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(govAction)
+		actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
+			govAction,
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"proposal %d in tx %s: %w",

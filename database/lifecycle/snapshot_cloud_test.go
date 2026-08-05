@@ -101,7 +101,8 @@ func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
 		"marker names a since-abandoned destination, not the one configured now",
 	)
 	require.True(
-		t, lifecycle.IsCloudMirrored(dir),
+		t,
+		lifecycle.IsCloudMirrored(dir),
 		"a stale marker is still a marker -- IsCloudMirrored's plain presence check is unaffected",
 	)
 }

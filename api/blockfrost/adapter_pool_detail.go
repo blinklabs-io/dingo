@@ -292,7 +292,9 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 		)
 	}
 	blocksEpochByPool, _, err := db.Metadata().CountPoolBlocksInSlotRange(
-		[]lcommon.PoolKeyHash{pkh}, epochRow.StartSlot, noSlotUpperBound, txn.Metadata(),
+		[]lcommon.PoolKeyHash{
+			pkh,
+		}, epochRow.StartSlot, noSlotUpperBound, txn.Metadata(),
 	)
 	if err != nil {
 		return PoolDetailInfo{}, fmt.Errorf(

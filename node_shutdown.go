@@ -268,8 +268,10 @@ func (n *Node) shutdown() error {
 		case <-ctx.Done():
 			n.config.logger.Warn(
 				"timed out waiting for deferred-index maintenance; continuing shutdown",
-				"timeout", shutdownTimeout,
-				"error", ctx.Err(),
+				"timeout",
+				shutdownTimeout,
+				"error",
+				ctx.Err(),
 			)
 			err = errors.Join(
 				err,
@@ -297,7 +299,10 @@ func (n *Node) shutdown() error {
 	}
 	if n.pluginHost != nil {
 		if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("plugin host shutdown: %w", stopErr))
+			err = errors.Join(
+				err,
+				fmt.Errorf("plugin host shutdown: %w", stopErr),
+			)
 		}
 	}
 

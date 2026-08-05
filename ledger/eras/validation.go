@@ -60,7 +60,10 @@ func minPoolMarginFromLedgerState(ls lcommon.LedgerState) *big.Rat {
 // certificate's margin (variable fee) is at least minMargin. It is a no-op when
 // minMargin is nil (feature disabled). A nil certificate margin is treated as 0.
 // Non-pool-registration certificates are ignored.
-func checkPoolMarginFloor(certs []lcommon.Certificate, minMargin *big.Rat) error {
+func checkPoolMarginFloor(
+	certs []lcommon.Certificate,
+	minMargin *big.Rat,
+) error {
 	if minMargin == nil {
 		return nil
 	}
@@ -231,7 +234,11 @@ func validateUtxoValidationSkipIndex(
 	if skipValidationFunc == nil {
 		panic(skipRuleName + " expected validation function is nil")
 	}
-	if utxoValidationRulePtr(rules[skipIndex]) != utxoValidationRulePtr(skipValidationFunc) {
+	if utxoValidationRulePtr(
+		rules[skipIndex],
+	) != utxoValidationRulePtr(
+		skipValidationFunc,
+	) {
 		panic(fmt.Sprintf(
 			"%s hardcoded rule index %d no longer resolves to the expected function",
 			skipRuleName,

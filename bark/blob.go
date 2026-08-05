@@ -71,7 +71,10 @@ func validateArchiveURL(rawURL string, allowedHosts map[string]struct{}) error {
 	return nil
 }
 
-func archiveDownloadHosts(baseURL string, allowlist []string) map[string]struct{} {
+func archiveDownloadHosts(
+	baseURL string,
+	allowlist []string,
+) map[string]struct{} {
 	hosts := map[string]struct{}{}
 	if u, err := url.Parse(baseURL); err == nil {
 		addArchiveDownloadHost(hosts, u.Hostname())
@@ -107,7 +110,9 @@ func archiveHTTPClient(client *http.Client) *http.Client {
 	}
 	secured := *client
 	secured.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return errors.New("bark: redirects are not permitted for archive downloads")
+		return errors.New(
+			"bark: redirects are not permitted for archive downloads",
+		)
 	}
 	return &secured
 }
@@ -142,9 +147,12 @@ func NewBarkBlobStore(
 			httpClient,
 			config.BaseUrl,
 		),
-		httpClient:                httpClient,
-		blockDownloadAllowedHosts: archiveDownloadHosts(config.BaseUrl, config.BlockDownloadAllowedHosts),
-		upstream:                  upstream,
+		httpClient: httpClient,
+		blockDownloadAllowedHosts: archiveDownloadHosts(
+			config.BaseUrl,
+			config.BlockDownloadAllowedHosts,
+		),
+		upstream: upstream,
 	}, nil
 }
 
@@ -196,13 +204,25 @@ type barkIterator struct {
 	store    *BlobStoreBark
 }
 
-func (it *barkIterator) Rewind()                      { it.upstream.Rewind() }
-func (it *barkIterator) Seek(prefix []byte)           { it.upstream.Seek(prefix) }
-func (it *barkIterator) Valid() bool                  { return it.upstream.Valid() }
-func (it *barkIterator) ValidForPrefix(p []byte) bool { return it.upstream.ValidForPrefix(p) }
-func (it *barkIterator) Next()                        { it.upstream.Next() }
-func (it *barkIterator) Close()                       { it.upstream.Close() }
-func (it *barkIterator) Err() error                   { return it.upstream.Err() }
+func (it *barkIterator) Rewind() { it.upstream.Rewind() }
+
+func (it *barkIterator) Seek(
+	prefix []byte,
+) {
+	it.upstream.Seek(prefix)
+}
+
+func (it *barkIterator) Valid() bool { return it.upstream.Valid() }
+
+func (it *barkIterator) ValidForPrefix(
+	p []byte,
+) bool {
+	return it.upstream.ValidForPrefix(p)
+}
+func (it *barkIterator) Next()  { it.upstream.Next() }
+func (it *barkIterator) Close() { it.upstream.Close() }
+
+func (it *barkIterator) Err() error { return it.upstream.Err() }
 
 func (it *barkIterator) Item() types.BlobItem {
 	upstreamItem := it.upstream.Item()
@@ -297,7 +317,11 @@ func (b *BlobStoreBark) GetBlock(
 		context.Background(), archiveFetchTimeout,
 	)
 	defer cancel()
-	archiveCbor, archiveMeta, archErr := b.fetchBlockFromArchive(ctx, slot, hash)
+	archiveCbor, archiveMeta, archErr := b.fetchBlockFromArchive(
+		ctx,
+		slot,
+		hash,
+	)
 	if archErr != nil {
 		return nil, types.BlockMetadata{}, archErr
 	}
@@ -342,7 +366,10 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	)
 	if err != nil {
 		return nil, types.BlockMetadata{},
-			fmt.Errorf("failed getting signed url from bark archive service: %w", err)
+			fmt.Errorf(
+				"failed getting signed url from bark archive service: %w",
+				err,
+			)
 	}
 
 	blocks := resp.Msg.GetBlocks()
@@ -371,7 +398,10 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	blockResp, err := b.httpClient.Do(blockReq) //nolint:gosec
 	if err != nil {
 		return nil, types.BlockMetadata{},
-			fmt.Errorf("failed downloading block from bark supplied url: %w", err)
+			fmt.Errorf(
+				"failed downloading block from bark supplied url: %w",
+				err,
+			)
 	}
 	if blockResp == nil {
 		return nil, types.BlockMetadata{},
@@ -393,7 +423,10 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	}
 	if int64(len(blockBody)) > maxArchiveBlockSize {
 		return nil, types.BlockMetadata{},
-			fmt.Errorf("bark: archive response exceeds %d-byte limit", maxArchiveBlockSize)
+			fmt.Errorf(
+				"bark: archive response exceeds %d-byte limit",
+				maxArchiveBlockSize,
+			)
 	}
 
 	archivePrevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())

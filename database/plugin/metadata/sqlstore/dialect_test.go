@@ -49,7 +49,9 @@ func TestTranslateMySQLReservedIdentifiers(t *testing.T) {
 	)
 }
 
-func TestTranslateMySQLReservedIdentifiersPreservesLiteralsAndComments(t *testing.T) {
+func TestTranslateMySQLReservedIdentifiersPreservesLiteralsAndComments(
+	t *testing.T,
+) {
 	t.Parallel()
 	query := `SELECT '"not an identifier"', "transaction" -- "comment"
 FROM "transaction" /* "comment" */`
@@ -63,9 +65,14 @@ FROM "transaction" /* "comment" */`
 func TestMySQLDeferredIndexDDLUsesPrefixes(t *testing.T) {
 	t.Parallel()
 	dialect := MySQLDialect()
-	require.Equal(t,
+	require.Equal(
+		t,
 		"CREATE INDEX `idx_utxo_deleted_payment_script` ON `utxo` (`deleted_slot`, `payment_script`, `amount`(255))",
-		dialect.CreateIndexSQL("idx_utxo_deleted_payment_script", "utxo", []string{"deleted_slot", "payment_script", "amount"}),
+		dialect.CreateIndexSQL(
+			"idx_utxo_deleted_payment_script",
+			"utxo",
+			[]string{"deleted_slot", "payment_script", "amount"},
+		),
 	)
 	require.Equal(t,
 		"DROP INDEX `idx_utxo_deleted_payment_script` ON `utxo`",
@@ -95,7 +102,9 @@ func TestMySQLReturningTranslationQuotesReservedIdentifiers(t *testing.T) {
 func TestMySQLForeignKeyIndexErrorDetection(t *testing.T) {
 	t.Parallel()
 	require.True(t, isMySQLForeignKeyIndexError(
-		fmt.Errorf("Error 1553 (HY000): Cannot drop index: needed in a foreign key constraint"),
+		fmt.Errorf(
+			"Error 1553 (HY000): Cannot drop index: needed in a foreign key constraint",
+		),
 	))
 	require.False(t, isMySQLForeignKeyIndexError(
 		fmt.Errorf("Error 1553 (HY000): unrelated DDL failure"),

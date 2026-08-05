@@ -42,7 +42,10 @@ func BuildSummary(
 	transition TransitionInfo,
 ) (Summary, error) {
 	if err := current.Params.Validate(); err != nil {
-		return Summary{}, fmt.Errorf("hardfork: current era params invalid: %w", err)
+		return Summary{}, fmt.Errorf(
+			"hardfork: current era params invalid: %w",
+			err,
+		)
 	}
 	for i, p := range past {
 		if p.End == nil {
@@ -60,7 +63,8 @@ func BuildSummary(
 		if transition.KnownEpoch <= current.Start.Epoch {
 			return Summary{}, fmt.Errorf(
 				"hardfork: TransitionKnown epoch %d must be > era start epoch %d",
-				transition.KnownEpoch, current.Start.Epoch,
+				transition.KnownEpoch,
+				current.Start.Epoch,
 			)
 		}
 		b := mkUpperBound(current.Params, current.Start, transition.KnownEpoch)

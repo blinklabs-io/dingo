@@ -37,7 +37,11 @@ func TestCheckCommitTimestamp_FreshBlobAndMetadata(t *testing.T) {
 	defer closeTestDatabase(db)
 
 	bts, bErr := db.Blob().GetCommitTimestamp()
-	require.NoError(t, bErr, "blob.GetCommitTimestamp on fresh blob must not error")
+	require.NoError(
+		t,
+		bErr,
+		"blob.GetCommitTimestamp on fresh blob must not error",
+	)
 	require.Equal(t, int64(0), bts, "fresh blob should report timestamp 0")
 }
 
@@ -70,7 +74,13 @@ func TestCheckCommitTimestamp_MetadataOnly(t *testing.T) {
 	}
 	require.Error(t, err)
 	var cte CommitTimestampError
-	require.ErrorAs(t, err, &cte, "expected recoverable CommitTimestampError, got: %v", err)
+	require.ErrorAs(
+		t,
+		err,
+		&cte,
+		"expected recoverable CommitTimestampError, got: %v",
+		err,
+	)
 	require.Equal(t, int64(123456789), cte.MetadataTimestamp)
 	require.Equal(t, int64(0), cte.BlobTimestamp)
 	require.False(
@@ -108,7 +118,13 @@ func TestCheckCommitTimestamp_BlobOnly(t *testing.T) {
 	}
 	require.Error(t, err)
 	var cte CommitTimestampError
-	require.ErrorAs(t, err, &cte, "expected recoverable CommitTimestampError, got: %v", err)
+	require.ErrorAs(
+		t,
+		err,
+		&cte,
+		"expected recoverable CommitTimestampError, got: %v",
+		err,
+	)
 	require.Equal(t, int64(0), cte.MetadataTimestamp)
 	require.Equal(t, int64(123456789), cte.BlobTimestamp)
 }

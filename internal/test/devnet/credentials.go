@@ -84,7 +84,11 @@ func LoadGenesisStakeCredentials(dir string) ([]olsq.StakeCredential, error) {
 			raw = raw[2:]
 		}
 		if len(raw) != 32 {
-			return nil, fmt.Errorf("unexpected stake key length %d in %s", len(raw), e.Name())
+			return nil, fmt.Errorf(
+				"unexpected stake key length %d in %s",
+				len(raw),
+				e.Name(),
+			)
 		}
 		out = append(out, StakeKeyToCredential(raw))
 	}

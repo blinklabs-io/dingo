@@ -22,8 +22,14 @@ import (
 func FuzzCompareVRFOutputs(f *testing.F) {
 	f.Add([]byte(nil), []byte(nil))
 	f.Add(make([]byte, VRFOutputSize), make([]byte, VRFOutputSize))
-	f.Add(append([]byte{0x00}, bytes.Repeat([]byte{0xff}, VRFOutputSize-1)...), bytes.Repeat([]byte{0xff}, VRFOutputSize))
-	f.Add(bytes.Repeat([]byte{0xff}, VRFOutputSize), append([]byte{0x00}, bytes.Repeat([]byte{0xff}, VRFOutputSize-1)...))
+	f.Add(
+		append([]byte{0x00}, bytes.Repeat([]byte{0xff}, VRFOutputSize-1)...),
+		bytes.Repeat([]byte{0xff}, VRFOutputSize),
+	)
+	f.Add(
+		bytes.Repeat([]byte{0xff}, VRFOutputSize),
+		append([]byte{0x00}, bytes.Repeat([]byte{0xff}, VRFOutputSize-1)...),
+	)
 
 	f.Fuzz(func(t *testing.T, vrfA, vrfB []byte) {
 		result := CompareVRFOutputs(vrfA, vrfB)
@@ -43,15 +49,27 @@ func FuzzCompareVRFOutputs(f *testing.F) {
 		switch cmp := bytes.Compare(vrfA, vrfB); {
 		case cmp < 0:
 			if result != ChainABetter || reversed != ChainBBetter {
-				t.Fatalf("lower A comparison = (%v,%v), want (A better,B better)", result, reversed)
+				t.Fatalf(
+					"lower A comparison = (%v,%v), want (A better,B better)",
+					result,
+					reversed,
+				)
 			}
 		case cmp > 0:
 			if result != ChainBBetter || reversed != ChainABetter {
-				t.Fatalf("lower B comparison = (%v,%v), want (B better,A better)", result, reversed)
+				t.Fatalf(
+					"lower B comparison = (%v,%v), want (B better,A better)",
+					result,
+					reversed,
+				)
 			}
 		default:
 			if result != ChainEqual || reversed != ChainEqual {
-				t.Fatalf("equal VRFs comparison = (%v,%v), want equal", result, reversed)
+				t.Fatalf(
+					"equal VRFs comparison = (%v,%v), want equal",
+					result,
+					reversed,
+				)
 			}
 		}
 	})

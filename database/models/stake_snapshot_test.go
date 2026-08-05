@@ -28,9 +28,19 @@ func TestValidPoolStakeSnapshotType(t *testing.T) {
 		models.PoolStakeSnapshotTypeGo,
 		models.PoolStakeSnapshotTypeActive,
 	} {
-		require.True(t, models.ValidPoolStakeSnapshotType(valid), "%q must be valid", valid)
+		require.True(
+			t,
+			models.ValidPoolStakeSnapshotType(valid),
+			"%q must be valid",
+			valid,
+		)
 	}
 	for _, invalid := range []string{"", "Mark", "MARK", "active", "unknown"} {
-		require.False(t, models.ValidPoolStakeSnapshotType(invalid), "%q must be invalid", invalid)
+		require.False(
+			t,
+			models.ValidPoolStakeSnapshotType(invalid),
+			"%q must be invalid",
+			invalid,
+		)
 	}
 }

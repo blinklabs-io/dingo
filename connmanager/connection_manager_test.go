@@ -393,7 +393,10 @@ func TestResolvedListeners_PreservesUnixSentinelForPipeListener(t *testing.T) {
 		t.Fatalf("expected 1 resolved listener config, got %d", len(resolved))
 	}
 	if resolved[0].Listener != nil {
-		t.Fatalf("expected Listener to be cleared, got %v", resolved[0].Listener)
+		t.Fatalf(
+			"expected Listener to be cleared, got %v",
+			resolved[0].Listener,
+		)
 	}
 	if resolved[0].ListenNetwork != "unix" {
 		t.Fatalf(

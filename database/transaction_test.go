@@ -500,7 +500,11 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
 	txn := db.Transaction(true)
 	defer txn.Release()
 
-	_, err = db.recoverConsumedUtxo(dbtestutil.NewMockInput(txId, 0), txn, false)
+	_, err = db.recoverConsumedUtxo(
+		dbtestutil.NewMockInput(txId, 0),
+		txn,
+		false,
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
 }
@@ -794,8 +798,10 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	newRecoverableDB := func(t *testing.T) *Database {
 		t.Helper()
 		db, err := newTestDatabase(t, &Config{
-			DataDir:              t.TempDir(),
-			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			DataDir: t.TempDir(),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			StrictUtxoValidation: true,
 		})
 		require.NoError(t, err)
@@ -891,8 +897,10 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 
 	t.Run("flag on inert without StrictUtxoValidation", func(t *testing.T) {
 		db, err := newTestDatabase(t, &Config{
-			DataDir:              t.TempDir(),
-			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			DataDir: t.TempDir(),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			StrictUtxoValidation: false,
 		})
 		require.NoError(t, err)

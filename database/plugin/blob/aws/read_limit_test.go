@@ -31,12 +31,22 @@ func TestS3TransactionStagesAndRollsBack(t *testing.T) {
 	txn.stageSet([]byte("key"), []byte("value"))
 	value, deleted, staged := txn.stagedValue([]byte("key"))
 	if !staged || deleted || string(value) != "value" {
-		t.Fatalf("staged value = %q, deleted=%v, staged=%v", value, deleted, staged)
+		t.Fatalf(
+			"staged value = %q, deleted=%v, staged=%v",
+			value,
+			deleted,
+			staged,
+		)
 	}
 	txn.stageDelete([]byte("key"))
 	value, deleted, staged = txn.stagedValue([]byte("key"))
 	if !staged || !deleted || value != nil {
-		t.Fatalf("staged delete = %q, deleted=%v, staged=%v", value, deleted, staged)
+		t.Fatalf(
+			"staged delete = %q, deleted=%v, staged=%v",
+			value,
+			deleted,
+			staged,
+		)
 	}
 	if err := txn.Rollback(); err != nil {
 		t.Fatal(err)
@@ -64,7 +74,11 @@ func TestReverseKeyFile(t *testing.T) {
 		}
 	}
 	if _, valid, err := f.nextReverse(); err != nil || valid {
-		t.Fatalf("reverse iterator should be exhausted: valid=%v err=%v", valid, err)
+		t.Fatalf(
+			"reverse iterator should be exhausted: valid=%v err=%v",
+			valid,
+			err,
+		)
 	}
 	file.Close()
 }

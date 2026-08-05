@@ -74,8 +74,12 @@ func TestGetPraosTiebreakerView_Dijkstra(t *testing.T) {
 	assert.Equal(t, issuer[:], view.Issuer)
 	assert.Equal(t, header.Body.VrfResult.Output, view.TieBreakVRF)
 	assert.True(t, view.hasIssuerIssueNo())
-	assert.Equal(t, PraosTiebreakerConfigConway(), view.TiebreakerConfig,
-		"Dijkstra must use the Conway-compatible restricted VRF tiebreaker config")
+	assert.Equal(
+		t,
+		PraosTiebreakerConfigConway(),
+		view.TiebreakerConfig,
+		"Dijkstra must use the Conway-compatible restricted VRF tiebreaker config",
+	)
 }
 
 // TestComparePraosTipsDijkstraVRFTiebreak confirms the extracted Dijkstra
@@ -90,11 +94,17 @@ func TestComparePraosTipsDijkstraVRFTiebreak(t *testing.T) {
 	higherVRFHeader.Body.Slot = 202
 
 	ours := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: lowerVRFHeader.Body.Slot, Hash: []byte("ours")},
+		Point: ocommon.Point{
+			Slot: lowerVRFHeader.Body.Slot,
+			Hash: []byte("ours"),
+		},
 		BlockNumber: 50,
 	}
 	candidate := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: higherVRFHeader.Body.Slot, Hash: []byte("candidate")},
+		Point: ocommon.Point{
+			Slot: higherVRFHeader.Body.Slot,
+			Hash: []byte("candidate"),
+		},
 		BlockNumber: 50,
 	}
 

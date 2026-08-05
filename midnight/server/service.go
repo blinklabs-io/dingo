@@ -244,7 +244,9 @@ func (s *service) GetEpochCandidates(
 		candidates[i].BlockNumber = reg.BlockNumber
 		candidates[i].SlotNumber = reg.SlotNumber
 		candidates[i].TxIndex = reg.TxIndex
-		inputs, err := midnightindexer.DecodeCandidateInputsCbor(reg.TxInputsCbor)
+		inputs, err := midnightindexer.DecodeCandidateInputsCbor(
+			reg.TxInputsCbor,
+		)
 		if err != nil {
 			return nil, status.Errorf(
 				codes.Internal,
@@ -318,11 +320,16 @@ func (s *service) candidateRegistrationsFor(
 		seen[key] = struct{}{}
 		txHashes = append(txHashes, entry.TxHash)
 	}
-	rows, err := s.db.GetMidnightCommitteeCandidateRegistrationsByTxHashes(txHashes)
+	rows, err := s.db.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		txHashes,
+	)
 	if err != nil {
 		return nil, err
 	}
-	byKey := make(map[candidateRegistrationKey]models.MidnightCommitteeCandidateRegistration, len(rows))
+	byKey := make(
+		map[candidateRegistrationKey]models.MidnightCommitteeCandidateRegistration,
+		len(rows),
+	)
 	for _, row := range rows {
 		byKey[candidateRegistrationKey{
 			txHash:      string(row.TxHash),

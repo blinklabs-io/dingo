@@ -188,7 +188,10 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open(
+		"sqlite",
+		path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)",
+	)
 	if err != nil {
 		return nil, fmt.Errorf("open cache db: %w", err)
 	}
@@ -221,7 +224,8 @@ func (c *Cache) Close() error {
 
 // UpsertEpochInfo idempotently inserts or updates a Koios epoch info row.
 func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
-	_, err := c.db.Exec(`INSERT INTO koios_epoch_info
+	_, err := c.db.Exec(
+		`INSERT INTO koios_epoch_info
 		(network, epoch, active_stake, fees, total_rewards, epoch_end_time, pre_staking, fetched_at,
 		 era, out_sum, tx_count, blk_count, epoch_start_time, first_block_time, last_block_time, avg_blk_reward)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -231,9 +235,23 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 		 era=excluded.era, out_sum=excluded.out_sum, tx_count=excluded.tx_count, blk_count=excluded.blk_count,
 		 epoch_start_time=excluded.epoch_start_time, first_block_time=excluded.first_block_time,
 		 last_block_time=excluded.last_block_time, avg_blk_reward=excluded.avg_blk_reward`,
-		info.Network, info.Epoch, info.ActiveStake, info.Fees, info.TotalRewards, info.EpochEndTime,
-		info.PreStaking, info.FetchedAt, info.Era, info.OutSum, info.TxCount, info.BlkCount,
-		info.EpochStartTime, info.FirstBlockTime, info.LastBlockTime, info.AvgBlkReward)
+		info.Network,
+		info.Epoch,
+		info.ActiveStake,
+		info.Fees,
+		info.TotalRewards,
+		info.EpochEndTime,
+		info.PreStaking,
+		info.FetchedAt,
+		info.Era,
+		info.OutSum,
+		info.TxCount,
+		info.BlkCount,
+		info.EpochStartTime,
+		info.FirstBlockTime,
+		info.LastBlockTime,
+		info.AvgBlkReward,
+	)
 	return err
 }
 
@@ -254,7 +272,11 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 //
 // totals is nil for pre-staking marker commits, which have no /totals data to
 // store (see fetchEpoch).
-func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch, totals *KoiosTotals) error {
+func (c *Cache) CommitEpochData(
+	info KoiosEpochInfo,
+	rows []KoiosPoolEpoch,
+	totals *KoiosTotals,
+) error {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
@@ -314,7 +336,8 @@ func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch, tota
 
 // UpsertPoolEpoch idempotently inserts or updates a Koios pool epoch row.
 func (c *Cache) UpsertPoolEpoch(pe KoiosPoolEpoch) error {
-	_, err := c.db.Exec(`INSERT INTO koios_pool_epoch
+	_, err := c.db.Exec(
+		`INSERT INTO koios_pool_epoch
 		(network, epoch, pool_bech32, active_stake, block_cnt, delegators, margin, fixed_cost,
 		 pool_fees, deleg_rewards, member_rewards, fetched_at, active_stake_pct, saturation_pct, epoch_ros)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -323,20 +346,38 @@ func (c *Cache) UpsertPoolEpoch(pe KoiosPoolEpoch) error {
 		fixed_cost=excluded.fixed_cost, pool_fees=excluded.pool_fees, deleg_rewards=excluded.deleg_rewards,
 		member_rewards=excluded.member_rewards, fetched_at=excluded.fetched_at,
 		active_stake_pct=excluded.active_stake_pct, saturation_pct=excluded.saturation_pct, epoch_ros=excluded.epoch_ros`,
-		pe.Network, pe.Epoch, pe.PoolBech32, pe.ActiveStake, pe.BlockCnt, pe.Delegators, pe.Margin, pe.FixedCost,
-		pe.PoolFees, pe.DelegRewards, pe.MemberRewards, pe.FetchedAt, pe.ActiveStakePct, pe.SaturationPct, pe.EpochRos)
+		pe.Network,
+		pe.Epoch,
+		pe.PoolBech32,
+		pe.ActiveStake,
+		pe.BlockCnt,
+		pe.Delegators,
+		pe.Margin,
+		pe.FixedCost,
+		pe.PoolFees,
+		pe.DelegRewards,
+		pe.MemberRewards,
+		pe.FetchedAt,
+		pe.ActiveStakePct,
+		pe.SaturationPct,
+		pe.EpochRos,
+	)
 	return err
 }
 
 // GetEpochInfo retrieves a cached Koios epoch info record.
-func (c *Cache) GetEpochInfo(network string, epoch uint64) (*KoiosEpochInfo, error) {
+func (c *Cache) GetEpochInfo(
+	network string,
+	epoch uint64,
+) (*KoiosEpochInfo, error) {
 	var info KoiosEpochInfo
 	err := c.db.QueryRow(`SELECT network, epoch, active_stake, fees, total_rewards, epoch_end_time, pre_staking,
 		fetched_at, era, out_sum, tx_count, blk_count, epoch_start_time, first_block_time, last_block_time, avg_blk_reward
-		FROM koios_epoch_info WHERE network = ? AND epoch = ?`, network, epoch).Scan(
-		&info.Network, &info.Epoch, &info.ActiveStake, &info.Fees, &info.TotalRewards, &info.EpochEndTime,
-		&info.PreStaking, &info.FetchedAt, &info.Era, &info.OutSum, &info.TxCount, &info.BlkCount,
-		&info.EpochStartTime, &info.FirstBlockTime, &info.LastBlockTime, &info.AvgBlkReward)
+		FROM koios_epoch_info WHERE network = ? AND epoch = ?`, network, epoch).
+		Scan(
+			&info.Network, &info.Epoch, &info.ActiveStake, &info.Fees, &info.TotalRewards, &info.EpochEndTime,
+			&info.PreStaking, &info.FetchedAt, &info.Era, &info.OutSum, &info.TxCount, &info.BlkCount,
+			&info.EpochStartTime, &info.FirstBlockTime, &info.LastBlockTime, &info.AvgBlkReward)
 	if err != nil {
 		return nil, err
 	}
@@ -352,10 +393,11 @@ func (c *Cache) GetTotals(network string, epoch uint64) (*KoiosTotals, error) {
 	var totals KoiosTotals
 	err := c.db.QueryRow(`SELECT network, epoch, treasury, reserves, fees, reward, fetched_at, circulation, supply,
 		deposits_stake, deposits_drep, deposits_proposal, treasury_donation, treasury_withdrawal, reserves_withdrawal
-		FROM koios_totals WHERE network = ? AND epoch = ?`, network, epoch).Scan(
-		&totals.Network, &totals.Epoch, &totals.Treasury, &totals.Reserves, &totals.Fees, &totals.Reward,
-		&totals.FetchedAt, &totals.Circulation, &totals.Supply, &totals.DepositsStake, &totals.DepositsDRep,
-		&totals.DepositsProposal, &totals.TreasuryDonation, &totals.TreasuryWithdrawal, &totals.ReservesWithdrawal)
+		FROM koios_totals WHERE network = ? AND epoch = ?`, network, epoch).
+		Scan(
+			&totals.Network, &totals.Epoch, &totals.Treasury, &totals.Reserves, &totals.Fees, &totals.Reward,
+			&totals.FetchedAt, &totals.Circulation, &totals.Supply, &totals.DepositsStake, &totals.DepositsDRep,
+			&totals.DepositsProposal, &totals.TreasuryDonation, &totals.TreasuryWithdrawal, &totals.ReservesWithdrawal)
 	if err != nil {
 		return nil, err
 	}
@@ -363,10 +405,17 @@ func (c *Cache) GetTotals(network string, epoch uint64) (*KoiosTotals, error) {
 }
 
 // GetAllPoolsForEpoch retrieves all cached pool rows for (network, epoch).
-func (c *Cache) GetAllPoolsForEpoch(network string, epoch uint64) ([]KoiosPoolEpoch, error) {
-	rows, err := c.db.Query(`SELECT network, epoch, pool_bech32, active_stake, block_cnt, delegators, margin,
+func (c *Cache) GetAllPoolsForEpoch(
+	network string,
+	epoch uint64,
+) ([]KoiosPoolEpoch, error) {
+	rows, err := c.db.Query(
+		`SELECT network, epoch, pool_bech32, active_stake, block_cnt, delegators, margin,
 		fixed_cost, pool_fees, deleg_rewards, member_rewards, fetched_at, active_stake_pct, saturation_pct, epoch_ros
-		FROM koios_pool_epoch WHERE network = ? AND epoch = ? ORDER BY id`, network, epoch)
+		FROM koios_pool_epoch WHERE network = ? AND epoch = ? ORDER BY id`,
+		network,
+		epoch,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -383,9 +432,12 @@ func (c *Cache) GetAllPoolsForEpoch(network string, epoch uint64) ([]KoiosPoolEp
 }
 
 // GetFetchedEpochRange returns the min and max fetched epoch numbers.
-func (c *Cache) GetFetchedEpochRange(network string) (min, max uint64, err error) {
+func (c *Cache) GetFetchedEpochRange(
+	network string,
+) (min, max uint64, err error) {
 	var lo, hi sql.NullInt64
-	err = c.db.QueryRow("SELECT MIN(epoch), MAX(epoch) FROM koios_epoch_info WHERE network = ?", network).Scan(&lo, &hi)
+	err = c.db.QueryRow("SELECT MIN(epoch), MAX(epoch) FROM koios_epoch_info WHERE network = ?", network).
+		Scan(&lo, &hi)
 	if lo.Valid {
 		min = uint64(lo.Int64) //nolint:gosec // epoch values are non-negative
 	}
@@ -397,7 +449,10 @@ func (c *Cache) GetFetchedEpochRange(network string) (min, max uint64, err error
 
 // GetAllFetchedEpochs returns all fetched epoch numbers for a network in order.
 func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
-	rows, err := c.db.Query("SELECT epoch FROM koios_epoch_info WHERE network = ? ORDER BY epoch ASC", network)
+	rows, err := c.db.Query(
+		"SELECT epoch FROM koios_epoch_info WHERE network = ? ORDER BY epoch ASC",
+		network,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -448,14 +503,22 @@ func (c *Cache) GetEpochsNeedingCheck(network string) ([]uint64, error) {
 // are NOT yet in koios_epoch_info for the given network. This is used by Fetch
 // to fill holes left by prior failed or interrupted runs rather than naively
 // resuming from max(fetched) + 1.
-func (c *Cache) GetUncachedEpochs(network string, from, through uint64) ([]uint64, error) {
+func (c *Cache) GetUncachedEpochs(
+	network string,
+	from, through uint64,
+) ([]uint64, error) {
 	// Build the full desired range in memory (typically ≤ a few thousand epochs).
 	want := make(map[uint64]bool, through-from+1)
 	for e := from; e <= through; e++ {
 		want[e] = true
 	}
 
-	rows, err := c.db.Query("SELECT epoch FROM koios_epoch_info WHERE network = ? AND epoch >= ? AND epoch <= ?", network, from, through)
+	rows, err := c.db.Query(
+		"SELECT epoch FROM koios_epoch_info WHERE network = ? AND epoch >= ? AND epoch <= ?",
+		network,
+		from,
+		through,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -486,20 +549,38 @@ func (c *Cache) GetUncachedEpochs(network string, from, through uint64) ([]uint6
 
 // UpsertCheckEpochStatus idempotently stores a check result for an epoch.
 func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
-	_, err := c.db.Exec(`INSERT INTO check_epoch_status
+	_, err := c.db.Exec(
+		`INSERT INTO check_epoch_status
 		(network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(network, epoch) DO UPDATE SET last_checked_at=excluded.last_checked_at, status=excluded.status,
 		mismatch_count=excluded.mismatch_count, dingo_pool_count=excluded.dingo_pool_count,
 		koios_pool_count=excluded.koios_pool_count, only_dingo_pools=excluded.only_dingo_pools,
-		only_koios_pools=excluded.only_koios_pools`, status.Network, status.Epoch, status.LastCheckedAt, status.Status,
-		status.MismatchCount, status.DingoPoolCount, status.KoiosPoolCount, status.OnlyDingoPools, status.OnlyKoiosPools)
+		only_koios_pools=excluded.only_koios_pools`,
+		status.Network,
+		status.Epoch,
+		status.LastCheckedAt,
+		status.Status,
+		status.MismatchCount,
+		status.DingoPoolCount,
+		status.KoiosPoolCount,
+		status.OnlyDingoPools,
+		status.OnlyKoiosPools,
+	)
 	return err
 }
 
 // InsertCheckRun appends a check run record.
 func (c *Cache) InsertCheckRun(run CheckRun) error {
-	_, err := c.db.Exec(`INSERT INTO check_runs (network, run_at, epochs_checked, pools_checked, mismatch_count, report_path) VALUES (?, ?, ?, ?, ?, ?)`, run.Network, run.RunAt, run.EpochsChecked, run.PoolsChecked, run.MismatchCount, run.ReportPath)
+	_, err := c.db.Exec(
+		`INSERT INTO check_runs (network, run_at, epochs_checked, pools_checked, mismatch_count, report_path) VALUES (?, ?, ?, ?, ?, ?)`,
+		run.Network,
+		run.RunAt,
+		run.EpochsChecked,
+		run.PoolsChecked,
+		run.MismatchCount,
+		run.ReportPath,
+	)
 	return err
 }
 
@@ -517,7 +598,9 @@ func (c *Cache) InsertMismatches(mismatches []CheckMismatch) error {
 			_ = tx.Rollback()
 		}
 	}()
-	stmt, err := tx.Prepare(`INSERT INTO check_mismatches (network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(
+		`INSERT INTO check_mismatches (network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
 	if err != nil {
 		return err
 	}
@@ -532,12 +615,20 @@ func (c *Cache) InsertMismatches(mismatches []CheckMismatch) error {
 
 // DeleteEpochMismatches removes all mismatch rows for an epoch (before re-check).
 func (c *Cache) DeleteEpochMismatches(network string, epoch uint64) error {
-	_, err := c.db.Exec("DELETE FROM check_mismatches WHERE network = ? AND epoch = ?", network, epoch)
+	_, err := c.db.Exec(
+		"DELETE FROM check_mismatches WHERE network = ? AND epoch = ?",
+		network,
+		epoch,
+	)
 	return err
 }
 
 // GetMismatches retrieves mismatch records. An empty poolBech32 returns all pools.
-func (c *Cache) GetMismatches(network string, epoch uint64, poolBech32 string) ([]CheckMismatch, error) {
+func (c *Cache) GetMismatches(
+	network string,
+	epoch uint64,
+	poolBech32 string,
+) ([]CheckMismatch, error) {
 	query := `SELECT network, epoch, pool_bech32, stake_address, field, dingo_value, koios_value, category, checked_at FROM check_mismatches WHERE network = ? AND epoch = ?`
 	args := []any{network, epoch}
 	if poolBech32 != "" {
@@ -563,7 +654,10 @@ func (c *Cache) GetMismatches(network string, epoch uint64, poolBech32 string) (
 
 // GetStatusSummary returns all check epoch statuses for a network in epoch order.
 func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
-	rows, err := c.db.Query(`SELECT network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools FROM check_epoch_status WHERE network = ? ORDER BY epoch ASC`, network)
+	rows, err := c.db.Query(
+		`SELECT network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools FROM check_epoch_status WHERE network = ? ORDER BY epoch ASC`,
+		network,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +723,11 @@ func createCacheSchema(db *sql.DB) error {
 	}
 	// Older cache files may contain columns that the current structs no longer write.
 	for _, item := range [][2]string{{"koios_epoch_info", "pool_cnt"}, {"koios_epoch_info", "delegator_cnt"}, {"koios_totals", "deposits_d_rep"}} {
-		rows, err := db.Query("SELECT 1 FROM pragma_table_info(?) WHERE name = ?", item[0], item[1])
+		rows, err := db.Query(
+			"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+			item[0],
+			item[1],
+		)
 		if err != nil {
 			continue
 		}
@@ -646,9 +744,23 @@ func createCacheSchema(db *sql.DB) error {
 }
 
 func scanPool(rows *sql.Rows, p *KoiosPoolEpoch) error {
-	return rows.Scan(&p.Network, &p.Epoch, &p.PoolBech32, &p.ActiveStake, &p.BlockCnt, &p.Delegators,
-		&p.Margin, &p.FixedCost, &p.PoolFees, &p.DelegRewards, &p.MemberRewards, &p.FetchedAt,
-		&p.ActiveStakePct, &p.SaturationPct, &p.EpochRos)
+	return rows.Scan(
+		&p.Network,
+		&p.Epoch,
+		&p.PoolBech32,
+		&p.ActiveStake,
+		&p.BlockCnt,
+		&p.Delegators,
+		&p.Margin,
+		&p.FixedCost,
+		&p.PoolFees,
+		&p.DelegRewards,
+		&p.MemberRewards,
+		&p.FetchedAt,
+		&p.ActiveStakePct,
+		&p.SaturationPct,
+		&p.EpochRos,
+	)
 }
 
 // MarshalPoolList encodes a pool ID slice as a JSON string for DB storage.

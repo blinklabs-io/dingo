@@ -84,7 +84,11 @@ func classifyFetchErr(err error) error {
 }
 
 // Fetch pulls Koios data into the cache, resuming from the last cached epoch.
-func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchResult, error) {
+func Fetch(
+	ctx context.Context,
+	cfg FetchConfig,
+	logger *slog.Logger,
+) (*FetchResult, error) {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 5
 	}
@@ -106,7 +110,9 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		return nil, fmt.Errorf("get tip epoch: %w", err)
 	}
 	if tipEpoch == 0 {
-		return nil, errors.New("koios tip epoch is 0: no closed epochs to fetch")
+		return nil, errors.New(
+			"koios tip epoch is 0: no closed epochs to fetch",
+		)
 	}
 	// We only compare closed epochs: tip - 1.
 	throughEpoch := tipEpoch - 1
@@ -123,7 +129,10 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			"network", cfg.Network,
 			"last_epoch", throughEpoch,
 		)
-		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
+		return &FetchResult{
+			FromEpoch:    fromEpoch,
+			ThroughEpoch: throughEpoch,
+		}, nil
 	}
 
 	// Collect every pool that has ever been registered on chain, including
@@ -166,7 +175,10 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			"network", cfg.Network,
 			"last_epoch", throughEpoch,
 		)
-		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
+		return &FetchResult{
+			FromEpoch:    fromEpoch,
+			ThroughEpoch: throughEpoch,
+		}, nil
 	}
 
 	logger.Info("koiosparity: fetching epochs from Koios",
@@ -212,15 +224,24 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 				elapsed := time.Since(start)
 				var eta time.Duration
 				if done > 0 {
-					eta = time.Duration(int64(elapsed) / done * int64(totalEpochs-int(done)))
+					eta = time.Duration(
+						int64(elapsed) / done * int64(totalEpochs-int(done)),
+					)
 				}
-				logger.Info("koiosparity: fetch progress",
-					"network", cfg.Network,
-					"epochs_done", done,
-					"epochs_total", totalEpochs,
-					"percent", fmt.Sprintf("%.1f", float64(done)/float64(totalEpochs)*100),
-					"elapsed", elapsed.Round(time.Second),
-					"eta", eta.Round(time.Second),
+				logger.Info(
+					"koiosparity: fetch progress",
+					"network",
+					cfg.Network,
+					"epochs_done",
+					done,
+					"epochs_total",
+					totalEpochs,
+					"percent",
+					fmt.Sprintf("%.1f", float64(done)/float64(totalEpochs)*100),
+					"elapsed",
+					elapsed.Round(time.Second),
+					"eta",
+					eta.Round(time.Second),
 				)
 			case <-progressDone:
 				return
@@ -350,7 +371,16 @@ func FetchEpochWithClient(
 	if err != nil {
 		return 0, err
 	}
-	return fetchEpoch(ctx, koios, cache, network, epoch, poolIDs, firstActiveEpochs, logger)
+	return fetchEpoch(
+		ctx,
+		koios,
+		cache,
+		network,
+		epoch,
+		poolIDs,
+		firstActiveEpochs,
+		logger,
+	)
 }
 
 // FetchEpochWithPools is FetchEpochWithClient with the pool universe
@@ -371,7 +401,16 @@ func FetchEpochWithPools(
 	firstActiveEpochs map[string]uint64,
 	logger *slog.Logger,
 ) (int, error) {
-	return fetchEpoch(ctx, koios, cache, network, epoch, poolIDs, firstActiveEpochs, logger)
+	return fetchEpoch(
+		ctx,
+		koios,
+		cache,
+		network,
+		epoch,
+		poolIDs,
+		firstActiveEpochs,
+		logger,
+	)
 }
 
 // resolvePoolUniverse fetches the full historical pool ID list and each
@@ -458,16 +497,20 @@ func fetchEpoch(
 		}, nil, nil); err != nil {
 			return 0, fmt.Errorf("commit pre-staking marker: %w", err)
 		}
-		logger.Info("koiosparity: epoch predates staking, marking permanently unfetchable",
-			"network", network,
-			"epoch", epoch,
+		logger.Info(
+			"koiosparity: epoch predates staking, marking permanently unfetchable",
+			"network",
+			network,
+			"epoch",
+			epoch,
 		)
 		return 0, nil
 	}
 	if info.ActiveStake == nil {
 		return 0, fmt.Errorf(
 			"epoch %d: koios returned null active_stake unexpectedly (only epochs <= %d predate a valid stake snapshot)",
-			epoch, preStakingThroughEpoch,
+			epoch,
+			preStakingThroughEpoch,
 		)
 	}
 	activeStake := *info.ActiveStake
@@ -475,7 +518,10 @@ func fetchEpoch(
 	// end_time 0 means the epoch is not yet fully closed in Koios. Reject now
 	// rather than after pool rows have been written to the cache.
 	if info.EndTime == 0 {
-		return 0, fmt.Errorf("epoch %d: koios returned end_time=0 — epoch may not be fully closed yet", epoch)
+		return 0, fmt.Errorf(
+			"epoch %d: koios returned end_time=0 — epoch may not be fully closed yet",
+			epoch,
+		)
 	}
 	epochEndTime := unixTime(info.EndTime)
 

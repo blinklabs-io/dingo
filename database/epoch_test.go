@@ -42,7 +42,8 @@ func legacyEpochBySlot(
 	var best *models.Epoch
 	for i := range epochs {
 		e := &epochs[i]
-		if e.StartSlot <= slot && (best == nil || e.StartSlot > best.StartSlot) {
+		if e.StartSlot <= slot &&
+			(best == nil || e.StartSlot > best.StartSlot) {
 			best = e
 		}
 	}

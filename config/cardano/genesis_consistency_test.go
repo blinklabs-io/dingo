@@ -36,16 +36,20 @@ func TestValidateGenesisConsistencyNoGenesis(t *testing.T) {
 
 func TestValidateGenesisConsistencyMatch(t *testing.T) {
 	c := &CardanoNodeConfig{
-		byronGenesis:   &byron.ByronGenesis{StartTime: 1666656000},
-		shelleyGenesis: &shelley.ShelleyGenesis{SystemStart: time.Unix(1666656000, 0).UTC()},
+		byronGenesis: &byron.ByronGenesis{StartTime: 1666656000},
+		shelleyGenesis: &shelley.ShelleyGenesis{
+			SystemStart: time.Unix(1666656000, 0).UTC(),
+		},
 	}
 	require.NoError(t, c.validateGenesisConsistency())
 }
 
 func TestValidateGenesisConsistencyMismatch(t *testing.T) {
 	c := &CardanoNodeConfig{
-		byronGenesis:   &byron.ByronGenesis{StartTime: 1506203091},
-		shelleyGenesis: &shelley.ShelleyGenesis{SystemStart: time.Unix(1666656000, 0).UTC()},
+		byronGenesis: &byron.ByronGenesis{StartTime: 1506203091},
+		shelleyGenesis: &shelley.ShelleyGenesis{
+			SystemStart: time.Unix(1666656000, 0).UTC(),
+		},
 	}
 	require.Error(t, c.validateGenesisConsistency())
 }

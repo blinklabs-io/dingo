@@ -28,7 +28,9 @@ func TestAddPeer_RejectsGossipPeersAtCap(t *testing.T) {
 	// Use a small TargetNumberOfKnownPeers so the cap is
 	// defaultMinPeerListCap (200).
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 5, // cap = max(2*5, 200) = 200
 	})
 	cap := pg.maxPeerListSize()
@@ -52,7 +54,9 @@ func TestAddPeer_RejectsGossipPeersAtCap(t *testing.T) {
 
 func TestAddPeer_RejectsLedgerPeersAtCap(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 5,
 	})
 	cap := pg.maxPeerListSize()
@@ -72,7 +76,9 @@ func TestAddPeer_RejectsLedgerPeersAtCap(t *testing.T) {
 
 func TestAddPeer_AcceptsTopologyPeersAtCap(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 5,
 	})
 	cap := pg.maxPeerListSize()
@@ -106,7 +112,9 @@ func TestAddPeer_AcceptsTopologyPeersAtCap(t *testing.T) {
 
 func TestAddPeer_NormalOperationWithinCap(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 5,
 	})
 
@@ -133,7 +141,9 @@ func TestAddPeer_NormalOperationWithinCap(t *testing.T) {
 
 func TestMaxPeerListSize_UsesDoubleKnownPeersWhenLarger(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 150, // cap = max(2*150, 200) = 300
 	})
 	assert.Equal(t, 300, pg.maxPeerListSize())
@@ -141,7 +151,9 @@ func TestMaxPeerListSize_UsesDoubleKnownPeersWhenLarger(t *testing.T) {
 
 func TestMaxPeerListSize_UsesMinCapWhenSmaller(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 50, // cap = max(2*50, 200) = 200
 	})
 	assert.Equal(t, defaultMinPeerListCap, pg.maxPeerListSize())
@@ -149,7 +161,9 @@ func TestMaxPeerListSize_UsesMinCapWhenSmaller(t *testing.T) {
 
 func TestAddPeer_InboundRejectedAtCap(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 5,
 	})
 	cap := pg.maxPeerListSize()
@@ -169,7 +183,9 @@ func TestAddPeer_InboundRejectedAtCap(t *testing.T) {
 
 func TestAddLedgerPeer_RejectedAtCap(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		TargetNumberOfKnownPeers: 5,
 	})
 	cap := pg.maxPeerListSize()

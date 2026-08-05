@@ -59,7 +59,9 @@ func (r *cappingBlockTxsRequester) BlockTxsRequest(
 		if k >= n {
 			break
 		}
-		served[uint16(idx/64)] |= 1 << uint(63-(idx%64)) // MSB-first, see leiosWindowNeededMask
+		served[uint16(idx/64)] |= 1 << uint(
+			63-(idx%64),
+		) // MSB-first, see leiosWindowNeededMask
 		enc, err := cbor.Encode(idx)
 		if err != nil {
 			return nil, err
@@ -213,7 +215,10 @@ func TestLeiosBitmapMSBFirstWireConvention(t *testing.T) {
 	for i := range txs {
 		txs[i] = cbor.RawMessage{byte(i)}
 	}
-	require.NoError(t, validateLeiosTxBitmap(txCount, map[uint16]uint64{2: mask}))
+	require.NoError(
+		t,
+		validateLeiosTxBitmap(txCount, map[uint16]uint64{2: mask}),
+	)
 	require.Equal(
 		t,
 		[]cbor.RawMessage{txs[128], txs[129], txs[130]},
@@ -266,7 +271,9 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 	served := map[uint16]uint64{}
 	txs := make([]cbor.RawMessage, 0, len(requested))
 	for _, idx := range requested {
-		served[uint16(idx/64)] |= 1 << uint(63-(idx%64)) // MSB-first, see leiosWindowNeededMask
+		served[uint16(idx/64)] |= 1 << uint(
+			63-(idx%64),
+		) // MSB-first, see leiosWindowNeededMask
 		enc, err := cbor.Encode(idx)
 		if err != nil {
 			return nil, err

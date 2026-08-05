@@ -398,7 +398,9 @@ func betaVersionedQueryHandler(
 		) (*connect.Response[betaquery.ReadStateResponse], error) {
 			return nil, connect.NewError(
 				connect.CodeUnimplemented,
-				errors.New("utxorpc.v1beta.query.QueryService.ReadState is not implemented"),
+				errors.New(
+					"utxorpc.v1beta.query.QueryService.ReadState is not implemented",
+				),
 			)
 		},
 		connect.WithSchema(readStateMethod),
@@ -490,7 +492,8 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 		// instead of continuing to wait out the timer above.
 		u.config.Logger.Warn(
 			"utxorpc gRPC graceful shutdown cancelled by caller context; forcing close",
-			"error", ctx.Err(),
+			"error",
+			ctx.Err(),
 		)
 		return forceCloseUtxorpc(server, shutdownErr)
 	}

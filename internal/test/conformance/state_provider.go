@@ -323,7 +323,11 @@ func (p *DingoStateProvider) DRepDelegation(
 
 // DRepRegistrations returns all DRep registrations
 func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, error) {
-	dreps := make([]common.DRepRegistration, 0, len(p.manager.drepRegistrations))
+	dreps := make(
+		[]common.DRepRegistration,
+		0,
+		len(p.manager.drepRegistrations),
+	)
 	for cred := range p.manager.drepRegistrations {
 		dreps = append(dreps, common.DRepRegistration{
 			Credential: cred,

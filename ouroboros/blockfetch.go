@@ -614,7 +614,8 @@ func (o *Ouroboros) blockfetchClientBlock(
 			)
 		}
 	}
-	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+	if o.EventBus != nil &&
+		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
 		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(
@@ -641,7 +642,8 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, ctx.ConnectionId)
 	o.blockFetchMutex.Unlock()
-	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+	if o.EventBus != nil &&
+		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
 		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(

@@ -115,12 +115,18 @@ func Parse(data []byte) (*Config, error) {
 
 	var byron byronOverride
 	if err := dec.Decode(&byron); err != nil {
-		return nil, fmt.Errorf("genesis.Parse: byron overrides (doc 2): %w", err)
+		return nil, fmt.Errorf(
+			"genesis.Parse: byron overrides (doc 2): %w",
+			err,
+		)
 	}
 
 	var shelley shelleyOverride
 	if err := dec.Decode(&shelley); err != nil {
-		return nil, fmt.Errorf("genesis.Parse: shelley overrides (doc 3): %w", err)
+		return nil, fmt.Errorf(
+			"genesis.Parse: shelley overrides (doc 3): %w",
+			err,
+		)
 	}
 
 	// SecurityParam can come from either Shelley or Byron (k).

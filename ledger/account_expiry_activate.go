@@ -65,7 +65,10 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 	if !ls.config.DelegatorInactivityEnabled {
 		return nil
 	}
-	done, err := ls.db.GetSyncState(database.DelegatorInactivityActivatedSyncKey, txn)
+	done, err := ls.db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		txn,
+	)
 	if err != nil {
 		return err
 	}
@@ -110,7 +113,10 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 func (ls *LedgerState) delegatorInactivityActivationEpoch(
 	txn *database.Txn,
 ) (epoch uint64, activated bool, err error) {
-	marker, err := ls.db.GetSyncState(database.DelegatorInactivityActivatedSyncKey, txn)
+	marker, err := ls.db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		txn,
+	)
 	if err != nil {
 		return 0, false, err
 	}

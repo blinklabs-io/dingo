@@ -35,7 +35,12 @@ func TestNewLogger_JSONFormatProducesValidJSON(t *testing.T) {
 
 	line := strings.TrimSpace(buf.String())
 	require.NotEmpty(t, line)
-	require.True(t, json.Valid([]byte(line)), "expected valid JSON, got: %s", line)
+	require.True(
+		t,
+		json.Valid([]byte(line)),
+		"expected valid JSON, got: %s",
+		line,
+	)
 	var rec map[string]any
 	require.NoError(t, json.Unmarshal([]byte(line), &rec))
 	assert.Equal(t, "hello", rec["msg"])

@@ -110,7 +110,9 @@ func startFakeArchive(
 			}
 			if a.oversize {
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(bytes.Repeat([]byte{0xFF}, maxArchiveBlockSize+1))
+				_, _ = w.Write(
+					bytes.Repeat([]byte{0xFF}, maxArchiveBlockSize+1),
+				)
 				return
 			}
 			if a.substituteBody != nil {
@@ -156,7 +158,10 @@ func newTestDB(t *testing.T) *database.Database {
 // and pointed at baseURL. Direct struct construction lets the tests inject
 // a fake archive client while focusing on the iterator path.
 func newBarkBlobStoreForTest(
-	t *testing.T, db *database.Database, baseURL string, httpClient *http.Client,
+	t *testing.T,
+	db *database.Database,
+	baseURL string,
+	httpClient *http.Client,
 ) *BlobStoreBark {
 	t.Helper()
 	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
@@ -179,13 +184,32 @@ func TestValidateArchiveURL(t *testing.T) {
 		url     string
 		wantErr string
 	}{
-		{name: "valid expected host", url: "https://archive.example.com/block?sig=abc"},
+		{
+			name: "valid expected host",
+			url:  "https://archive.example.com/block?sig=abc",
+		},
 		{name: "valid HTTPS", url: "https://s3.example.com/block?sig=abc"},
-		{name: "non-HTTPS external", url: "http://s3.example.com/block", wantErr: "HTTPS"},
-		{name: "FTP scheme", url: "ftp://s3.example.com/block", wantErr: "HTTPS"},
-		{name: "embedded credentials", url: "https://user:pass@s3.example.com/block", wantErr: "credential"},
+		{
+			name:    "non-HTTPS external",
+			url:     "http://s3.example.com/block",
+			wantErr: "HTTPS",
+		},
+		{
+			name:    "FTP scheme",
+			url:     "ftp://s3.example.com/block",
+			wantErr: "HTTPS",
+		},
+		{
+			name:    "embedded credentials",
+			url:     "https://user:pass@s3.example.com/block",
+			wantErr: "credential",
+		},
 		{name: "missing host", url: "https:///block", wantErr: "host"},
-		{name: "disallowed host", url: "https://evil.example.com/block", wantErr: "not allowed"},
+		{
+			name:    "disallowed host",
+			url:     "https://evil.example.com/block",
+			wantErr: "not allowed",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -561,7 +585,9 @@ func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
 	baseURL, fakeArch, httpClient := startFakeArchive(
 		t, map[string][]byte{hex.EncodeToString(hash[:]): raw},
 	)
-	fakeArch.blockType = archive.BlockType(trueType) //nolint:gosec // fixture-derived era
+	fakeArch.blockType = archive.BlockType(
+		trueType,
+	) //nolint:gosec // fixture-derived era
 	fakeArch.height = decoded.BlockNumber()
 	prevHash := decoded.PrevHash()
 	fakeArch.prevHash = prevHash[:]
