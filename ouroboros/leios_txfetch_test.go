@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"slices"
 	"testing"
 
@@ -39,6 +40,7 @@ type cappingBlockTxsRequester struct {
 }
 
 func (r *cappingBlockTxsRequester) BlockTxsRequest(
+	_ context.Context,
 	point ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
@@ -251,6 +253,7 @@ type servingBlockTxsRequester struct {
 }
 
 func (r *servingBlockTxsRequester) BlockTxsRequest(
+	_ context.Context,
 	point ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {

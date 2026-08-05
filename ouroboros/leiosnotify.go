@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -526,7 +527,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// txs-offer below. Failures are best-effort: a transient manifest fetch
 		// error must not tear down the shared connection.
 		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
-			resp, err := client.BlockRequest(point)
+			reqCtx, cancel := leiosFetchRequestContext(time.Time{})
+			resp, err := client.BlockRequest(reqCtx, point)
+			cancel()
 			if err != nil {
 				o.config.Logger.Debug(
 					"leios EB manifest fetch failed",
@@ -618,7 +621,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			if !ok {
 				// Manifest not cached yet (txs offered before/without a block
 				// offer): fetch the manifest first to learn the tx count.
-				resp, err := client.BlockRequest(point)
+				reqCtx, cancel := leiosFetchRequestContext(time.Time{})
+				resp, err := client.BlockRequest(reqCtx, point)
+				cancel()
 				if err != nil {
 					o.config.Logger.Debug(
 						"leios EB manifest fetch failed on txs offer",
@@ -741,6 +746,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 // can be unit-tested without a live connection.
 type leiosBlockTxsRequester interface {
 	BlockTxsRequest(
+		ctx context.Context,
 		point ocommon.Point,
 		bitmaps map[uint16]uint64,
 	) (protocol.Message, error)
@@ -994,7 +1000,9 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 				round,
 			)
 		}
-		resp, err := client.BlockTxsRequest(point, needed)
+		reqCtx, cancel := leiosFetchRequestContext(deadline)
+		resp, err := client.BlockTxsRequest(reqCtx, point, needed)
+		cancel()
 		if err != nil {
 			return leiosCollectTxs(result), err
 		}
