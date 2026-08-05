@@ -494,6 +494,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if copyChain == nil {
 		return SyncResult{}, errors.New("primary chain not available")
 	}
+	// pipeImm is bound to the handle downloadImmutables holds open, so it is
+	// only usable from inside the callback below: that handle is closed when
+	// the download returns, and the sequencer drains before it does. Nothing
+	// after Bootstrap may read it — the post-bootstrap copy opens its own.
 	var pipeImm *immutable.ImmutableDb
 	var pipeLastChunk uint64
 	pipeCopied := false
@@ -631,8 +635,9 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	//
 	// Released on the way out whether or not the extracted tree is cleaned up:
 	// a run that keeps the tree for a later sync still must not leak the
-	// descriptor.
-	defer result.CloseImmutableRoot()
+	// descriptors. This runs after the import errgroup is joined, which is what
+	// makes clearing the fields safe against the goroutines that read them.
+	defer result.CloseHandles()
 	certifiedImmutable, err := openBootstrappedImmutable(result)
 	if err != nil {
 		return SyncResult{}, err
@@ -775,7 +780,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
 			gctx, nil, logger, result.ImmutableDir, db,
-			node.WithImmutableRoot(result.ImmutableRoot),
+			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
 					Phase:          PhaseImmutableCopy,

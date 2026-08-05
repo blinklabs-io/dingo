@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -185,8 +187,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	blocksCopied, _, err := copyBlocksRawWithCallback(
 		context.Background(),
 		logger,
-		immutableDir,
-		nil,
+		mustOpenImmutable(t, immutableDir),
 		db,
 		cm.PrimaryChain(),
 		nil,
@@ -289,8 +290,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	blocksCopied, _, err := copyBlocksRawWithCallback(
 		context.Background(),
 		logger,
-		immutableDir,
-		nil,
+		mustOpenImmutable(t, immutableDir),
 		db,
 		cm.PrimaryChain(),
 		func(rb chain.RawBlock, txn *database.Txn) error {
@@ -397,8 +397,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	_, immutableTipSlot, err := copyBlocksRawWithCallback(
 		context.Background(),
 		logger,
-		immutableDir,
-		nil,
+		mustOpenImmutable(t, immutableDir),
 		db,
 		cm.PrimaryChain(),
 		nil,
@@ -428,8 +427,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	blocksCopied, resumedImmutableTipSlot, err := copyBlocksRawWithCallback(
 		context.Background(),
 		logger,
-		immutableDir,
-		nil,
+		mustOpenImmutable(t, immutableDir),
 		db,
 		cm.PrimaryChain(),
 		func(rb chain.RawBlock, txn *database.Txn) error {
@@ -865,4 +863,104 @@ func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
 	err := RunPlannerStats(db, slog.Default())
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "planner statistics maintenance")
+}
+
+// mustOpenImmutable opens an ImmutableDB by pathname for tests that have no
+// vetted directory handle to bind to and nothing racing them.
+func mustOpenImmutable(t *testing.T, dir string) *immutable.ImmutableDb {
+	t.Helper()
+	imm, err := immutable.New(dir)
+	require.NoError(t, err)
+	return imm
+}
+
+// TestLoadBlobsWithDBCopiesFromTheSuppliedDatabase covers the last leg of the
+// Mithril handoff: the blob copy.
+//
+// Bootstrap vets the ImmutableDB directory and opens it; this call is where
+// those blocks are read. Resolving the directory's pathname here instead would
+// end the binding at the final step — a writer who repoints the name while the
+// sync runs would have their blocks copied into the blob store, with the
+// vetting having been about a different tree.
+//
+// The swap is staged rather than raced: the window is interior to a sync and
+// cannot be driven from outside it, so the substitution is placed where a
+// concurrent writer would land it.
+func TestLoadBlobsWithDBCopiesFromTheSuppliedDatabase(t *testing.T) {
+	base := t.TempDir()
+	ours := filepath.Join(base, "immutable")
+	requireChunkTrio(t, "00000", ours)
+
+	root, err := os.OpenRoot(ours)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+	imm, err := immutable.NewFromRoot(root)
+	require.NoError(t, err)
+	wantTip, err := imm.GetTip()
+	require.NoError(t, err)
+	require.NotNil(t, wantTip)
+
+	// A writer takes the name for a tree built from a different immutable
+	// file, so which tree was copied is visible in the tip.
+	theirs := filepath.Join(base, "theirs")
+	requireChunkTrio(t, "00001", theirs)
+	if err := os.Rename(ours, filepath.Join(base, "moved-aside")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot swap a directory with an open handle: %s", err)
+		}
+		require.NoError(t, err)
+	}
+	require.NoError(t, os.Rename(theirs, ours))
+
+	byName, err := immutable.New(ours)
+	require.NoError(t, err)
+	swappedTip, err := byName.GetTip()
+	require.NoError(t, err)
+	require.NotNil(t, swappedTip)
+	require.NotEqual(t, wantTip.Slot, swappedTip.Slot,
+		"the substitution must be observable through the name, "+
+			"or this test proves nothing")
+
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// A non-nil config even though the supplied database makes it unused:
+	// ensureDB only reads it when it has to open one.
+	result, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, ours, db,
+		WithImmutableDB(imm),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, wantTip.Slot, result.ImmutableTipSlot,
+		"the copy must read the supplied database, not the tree that took "+
+			"its directory's name")
+}
+
+// TestLoadBlobsWithDBRefusesNilImmutableDB pins that supplying nothing to
+// WithImmutableDB is an error rather than a quiet fall back to opening the
+// directory by pathname, which is the open a caller passing the option is
+// trying to avoid.
+func TestLoadBlobsWithDBRefusesNilImmutableDB(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, t.TempDir(), db,
+		WithImmutableDB(nil),
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "refusing to fall back")
+}
+
+// requireChunkTrio copies one immutable file's chunk/primary/secondary trio out
+// of the shared testdata into dir, producing a real single-chunk ImmutableDB.
+func requireChunkTrio(t *testing.T, name, dir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	src := filepath.Join("..", "..", "database", "immutable", "testdata")
+	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+		data, err := os.ReadFile(filepath.Join(src, name+ext))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(dir, name+ext), data, 0o640,
+		))
+	}
 }

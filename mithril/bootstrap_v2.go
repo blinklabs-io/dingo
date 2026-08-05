@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -185,9 +186,16 @@ func bootstrapV2(
 		downloadDir,
 		"immutable-"+artifact.Hash,
 	)
-	var ancillaryDir string
+	var ancillaryTree *vettedDir
 	var ancillaryArchivePath string
 	var ancillaryErr error
+	// Closed only when the result that would own it is never returned; on
+	// success it is carried to the ledger-state import and released by Cleanup.
+	defer func() {
+		if !success {
+			ancillaryTree.Close()
+		}
+	}()
 
 	// Steps 4+5: Download immutable archives and the ancillary archive in
 	// parallel. A verified bootstrap records ancillary failures and returns
@@ -212,18 +220,16 @@ func bootstrapV2(
 					truncateDigest(artifact.Hash),
 				),
 			)
-			// ledgerDir binds its answer to the tree it read, and verification
-			// then resolves that name again rather than inheriting a handle
-			// from it. That is deliberate: a handle outliving the check would
-			// verify a tree the caller no longer names, since what is loaded
-			// downstream is opened by name. Re-resolving keeps the thing
-			// verified and the thing used the same, so a directory substituted
-			// after the cache check is what verification sees — and it carries
-			// no manifest this node's ancillary key signed.
-			if cachedDir := ledgerDir(candidateDir); cachedDir != "" {
+			// One handle spans the cache check, the manifest verification,
+			// and the ledger-state import downstream. A directory substituted
+			// at any point after the check is therefore not what gets
+			// verified *or* loaded — where re-resolving the name at each step
+			// would leave each step describing a possibly different tree.
+			if cached := ledgerDir(candidateDir); cached != nil {
 				if err := verifyAncillaryExtraction(
-					cfg, cachedDir,
+					cfg, cached,
 				); err != nil {
+					cached.Close()
 					cfg.Logger.Warn(
 						"cached ancillary data failed "+
 							"verification, redownloading",
@@ -253,9 +259,9 @@ func bootstrapV2(
 						"ancillary data already "+
 							"extracted, skipping",
 						"component", "mithril",
-						"path", cachedDir,
+						"path", cached.Path(),
 					)
-					ancillaryDir = cachedDir
+					ancillaryTree = cached
 					if _, err := os.Stat(candidateArchive); err == nil {
 						ancillaryArchivePath = candidateArchive
 					}
@@ -269,8 +275,21 @@ func bootstrapV2(
 				ancillaryErr = ancErr
 				return
 			}
-			ancillaryDir = dir
+			// Recorded before the vetting below, so a tree that turns out
+			// to hold no ledger state still gets its archive cleaned up.
 			ancillaryArchivePath = archPath
+			// Vetted even though this process just extracted it: the handle
+			// is what the manifest check and the import read through, and it
+			// is opening it here that binds the two to one tree.
+			tree := ledgerDir(dir)
+			if tree == nil {
+				ancillaryErr = fmt.Errorf(
+					"extracted ancillary data at %s holds no ledger state",
+					dir,
+				)
+				return
+			}
+			ancillaryTree = tree
 		})
 	}
 
@@ -321,17 +340,32 @@ func bootstrapV2(
 			"error", ancillaryErr,
 		)
 	}
-	if cfg.VerifyCertificateChain && ancillaryDir == "" {
+	if cfg.VerifyCertificateChain && ancillaryTree == nil {
 		return nil, errors.New(
 			"verified Mithril bootstrap produced no ancillary data",
 		)
 	}
 
+	// The ledger-state import falls back to the extraction directory when the
+	// ancillary tree carries no ledger state, so that directory is vetted and
+	// held open too rather than searched by name.
+	extractTree, err := openVerifiedDir(extractDir)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"verifying extraction directory %s: %w", extractDir, err,
+		)
+	}
+	defer func() {
+		if !success {
+			_ = extractTree.Close()
+		}
+	}()
+
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
 		"immutable_dir", immutableTree.Path(),
-		"ancillary_dir", ancillaryDir,
+		"ancillary_dir", ancillaryTree.Path(),
 	)
 
 	success = true
@@ -353,7 +387,9 @@ func bootstrapV2(
 		ImmutableDir:         immutableTree.Path(),
 		ImmutableRoot:        immutableTree.Root(),
 		ExtractDir:           extractDir,
-		AncillaryDir:         ancillaryDir,
+		ExtractRoot:          extractTree,
+		AncillaryDir:         ancillaryTree.Path(),
+		AncillaryRoot:        ancillaryTree.Root(),
 		AncillaryArchivePath: ancillaryArchivePath,
 	}
 	if createdTempDir {
@@ -1213,11 +1249,18 @@ func downloadAncillaryV2(
 		)
 	}
 
-	if err := verifyAncillaryExtraction(cfg, ancillaryDir); err != nil {
+	// Verified through a handle on what was just extracted. The caller vets
+	// the directory again to obtain the handle it will import through; that
+	// second vetting is not redundant, because this one's handle does not
+	// outlive the function and a name alone would carry nothing across.
+	extracted := ledgerDir(ancillaryDir)
+	verifyErr := verifyAncillaryExtraction(cfg, extracted)
+	extracted.Close()
+	if verifyErr != nil {
 		// Remove the unverified extraction so it cannot be
 		// picked up by the resume path on a later run.
 		os.RemoveAll(ancillaryDir)
-		return "", "", err
+		return "", "", verifyErr
 	}
 
 	cfg.Logger.Info(
@@ -1229,9 +1272,19 @@ func downloadAncillaryV2(
 	return ancillaryDir, ancillaryPath, nil
 }
 
+// verifyAncillaryExtraction checks a verified bootstrap's ancillary tree
+// against the signed manifest.
+//
+// It takes the directory as the handle it was vetted through, and every read
+// below — the ledger-state presence check, the manifest, the per-file digests,
+// the completeness walk — resolves through that one handle. The handle then
+// goes on to the ledger-state import, so what was verified and what is loaded
+// are the same directory. Verifying by name would not carry that: the importer
+// resolves the name again, and nothing links the tree it reads to the tree that
+// satisfied the signature.
 func verifyAncillaryExtraction(
 	cfg BootstrapConfig,
-	ancillaryDir string,
+	ancillary *vettedDir,
 ) error {
 	if !cfg.VerifyCertificateChain {
 		return nil
@@ -1241,13 +1294,18 @@ func verifyAncillaryExtraction(
 			"ancillary verification key is required for verified bootstrap",
 		)
 	}
-	if !hasLedgerFiles(ancillaryDir) {
+	if ancillary == nil {
+		return errors.New(
+			"verified ancillary archive was not vetted",
+		)
+	}
+	if !hasLedgerFilesIn(ancillary.Root()) {
 		return errors.New(
 			"verified ancillary archive contains no ledger state",
 		)
 	}
 	if err := verifyAncillaryManifest(
-		ancillaryDir, cfg.AncillaryVerificationKey,
+		ancillary.Root(), cfg.AncillaryVerificationKey,
 	); err != nil {
 		return fmt.Errorf(
 			"ancillary manifest verification failed: %w",
@@ -1285,12 +1343,10 @@ func (m *ancillaryManifest) computeHash() []byte {
 // configured ancillary verification key, and checks every listed
 // file's SHA-256 digest.
 func verifyAncillaryManifest(
-	dir string,
+	root *os.Root,
 	ancillaryVerificationKey string,
 ) error {
-	data, err := os.ReadFile( //nolint:gosec // path rooted in our own extraction directory
-		filepath.Join(dir, ancillaryManifestFilename),
-	)
+	data, err := readFileIn(root, ancillaryManifestFilename)
 	if err != nil {
 		return fmt.Errorf("reading ancillary manifest: %w", err)
 	}
@@ -1346,9 +1402,7 @@ func verifyAncillaryManifest(
 				relPath,
 			)
 		}
-		sum, _, err := sha256File(
-			filepath.Join(dir, filepath.FromSlash(relPath)),
-		)
+		sum, err := sha256FileIn(root, relPath)
 		if err != nil {
 			return fmt.Errorf(
 				"hashing ancillary file %s: %w",
@@ -1366,20 +1420,16 @@ func verifyAncillaryManifest(
 	// The signed manifest must cover the complete extracted payload. An
 	// attacker must not be able to add an unlisted ledger or immutable file
 	// that the importer could later select.
-	if err := filepath.WalkDir(
-		dir,
-		func(path string, entry os.DirEntry, walkErr error) error {
+	if err := fs.WalkDir(
+		root.FS(),
+		".",
+		func(relPath string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
 			if entry.IsDir() {
 				return nil
 			}
-			relPath, err := filepath.Rel(dir, path)
-			if err != nil {
-				return err
-			}
-			relPath = filepath.ToSlash(relPath)
 			if relPath == ancillaryManifestFilename {
 				return nil
 			}
@@ -1395,4 +1445,33 @@ func verifyAncillaryManifest(
 		return err
 	}
 	return nil
+}
+
+// readFileIn reads a slash-separated path relative to root.
+func readFileIn(root *os.Root, rel string) ([]byte, error) {
+	f, err := root.Open(filepath.FromSlash(rel))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// sha256FileIn hashes a slash-separated path relative to root.
+//
+// Through the handle rather than by name, because the digest has to describe
+// the file in the tree that was vetted. Hashing a name would leave the manifest
+// check and everything downstream of it about whatever occupied that name at
+// two different instants.
+func sha256FileIn(root *os.Root, rel string) (string, error) {
+	f, err := root.Open(filepath.FromSlash(rel))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", fmt.Errorf("hashing %s: %w", rel, err)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }

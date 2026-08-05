@@ -2629,27 +2629,39 @@ the handle for the same reason: names taken from a re-walked pathname would be
 checked against the tree that was opened while resolving into the replacement.
 
 The handle then travels to the consumer rather than stopping at the package
-boundary. `BootstrapResult.ImmutableRoot` holds it from the lookup until
-`Cleanup` (or `CloseImmutableRoot`), and `immutable.NewFromRoot` /
-`node.WithImmutableRoot` open the ImmutableDB through it, so the trust-boundary
-tip read, the catch-up divergence check, and the blob copy all read the directory
-the bootstrap vetted. The v2 pipelined copy reads through the same handle
-extraction is writing through. `ImmutableDir` is carried alongside for messages;
-it is not what the load resolves.
+boundary. `BootstrapResult` carries three — `ImmutableRoot`, `AncillaryRoot`,
+and `ExtractRoot` — held from the lookup that vetted each until `CloseHandles`
+(which `Cleanup` calls first, since Windows will not remove a directory with an
+open handle beneath it). `CloseHandles` clears the fields, so it runs only once
+the work that reads them has joined.
 
-A result carrying no handle is refused rather than opened by name
-(`openBootstrappedImmutable`). Both bootstrap paths set one, so its absence
-means the result did not come from a vetted lookup, and a fallback would be
-invisible — the load would succeed, having read a directory nothing vetted.
+Every read of a bootstrapped tree goes through one of them:
 
-The ancillary side deliberately stops at the name. Its consumer is the
-ledger-state importer, which discovers and opens files by pathname and cannot
-take a handle, and the tree is re-verified against the signed ancillary manifest
-at that same name. Carrying a handle past the lookup there would verify a tree
-the importer does not read, which is worse than binding neither — the check and
-the load have to be about one directory. So `ledgerDir` returns a name that was
-confirmed to denote the tree it inspected, and nothing stronger; the
-`so the two cannot disagree` guarantee above is about the immutable lookups.
+| tree | opened by | read by |
+|---|---|---|
+| immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRoot`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.FindLedgerStateAtOrBefore`, `RootOpen`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
+
+The v2 pipelined copy reads through the same handle extraction is writing
+through. The directory names are carried alongside for messages; they are not
+what the load resolves.
+
+The ancillary tree matters most here, because what binds it is a signature. One
+handle spans the cache-reuse check, the manifest verification, and the import,
+so the tree whose digests satisfied the ancillary key is the tree whose bytes
+get loaded. Verifying and then importing by name would leave those two steps
+describing possibly different directories, with nothing but timing between
+them — and the manifest walk that proves the payload is completely covered would
+be about a third.
+
+A result carrying no handle is refused rather than opened by name — by
+`openBootstrappedImmutable` for the immutable side and by `importLedgerState`
+for the ancillary one. Both bootstrap paths set them, so an absent handle means
+the result did not come from a vetted lookup, and a fallback would be invisible:
+the load would succeed, having read a directory nothing checked. For the same
+reason `node.WithImmutableDB` treats a nil argument as an error rather than as a
+pathname fallback.
 
 ### Catch-up vs bootstrap dispatch
 

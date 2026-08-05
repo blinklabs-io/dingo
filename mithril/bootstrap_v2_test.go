@@ -35,6 +35,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -924,16 +925,18 @@ func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {
 	assert.Equal(t, candidateArchive, result.AncillaryArchivePath)
 }
 
-// TestVerifyAncillaryExtractionSeesTheTreeAtTheName stages a substitution of
+// TestVerifyAncillaryExtractionIsAboutTheInspectedTree stages a substitution of
 // the ancillary cache directory after ledgerDir has read and bound it, and
-// before the verification that decides whether it is reused.
+// covers every window after that: the verification that decides whether the
+// cache is reused, and the ledger-state read the import performs.
 //
-// No handle crosses that boundary — ledgerDir closes its own, and verification
-// opens the name again — so verification is about whatever the name holds when
-// it runs, which is the same tree the caller then uses. A replacement cannot
-// pass on the strength of the tree it displaced: it has to carry a manifest
-// this node's ancillary key signed, and it does not.
-func TestVerifyAncillaryExtractionSeesTheTreeAtTheName(t *testing.T) {
+// One handle spans all of them. So a directory swapped in behind the name is
+// neither verified nor loaded — the manifest check still describes the tree
+// that was inspected, and so do the bytes the import reads. Re-resolving the
+// name at each step would instead leave each step describing a possibly
+// different tree, which is only safe for as long as every one of those steps
+// happens to re-check the signature.
+func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 	cfg := BootstrapConfig{
@@ -968,12 +971,14 @@ func TestVerifyAncillaryExtractionSeesTheTreeAtTheName(t *testing.T) {
 		0o640,
 	))
 
-	cachedDir := ledgerDir(candidateDir)
-	require.Equal(t, candidateDir, cachedDir,
-		"the cached tree is reusable as it stands")
-	require.NoError(t, verifyAncillaryExtraction(cfg, cachedDir))
+	cached := ledgerDir(candidateDir)
+	require.NotNil(t, cached, "the cached tree is reusable as it stands")
+	t.Cleanup(cached.Close)
+	require.Equal(t, candidateDir, cached.Path())
+	require.NoError(t, verifyAncillaryExtraction(cfg, cached))
 
-	// A writer takes the name for ledger state of their own.
+	// A writer takes the name for ledger state of their own, after the cache
+	// check has run and while verification and the import are still to come.
 	theirs := filepath.Join(downloadDir, "theirs", "ledger", "100")
 	require.NoError(t, os.MkdirAll(theirs, 0o750))
 	require.NoError(t, os.WriteFile(
@@ -986,9 +991,34 @@ func TestVerifyAncillaryExtractionSeesTheTreeAtTheName(t *testing.T) {
 		t, filepath.Join(downloadDir, "theirs"), candidateDir,
 	)
 
-	require.Error(t, verifyAncillaryExtraction(cfg, cachedDir),
-		"verification must be about the tree the name holds now, "+
-			"not the one it held when the cache check ran")
+	// The premise: the name denotes the writer's tree now, so anything that
+	// resolved it afresh would be reading theirs.
+	byName, err := os.ReadFile(
+		filepath.Join(candidateDir, "ledger", "100", "state"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("theirs"), byName,
+		"the substitution must be observable through the name, "+
+			"or this test proves nothing")
+
+	// Verification still describes the tree that was inspected.
+	require.NoError(t, verifyAncillaryExtraction(cfg, cached),
+		"verification goes through the handle, so a tree swapped in behind "+
+			"the name is not what it is about")
+
+	// And so does the read the import performs: the ledger state discovered
+	// and opened through the handle is the verified one, not the replacement.
+	rel, err := ledgerstate.FindLedgerStateAtOrBefore(
+		cached.Root(), ^uint64(0),
+	)
+	require.NoError(t, err)
+	f, err := ledgerstate.RootOpen(cached.Root(), rel)
+	require.NoError(t, err)
+	defer f.Close()
+	loaded, err := io.ReadAll(f)
+	require.NoError(t, err)
+	assert.Equal(t, state, loaded,
+		"the import must read the tree the manifest was verified against")
 }
 
 func TestBootstrapV2Resume(t *testing.T) {

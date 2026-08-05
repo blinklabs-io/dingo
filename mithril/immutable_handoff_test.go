@@ -15,6 +15,8 @@
 package mithril
 
 import (
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -152,20 +154,55 @@ func TestOpenBootstrappedImmutableRefusesUnvettedResult(t *testing.T) {
 	assert.ErrorContains(t, err, "no verified directory handle")
 }
 
-// TestBootstrapResultCloseImmutableRootIsIdempotent pins that the descriptor is
+// TestBootstrapResultCloseHandlesIsIdempotent pins that every descriptor is
 // released once and that a second release — Cleanup after an explicit close, or
 // the deferred close after Cleanup — is not an error.
-func TestBootstrapResultCloseImmutableRootIsIdempotent(t *testing.T) {
+func TestBootstrapResultCloseHandlesIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	root, err := os.OpenRoot(dir)
-	require.NoError(t, err)
-	result := &BootstrapResult{ImmutableDir: dir, ImmutableRoot: root}
+	openRoot := func() *os.Root {
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		return root
+	}
+	result := &BootstrapResult{
+		ImmutableDir:  dir,
+		ImmutableRoot: openRoot(),
+		AncillaryRoot: openRoot(),
+		ExtractRoot:   openRoot(),
+	}
 
-	result.CloseImmutableRoot()
+	result.CloseHandles()
 	assert.Nil(t, result.ImmutableRoot)
-	result.CloseImmutableRoot()
+	assert.Nil(t, result.AncillaryRoot)
+	assert.Nil(t, result.ExtractRoot)
+	result.CloseHandles()
 
-	// A result that never had a handle is a no-op, which is the shape callers
-	// that fall back to the pathname produce.
-	(&BootstrapResult{}).CloseImmutableRoot()
+	// A result that never had handles is a no-op, which is the shape a
+	// hand-built result produces.
+	(&BootstrapResult{}).CloseHandles()
+}
+
+// TestImportLedgerStateRefusesUnvettedResult pins the ancillary side's
+// fail-closed rule, matching the immutable one.
+//
+// The ledger-state search reads only through handles the bootstrap vetted. A
+// result carrying none is refused rather than searched by pathname, because a
+// pathname search would succeed while describing a tree nothing checked — and
+// for the ancillary tree that check is a signature.
+func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
+	_, _, err := importLedgerState(
+		t.Context(),
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		&BootstrapResult{
+			AncillaryDir: t.TempDir(),
+			ExtractDir:   t.TempDir(),
+		},
+		false,
+		^uint64(0),
+		nil,
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no verified directory handle")
 }

@@ -1129,9 +1129,10 @@ func TestVettedRefusesCandidateSwappedAfterInspection(t *testing.T) {
 }
 
 // TestLedgerDir holds the ancillary fast path to the same rule as the immutable
-// one: it returns the directory it inspected rather than a bool the caller then
-// pairs with a name of its own. Nothing downstream re-checks an unverified
-// bootstrap's ledger state, so what that path names is what gets loaded.
+// one: it returns the directory it inspected, as the handle it inspected it
+// through, rather than a name the caller pairs with its own reading of the
+// tree. The manifest check and the ledger-state import both go through that
+// handle, so neither can end up describing a different tree.
 func TestLedgerDir(t *testing.T) {
 	t.Run("returns the inspected directory", func(t *testing.T) {
 		dir := t.TempDir()
@@ -1141,11 +1142,21 @@ func TestLedgerDir(t *testing.T) {
 			filepath.Join(state, "state"), []byte("ours"), 0o640,
 		))
 
-		assert.Equal(t, dir, ledgerDir(dir))
+		found := ledgerDir(dir)
+		require.NotNil(t, found)
+		t.Cleanup(found.Close)
+		assert.Equal(t, dir, found.Path())
+
+		opened, err := found.Root().Stat(".")
+		require.NoError(t, err)
+		want, err := os.Lstat(dir)
+		require.NoError(t, err)
+		assert.True(t, os.SameFile(opened, want),
+			"the handle must refer to the directory that was inspected")
 	})
 
 	t.Run("refuses a tree without ledger state", func(t *testing.T) {
-		assert.Empty(t, ledgerDir(t.TempDir()))
+		assert.Nil(t, ledgerDir(t.TempDir()))
 	})
 
 	t.Run("refuses a symlinked directory", func(t *testing.T) {
@@ -1158,7 +1169,7 @@ func TestLedgerDir(t *testing.T) {
 		candidate := filepath.Join(parent, "ancillary-abc123")
 		requireSymlinkSupport(t, "outside", candidate)
 
-		assert.Empty(t, ledgerDir(candidate))
+		assert.Nil(t, ledgerDir(candidate))
 	})
 }
 

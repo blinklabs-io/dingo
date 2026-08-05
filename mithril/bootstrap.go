@@ -190,6 +190,19 @@ type BootstrapResult struct {
 	// archive was extracted. Contains ledger/<slot>/{meta,state,
 	// tables/tvar}. Empty if no ancillary data was downloaded.
 	AncillaryDir string
+	// AncillaryRoot is an open handle on AncillaryDir, on the same terms as
+	// ImmutableRoot: the ledger-state import discovers and reads through it, so
+	// the tree the signed manifest was checked against is the tree that gets
+	// loaded. Nil when no ancillary data was obtained.
+	AncillaryRoot *os.Root
+	// ExtractRoot is an open handle on ExtractDir.
+	//
+	// The ledger-state import falls back to the main extraction directory when
+	// the ancillary archive carried no ledger state (v1 snapshots keep it in
+	// db/ledger). ExtractDir is derived inside the download directory like
+	// everything else here, so that fallback reads through a handle too rather
+	// than resolving a name nothing vetted.
+	ExtractRoot *os.Root
 	// AncillaryArchivePath is the path to the downloaded ancillary
 	// archive file. Empty if no ancillary data was downloaded.
 	AncillaryArchivePath string
@@ -497,8 +510,15 @@ func Bootstrap(
 		downloadDir,
 		"immutable-"+snapshotCacheKey,
 	)
-	var ancillaryDir string
+	var ancillaryTree *vettedDir
 	var ancillaryArchivePath string
+	// Closed only when the result that would own it is never returned; on
+	// success it is carried to the ledger-state import and released by Cleanup.
+	defer func() {
+		if !success {
+			ancillaryTree.Close()
+		}
+	}()
 
 	// Launch ancillary download concurrently (non-fatal if it fails).
 	// Always wait for the goroutine before returning, even on error,
@@ -517,14 +537,14 @@ func Bootstrap(
 				downloadDir,
 				"ancillary-"+snapshotCacheKey,
 			)
-			if cachedDir := ledgerDir(candidateDir); cachedDir != "" {
+			if cached := ledgerDir(candidateDir); cached != nil {
 				cfg.Logger.Info(
 					"ancillary data already "+
 						"extracted, skipping",
 					"component", "mithril",
-					"path", cachedDir,
+					"path", cached.Path(),
 				)
-				ancillaryDir = cachedDir
+				ancillaryTree = cached
 				// Only set archive path if the file still
 				// exists (it may have been cleaned up after
 				// a prior successful extraction).
@@ -556,8 +576,25 @@ func Bootstrap(
 				)
 				return
 			}
-			ancillaryDir = dir
+			// Recorded before the vetting below, so a tree that turns
+			// out to hold no ledger state still gets its archive
+			// cleaned up.
 			ancillaryArchivePath = archPath
+			// Freshly extracted by this process, but vetted all the
+			// same: the handle is what the import reads through, and
+			// opening it here is what binds the tree that was written
+			// to the tree that gets loaded.
+			tree := ledgerDir(dir)
+			if tree == nil {
+				cfg.Logger.Warn(
+					"extracted ancillary data holds no "+
+						"ledger state, continuing without it",
+					"component", "mithril",
+					"path", dir,
+				)
+				return
+			}
+			ancillaryTree = tree
 		})
 	}
 
@@ -606,11 +643,26 @@ func Bootstrap(
 	// for the error-return path; calling Wait twice is safe).
 	ancWg.Wait()
 
+	// The ledger-state import falls back to the extraction directory when the
+	// ancillary tree carries no ledger state, so that directory is vetted and
+	// held open too rather than searched by name.
+	extractTree, err := openVerifiedDir(extractDir)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"verifying extraction directory %s: %w", extractDir, err,
+		)
+	}
+	defer func() {
+		if !success {
+			_ = extractTree.Close()
+		}
+	}()
+
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
 		"immutable_dir", immutableTree.Path(),
-		"ancillary_dir", ancillaryDir,
+		"ancillary_dir", ancillaryTree.Path(),
 	)
 
 	success = true
@@ -619,7 +671,9 @@ func Bootstrap(
 		ImmutableDir:         immutableTree.Path(),
 		ImmutableRoot:        immutableTree.Root(),
 		ExtractDir:           extractDir,
-		AncillaryDir:         ancillaryDir,
+		ExtractRoot:          extractTree,
+		AncillaryDir:         ancillaryTree.Path(),
+		AncillaryRoot:        ancillaryTree.Root(),
 		ArchivePath:          archivePath,
 		AncillaryArchivePath: ancillaryArchivePath,
 	}
@@ -726,7 +780,7 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	}
 	// Released before the directories go, so Windows — which refuses to remove
 	// a directory with an open handle beneath it — can remove the tree.
-	r.CloseImmutableRoot()
+	r.CloseHandles()
 	paths := []string{
 		r.ArchivePath,
 		r.ExtractDir,
@@ -772,16 +826,28 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	}
 }
 
-// CloseImmutableRoot releases the ImmutableDB directory handle. It is
+// CloseHandles releases the directory handles the result carries. It is
 // idempotent, and callers that do not clean up (CleanupAfterLoad off, which
 // keeps the extracted tree for a later run) still owe this call once loading is
-// done — the handle is a descriptor held for the lifetime of the result.
-func (r *BootstrapResult) CloseImmutableRoot() {
-	if r == nil || r.ImmutableRoot == nil {
+// done — the handles are descriptors held for the lifetime of the result.
+//
+// Not safe to call while another goroutine reads the handle fields: it clears
+// them. Call it once the work that reads them has finished — in Sync that is
+// after the import errgroup is joined.
+func (r *BootstrapResult) CloseHandles() {
+	if r == nil {
 		return
 	}
-	_ = r.ImmutableRoot.Close()
-	r.ImmutableRoot = nil
+	for _, root := range []**os.Root{
+		&r.ImmutableRoot,
+		&r.AncillaryRoot,
+		&r.ExtractRoot,
+	} {
+		if *root != nil {
+			_ = (*root).Close()
+			*root = nil
+		}
+	}
 }
 
 // findImmutableDir looks for the ImmutableDB directory in the
@@ -1180,48 +1246,29 @@ func isFileComplete(path string, expectedSize int64) bool {
 	return fi.Size() == expectedSize
 }
 
-// hasLedgerFiles checks if a directory contains ledger state files.
-// It looks for any file named "state" in subdirectories, which is
-// the UTxO-HD layout: ledger/<slot>/state.
-func hasLedgerFiles(dir string) bool {
-	root, err := openVerifiedDir(dir)
-	if err != nil {
-		return false
-	}
-	defer root.Close()
-	return hasLedgerFilesIn(root)
-}
-
-// ledgerDir returns dir when it holds ledger state files, and "" when it does
+// ledgerDir returns dir when it holds ledger state files, and nil when it does
 // not or when the name no longer denotes the directory that was read.
+//
+// This replaced a bool-returning hasLedgerFiles: every caller went on to use
+// the directory, and a bool left each of them to name it again for themselves.
 //
 // This is hasLedgerFiles for the callers that go on to *use* the directory
 // rather than merely assert something about it: the "already extracted,
 // skipping" fast paths, which take the answer as licence to skip extraction and
-// hand the path on as the node's ledger state. Returning the path from the
-// lookup that read it keeps the two from being about different trees.
-//
-// Unlike the immutable side, the answer here is a name and the handle is
-// dropped. That is deliberate rather than an omission: the ancillary tree is
-// consumed by the ledger-state importer, which discovers and opens files by
-// pathname and has no way to take a handle, and it is re-verified against the
-// signed ancillary manifest at that same name. A handle carried past this point
-// would bind the verification to a tree the importer does not read, which is
-// worse than binding neither — the check and the load have to be about one
-// directory. See vettedDir for what carrying the handle buys where the consumer
-// can accept one.
-func ledgerDir(dir string) string {
+// hand the tree on as the node's ledger state. The handle it was read through
+// is what is returned, so the manifest verification and the ledger-state import
+// downstream are about the directory this inspected rather than about whatever
+// later holds its name. The caller must Close the result.
+func ledgerDir(dir string) *vettedDir {
 	root, err := openVerifiedDir(dir)
 	if err != nil {
-		return ""
+		return nil
 	}
 	if !hasLedgerFilesIn(root) {
 		_ = root.Close()
-		return ""
+		return nil
 	}
-	d := vetted(root, dir, ".")
-	defer d.Close()
-	return d.Path()
+	return vetted(root, dir, ".")
 }
 
 // hasLedgerFilesIn is hasLedgerFiles resolved through an open handle on the

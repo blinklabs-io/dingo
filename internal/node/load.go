@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -581,8 +580,9 @@ type LoadBlobsProgress struct {
 }
 
 type loadBlobsOptions struct {
-	onProgress    func(LoadBlobsProgress)
-	immutableRoot *os.Root
+	onProgress     func(LoadBlobsProgress)
+	immutableDB    *immutable.ImmutableDb
+	immutableDBSet bool
 }
 
 // LoadBlobsOption customizes LoadBlobsWithDB behavior.
@@ -597,16 +597,25 @@ func WithLoadBlobsProgress(
 	}
 }
 
-// WithImmutableRoot supplies an open handle on the ImmutableDB directory, so
-// every read resolves through it instead of through the directory's pathname.
+// WithImmutableDB supplies an already-open ImmutableDB to copy from, instead of
+// opening immutableDir by pathname.
 //
-// Callers that vetted the directory before handing it over need this: the
-// pathname alone would let a tree substituted in the meantime be read as though
-// it were the one that was checked. The caller keeps ownership of the handle and
-// must hold it open for the duration of the call.
-func WithImmutableRoot(root *os.Root) LoadBlobsOption {
+// Callers that vetted the directory before handing it over need this: opening
+// the pathname here would let a tree substituted in the meantime be read as
+// though it were the one that was checked. Passing the open database rather
+// than a directory handle also leaves one place where the decision how to
+// resolve the directory was made, so it cannot be made differently twice.
+//
+// A nil argument is an error rather than a fallback to the pathname — a caller
+// that meant to supply a vetted database and passed nothing must not silently
+// get the open it was avoiding. Omit the option entirely to open by pathname.
+//
+// The caller keeps ownership and must keep the database usable for the duration
+// of the call.
+func WithImmutableDB(imm *immutable.ImmutableDb) LoadBlobsOption {
 	return func(opts *loadBlobsOptions) {
-		opts.immutableRoot = root
+		opts.immutableDB = imm
+		opts.immutableDBSet = true
 	}
 }
 
@@ -629,6 +638,19 @@ func LoadBlobsWithDB(
 			continue
 		}
 		option(&opts)
+	}
+	if opts.immutableDBSet && opts.immutableDB == nil {
+		return nil, errors.New(
+			"WithImmutableDB was given no ImmutableDB; refusing to fall " +
+				"back to opening the directory by pathname",
+		)
+	}
+	imm := opts.immutableDB
+	if imm == nil {
+		var err error
+		if imm, err = immutable.New(immutableDir); err != nil {
+			return nil, fmt.Errorf("failed to read immutable DB: %w", err)
+		}
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
@@ -656,7 +678,7 @@ func LoadBlobsWithDB(
 
 	var utxoOffsetsStored int
 	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
-		ctx, logger, immutableDir, opts.immutableRoot, db, c,
+		ctx, logger, imm, db, c,
 		func(rb chain.RawBlock, txn *database.Txn) error {
 			stored, err := storeRawBlockUtxoOffsets(txn, rb)
 			if err != nil {
@@ -680,18 +702,6 @@ func LoadBlobsWithDB(
 		BlocksCopied:     blocksCopied,
 		ImmutableTipSlot: immutableTipSlot,
 	}, nil
-}
-
-// openImmutable opens an ImmutableDB, through root when the caller supplied
-// one and by pathname otherwise.
-func openImmutable(
-	dir string,
-	root *os.Root,
-) (*immutable.ImmutableDb, error) {
-	if root != nil {
-		return immutable.NewFromRoot(root)
-	}
-	return immutable.New(dir)
 }
 
 // copyBlocksDirect reads immutable blocks once, persists them to the chain,
@@ -938,23 +948,18 @@ func CopyImmutableBlobsBounded(
 // runs in the same transaction after each block is persisted, giving
 // callers a hook to attach derived blob-side state such as UTxO offsets.
 //
-// immutableRoot, when non-nil, is an open handle on immutableDir that the reads
-// resolve through; immutableDir is then only a name for messages. See
-// WithImmutableRoot.
+// The ImmutableDB is passed in already open so the caller decides how its
+// directory was resolved — by pathname, or through a handle that binds the
+// reads to a directory somebody else cannot repoint. See WithImmutableDB.
 func copyBlocksRawWithCallback(
 	ctx context.Context,
 	logger *slog.Logger,
-	immutableDir string,
-	immutableRoot *os.Root,
+	imm *immutable.ImmutableDb,
 	db *database.Database,
 	c *chain.Chain,
 	callback func(chain.RawBlock, *database.Txn) error,
 	onProgress func(LoadBlobsProgress),
 ) (int, uint64, error) {
-	imm, err := openImmutable(immutableDir, immutableRoot)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
-	}
 	immutableTip, err := imm.GetTip()
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB tip: %w", err)

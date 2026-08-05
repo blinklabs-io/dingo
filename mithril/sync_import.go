@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -186,39 +188,68 @@ func importLedgerState(
 	maxTrustedSlot uint64,
 	onLedger func(ledgerstate.ImportProgress),
 ) (ledgerStateSlot uint64, ledgerStateHash []byte, err error) {
-	// Search for ledger state: prefer ancillary dir, fall back to
-	// main extract dir.
-	searchDirs := []string{}
-	if result.AncillaryDir != "" {
-		searchDirs = append(searchDirs, result.AncillaryDir)
+	// Search for ledger state: prefer the ancillary tree, fall back to the
+	// main extraction tree.
+	//
+	// Both are searched through the handle the bootstrap vetted them with, and
+	// the state file is opened through the same handle rather than by the name
+	// the search produced. That is what makes the manifest verification mean
+	// something downstream: the bytes imported come from the tree that was
+	// verified, not from whatever holds its name once the import starts.
+	type searchTree struct {
+		name string
+		root *os.Root
 	}
-	searchDirs = append(searchDirs, result.ExtractDir)
+	searchTrees := []searchTree{}
+	if result.AncillaryRoot != nil {
+		searchTrees = append(
+			searchTrees,
+			searchTree{result.AncillaryDir, result.AncillaryRoot},
+		)
+	}
+	if result.ExtractRoot != nil {
+		searchTrees = append(
+			searchTrees,
+			searchTree{result.ExtractDir, result.ExtractRoot},
+		)
+	}
+	if len(searchTrees) == 0 {
+		return 0, nil, errors.New(
+			"bootstrap result carries no verified directory handle to " +
+				"import ledger state from",
+		)
+	}
 
-	var lstatePath string
-	for _, dir := range searchDirs {
-		path, findErr := ledgerstate.FindLedgerStateFileAtOrBefore(
-			dir,
+	var (
+		stateRel  string
+		stateRoot *os.Root
+		stateDir  string
+	)
+	for _, tree := range searchTrees {
+		rel, findErr := ledgerstate.FindLedgerStateAtOrBefore(
+			tree.root,
 			maxTrustedSlot,
 		)
 		if findErr == nil {
-			lstatePath = path
+			stateRel, stateRoot, stateDir = rel, tree.root, tree.name
 			break
 		}
 		logger.Debug(
 			"ledger state not found in directory",
 			"component", "mithril",
-			"dir", dir,
+			"dir", tree.name,
 			"error", findErr,
 		)
 	}
 
-	if lstatePath == "" {
+	if stateRel == "" {
 		return 0, nil, fmt.Errorf(
 			"no ledger state at or before certified ImmutableDB tip slot %d; "+
 				"refusing to trust a volatile ancillary ledger state",
 			maxTrustedSlot,
 		)
 	}
+	lstatePath := filepath.Join(stateDir, filepath.FromSlash(stateRel))
 
 	logger.Info(
 		"found ledger state file",
@@ -227,20 +258,36 @@ func importLedgerState(
 		"max_trusted_slot", maxTrustedSlot,
 	)
 
-	// Parse the snapshot
-	state, err := ledgerstate.ParseSnapshot(lstatePath)
+	// Parse the snapshot, read through the handle the search used.
+	stateFile, err := ledgerstate.RootOpen(stateRoot, stateRel)
+	if err != nil {
+		return 0, nil, fmt.Errorf("opening ledger state: %w", err)
+	}
+	state, err := ledgerstate.ParseSnapshotFile(stateFile)
+	_ = stateFile.Close()
 	if err != nil {
 		return 0, nil, fmt.Errorf("parsing ledger state: %w", err)
 	}
 
-	// Check for UTxO-HD tvar file (UTxOs stored separately)
-	tvarPath := ledgerstate.FindUTxOTableFileForState(lstatePath)
-	if tvarPath != "" {
-		state.UTxOTablePath = tvarPath
+	// Check for UTxO-HD tvar file (UTxOs stored separately). Held open for the
+	// whole import, since that is what the UTxO stream is read from.
+	tvarRel := ledgerstate.FindUTxOTableForState(stateRoot, stateRel)
+	if tvarRel != "" {
+		tvarFile, openErr := ledgerstate.RootOpen(stateRoot, tvarRel)
+		if openErr != nil {
+			return 0, nil, fmt.Errorf(
+				"opening UTxO table: %w", openErr,
+			)
+		}
+		defer func() { _ = tvarFile.Close() }()
+		state.UTxOTablePath = filepath.Join(
+			stateDir, filepath.FromSlash(tvarRel),
+		)
+		state.UTxOTableFile = tvarFile
 		logger.Info(
 			"found UTxO table file (UTxO-HD format)",
 			"component", "mithril",
-			"path", tvarPath,
+			"path", state.UTxOTablePath,
 		)
 	}
 
