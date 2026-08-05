@@ -275,8 +275,10 @@ func (s *submitServiceServer) EvalTx(
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
 	for key, val := range redeemerExUnits {
 		r := &cardano.Redeemer{
-			Purpose: cardano.RedeemerPurpose(key.Tag + 1), // gouroboros tags are 0-based, cardano tags are offset by 1
-			Index:   key.Index,
+			Purpose: cardano.RedeemerPurpose(
+				key.Tag + 1,
+			), // gouroboros tags are 0-based, cardano tags are offset by 1
+			Index: key.Index,
 			ExUnits: &cardano.ExUnits{
 				Steps:  uint64(val.Steps),  // nolint:gosec
 				Memory: uint64(val.Memory), // nolint:gosec
@@ -632,7 +634,11 @@ func (u *Utxorpc) addressPatternMatchesOutput(
 	if b := ap.GetExactAddress(); b != nil {
 		patAddr, err := lcommon.NewAddressFromBytes(b)
 		if err != nil {
-			u.config.Logger.Error("failed to decode exact address", "error", err)
+			u.config.Logger.Error(
+				"failed to decode exact address",
+				"error",
+				err,
+			)
 			sawUnevaluable = true
 		} else if addr.String() != patAddr.String() {
 			return predNoMatch

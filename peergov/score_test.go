@@ -406,7 +406,11 @@ func TestStaleLatencyDecaysTowardNeutralNotPenalty(t *testing.T) {
 		}
 		// Explicitly reject the no-decay regression.
 		if peer.BlockFetchLatencyMs == tc.start {
-			t.Fatalf("%s: latency did not decay at all (still %v)", tc.name, tc.start)
+			t.Fatalf(
+				"%s: latency did not decay at all (still %v)",
+				tc.name,
+				tc.start,
+			)
 		}
 	}
 

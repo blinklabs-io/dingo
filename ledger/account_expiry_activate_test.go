@@ -74,7 +74,10 @@ func TestActivateDelegatorInactivityIfNeeded_GateOn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, epoch+inactivity, acctB.ExpirationEpoch)
 
-	marker, err := db.GetSyncState(database.DelegatorInactivityActivatedSyncKey, nil)
+	marker, err := db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -149,7 +152,10 @@ func TestActivateDelegatorInactivityIfNeeded_GateOff(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), acct.ExpirationEpoch, "gate off must not stamp")
 
-	marker, err := db.GetSyncState(database.DelegatorInactivityActivatedSyncKey, nil)
+	marker, err := db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "", marker, "gate off must not write the activation marker")
 }

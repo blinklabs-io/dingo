@@ -30,7 +30,10 @@ func (d *Database) RebuildRewardLiveStake(slot uint64, txn *Txn) error {
 		})
 	}
 	if txn.db != d || txn.Metadata() == nil {
-		return fmt.Errorf("rebuild reward live stake: %w", types.ErrTxnWrongType)
+		return fmt.Errorf(
+			"rebuild reward live stake: %w",
+			types.ErrTxnWrongType,
+		)
 	}
 	if !txn.IsReadWrite() {
 		return fmt.Errorf(

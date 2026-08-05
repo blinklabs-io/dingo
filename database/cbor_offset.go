@@ -299,7 +299,9 @@ func (t *TxCborParts) HasMetadata() bool {
 // a different encoding order or structure.
 func (t *TxCborParts) ReassembleTxCbor(blockCbor []byte) ([]byte, error) {
 	// Safe conversion: Cardano blocks are limited to ~90KB, well within uint32 range.
-	blockLen := uint32(len(blockCbor)) // #nosec G115: bounded by Cardano protocol limits
+	blockLen := uint32(
+		len(blockCbor),
+	) // #nosec G115: bounded by Cardano protocol limits
 
 	// Validate body bounds (overflow-safe: check offset first, then remaining space)
 	if t.BodyOffset > blockLen || t.BodyLength > blockLen-t.BodyOffset {
@@ -310,7 +312,8 @@ func (t *TxCborParts) ReassembleTxCbor(blockCbor []byte) ([]byte, error) {
 	}
 
 	// Validate witness bounds (overflow-safe)
-	if t.WitnessOffset > blockLen || t.WitnessLength > blockLen-t.WitnessOffset {
+	if t.WitnessOffset > blockLen ||
+		t.WitnessLength > blockLen-t.WitnessOffset {
 		return nil, fmt.Errorf(
 			"witness range [%d:%d] exceeds block size %d",
 			t.WitnessOffset, t.WitnessOffset+t.WitnessLength, blockLen,
@@ -318,7 +321,8 @@ func (t *TxCborParts) ReassembleTxCbor(blockCbor []byte) ([]byte, error) {
 	}
 
 	// Validate metadata bounds if present (overflow-safe)
-	if t.HasMetadata() && (t.MetadataOffset > blockLen || t.MetadataLength > blockLen-t.MetadataOffset) {
+	if t.HasMetadata() &&
+		(t.MetadataOffset > blockLen || t.MetadataLength > blockLen-t.MetadataOffset) {
 		return nil, fmt.Errorf(
 			"metadata range [%d:%d] exceeds block size %d",
 			t.MetadataOffset, t.MetadataOffset+t.MetadataLength, blockLen,
@@ -341,7 +345,11 @@ func (t *TxCborParts) ReassembleTxCbor(blockCbor []byte) ([]byte, error) {
 
 // buildTxCborArray constructs a CBOR array containing the transaction components.
 // Format: [body, witness, is_valid, metadata_or_null]
-func buildTxCborArray(body, witness []byte, isValid bool, metadata []byte) []byte {
+func buildTxCborArray(
+	body, witness []byte,
+	isValid bool,
+	metadata []byte,
+) []byte {
 	// Calculate total size needed
 	// CBOR array header (1 byte for 4-element array: 0x84)
 	// + body bytes + witness bytes

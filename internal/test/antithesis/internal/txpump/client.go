@@ -90,7 +90,10 @@ func (c *NodeClient) SubmitTx(eraID uint16, txBytes []byte) error {
 	}
 	lts := c.conn.LocalTxSubmission()
 	if lts == nil {
-		return fmt.Errorf("node %s: LocalTxSubmission protocol not available", c.addr)
+		return fmt.Errorf(
+			"node %s: LocalTxSubmission protocol not available",
+			c.addr,
+		)
 	}
 	if lts.Client == nil {
 		return fmt.Errorf(

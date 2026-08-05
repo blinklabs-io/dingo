@@ -37,7 +37,12 @@ func TestGetPoolStakeSnapshotsByEpoch_AcceptsKnownTypes(t *testing.T) {
 	db := newTestDB(t)
 	for _, snapshotType := range []string{"mark", "set", "go", "actv"} {
 		rows, err := db.GetPoolStakeSnapshotsByEpoch(1, snapshotType, nil)
-		require.NoError(t, err, "snapshot type %q must be accepted", snapshotType)
+		require.NoError(
+			t,
+			err,
+			"snapshot type %q must be accepted",
+			snapshotType,
+		)
 		require.Empty(t, rows)
 	}
 }

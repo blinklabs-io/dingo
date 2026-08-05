@@ -32,12 +32,36 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", "localhost:3113", "Dingo NtN address (host:port)")
-	name := flag.String("name", "dingo-pruning", "endpoint name shown in log lines")
-	magic := flag.Uint("magic", uint(archivedemo.DefaultNetworkMagic), "network magic")
-	slot := flag.Uint64("slot", 50, "fetch the first block at or after this slot")
-	resolveAddr := flag.String("resolve-addr", "localhost:3111", "endpoint used to resolve the target block hash (typically the archive node)")
-	resolveName := flag.String("resolve-name", "dingo-archive", "name for the resolve endpoint")
+	addr := flag.String(
+		"addr",
+		"localhost:3113",
+		"Dingo NtN address (host:port)",
+	)
+	name := flag.String(
+		"name",
+		"dingo-pruning",
+		"endpoint name shown in log lines",
+	)
+	magic := flag.Uint(
+		"magic",
+		uint(archivedemo.DefaultNetworkMagic),
+		"network magic",
+	)
+	slot := flag.Uint64(
+		"slot",
+		50,
+		"fetch the first block at or after this slot",
+	)
+	resolveAddr := flag.String(
+		"resolve-addr",
+		"localhost:3111",
+		"endpoint used to resolve the target block hash (typically the archive node)",
+	)
+	resolveName := flag.String(
+		"resolve-name",
+		"dingo-archive",
+		"name for the resolve endpoint",
+	)
 	timeout := flag.Duration("timeout", 60*time.Second, "per-step timeout")
 	flag.Parse()
 
@@ -46,7 +70,11 @@ func main() {
 	}
 
 	if *magic > math.MaxUint32 {
-		fmt.Fprintf(os.Stderr, "FAIL: network magic %d exceeds uint32 max\n", *magic)
+		fmt.Fprintf(
+			os.Stderr,
+			"FAIL: network magic %d exceeds uint32 max\n",
+			*magic,
+		)
 		os.Exit(1)
 	}
 	magic32 := uint32(*magic) // #nosec G115 -- bounds checked above
@@ -63,7 +91,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 		os.Exit(1)
 	}
-	logf("resolved: slot=%d hash=%x (took %s)", point.Slot, point.Hash, time.Since(t0).Round(time.Millisecond))
+	logf(
+		"resolved: slot=%d hash=%x (took %s)",
+		point.Slot,
+		point.Hash,
+		time.Since(t0).Round(time.Millisecond),
+	)
 
 	logf("BlockFetch from %s for slot %d...", target.Name, point.Slot)
 	t1 := time.Now()

@@ -190,7 +190,8 @@ func parseVoteSigningKeyFile(data []byte) (*VoteSigningKey, error) {
 		return nil, fmt.Errorf("decode Cardano signing key envelope: %w", err)
 	}
 	keyType := strings.ToLower(envelope.Type)
-	if !strings.Contains(keyType, "bls") && !strings.Contains(keyType, "leios") {
+	if !strings.Contains(keyType, "bls") &&
+		!strings.Contains(keyType, "leios") {
 		return nil, fmt.Errorf(
 			"%w: unsupported Cardano signing key type %q",
 			ErrInvalidSigningKey,

@@ -200,6 +200,38 @@ historyExpiry:
   # CLI: --history-expiry-frequency
   frequency: 1h
 
+# Optional in-process Koios reward-parity observer (dingo #3098). When
+# enabled, Dingo subscribes an observer to its own epoch.transition EventBus
+# event and validates each newly closed epoch's committed reward state
+# directly against Koios reference data as the node advances -- no separate
+# koios-parity CLI process or second synced copy of the database required.
+# This is a one-off validation aid for preview/preprod, not a permanent
+# subsystem; leave disabled for normal node operation. See
+# internal/koiosparity and ARCHITECTURE.md's "Koios Parity Tracker" section.
+koiosParity:
+  # Can be overridden with DINGO_KOIOS_PARITY_ENABLED
+  # CLI: --koios-parity-enabled
+  enabled: false
+  # Koios network to validate against: preview or preprod. Empty defaults to
+  # this node's own `network` setting.
+  # Can be overridden with DINGO_KOIOS_PARITY_NETWORK
+  # CLI: --koios-parity-network
+  network: ""
+  # Can be overridden with DINGO_KOIOS_PARITY_CACHE_PATH
+  # CLI: --koios-parity-cache-path
+  cachePath: ""
+  # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
+  # CLI: --koios-parity-api-key
+  apiKey: ""
+  # Stop/cancel the node on the first Koios/tool error or exact parity
+  # mismatch instead of logging it and continuing normal operation.
+  # Can be overridden with DINGO_KOIOS_PARITY_STRICT
+  # CLI: --koios-parity-strict
+  strict: true
+  # Can be overridden with DINGO_KOIOS_PARITY_GRACE_HOURS
+  # CLI: --koios-parity-grace-hours
+  graceHours: 24
+
 # ---
 # Deployment pattern examples (uncomment one block):
 #

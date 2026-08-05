@@ -173,7 +173,9 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 	return m.activeSlotCoeff
 }
 
-func (m *mockEpochProvider) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+func (m *mockEpochProvider) ConsensusModeForEpoch(
+	epoch uint64,
+) consensus.ConsensusMode {
 	return consensus.ConsensusModeTPraos
 }
 
@@ -489,7 +491,9 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 
 	select {
 	case <-stopDone:
-		t.Fatal("Stop returned before the in-flight schedule computation finished")
+		t.Fatal(
+			"Stop returned before the in-flight schedule computation finished",
+		)
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -634,7 +638,13 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	store := newMockScheduleStore()
-	persisted := NewSchedule(10, poolId, 1_000_000, 1_000_000, makeElectionNonce(0x44))
+	persisted := NewSchedule(
+		10,
+		poolId,
+		1_000_000,
+		1_000_000,
+		makeElectionNonce(0x44),
+	)
 	persisted.AddLeaderSlot(999)
 	require.NoError(t, store.SaveSchedule(persisted))
 
@@ -953,7 +963,9 @@ func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
 // known range), the producer declines rather than running with an
 // incorrect epoch index. The compute path is not engaged because we
 // don't know which epoch's schedule to request.
-func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(t *testing.T) {
+func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(
+	t *testing.T,
+) {
 	poolId := lcommon.PoolKeyHash{}
 	epochProvider := newMockEpochProvider()
 	epochProvider.epochForSlot = func(uint64) (uint64, error) {
@@ -1255,7 +1267,10 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(expectedNonce, schedule.EpochNonce) &&
-			assert.ObjectsAreEqual(expectedSlots, schedule.LeaderSlotsSnapshot())
+			assert.ObjectsAreEqual(
+				expectedSlots,
+				schedule.LeaderSlotsSnapshot(),
+			)
 	}, time.Second, 20*time.Millisecond,
 		"rollback should not invalidate a precomputed next-epoch schedule")
 }

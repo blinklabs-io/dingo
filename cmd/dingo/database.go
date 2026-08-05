@@ -67,7 +67,11 @@ func databaseSnapshotCommand() *cobra.Command {
 				return errors.New("--dir is required")
 			}
 			logger := commonRun(cfg)
-			svc := dblifecycle.NewService(cfg, newCLIDestinationRegistry(), logger)
+			svc := dblifecycle.NewService(
+				cfg,
+				newCLIDestinationRegistry(),
+				logger,
+			)
 
 			// Snapshot can run for a long time against a large database,
 			// and Cobra's default cmd.Context() is a plain
@@ -120,7 +124,11 @@ func databaseRestoreCommand() *cobra.Command {
 				return errors.New("no config found in context")
 			}
 			logger := commonRun(cfg)
-			svc := dblifecycle.NewService(cfg, newCLIDestinationRegistry(), logger)
+			svc := dblifecycle.NewService(
+				cfg,
+				newCLIDestinationRegistry(),
+				logger,
+			)
 
 			// Restore can run for a long time against a large database,
 			// and Cobra's default cmd.Context() is a plain

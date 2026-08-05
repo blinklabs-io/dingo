@@ -176,7 +176,11 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		"snapshot must complete over the wire",
 	)
 	require.Equal(t, "completed", finalProgress.GetMessage())
-	require.Equal(t, createResp.Msg.GetOperationId(), finalProgress.GetOperationId())
+	require.Equal(
+		t,
+		createResp.Msg.GetOperationId(),
+		finalProgress.GetOperationId(),
+	)
 
 	// Truncate over the same real connection, sequenced after the
 	// snapshot completes so the handler's single-operation gate doesn't
@@ -232,7 +236,11 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		}
 	}
 	require.NoError(t, stream.Err())
-	require.True(t, sawCompleted, "stream must report the truncate's completed status before closing")
+	require.True(
+		t,
+		sawCompleted,
+		"stream must report the truncate's completed status before closing",
+	)
 
 	listResp, err := client.ListSnapshots(
 		context.Background(),

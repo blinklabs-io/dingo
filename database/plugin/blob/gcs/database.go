@@ -146,8 +146,14 @@ func (d *BlobStoreGCS) object(key []byte) *storage.ObjectHandle {
 	return d.bucket.Object(d.fullKey(string(key)))
 }
 
-func (d *BlobStoreGCS) objects(ctx context.Context, prefix []byte) *storage.ObjectIterator {
-	return d.bucket.Objects(ctx, &storage.Query{Prefix: d.fullKey(string(prefix))})
+func (d *BlobStoreGCS) objects(
+	ctx context.Context,
+	prefix []byte,
+) *storage.ObjectIterator {
+	return d.bucket.Objects(
+		ctx,
+		&storage.Query{Prefix: d.fullKey(string(prefix))},
+	)
 }
 
 func (d *BlobStoreGCS) opContext() (context.Context, context.CancelFunc) {
@@ -155,7 +161,10 @@ func (d *BlobStoreGCS) opContext() (context.Context, context.CancelFunc) {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-	return context.WithTimeout(context.Background(), timeout) //nolint:gosec // G118: cancel func is returned to caller
+	return context.WithTimeout(
+		context.Background(),
+		timeout,
+	) //nolint:gosec // G118: cancel func is returned to caller
 }
 
 // Close closes the GCS client.
@@ -961,7 +970,11 @@ func (t *gcsTxn) Commit() error {
 			undoErr := comp.Undo(
 				i,
 				func(key string, value *io.SectionReader, _ int64) error {
-					return t.store.writeObjectStream(undoCtx, []byte(key), value)
+					return t.store.writeObjectStream(
+						undoCtx,
+						[]byte(key),
+						value,
+					)
 				},
 				func(key string) error {
 					delErr := t.store.deleteObject(undoCtx, []byte(key))

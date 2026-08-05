@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -66,7 +67,9 @@ func TestLeiosFetchGuardRecentlySucceeded(t *testing.T) {
 	// now-flaky connection is not still treated as proven.
 	g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
 	if g.recentlySucceeded(time.Now(), time.Minute) {
-		t.Fatal("a failure after a success should clear the affinity preference")
+		t.Fatal(
+			"a failure after a success should clear the affinity preference",
+		)
 	}
 }
 
@@ -128,13 +131,25 @@ func TestLeiosBackfillConnOrderPreservesRotation(t *testing.T) {
 	require.Equal(
 		t,
 		[]ouroboros.ConnectionId{b, c, a},
-		leiosBackfillConnOrder(connIds, 1, time.Now(), leiosBackfillAffinityWindow, guardFor),
+		leiosBackfillConnOrder(
+			connIds,
+			1,
+			time.Now(),
+			leiosBackfillAffinityWindow,
+			guardFor,
+		),
 		"start=1 rotates the fresh partition",
 	)
 	require.Equal(
 		t,
 		[]ouroboros.ConnectionId{c, a, b},
-		leiosBackfillConnOrder(connIds, 2, time.Now(), leiosBackfillAffinityWindow, guardFor),
+		leiosBackfillConnOrder(
+			connIds,
+			2,
+			time.Now(),
+			leiosBackfillAffinityWindow,
+			guardFor,
+		),
 		"start=2 rotates the fresh partition",
 	)
 }
@@ -200,7 +215,11 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deadline")
 	require.Empty(t, txs)
-	require.Zero(t, requester.calls, "no request should be issued past the deadline")
+	require.Zero(
+		t,
+		requester.calls,
+		"no request should be issued past the deadline",
+	)
 }
 
 // TestLeiosFetchResponseTimeoutFitsBackfillAttempt ensures a single request
@@ -226,6 +245,7 @@ type dribbleBlockTxsRequester struct {
 }
 
 func (r *dribbleBlockTxsRequester) BlockTxsRequest(
+	_ context.Context,
 	point ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
@@ -234,7 +254,11 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 	requested := leiosBitmapTxIndices(bitmaps)
 	slices.Sort(requested)
 	if len(requested) == 0 {
-		return leiosfetch.NewMsgBlockTxsFull(point, map[uint16]uint64{}, nil), nil
+		return leiosfetch.NewMsgBlockTxsFull(
+			point,
+			map[uint16]uint64{},
+			nil,
+		), nil
 	}
 	idx := requested[0]
 	served := map[uint16]uint64{uint16(idx / 64): 1 << uint(63-(idx%64))}
@@ -271,8 +295,17 @@ func TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deadline")
-	require.NotEmpty(t, txs, "the prefix fetched before the deadline is returned")
-	require.Less(t, len(txs), txCount, "the fetch is abandoned before completing")
+	require.NotEmpty(
+		t,
+		txs,
+		"the prefix fetched before the deadline is returned",
+	)
+	require.Less(
+		t,
+		len(txs),
+		txCount,
+		"the fetch is abandoned before completing",
+	)
 }
 
 // TestFetchLeiosEbTxsBatchedNoDeadlineStillCompletes verifies the zero-deadline

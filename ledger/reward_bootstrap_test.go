@@ -48,7 +48,9 @@ func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	}, epochs)
 }
 
-func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(t *testing.T) {
+func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
+	t *testing.T,
+) {
 	result := &rewards.Result{
 		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
 		AccountRewards:   []rewards.AccountReward{{Amount: 600}},

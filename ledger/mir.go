@@ -168,7 +168,8 @@ func (ls *LedgerState) debitMIRPot(
 	default:
 		return fmt.Errorf("unknown MIR pot %d", pot)
 	}
-	return ls.db.Metadata().SetNetworkState(treasury, reserves, slot, txn.Metadata())
+	return ls.db.Metadata().
+		SetNetworkState(treasury, reserves, slot, txn.Metadata())
 }
 
 // applyMIRPotTransfer moves amount lovelace between the two Ada pots at slot.
@@ -189,13 +190,15 @@ func (ls *LedgerState) applyMIRPotTransfer(
 		if amount > reserves {
 			return fmt.Errorf(
 				"MIR pot transfer would underflow reserves: pot has %d, moving %d",
-				reserves, amount,
+				reserves,
+				amount,
 			)
 		}
 		if amount > ^uint64(0)-treasury {
 			return fmt.Errorf(
 				"MIR pot transfer would overflow treasury: pot has %d, moving %d",
-				treasury, amount,
+				treasury,
+				amount,
 			)
 		}
 		reserves -= amount
@@ -204,13 +207,15 @@ func (ls *LedgerState) applyMIRPotTransfer(
 		if amount > treasury {
 			return fmt.Errorf(
 				"MIR pot transfer would underflow treasury: pot has %d, moving %d",
-				treasury, amount,
+				treasury,
+				amount,
 			)
 		}
 		if amount > ^uint64(0)-reserves {
 			return fmt.Errorf(
 				"MIR pot transfer would overflow reserves: pot has %d, moving %d",
-				reserves, amount,
+				reserves,
+				amount,
 			)
 		}
 		treasury -= amount
@@ -224,12 +229,15 @@ func (ls *LedgerState) applyMIRPotTransfer(
 		"amount", amount,
 		"component", "ledger",
 	)
-	return ls.db.Metadata().SetNetworkState(treasury, reserves, slot, txn.Metadata())
+	return ls.db.Metadata().
+		SetNetworkState(treasury, reserves, slot, txn.Metadata())
 }
 
 // readNetworkState returns the current treasury and reserves from the most
 // recent NetworkState row, returning (0, 0) if none exists yet.
-func (ls *LedgerState) readNetworkState(txn *database.Txn) (treasury, reserves uint64, err error) {
+func (ls *LedgerState) readNetworkState(
+	txn *database.Txn,
+) (treasury, reserves uint64, err error) {
 	state, err := ls.db.Metadata().GetNetworkState(txn.Metadata())
 	if err != nil {
 		return 0, 0, fmt.Errorf("get network state: %w", err)

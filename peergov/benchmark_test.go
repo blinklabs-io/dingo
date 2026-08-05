@@ -15,7 +15,9 @@ func BenchmarkReconcile(b *testing.B) {
 	for _, peerCount := range []int{100, 500, 1000} {
 		b.Run(strconv.Itoa(peerCount), func(b *testing.B) {
 			pg := NewPeerGovernor(PeerGovernorConfig{
-				Logger:                         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
 				MinHotPeers:                    20,
 				TargetNumberOfActivePeers:      20,
 				TargetNumberOfEstablishedPeers: 50,
@@ -42,13 +44,19 @@ func benchmarkPeers(count int) []*Peer {
 	peers := make([]*Peer, 0, count)
 	for i := range count {
 		peer := &Peer{
-			Address:           net.JoinHostPort("198.51.100."+strconv.Itoa(i%250+1), strconv.Itoa(3000+i)),
-			NormalizedAddress: net.JoinHostPort("198.51.100."+strconv.Itoa(i%250+1), strconv.Itoa(3000+i)),
-			FirstSeen:         now.Add(-2 * time.Hour),
-			LastActivity:      now.Add(-1 * time.Minute),
-			GroupID:           "group-" + strconv.Itoa(i%16),
-			Valency:           2,
-			WarmValency:       4,
+			Address: net.JoinHostPort(
+				"198.51.100."+strconv.Itoa(i%250+1),
+				strconv.Itoa(3000+i),
+			),
+			NormalizedAddress: net.JoinHostPort(
+				"198.51.100."+strconv.Itoa(i%250+1),
+				strconv.Itoa(3000+i),
+			),
+			FirstSeen:    now.Add(-2 * time.Hour),
+			LastActivity: now.Add(-1 * time.Minute),
+			GroupID:      "group-" + strconv.Itoa(i%16),
+			Valency:      2,
+			WarmValency:  4,
 		}
 		switch i % 6 {
 		case 0:

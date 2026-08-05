@@ -230,10 +230,34 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
 		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
-		{"plugins.api.utxorpc.config.port", c.BindAddr, utxorpcPort, apiListeners, false},
-		{"plugins.api.blockfrost.config.port", c.BindAddr, blockfrostPort, apiListeners, false},
-		{"plugins.api.mesh.config.port", c.BindAddr, meshPort, apiListeners, false},
-		{"midnight.port", c.Midnight.Host, c.Midnight.Port, apiListeners, false},
+		{
+			"plugins.api.utxorpc.config.port",
+			c.BindAddr,
+			utxorpcPort,
+			apiListeners,
+			false,
+		},
+		{
+			"plugins.api.blockfrost.config.port",
+			c.BindAddr,
+			blockfrostPort,
+			apiListeners,
+			false,
+		},
+		{
+			"plugins.api.mesh.config.port",
+			c.BindAddr,
+			meshPort,
+			apiListeners,
+			false,
+		},
+		{
+			"midnight.port",
+			c.Midnight.Host,
+			c.Midnight.Port,
+			apiListeners,
+			false,
+		},
 	}
 	// Two active listeners contending for a port only fails at bind
 	// time; catch it here. Zero ports are disabled or OS-assigned, so
@@ -550,6 +574,31 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				prefix,
 			))
 		}
+	}
+
+	// Koios parity observer (dingo #3098): network mirrors the same
+	// preview/preprod restriction internal/koiosparity.NewObserver enforces
+	// at construction time, checked here too so a bad value fails fast at
+	// config-validation time instead of only once the node reaches
+	// startKoiosParityObserver. Empty is valid -- it defers to the node's
+	// own configured Network.
+	if net := c.KoiosParity.Network; net != "" && net != "preview" &&
+		net != "preprod" {
+		errs = append(errs, fmt.Errorf(
+			"invalid koiosParity.network %q: must be empty, \"preview\", or \"preprod\"",
+			net,
+		))
+	}
+	// ApplyDefaults only fills in an unset (zero) GraceHours, so a negative
+	// value here was configured explicitly -- reject it the same way
+	// historyExpiry.frequency's equivalent check does, rather than let it
+	// silently change the grace-window semantics CompareEpochAggregates/
+	// CompareEpochTotals apply.
+	if c.KoiosParity.GraceHours < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid koiosParity.graceHours: %d (must not be negative; 0 selects the default of 24)",
+			c.KoiosParity.GraceHours,
+		))
 	}
 
 	return errors.Join(errs...)

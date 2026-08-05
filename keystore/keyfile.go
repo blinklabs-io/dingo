@@ -175,7 +175,10 @@ func parseKeyEnvelope(fileBytes []byte) (*loadedKey, error) {
 func decodeVRFSKey(skeyBytes []byte) ([]byte, []byte, error) {
 	var keyBytes []byte
 	if _, err := cbor.Decode(skeyBytes, &keyBytes); err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal VRF skey CBOR: %w", err)
+		return nil, nil, fmt.Errorf(
+			"failed to unmarshal VRF skey CBOR: %w",
+			err,
+		)
 	}
 
 	switch len(keyBytes) {
@@ -183,7 +186,10 @@ func decodeVRFSKey(skeyBytes []byte) ([]byte, []byte, error) {
 		// Just the seed - generate public key
 		pubKey, _, err := vrf.KeyGen(keyBytes)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to derive VRF public key: %w", err)
+			return nil, nil, fmt.Errorf(
+				"failed to derive VRF public key: %w",
+				err,
+			)
 		}
 		return keyBytes, pubKey, nil
 	case vrf.SeedSize + vrf.PublicKeySize:
@@ -192,7 +198,10 @@ func decodeVRFSKey(skeyBytes []byte) ([]byte, []byte, error) {
 		seed := keyBytes[:vrf.SeedSize]
 		pubKey, _, err := vrf.KeyGen(seed)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to derive VRF public key: %w", err)
+			return nil, nil, fmt.Errorf(
+				"failed to derive VRF public key: %w",
+				err,
+			)
 		}
 		return seed, pubKey, nil
 	default:
@@ -209,7 +218,10 @@ func decodeVRFSKey(skeyBytes []byte) ([]byte, []byte, error) {
 func decodeKESSKey(skeyBytes []byte) ([]byte, []byte, error) {
 	var keyBytes []byte
 	if _, err := cbor.Decode(skeyBytes, &keyBytes); err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal KES skey CBOR: %w", err)
+		return nil, nil, fmt.Errorf(
+			"failed to unmarshal KES skey CBOR: %w",
+			err,
+		)
 	}
 	if len(keyBytes) != kes.CardanoKesSecretKeySize {
 		return nil, nil, fmt.Errorf(

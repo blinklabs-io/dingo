@@ -22,7 +22,10 @@ func TestChecksumIncludesPhaseBoundaries(t *testing.T) {
 		Name:             "v1alpha1",
 		BackfillRevision: "none",
 		SQL: map[string]SQL{
-			"sqlite": {Expand: []string{"one", "two"}, Contract: []string{"three"}},
+			"sqlite": {
+				Expand:   []string{"one", "two"},
+				Contract: []string{"three"},
+			},
 		},
 	}
 	moved := base

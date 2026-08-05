@@ -29,7 +29,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(t *testing.T) {
+func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(
+	t *testing.T,
+) {
 	o := &Ouroboros{
 		config: OuroborosConfig{
 			Logger: slog.New(slog.DiscardHandler),
@@ -55,7 +57,9 @@ func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(t *testing.T
 	})
 }
 
-func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(t *testing.T) {
+func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(
+	t *testing.T,
+) {
 	for _, era := range []uint16{
 		gledger.EraIdShelley,
 		gledger.EraIdAllegra,

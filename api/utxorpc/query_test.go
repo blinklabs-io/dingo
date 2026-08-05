@@ -144,7 +144,10 @@ func TestSearchUtxosMatchAllAddresses(t *testing.T) {
 
 	apBoth, assetBoth := extractSearchPredicatePatterns(addrAndAsset)
 	require.NotNil(t, apBoth)
-	require.False(t, searchUtxosMatchAllAddresses(addrAndAsset, apBoth, assetBoth))
+	require.False(
+		t,
+		searchUtxosMatchAllAddresses(addrAndAsset, apBoth, assetBoth),
+	)
 
 	require.True(t, searchUtxosMatchAllAddresses(nil, nil, nil))
 }

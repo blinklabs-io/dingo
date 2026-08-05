@@ -26,34 +26,36 @@ func FuzzCompactBlockMetadataRoundTrip(f *testing.F) {
 	f.Add(uint64(42), uint64(7), uint64(99), bytes.Repeat([]byte{0xab}, 32))
 	f.Add(uint64(1), uint64(2), uint64(3), bytes.Repeat([]byte{0xcd}, 33))
 
-	f.Fuzz(func(t *testing.T, id uint64, typeValue uint64, height uint64, prevHash []byte) {
-		if len(prevHash) > blockMetadataPrevHashMaxLen {
-			return
-		}
+	f.Fuzz(
+		func(t *testing.T, id uint64, typeValue uint64, height uint64, prevHash []byte) {
+			if len(prevHash) > blockMetadataPrevHashMaxLen {
+				return
+			}
 
-		metadata := types.BlockMetadata{
-			ID:       id,
-			Type:     uint(typeValue),
-			Height:   height,
-			PrevHash: append([]byte(nil), prevHash...),
-		}
-		dst := make([]byte, 32+len(prevHash))
-		err := marshalBlockMetadataInto(dst, metadata)
-		if err != nil {
-			t.Fatalf("marshalBlockMetadataInto: %v", err)
-		}
+			metadata := types.BlockMetadata{
+				ID:       id,
+				Type:     uint(typeValue),
+				Height:   height,
+				PrevHash: append([]byte(nil), prevHash...),
+			}
+			dst := make([]byte, 32+len(prevHash))
+			err := marshalBlockMetadataInto(dst, metadata)
+			if err != nil {
+				t.Fatalf("marshalBlockMetadataInto: %v", err)
+			}
 
-		decoded, err := unmarshalBlockMetadata(dst)
-		if err != nil {
-			t.Fatalf("unmarshalBlockMetadata(compact): %v", err)
-		}
-		if decoded.ID != metadata.ID ||
-			decoded.Type != metadata.Type ||
-			decoded.Height != metadata.Height ||
-			!bytes.Equal(decoded.PrevHash, metadata.PrevHash) {
-			t.Fatalf("decoded metadata = %#v, want %#v", decoded, metadata)
-		}
-	})
+			decoded, err := unmarshalBlockMetadata(dst)
+			if err != nil {
+				t.Fatalf("unmarshalBlockMetadata(compact): %v", err)
+			}
+			if decoded.ID != metadata.ID ||
+				decoded.Type != metadata.Type ||
+				decoded.Height != metadata.Height ||
+				!bytes.Equal(decoded.PrevHash, metadata.PrevHash) {
+				t.Fatalf("decoded metadata = %#v, want %#v", decoded, metadata)
+			}
+		},
+	)
 }
 
 func FuzzUnmarshalBlockMetadata(f *testing.F) {

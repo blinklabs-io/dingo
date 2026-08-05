@@ -94,8 +94,11 @@ func (s *Summary) Validate() error {
 		prev := s.Eras[i-1]
 		cur := s.Eras[i]
 		if prev.End == nil {
-			return fmt.Errorf("hardfork: era %d (id=%d) is unbounded but not last",
-				i-1, prev.EraID)
+			return fmt.Errorf(
+				"hardfork: era %d (id=%d) is unbounded but not last",
+				i-1,
+				prev.EraID,
+			)
 		}
 		if *prev.End != cur.Start {
 			return fmt.Errorf(
@@ -146,7 +149,9 @@ func (s *Summary) SlotToTime(slot uint64) (time.Time, error) {
 	// slotsIntoEra is bounded by the era slot range; at Cardano slot lengths
 	// the product stays well within time.Duration's int64 nanosecond range.
 	// #nosec G115
-	rel := era.Start.RelativeTime + time.Duration(slotsIntoEra)*era.Params.SlotLength
+	rel := era.Start.RelativeTime + time.Duration(
+		slotsIntoEra,
+	)*era.Params.SlotLength
 	return s.SystemStart.Add(rel), nil
 }
 

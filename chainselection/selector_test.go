@@ -202,7 +202,10 @@ func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
 	leadingConn := newTestConnectionId(2)
 
 	laggingAdvertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 200, Hash: []byte("lagging-advertised")},
+		Point: ocommon.Point{
+			Slot: 200,
+			Hash: []byte("lagging-advertised"),
+		},
 		BlockNumber: 200,
 	}
 	laggingObservedTip := ochainsync.Tip{
@@ -210,7 +213,10 @@ func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
 		BlockNumber: 120,
 	}
 	leadingAdvertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 180, Hash: []byte("leading-advertised")},
+		Point: ocommon.Point{
+			Slot: 180,
+			Hash: []byte("leading-advertised"),
+		},
 		BlockNumber: 180,
 	}
 	leadingObservedTip := ochainsync.Tip{
@@ -516,7 +522,9 @@ func TestChainSelectorSkipsIneligiblePeers(t *testing.T) {
 	assert.Equal(t, eligibleConn, *bestPeer)
 }
 
-func TestChainSelectorDoesNotSwitchToIneligiblePeerAfterDisconnect(t *testing.T) {
+func TestChainSelectorDoesNotSwitchToIneligiblePeerAfterDisconnect(
+	t *testing.T,
+) {
 	eligibleConn := newTestConnectionId(1)
 	ineligibleConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1496,7 +1504,12 @@ func TestUpdatePeerTipRejectsImplausibleTip(t *testing.T) {
 		cs.GetPeerTip(connId),
 		"rejected tip should not be tracked",
 	)
-	assert.Equal(t, 1, cs.PeerCount(), "peer count should remain 1 (existing peer only)")
+	assert.Equal(
+		t,
+		1,
+		cs.PeerCount(),
+		"peer count should remain 1 (existing peer only)",
+	)
 }
 
 func TestUpdatePeerTipAcceptsPlausibleTip(t *testing.T) {

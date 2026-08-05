@@ -183,7 +183,8 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	// occupies), reuse the current era's params — epoch length and slot length
 	// are constant across post-Byron eras, which is all SlotToEpoch needs.
 	// Mirrors the successor-era recursion in Haskell HFC reconstructSummary.
-	if transitionInfo.State == hardfork.TransitionKnown && len(summary.Eras) > 0 {
+	if transitionInfo.State == hardfork.TransitionKnown &&
+		len(summary.Eras) > 0 {
 		bounded := summary.Eras[len(summary.Eras)-1]
 		if bounded.End != nil {
 			succEraID := bounded.EraID

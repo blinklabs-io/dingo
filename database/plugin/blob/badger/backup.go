@@ -106,7 +106,10 @@ func isEmptyBadgerStore(db *badger.DB) (bool, error) {
 // first, so an oversized declared length is rejected as a normal error
 // before Load ever sees it, rather than only after it's already been
 // trusted for the allocation.
-func (d *BlobStoreBadger) Restore(ctx context.Context, r io.Reader) (err error) {
+func (d *BlobStoreBadger) Restore(
+	ctx context.Context,
+	r io.Reader,
+) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -207,7 +210,8 @@ func validateLoadRecordSizes(r io.Reader, maxRecordSize uint64) error {
 		if sz > maxRecordSize {
 			return fmt.Errorf(
 				"backup record size %d exceeds %d byte limit (corrupted or invalid backup)",
-				sz, maxRecordSize,
+				sz,
+				maxRecordSize,
 			)
 		}
 		if _, err := io.CopyN(io.Discard, br, int64(sz)); err != nil {

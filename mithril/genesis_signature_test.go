@@ -53,10 +53,12 @@ func TestVerifyGenesisCertificateSignatureRejectsBadSignature(t *testing.T) {
 		hex.EncodeToString(pubKey),
 	)
 	cert := &Certificate{
-		Hash:             "genesis",
-		PreviousHash:     "genesis",
-		SignedMessage:    "mithril-genesis-signed-message",
-		GenesisSignature: hex.EncodeToString(make([]byte, ed25519.SignatureSize)),
+		Hash:          "genesis",
+		PreviousHash:  "genesis",
+		SignedMessage: "mithril-genesis-signed-message",
+		GenesisSignature: hex.EncodeToString(
+			make([]byte, ed25519.SignatureSize),
+		),
 	}
 
 	require.Error(t, VerifyGenesisCertificateSignature(cert, keyText))

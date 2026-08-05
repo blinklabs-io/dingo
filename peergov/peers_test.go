@@ -85,22 +85,32 @@ func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
 	localOnly := ouroboros.ConnectionId{LocalAddr: remoteAddr}
 
 	if !sameConnectionId(remoteOnly, remoteOnly) {
-		t.Fatal("sameConnectionId() = false, want true for identical remote-only ids")
+		t.Fatal(
+			"sameConnectionId() = false, want true for identical remote-only ids",
+		)
 	}
 	if !sameConnectionId(remoteOnly, remoteOnlySame) {
-		t.Fatal("sameConnectionId() = false, want true for equal remote-only ids")
+		t.Fatal(
+			"sameConnectionId() = false, want true for equal remote-only ids",
+		)
 	}
 	if sameConnectionId(remoteOnly, remoteOnlyOther) {
-		t.Fatal("sameConnectionId() = true, want false for differing remote-only ids")
+		t.Fatal(
+			"sameConnectionId() = true, want false for differing remote-only ids",
+		)
 	}
 	if sameConnectionId(remoteOnly, localOnly) {
-		t.Fatal("sameConnectionId() = true, want false for remote-only vs local-only")
+		t.Fatal(
+			"sameConnectionId() = true, want false for remote-only vs local-only",
+		)
 	}
 	if sameConnectionId(remoteOnly, ouroboros.ConnectionId{}) {
 		t.Fatal("sameConnectionId() = true, want false for remote-only vs zero")
 	}
 	if sameConnectionId(remoteOnly, testPeerConnId(6000, 3001)) {
-		t.Fatal("sameConnectionId() = true, want false for remote-only vs full id")
+		t.Fatal(
+			"sameConnectionId() = true, want false for remote-only vs full id",
+		)
 	}
 }
 

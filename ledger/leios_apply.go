@@ -130,7 +130,11 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 		var elems []cbor.RawMessage
 		if _, err := cbor.Decode(txCbor, &elems); err != nil {
-			return 0, 0, fmt.Errorf("decode endorser tx %d envelope: %w", i, err)
+			return 0, 0, fmt.Errorf(
+				"decode endorser tx %d envelope: %w",
+				i,
+				err,
+			)
 		}
 		if len(elems) < 2 {
 			return 0, 0, fmt.Errorf(
@@ -180,13 +184,32 @@ func (ls *LedgerState) applyEndorserBlock(
 	if err != nil {
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
-	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, txn); err != nil {
+	// Persist the endorser-block blob. Which transaction commits it depends on
+	// the apply path (see DATABASE.md, "Leios endorser-block storage", for the
+	// full rationale):
+	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
+	//     in its own blob transaction (nil txn) to avoid overflowing the shared
+	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
+	//     the blob is never read back within the chunk, so an independent commit
+	//     is safe.
+	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
+	//     the shared txn so a later block spending an endorser-produced output can
+	//     resolve it via read-your-writes.
+	blobTxn := txn
+	if !ls.config.LeiosApplyEndorserBlockTxs {
+		blobTxn = nil
+	}
+	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, blobTxn); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
 
-	delta := NewLedgerDelta(rbPoint, uint(dijkstra.EraIdDijkstra), rbBlockNumber)
+	delta := NewLedgerDelta(
+		rbPoint,
+		uint(dijkstra.EraIdDijkstra),
+		rbBlockNumber,
+	)
 	defer delta.Release()
 	delta.Offsets = offsets
 	if ls.config.LeiosApplyEndorserBlockTxs {
@@ -309,7 +332,9 @@ func buildEndorserBlockBlob(
 	writeRange := func(b []byte) (uint32, uint32, error) {
 		off := buf.Len()
 		if off > math.MaxUint32 || len(b) > math.MaxUint32 {
-			return 0, 0, errors.New("endorser block blob offset out of uint32 range")
+			return 0, 0, errors.New(
+				"endorser block blob offset out of uint32 range",
+			)
 		}
 		buf.Write(b)
 		//nolint:gosec // bounds checked above
@@ -333,7 +358,10 @@ func buildEndorserBlockBlob(
 			if len(outCbor) == 0 {
 				enc, err := cbor.Encode(utxo.Output)
 				if err != nil {
-					return nil, nil, fmt.Errorf("encode endorser output: %w", err)
+					return nil, nil, fmt.Errorf(
+						"encode endorser output: %w",
+						err,
+					)
 				}
 				outCbor = enc
 			}
@@ -875,9 +903,12 @@ func (ls *LedgerState) waitForEndorserBlock(
 		case <-waitCtx.Done():
 			ls.config.Logger.Info(
 				"endorser block not fetched within diffusion window; proceeding without it",
-				"component", "ledger",
-				"slot", rbSlot,
-				"eb_hash", ebHash.String(),
+				"component",
+				"ledger",
+				"slot",
+				rbSlot,
+				"eb_hash",
+				ebHash.String(),
 			)
 			return
 		case <-ticker.C:

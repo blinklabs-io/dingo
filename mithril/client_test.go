@@ -1322,7 +1322,11 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 				MessageParts: map[string]string{
 					"current_epoch":                   "269",
 					"next_aggregate_verification_key": "",
-					"next_protocol_parameters":        ProtocolParameters{K: 1, M: 1, PhiF: 1.0}.ComputeHash(),
+					"next_protocol_parameters": ProtocolParameters{
+						K:    1,
+						M:    1,
+						PhiF: 1.0,
+					}.ComputeHash(),
 				},
 			},
 		},
@@ -1338,7 +1342,10 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 	genesisCert := certs["cert_genesis"]
 	genesisCert.ProtocolMessage.MessageParts["next_aggregate_verification_key"] = leafCert.AggregateVerificationKey
 	genesisCert.SignedMessage = genesisCert.ProtocolMessage.ComputeHash()
-	genesisSignature := ed25519.Sign(genesisPrivKey, []byte(genesisCert.SignedMessage))
+	genesisSignature := ed25519.Sign(
+		genesisPrivKey,
+		[]byte(genesisCert.SignedMessage),
+	)
 	genesisCert.GenesisSignature = hex.EncodeToString(genesisSignature)
 	hash, err := genesisCert.ComputeHash()
 	require.NoError(t, err)

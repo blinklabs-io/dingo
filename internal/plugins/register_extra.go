@@ -31,7 +31,10 @@ func registerExtra(host *plugin.Host) error {
 		name     string
 		register func(*plugin.Host) error
 	}{
-		{"s3", aws.RegisterProvider}, {"gcs", gcs.RegisterProvider}, {"mysql", mysql.RegisterProvider}, {"postgres", postgres.RegisterProvider},
+		{
+			"s3",
+			aws.RegisterProvider,
+		}, {"gcs", gcs.RegisterProvider}, {"mysql", mysql.RegisterProvider}, {"postgres", postgres.RegisterProvider},
 	}
 	for _, item := range registrations {
 		if err := item.register(host); err != nil {

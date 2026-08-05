@@ -242,7 +242,8 @@ func applyTreasuryWithdrawal(
 	if total > ctx.TreasuryWithdrawalRemaining {
 		return fmt.Errorf(
 			"treasury withdrawal of %d exceeds tracked treasury withdrawal capacity %d",
-			total, ctx.TreasuryWithdrawalRemaining,
+			total,
+			ctx.TreasuryWithdrawalRemaining,
 		)
 	}
 	ctx.TreasuryWithdrawalRemaining -= total
@@ -256,7 +257,10 @@ func applyTreasuryWithdrawal(
 		}
 		rewardAddrBytes, err := rewardAddr.Bytes()
 		if err != nil {
-			return fmt.Errorf("encode treasury withdrawal reward address: %w", err)
+			return fmt.Errorf(
+				"encode treasury withdrawal reward address: %w",
+				err,
+			)
 		}
 		credentialTag, stakeCredential, err := rewardAccountStakeCredential(
 			rewardAddrBytes,
@@ -332,7 +336,14 @@ func CreditRegisteredRewardAccountBeforeSnapshot(
 	sourceHash []byte,
 ) (bool, error) {
 	return creditRegisteredRewardAccount(
-		db, txn, credentialTag, stakeCredential, amount, slot, sourceHash, false,
+		db,
+		txn,
+		credentialTag,
+		stakeCredential,
+		amount,
+		slot,
+		sourceHash,
+		false,
 	)
 }
 
@@ -462,7 +473,10 @@ func applyUpdateCommittee(
 	// Sort by cold credential hash so the auto-increment ID assigned
 	// by the DB is stable across nodes (Go map iteration is random).
 	sort.Slice(members, func(i, j int) bool {
-		return bytes.Compare(members[i].ColdCredHash, members[j].ColdCredHash) < 0
+		return bytes.Compare(
+			members[i].ColdCredHash,
+			members[j].ColdCredHash,
+		) < 0
 	})
 	return ctx.DB.SetCommitteeMembers(members, ctx.Txn)
 }

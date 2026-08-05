@@ -506,7 +506,10 @@ WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
 					return err
 				}
 				if err := stakeRows.Err(); err != nil {
-					return fmt.Errorf("scan affected stake credentials for rollback: %w", err)
+					return fmt.Errorf(
+						"scan affected stake credentials for rollback: %w",
+						err,
+					)
 				}
 				if _, err := db.ExecContext(context.Background(), `
 UPDATE utxo SET spent_at_tx_id = NULL, deleted_slot = 0

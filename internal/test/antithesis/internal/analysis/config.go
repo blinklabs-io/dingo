@@ -153,8 +153,11 @@ func LoadConfig() (*Config, error) {
 			}
 			cfg.Pools = gcfg.PoolCount
 		}
-		if os.Getenv("ANALYSIS_MAX_FORK_DEPTH") == "" && gcfg.SecurityParam > 0 {
-			cfg.MaxForkDepth = int(gcfg.SecurityParam) //nolint:gosec // SecurityParam always fits in int
+		if os.Getenv("ANALYSIS_MAX_FORK_DEPTH") == "" &&
+			gcfg.SecurityParam > 0 {
+			cfg.MaxForkDepth = int(
+				gcfg.SecurityParam,
+			) //nolint:gosec // SecurityParam always fits in int
 		}
 		if gcfg.EpochLength == 0 {
 			return nil, errors.New(

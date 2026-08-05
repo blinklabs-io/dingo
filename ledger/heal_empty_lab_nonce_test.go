@@ -111,7 +111,11 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 	)
 	// The one-epoch-shifted assembly (candidate ⭒ epoch 5's OWN lab) must NOT
 	// be produced — that is the #2734 divergence.
-	shifted, err := lcommon.CalculateEpochNonce(candidate, boundaryPrevHash, nil)
+	shifted, err := lcommon.CalculateEpochNonce(
+		candidate,
+		boundaryPrevHash,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotEqual(
 		t,
@@ -166,8 +170,11 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 
 	ls.healEmptyLabNonces()
 
-	require.Empty(t, ls.epochCache[0].LastEpochBlockNonce,
-		"epoch older than the recent window must be left untouched, not repaired")
+	require.Empty(
+		t,
+		ls.epochCache[0].LastEpochBlockNonce,
+		"epoch older than the recent window must be left untouched, not repaired",
+	)
 	require.Equal(t, boundaryPrevHash, ls.epochCache[n-1].LastEpochBlockNonce,
 		"the most recent epoch must still be repaired")
 }
@@ -222,10 +229,18 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 	oldest := n - healLabNonceRecentEpochs
 	want, err := lcommon.CalculateEpochNonce(candidate, prevHash, nil)
 	require.NoError(t, err)
-	require.Equal(t, want.Bytes(), ls.epochCache[oldest].Nonce,
-		"oldest in-window epoch nonce must be repaired from the verified predecessor lab")
-	require.NotEqual(t, candidate, ls.epochCache[oldest].Nonce,
-		"oldest in-window epoch nonce must no longer be the collapsed candidate")
+	require.Equal(
+		t,
+		want.Bytes(),
+		ls.epochCache[oldest].Nonce,
+		"oldest in-window epoch nonce must be repaired from the verified predecessor lab",
+	)
+	require.NotEqual(
+		t,
+		candidate,
+		ls.epochCache[oldest].Nonce,
+		"oldest in-window epoch nonce must no longer be the collapsed candidate",
+	)
 }
 
 // TestHealEmptyLabNoncesLeavesValidRecordsUntouched verifies the recovery is a

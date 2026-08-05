@@ -74,9 +74,11 @@ func TestRewriteVersionHandler(t *testing.T) {
 	alphaPath := "/utxorpc.v1alpha.query.QueryService/ReadParams"
 	betaPath := "/utxorpc.v1beta.query.QueryService/ReadParams"
 	calledPath := ""
-	alphaHandler := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		calledPath = r.URL.Path
-	})
+	alphaHandler := http.HandlerFunc(
+		func(_ http.ResponseWriter, r *http.Request) {
+			calledPath = r.URL.Path
+		},
+	)
 	handler := rewriteVersionHandler(alphaHandler, betaPath, alphaPath)
 
 	req := httptest.NewRequest(http.MethodPost, betaPath, nil)
@@ -193,7 +195,9 @@ func TestUtxorpc_StopForcesCloseOnUnboundedStream(t *testing.T) {
 
 	client := &http.Client{}
 	go func() {
-		resp, getErr := client.Get("http://" + ln.Addr().String() + "/") //nolint:noctx
+		resp, getErr := client.Get(
+			"http://" + ln.Addr().String() + "/",
+		) //nolint:noctx
 		if getErr == nil {
 			resp.Body.Close()
 		}
@@ -238,7 +242,9 @@ func TestUtxorpc_StopObservesCtxCancellation(t *testing.T) {
 
 	client := &http.Client{}
 	go func() {
-		resp, getErr := client.Get("http://" + ln.Addr().String() + "/") //nolint:noctx
+		resp, getErr := client.Get(
+			"http://" + ln.Addr().String() + "/",
+		) //nolint:noctx
 		if getErr == nil {
 			resp.Body.Close()
 		}

@@ -63,8 +63,14 @@ func TestProtocolParamsResponseConway(t *testing.T) {
 			MemPrice:  rat(577, 10000),
 			StepPrice: rat(721, 10000000),
 		},
-		MaxTxExUnits:         common.ExUnits{Memory: 14000000, Steps: 10000000000},
-		MaxBlockExUnits:      common.ExUnits{Memory: 62000000, Steps: 20000000000},
+		MaxTxExUnits: common.ExUnits{
+			Memory: 14000000,
+			Steps:  10000000000,
+		},
+		MaxBlockExUnits: common.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
 		MaxValueSize:         5000,
 		CollateralPercentage: 150,
 		MaxCollateralInputs:  3,

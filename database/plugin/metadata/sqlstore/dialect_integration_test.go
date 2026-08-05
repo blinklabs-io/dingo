@@ -95,11 +95,19 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	case "postgres":
 		dialect = PostgresDialect()
 		registry, err = migrations.PostgresRegistry()
-		locker = migrations.NewAdvisoryLocker("postgres", 0x64696e676f6d6574, time.Second)
+		locker = migrations.NewAdvisoryLocker(
+			"postgres",
+			0x64696e676f6d6574,
+			time.Second,
+		)
 	case "mysql":
 		dialect = MySQLDialect()
 		registry, err = migrations.MySQLRegistry()
-		locker = migrations.NewAdvisoryLocker("mysql", 0x64696e676f6d6574, time.Second)
+		locker = migrations.NewAdvisoryLocker(
+			"mysql",
+			0x64696e676f6d6574,
+			time.Second,
+		)
 	}
 	require.NoError(t, err)
 	store, err := New(Config{
@@ -136,7 +144,9 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	// Simulate a legacy singleton row whose network was left empty.  The
 	// MySQL duplicate no-op upsert must still run the conditional backfill even
 	// when CLIENT_FOUND_ROWS makes the insert report one affected row.
-	_, err = db.Exec(dialect.Rebind("UPDATE node_settings SET network = '' WHERE id = 1"))
+	_, err = db.Exec(
+		dialect.Rebind("UPDATE node_settings SET network = '' WHERE id = 1"),
+	)
 	require.NoError(t, err)
 	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
 		StorageMode: types.StorageModeCore,
@@ -170,7 +180,12 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	}
 	require.NoError(t, store.ImportAccount(account, nil))
 	require.NotZero(t, account.ID)
-	loaded, err := store.GetAccountByCredential(0, account.StakingKey, false, nil)
+	loaded, err := store.GetAccountByCredential(
+		0,
+		account.StakingKey,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, account.ID, loaded.ID)
 	_, err = db.Exec(dialect.Rebind(`
@@ -183,12 +198,19 @@ INSERT INTO reward_live_stake (
 		models.RewardStakeCalculationVersion,
 	)
 	require.NoError(t, err)
-	stakes, delegators, err := store.GetStakeByPools([][]byte{account.Pool}, nil)
+	stakes, delegators, err := store.GetStakeByPools(
+		[][]byte{account.Pool},
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(9), stakes[string(account.Pool)])
 	require.Equal(t, uint64(1), delegators[string(account.Pool)])
 	require.NoError(t, store.RebuildRewardLiveStake(2, nil))
-	inputs, err := store.GetLiveStakeInputsForPools([][]byte{account.Pool}, 0, nil)
+	inputs, err := store.GetLiveStakeInputsForPools(
+		[][]byte{account.Pool},
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1)
 	require.Equal(t, types.Uint64(9), inputs[0].Stake)
@@ -222,14 +244,42 @@ INSERT INTO reward_live_stake (
 ON CONFLICT (hash) DO UPDATE SET block_hash = excluded.block_hash
 RETURNING id`
 	var transactionID int64
-	require.NoError(t, queryer.QueryRowContext(context.Background(), transactionQuery,
-		transactionHash, []byte{0xd0}, nil, int64(100), 0, "0", "0", "0", 0, true,
-	).Scan(&transactionID))
+	require.NoError(
+		t,
+		queryer.QueryRowContext(
+			context.Background(),
+			transactionQuery,
+			transactionHash,
+			[]byte{0xd0},
+			nil,
+			int64(100),
+			0,
+			"0",
+			"0",
+			"0",
+			0,
+			true,
+		).Scan(&transactionID),
+	)
 	require.NotZero(t, transactionID)
 	firstTransactionID := transactionID
-	require.NoError(t, queryer.QueryRowContext(context.Background(), transactionQuery,
-		transactionHash, []byte{0xe0}, nil, int64(100), 0, "0", "0", "0", 0, true,
-	).Scan(&transactionID))
+	require.NoError(
+		t,
+		queryer.QueryRowContext(
+			context.Background(),
+			transactionQuery,
+			transactionHash,
+			[]byte{0xe0},
+			nil,
+			int64(100),
+			0,
+			"0",
+			"0",
+			"0",
+			0,
+			true,
+		).Scan(&transactionID),
+	)
 	require.Equal(t, firstTransactionID, transactionID)
 	var redeemerCount int
 	_, err = queryer.ExecContext(context.Background(), `

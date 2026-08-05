@@ -107,9 +107,12 @@ func (m *Manager) saveSnapshot(
 		case errors.Is(err, errFallbackSupersededByAuthoritative):
 			m.logger.Debug(
 				"authoritative mark snapshot landed concurrently; discarding fallback capture",
-				"component", "snapshot",
-				"epoch", epoch,
-				"snapshot_type", snapshotType,
+				"component",
+				"snapshot",
+				"epoch",
+				epoch,
+				"snapshot_type",
+				snapshotType,
 			)
 			return false, nil
 		}
@@ -342,9 +345,11 @@ func (m *Manager) buildRewardStateInputs(
 
 	return &rewardStateBundle{
 		snapshot: &models.RewardSnapshot{
-			Epoch:              epoch,
-			SnapshotType:       snapshotType,
-			TotalActiveStake:   types.Uint64(sumPoolStakes(effective.PoolStakes)),
+			Epoch:        epoch,
+			SnapshotType: snapshotType,
+			TotalActiveStake: types.Uint64(
+				sumPoolStakes(effective.PoolStakes),
+			),
 			TotalPoolCount:     uint64(len(effective.PoolStakes)),
 			TotalDelegators:    sumDelegators(effective.DelegatorCount),
 			CapturedSlot:       distribution.Slot,
@@ -489,10 +494,14 @@ func (m *Manager) rewardInputsSkippingDegradedPools(
 		}
 		m.logger.Warn(
 			"skipping pool from reward inputs: missing or invalid pool registration data",
-			"component", "snapshot",
-			"epoch", epoch,
-			"pool_key_hash", hex.EncodeToString(poolErr.poolKeyHash),
-			"reason", err,
+			"component",
+			"snapshot",
+			"epoch",
+			epoch,
+			"pool_key_hash",
+			hex.EncodeToString(poolErr.poolKeyHash),
+			"reason",
+			err,
 		)
 	}
 }
@@ -519,12 +528,18 @@ func cloneStakeDistributionForRewardInputs(
 	dist *StakeDistribution,
 ) *StakeDistribution {
 	clone := &StakeDistribution{
-		Slot:           dist.Slot,
-		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64, len(dist.PoolStakes)),
-		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64, len(dist.DelegatorCount)),
-		StakeInputs:    append([]StakeInput(nil), dist.StakeInputs...),
-		TotalStake:     dist.TotalStake,
-		TotalPools:     dist.TotalPools,
+		Slot: dist.Slot,
+		PoolStakes: make(
+			map[lcommon.PoolKeyHash]uint64,
+			len(dist.PoolStakes),
+		),
+		DelegatorCount: make(
+			map[lcommon.PoolKeyHash]uint64,
+			len(dist.DelegatorCount),
+		),
+		StakeInputs: append([]StakeInput(nil), dist.StakeInputs...),
+		TotalStake:  dist.TotalStake,
+		TotalPools:  dist.TotalPools,
 	}
 	maps.Copy(clone.PoolStakes, dist.PoolStakes)
 	maps.Copy(clone.DelegatorCount, dist.DelegatorCount)
@@ -627,7 +642,10 @@ func (m *Manager) rewardInputs(
 		metaTxn,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get reward input pool registrations: %w", err)
+		return nil, nil, fmt.Errorf(
+			"get reward input pool registrations: %w",
+			err,
+		)
 	}
 	registrationByHash := make(
 		map[string]models.PoolRegistration,
@@ -776,7 +794,10 @@ func validateRewardStakeInputTotals(distribution *StakeDistribution) error {
 	if distribution == nil {
 		return errors.New("missing stake distribution")
 	}
-	stakeByPool := make(map[lcommon.PoolKeyHash]uint64, len(distribution.PoolStakes))
+	stakeByPool := make(
+		map[lcommon.PoolKeyHash]uint64,
+		len(distribution.PoolStakes),
+	)
 	for _, input := range distribution.StakeInputs {
 		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
 			return fmt.Errorf(
@@ -843,7 +864,9 @@ func rewardOwnerSets(
 		for _, owner := range registration.Owners {
 			if len(owner.KeyHash) != len(lcommon.PoolKeyHash{}) {
 				return nil, &rewardInputPoolError{
-					poolKeyHash: append([]byte(nil), registration.PoolKeyHash...),
+					poolKeyHash: append(
+						[]byte(nil),
+						registration.PoolKeyHash...),
 					msg: fmt.Sprintf(
 						"invalid pool owner key hash length while saving reward inputs: pool_key_hash=%s length=%d",
 						hex.EncodeToString(registration.PoolKeyHash),

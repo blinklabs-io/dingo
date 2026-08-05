@@ -103,7 +103,9 @@ func TestQueryLedgerPeerSnapshotDispatch(t *testing.T) {
 func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 	ls := &LedgerState{db: newTestDB(t)}
 
-	result, err := ls.queryLedgerPeerSnapshot(olocalstatequery.LedgerPeerKindAll)
+	result, err := ls.queryLedgerPeerSnapshot(
+		olocalstatequery.LedgerPeerKindAll,
+	)
 	require.NoError(t, err)
 
 	snapshot := result.(olocalstatequery.LedgerPeerSnapshotResult)
@@ -120,7 +122,9 @@ func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
 		nil,
 	))
 
-	result, err := ls.queryLedgerPeerSnapshot(olocalstatequery.LedgerPeerKindAll)
+	result, err := ls.queryLedgerPeerSnapshot(
+		olocalstatequery.LedgerPeerKindAll,
+	)
 	require.NoError(t, err)
 
 	snapshot := result.(olocalstatequery.LedgerPeerSnapshotResult)
@@ -301,7 +305,12 @@ func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 	stake := map[string]uint64{string(kh): 1}
 
 	snapshot := assembleLedgerPeerSnapshot(
-		atSlot(1), stake, []models.Pool{pool}, olocalstatequery.LedgerPeerKindAll,
+		atSlot(
+			1,
+		),
+		stake,
+		[]models.Pool{pool},
+		olocalstatequery.LedgerPeerKindAll,
 	)
 	require.Len(t, snapshot.Pools, 1)
 	relays := snapshot.Pools[0].Detail.Relays
@@ -356,7 +365,12 @@ func TestAssembleLedgerPeerSnapshotMalformedPort(t *testing.T) {
 	stake := map[string]uint64{string(kh): 1}
 
 	snapshot := assembleLedgerPeerSnapshot(
-		atSlot(1), stake, []models.Pool{pool}, olocalstatequery.LedgerPeerKindAll,
+		atSlot(
+			1,
+		),
+		stake,
+		[]models.Pool{pool},
+		olocalstatequery.LedgerPeerKindAll,
 	)
 	require.Len(t, snapshot.Pools, 1)
 	relays := snapshot.Pools[0].Detail.Relays

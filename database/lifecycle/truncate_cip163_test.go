@@ -66,7 +66,9 @@ func seedCip163Certificate(
 // surviving chain actually witnessed, producing incorrect stake/reward/
 // DRep calculations after any offline or live truncate on a CIP-0163-
 // enabled network.
-func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(t *testing.T) {
+func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
+	t *testing.T,
+) {
 	const (
 		inactivity = uint64(90)
 		// 100 slots per epoch: epoch 0 = [0,100), epoch 1 = [100,200), ...
@@ -120,7 +122,10 @@ func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(t *testi
 	})
 
 	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: truncatedBlock.Slot, Hash: truncatedBlock.Hash},
+		Point: ocommon.Point{
+			Slot: truncatedBlock.Slot,
+			Hash: truncatedBlock.Hash,
+		},
 		BlockNumber: truncatedBlock.Number,
 	}, nil))
 

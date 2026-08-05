@@ -268,7 +268,11 @@ DELETE FROM address_transaction WHERE transaction_id = ?`,
 SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
 FROM utxo WHERE `+strings.Join(predicates, " OR "), args...)
 		if err != nil {
-			return fmt.Errorf("lookup input addresses for transaction %d: %w", transactionID, err)
+			return fmt.Errorf(
+				"lookup input addresses for transaction %d: %w",
+				transactionID,
+				err,
+			)
 		}
 		if err := func() (runErr error) {
 			defer func() {

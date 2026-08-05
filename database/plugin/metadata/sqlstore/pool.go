@@ -230,7 +230,10 @@ func (s *Store) GetPoolByVrfKeyHash(
 
 // activePoolOrNil applies the same current-registration/retirement semantics
 // used by GetPool(..., false) to other lookups that expose active pools.
-func (s *Store) activePoolOrNil(db queryer, pool *models.Pool) (*models.Pool, error) {
+func (s *Store) activePoolOrNil(
+	db queryer,
+	pool *models.Pool,
+) (*models.Pool, error) {
 	if len(pool.Registration) == 0 {
 		return nil, nil
 	}
@@ -916,17 +919,25 @@ func (s *Store) GetStakeByPools(
 		return nil, nil, err
 	}
 	stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
-	complete, err := s.getStakeByPoolsFromLive(db, poolKeyHashes, stakes, delegators)
+	complete, err := s.getStakeByPoolsFromLive(
+		db,
+		poolKeyHashes,
+		stakes,
+		delegators,
+	)
 	if err == nil && complete {
 		return stakes, delegators, nil
 	}
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+	if err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "no such table") {
 		return nil, nil, err
 	}
 	return s.getStakeByPoolsDirect(poolKeyHashes, txn)
 }
 
-func emptyPoolStakeMaps(poolKeyHashes [][]byte) (map[string]uint64, map[string]uint64) {
+func emptyPoolStakeMaps(
+	poolKeyHashes [][]byte,
+) (map[string]uint64, map[string]uint64) {
 	stakes := make(map[string]uint64, len(poolKeyHashes))
 	delegators := make(map[string]uint64, len(poolKeyHashes))
 	for _, hash := range poolKeyHashes {
@@ -1328,7 +1339,10 @@ SELECT id FROM ranked WHERE rn = 1`,
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("query in-epoch fresh pool registrations: %w", err)
+			return nil, fmt.Errorf(
+				"query in-epoch fresh pool registrations: %w",
+				err,
+			)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
@@ -1966,9 +1980,16 @@ ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 			poolIndex, ok := poolByID[registration.PoolID]
 			if !ok {
 				rows.Close()
-				return fmt.Errorf("pool registration %d references unknown pool %d", registration.ID, registration.PoolID)
+				return fmt.Errorf(
+					"pool registration %d references unknown pool %d",
+					registration.ID,
+					registration.PoolID,
+				)
 			}
-			pools[poolIndex].Registration = append(pools[poolIndex].Registration, *registration)
+			pools[poolIndex].Registration = append(
+				pools[poolIndex].Registration,
+				*registration,
+			)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -1985,7 +2006,10 @@ ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 	registrations := make([]*models.PoolRegistration, 0, registrationCount)
 	for poolIndex := range pools {
 		for registrationIndex := range pools[poolIndex].Registration {
-			registrations = append(registrations, &pools[poolIndex].Registration[registrationIndex])
+			registrations = append(
+				registrations,
+				&pools[poolIndex].Registration[registrationIndex],
+			)
 		}
 	}
 	if err := loadPoolRegistrationChildrenBatch(db, registrations); err != nil {
@@ -2015,7 +2039,10 @@ WHERE r.pool_id IN (` + bindPlaceholders(end-start) + `)
 ORDER BY r.pool_id, r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC,
          CASE WHEN r.certificate_id = 0 THEN 1 ELSE 0 END DESC, r.id DESC`
-		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(query), poolIDs[start:end]...)
+		rows, err := db.QueryContext(
+			context.Background(),
+			s.dialect.Rebind(query),
+			poolIDs[start:end]...)
 		if err != nil {
 			return fmt.Errorf("load pool retirements: %w", err)
 		}
@@ -2032,9 +2059,16 @@ ORDER BY r.pool_id, r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 			index, ok := poolByID[retirement.PoolID]
 			if !ok {
 				rows.Close()
-				return fmt.Errorf("pool retirement %d references unknown pool %d", retirement.ID, retirement.PoolID)
+				return fmt.Errorf(
+					"pool retirement %d references unknown pool %d",
+					retirement.ID,
+					retirement.PoolID,
+				)
 			}
-			pools[index].Retirement = append(pools[index].Retirement, retirement)
+			pools[index].Retirement = append(
+				pools[index].Retirement,
+				retirement,
+			)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -2269,7 +2303,11 @@ func queryReturnedID(
 // certificates may occur in one slot; the transaction block index and
 // certificate index provide the remaining ordering, with retirement events
 // winning ties through the synthetic is_retirement component.
-func latestPoolEventIsRetirement(db queryer, dialect Dialect, poolID uint) (bool, error) {
+func latestPoolEventIsRetirement(
+	db queryer,
+	dialect Dialect,
+	poolID uint,
+) (bool, error) {
 	var retirement bool
 	err := db.QueryRowContext(context.Background(), `
 WITH events AS (

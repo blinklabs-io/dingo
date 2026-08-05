@@ -151,7 +151,7 @@ func CertDepositConway(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
@@ -181,7 +181,7 @@ func ValidateTxConway(
 	pp lcommon.ProtocolParameters,
 ) error {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return ErrIncompatibleProtocolParams
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
@@ -336,6 +336,9 @@ func ValidateTxPlutusConway(
 	ls lcommon.LedgerState,
 	pp *conway.ConwayProtocolParameters,
 ) error {
+	if pp == nil {
+		return ErrIncompatibleProtocolParams
+	}
 	return validateTxPlutusConway(tx, ls, pp, true)
 }
 
@@ -394,6 +397,7 @@ func validateTxPlutusConwayWithContext(
 		ls,
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
+		pp,
 	)
 	for redeemerKey, redeemerValue := range plutusCtx.redeemers.Iter() {
 		purpose, ok := buildConwayScriptPurpose(
@@ -867,21 +871,38 @@ type conwayTxInfoCache struct {
 	txInfoV1       script.TxInfoV1
 	txInfoV2       script.TxInfoV2
 	txInfoV3       script.TxInfoV3
+	pparams        *conway.ConwayProtocolParameters
 	txInfoV1Built  bool
 	txInfoV2Built  bool
 	txInfoV3Built  bool
 }
 
+// newConwayTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache.
+//
+// pparams must be non-nil. The PlutusV1/V2 txInfoMint rendering depends on the
+// active major protocol version, and an omitted (zero) major silently produces a
+// pre-Plomin script context at PV10+, changing both the evaluated ex-units and
+// the script result. Taking the parameter set rather than a bare major keeps a
+// caller from passing a version that drifts from the active one.
 func newConwayTxInfoCache(
 	ls lcommon.LedgerState,
 	tx lcommon.Transaction,
 	resolvedInputs []lcommon.Utxo,
+	pparams *conway.ConwayProtocolParameters,
 ) *conwayTxInfoCache {
 	return &conwayTxInfoCache{
 		ls:             ls,
 		tx:             tx,
 		resolvedInputs: resolvedInputs,
+		pparams:        pparams,
 	}
+}
+
+// protocolMajor reports the active major protocol version. The Conway plutus
+// entry points reject a nil (including typed-nil) parameter set before the cache
+// is built, so this does not paper over a missing version.
+func (c *conwayTxInfoCache) protocolMajor() uint {
+	return c.pparams.ProtocolVersion.Major
 }
 
 func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
@@ -896,6 +917,7 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 				Err: err,
 			}
 		}
+		txInfo.ProtocolMajor = c.protocolMajor()
 		c.txInfoV1 = txInfo
 		c.txInfoV1Built = true
 	}
@@ -914,6 +936,7 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 				Err: err,
 			}
 		}
+		txInfo.ProtocolMajor = c.protocolMajor()
 		c.txInfoV2 = txInfo
 		c.txInfoV2Built = true
 	}
@@ -1191,7 +1214,7 @@ func EvaluateTxConway(
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	tmpPparams, ok := pp.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
 	scriptInputs, err := resolveConwayScriptInputs(tx, ls, true)
@@ -1205,10 +1228,14 @@ func EvaluateTxConway(
 		ls,
 		tx,
 		scriptInputs.resolvedAllInputs,
+		tmpPparams,
 	)
-	txInfoV3, err := txInfos.v3()
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	var txInfoV3 script.TxInfoV3
+	if txHasRedeemers(tx) {
+		txInfoV3, err = txInfos.v3()
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV3.Redeemers {
 		purpose := redeemerPair.Key

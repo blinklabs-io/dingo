@@ -283,12 +283,16 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.ChainsyncBlockTimeout,
 	)
 	o := &Ouroboros{
-		config:                     cfg,
-		EventBus:                   cfg.EventBus,
-		ConnManager:                cfg.ConnManager,
-		blockFetchStarts:           make(map[ouroboros.ConnectionId]time.Time),
-		blockfetchNoBlocksCounts:   make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
-		chainsyncStats:             make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		config:           cfg,
+		EventBus:         cfg.EventBus,
+		ConnManager:      cfg.ConnManager,
+		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
+		blockfetchNoBlocksCounts: make(
+			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
+		),
+		chainsyncStats: make(
+			map[ouroboros.ConnectionId]*chainsyncPeerStats,
+		),
 		leiosEndorserBlocks:        make(map[string]*leiosEndorserBlockData),
 		leiosClosureWaiters:        make(map[string][]chan struct{}),
 		leiosEBLog:                 newLeiosForgedEBLog(),
@@ -325,28 +329,36 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 			Help: "total blocks served to clients",
 		},
 	)
-	o.blockfetchMetrics.blockDelay = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
-		Help: "delay in seconds for the most recent block fetch",
-	})
-	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(prometheus.CounterOpts{
-		Name: "cardano_node_metrics_blockfetchclient_lateblocks",
-		Help: "blocks that took more than 5 seconds to fetch",
-	})
-	o.blockfetchMetrics.blockDelayCdfOne = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
-		Help: "percentage of blocks fetched in less than 1 second",
-	})
+	o.blockfetchMetrics.blockDelay = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
+			Help: "delay in seconds for the most recent block fetch",
+		},
+	)
+	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_blockfetchclient_lateblocks",
+			Help: "blocks that took more than 5 seconds to fetch",
+		},
+	)
+	o.blockfetchMetrics.blockDelayCdfOne = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
+			Help: "percentage of blocks fetched in less than 1 second",
+		},
+	)
 	o.blockfetchMetrics.blockDelayCdfThree = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree",
 			Help: "percentage of blocks fetched in less than 3 seconds",
 		},
 	)
-	o.blockfetchMetrics.blockDelayCdfFive = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
-		Help: "percentage of blocks fetched in less than 5 seconds",
-	})
+	o.blockfetchMetrics.blockDelayCdfFive = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
+			Help: "percentage of blocks fetched in less than 5 seconds",
+		},
+	)
 }
 
 func (o *Ouroboros) ConfigureListeners(
@@ -587,8 +599,10 @@ func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
 	if !ok {
 		o.config.Logger.Warn(
 			"received unexpected event data type for peer eligibility change event",
-			"expected", "peergov.PeerEligibilityChangedEvent",
-			"got", fmt.Sprintf("%T", evt.Data),
+			"expected",
+			"peergov.PeerEligibilityChangedEvent",
+			"got",
+			fmt.Sprintf("%T", evt.Data),
 		)
 		return
 	}
@@ -756,7 +770,8 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 
 	// Only start client protocols if the peer negotiated full duplex
 	_, versionData := conn.ProtocolVersion()
-	if versionData == nil || versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
+	if versionData == nil ||
+		versionData.DiffusionMode() != oprotocol.DiffusionModeInitiatorAndResponder {
 		o.config.Logger.Debug(
 			"inbound connection is not full-duplex, skipping client start",
 			"connection_id", connId.String(),
@@ -793,8 +808,10 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 				o.ChainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Warn(
 					"chainsync client failed on inbound connection, closing to free per-IP slot",
-					"error", err,
-					"connection_id", connId.String(),
+					"error",
+					err,
+					"connection_id",
+					connId.String(),
 				)
 				conn.Close()
 				return

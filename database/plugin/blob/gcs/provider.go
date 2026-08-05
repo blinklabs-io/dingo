@@ -28,12 +28,27 @@ type Config struct {
 }
 
 func RegisterProvider(host *plugin.Host) error {
-	return plugin.Register(host, plugin.Descriptor{Capability: plugin.CapabilityStorageBlob, Name: "gcs", Description: "Google Cloud Storage blob store"}, func() Config { return Config{} },
+	return plugin.Register(
+		host,
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityStorageBlob,
+			Name:        "gcs",
+			Description: "Google Cloud Storage blob store",
+		},
+		func() Config { return Config{} },
 		func(_ context.Context, cfg Config, deps blob.ProviderDependencies) (*BlobStoreGCS, plugin.Instance, error) {
-			store, err := NewWithOptions(WithBucket(cfg.Bucket), WithLogger(deps.Logger), WithPromRegistry(deps.PromRegistry))
+			store, err := NewWithOptions(
+				WithBucket(cfg.Bucket),
+				WithLogger(deps.Logger),
+				WithPromRegistry(deps.PromRegistry),
+			)
 			if err != nil {
 				return nil, nil, err
 			}
-			return store, plugin.Lifecycle{StartFunc: func(context.Context) error { return store.Start() }, StopFunc: func(context.Context) error { return store.Stop() }}, nil //nolint:contextcheck
-		})
+			return store, plugin.Lifecycle{
+				StartFunc: func(context.Context) error { return store.Start() }, //nolint:contextcheck
+				StopFunc:  func(context.Context) error { return store.Stop() },
+			}, nil
+		},
+	)
 }

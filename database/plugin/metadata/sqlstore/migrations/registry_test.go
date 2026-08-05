@@ -38,7 +38,10 @@ func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {
 	require.NoError(t, err)
 	translated := translateSchemaSQL(expand, "mysql")
 	for _, statement := range translated {
-		if strings.Contains(statement, "idx_account_inactivity_activation_staking_key") {
+		if strings.Contains(
+			statement,
+			"idx_account_inactivity_activation_staking_key",
+		) {
 			require.Contains(t, statement, "`staking_key`(255)")
 		}
 		if strings.Contains(statement, "idx_transaction_block_hash") {
@@ -80,7 +83,9 @@ func TestSplitSQL(t *testing.T) {
 
 func TestSplitSQLPreservesCommentTokenBoundaries(t *testing.T) {
 	t.Parallel()
-	statements, err := splitSQL("CREATE/*inline*/TABLE thing (id INTEGER); SELECT/*x*/1;")
+	statements, err := splitSQL(
+		"CREATE/*inline*/TABLE thing (id INTEGER); SELECT/*x*/1;",
+	)
 	require.NoError(t, err)
 	require.Equal(t, []string{
 		"CREATE TABLE thing (id INTEGER)",

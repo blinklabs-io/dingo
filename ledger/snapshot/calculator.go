@@ -578,13 +578,22 @@ func rewardStakeInputsFromRows(
 			return nil, errors.New("nil reward stake input")
 		}
 		if len(row.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
-			return nil, fmt.Errorf("invalid reward stake input pool key length %d", len(row.PoolKeyHash))
+			return nil, fmt.Errorf(
+				"invalid reward stake input pool key length %d",
+				len(row.PoolKeyHash),
+			)
 		}
 		if len(row.StakingKey) != len(lcommon.PoolKeyHash{}) {
-			return nil, fmt.Errorf("invalid reward stake input credential length %d", len(row.StakingKey))
+			return nil, fmt.Errorf(
+				"invalid reward stake input credential length %d",
+				len(row.StakingKey),
+			)
 		}
 		if row.CredentialTag > 1 {
-			return nil, fmt.Errorf("invalid reward stake input credential tag %d", row.CredentialTag)
+			return nil, fmt.Errorf(
+				"invalid reward stake input credential tag %d",
+				row.CredentialTag,
+			)
 		}
 		inputs = append(inputs, StakeInput{
 			PoolKeyHash:   append([]byte(nil), row.PoolKeyHash...),

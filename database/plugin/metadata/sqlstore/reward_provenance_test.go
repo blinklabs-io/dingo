@@ -111,7 +111,13 @@ func TestSaveRewardAccountOutputsBatchesAndAssignsIDs(t *testing.T) {
 		Epoch: 500, StakingKey: []byte{1}, PoolKeyHash: []byte{2},
 		RewardType: "member", Amount: 2, Spendable: true,
 	}
-	require.NoError(t, store.SaveRewardAccountOutputs([]*models.RewardAccountOutput{duplicateA, duplicateB}, nil))
+	require.NoError(
+		t,
+		store.SaveRewardAccountOutputs(
+			[]*models.RewardAccountOutput{duplicateA, duplicateB},
+			nil,
+		),
+	)
 	require.Equal(t, duplicateA.ID, duplicateB.ID)
 	rows, err = store.GetRewardAccountOutputs(500, nil)
 	require.NoError(t, err)

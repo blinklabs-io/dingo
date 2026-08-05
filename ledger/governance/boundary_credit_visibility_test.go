@@ -41,7 +41,11 @@ WHERE credential_tag = ? AND staking_key = ? AND withdrawal = FALSE`,
 	require.Equal(t, want, postSnapshot, msg)
 }
 
-func insertBoundaryAccount(t *testing.T, store *tallyTestStore, credential []byte) {
+func insertBoundaryAccount(
+	t *testing.T,
+	store *tallyTestStore,
+	credential []byte,
+) {
 	t.Helper()
 	_, err := store.raw.Exec(`INSERT INTO account (staking_key, reward, active)
 VALUES (?, '0', TRUE)`, credential)
@@ -75,8 +79,13 @@ func TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot(
 		&models.GovernanceProposal{TxHash: testBytes(32, 0x62)},
 	))
 
-	requireSoleCreditPostSnapshot(t, store.raw, stakeCred, true,
-		"enactment runs after SNAP, so a treasury withdrawal must be excluded from the mark snapshot")
+	requireSoleCreditPostSnapshot(
+		t,
+		store.raw,
+		stakeCred,
+		true,
+		"enactment runs after SNAP, so a treasury withdrawal must be excluded from the mark snapshot",
+	)
 }
 
 // TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot pins a
@@ -89,12 +98,20 @@ func TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot(
 	rewardAddrBytes := buildRewardAddr(t, stakeCred)
 	insertBoundaryAccount(t, store, stakeCred)
 
-	require.NoError(t, refundProposalDeposit(db, nil, &models.GovernanceProposal{
-		TxHash:        testBytes(32, 0x64),
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-	}, 200))
+	require.NoError(
+		t,
+		refundProposalDeposit(db, nil, &models.GovernanceProposal{
+			TxHash:        testBytes(32, 0x64),
+			Deposit:       7,
+			ReturnAddress: rewardAddrBytes,
+		}, 200),
+	)
 
-	requireSoleCreditPostSnapshot(t, store.raw, stakeCred, true,
-		"a proposal-deposit refund is enacted after SNAP and must be excluded from the mark snapshot")
+	requireSoleCreditPostSnapshot(
+		t,
+		store.raw,
+		stakeCred,
+		true,
+		"a proposal-deposit refund is enacted after SNAP and must be excluded from the mark snapshot",
+	)
 }

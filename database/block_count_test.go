@@ -68,7 +68,12 @@ func TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks(t *testing.T) {
 
 	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), count, "the tombstoned block must not be counted")
+	require.Equal(
+		t,
+		uint64(1),
+		count,
+		"the tombstoned block must not be counted",
+	)
 	require.Equal(
 		t, uint64(200), oldestSlot,
 		"the tombstoned block's slot must not be reported as the oldest",

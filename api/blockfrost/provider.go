@@ -37,11 +37,18 @@ type ProviderDependencies struct {
 func RegisterProvider(host *plugin.Host) error {
 	return plugin.Register(
 		host,
-		plugin.Descriptor{Capability: plugin.CapabilityAPIBlockfrost, Name: "builtin", Description: "built-in Blockfrost-compatible HTTP API"},
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityAPIBlockfrost,
+			Name:        "builtin",
+			Description: "built-in Blockfrost-compatible HTTP API",
+		},
 		func() ProviderConfig { return ProviderConfig{Port: 3000} },
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Blockfrost, plugin.Instance, error) {
 			server := New(BlockfrostConfig{
-				ListenAddress:      net.JoinHostPort(deps.Host, strconv.FormatUint(uint64(cfg.Port), 10)),
+				ListenAddress: net.JoinHostPort(
+					deps.Host,
+					strconv.FormatUint(uint64(cfg.Port), 10),
+				),
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 			}, deps.Node, deps.Logger)
 			return server, server, nil

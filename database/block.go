@@ -135,7 +135,12 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 // extraction while preventing the chain iterator from trying to decode it
 // as a real block (which would fail since genesis CBOR is just concatenated
 // UTxO data, not a valid block structure).
-func (d *Database) SetGenesisCbor(slot uint64, hash []byte, cborData []byte, txn *Txn) error {
+func (d *Database) SetGenesisCbor(
+	slot uint64,
+	hash []byte,
+	cborData []byte,
+	txn *Txn,
+) error {
 	owned := false
 	if txn == nil {
 		txn = d.BlobTxn(true)
@@ -169,7 +174,10 @@ func (d *Database) SetGenesisCbor(slot uint64, hash []byte, cborData []byte, txn
 		return err
 	}
 	if err := blob.Set(blobTxn, metadataKey, tmpMetadataBytes); err != nil {
-		return fmt.Errorf("SetGenesisCbor: failed to set block metadata: %w", err)
+		return fmt.Errorf(
+			"SetGenesisCbor: failed to set block metadata: %w",
+			err,
+		)
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -394,7 +402,10 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		// Empty value at a present hash-index entry is local DB corruption,
 		// not a soft miss. Surface a descriptive error so the operator sees
 		// the problem rather than retrying on another peer.
-		return models.Block{}, fmt.Errorf("empty block hash index entry for %s", hex.EncodeToString(hash))
+		return models.Block{}, fmt.Errorf(
+			"empty block hash index entry for %s",
+			hex.EncodeToString(hash),
+		)
 	}
 	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
 		// Surface real backend errors (I/O, closed DB) instead of folding
