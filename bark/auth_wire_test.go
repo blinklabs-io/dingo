@@ -124,17 +124,21 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 	t.Run("cert signed by an untrusted CA is treated as unverified, not rejected outright", func(t *testing.T) {
 		client := newClient(untrustedClientCertPath, untrustedClientKeyPath)
 
-		// Whether tls.VerifyClientCertIfGiven aborts the handshake itself
-		// for an unverifiable client cert is not something this pins: Go's
-		// TLS stack does not guarantee that (unlike
-		// RequireAndVerifyClientCert, which would), so a read-only call may
-		// still succeed here. What must hold regardless is the actual
-		// security property: peerCertContextMiddleware keys off
-		// r.TLS.VerifiedChains (populated only for a chain that resolved to
-		// a trusted ClientCAs root), not r.TLS.PeerCertificates (populated
-		// for whatever the client presented, verified or not) — so an
-		// unverifiable cert must never be treated as an authenticated
-		// operator, regardless of whether the handshake itself completes.
+		// Whether this specific connection gets rejected at the handshake
+		// or reaches the application layer anonymous is not something this
+		// pins: a client can fail to actually present its configured
+		// certificate for reasons entirely unrelated to CA trust (e.g. no
+		// mutually acceptable signature scheme), in which case the
+		// connection proceeds like any anonymous one rather than erroring,
+		// alongside Go's documented handshake-level rejection of a
+		// genuinely-received-but-untrusted chain. What must hold regardless
+		// of which of those occurred is the actual security property:
+		// peerCertContextMiddleware keys off r.TLS.VerifiedChains
+		// (populated only for a chain that resolved to a trusted ClientCAs
+		// root), not r.TLS.PeerCertificates (populated for whatever the
+		// client presented, verified or not) — so this untrusted cert must
+		// never be treated as an authenticated operator, regardless of
+		// which path the connection actually took to get here.
 		_, err := client.GetDatabaseInfo(
 			context.Background(),
 			connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),

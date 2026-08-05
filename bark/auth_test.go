@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -33,24 +34,66 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDestructiveDatabaseProcedures_MatchesDocumentedSet pins the exact set
-// of DatabaseService RPCs newOperatorAuthInterceptor treats as destructive,
-// so a future addition to the proto's method list doesn't silently join
-// this set (or leave it out) without a test noticing.
-func TestDestructiveDatabaseProcedures_MatchesDocumentedSet(t *testing.T) {
-	want := []string{
-		databaseconnect.DatabaseServiceCreateSnapshotProcedure,
-		databaseconnect.DatabaseServiceDeleteSnapshotProcedure,
-		databaseconnect.DatabaseServiceVerifySnapshotProcedure,
-		databaseconnect.DatabaseServiceRestoreProcedure,
-		databaseconnect.DatabaseServiceTruncateProcedure,
-		databaseconnect.DatabaseServiceCancelOperationProcedure,
+// TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod derives the
+// full DatabaseService method list from the generated protobuf
+// ServiceDescriptor -- the actual .proto-derived source of truth,
+// independent of both destructiveDatabaseProcedures and the databaseconnect
+// procedure constants -- and requires every single one to be explicitly
+// classified as either destructive (destructiveDatabaseProcedures, auth.go)
+// or read-only (readOnlyDatabaseProcedures, below). A prior version of this
+// test only re-checked destructiveDatabaseProcedures against a hand-copied
+// list of the same six names, so it could only ever notice one of those six
+// being removed -- it could not catch a brand-new DatabaseService RPC added
+// later landing in neither set and silently being served without mTLS. This
+// version fails loudly on that: any procedure absent from both sets, or
+// (a bug in itself) present in both, is a test failure.
+func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(t *testing.T) {
+	fd := databasev1alpha1.File_v1alpha1_database_database_proto
+	services := fd.Services()
+	var svcIdx int
+	for svcIdx = 0; svcIdx < services.Len(); svcIdx++ {
+		if services.Get(svcIdx).Name() == "DatabaseService" {
+			break
+		}
 	}
-	assert.Len(t, destructiveDatabaseProcedures, len(want))
-	for _, procedure := range want {
-		assert.Truef(t, destructiveDatabaseProcedures[procedure],
-			"expected %q to be classified as destructive", procedure)
+	require.Less(t, svcIdx, services.Len(),
+		"DatabaseService not found in the generated file descriptor")
+	svc := services.Get(svcIdx)
+
+	methods := svc.Methods()
+	require.Positive(t, methods.Len(), "DatabaseService has no methods")
+
+	for i := 0; i < methods.Len(); i++ {
+		method := methods.Get(i)
+		procedure := "/" + string(svc.FullName()) + "/" + string(method.Name())
+		isDestructive := destructiveDatabaseProcedures[procedure]
+		isReadOnly := readOnlyDatabaseProcedures[procedure]
+		assert.Truef(t, isDestructive || isReadOnly,
+			"procedure %q is not classified as destructive (auth.go's "+
+				"destructiveDatabaseProcedures) or read-only (this test's "+
+				"readOnlyDatabaseProcedures) -- a new DatabaseService RPC "+
+				"must be explicitly added to one of those, not silently "+
+				"left unauthenticated by default", procedure)
+		assert.Falsef(t, isDestructive && isReadOnly,
+			"procedure %q is classified as both destructive and read-only", procedure)
 	}
+}
+
+// readOnlyDatabaseProcedures is every DatabaseService RPC that is NOT in
+// auth.go's destructiveDatabaseProcedures -- status/catalog RPCs that never
+// require a verified client certificate. Listed explicitly (rather than
+// e.g. "everything not destructive") so
+// TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod can detect a
+// brand-new RPC that landed in neither set.
+var readOnlyDatabaseProcedures = map[string]bool{
+	databaseconnect.DatabaseServiceGetSnapshotStatusProcedure:       true,
+	databaseconnect.DatabaseServiceListSnapshotsProcedure:           true,
+	databaseconnect.DatabaseServiceGetRestoreStatusProcedure:        true,
+	databaseconnect.DatabaseServiceListAvailableSnapshotsProcedure:  true,
+	databaseconnect.DatabaseServiceGetTruncateStatusProcedure:       true,
+	databaseconnect.DatabaseServiceStreamOperationProgressProcedure: true,
+	databaseconnect.DatabaseServiceGetOperationHistoryProcedure:     true,
+	databaseconnect.DatabaseServiceGetDatabaseInfoProcedure:         true,
 }
 
 // TestPeerCertContextMiddleware_KeysOffVerifiedChains pins the exact bug
