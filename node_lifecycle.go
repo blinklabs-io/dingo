@@ -743,14 +743,14 @@ func (n *Node) reinitializeMidnightIndexer() error {
 }
 
 // reinitializeBackgroundManagers rebuilds the stake-snapshot manager and
-// wires its epoch-boundary capture hook, (re)starts the optional Koios
-// parity observer (dingo #3098) if configured, then starts n.ledgerState --
-// in that order, matching Run()'s own "hooks configured → observer
-// subscribed → ledger started" sequencing (node.go), so an epoch boundary
-// reached immediately after restart can never fire before the snapshot hook
-// or the parity observer's subscription exist. It then restarts the
-// database-lifecycle manager and (if enabled) the Leios vote/pipeline
-// managers, matching Run()'s order.
+// wires both its epoch-boundary hooks (the stake hook and the capture
+// hook), (re)starts the optional Koios parity observer (dingo #3098) if
+// configured, then starts n.ledgerState -- in that order, matching Run()'s
+// own "hooks configured → observer subscribed → ledger started" sequencing
+// (node.go), so an epoch boundary reached immediately after restart can
+// never fire before both snapshot hooks or the parity observer's
+// subscription exist. It then restarts the database-lifecycle manager and
+// (if enabled) the Leios vote/pipeline managers, matching Run()'s order.
 func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	n.snapshotMgr = snapshot.NewManager(n.db, n.eventBus, n.config.logger)
 	// Mirror the CIP-0163 reward-account inactivity gate into snapshot
@@ -767,6 +767,22 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Reinstall both epoch-boundary hooks, in the same order and with the
+	// same bodies as Run() (node.go): the stake hook first, so the
+	// authoritative SNAP-point stake read (after MIR, before POOLREAP/
+	// enactment) is captured via ComputeEpochBoundarySnapshot, then the
+	// capture hook, which stages that snapshot atomically as part of the
+	// same rollover transaction. A live Restore/Truncate must not leave
+	// only the capture hook installed -- without the paired stake hook,
+	// the next epoch boundary would fall back to reconstructing stake
+	// instead of using the SNAP-point capture, producing snapshot/reward
+	// state inconsistent with a normal (non-restored) startup and able to
+	// trip false mismatches in the Koios parity observer/check.
+	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 	n.ledgerState.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
