@@ -267,6 +267,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	var headerTop []cbor.RawMessage
 	_, err = cbor.Decode(components[0], &headerTop)
 	require.NoError(t, err)
+	require.Len(t, headerTop, 2)
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)

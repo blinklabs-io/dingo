@@ -335,14 +335,12 @@ func TestProtocolParamsForSlot_ConcurrentPostForkCallsDoNotRaceOnCostModels(
 	const goroutines = 16
 	var wg sync.WaitGroup
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got := ls.ProtocolParamsForSlot(75)
 			babbagePParams, ok := got.(*babbage.BabbageProtocolParameters)
 			require.True(t, ok)
 			require.NotEmpty(t, babbagePParams.CostModels)
-		}()
+		})
 	}
 	wg.Wait()
 }

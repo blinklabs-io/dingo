@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -1249,9 +1250,7 @@ func (o *Ouroboros) deferLeiosAnnouncement(
 func (o *Ouroboros) retryDeferredLeiosAnnouncements() {
 	o.leiosDeferredMu.Lock()
 	pending := make(map[string]leiosDeferredAnnouncement, len(o.leiosDeferredAnnouncements))
-	for key, announcement := range o.leiosDeferredAnnouncements {
-		pending[key] = announcement
-	}
+	maps.Copy(pending, o.leiosDeferredAnnouncements)
 	o.leiosDeferredMu.Unlock()
 	for key, announcement := range pending {
 		err := o.acceptLeiosAnnouncementInternal(announcement.raw, announcement.source, false)

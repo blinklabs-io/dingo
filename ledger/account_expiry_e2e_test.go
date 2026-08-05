@@ -149,7 +149,6 @@ func runDelegatorInactivityLifecycleScenario(
 	ls.config.DelegatorInactivityEnabled = gateEnabled
 	ls.config.DelegatorInactivity = delegatorInactivityE2EInactivity
 	meta := db.Metadata()
-	gormDB := rewardCalcGormDB(t, db)
 
 	poolKey := rewardCalcHash(0x91)
 	cred := renewTestCred(0x92)
@@ -158,12 +157,11 @@ func runDelegatorInactivityLifecycleScenario(
 	copy(poolID[:], poolKey)
 
 	pool := models.Pool{PoolKeyHash: poolKey}
-	require.NoError(t, gormDB.Create(&pool).Error)
-	require.NoError(t, gormDB.Create(&models.PoolRegistration{
+	require.NoError(t, db.ImportPool(nil, &pool, &models.PoolRegistration{
 		PoolID:      pool.ID,
 		PoolKeyHash: poolKey,
 		AddedSlot:   0,
-	}).Error)
+	}))
 
 	// ---- Stage 1: register + delegate (witness) ----
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -172,13 +170,13 @@ func runDelegatorInactivityLifecycleScenario(
 		Pool:          poolKey,
 		Active:        true,
 	}))
-	require.NoError(t, gormDB.Create(&models.Utxo{
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
 		TxId:       bytes.Repeat([]byte{0x71}, 32),
 		OutputIdx:  0,
 		StakingKey: cred,
 		Amount:     1_000_000,
 		AddedSlot:  0,
-	}).Error)
+	}))
 
 	regDelegCred := lcommon.Credential{
 		CredType:   0,
@@ -334,10 +332,22 @@ func runDelegatorInactivityLifecycleScenario(
 		Active:        true,
 	}))
 	rewardCalcSeedStakeCert(
-		t, db, 1, leaderCred, 0, 250, uint(lcommon.CertificateTypeStakeRegistration),
+		t,
+		db,
+		1,
+		leaderCred,
+		0,
+		250,
+		uint(lcommon.CertificateTypeStakeRegistration),
 	)
 	rewardCalcSeedStakeCert(
-		t, db, 2, member, 0, 250, uint(lcommon.CertificateTypeStakeRegistration),
+		t,
+		db,
+		2,
+		member,
+		0,
+		250,
+		uint(lcommon.CertificateTypeStakeRegistration),
 	)
 
 	txn := db.Transaction(true)
@@ -357,7 +367,11 @@ func runDelegatorInactivityLifecycleScenario(
 	res.memberRewardAfterGuard = uint64(rewardMember.Reward)
 
 	// ---- Stage 3: witness again (withdrawal) -> renewed + reactivated ----
-	rewardAddr := renewTestRewardAddress(t, 0xE1, 0x92) // same fill byte as cred
+	rewardAddr := renewTestRewardAddress(
+		t,
+		0xE1,
+		0x92,
+	) // same fill byte as cred
 	withdrawTx := mockledger.NewTransactionBuilder()
 	withdrawTx.WithValid(true)
 	withdrawTx.WithWithdrawals(map[*lcommon.Address]uint64{rewardAddr: 1})
@@ -436,8 +450,12 @@ func testDelegatorInactivityEndToEndGateOff(t *testing.T) {
 
 	// Baseline unchanged: the same "advance past expiration" point that
 	// excludes with the gate on must still include with the gate off.
-	require.Equal(t, uint64(1_000_000), res.stakeAtExclude,
-		"gate off must keep the delegator included at every point in the timeline")
+	require.Equal(
+		t,
+		uint64(1_000_000),
+		res.stakeAtExclude,
+		"gate off must keep the delegator included at every point in the timeline",
+	)
 	require.Equal(t, uint64(1), res.delegatorsAtExclude)
 
 	require.Greater(t, res.leaderRewardAfterGuard, uint64(0),

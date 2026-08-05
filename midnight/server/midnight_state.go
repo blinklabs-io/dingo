@@ -65,7 +65,7 @@ func effectivePageSize(requested uint32) int {
 // UTxO-event query RPCs. It is declared locally, rather than depending on
 // the full metadata.MetadataStore interface, so this gRPC-query package
 // does not carry unrelated write-path and lifecycle methods; any store
-// (e.g. *sqlite.MetadataStoreSqlite) that implements these methods
+// (e.g. *sqlstore.Store) that implements these methods
 // satisfies it structurally, with no explicit declaration required.
 type eventStore interface {
 	FindMidnightAssetCreatesFrom(
@@ -109,7 +109,10 @@ func (s *service) GetAssetCreates(
 	req *midnight.AssetCreatesRequest,
 ) (*midnight.AssetCreatesResponse, error) {
 	if s.metadata == nil {
-		return nil, status.Error(codes.Unimplemented, "method GetAssetCreates not implemented")
+		return nil, status.Error(
+			codes.Unimplemented,
+			"method GetAssetCreates not implemented",
+		)
 	}
 	rows, err := s.metadata.FindMidnightAssetCreatesFrom(
 		uint64(req.GetStartBlock()),
@@ -118,7 +121,11 @@ func (s *service) GetAssetCreates(
 		nil,
 	)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query asset creates: %v", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query asset creates: %v",
+			err,
+		)
 	}
 	creates := make([]*midnight.AssetCreate, len(rows))
 	for i := range rows {
@@ -135,7 +142,10 @@ func (s *service) GetAssetSpends(
 	req *midnight.AssetSpendsRequest,
 ) (*midnight.AssetSpendsResponse, error) {
 	if s.metadata == nil {
-		return nil, status.Error(codes.Unimplemented, "method GetAssetSpends not implemented")
+		return nil, status.Error(
+			codes.Unimplemented,
+			"method GetAssetSpends not implemented",
+		)
 	}
 	rows, err := s.metadata.FindMidnightAssetSpendsFrom(
 		uint64(req.GetStartBlock()),
@@ -161,7 +171,10 @@ func (s *service) GetRegistrations(
 	req *midnight.RegistrationsRequest,
 ) (*midnight.RegistrationsResponse, error) {
 	if s.metadata == nil {
-		return nil, status.Error(codes.Unimplemented, "method GetRegistrations not implemented")
+		return nil, status.Error(
+			codes.Unimplemented,
+			"method GetRegistrations not implemented",
+		)
 	}
 	rows, err := s.metadata.FindMidnightRegistrationsFrom(
 		uint64(req.GetStartBlock()),
@@ -170,7 +183,11 @@ func (s *service) GetRegistrations(
 		nil,
 	)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query registrations: %v", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query registrations: %v",
+			err,
+		)
 	}
 	registrations := make([]*midnight.Registration, len(rows))
 	for i := range rows {
@@ -187,7 +204,10 @@ func (s *service) GetDeregistrations(
 	req *midnight.DeregistrationsRequest,
 ) (*midnight.DeregistrationsResponse, error) {
 	if s.metadata == nil {
-		return nil, status.Error(codes.Unimplemented, "method GetDeregistrations not implemented")
+		return nil, status.Error(
+			codes.Unimplemented,
+			"method GetDeregistrations not implemented",
+		)
 	}
 	rows, err := s.metadata.FindMidnightDeregistrationsFrom(
 		uint64(req.GetStartBlock()),
@@ -196,13 +216,19 @@ func (s *service) GetDeregistrations(
 		nil,
 	)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query deregistrations: %v", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query deregistrations: %v",
+			err,
+		)
 	}
 	deregistrations := make([]*midnight.Deregistration, len(rows))
 	for i := range rows {
 		deregistrations[i] = deregistrationToProto(&rows[i])
 	}
-	return &midnight.DeregistrationsResponse{Deregistrations: deregistrations}, nil
+	return &midnight.DeregistrationsResponse{
+		Deregistrations: deregistrations,
+	}, nil
 }
 
 // utxoEventMergeItem is one row from any of the four UTxO-event tables,
@@ -231,7 +257,10 @@ func (s *service) GetUtxoEvents(
 	req *midnight.UtxoEventsRequest,
 ) (*midnight.UtxoEventsResponse, error) {
 	if s.metadata == nil {
-		return nil, status.Error(codes.Unimplemented, "method GetUtxoEvents not implemented")
+		return nil, status.Error(
+			codes.Unimplemented,
+			"method GetUtxoEvents not implemented",
+		)
 	}
 	var startBlock uint64
 	var startTxIndex uint32
@@ -248,21 +277,53 @@ func (s *service) GetUtxoEvents(
 	txn := s.metadata.ReadTransaction()
 	defer txn.Rollback() //nolint:errcheck
 
-	creates, err := s.metadata.FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)
+	creates, err := s.metadata.FindMidnightAssetCreatesFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query asset creates: %v", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query asset creates: %v",
+			err,
+		)
 	}
-	spends, err := s.metadata.FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, txn)
+	spends, err := s.metadata.FindMidnightAssetSpendsFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query asset spends: %v", err)
 	}
-	registrations, err := s.metadata.FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, txn)
+	registrations, err := s.metadata.FindMidnightRegistrationsFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query registrations: %v", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query registrations: %v",
+			err,
+		)
 	}
-	deregistrations, err := s.metadata.FindMidnightDeregistrationsFrom(startBlock, startTxIndex, limit, txn)
+	deregistrations, err := s.metadata.FindMidnightDeregistrationsFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "query deregistrations: %v", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query deregistrations: %v",
+			err,
+		)
 	}
 
 	items := make(
@@ -279,7 +340,9 @@ func (s *service) GetUtxoEvents(
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
 			event: &midnight.UtxoEvent{
-				Kind: &midnight.UtxoEvent_AssetCreate{AssetCreate: assetCreateToProto(row)},
+				Kind: &midnight.UtxoEvent_AssetCreate{
+					AssetCreate: assetCreateToProto(row),
+				},
 			},
 		})
 	}
@@ -292,7 +355,9 @@ func (s *service) GetUtxoEvents(
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
 			event: &midnight.UtxoEvent{
-				Kind: &midnight.UtxoEvent_AssetSpend{AssetSpend: assetSpendToProto(row)},
+				Kind: &midnight.UtxoEvent_AssetSpend{
+					AssetSpend: assetSpendToProto(row),
+				},
 			},
 		})
 	}
@@ -305,7 +370,9 @@ func (s *service) GetUtxoEvents(
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
 			event: &midnight.UtxoEvent{
-				Kind: &midnight.UtxoEvent_Registration{Registration: registrationToProto(row)},
+				Kind: &midnight.UtxoEvent_Registration{
+					Registration: registrationToProto(row),
+				},
 			},
 		})
 	}
@@ -318,7 +385,9 @@ func (s *service) GetUtxoEvents(
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
 			event: &midnight.UtxoEvent{
-				Kind: &midnight.UtxoEvent_Deregistration{Deregistration: deregistrationToProto(row)},
+				Kind: &midnight.UtxoEvent_Deregistration{
+					Deregistration: deregistrationToProto(row),
+				},
 			},
 		})
 	}
@@ -345,7 +414,11 @@ func (s *service) GetUtxoEvents(
 		// items, silently letting the response run past the boundary.
 		boundary, found, err := s.blockNumberByHash(endHash)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "resolve end_block_hash: %v", err)
+			return nil, status.Errorf(
+				codes.Internal,
+				"resolve end_block_hash: %v",
+				err,
+			)
 		}
 		if found {
 			cut := len(items)
@@ -381,63 +454,87 @@ func (s *service) GetUtxoEvents(
 	if len(items) > 0 {
 		last := items[len(items)-1]
 		resp.NextPosition = &midnight.CardanoPosition{
-			BlockHash:                last.blockHash,
-			BlockNumber:              uint32(last.blockNumber), //nolint:gosec // wire format is uint32
-			TxIndex:                  last.txIndex,
-			BlockTimestampUnixMillis: int64(last.timestampMs), //nolint:gosec // wire format is int64
+			BlockHash:   last.blockHash,
+			BlockNumber: midnightBlockNumber(last.blockNumber),
+			TxIndex:     last.txIndex,
+			BlockTimestampUnixMillis: midnightTimestamp(
+				last.timestampMs,
+			),
 		}
 	}
 	return resp, nil
 }
 
+func midnightBlockNumber(value uint64) uint32 {
+	// The Midnight protocol fixes this field at uint32.
+	return uint32(value) //nolint:gosec
+}
+
+func midnightTimestamp(value uint64) int64 {
+	// The Midnight protocol fixes Unix millisecond timestamps at int64.
+	return int64(value) //nolint:gosec
+}
+
 func assetCreateToProto(row *models.MidnightAssetCreate) *midnight.AssetCreate {
 	return &midnight.AssetCreate{
-		Address:                  row.Address,
-		Quantity:                 row.Quantity,
-		TxHash:                   row.TxHash,
-		OutputIndex:              row.OutputIndex,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		BlockTimestampUnixMillis: int64(row.BlockTimestampMs), //nolint:gosec // wire format is int64
+		Address:     row.Address,
+		Quantity:    row.Quantity,
+		TxHash:      row.TxHash,
+		OutputIndex: row.OutputIndex,
+		BlockNumber: row.BlockNumber,
+		BlockHash:   row.BlockHash,
+		TxIndex:     row.TxIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
 	}
 }
 
 func assetSpendToProto(row *models.MidnightAssetSpend) *midnight.AssetSpend {
 	return &midnight.AssetSpend{
-		Address:                  row.Address,
-		Quantity:                 row.Quantity,
-		SpendingTxHash:           row.SpendingTxHash,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		UtxoTxHash:               row.UtxoTxHash,
-		UtxoIndex:                row.UtxoIndex,
-		BlockTimestampUnixMillis: int64(row.BlockTimestampMs), //nolint:gosec // wire format is int64
+		Address:        row.Address,
+		Quantity:       row.Quantity,
+		SpendingTxHash: row.SpendingTxHash,
+		BlockNumber:    row.BlockNumber,
+		BlockHash:      row.BlockHash,
+		TxIndex:        row.TxIndex,
+		UtxoTxHash:     row.UtxoTxHash,
+		UtxoIndex:      row.UtxoIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
 	}
 }
 
-func registrationToProto(row *models.MidnightRegistration) *midnight.Registration {
+func registrationToProto(
+	row *models.MidnightRegistration,
+) *midnight.Registration {
 	return &midnight.Registration{
-		FullDatum:                row.FullDatum,
-		TxHash:                   row.TxHash,
-		OutputIndex:              row.OutputIndex,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		BlockTimestampUnixMillis: int64(row.BlockTimestampMs), //nolint:gosec // wire format is int64
+		FullDatum:   row.FullDatum,
+		TxHash:      row.TxHash,
+		OutputIndex: row.OutputIndex,
+		BlockNumber: row.BlockNumber,
+		BlockHash:   row.BlockHash,
+		TxIndex:     row.TxIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
 	}
 }
 
-func deregistrationToProto(row *models.MidnightDeregistration) *midnight.Deregistration {
+func deregistrationToProto(
+	row *models.MidnightDeregistration,
+) *midnight.Deregistration {
 	return &midnight.Deregistration{
-		FullDatum:                row.FullDatum,
-		TxHash:                   row.TxHash,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		UtxoTxHash:               row.UtxoTxHash,
-		UtxoIndex:                row.UtxoIndex,
-		BlockTimestampUnixMillis: int64(row.BlockTimestampMs), //nolint:gosec // wire format is int64
+		FullDatum:   row.FullDatum,
+		TxHash:      row.TxHash,
+		BlockNumber: row.BlockNumber,
+		BlockHash:   row.BlockHash,
+		TxIndex:     row.TxIndex,
+		UtxoTxHash:  row.UtxoTxHash,
+		UtxoIndex:   row.UtxoIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
 	}
 }

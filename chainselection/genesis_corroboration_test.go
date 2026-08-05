@@ -951,6 +951,9 @@ func TestGenesisModeExitEmitsEvent(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	if len(exits) == 0 {
+		t.Fatal("expected genesis mode exit event")
+	}
 	assert.Equal(t, uint64(75), exits[0].LocalSlot)
 	assert.Equal(t, uint64(100), exits[0].BestKnownSlot)
 	assert.Equal(t, uint64(30), exits[0].GenesisWindowSlots)

@@ -22,17 +22,13 @@ import (
 )
 
 type Asset struct {
-	Name        []byte       `gorm:"uniqueIndex:idx_asset_unique;size:32"`
-	NameHex     []byte       `gorm:"index;size:64"`
-	PolicyId    []byte       `gorm:"index:idx_asset_policy_id;uniqueIndex:idx_asset_unique;size:28"`
-	Fingerprint []byte       `gorm:"index;size:48"`
-	ID          uint         `gorm:"primaryKey"`
-	UtxoID      uint         `gorm:"index;uniqueIndex:idx_asset_unique"`
-	Amount      types.Uint64 `gorm:"index"`
-}
-
-func (Asset) TableName() string {
-	return "asset"
+	Name        []byte
+	NameHex     []byte
+	PolicyId    []byte
+	Fingerprint []byte
+	ID          uint
+	UtxoID      uint
+	Amount      types.Uint64
 }
 
 // AssetMintBurn records a single asset mint or burn event: one row per
@@ -44,18 +40,14 @@ func (Asset) TableName() string {
 // full mint/burn history so the Blockfrost API can derive an asset's
 // initial_mint_tx_hash (earliest event) and mint_or_burn_count (row count).
 type AssetMintBurn struct {
-	ID          uint   `gorm:"primaryKey"`
-	TxHash      []byte `gorm:"size:32;uniqueIndex:idx_asset_mint_burn_unique,priority:1"`
-	PolicyId    []byte `gorm:"size:28;uniqueIndex:idx_asset_mint_burn_unique,priority:2;index:idx_asset_mint_burn_lookup,priority:1"`
-	Name        []byte `gorm:"size:32;uniqueIndex:idx_asset_mint_burn_unique,priority:3;index:idx_asset_mint_burn_lookup,priority:2"`
-	Fingerprint []byte `gorm:"index;size:48"`
-	Slot        uint64 `gorm:"index;index:idx_asset_mint_burn_lookup,priority:3"`
-	Quantity    string `gorm:"size:40"`
+	ID          uint
+	TxHash      []byte
+	PolicyId    []byte
+	Name        []byte
+	Fingerprint []byte
+	Slot        uint64
+	Quantity    string
 	TxIndex     uint32
-}
-
-func (AssetMintBurn) TableName() string {
-	return "asset_mint_burn"
 }
 
 // ConvertMintToAssetMintBurnModels converts a transaction's mint field into a

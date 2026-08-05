@@ -168,10 +168,10 @@ func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
 	)
 
 	var deltas int64
-	require.NoError(t, rewardCalcGormDB(t, db).
-		Model(&models.AccountRewardDelta{}).
-		Where("added_slot = ?", retentionBoundarySlot).
-		Count(&deltas).Error)
+	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
+		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
+		retentionBoundarySlot,
+	).Scan(&deltas))
 	require.Zero(t, deltas, "skipped epoch must not record reward deltas")
 }
 

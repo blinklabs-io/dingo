@@ -23,8 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
-	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
@@ -70,7 +68,9 @@ func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
 				config: LedgerStateConfig{
 					Database:          db,
 					CardanoNodeConfig: nodeCfg,
-					Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+					Logger: slog.New(
+						slog.NewTextHandler(io.Discard, nil),
+					),
 				},
 			}
 
@@ -81,26 +81,25 @@ func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
 				"createGenesisBlock should not fail with FK constraint",
 			)
 
-			store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-			require.True(t, ok, "metadata store should be sqlite")
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
 
 			// At least one genesis UTxO should have been created so the
 			// assertions below are meaningful.
 			var utxoCount int64
-			require.NoError(
-				t,
-				store.DB().Model(&models.Utxo{}).Count(&utxoCount).Error,
-			)
+			require.NoError(t, raw.QueryRow(
+				"SELECT COUNT(*) FROM utxo",
+			).Scan(&utxoCount))
 			require.Greater(t, utxoCount, int64(0), "genesis UTxOs created")
 
 			// The hash FK columns must be stored as NULL, never empty blobs.
 			var nonNull int64
-			require.NoError(
-				t,
-				store.DB().Model(&models.Utxo{}).
-					Where("spent_at_tx_id IS NOT NULL OR referenced_by_tx_id IS NOT NULL OR collateral_by_tx_id IS NOT NULL").
-					Count(&nonNull).Error,
-			)
+			require.NoError(t, raw.QueryRow(`
+SELECT COUNT(*) FROM utxo
+WHERE spent_at_tx_id IS NOT NULL
+   OR referenced_by_tx_id IS NOT NULL
+   OR collateral_by_tx_id IS NOT NULL`,
+			).Scan(&nonNull))
 			require.Equal(
 				t,
 				int64(0),

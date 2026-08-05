@@ -18,16 +18,12 @@ import (
 	"context"
 	"encoding/hex"
 	"math/big"
-	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
 )
 
 // openTestDingoDB opens a fresh, schema-migrated Dingo metadata sqlite file
@@ -35,18 +31,11 @@ import (
 // check_test.go's newTestDingoDataDir pattern but exposing the writable
 // handle (dingo_db.go's own OpenDingoDB is read-only, which a seeding test
 // cannot use).
-func openTestDingoDB(t *testing.T) (*DingoDB, *gorm.DB) {
+func openTestDingoDB(t *testing.T) (*DingoDB, *testDB) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{Logger: gormlogger.Discard})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(
-		&models.EpochSummary{},
-		&models.RewardAdaPots{},
-		&models.RewardPoolInput{},
-		&models.RewardPoolOutput{},
-	))
-	return &DingoDB{db: db}, db
+	dir := t.TempDir()
+	gdb := openTestSQLDB(t, dir, true)
+	return &DingoDB{db: gdb.db, dialect: "sqlite"}, gdb
 }
 
 func testPoolKeyHash(t *testing.T, b byte) []byte {

@@ -21,6 +21,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -831,8 +832,15 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 	}
 	var treasury, reserves int64
 	if state != nil {
-		treasury = int64(state.Treasury) //nolint:gosec // pot values fit in int64
-		reserves = int64(state.Reserves) //nolint:gosec // pot values fit in int64
+		var parseErr error
+		treasury, parseErr = strconv.ParseInt(strconv.FormatUint(uint64(state.Treasury), 10), 10, 64)
+		if parseErr != nil {
+			return nil, fmt.Errorf("network state treasury exceeds signed account-state range: %w", parseErr)
+		}
+		reserves, parseErr = strconv.ParseInt(strconv.FormatUint(uint64(state.Reserves), 10), 10, 64)
+		if parseErr != nil {
+			return nil, fmt.Errorf("network state reserves exceeds signed account-state range: %w", parseErr)
+		}
 	}
 	return []any{
 		olocalstatequery.AccountState{

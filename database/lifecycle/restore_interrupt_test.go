@@ -101,6 +101,7 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 
+	require.NotEmpty(t, os.Args)
 	cmd := exec.Command( //nolint:gosec
 		os.Args[0],
 		"-test.run=^TestRestoreInterruptedByProcessKillLeavesTargetUntouched$",

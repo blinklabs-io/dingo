@@ -5,7 +5,7 @@ against Dingo's ledger implementation. The shared harness and embedded test
 data live in `github.com/blinklabs-io/ouroboros-mock/conformance`; this package
 provides `DingoStateManager`, an adapter that drives Dingo's database and
 ledger packages so every vector runs against a clean state. `DingoStateManager`
-only ever talks to the database through `*gorm.DB`, so the same adapter runs
+uses the shared `database/sql` metadata store, so the same adapter runs
 against an in-memory SQLite backend (the default, no setup required), a real
 PostgreSQL backend (see [PostgreSQL backend](#postgresql-backend)), or a real
 MySQL backend (see [MySQL backend](#mysql-backend)).
@@ -143,7 +143,7 @@ Cross-repo change cascades that must re-run this suite:
 1. The test extracts embedded vectors from `ouroboros-mock/conformance` into
    a temp directory (`ExtractEmbeddedTestdata`).
 2. A fresh `DingoStateManager` spins up an in-memory SQLite database and
-   applies Dingo's GORM migrations.
+   runs the versioned SQL-store migrations.
 3. The harness (`conformance.NewHarness`) walks every vector, feeding
    transactions through the state manager and comparing expected vs. actual
    ledger state after each step.
@@ -175,7 +175,7 @@ re-run the suite. Do not add or mutate vectors locally.
 1. Re-run the failing vector in isolation with `-v` so the harness prints
    per-step diagnostics.
 2. Check whether the failure is Dingo-side (ledger logic) or state-manager-side
-   (`state_manager.go` mapping between `common.*` types and Dingo's GORM
+   (`state_manager.go` mapping between `common.*` types and the SQL-store
    models). State-manager bugs usually surface as the same vector failing
    identically across multiple eras; ledger bugs are usually era-specific.
 3. If the upstream vector itself looks wrong, file an issue against

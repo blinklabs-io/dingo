@@ -49,6 +49,20 @@ func newTestDB(t *testing.T) *database.Database {
 	return db
 }
 
+func newFileTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  logger,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		dbtest.CloseDatabase(db) //nolint:errcheck
+	})
+	return db
+}
+
 func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	t *testing.T,
 ) {
@@ -478,8 +492,12 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 	// first block.
 	output := logs.String()
 	assert.Contains(t, output, `"msg":"skipping unparseable block"`)
-	assert.Contains(t, output, `"slot":0`,
-		"iterator must visit slot 0 when resuming from a checkpoint with LastSlot=0")
+	assert.Contains(
+		t,
+		output,
+		`"slot":0`,
+		"iterator must visit slot 0 when resuming from a checkpoint with LastSlot=0",
+	)
 	assert.Contains(t, output, `"slot":1`,
 		"iterator must also visit slot 1")
 }
@@ -537,7 +555,9 @@ func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 	require.NoError(t, bf.Run(context.Background()))
 
 	assert.Equal(
-		t, uint64(0), bf.immutableUtxoOffsetsTipSlot,
+		t,
+		uint64(0),
+		bf.immutableUtxoOffsetsTipSlot,
 		"explicit SetImmutableUtxoOffsetsTipSlot(0) must beat sync-state auto-detect",
 	)
 }
@@ -594,6 +614,10 @@ func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 	// With blocks present, Run enters the iteration loop and
 	// detects the cancelled context, returning an error.
 	err = bf.Run(ctx)
-	require.Error(t, err, "Run should return error on cancelled context with blocks")
+	require.Error(
+		t,
+		err,
+		"Run should return error on cancelled context with blocks",
+	)
 	assert.ErrorIs(t, err, context.Canceled)
 }

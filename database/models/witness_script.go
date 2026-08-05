@@ -25,12 +25,8 @@ package models
 // transactions, we store only the script hash here. The actual script content
 // is stored separately in Script table, indexed by hash.
 type WitnessScripts struct {
-	ScriptHash    []byte `gorm:"index;size:28"`
-	ID            uint   `gorm:"primaryKey"`
-	TransactionID uint   `gorm:"index"`
-	Type          uint8  `gorm:"index"`
-}
-
-func (WitnessScripts) TableName() string {
-	return "witness_scripts"
+	ScriptHash    []byte
+	ID            uint
+	TransactionID uint
+	Type          uint8
 }

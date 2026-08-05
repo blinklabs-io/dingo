@@ -16,9 +16,12 @@ package sqlite
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +34,12 @@ func TestProviderMaxConnectionsPrecedence(t *testing.T) {
 		want     int
 	}{
 		{name: "injected worker count", injected: 11, want: 11},
-		{name: "provider override", config: map[string]any{"maxConnections": 7}, injected: 11, want: 7},
+		{
+			name:     "provider override",
+			config:   map[string]any{"maxConnections": 7},
+			injected: 11,
+			want:     7,
+		},
 		{name: "provider default", want: DefaultMaxConnections},
 	}
 	for _, tt := range tests {
@@ -42,7 +50,7 @@ func TestProviderMaxConnectionsPrecedence(t *testing.T) {
 				require.NoError(t, host.Stop(context.Background()))
 			})
 
-			store, err := plugin.Resolve[*MetadataStoreSqlite](
+			store, err := plugin.Resolve[*sqlstore.Store](
 				context.Background(),
 				host,
 				plugin.CapabilityStorageMetadata,
@@ -51,7 +59,11 @@ func TestProviderMaxConnectionsPrecedence(t *testing.T) {
 				metadata.ProviderDependencies{MaxConnections: tt.injected},
 			)
 			require.NoError(t, err)
-			require.Equal(t, tt.want, store.maxConnections)
+			require.Equal(
+				t,
+				tt.want,
+				store.ReadPoolStats().MaxOpenConnections,
+			)
 		})
 	}
 }
@@ -79,13 +91,14 @@ func TestProviderDataDirPrecedence(t *testing.T) {
 				require.NoError(t, host.Stop(context.Background()))
 			})
 
-			store, err := plugin.Resolve[*MetadataStoreSqlite](
+			_, err := plugin.Resolve[*sqlstore.Store](
 				context.Background(), host,
 				plugin.CapabilityStorageMetadata, "sqlite", config,
 				metadata.ProviderDependencies{DataDir: injected},
 			)
 			require.NoError(t, err)
-			require.Equal(t, want, store.dataDir)
+			_, err = os.Stat(filepath.Join(want, "metadata.sqlite"))
+			require.NoError(t, err)
 		})
 	}
 }

@@ -34,7 +34,7 @@ import (
 // ingestion boundary, mirroring ledger's own account_expiry_rollback_test.go
 // seedRollbackCertificate helper (a different package, so not directly
 // reusable) -- this keeps the test independent of a concrete metadata
-// plugin and its GORM schema.
+// plugin and its SQL schema.
 func seedCip163Certificate(
 	t *testing.T,
 	db *database.Database,

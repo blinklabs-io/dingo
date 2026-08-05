@@ -253,27 +253,22 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 	}, 100)
 	seedPoolAndDelegations(t, db, poolB, nil, 100)
 
-	gormDB := snapshotGormDB(t, db)
+	raw := snapshotSQLDB(t, db)
 	// Reproduce a pre-unique-index database: drop the constraint, then add the
 	// duplicate credential row it would now reject.
-	require.NoError(t, gormDB.Exec(
-		"DROP INDEX IF EXISTS idx_reward_live_stake_cred",
-	).Error)
-	require.NoError(t, gormDB.Create(&models.RewardLiveStake{
-		CredentialTag:      0,
-		StakingKey:         stakingKey,
-		PoolKeyHash:        poolB,
-		UtxoStake:          types.Uint64(10),
-		TotalStake:         types.Uint64(10),
-		Registered:         true,
-		PoolDelegationSlot: 100,
-		UpdatedSlot:        100,
-	}).Error)
+	_, err := raw.Exec("DROP INDEX IF EXISTS idx_reward_live_stake_cred")
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO reward_live_stake
+ (credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
+  total_stake, registered, pool_delegation_slot, updated_slot, calculation_version)
+ VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, 0)`, 0, stakingKey, poolB, "10", "0", "10", 100, 100)
+	require.NoError(t, err)
 
-	var rows int64
-	require.NoError(t, gormDB.Model(&models.RewardLiveStake{}).
-		Where("staking_key = ?", stakingKey).Count(&rows).Error)
-	require.Equal(t, int64(2), rows, "fixture must hold the duplicate rows")
+	var rows int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM reward_live_stake WHERE staking_key = ?", stakingKey,
+	).Scan(&rows))
+	require.Equal(t, 2, rows, "fixture must hold the duplicate rows")
 
 	calc := NewCalculator(db)
 	txn := db.Transaction(false)
@@ -337,10 +332,12 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 			// Make the live aggregate disagree with the historical
 			// reconstruction, standing in for stake that moved after the
 			// boundary.
-			require.NoError(t, snapshotGormDB(t, db).
-				Model(&models.RewardLiveStake{}).
-				Where("staking_key = ?", stakingKey).
-				Update("total_stake", types.Uint64(75)).Error)
+			raw := snapshotSQLDB(t, db)
+			_, err := raw.Exec(
+				"UPDATE reward_live_stake SET total_stake = ? WHERE staking_key = ?",
+				"75", stakingKey,
+			)
+			require.NoError(t, err)
 			// Tip past the snapshot slot selects the historical fallback.
 			require.NoError(t, db.SetTip(ochainsync.Tip{
 				Point: ocommon.Point{

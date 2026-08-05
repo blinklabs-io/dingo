@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -34,7 +34,9 @@ import (
 // offline and win slots regardless of stake. With no pool registration present
 // for the block's issuer, the block's VRF key cannot match any registered key,
 // so verification must fail (it must never pass by default).
-func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(t *testing.T) {
+func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
+	t *testing.T,
+) {
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -51,7 +53,12 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(t *testing.T)
 	msg := err.Error()
 	assert.True(
 		t,
-		containsAny(msg, "VRF key", "registered VRF key", "registration lookup"),
+		containsAny(
+			msg,
+			"VRF key",
+			"registered VRF key",
+			"registration lookup",
+		),
 		"rejection should cite the VRF-key registration binding, got: %s",
 		msg,
 	)
@@ -61,12 +68,14 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(t *testing.T)
 	require.True(t, ok)
 	require.NotEmpty(t, vrfKey)
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "expected sqlite metadata store")
-	require.NoError(t, store.DB().Create(&models.Pool{
-		PoolKeyHash: poolKeyHash[:],
-		VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
-	}).Error)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		"INSERT INTO pool (pool_key_hash, vrf_key_hash) VALUES (?, ?)",
+		poolKeyHash[:],
+		lcommon.Blake2b256Hash(vrfKey).Bytes(),
+	)
+	require.NoError(t, err)
 
 	err = ls.verifyRegisteredVrfKey(tb.block)
 	require.Error(
@@ -195,18 +204,19 @@ func TestVerifyRegisteredVrfKey_AcceptsRetiredPoolRegistration(
 		BlockNumber: 2,
 	}, nil))
 
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "expected sqlite metadata store")
-	var pool models.Pool
-	require.NoError(t, store.DB().
-		Where("pool_key_hash = ?", poolKeyHash[:]).
-		First(&pool).Error)
-	require.NoError(t, store.DB().Create(&models.PoolRetirement{
-		PoolID:      pool.ID,
-		PoolKeyHash: poolKeyHash[:],
-		Epoch:       2,
-		AddedSlot:   2,
-	}).Error)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	var poolID uint
+	require.NoError(t, raw.QueryRow(
+		"SELECT id FROM pool WHERE pool_key_hash = ?",
+		poolKeyHash[:],
+	).Scan(&poolID))
+	_, err = raw.Exec(`
+INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
+VALUES (?, ?, 2, 2)`,
+		poolID, poolKeyHash[:],
+	)
+	require.NoError(t, err)
 
 	require.NoError(
 		t,

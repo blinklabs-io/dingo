@@ -18,7 +18,10 @@ package dbtest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/plugin"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 var databaseHosts sync.Map
@@ -41,6 +45,46 @@ type StorageProvider struct {
 	Name     string
 	Config   map[string]any
 	Register func(*plugin.Host) error
+}
+
+// RawSQLiteMetadata opens a repository-internal database/sql fixture against
+// the metadata file owned by db. It exists only for tests that must seed a
+// deliberately impossible or partially-upgraded state that the public store
+// contract cannot represent. Production code must use MetadataStore methods.
+func RawSQLiteMetadata(
+	tb testing.TB,
+	db *database.Database,
+) (*sql.DB, error) {
+	tb.Helper()
+	if db == nil {
+		return nil, errors.New("nil test database")
+	}
+	if db.DataDir() == "" {
+		return nil, errors.New(
+			"raw SQLite fixture requires a file-backed test database",
+		)
+	}
+	path := filepath.Join(db.DataDir(), "metadata.sqlite")
+	raw, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:%s?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+			path,
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := raw.Ping(); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	tb.Cleanup(func() {
+		if err := raw.Close(); err != nil {
+			tb.Errorf("close raw SQLite metadata fixture: %v", err)
+		}
+	})
+	return raw, nil
 }
 
 // Options configures a test database. The zero value composes the badger blob

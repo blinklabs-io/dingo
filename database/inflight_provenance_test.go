@@ -17,8 +17,6 @@ package database
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,7 +75,11 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 		"same-batch produced output must be created at flush",
 	)
 	require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), []byte(utxo.SpentAtTxId))
+	require.Equal(
+		t,
+		candidate.consumerTx.Hash().Bytes(),
+		[]byte(utxo.SpentAtTxId),
+	)
 }
 
 // TestSetTransactionBatched_CrossBatchProducerResolvesFromDB flushes the
@@ -149,7 +151,11 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, post)
 	require.Equal(t, candidate.consumerPoint.Slot, post.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), []byte(post.SpentAtTxId))
+	require.Equal(
+		t,
+		candidate.consumerTx.Hash().Bytes(),
+		[]byte(post.SpentAtTxId),
+	)
 }
 
 // TestSetTransactionBatched_MissingProducerNotFabricated ingests only the
@@ -248,16 +254,16 @@ func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	// exists.
 	ingestSameBatchProducerConsumer(t, db, candidate)
 
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-
 	// Mimic a partial prior run: the row stays deleted at the consumer slot
 	// but loses its spender hash.
-	require.NoError(t, store.DB().
-		Model(&models.Utxo{}).
-		Where("tx_id = ? AND output_idx = ?",
-			candidate.input.Id().Bytes(), candidate.input.Index()).
-		Update("spent_at_tx_id", nil).Error)
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err := raw.Exec(`
+UPDATE utxo SET spent_at_tx_id = NULL
+WHERE tx_id = ? AND output_idx = ?`,
+		candidate.input.Id().Bytes(),
+		candidate.input.Index(),
+	)
+	require.NoError(t, err)
 
 	pre, err := db.Metadata().GetUtxoIncludingSpent(
 		candidate.input.Id().Bytes(), candidate.input.Index(), nil,

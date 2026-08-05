@@ -24,9 +24,9 @@ import (
 
 // TestCommitEpochDataWithTotals exercises the actual SQL generated for the
 // koios_totals upsert against a real SQLite file — a pure-Go struct test
-// cannot catch a GORM column-name mismatch (e.g. DepositsDRep, which GORM's
-// naming strategy converts to "deposits_d_rep", not "deposits_drep"; the
-// column must be pinned explicitly in cache.go). CommitEpochData's
+// cannot catch a column-name mismatch (e.g. DepositsDRep versus the persisted
+// "deposits_drep" spelling; the column must be pinned explicitly in cache.go).
+// CommitEpochData's
 // AssignmentColumns list is a hardcoded string literal that must match the
 // real migrated column for every field, so this has to run against a real
 // DB, not just construct the struct in memory.
