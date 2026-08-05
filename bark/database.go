@@ -472,9 +472,9 @@ func snapshotInfoFromEntry(
 			Slot:        new(m.TipSlot),
 			BlockNumber: new(m.TipBlockNumber),
 		},
-		SizeBytes: uint64(
+		SizeBytes: uint64( //nolint:gosec // G115: file sizes are never negative
 			m.BlobBytes + m.MetadataBytes,
-		), //nolint:gosec // G115: file sizes are never negative
+		),
 		Checksum:  "sha256:" + m.Checksum,
 		CreatedAt: timestamppb.New(m.CreatedAt),
 		Location:  dir,

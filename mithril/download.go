@@ -304,8 +304,8 @@ func transientRetryDelay(attempt int) time.Duration {
 	if quarter := d / 4; quarter > 0 {
 		// Jitter in [-quarter, +quarter]
 		d += time.Duration(
-			rand.Int63n(int64(quarter)*2+1),
-		) - quarter //nolint:gosec
+			rand.Int63n(int64(quarter)*2+1), //nolint:gosec
+		) - quarter
 	}
 	return d
 }
@@ -379,14 +379,16 @@ func newPooledDownloadTransport(maxConns int) *http.Transport {
 	// connections preserves keep-alive without sharing stream fate.
 	transport.ForceAttemptHTTP2 = false
 	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	if transport.TLSClientConfig != nil {
-		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
-	} else {
-		transport.TLSClientConfig = &tls.Config{
+	tlsConfig := transport.TLSClientConfig
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
+	} else if cloned := tlsConfig.Clone(); cloned != nil {
+		tlsConfig = cloned
 	}
-	transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	tlsConfig.NextProtos = []string{"http/1.1"}
+	transport.TLSClientConfig = tlsConfig
 	return transport
 }
 

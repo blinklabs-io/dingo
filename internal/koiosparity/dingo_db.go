@@ -203,9 +203,9 @@ func (d *DingoDB) GetLatestEpoch(ctx context.Context) (uint64, error) {
 	if !epoch.Valid {
 		return 0, errors.New("dingo db: no epoch_summary rows found")
 	}
-	return uint64(
+	return uint64( //nolint:gosec // epoch values are non-negative
 		epoch.Int64,
-	), nil //nolint:gosec // epoch values are non-negative
+	), nil
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch.
@@ -357,15 +357,18 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		}
 		data.ParamsPresent = true
 		if blocks.Valid {
-			data.BlocksProduced = uint64(
+			data.BlocksProduced = uint64( //nolint:gosec // metadata values are non-negative
 				blocks.Int64,
-			) //nolint:gosec // metadata values are non-negative
+			)
 		}
 		if cost.Valid {
 			data.FixedCost = strconv.FormatUint(
-				uint64(cost.Int64),
+				//nolint:gosec // metadata values are non-negative
+				uint64(
+					cost.Int64,
+				),
 				10,
-			) //nolint:gosec // metadata values are non-negative
+			)
 		}
 		if margin.Rat != nil {
 			data.Margin = margin.String()

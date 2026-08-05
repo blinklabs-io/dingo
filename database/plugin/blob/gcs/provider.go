@@ -46,9 +46,9 @@ func RegisterProvider(host *plugin.Host) error {
 				return nil, nil, err
 			}
 			return store, plugin.Lifecycle{
-				StartFunc: func(context.Context) error { return store.Start() },
+				StartFunc: func(context.Context) error { return store.Start() }, //nolint:contextcheck
 				StopFunc:  func(context.Context) error { return store.Stop() },
-			}, nil //nolint:contextcheck
+			}, nil
 		},
 	)
 }

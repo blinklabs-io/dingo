@@ -127,9 +127,9 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 			return fmt.Errorf("open %q for upload: %w", localPath, err)
 		}
 		key := d.objectKey(entry.Name())
-		_, uploadErr := uploader.Upload(
+		_, uploadErr := uploader.Upload( //nolint:staticcheck
 			ctx,
-			&s3.PutObjectInput{ //nolint:staticcheck
+			&s3.PutObjectInput{
 				Bucket: &d.bucket,
 				Key:    &key,
 				Body:   f,
@@ -160,9 +160,9 @@ func (d *s3Destination) DownloadDir(
 	ctx context.Context,
 	localDir string,
 ) error {
-	downloader := manager.NewDownloader(
+	downloader := manager.NewDownloader( //nolint:staticcheck // see UploadDir's note on manager.Uploader
 		d.client,
-	) //nolint:staticcheck // see UploadDir's note on manager.Uploader
+	)
 	listInput := &s3.ListObjectsV2Input{Bucket: &d.bucket}
 	if d.prefix != "" {
 		p := d.prefix + "/"
@@ -190,10 +190,10 @@ func (d *s3Destination) DownloadDir(
 			if err != nil {
 				return fmt.Errorf("create %q for download: %w", localPath, err)
 			}
-			_, downloadErr := downloader.Download(
+			_, downloadErr := downloader.Download( //nolint:staticcheck
 				ctx,
 				f,
-				&s3.GetObjectInput{ //nolint:staticcheck
+				&s3.GetObjectInput{
 					Bucket: &d.bucket,
 					Key:    obj.Key,
 				},
