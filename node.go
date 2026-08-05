@@ -268,7 +268,7 @@ func (n *Node) apiPluginSelection(
 // bark's own existing default behavior (all interfaces) is preserved for
 // deployments only using it for the read-only Archive service. Bind address
 // is a network control, independent of the mTLS client-certificate
-// authentication bark.NewBark requires whenever lifecycleEnabled (see
+// authentication check Bark.Start enforces whenever lifecycleEnabled (see
 // BarkConfig.TlsClientCAFilePath) -- this default narrows exposure as
 // defense in depth, it is not what makes those RPCs safe to reach.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {

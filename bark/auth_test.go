@@ -16,8 +16,15 @@ package bark
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"connectrpc.com/connect"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -43,6 +50,79 @@ func TestDestructiveDatabaseProcedures_MatchesDocumentedSet(t *testing.T) {
 	for _, procedure := range want {
 		assert.Truef(t, destructiveDatabaseProcedures[procedure],
 			"expected %q to be classified as destructive", procedure)
+	}
+}
+
+// TestPeerCertContextMiddleware_KeysOffVerifiedChains pins the exact bug
+// class this file's auth model previously had: peerCertContextMiddleware
+// must decide Verified from r.TLS.VerifiedChains (populated only when the
+// presented chain resolved to a trusted ClientCAs root), never from
+// r.TLS.PeerCertificates alone (populated for whatever the client
+// presented, verified or not). Driving this via a synthetic
+// *tls.ConnectionState — rather than a real TLS handshake, as
+// auth_wire_test.go's wire-level test does — makes this deterministic
+// regardless of whether tls.VerifyClientCertIfGiven happens to abort the
+// handshake for a given unverifiable certificate (it does not always, as
+// that wire-level test discovered): a bad cert can still reach this
+// middleware with a non-empty PeerCertificates and an empty VerifiedChains,
+// and that is exactly the case that must resolve to Verified: false.
+func TestPeerCertContextMiddleware_KeysOffVerifiedChains(t *testing.T) {
+	leaf, _, _ := writeTestCA(t) // any in-memory *x509.Certificate works as a stand-in leaf here
+
+	interceptor := &operatorAuthInterceptor{
+		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		destructive: destructiveDatabaseProcedures,
+	}
+
+	cases := []struct {
+		name         string
+		tlsState     *tls.ConnectionState
+		wantVerified bool
+	}{
+		{
+			name:         "no TLS at all (plaintext connection)",
+			tlsState:     nil,
+			wantVerified: false,
+		},
+		{
+			name: "cert presented but not verified (empty VerifiedChains)",
+			tlsState: &tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{leaf},
+			},
+			wantVerified: false,
+		},
+		{
+			name: "cert presented and verified",
+			tlsState: &tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{leaf},
+				VerifiedChains:   [][]*x509.Certificate{{leaf}},
+			},
+			wantVerified: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotCtx context.Context
+			next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				gotCtx = r.Context()
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.TLS = tc.tlsState
+			peerCertContextMiddleware(next).ServeHTTP(httptest.NewRecorder(), req)
+
+			id := peerIdentityFromContext(gotCtx)
+			require.Equal(t, tc.wantVerified, id.Verified)
+
+			err := interceptor.authorize(gotCtx, databaseconnect.DatabaseServiceRestoreProcedure)
+			if tc.wantVerified {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+			}
+		})
 	}
 }
 

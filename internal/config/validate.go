@@ -294,7 +294,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// never be reachable without a way to authenticate callers, regardless
 	// of bind address (BarkHost/effectiveBarkHost is a network control, not
 	// an identity one), so a client CA is required upfront here rather than
-	// left to fail deep inside bark.NewBark at startup.
+	// left to fail deep inside bark.Bark.Start at startup.
 	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
 		c.BarkClientCAFilePath == "" {
 		errs = append(errs, errors.New(
@@ -302,6 +302,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
 				"destructive DatabaseService RPCs must not be mounted "+
 				"without a way to authenticate callers",
+		))
+	}
+	// mTLS client verification also needs the server's own TLS pair --
+	// without it, bark.Bark.Start's own equivalent check (independent of
+	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
+	// deep inside node startup instead of here. Checked independently of
+	// the barkPort/snapshotDir gate above so a barkClientCaFilePath set by
+	// mistake without barkPort/snapshotDir still gets flagged.
+	if serving && c.BarkClientCAFilePath != "" &&
+		(c.TlsCertFilePath == "" || c.TlsKeyFilePath == "") {
+		errs = append(errs, errors.New(
+			"barkClientCaFilePath requires tlsCertFilePath and tlsKeyFilePath "+
+				"to also be set for mTLS client verification",
 		))
 	}
 
