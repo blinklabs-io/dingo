@@ -28,6 +28,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/lang"
+	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -285,6 +287,142 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		babbage.UtxoValidatePlutusScripts,
 		"Babbage validation must use Dingo's local Plutus execution path",
 	)
+}
+
+func TestPlutusBudgetMismatchUsesScriptFailureError(t *testing.T) {
+	// A zero declared budget is intentional: restrictive validation should
+	// execute this script with the enormous budget and classify the resulting
+	// overage as a Plutus disagreement.
+	program := &syn.Program[syn.DeBruijn]{
+		Version: lang.LanguageVersionV1,
+		Term: &syn.Lambda[syn.DeBruijn]{
+			Body: &syn.Lambda[syn.DeBruijn]{
+				Body: &syn.Constant{Con: &syn.Unit{}},
+			},
+		},
+	}
+	flatProgram, err := syn.Encode(program)
+	require.NoError(t, err)
+	scriptBytes, err := cbor.Encode(flatProgram)
+	require.NoError(t, err)
+
+	spendInput := newTestInput(0x01, 0)
+
+	tests := []struct {
+		name     string
+		validate func(lcommon.Transaction, lcommon.LedgerState) error
+		reset    func()
+	}{
+		{
+			name: "alonzo",
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+				return ValidateTxAlonzo(
+					tx,
+					0,
+					ls,
+					&alonzo.AlonzoProtocolParameters{
+						ProtocolMajor: 5,
+					},
+				)
+			},
+			reset: func() {
+				alonzoUtxoValidationRules = nil
+			},
+		},
+		{
+			name: "babbage",
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+				return ValidateTxBabbage(
+					tx,
+					0,
+					ls,
+					&babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+					},
+				)
+			},
+			reset: func() {
+				babbageUtxoValidationRules = nil
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "alonzo" {
+				origRules := alonzoUtxoValidationRules
+				t.Cleanup(func() { alonzoUtxoValidationRules = origRules })
+			} else {
+				origRules := babbageUtxoValidationRules
+				t.Cleanup(func() { babbageUtxoValidationRules = origRules })
+			}
+			tc.reset()
+
+			var plutusScript lcommon.Script
+			witnesses := &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{
+							key: lcommon.RedeemerKey{
+								Tag:   lcommon.RedeemerTagSpend,
+								Index: 0,
+							},
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{},
+							},
+						},
+					},
+				},
+			}
+			if tc.name == "alonzo" {
+				v1Script := lcommon.PlutusV1Script(scriptBytes)
+				plutusScript = v1Script
+				witnesses.plutusV1Scripts = []lcommon.PlutusV1Script{v1Script}
+			} else {
+				v2Script := lcommon.PlutusV2Script(scriptBytes)
+				plutusScript = v2Script
+				witnesses.plutusV2Scripts = []lcommon.PlutusV2Script{v2Script}
+			}
+			scriptHash := plutusScript.Hash()
+			addr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeScriptNone,
+				lcommon.AddressNetworkTestnet,
+				scriptHash.Bytes(),
+				nil,
+			)
+			require.NoError(t, err)
+			tx := &mockConwayFeeTx{
+				mockFeeTx: mockFeeTx{
+					txType:    txTypeAlonzo,
+					witnesses: witnesses,
+				},
+				inputs: []lcommon.TransactionInput{spendInput},
+			}
+			ls := newMockLedgerState()
+			ls.addUtxo(
+				spendInput,
+				testAddressOutput{
+					testOutput: newTestOutput(1_000_000),
+					addr:       addr,
+				},
+			)
+			err = tc.validate(tx, ls)
+			require.Error(t, err)
+
+			var plutusErr conway.PlutusScriptFailedError
+			require.ErrorAs(t, err, &plutusErr)
+			assert.Equal(t, scriptHash, plutusErr.ScriptHash)
+			assert.Equal(t, lcommon.RedeemerTagSpend, plutusErr.Tag)
+			assert.Equal(t, uint32(0), plutusErr.Index)
+			assert.Contains(
+				t,
+				plutusErr.Err.Error(),
+				"script exceeded declared budget",
+			)
+		})
+	}
 }
 
 func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
