@@ -95,6 +95,19 @@ func (n *Node) startKoiosParityObserver() error {
 	}
 
 	if err := observer.Start(n.ctx); err != nil { //nolint:contextcheck
+		// observer has not been stored on n yet, so nothing else will ever
+		// close the cache.db handle NewObserver already opened above (and
+		// the Koios client it created) unless we release them here. Stop is
+		// safe to call on a not-yet-(fully)-started Observer: Start only
+		// ever returns an error before it sets o.cancel or launches run's
+		// goroutine, so Stop's cancel/wg.Wait are no-ops and it falls
+		// straight through to closing the cache.
+		if stopErr := observer.Stop(n.ctx); stopErr != nil { //nolint:contextcheck
+			n.config.logger.Warn(
+				"koios parity observer: failed to release cache after failed start",
+				"error", stopErr,
+			)
+		}
 		return fmt.Errorf("start koios parity observer: %w", err)
 	}
 	n.koiosParityObserver = observer

@@ -485,9 +485,10 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 	}
 	var poolIDs []string
 	var firstActiveEpochs map[string]uint64
+	var poolsResolved bool
 	var lastErr error
 	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
-		if poolIDs == nil {
+		if !poolsResolved {
 			poolIDs, firstActiveEpochs, err = resolvePoolUniverse(ctx, o.koios)
 			if err != nil {
 				if errors.Is(err, ErrKoiosPermanent) {
@@ -505,6 +506,7 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 				}
 				continue
 			}
+			poolsResolved = true
 		}
 		_, err := FetchEpochWithPools(
 			ctx, o.koios, o.cache, o.cfg.Network, epoch, poolIDs, firstActiveEpochs, o.cfg.Logger,
