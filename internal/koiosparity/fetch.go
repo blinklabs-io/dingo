@@ -320,6 +320,81 @@ loop:
 	return result, nil
 }
 
+// FetchEpochWithClient fetches and caches Koios reference data for exactly
+// one epoch using an already-open cache and Koios client, without reopening
+// the cache database or reconstructing a Koios client — the primitive Fetch's
+// per-epoch worker pool uses internally (fetchEpoch), exported so a
+// long-lived caller (the dingo #3098 in-process epoch observer, which fetches
+// one newly closed epoch at a time as epoch.transition events arrive rather
+// than batching a whole historical range) can reuse one cache handle and one
+// Koios client across many calls.
+//
+// Every request Koios needs beyond the target epoch's own history — the
+// full historical pool ID list and each pool's first-active epoch — is
+// re-resolved on every call. A caller that will fetch the same epoch more
+// than once in quick succession (e.g. a bounded retry loop riding out a
+// transient failure) should resolve these once with
+// GetAllHistoricalPoolIDs/GetPoolFirstActiveEpochs and call
+// FetchEpochWithPools instead, to avoid repeating both full Koios scans on
+// every attempt. Efficient reuse/pagination across many distinct epochs is
+// #3099's chunked/resumable fetch scope, not this function's.
+func FetchEpochWithClient(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	logger *slog.Logger,
+) (int, error) {
+	poolIDs, firstActiveEpochs, err := resolvePoolUniverse(ctx, koios)
+	if err != nil {
+		return 0, err
+	}
+	return fetchEpoch(ctx, koios, cache, network, epoch, poolIDs, firstActiveEpochs, logger)
+}
+
+// FetchEpochWithPools is FetchEpochWithClient with the pool universe
+// (poolIDs/firstActiveEpochs) already resolved by the caller — see
+// resolvePoolUniverse. Intended for a caller that fetches the same epoch
+// across multiple attempts (a retry loop) or fetches several epochs in one
+// batch: resolving the pool universe once, up front, and passing it to every
+// call avoids repeating /pool_list and /pool_updates's full scans on every
+// attempt/epoch, which matters for rate-limit budget on wide backfills or
+// long retry sequences near Koios's daily quota.
+func FetchEpochWithPools(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	poolIDs []string,
+	firstActiveEpochs map[string]uint64,
+	logger *slog.Logger,
+) (int, error) {
+	return fetchEpoch(ctx, koios, cache, network, epoch, poolIDs, firstActiveEpochs, logger)
+}
+
+// resolvePoolUniverse fetches the full historical pool ID list and each
+// pool's true first-active epoch — the two requests every fetchEpoch call
+// needs beyond the target epoch's own history. Factored out so callers that
+// fetch more than one epoch (or retry the same epoch) can resolve it once
+// and reuse it via FetchEpochWithPools, instead of paying for both full
+// Koios scans again on every call the way FetchEpochWithClient does.
+func resolvePoolUniverse(
+	ctx context.Context,
+	koios *KoiosClient,
+) (poolIDs []string, firstActiveEpochs map[string]uint64, err error) {
+	poolIDs, err = koios.GetAllHistoricalPoolIDs(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get historical pool IDs: %w", err)
+	}
+	firstActiveEpochs, err = koios.GetPoolFirstActiveEpochs(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get pool first-active epochs: %w", err)
+	}
+	return poolIDs, firstActiveEpochs, nil
+}
+
 // fetchEpoch fetches and caches one epoch's worth of Koios data.
 //
 // Pool rows are written before epoch info so the resume cursor

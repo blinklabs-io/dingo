@@ -268,6 +268,49 @@ type HistoryExpiryConfig struct {
 	Frequency time.Duration `yaml:"frequency" envconfig:"DINGO_HISTORY_EXPIRY_FREQUENCY"`
 }
 
+// KoiosParityConfig controls the in-process Koios reward-parity observer
+// (dingo #3098). When enabled, Dingo subscribes an epoch-boundary observer to
+// its own EventBus (event.EpochTransitionEventType) and validates each newly
+// closed epoch's committed reward state directly against Koios reference
+// data as the node advances, instead of requiring a separate koios-parity
+// CLI process polling a second, independently synced copy of the metadata
+// database. See internal/koiosparity and ARCHITECTURE.md's "Koios Parity
+// Tracker" section. This is a one-off validation aid, not a permanent
+// subsystem — leave it disabled for normal node operation.
+type KoiosParityConfig struct {
+	// Enabled subscribes the observer to epoch.transition when true.
+	Enabled bool `yaml:"enabled" envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
+	// Network is the Koios network to validate against: "preview" or
+	// "preprod". Empty defaults to the node's own configured Network.
+	Network string `yaml:"network" envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
+	// CachePath is the Koios reference cache.db path. Empty defaults to
+	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
+	// default cache location.
+	CachePath string `yaml:"cachePath" envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
+	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
+	// uses Koios's unauthenticated rate limit.
+	APIKey string `yaml:"apiKey" envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	// Strict stops/cancels the node on the first Koios/tool error or exact
+	// parity mismatch, rather than logging it and continuing normal node
+	// operation.
+	Strict bool `yaml:"strict" envconfig:"DINGO_KOIOS_PARITY_STRICT"`
+	// GraceHours is the window after an epoch closes during which a
+	// Dingo-side row still missing is treated as reference/sync lag rather
+	// than a failure. 0 selects the default (24).
+	GraceHours int `yaml:"graceHours" envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
+}
+
+// DefaultKoiosParityConfig returns the default (disabled) Koios parity
+// observer settings. Strict defaults to true: once an operator opts into the
+// feature at all (Enabled), the safety-motivated fail-stop behavior it exists
+// for is on unless explicitly disabled with --koios-parity-strict=false /
+// DINGO_KOIOS_PARITY_STRICT=false — matching KoiosParityConfig.Strict's and
+// internal/koiosparity.Observer's own doc comments, which already describe
+// Strict as the operator default.
+func DefaultKoiosParityConfig() KoiosParityConfig {
+	return KoiosParityConfig{GraceHours: 24, Strict: true}
+}
+
 // OffchainMetadataConfig holds API-mode off-chain metadata fetcher settings.
 // Zero values fall back to the fetcher's internal defaults.
 type OffchainMetadataConfig struct {
@@ -481,6 +524,10 @@ type Config struct {
 
 	// History expiry configuration for local immutable block CBOR expiry.
 	HistoryExpiry HistoryExpiryConfig `yaml:"historyExpiry"`
+
+	// KoiosParity configures the optional in-process Koios reward-parity
+	// observer (dingo #3098). Disabled by default.
+	KoiosParity KoiosParityConfig `yaml:"koiosParity"`
 
 	// Off-chain metadata fetcher configuration.
 	OffchainMetadata OffchainMetadataConfig `yaml:"offchainMetadata"`
@@ -862,6 +909,8 @@ var globalConfig = &Config{
 	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
 	// History expiry defaults
 	HistoryExpiry: DefaultHistoryExpiryConfig(),
+	// Koios parity observer defaults (disabled)
+	KoiosParity: DefaultKoiosParityConfig(),
 	// Logging defaults (text output at info level)
 	Logging: DefaultLoggingConfig(),
 	// Midnight defaults
@@ -1176,6 +1225,9 @@ func (c *Config) ApplyDefaults() {
 	// the node silently starting the expiry worker on the default cadence
 	if c.HistoryExpiry.Frequency == 0 {
 		c.HistoryExpiry.Frequency = time.Hour
+	}
+	if c.KoiosParity.GraceHours == 0 {
+		c.KoiosParity.GraceHours = 24
 	}
 }
 

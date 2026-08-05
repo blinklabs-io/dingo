@@ -207,6 +207,32 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	return result, nil
 }
 
+// CheckEpoch compares the Koios reference cache against source (either a
+// standalone DingoDB connection or the dingo #3098 in-process
+// DatabaseSource) for exactly one epoch, persisting the result the same way
+// checkEpoch's callers inside Check do. This is the primitive both Check's
+// batch CLI/watch-loop mode and the in-process epoch observer (observer.go)
+// share — the observer needs a "validate exactly this epoch now, regardless
+// of whether it was already checked" call unconditioned by
+// GetEpochsNeedingCheck's Koios-reference-freshness gate, so a
+// rollback-driven replay of an already-checked epoch's boundary is always
+// re-validated against Dingo's corrected committed state rather than trusting
+// a stale prior result.
+func CheckEpoch(
+	ctx context.Context,
+	cache *Cache,
+	source RewardParitySource,
+	network string,
+	epoch uint64,
+	graceHours int,
+	logger *slog.Logger,
+) (*EpochCompareResult, error) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return checkEpoch(ctx, cache, source, network, epoch, graceHours, logger)
+}
+
 // koiosStakeEpoch returns the Dingo epoch whose reward_pool_input/
 // reward_pool_output rows and epoch_summary/mark stake distribution actually
 // correspond to Koios reporting epoch koiosEpoch's active stake and reward
@@ -270,7 +296,7 @@ func koiosParamEpoch(koiosEpoch uint64) uint64 {
 func checkEpoch(
 	ctx context.Context,
 	cache *Cache,
-	dingo *DingoDB,
+	dingo RewardParitySource,
 	network string,
 	epoch uint64,
 	graceHours int,

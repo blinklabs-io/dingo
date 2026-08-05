@@ -387,6 +387,48 @@ func rebind(query, dialect string) string {
 	return string(out)
 }
 
+// GetRewardAccountOutputs returns every per-account reward calculation
+// output row Dingo committed for epoch, straight from reward_account_output.
+// Not yet consumed by any comparison — #3097 (per-account exact parity) is
+// what wires this up; it exists on DingoDB now so the standalone-CLI and
+// in-process (DatabaseSource) implementations of RewardParitySource stay
+// symmetric. ctx is forwarded to the DB driver so a cancelled context aborts
+// the query.
+func (d *DingoDB) GetRewardAccountOutputs(
+	ctx context.Context,
+	epoch uint64,
+) ([]*models.RewardAccountOutput, error) {
+	rows, err := d.query(ctx, `SELECT staking_key, pool_key_hash, reward_type, epoch, credential_tag, amount, spendable, guarded, captured_slot, boundary_slot FROM reward_account_output WHERE epoch = ?`, epoch)
+	if err != nil {
+		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
+	}
+	defer rows.Close()
+
+	var out []*models.RewardAccountOutput
+	for rows.Next() {
+		row := &models.RewardAccountOutput{}
+		if err := rows.Scan(
+			&row.StakingKey,
+			&row.PoolKeyHash,
+			&row.RewardType,
+			&row.Epoch,
+			&row.CredentialTag,
+			&row.Amount,
+			&row.Spendable,
+			&row.Guarded,
+			&row.CapturedSlot,
+			&row.BoundarySlot,
+		); err != nil {
+			return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
+	}
+	return out, nil
+}
+
 // PoolKeyHashHex converts a pool bech32 ID ("pool1…") to its lower-hex
 // 28-byte key hash. The hex string matches the keys in GetPoolEpochDataMap.
 func PoolKeyHashHex(bech32 string) (string, error) {

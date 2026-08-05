@@ -152,6 +152,36 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
+	// The Koios parity observer (dingo #3098) reads Dingo's committed reward
+	// state through a RewardParitySource backed directly by n.db, the same
+	// way snapshotMgr above does -- it must be fully stopped (Observer.Stop
+	// blocks until its background goroutine has actually exited) and its
+	// event.EpochTransitionEventType subscription torn down before n.db is
+	// closed below, or it would keep running against a stale, soon-to-be-
+	// closed database and its subscription would leak (the EventBus itself
+	// is never recreated across a live restore/truncate cycle). It is
+	// rebuilt against the new n.db and resubscribed by
+	// reinitializeBackgroundManagers, mirroring reinitializeMidnightIndexer's
+	// stop-here/rebuild-there split for the same reason.
+	if n.koiosParityObserver != nil {
+		stopCtx, cancel := context.WithTimeout(ctx, n.configuredShutdownTimeout())
+		stopErr := n.koiosParityObserver.Stop(stopCtx)
+		cancel()
+		if stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("koios parity observer shutdown: %w", stopErr),
+			)
+		}
+		n.koiosParityObserver = nil
+	}
+	if n.koiosParitySubId != 0 {
+		n.eventBus.UnsubscribeAndWait(
+			event.EpochTransitionEventType,
+			n.koiosParitySubId,
+		)
+		n.koiosParitySubId = 0
+	}
 	if n.dbLifecycleMgr != nil {
 		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
 			err = errors.Join(
@@ -712,15 +742,16 @@ func (n *Node) reinitializeMidnightIndexer() error {
 	return nil
 }
 
-// reinitializeBackgroundManagers starts n.ledgerState (deferred until here
-// so the Midnight indexer's subscription already exists), then rebuilds
-// the stake-snapshot manager, the database-lifecycle manager, and (if
-// enabled) the Leios vote/pipeline managers — matching Run()'s order.
+// reinitializeBackgroundManagers rebuilds the stake-snapshot manager and
+// wires both its epoch-boundary hooks (the stake hook and the capture
+// hook), (re)starts the optional Koios parity observer (dingo #3098) if
+// configured, then starts n.ledgerState -- in that order, matching Run()'s
+// own "hooks configured → observer subscribed → ledger started" sequencing
+// (node.go), so an epoch boundary reached immediately after restart can
+// never fire before both snapshot hooks or the parity observer's
+// subscription exist. It then restarts the database-lifecycle manager and
+// (if enabled) the Leios vote/pipeline managers, matching Run()'s order.
 func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
-	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to restart ledger: %w", err)
-	}
-
 	n.snapshotMgr = snapshot.NewManager(n.db, n.eventBus, n.config.logger)
 	// Mirror the CIP-0163 reward-account inactivity gate into snapshot
 	// capture so it matches the ledger config that drives account expiry
@@ -736,11 +767,45 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Reinstall both epoch-boundary hooks, in the same order and with the
+	// same bodies as Run() (node.go): the stake hook first, so the
+	// authoritative SNAP-point stake read (after MIR, before POOLREAP/
+	// enactment) is captured via ComputeEpochBoundarySnapshot, then the
+	// capture hook, which stages that snapshot atomically as part of the
+	// same rollover transaction. A live Restore/Truncate must not leave
+	// only the capture hook installed -- without the paired stake hook,
+	// the next epoch boundary would fall back to reconstructing stake
+	// instead of using the SNAP-point capture, producing snapshot/reward
+	// state inconsistent with a normal (non-restored) startup and able to
+	// trip false mismatches in the Koios parity observer/check.
+	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 	n.ledgerState.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+
+	// Rebuild the Koios parity observer (if enabled) against the fresh
+	// n.db a live restore/truncate just reinitialized, and resubscribe it to
+	// event.EpochTransitionEventType, before n.ledgerState.Start below --
+	// quiesceForLiveLifecycleOp already stopped and unsubscribed the old
+	// one (bound to the now-closed pre-rebuild n.db) as part of tearing
+	// storage down. startKoiosParityObserver sets n.koiosParityObserver/
+	// n.koiosParitySubId itself, identical to Run()'s own call.
+	if n.config.koiosParity.Enabled {
+		if err := n.startKoiosParityObserver(); err != nil {
+			return fmt.Errorf("restarting koios parity observer: %w", err)
+		}
+	}
+
+	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to restart ledger: %w", err)
+	}
+
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
 			return err
