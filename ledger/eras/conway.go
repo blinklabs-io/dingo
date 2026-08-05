@@ -397,7 +397,7 @@ func validateTxPlutusConwayWithContext(
 		ls,
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
-		pp.ProtocolVersion.Major,
+		pp,
 	)
 	for redeemerKey, redeemerValue := range plutusCtx.redeemers.Iter() {
 		purpose, ok := buildConwayScriptPurpose(
@@ -871,29 +871,38 @@ type conwayTxInfoCache struct {
 	txInfoV1       script.TxInfoV1
 	txInfoV2       script.TxInfoV2
 	txInfoV3       script.TxInfoV3
-	protocolMajor  uint
+	pparams        *conway.ConwayProtocolParameters
 	txInfoV1Built  bool
 	txInfoV2Built  bool
 	txInfoV3Built  bool
 }
 
 // newConwayTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache.
-// protocolMajor is the active major protocol version and must be supplied: the
-// PlutusV1/V2 txInfoMint rendering depends on it, so an omitted (zero) value
-// silently produces a pre-Plomin script context at PV10+, which changes both
-// the evaluated ex-units and the script result.
+//
+// pparams must be non-nil. The PlutusV1/V2 txInfoMint rendering depends on the
+// active major protocol version, and an omitted (zero) major silently produces a
+// pre-Plomin script context at PV10+, changing both the evaluated ex-units and
+// the script result. Taking the parameter set rather than a bare major keeps a
+// caller from passing a version that drifts from the active one.
 func newConwayTxInfoCache(
 	ls lcommon.LedgerState,
 	tx lcommon.Transaction,
 	resolvedInputs []lcommon.Utxo,
-	protocolMajor uint,
+	pparams *conway.ConwayProtocolParameters,
 ) *conwayTxInfoCache {
 	return &conwayTxInfoCache{
 		ls:             ls,
 		tx:             tx,
 		resolvedInputs: resolvedInputs,
-		protocolMajor:  protocolMajor,
+		pparams:        pparams,
 	}
+}
+
+// protocolMajor reports the active major protocol version. The Conway plutus
+// entry points reject a nil (including typed-nil) parameter set before the cache
+// is built, so this does not paper over a missing version.
+func (c *conwayTxInfoCache) protocolMajor() uint {
+	return c.pparams.ProtocolVersion.Major
 }
 
 func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
@@ -908,7 +917,7 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 				Err: err,
 			}
 		}
-		txInfo.ProtocolMajor = c.protocolMajor
+		txInfo.ProtocolMajor = c.protocolMajor()
 		c.txInfoV1 = txInfo
 		c.txInfoV1Built = true
 	}
@@ -927,7 +936,7 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 				Err: err,
 			}
 		}
-		txInfo.ProtocolMajor = c.protocolMajor
+		txInfo.ProtocolMajor = c.protocolMajor()
 		c.txInfoV2 = txInfo
 		c.txInfoV2Built = true
 	}
@@ -1219,7 +1228,7 @@ func EvaluateTxConway(
 		ls,
 		tx,
 		scriptInputs.resolvedAllInputs,
-		tmpPparams.ProtocolVersion.Major,
+		tmpPparams,
 	)
 	txInfoV3, err := txInfos.v3()
 	if err != nil {

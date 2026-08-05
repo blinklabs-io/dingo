@@ -2688,10 +2688,15 @@ func TestConwayTxInfoCachePropagatesProtocolMajor(t *testing.T) {
 	resolved := []lcommon.Utxo{{Id: input, Output: newTestOutput(1_000_000)}}
 
 	// The mint rendering differs even for a tx that mints nothing, so no mint
-	// fixture is needed to observe the two renderings.
+	// fixture is needed to observe the two renderings. Driving this through a
+	// parameter set rather than a bare major mirrors production: the cache reads
+	// the version out of the pparams the caller is already holding, so a call
+	// site cannot supply a version that drifts from the active one.
 	build := func(t *testing.T, major uint) (script.TxInfoV1, script.TxInfoV2) {
 		t.Helper()
-		cache := newConwayTxInfoCache(ls, tx, resolved, major)
+		pp := &conway.ConwayProtocolParameters{}
+		pp.ProtocolVersion.Major = major
+		cache := newConwayTxInfoCache(ls, tx, resolved, pp)
 		v1, err := cache.v1()
 		require.NoError(t, err)
 		v2, err := cache.v2()
@@ -2718,10 +2723,12 @@ func TestConwayTxInfoCachePropagatesProtocolMajor(t *testing.T) {
 	)
 }
 
-// TestValidateTxPlutusConwayUsesPparamsProtocolMajor asserts the protocol major
-// reaches the cache from the protocol parameters rather than defaulting to
-// zero, which is what makes the rendering above reachable in production.
-func TestValidateTxPlutusConwayUsesPparamsProtocolMajor(t *testing.T) {
+// TestConwayTxInfoCacheReadsMajorFromPparams pins the cache to the version in
+// the parameter set it was given. Combined with the cache taking
+// *conway.ConwayProtocolParameters, this is what keeps the two production call
+// sites honest: neither can pass a standalone version at all, so the only way to
+// reach a wrong major is to change what the pparams themselves say.
+func TestConwayTxInfoCacheReadsMajorFromPparams(t *testing.T) {
 	input := newTestInput(0x01, 0)
 	tx := &mockConwayFeeTx{
 		mockFeeTx: mockFeeTx{
@@ -2742,12 +2749,29 @@ func TestValidateTxPlutusConwayUsesPparamsProtocolMajor(t *testing.T) {
 		ls,
 		tx,
 		plutusCtx.scriptInputs.resolvedAllInputs,
-		pp.ProtocolVersion.Major,
+		pp,
 	)
 	v1, err := cache.v1()
 	require.NoError(t, err)
+	v2, err := cache.v2()
+	require.NoError(t, err)
 
 	assert.Equal(t, lcommon.ProtocolVersionPlomin, v1.ProtocolMajor)
+	assert.Equal(t, lcommon.ProtocolVersionPlomin, v2.ProtocolMajor)
+
+	// A later version in the same parameter set must follow through, so the
+	// cache cannot be reading a constant.
+	pp.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+	later := newConwayTxInfoCache(
+		ls,
+		tx,
+		plutusCtx.scriptInputs.resolvedAllInputs,
+		pp,
+	)
+	laterV1, err := later.v1()
+	require.NoError(t, err)
+
+	assert.Equal(t, lcommon.ProtocolVersionVanRossem, laterV1.ProtocolMajor)
 }
 
 // TestConwayPlutusRejectsNilPparams covers the typed-nil pointer case: a nil
@@ -2776,4 +2800,10 @@ func TestConwayPlutusRejectsNilPparams(t *testing.T) {
 	)
 	_, _, _, err := EvaluateTxConway(tx, ls, nilPparams)
 	assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+	// CertDepositConway takes the same guard and reads pparams fields directly.
+	_, certErr := CertDepositConway(
+		&lcommon.StakeRegistrationCertificate{},
+		nilPparams,
+	)
+	assert.ErrorIs(t, certErr, ErrIncompatibleProtocolParams)
 }
