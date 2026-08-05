@@ -1206,9 +1206,12 @@ func EvaluateTxConway(
 		tx,
 		scriptInputs.resolvedAllInputs,
 	)
-	txInfoV3, err := txInfos.v3()
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	var txInfoV3 script.TxInfoV3
+	if txHasRedeemers(tx) {
+		txInfoV3, err = txInfos.v3()
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV3.Redeemers {
 		purpose := redeemerPair.Key

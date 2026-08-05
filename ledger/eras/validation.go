@@ -122,6 +122,37 @@ func shouldSkipPhase2Validation(
 	return ok && skipper.SkipPhase2Validation()
 }
 
+// txHasRedeemers reports whether the transaction carries at least one redeemer.
+//
+// Redeemers are what drive Plutus phase-2 evaluation: every Plutus script a
+// transaction runs needs one, so a transaction without any runs no Plutus
+// script. Native scripts are phase-1 and never reach evaluation.
+//
+// Callers use this to avoid building a Plutus script context (TxInfo) for a
+// transaction that has no script to evaluate. That is not merely wasted work:
+// the context embeds the transaction's validity interval translated to
+// wall-clock time, so building it converts the transaction's TTL through the
+// bounded HFC forecast horizon and fails with hardfork.ErrPastHorizon whenever
+// the TTL lies past that horizon — rejecting canonical, script-free
+// transactions. cardano-ledger only translates the validity interval while
+// assembling the context for the Plutus scripts a transaction actually needs
+// (Alonzo collectPlutusScriptsWithContext), and ValidateTxConway already
+// follows that shape here via conwayTxInfoCache.
+func txHasRedeemers(tx lcommon.Transaction) bool {
+	witnesses := tx.Witnesses()
+	if witnesses == nil {
+		return false
+	}
+	redeemers := witnesses.Redeemers()
+	if redeemers == nil {
+		return false
+	}
+	for range redeemers.Iter() {
+		return true
+	}
+	return false
+}
+
 func buildIndexedUtxoValidationRules(
 	rules []lcommon.UtxoValidationRuleFunc,
 	skipIndex int,

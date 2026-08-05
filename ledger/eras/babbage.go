@@ -279,13 +279,15 @@ func ValidateTxBabbage(
 	}
 	// Evaluate scripts
 	var txInfoV2 script.TxInfoV2
-	txInfoV2, err = script.NewTxInfoV2FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return err
+	if txHasRedeemers(tx) {
+		txInfoV2, err = script.NewTxInfoV2FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return err
+		}
 	}
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
@@ -472,13 +474,16 @@ func EvaluateTxBabbage(
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
-	txInfoV2, err := script.NewTxInfoV2FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	var txInfoV2 script.TxInfoV2
+	if txHasRedeemers(tx) {
+		txInfoV2, err = script.NewTxInfoV2FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
