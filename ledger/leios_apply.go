@@ -180,7 +180,22 @@ func (ls *LedgerState) applyEndorserBlock(
 	if err != nil {
 		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
-	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, txn); err != nil {
+	// Persist the endorser-block blob. Which transaction commits it depends on
+	// the apply path (see DATABASE.md, "Leios endorser-block storage", for the
+	// full rationale):
+	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
+	//     in its own blob transaction (nil txn) to avoid overflowing the shared
+	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
+	//     the blob is never read back within the chunk, so an independent commit
+	//     is safe.
+	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
+	//     the shared txn so a later block spending an endorser-produced output can
+	//     resolve it via read-your-writes.
+	blobTxn := txn
+	if !ls.config.LeiosApplyEndorserBlockTxs {
+		blobTxn = nil
+	}
+	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, blobTxn); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
