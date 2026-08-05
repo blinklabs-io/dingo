@@ -17,6 +17,7 @@ package immutable
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,6 +28,17 @@ import (
 
 type ImmutableDb struct {
 	dataDir string
+	// root, when set, is an open handle on the data directory that every
+	// read resolves through instead of re-walking dataDir.
+	//
+	// This is what lets a caller that vetted the directory hand the vetted
+	// directory itself across the API rather than a name for it. A name is
+	// only ever a description of whatever occupies it at the moment it is
+	// resolved, so a caller opening by name gets no guarantee that the tree
+	// it checked is the tree that gets read. Mithril bootstrap needs that
+	// guarantee, because the directory sits in a download area a concurrent
+	// writer may reach and the decision to trust it was made earlier.
+	root *os.Root
 }
 
 var ErrPointBeyondLastChunk = errors.New(
@@ -52,9 +64,67 @@ func New(dataDir string) (*ImmutableDb, error) {
 	return i, nil
 }
 
+// NewFromRoot returns a new ImmutableDb that reads every file through root
+// rather than by resolving the data directory's pathname again.
+//
+// Use this when the directory was vetted and the caller needs the reads to be
+// about that directory rather than about whatever its name refers to later. The
+// handle refers to the directory itself, so a tree substituted behind the name
+// afterwards is not what gets read; New cannot offer that, because it only ever
+// holds a name.
+//
+// The caller keeps ownership of root and must hold it open for as long as the
+// returned ImmutableDb is used. Closing it early makes subsequent reads fail
+// rather than silently fall back to the pathname.
+func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
+	if root == nil {
+		return nil, errors.New("immutable DB: nil data directory handle")
+	}
+	if _, err := root.Stat("."); err != nil {
+		return nil, err
+	}
+	i := &ImmutableDb{
+		// Kept for messages only. Every read below goes through root, so
+		// this name is never resolved.
+		dataDir: root.Name(),
+		root:    root,
+	}
+	return i, nil
+}
+
+// entryPath names an entry in the data directory for use in messages. It is
+// never opened when a root handle is held; see openEntry.
+func (i *ImmutableDb) entryPath(name string) string {
+	return filepath.Join(i.dataDir, name)
+}
+
+// openEntry opens a file directly beneath the data directory.
+func (i *ImmutableDb) openEntry(name string) (*os.File, error) {
+	if i.root != nil {
+		return i.root.Open(name)
+	}
+	return os.Open(i.entryPath(name))
+}
+
+// removeEntry removes a file directly beneath the data directory.
+func (i *ImmutableDb) removeEntry(name string) error {
+	if i.root != nil {
+		return i.root.Remove(name)
+	}
+	return os.Remove(i.entryPath(name))
+}
+
+// readDir lists the data directory.
+func (i *ImmutableDb) readDir() ([]os.DirEntry, error) {
+	if i.root != nil {
+		return fs.ReadDir(i.root.FS(), ".")
+	}
+	return os.ReadDir(i.dataDir)
+}
+
 func (i *ImmutableDb) getChunkNames() ([]string, error) {
 	ret := []string{}
-	files, err := os.ReadDir(i.dataDir)
+	files, err := i.readDir()
 	if err != nil {
 		return nil, err
 	}
@@ -143,15 +213,21 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 func (i *ImmutableDb) getChunkPrimaryIndex(
 	chunkName string,
 ) (*primaryIndex, error) {
-	primaryFilePath := filepath.Join(
-		i.dataDir,
-		chunkName+primaryFileExtension,
-	)
-	primary := newPrimaryIndex()
-	if err := primary.Open(primaryFilePath); err != nil {
+	primaryFileName := chunkName + primaryFileExtension
+	f, err := i.openEntry(primaryFileName)
+	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to read primary index: %s: %w",
-			primaryFilePath,
+			i.entryPath(primaryFileName),
+			err,
+		)
+	}
+	primary := newPrimaryIndex()
+	if err := primary.Open(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf(
+			"failed to read primary index: %s: %w",
+			i.entryPath(primaryFileName),
 			err,
 		)
 	}
@@ -165,15 +241,23 @@ func (i *ImmutableDb) getChunkSecondaryIndex(
 	if err != nil {
 		return nil, err
 	}
-	secondaryFilePath := filepath.Join(
-		i.dataDir,
-		chunkName+secondaryFileExtension,
-	)
-	secondary := newSecondaryIndex()
-	if err := secondary.Open(secondaryFilePath, primary); err != nil {
+	secondaryFileName := chunkName + secondaryFileExtension
+	f, err := i.openEntry(secondaryFileName)
+	if err != nil {
+		_ = primary.Close()
 		return nil, fmt.Errorf(
 			"failed to read secondary index: %s: %w",
-			secondaryFilePath,
+			i.entryPath(secondaryFileName),
+			err,
+		)
+	}
+	secondary := newSecondaryIndex()
+	if err := secondary.Open(f, primary); err != nil {
+		_ = f.Close()
+		_ = primary.Close()
+		return nil, fmt.Errorf(
+			"failed to read secondary index: %s: %w",
+			i.entryPath(secondaryFileName),
 			err,
 		)
 	}
@@ -187,15 +271,23 @@ func (i *ImmutableDb) getChunk(chunkName string) (*chunk, error) {
 		return nil, err
 	}
 	// Open chunk
-	chunkFilePath := filepath.Join(
-		i.dataDir,
-		chunkName+chunkFileExtension,
-	)
-	chunk := newChunk()
-	if err := chunk.Open(chunkFilePath, secondary); err != nil {
+	chunkFileName := chunkName + chunkFileExtension
+	f, err := i.openEntry(chunkFileName)
+	if err != nil {
+		_ = secondary.Close()
 		return nil, fmt.Errorf(
 			"failed to read chunk: %s: %w",
-			chunkFilePath,
+			i.entryPath(chunkFileName),
+			err,
+		)
+	}
+	chunk := newChunk()
+	if err := chunk.Open(f, secondary); err != nil {
+		_ = f.Close()
+		_ = secondary.Close()
+		return nil, fmt.Errorf(
+			"failed to read chunk: %s: %w",
+			i.entryPath(chunkFileName),
 			err,
 		)
 	}
@@ -307,17 +399,13 @@ func (i *ImmutableDb) TruncateChunksFromPoint(point ocommon.Point) error {
 		return err
 	}
 	for _, chunkName := range chunkNames {
-		chunkPathPrefix := filepath.Join(
-			i.dataDir,
-			chunkName,
-		)
-		if err := os.Remove(chunkPathPrefix + chunkFileExtension); err != nil {
+		if err := i.removeEntry(chunkName + chunkFileExtension); err != nil {
 			return err
 		}
-		if err := os.Remove(chunkPathPrefix + secondaryFileExtension); err != nil {
+		if err := i.removeEntry(chunkName + secondaryFileExtension); err != nil {
 			return err
 		}
-		if err := os.Remove(chunkPathPrefix + primaryFileExtension); err != nil {
+		if err := i.removeEntry(chunkName + primaryFileExtension); err != nil {
 			return err
 		}
 	}

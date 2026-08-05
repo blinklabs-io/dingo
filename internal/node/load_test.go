@@ -186,6 +186,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		context.Background(),
 		logger,
 		immutableDir,
+		nil,
 		db,
 		cm.PrimaryChain(),
 		nil,
@@ -289,6 +290,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 		context.Background(),
 		logger,
 		immutableDir,
+		nil,
 		db,
 		cm.PrimaryChain(),
 		func(rb chain.RawBlock, txn *database.Txn) error {
@@ -396,6 +398,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		context.Background(),
 		logger,
 		immutableDir,
+		nil,
 		db,
 		cm.PrimaryChain(),
 		nil,
@@ -426,6 +429,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		context.Background(),
 		logger,
 		immutableDir,
+		nil,
 		db,
 		cm.PrimaryChain(),
 		func(rb chain.RawBlock, txn *database.Txn) error {

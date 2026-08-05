@@ -39,11 +39,10 @@ func newChunk() *chunk {
 	return &chunk{}
 }
 
-func (c *chunk) Open(path string, secondary *secondaryIndex) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
+// Open takes an already-open chunk file rather than a path so the caller
+// decides how it was resolved — by name, or through a directory handle that
+// binds the read to a directory somebody else cannot repoint.
+func (c *chunk) Open(f *os.File, secondary *secondaryIndex) error {
 	c.file = f
 	c.secondary = secondary
 	if stat, err := f.Stat(); err != nil {

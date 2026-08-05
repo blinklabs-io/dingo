@@ -17,6 +17,9 @@ package immutable_test
 import (
 	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -201,4 +204,105 @@ func TestBlocksRangeMultipleChunks(t *testing.T) {
 	}
 	// Since we started from the middle and there are multiple chunks,
 	// and we iterated blocks, we tested range queries across chunks
+}
+
+// TestNewFromRootReadsThroughTheHandle pins what NewFromRoot exists for: the
+// reads follow the directory the handle refers to, not the name it was opened
+// under.
+//
+// A caller that vetted a directory and then handed on its name would have the
+// name resolved again at open time, and whatever occupies it by then is what
+// gets read. Mithril bootstrap extracts into a download area where that is a
+// real possibility, so the handle is what it passes.
+func TestNewFromRootReadsThroughTheHandle(t *testing.T) {
+	base := t.TempDir()
+	ours := filepath.Join(base, "immutable")
+	copyChunkTrio(t, "00000", ours)
+
+	root, err := os.OpenRoot(ours)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = root.Close() }()
+	imm, err := immutable.NewFromRoot(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	want, err := imm.GetTip()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if want == nil {
+		t.Fatal("test fixture produced no tip")
+	}
+
+	// Somebody takes the name for a tree built from a different immutable
+	// file, so which tree was read is visible in the tip.
+	theirs := filepath.Join(base, "theirs")
+	copyChunkTrio(t, "00001", theirs)
+	if err := os.Rename(ours, filepath.Join(base, "moved-aside")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot swap a directory with an open handle: %s", err)
+		}
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := os.Rename(theirs, ours); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	byName, err := immutable.New(ours)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	swapped, err := byName.GetTip()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if swapped == nil || swapped.Slot == want.Slot {
+		t.Fatal(
+			"the substitution must be observable through the name, or this " +
+				"test proves nothing",
+		)
+	}
+
+	got, err := imm.GetTip()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if got == nil || got.Slot != want.Slot {
+		t.Fatalf(
+			"read through the handle must stay on the original tree: "+
+				"expected slot %d, got %v",
+			want.Slot,
+			got,
+		)
+	}
+}
+
+// TestNewFromRootRejectsNilHandle keeps the nil case an error rather than a
+// silent fall back to a pathname the caller did not supply.
+func TestNewFromRootRejectsNilHandle(t *testing.T) {
+	if _, err := immutable.NewFromRoot(nil); err == nil {
+		t.Fatal("expected an error for a nil directory handle")
+	}
+}
+
+// copyChunkTrio copies one immutable file's chunk/primary/secondary trio out of
+// the shared testdata into dir, producing a real single-chunk ImmutableDB.
+func copyChunkTrio(t *testing.T, name, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+		data, err := os.ReadFile(filepath.Join(testDataDir, name+ext))
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(dir, name+ext), data, 0o640,
+		); err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	}
 }

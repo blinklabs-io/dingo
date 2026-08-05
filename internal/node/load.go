@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -580,7 +581,8 @@ type LoadBlobsProgress struct {
 }
 
 type loadBlobsOptions struct {
-	onProgress func(LoadBlobsProgress)
+	onProgress    func(LoadBlobsProgress)
+	immutableRoot *os.Root
 }
 
 // LoadBlobsOption customizes LoadBlobsWithDB behavior.
@@ -592,6 +594,19 @@ func WithLoadBlobsProgress(
 ) LoadBlobsOption {
 	return func(opts *loadBlobsOptions) {
 		opts.onProgress = onProgress
+	}
+}
+
+// WithImmutableRoot supplies an open handle on the ImmutableDB directory, so
+// every read resolves through it instead of through the directory's pathname.
+//
+// Callers that vetted the directory before handing it over need this: the
+// pathname alone would let a tree substituted in the meantime be read as though
+// it were the one that was checked. The caller keeps ownership of the handle and
+// must hold it open for the duration of the call.
+func WithImmutableRoot(root *os.Root) LoadBlobsOption {
+	return func(opts *loadBlobsOptions) {
+		opts.immutableRoot = root
 	}
 }
 
@@ -641,7 +656,7 @@ func LoadBlobsWithDB(
 
 	var utxoOffsetsStored int
 	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
-		ctx, logger, immutableDir, db, c,
+		ctx, logger, immutableDir, opts.immutableRoot, db, c,
 		func(rb chain.RawBlock, txn *database.Txn) error {
 			stored, err := storeRawBlockUtxoOffsets(txn, rb)
 			if err != nil {
@@ -665,6 +680,18 @@ func LoadBlobsWithDB(
 		BlocksCopied:     blocksCopied,
 		ImmutableTipSlot: immutableTipSlot,
 	}, nil
+}
+
+// openImmutable opens an ImmutableDB, through root when the caller supplied
+// one and by pathname otherwise.
+func openImmutable(
+	dir string,
+	root *os.Root,
+) (*immutable.ImmutableDb, error) {
+	if root != nil {
+		return immutable.NewFromRoot(root)
+	}
+	return immutable.New(dir)
 }
 
 // copyBlocksDirect reads immutable blocks once, persists them to the chain,
@@ -910,16 +937,21 @@ func CopyImmutableBlobsBounded(
 // ~200-500 byte header needed for chain indexing. The optional callback
 // runs in the same transaction after each block is persisted, giving
 // callers a hook to attach derived blob-side state such as UTxO offsets.
+//
+// immutableRoot, when non-nil, is an open handle on immutableDir that the reads
+// resolve through; immutableDir is then only a name for messages. See
+// WithImmutableRoot.
 func copyBlocksRawWithCallback(
 	ctx context.Context,
 	logger *slog.Logger,
 	immutableDir string,
+	immutableRoot *os.Root,
 	db *database.Database,
 	c *chain.Chain,
 	callback func(chain.RawBlock, *database.Txn) error,
 	onProgress func(LoadBlobsProgress),
 ) (int, uint64, error) {
-	imm, err := immutable.New(immutableDir)
+	imm, err := openImmutable(immutableDir, immutableRoot)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read immutable DB: %w", err)
 	}

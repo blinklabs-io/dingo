@@ -48,11 +48,8 @@ func newSecondaryIndex() *secondaryIndex {
 	return &secondaryIndex{}
 }
 
-func (s *secondaryIndex) Open(path string, primary *primaryIndex) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
+// Open takes an already-open index file; see chunk.Open for why.
+func (s *secondaryIndex) Open(f *os.File, primary *primaryIndex) error {
 	s.file = f
 	s.primary = primary
 	if stat, err := f.Stat(); err != nil {
