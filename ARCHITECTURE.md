@@ -745,8 +745,10 @@ When `Node.Run()` is called, components are initialized in this order:
  3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
  5. LedgerState creation, followed by mempool provider resolution
- 6. Bark remote archive adapter and History Expiry worker (if configured)
- 7. Database recovery, if startup detects a recoverable timestamp conflict
+ 6. Bark remote archive adapter, then database recovery if startup detects a
+    recoverable timestamp conflict
+ 7. History Expiry worker (if configured), after recovery has settled the
+    ledger tip and blob contents
  8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
     backfill + EventBus subscription (if API storage mode).
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,

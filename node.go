@@ -750,6 +750,14 @@ func (n *Node) Run(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
+	// Recovery changes both the ledger tip and blob contents. Complete it
+	// before starting background maintenance that reads or prunes either store.
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+
 	if n.config.historyExpiry.Enabled {
 		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
@@ -771,12 +779,6 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Run DB recovery if needed
-	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
-			return fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}
