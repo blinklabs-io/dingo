@@ -38,13 +38,23 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	snapMan, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	restoreMan, err := lifecycle.Restore(
-		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(),
+		newTestStorageHost(t),
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
 		lifecycle.RestoreStorageConfig{},
 	)
 	require.NoError(t, err)
@@ -72,7 +82,13 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	_, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
@@ -83,7 +99,11 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 	))
 
 	_, err = lifecycle.Restore(
-		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(),
+		newTestStorageHost(t),
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
 		lifecycle.RestoreStorageConfig{},
 	)
 	require.Error(t, err)
@@ -101,19 +121,31 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 // staging directory this package's atomic-rename interruption safety
 // depends on) -- and, like every other RestoreValidated rejection, before
 // targetDataDir is touched at all.
-func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(t *testing.T) {
+func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(
+	t *testing.T,
+) {
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	_, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = lifecycle.Restore(
-		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(),
+		newTestStorageHost(t),
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
 		lifecycle.RestoreStorageConfig{
 			Blob: map[string]any{"dataDir": "/some/other/configured/path"},
 		},
@@ -171,7 +203,13 @@ func TestManifestCheckPluginMatch(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	m, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))
@@ -188,19 +226,31 @@ func TestManifestCheckPluginMatch(t *testing.T) {
 // called Manifest.CheckPluginMatch directly and never invoked Restore or
 // RestoreValidated at all), this proves the mismatch actually aborts a
 // restore attempt, and that it does so before creating targetDir.
-func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(t *testing.T) {
+func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(
+	t *testing.T,
+) {
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	_, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = lifecycle.RestoreValidated(
-		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(),
+		newTestStorageHost(t),
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
 		func(m lifecycle.Manifest) error {
 			return m.CheckPluginMatch("gcs", "sqlite")
 		},
@@ -230,7 +280,13 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	m, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
@@ -239,7 +295,11 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = lifecycle.Restore(
-		context.Background(), newTestStorageHost(t), testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(),
+		newTestStorageHost(t),
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
 		lifecycle.RestoreStorageConfig{},
 	)
 	require.Error(t, err)
@@ -255,15 +315,27 @@ type manifestOnlyCloudDestination struct {
 	manifest lifecycle.Manifest
 }
 
-func (d *manifestOnlyCloudDestination) UploadDir(context.Context, string) error {
-	return errors.New("manifestOnlyCloudDestination: UploadDir must never be called")
+func (d *manifestOnlyCloudDestination) UploadDir(
+	context.Context,
+	string,
+) error {
+	return errors.New(
+		"manifestOnlyCloudDestination: UploadDir must never be called",
+	)
 }
 
-func (d *manifestOnlyCloudDestination) DownloadDir(context.Context, string) error {
-	return errors.New("manifestOnlyCloudDestination: DownloadDir must never be called")
+func (d *manifestOnlyCloudDestination) DownloadDir(
+	context.Context,
+	string,
+) error {
+	return errors.New(
+		"manifestOnlyCloudDestination: DownloadDir must never be called",
+	)
 }
 
-func (d *manifestOnlyCloudDestination) FetchManifest(context.Context) (lifecycle.Manifest, error) {
+func (d *manifestOnlyCloudDestination) FetchManifest(
+	context.Context,
+) (lifecycle.Manifest, error) {
 	return d.manifest, nil
 }
 
@@ -277,7 +349,9 @@ func init() {
 	testDestinationRegistry.Register(
 		"faketest-manifestonly",
 		func(*url.URL) (lifecycle.CloudDestination, error) {
-			return &manifestOnlyCloudDestination{manifest: manifestOnlyFixture}, nil
+			return &manifestOnlyCloudDestination{
+				manifest: manifestOnlyFixture,
+			}, nil
 		},
 	)
 }
@@ -298,7 +372,11 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // the lightweight FetchCloudManifest path and never called DownloadDir
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
-	m, err := lifecycle.PeekManifest(context.Background(), testDestinationRegistry, "faketest-manifestonly://bucket/prefix")
+	m, err := lifecycle.PeekManifest(
+		context.Background(),
+		testDestinationRegistry,
+		"faketest-manifestonly://bucket/prefix",
+	)
 	require.NoError(t, err)
 	require.Equal(t, manifestOnlyFixture, m)
 }
@@ -317,11 +395,17 @@ type noManifestFetcherCloudDestination struct {
 	inner *fakeCloudDestination
 }
 
-func (d *noManifestFetcherCloudDestination) UploadDir(ctx context.Context, localDir string) error {
+func (d *noManifestFetcherCloudDestination) UploadDir(
+	ctx context.Context,
+	localDir string,
+) error {
 	return d.inner.UploadDir(ctx, localDir)
 }
 
-func (d *noManifestFetcherCloudDestination) DownloadDir(ctx context.Context, localDir string) error {
+func (d *noManifestFetcherCloudDestination) DownloadDir(
+	ctx context.Context,
+	localDir string,
+) error {
 	return d.inner.DownloadDir(ctx, localDir)
 }
 
@@ -355,7 +439,9 @@ func init() {
 // "faketest" scheme, whose fakeCloudDestination DOES implement
 // CloudManifestFetcher and would therefore take the lightweight
 // FetchCloudManifest path instead of genuinely exercising this fallback.
-func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher(t *testing.T) {
+func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 

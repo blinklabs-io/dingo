@@ -28,7 +28,9 @@ import (
 // TestListSnapshotsMissingBaseDirReturnsEmpty verifies that a
 // non-existent base directory returns an empty list, not an error.
 func TestListSnapshotsMissingBaseDirReturnsEmpty(t *testing.T) {
-	entries, err := lifecycle.ListSnapshots(filepath.Join(t.TempDir(), "does-not-exist"))
+	entries, err := lifecycle.ListSnapshots(
+		filepath.Join(t.TempDir(), "does-not-exist"),
+	)
 	require.NoError(t, err)
 	require.Empty(t, entries)
 }
@@ -42,7 +44,10 @@ func TestListSnapshotsSkipsEntriesWithoutValidManifest(t *testing.T) {
 	good := testManifest()
 	good.CreatedAt = time.Unix(1700000100, 0).UTC()
 	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-good"), 0o755))
-	require.NoError(t, lifecycle.WriteManifest(filepath.Join(base, "snap-good"), good))
+	require.NoError(
+		t,
+		lifecycle.WriteManifest(filepath.Join(base, "snap-good"), good),
+	)
 
 	// A directory that exists but has no manifest.json yet (snapshot
 	// still in progress, or failed partway through).
@@ -50,7 +55,10 @@ func TestListSnapshotsSkipsEntriesWithoutValidManifest(t *testing.T) {
 
 	// A regular file directly under baseDir (not a directory) must be
 	// ignored entirely, not mistaken for a snapshot.
-	require.NoError(t, os.WriteFile(filepath.Join(base, "not-a-dir"), []byte("x"), 0o644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(base, "not-a-dir"), []byte("x"), 0o644),
+	)
 
 	entries, err := lifecycle.ListSnapshots(base)
 	require.NoError(t, err)
@@ -69,21 +77,39 @@ func TestListSnapshotsSkipsEntriesWithoutValidManifest(t *testing.T) {
 // broken directory must not hide the rest of the catalog), but it must
 // also report the corruption via its error return rather than pretending
 // the corrupted snapshot was simply never taken.
-func TestListSnapshotsSurfacesCorruptedManifestWithoutHidingGoodEntries(t *testing.T) {
+func TestListSnapshotsSurfacesCorruptedManifestWithoutHidingGoodEntries(
+	t *testing.T,
+) {
 	base := t.TempDir()
 
 	good := testManifest()
 	good.CreatedAt = time.Unix(1700000100, 0).UTC()
 	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-good"), 0o755))
-	require.NoError(t, lifecycle.WriteManifest(filepath.Join(base, "snap-good"), good))
+	require.NoError(
+		t,
+		lifecycle.WriteManifest(filepath.Join(base, "snap-good"), good),
+	)
 
 	corrupted := testManifest()
-	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-corrupted"), 0o755))
-	require.NoError(t, lifecycle.WriteManifest(filepath.Join(base, "snap-corrupted"), corrupted))
+	require.NoError(
+		t,
+		os.MkdirAll(filepath.Join(base, "snap-corrupted"), 0o755),
+	)
+	require.NoError(
+		t,
+		lifecycle.WriteManifest(
+			filepath.Join(base, "snap-corrupted"),
+			corrupted,
+		),
+	)
 	// Tamper with the manifest after writing it so its checksum no longer
 	// matches — same class of on-disk corruption ErrManifestCorrupted
 	// exists to detect.
-	manifestPath := filepath.Join(base, "snap-corrupted", lifecycle.ManifestFileName)
+	manifestPath := filepath.Join(
+		base,
+		"snap-corrupted",
+		lifecycle.ManifestFileName,
+	)
 	data, err := os.ReadFile(manifestPath)
 	require.NoError(t, err)
 	tampered := bytes.Replace(data, []byte(`"mainnet"`), []byte(`"testnet"`), 1)
@@ -108,12 +134,18 @@ func TestListSnapshotsOrdersNewestFirst(t *testing.T) {
 	older := testManifest()
 	older.CreatedAt = time.Unix(1700000000, 0).UTC()
 	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-older"), 0o755))
-	require.NoError(t, lifecycle.WriteManifest(filepath.Join(base, "snap-older"), older))
+	require.NoError(
+		t,
+		lifecycle.WriteManifest(filepath.Join(base, "snap-older"), older),
+	)
 
 	newer := testManifest()
 	newer.CreatedAt = time.Unix(1700000999, 0).UTC()
 	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-newer"), 0o755))
-	require.NoError(t, lifecycle.WriteManifest(filepath.Join(base, "snap-newer"), newer))
+	require.NoError(
+		t,
+		lifecycle.WriteManifest(filepath.Join(base, "snap-newer"), newer),
+	)
 
 	entries, err := lifecycle.ListSnapshots(base)
 	require.NoError(t, err)

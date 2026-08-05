@@ -139,7 +139,10 @@ type dbReadySignalHandler struct {
 	seen    chan struct{}
 }
 
-func (h dbReadySignalHandler) Handle(ctx context.Context, record slog.Record) error {
+func (h dbReadySignalHandler) Handle(
+	ctx context.Context,
+	record slog.Record,
+) error {
 	if record.Message == h.message {
 		select {
 		case h.seen <- struct{}{}:
@@ -167,7 +170,10 @@ func (h dbReadySignalHandler) WithGroup(name string) slog.Handler {
 func newDBReadyLogger(w io.Writer) (*slog.Logger, <-chan struct{}) {
 	dbReady := make(chan struct{}, 1)
 	return slog.New(dbReadySignalHandler{
-		Handler: slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		Handler: slog.NewTextHandler(
+			w,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
 		message: "database worker pool initialized",
 		seen:    dbReady,
 	}), dbReady
@@ -289,7 +295,9 @@ func runNodeInBackground(t *testing.T, n *Node) {
 // ResolvedListeners's doc comment — so a caller that wants to dial the
 // syncer after a live Restore/Truncate must redial syncerLn.Addr(), not
 // reuse the object).
-func startTwoNodeDevnet(t *testing.T) (forger, syncer *Node, syncerLn net.Listener) {
+func startTwoNodeDevnet(
+	t *testing.T,
+) (forger, syncer *Node, syncerLn net.Listener) {
 	t.Helper()
 	cardanoCfg := devnetCardanoConfig(t)
 	ln := newLoopbackListener(t)
@@ -308,7 +316,13 @@ func startTwoNodeDevnet(t *testing.T) (forger, syncer *Node, syncerLn net.Listen
 
 	syncerLogger, syncerDBReady := newDBReadyLogger(io.Discard)
 	syncerLn = newLoopbackListener(t)
-	syncer = newDevnetSyncNode(t, cardanoCfg, syncerLogger, forgerAddr, syncerLn)
+	syncer = newDevnetSyncNode(
+		t,
+		cardanoCfg,
+		syncerLogger,
+		forgerAddr,
+		syncerLn,
+	)
 	runNodeInBackground(t, syncer)
 
 	select {
@@ -354,15 +368,25 @@ func waitForTipSlotAtLeast(t *testing.T, n *Node, minSlot uint64) {
 func requireInboundListenerAcceptsConnections(t *testing.T, ln net.Listener) {
 	t.Helper()
 	addr := ln.Addr()
-	require.Eventually(t, func() bool {
-		conn, err := net.DialTimeout(addr.Network(), addr.String(), time.Second)
-		if err != nil {
-			return false
-		}
-		_ = conn.Close()
-		return true
-	}, 5*time.Second, 50*time.Millisecond,
-		"node must still accept inbound connections on %s after the live operation", addr)
+	require.Eventually(
+		t,
+		func() bool {
+			conn, err := net.DialTimeout(
+				addr.Network(),
+				addr.String(),
+				time.Second,
+			)
+			if err != nil {
+				return false
+			}
+			_ = conn.Close()
+			return true
+		},
+		5*time.Second,
+		50*time.Millisecond,
+		"node must still accept inbound connections on %s after the live operation",
+		addr,
+	)
 }
 
 func TestTwoNodeDevnetSyncOverRealNetworking(t *testing.T) {
@@ -398,9 +422,12 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	require.NoError(t, err)
 
 	targetSlot := earlyTip.Point.Slot
-	blocksRemoved, err := syncer.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot: &targetSlot,
-	})
+	blocksRemoved, err := syncer.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{
+			Slot: &targetSlot,
+		},
+	)
 	require.NoError(t, err)
 	require.NotZero(t, blocksRemoved)
 	requireInboundListenerAcceptsConnections(t, syncerLn)

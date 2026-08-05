@@ -61,7 +61,10 @@ type CheckResult struct {
 // summary they already fetched (e.g. the default 'run' command), so a stale
 // CheckResult (nil, or empty because nothing needed rechecking) never masks a
 // persisted FAIL/ERROR.
-func EffectiveCheckOutcome(statuses []CheckEpochStatus, fromEpoch, throughEpoch uint64) *CheckResult {
+func EffectiveCheckOutcome(
+	statuses []CheckEpochStatus,
+	fromEpoch, throughEpoch uint64,
+) *CheckResult {
 	result := &CheckResult{}
 	for _, s := range statuses {
 		if fromEpoch > 0 && s.Epoch < fromEpoch {
@@ -83,7 +86,11 @@ func EffectiveCheckOutcome(statuses []CheckEpochStatus, fromEpoch, throughEpoch 
 // Check compares the Koios reference cache against Dingo's metadata database
 // for unchecked or stale epochs. It reads reward_pool_input and epoch_summary
 // directly — no Blockfrost or other HTTP endpoints are contacted.
-func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckResult, error) {
+func Check(
+	ctx context.Context,
+	cfg CheckConfig,
+	logger *slog.Logger,
+) (*CheckResult, error) {
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.NumCPU()
 	}
@@ -193,7 +200,11 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	if err != nil {
 		return nil, fmt.Errorf("get status summary: %w", err)
 	}
-	effective := EffectiveCheckOutcome(statuses, cfg.FromEpoch, cfg.ThroughEpoch)
+	effective := EffectiveCheckOutcome(
+		statuses,
+		cfg.FromEpoch,
+		cfg.ThroughEpoch,
+	)
 	result.FailEpochs = effective.FailEpochs
 	result.ErrorEpochs = effective.ErrorEpochs
 
@@ -362,8 +373,17 @@ func checkEpoch(
 	} else {
 		epochErr = fmt.Errorf("epoch %d: no valid stake epoch (predates staking)", epoch)
 	}
-	allMismatches = append(allMismatches,
-		CompareEpochAggregates(network, epoch, koiosEpoch, dingoEpochStake, epochErr, now, graceHours)...,
+	allMismatches = append(
+		allMismatches,
+		CompareEpochAggregates(
+			network,
+			epoch,
+			koiosEpoch,
+			dingoEpochStake,
+			epochErr,
+			now,
+			graceHours,
+		)...,
 	)
 
 	// 1b. Compare /totals fields (treasury, reserves, and totals' own
@@ -410,7 +430,11 @@ func checkEpoch(
 	var dingoPoolMap map[string]*DingoPoolEpochData
 	var dingoPoolErr error
 	if hasStakeEpoch {
-		dingoPoolMap, dingoPoolErr = dingo.GetPoolEpochDataMap(ctx, stakeEpoch, paramEpoch)
+		dingoPoolMap, dingoPoolErr = dingo.GetPoolEpochDataMap(
+			ctx,
+			stakeEpoch,
+			paramEpoch,
+		)
 	} else {
 		dingoPoolErr = epochErr
 	}
@@ -462,7 +486,15 @@ func checkEpoch(
 			koiosKeySet[keyHex] = struct{}{}
 
 			dingoPool := dingoPoolMap[keyHex]
-			poolMismatches := ComparePoolEpoch(network, epoch, koiosPool, dingoPool, now, graceHours, epochEndTime)
+			poolMismatches := ComparePoolEpoch(
+				network,
+				epoch,
+				koiosPool,
+				dingoPool,
+				now,
+				graceHours,
+				epochEndTime,
+			)
 			allMismatches = append(allMismatches, poolMismatches...)
 
 			if dingoPool == nil {

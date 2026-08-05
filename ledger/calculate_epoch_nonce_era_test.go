@@ -75,7 +75,9 @@ import (
 // All other era boundaries within TPraos (Shelley→Allegra, Allegra→Mary,
 // Mary→Alonzo) and within Praos (Babbage→Conway) use the same multiplier
 // either way and therefore mask the bug.
-func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(t *testing.T) {
+func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
+	t *testing.T,
+) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)

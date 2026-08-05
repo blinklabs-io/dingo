@@ -1123,7 +1123,12 @@ func TestDedupeStakeInputsTieBreaks(t *testing.T) {
 	t.Run("registered preference", func(t *testing.T) {
 		got := dedupeStakeInputs([]StakeInput{
 			{PoolKeyHash: poolA, StakingKey: credential, Stake: 40},
-			{PoolKeyHash: poolA, StakingKey: credential, Stake: 40, Registered: true},
+			{
+				PoolKeyHash: poolA,
+				StakingKey:  credential,
+				Stake:       40,
+				Registered:  true,
+			},
 		})
 		require.Len(t, got, 1)
 		require.True(t, got[0].Registered)

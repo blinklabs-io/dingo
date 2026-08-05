@@ -454,12 +454,18 @@ func ProcessEpoch(
 				purpose != purposeNone {
 				in.Logger.Warn(
 					"skipping chained proposal: no enacted root for purpose; possible mithril bootstrap gap (#2195)",
-					"component", "governance",
-					"tx_hash", shortHash(proposal.TxHash),
-					"action_index", proposal.ActionIndex,
-					"action_type", proposal.ActionType,
-					"parent_tx_hash", hex.EncodeToString(proposal.ParentTxHash),
-					"epoch", in.NewEpoch,
+					"component",
+					"governance",
+					"tx_hash",
+					shortHash(proposal.TxHash),
+					"action_index",
+					proposal.ActionIndex,
+					"action_type",
+					proposal.ActionType,
+					"parent_tx_hash",
+					hex.EncodeToString(proposal.ParentTxHash),
+					"epoch",
+					in.NewEpoch,
 				)
 			}
 			continue
@@ -490,10 +496,14 @@ func ProcessEpoch(
 				if in.Logger != nil {
 					in.Logger.Error(
 						"skipping proposal: failed to decode parameter change action",
-						"tx_hash", shortHash(proposal.TxHash),
-						"action_index", proposal.ActionIndex,
-						"error", decodeErr,
-						"component", "governance",
+						"tx_hash",
+						shortHash(proposal.TxHash),
+						"action_index",
+						proposal.ActionIndex,
+						"error",
+						decodeErr,
+						"component",
+						"governance",
 					)
 				}
 				continue
@@ -503,10 +513,14 @@ func ProcessEpoch(
 				if in.Logger != nil {
 					in.Logger.Error(
 						"skipping proposal: decoded action is not a parameter change",
-						"tx_hash", shortHash(proposal.TxHash),
-						"action_index", proposal.ActionIndex,
-						"got_type", fmt.Sprintf("%T", action),
-						"component", "governance",
+						"tx_hash",
+						shortHash(proposal.TxHash),
+						"action_index",
+						proposal.ActionIndex,
+						"got_type",
+						fmt.Sprintf("%T", action),
+						"component",
+						"governance",
 					)
 				}
 				continue

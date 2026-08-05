@@ -37,7 +37,9 @@ func plutusDatumCBORToCardano(raw []byte) (*cardano.PlutusData, error) {
 	}
 	proto := plutusDataToCardano(pd)
 	if proto == nil {
-		return nil, errors.New("unsupported PlutusData type for utxorpc mapping")
+		return nil, errors.New(
+			"unsupported PlutusData type for utxorpc mapping",
+		)
 	}
 	return proto, nil
 }

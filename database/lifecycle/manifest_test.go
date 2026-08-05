@@ -175,7 +175,10 @@ func TestLabelSnapshotSetsNameAndDescription(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
 
-	require.NoError(t, lifecycle.LabelSnapshot(dir, "nightly", "pre-hardfork backup"))
+	require.NoError(
+		t,
+		lifecycle.LabelSnapshot(dir, "nightly", "pre-hardfork backup"),
+	)
 
 	got, err := lifecycle.ReadManifest(dir)
 	require.NoError(t, err)

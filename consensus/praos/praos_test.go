@@ -37,10 +37,26 @@ func TestComparePraosTipsLongerChainWins(t *testing.T) {
 		BlockNumber: 41,
 	}
 
-	assert.Equal(t, ChainBBetter,
-		ComparePraosTips(shorter, longer, PraosTiebreakerView{}, PraosTiebreakerView{}))
-	assert.Equal(t, ChainABetter,
-		ComparePraosTips(longer, shorter, PraosTiebreakerView{}, PraosTiebreakerView{}))
+	assert.Equal(
+		t,
+		ChainBBetter,
+		ComparePraosTips(
+			shorter,
+			longer,
+			PraosTiebreakerView{},
+			PraosTiebreakerView{},
+		),
+	)
+	assert.Equal(
+		t,
+		ChainABetter,
+		ComparePraosTips(
+			longer,
+			shorter,
+			PraosTiebreakerView{},
+			PraosTiebreakerView{},
+		),
+	)
 }
 
 func TestComparePraosTipsEqualLengthDoesNotUseSlotOrHashFallback(t *testing.T) {
@@ -69,14 +85,26 @@ func TestComparePraosTipsSameIssuerSlotHigherOCertWins(t *testing.T) {
 	}
 	issuer := []byte("issuer")
 	oursView := NewPraosTiebreakerViewFull(
-		ours, issuer, 1, make64ByteVRFFirstByte(0xAA), PraosTiebreakerConfigConway(),
+		ours,
+		issuer,
+		1,
+		make64ByteVRFFirstByte(0xAA),
+		PraosTiebreakerConfigConway(),
 	)
 	candidateView := NewPraosTiebreakerViewFull(
-		candidate, issuer, 2, make64ByteVRFFirstByte(0xAA), PraosTiebreakerConfigConway(),
+		candidate,
+		issuer,
+		2,
+		make64ByteVRFFirstByte(0xAA),
+		PraosTiebreakerConfigConway(),
 	)
 
-	assert.Equal(t, ChainBBetter, ComparePraosTips(ours, candidate, oursView, candidateView),
-		"higher opcert issue number must win at equal slot+issuer")
+	assert.Equal(
+		t,
+		ChainBBetter,
+		ComparePraosTips(ours, candidate, oursView, candidateView),
+		"higher opcert issue number must win at equal slot+issuer",
+	)
 }
 
 func TestComparePraosTipsVRFPrecedesSlot(t *testing.T) {
@@ -92,8 +120,16 @@ func TestComparePraosTipsVRFPrecedesSlot(t *testing.T) {
 	result := ComparePraosTips(
 		lowerSlotHigherVRF,
 		laterSlotLowerVRF,
-		PraosTiebreakerViewFromTip(lowerSlotHigherVRF, make64ByteVRFFirstByte(0xBD), PraosTiebreakerConfigConway()),
-		PraosTiebreakerViewFromTip(laterSlotLowerVRF, make64ByteVRFFirstByte(0x6E), PraosTiebreakerConfigConway()),
+		PraosTiebreakerViewFromTip(
+			lowerSlotHigherVRF,
+			make64ByteVRFFirstByte(0xBD),
+			PraosTiebreakerConfigConway(),
+		),
+		PraosTiebreakerViewFromTip(
+			laterSlotLowerVRF,
+			make64ByteVRFFirstByte(0x6E),
+			PraosTiebreakerConfigConway(),
+		),
 	)
 	assert.Equal(t, ChainBBetter, result,
 		"equal-height Praos comparison must use VRF before slot")
@@ -110,9 +146,18 @@ func TestComparePraosTipsDoesNotInventFallbackWithoutVRF(t *testing.T) {
 	}
 
 	result := ComparePraosTips(
-		lowerSlot, higherSlot,
-		PraosTiebreakerViewFromTip(lowerSlot, nil, PraosTiebreakerConfigConway()),
-		PraosTiebreakerViewFromTip(higherSlot, nil, PraosTiebreakerConfigConway()),
+		lowerSlot,
+		higherSlot,
+		PraosTiebreakerViewFromTip(
+			lowerSlot,
+			nil,
+			PraosTiebreakerConfigConway(),
+		),
+		PraosTiebreakerViewFromTip(
+			higherSlot,
+			nil,
+			PraosTiebreakerConfigConway(),
+		),
 	)
 	assert.Equal(t, ChainEqual, result)
 }
@@ -128,15 +173,30 @@ func TestComparePraosTipsConwayRestrictionDisarmsDistantVRF(t *testing.T) {
 	}
 
 	result := ComparePraosTips(
-		ours, candidate,
-		PraosTiebreakerViewFromTip(ours, make64ByteVRFFirstByte(0xBD), PraosTiebreakerConfigConway()),
-		PraosTiebreakerViewFromTip(candidate, make64ByteVRFFirstByte(0x6E), PraosTiebreakerConfigConway()),
+		ours,
+		candidate,
+		PraosTiebreakerViewFromTip(
+			ours,
+			make64ByteVRFFirstByte(0xBD),
+			PraosTiebreakerConfigConway(),
+		),
+		PraosTiebreakerViewFromTip(
+			candidate,
+			make64ByteVRFFirstByte(0x6E),
+			PraosTiebreakerConfigConway(),
+		),
 	)
-	assert.Equal(t, ChainEqual, result,
-		"Conway restriction must disarm VRF tiebreaker when tips are >5 slots apart")
+	assert.Equal(
+		t,
+		ChainEqual,
+		result,
+		"Conway restriction must disarm VRF tiebreaker when tips are >5 slots apart",
+	)
 }
 
-func TestComparePraosTipsSlotBattleWithoutSelectViewDoesNotInventHashTieBreak(t *testing.T) {
+func TestComparePraosTipsSlotBattleWithoutSelectViewDoesNotInventHashTieBreak(
+	t *testing.T,
+) {
 	dingoTip := ochainsync.Tip{
 		BlockNumber: 11,
 		Point: ocommon.Point{
@@ -163,9 +223,18 @@ func TestComparePraosTipsSlotBattleWithoutSelectViewDoesNotInventHashTieBreak(t 
 	}
 
 	got := ComparePraosTips(
-		dingoTip, cardanoTip,
-		PraosTiebreakerViewFromTip(dingoTip, nil, PraosTiebreakerConfigConway()),
-		PraosTiebreakerViewFromTip(cardanoTip, nil, PraosTiebreakerConfigConway()),
+		dingoTip,
+		cardanoTip,
+		PraosTiebreakerViewFromTip(
+			dingoTip,
+			nil,
+			PraosTiebreakerConfigConway(),
+		),
+		PraosTiebreakerViewFromTip(
+			cardanoTip,
+			nil,
+			PraosTiebreakerConfigConway(),
+		),
 	)
 	require.Equal(t, ChainEqual, got)
 }
@@ -318,8 +387,12 @@ func TestGetVRFOutput_ByronReturnsNil(t *testing.T) {
 	shelleyHeader.Body.LeaderVrf.Output = make64ByteVRF(0x01)
 
 	shelleyVRF := GetVRFOutput(shelleyHeader)
-	assert.Len(t, shelleyVRF, VRFOutputSize,
-		"Shelley header with populated LeaderVrf must return a 64-byte VRF output")
+	assert.Len(
+		t,
+		shelleyVRF,
+		VRFOutputSize,
+		"Shelley header with populated LeaderVrf must return a 64-byte VRF output",
+	)
 
 	cmp := CompareVRFOutputs(GetVRFOutput(byronHeader), shelleyVRF)
 	assert.Equal(t, ChainEqual, cmp,

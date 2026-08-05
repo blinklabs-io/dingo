@@ -136,7 +136,9 @@ func TestLeiosCommitteeParamsFromPParamsRejectsDefaultInvariantViolation(
 // simulating three live Restore/Truncate cycles — then publishes exactly
 // one VoteEmittedEvent and asserts exactly one vote is queued for
 // diffusion, not three.
-func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(t *testing.T) {
+func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
+	t *testing.T,
+) {
 	n, _ := newLiveLifecycleTestNode(t, 1)
 
 	const cycles = 3

@@ -276,7 +276,11 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	c.metrics.IncBlockLRUMiss()
 
 	// Fetch block from blob store
-	blockCbor, _, err := blob.GetBlock(txn, offset.BlockSlot, offset.BlockHash[:])
+	blockCbor, _, err := blob.GetBlock(
+		txn,
+		offset.BlockSlot,
+		offset.BlockHash[:],
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get block for utxo extraction: %w", err)
 	}
@@ -311,7 +315,10 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 // so reconstructing a complete transaction ([body, witness, is_valid, aux_data])
 // would require fetching multiple components. Use tx.Cbor() from the parsed
 // block if you need complete transaction CBOR for decoding.
-func (c *TieredCborCache) ResolveTxCbor(txn *Txn, txHash []byte) ([]byte, error) {
+func (c *TieredCborCache) ResolveTxCbor(
+	txn *Txn,
+	txHash []byte,
+) ([]byte, error) {
 	// Tier 1: Hot cache check
 	if cbor, ok := c.hotTx.Get(txHash); ok {
 		c.metrics.IncTxHotHit()
@@ -546,7 +553,10 @@ func (c *TieredCborCache) ResolveUtxoCborBatch(
 
 		// Extract all UTxOs from this block
 		for _, item := range group.refs {
-			cbor := cachedBlock.Extract(item.offset.ByteOffset, item.offset.ByteLength)
+			cbor := cachedBlock.Extract(
+				item.offset.ByteOffset,
+				item.offset.ByteLength,
+			)
 			if cbor == nil {
 				return nil, fmt.Errorf(
 					"utxo batch extraction failed: offset out of bounds "+
@@ -641,7 +651,11 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 		// Decode the offset reference
 		offset, err := DecodeTxOffset(txData)
 		if err != nil {
-			return result, fmt.Errorf("decode tx offset %x: %w", txHash[:8], err)
+			return result, fmt.Errorf(
+				"decode tx offset %x: %w",
+				txHash[:8],
+				err,
+			)
 		}
 
 		// Group by block
@@ -687,7 +701,10 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 
 		// Extract all TXs from this block
 		for _, item := range group.txs {
-			cbor := cachedBlock.Extract(item.offset.ByteOffset, item.offset.ByteLength)
+			cbor := cachedBlock.Extract(
+				item.offset.ByteOffset,
+				item.offset.ByteLength,
+			)
 			if cbor == nil {
 				return nil, fmt.Errorf(
 					"tx batch extraction failed: offset out of bounds "+
@@ -723,7 +740,9 @@ func (c *TieredCborCache) SetLogger(logger *slog.Logger) {
 // RegisterCASMetrics exposes both hot caches' copy-on-write contention
 // counters on the given Prometheus registry (see HotCache.RegisterCASMetrics).
 // If registry is nil, this is a no-op.
-func (c *TieredCborCache) RegisterCASMetrics(registry prometheus.Registerer) error {
+func (c *TieredCborCache) RegisterCASMetrics(
+	registry prometheus.Registerer,
+) error {
 	if err := c.hotUtxo.RegisterCASMetrics(registry, "utxo"); err != nil {
 		return err
 	}

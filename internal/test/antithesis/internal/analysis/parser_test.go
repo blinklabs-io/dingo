@@ -52,7 +52,11 @@ func TestParseDingo_MempoolMissingComponent(t *testing.T) {
 	// "added transaction" without "component":"mempool" should NOT match
 	line := `{"time":"2026-01-01T00:00:04Z","msg":"added transaction","slot":400}`
 	ev := ParseLogLine(line)
-	require.Nil(t, ev, "added transaction without component=mempool should not match")
+	require.Nil(
+		t,
+		ev,
+		"added transaction without component=mempool should not match",
+	)
 }
 
 func TestParseDingo_Unknown(t *testing.T) {

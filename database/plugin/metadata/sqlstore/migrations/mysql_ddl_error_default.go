@@ -56,9 +56,13 @@ func isMySQLDDLAlreadyAppliedOnConn(
 		!strings.Contains(message, "error 1826") {
 		return false
 	}
-	definition := mysqlIndexDefinitionPatternDefault.FindStringSubmatch(strings.TrimSpace(statement))
+	definition := mysqlIndexDefinitionPatternDefault.FindStringSubmatch(
+		strings.TrimSpace(statement),
+	)
 	if len(definition) != 5 {
-		match := mysqlDuplicateDDLPattern.FindStringSubmatch(strings.TrimSpace(statement))
+		match := mysqlDuplicateDDLPattern.FindStringSubmatch(
+			strings.TrimSpace(statement),
+		)
 		if len(match) != 3 {
 			return false
 		}

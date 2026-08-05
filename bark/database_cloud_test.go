@@ -46,7 +46,10 @@ type barkFakeCloudDestination struct {
 	dir string
 }
 
-func (d *barkFakeCloudDestination) UploadDir(_ context.Context, localDir string) error {
+func (d *barkFakeCloudDestination) UploadDir(
+	_ context.Context,
+	localDir string,
+) error {
 	if err := os.MkdirAll(d.dir, 0o755); err != nil {
 		return err
 	}
@@ -69,7 +72,10 @@ func (d *barkFakeCloudDestination) UploadDir(_ context.Context, localDir string)
 	return nil
 }
 
-func (d *barkFakeCloudDestination) DownloadDir(_ context.Context, localDir string) error {
+func (d *barkFakeCloudDestination) DownloadDir(
+	_ context.Context,
+	localDir string,
+) error {
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
 		return err
@@ -89,7 +95,9 @@ func (d *barkFakeCloudDestination) DownloadDir(_ context.Context, localDir strin
 	return nil
 }
 
-func (d *barkFakeCloudDestination) ListSnapshots(_ context.Context) ([]lifecycle.SnapshotEntry, error) {
+func (d *barkFakeCloudDestination) ListSnapshots(
+	_ context.Context,
+) ([]lifecycle.SnapshotEntry, error) {
 	return lifecycle.ListSnapshots(d.dir)
 }
 
@@ -98,7 +106,9 @@ func (d *barkFakeCloudDestination) ListSnapshots(_ context.Context) ([]lifecycle
 // absent), distinct from any other error (a real fake-backing-dir I/O
 // problem, which this fake has no way to simulate distinctly but is
 // preserved unwrapped regardless).
-func (d *barkFakeCloudDestination) FetchManifest(_ context.Context) (lifecycle.Manifest, error) {
+func (d *barkFakeCloudDestination) FetchManifest(
+	_ context.Context,
+) (lifecycle.Manifest, error) {
 	m, err := lifecycle.ReadManifest(d.dir)
 	if err != nil && errors.Is(err, fs.ErrNotExist) {
 		return lifecycle.Manifest{}, fmt.Errorf(
@@ -167,11 +177,17 @@ type barkFakeCloudDestinationNoDelete struct {
 	dir string
 }
 
-func (d *barkFakeCloudDestinationNoDelete) UploadDir(ctx context.Context, localDir string) error {
+func (d *barkFakeCloudDestinationNoDelete) UploadDir(
+	ctx context.Context,
+	localDir string,
+) error {
 	return (&barkFakeCloudDestination{dir: d.dir}).UploadDir(ctx, localDir)
 }
 
-func (d *barkFakeCloudDestinationNoDelete) DownloadDir(ctx context.Context, localDir string) error {
+func (d *barkFakeCloudDestinationNoDelete) DownloadDir(
+	ctx context.Context,
+	localDir string,
+) error {
 	return (&barkFakeCloudDestination{dir: d.dir}).DownloadDir(ctx, localDir)
 }
 
@@ -222,18 +238,26 @@ func setBarkFakeCloudNoDeleteBackingDir(t *testing.T, dir string) {
 // than silently folded into "not found".
 type barkFakeCloudDestinationCommError struct{}
 
-func (d *barkFakeCloudDestinationCommError) UploadDir(context.Context, string) error {
+func (d *barkFakeCloudDestinationCommError) UploadDir(
+	context.Context,
+	string,
+) error {
 	return errors.New("simulated cloud communication failure")
 }
 
-func (d *barkFakeCloudDestinationCommError) DownloadDir(context.Context, string) error {
+func (d *barkFakeCloudDestinationCommError) DownloadDir(
+	context.Context,
+	string,
+) error {
 	return errors.New("simulated cloud communication failure")
 }
 
 func (d *barkFakeCloudDestinationCommError) FetchManifest(
 	context.Context,
 ) (lifecycle.Manifest, error) {
-	return lifecycle.Manifest{}, errors.New("simulated cloud communication failure")
+	return lifecycle.Manifest{}, errors.New(
+		"simulated cloud communication failure",
+	)
 }
 
 func (d *barkFakeCloudDestinationCommError) ListSnapshots(
@@ -278,7 +302,8 @@ func TestBarkFakeCloudBackingDirsResetBetweenTests(t *testing.T) {
 	gotCloud := barkFakeCloudDir
 	barkFakeCloudMu.Unlock()
 	require.Empty(
-		t, gotCloud,
+		t,
+		gotCloud,
 		"barkFakeCloudDir must be reset via t.Cleanup once the test that set it finishes",
 	)
 
@@ -286,7 +311,8 @@ func TestBarkFakeCloudBackingDirsResetBetweenTests(t *testing.T) {
 	gotNoDelete := barkFakeCloudNoDeleteDir
 	barkFakeCloudNoDeleteMu.Unlock()
 	require.Empty(
-		t, gotNoDelete,
+		t,
+		gotNoDelete,
 		"barkFakeCloudNoDeleteDir must be reset via t.Cleanup once the test that set it finishes",
 	)
 }
@@ -331,7 +357,13 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 
 	localOnlyDir := filepath.Join(snapshotDir, "local-only")
 	_, err = lifecycle.Snapshot(
-		context.Background(), db, localOnlyDir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		context.Background(),
+		db,
+		localOnlyDir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
@@ -345,7 +377,10 @@ func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	byID := make(map[string]*databasev1alpha1.SnapshotInfo, len(resp.Msg.GetSnapshots()))
+	byID := make(
+		map[string]*databasev1alpha1.SnapshotInfo,
+		len(resp.Msg.GetSnapshots()),
+	)
 	for _, s := range resp.Msg.GetSnapshots() {
 		byID[s.GetSnapshotId()] = s
 	}
@@ -440,7 +475,11 @@ func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
-	require.Equal(t, "only-snapshot", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Equal(
+		t,
+		"only-snapshot",
+		resp.Msg.GetSnapshots()[0].GetSnapshotId(),
+	)
 }
 
 // ── Restore/VerifySnapshot/DeleteSnapshot cloud-fallback ──────────────────
@@ -476,20 +515,25 @@ func TestRestoreFromLocalSnapshot(t *testing.T) {
 
 	restoreResp, err := h.Restore(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.RestoreRequest{SnapshotId: "snap1"}),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "snap1"},
+		),
 	)
 	require.NoError(t, err)
 
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetRestoreStatus(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetRestoreStatusRequest{
-				OperationId: restoreResp.Msg.GetOperationId(),
-			}),
-		)
-		require.NoError(t, err)
-		return statusResp.Msg.GetProgress()
-	})
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetRestoreStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetRestoreStatusRequest{
+					OperationId: restoreResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
@@ -514,9 +558,17 @@ func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, sourceDB, filepath.Join(snapshotDir, "cloud-snap"),
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
-		"", "",
+		context.Background(),
+		testDestinationRegistry,
+		sourceDB,
+		filepath.Join(snapshotDir, "cloud-snap"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
 	)
 	require.NoError(t, err)
 	dbtest.CloseDatabase(sourceDB) //nolint:errcheck
@@ -532,20 +584,25 @@ func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
 
 	restoreResp, err := h.Restore(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.RestoreRequest{SnapshotId: "cloud-snap"}),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "cloud-snap"},
+		),
 	)
 	require.NoError(t, err)
 
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetRestoreStatus(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetRestoreStatusRequest{
-				OperationId: restoreResp.Msg.GetOperationId(),
-			}),
-		)
-		require.NoError(t, err)
-		return statusResp.Msg.GetProgress()
-	})
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetRestoreStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetRestoreStatusRequest{
+					OperationId: restoreResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
@@ -555,10 +612,16 @@ func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
 }
 
 func TestRestoreUnknownIDReturnsNotFound(t *testing.T) {
-	h := newTestDatabaseServiceHandler(t, nil, filepath.Join(t.TempDir(), "target"))
+	h := newTestDatabaseServiceHandler(
+		t,
+		nil,
+		filepath.Join(t.TempDir(), "target"),
+	)
 	_, err := h.Restore(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.RestoreRequest{SnapshotId: "does-not-exist"}),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "does-not-exist"},
+		),
 	)
 	require.Error(t, err)
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
@@ -575,12 +638,18 @@ func TestRestoreUnknownIDReturnsNotFound(t *testing.T) {
 // It must instead be reported as CodeUnavailable, distinct from a
 // genuine CodeNotFound.
 func TestRestoreReturnsUnavailableOnCloudCommunicationFailure(t *testing.T) {
-	h := newTestDatabaseServiceHandler(t, nil, filepath.Join(t.TempDir(), "target"))
+	h := newTestDatabaseServiceHandler(
+		t,
+		nil,
+		filepath.Join(t.TempDir(), "target"),
+	)
 	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
 
 	_, err := h.Restore(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.RestoreRequest{SnapshotId: "some-snapshot"}),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "some-snapshot"},
+		),
 	)
 	require.Error(t, err)
 	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
@@ -597,9 +666,17 @@ func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, db, filepath.Join(snapshotDir, "cloud-verify"),
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
-		"", "",
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		filepath.Join(snapshotDir, "cloud-verify"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
 	)
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(filepath.Join(snapshotDir, "cloud-verify")))
@@ -610,7 +687,9 @@ func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
 
 	verifyResp, err := h.VerifySnapshot(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.VerifySnapshotRequest{SnapshotId: "cloud-verify"}),
+		connect.NewRequest(
+			&databasev1alpha1.VerifySnapshotRequest{SnapshotId: "cloud-verify"},
+		),
 	)
 	require.NoError(t, err)
 
@@ -642,9 +721,17 @@ func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, db, filepath.Join(snapshotDir, "cloud-delete"),
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
-		"", "",
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		filepath.Join(snapshotDir, "cloud-delete"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
 	)
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(filepath.Join(snapshotDir, "cloud-delete")))
@@ -655,12 +742,16 @@ func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
 
 	_, err = h.DeleteSnapshot(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "cloud-delete"}),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "cloud-delete"},
+		),
 	)
 	require.NoError(t, err)
 
 	_, ok, err := lifecycle.FetchCloudManifest(
-		context.Background(), testDestinationRegistry, lifecycle.JoinCloudURI(cloudDest, "cloud-delete"),
+		context.Background(),
+		testDestinationRegistry,
+		lifecycle.JoinCloudURI(cloudDest, "cloud-delete"),
 	)
 	require.True(t, ok)
 	require.Error(t, err, "cloud copy must actually be gone after delete")
@@ -677,9 +768,17 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 	const cloudDest = "barkfaketest://bucket/prefix"
 
 	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, db, filepath.Join(snapshotDir, "both"),
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
-		"", "",
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		filepath.Join(snapshotDir, "both"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
 	)
 	require.NoError(t, err)
 
@@ -689,13 +788,17 @@ func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
 
 	_, err = h.DeleteSnapshot(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "both"}),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "both"},
+		),
 	)
 	require.NoError(t, err)
 
 	require.NoDirExists(t, filepath.Join(snapshotDir, "both"))
 	_, ok, err := lifecycle.FetchCloudManifest(
-		context.Background(), testDestinationRegistry, lifecycle.JoinCloudURI(cloudDest, "both"),
+		context.Background(),
+		testDestinationRegistry,
+		lifecycle.JoinCloudURI(cloudDest, "both"),
 	)
 	require.True(t, ok)
 	require.Error(t, err, "cloud copy must actually be gone after delete")
@@ -708,7 +811,11 @@ func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
 
 	_, err := h.DeleteSnapshot(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "does-not-exist"}),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{
+				SnapshotId: "does-not-exist",
+			},
+		),
 	)
 	require.Error(t, err)
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
@@ -720,13 +827,19 @@ func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
 // when the cloud probe itself failed to communicate — that could delete
 // nothing while telling the operator there was nothing to delete, when
 // the cloud copy may still be there.
-func TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure(t *testing.T) {
+func TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure(
+	t *testing.T,
+) {
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
 
 	_, err := h.DeleteSnapshot(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "some-snapshot"}),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{
+				SnapshotId: "some-snapshot",
+			},
+		),
 	)
 	require.Error(t, err)
 	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
@@ -739,7 +852,9 @@ func TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure(t *testing.
 // CloudDeleter — S3/GCS always do, but a future destination type might
 // not, and this must be reported clearly rather than silently no-op'ing
 // and reporting success.
-func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(t *testing.T) {
+func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
+	t *testing.T,
+) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -800,9 +915,17 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 	for _, name := range []string{"cloud-a", "cloud-b"} {
 		dir := filepath.Join(snapshotDir, name)
 		_, err := lifecycle.SnapshotToCloud(
-			context.Background(), testDestinationRegistry, db, dir,
-			lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
-			"", "",
+			context.Background(),
+			testDestinationRegistry,
+			db,
+			dir,
+			lifecycle.TriggerManual,
+			"test-version",
+			"badger",
+			"sqlite",
+			cloudDest,
+			"",
+			"",
 		)
 		require.NoError(t, err)
 		require.NoError(t, os.RemoveAll(dir))
@@ -840,11 +963,20 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 			break
 		}
 	}
-	require.Equal(t, 2, pages, "4 snapshots at page size 2 must take exactly 2 pages")
+	require.Equal(
+		t,
+		2,
+		pages,
+		"4 snapshots at page size 2 must take exactly 2 pages",
+	)
 
 	ids := make([]string, 0, len(seen))
 	for id := range seen {
 		ids = append(ids, id)
 	}
-	require.ElementsMatch(t, []string{"local-a", "local-b", "cloud-a", "cloud-b"}, ids)
+	require.ElementsMatch(
+		t,
+		[]string{"local-a", "local-b", "cloud-a", "cloud-b"},
+		ids,
+	)
 }

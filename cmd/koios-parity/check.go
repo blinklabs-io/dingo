@@ -35,7 +35,8 @@ No Koios HTTP calls; no Dingo API endpoint contacted.`,
 	cmd.Flags().Int("workers", 0, "parallel check workers (default: NumCPU)")
 	cmd.Flags().Int("grace-hours", defaultGraceHours,
 		"pools absent from Koios in recently-fetched epochs → reference_lag (not FAIL)")
-	cmd.Flags().Bool("all", false, "re-check all cached epochs, ignoring prior results")
+	cmd.Flags().
+		Bool("all", false, "re-check all cached epochs, ignoring prior results")
 	cmd.Flags().Uint64("from-epoch", 0, "lower bound (inclusive)")
 	cmd.Flags().Uint64("through-epoch", 0, "upper bound (inclusive)")
 	addDingoDBFlags(cmd)

@@ -44,7 +44,8 @@ func TestExtractFromMetadatumRejectsNilIntegerLabel(t *testing.T) {
 			},
 		},
 	})
-	if err == nil || err.Error() != "invalid metadata label: nil integer value" {
+	if err == nil ||
+		err.Error() != "invalid metadata label: nil integer value" {
 		t.Fatalf("expected nil integer label error, got %v", err)
 	}
 }

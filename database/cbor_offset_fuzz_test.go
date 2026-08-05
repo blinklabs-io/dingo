@@ -75,7 +75,10 @@ func FuzzDecodeCborOffset(f *testing.F) {
 		decoded, err := DecodeCborOffset(data)
 		if err != nil {
 			if IsUtxoOffsetStorage(data) || IsTxOffsetStorage(data) {
-				t.Fatalf("storage detector accepted data DecodeCborOffset rejected: %v", err)
+				t.Fatalf(
+					"storage detector accepted data DecodeCborOffset rejected: %v",
+					err,
+				)
 			}
 			return
 		}
@@ -87,7 +90,11 @@ func FuzzDecodeCborOffset(f *testing.F) {
 			t.Fatalf("IsTxOffsetStorage returned false for decoded offset")
 		}
 		if !bytes.Equal(decoded.Encode(), data) {
-			t.Fatalf("DecodeCborOffset re-encoded to %x, want %x", decoded.Encode(), data)
+			t.Fatalf(
+				"DecodeCborOffset re-encoded to %x, want %x",
+				decoded.Encode(),
+				data,
+			)
 		}
 	})
 }
@@ -111,7 +118,10 @@ func FuzzDecodeTxCborParts(f *testing.F) {
 		decoded, err := DecodeTxCborParts(data)
 		if err != nil {
 			if IsTxCborPartsStorage(data) {
-				t.Fatalf("storage detector accepted data DecodeTxCborParts rejected: %v", err)
+				t.Fatalf(
+					"storage detector accepted data DecodeTxCborParts rejected: %v",
+					err,
+				)
 			}
 			return
 		}
@@ -125,7 +135,11 @@ func FuzzDecodeTxCborParts(f *testing.F) {
 			t.Fatalf("DecodeTxCborParts(decoded.Encode()): %v", err)
 		}
 		if *roundTrip != *decoded {
-			t.Fatalf("round-trip tx parts = %#v, want %#v", *roundTrip, *decoded)
+			t.Fatalf(
+				"round-trip tx parts = %#v, want %#v",
+				*roundTrip,
+				*decoded,
+			)
 		}
 	})
 }

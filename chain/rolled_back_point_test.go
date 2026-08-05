@@ -227,6 +227,9 @@ func TestFromPointAcceptsCommonPointOnInMemoryFork(t *testing.T) {
 		err,
 		models.ErrBlockNotFound,
 	) {
-		t.Fatalf("expected rolled-back common point to be rejected, got: %v", err)
+		t.Fatalf(
+			"expected rolled-back common point to be rejected, got: %v",
+			err,
+		)
 	}
 }

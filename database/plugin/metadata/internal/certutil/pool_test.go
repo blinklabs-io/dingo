@@ -68,7 +68,9 @@ func TestPoolRewardAccountCBORLayouts(t *testing.T) {
 
 func TestPoolRewardAccountRejectsInvalidLayout(t *testing.T) {
 	fields := poolRegistrationFields(
-		append([]byte{0xE1}, bytes.Repeat([]byte{0x42}, lcommon.Blake2b224Size)...),
+		append(
+			[]byte{0xE1},
+			bytes.Repeat([]byte{0x42}, lcommon.Blake2b224Size)...),
 		false,
 	)
 	fields = fields[:9]

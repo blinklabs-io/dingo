@@ -153,8 +153,16 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.Equal(t, hex.EncodeToString(nonceAtPreCut), hex.EncodeToString(rCandidate))
-	require.Equal(t, hex.EncodeToString(rCandidate), hex.EncodeToString(hvCandidate))
+	require.Equal(
+		t,
+		hex.EncodeToString(nonceAtPreCut),
+		hex.EncodeToString(rCandidate),
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(rCandidate),
+		hex.EncodeToString(hvCandidate),
+	)
 	// The STORED lastEpochBlockNonce is the PARENT hash of the closing epoch's
 	// last block (prevHashToNonce(lastBlock.prevHash) == the post-cutoff block's
 	// PrevHash == hashAtPreCut), which becomes the carried lab at the NEXT
@@ -172,7 +180,11 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 		hex.EncodeToString(rLab),
 		"stored lastEpochBlockNonce must NOT be the closing epoch's last block's own hash (the #2734 eta_1349 off-by-one)",
 	)
-	require.NotEqual(t, hex.EncodeToString(carriedLab), hex.EncodeToString(rLab))
+	require.NotEqual(
+		t,
+		hex.EncodeToString(carriedLab),
+		hex.EncodeToString(rLab),
+	)
 	// The epoch nonce for THIS boundary uses the CARRIED lastEpochBlockNonce
 	// (#2734), not the closing epoch's own last block.
 	require.Equal(
@@ -222,13 +234,23 @@ func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
 	ls := &LedgerState{db: db}
 	lab, err := ls.epochLabNonce(nil, epochStart, epochEnd, carried)
 	require.NoError(t, err)
-	require.Equal(t, carried, lab,
-		"empty closing epoch must carry the previous (prevHash-shape) nonce forward unchanged")
-	require.NotEqual(t, boundaryHash, lab,
-		"empty closing epoch must NOT normalize the carried nonce to the boundary block's own hash")
+	require.Equal(
+		t,
+		carried,
+		lab,
+		"empty closing epoch must carry the previous (prevHash-shape) nonce forward unchanged",
+	)
+	require.NotEqual(
+		t,
+		boundaryHash,
+		lab,
+		"empty closing epoch must NOT normalize the carried nonce to the boundary block's own hash",
+	)
 }
 
-func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) {
+func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
+	t *testing.T,
+) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -300,7 +322,10 @@ func TestEpochLabNonceReturnsPrevHashNotHash(t *testing.T) {
 		epochEnd   uint64 = 2000
 	)
 	parentHash := bytes.Repeat([]byte{0xa1}, 32) // second-to-last block
-	lastHash := bytes.Repeat([]byte{0xb2}, 32)   // last block of the closing epoch
+	lastHash := bytes.Repeat(
+		[]byte{0xb2},
+		32,
+	) // last block of the closing epoch
 	require.NoError(t, db.BlockCreate(models.Block{
 		Slot:     1500,
 		Hash:     lastHash,
@@ -315,6 +340,10 @@ func TestEpochLabNonceReturnsPrevHashNotHash(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, parentHash, lab,
 		"epochLabNonce must return the last block's PrevHash (the parent hash)")
-	require.NotEqual(t, lastHash, lab,
-		"epochLabNonce must NOT return the last block's own hash (the eta_1349 off-by-one)")
+	require.NotEqual(
+		t,
+		lastHash,
+		lab,
+		"epochLabNonce must NOT return the last block's own hash (the eta_1349 off-by-one)",
+	)
 }

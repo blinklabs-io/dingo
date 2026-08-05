@@ -46,9 +46,20 @@ func (o *Ouroboros) initLeiosMetrics() {
 		),
 		certRbWaitSeconds: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Name:    "dingo_leios_ntc_certrb_closure_wait_seconds",
-				Help:    "time the NtC chainsync server waited for a CertRB endorser block closure, by outcome",
-				Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0},
+				Name: "dingo_leios_ntc_certrb_closure_wait_seconds",
+				Help: "time the NtC chainsync server waited for a CertRB endorser block closure, by outcome",
+				Buckets: []float64{
+					0.01,
+					0.05,
+					0.1,
+					0.25,
+					0.5,
+					1.0,
+					2.0,
+					5.0,
+					10.0,
+					20.0,
+				},
 			},
 			[]string{"outcome"},
 		),

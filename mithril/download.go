@@ -297,16 +297,25 @@ func isTransientDownloadError(err error) bool {
 // defaultTransientRetryMaxDelay with ±25% jitter.
 func transientRetryDelay(attempt int) time.Duration {
 	shift := min(attempt, 6) // 2^6 * 500ms = 32s, capped at 30s
-	d := min(defaultTransientRetryBaseDelay*(1<<shift), defaultTransientRetryMaxDelay)
+	d := min(
+		defaultTransientRetryBaseDelay*(1<<shift),
+		defaultTransientRetryMaxDelay,
+	)
 	if quarter := d / 4; quarter > 0 {
 		// Jitter in [-quarter, +quarter]
-		d += time.Duration(rand.Int63n(int64(quarter)*2+1)) - quarter //nolint:gosec
+		d += time.Duration(
+			rand.Int63n(int64(quarter)*2+1),
+		) - quarter //nolint:gosec
 	}
 	return d
 }
 
 func downloadIdleTimeoutCause(timeout time.Duration) error {
-	return fmt.Errorf("%w after %s without data", errDownloadIdleTimeout, timeout)
+	return fmt.Errorf(
+		"%w after %s without data",
+		errDownloadIdleTimeout,
+		timeout,
+	)
 }
 
 func downloadDestinationPath(cfg DownloadConfig) string {
@@ -629,7 +638,10 @@ func downloadSnapshotOnce(
 		headerTimer.Stop()
 	}
 	if err != nil {
-		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+		if cause := context.Cause(downloadCtx); errors.Is(
+			cause,
+			errDownloadIdleTimeout,
+		) {
 			return "", fmt.Errorf("downloading snapshot: %w", cause)
 		}
 		return "", fmt.Errorf("downloading snapshot: %w", err)
@@ -726,7 +738,10 @@ func downloadSnapshotOnce(
 			}
 			if err != nil {
 				file.Close()
-				if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+				if cause := context.Cause(downloadCtx); errors.Is(
+					cause,
+					errDownloadIdleTimeout,
+				) {
 					return "", fmt.Errorf("restarting download: %w", cause)
 				}
 				return "", fmt.Errorf(
@@ -874,7 +889,10 @@ func downloadSnapshotOnce(
 		body.Stop()
 		file.Close()
 		file = nil
-		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+		if cause := context.Cause(downloadCtx); errors.Is(
+			cause,
+			errDownloadIdleTimeout,
+		) {
 			return "", fmt.Errorf("writing snapshot data: %w", cause)
 		}
 		return "", fmt.Errorf("writing snapshot data: %w", err)

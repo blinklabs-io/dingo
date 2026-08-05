@@ -29,14 +29,23 @@ import (
 var mysqlDDLObjectPattern = regexp.MustCompile(
 	"(?is)(?:INDEX|KEY)(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?|CONSTRAINT\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?",
 )
-var mysqlIndexDefinitionPattern = regexp.MustCompile("(?is)^CREATE\\s+(UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s+ON\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s*\\((.*)\\)$")
+
+var mysqlIndexDefinitionPattern = regexp.MustCompile(
+	"(?is)^CREATE\\s+(UNIQUE\\s+)?INDEX(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s+ON\\s+[`\\\"]?([a-zA-Z0-9_]+)[`\\\"]?\\s*\\((.*)\\)$",
+)
 
 // isMySQLDDLAlreadyApplied verifies that the duplicate object named by the
 // server error actually exists in the current schema. This prevents masking a
 // duplicate-name error for a different object definition.
-func isMySQLDDLAlreadyAppliedOnConn(ctx context.Context, conn *sql.Conn, statement string, err error) bool {
+func isMySQLDDLAlreadyAppliedOnConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	statement string,
+	err error,
+) bool {
 	var mysqlErr *mysqldriver.MySQLError
-	if !errors.As(err, &mysqlErr) || (mysqlErr.Number != 1061 && mysqlErr.Number != 1826) {
+	if !errors.As(err, &mysqlErr) ||
+		(mysqlErr.Number != 1061 && mysqlErr.Number != 1826) {
 		return false
 	}
 	if conn == nil {
@@ -53,7 +62,8 @@ func isMySQLDDLAlreadyAppliedOnConn(ctx context.Context, conn *sql.Conn, stateme
 		name = match[2]
 	}
 	var schema string
-	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&schema); err != nil || schema == "" {
+	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&schema); err != nil ||
+		schema == "" {
 		return false
 	}
 	var exists int
@@ -70,9 +80,18 @@ func isMySQLDDLAlreadyAppliedOnConn(ctx context.Context, conn *sql.Conn, stateme
 		// treated as a successful migration.
 		columns = strings.ReplaceAll(columns, "`", "")
 		columns = regexp.MustCompile(`\(\d+\)?`).ReplaceAllString(columns, "")
-		columns = regexp.MustCompile(`(?i)\s+(?:ASC|DESC)\b`).ReplaceAllString(columns, "")
+		columns = regexp.MustCompile(`(?i)\s+(?:ASC|DESC)\b`).
+			ReplaceAllString(columns, "")
 		actual = strings.ReplaceAll(actual, "`", "")
-		if strings.ReplaceAll(columns, " ", "") != strings.ReplaceAll(actual, " ", "") {
+		if strings.ReplaceAll(
+			columns,
+			" ",
+			"",
+		) != strings.ReplaceAll(
+			actual,
+			" ",
+			"",
+		) {
 			return false
 		}
 		var nonUnique int

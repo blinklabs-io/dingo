@@ -228,8 +228,10 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 		// goroutine will still exit once the store unblocks.
 		o.config.Logger.Warn(
 			"timed out waiting for leios EB persistence writer to drain; abandoning remaining historical-serving writes",
-			"component", "network",
-			"timeout", drainTimeout,
+			"component",
+			"network",
+			"timeout",
+			drainTimeout,
 		)
 		return false
 	}

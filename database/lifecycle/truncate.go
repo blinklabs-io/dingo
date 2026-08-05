@@ -35,7 +35,9 @@ import (
 // committed. Callers deciding whether it's safe to resume normal service
 // after a failed live truncate (rather than treat the data directory as
 // possibly inconsistent) should check errors.Is against this.
-var ErrTruncateNotStarted = errors.New("truncate: not started, no data was modified")
+var ErrTruncateNotStarted = errors.New(
+	"truncate: not started, no data was modified",
+)
 
 const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
 
@@ -266,7 +268,10 @@ func setPendingTruncate(
 }
 
 // ResolveTargetByHash resolves a truncate target identified by block hash.
-func ResolveTargetByHash(db *database.Database, hash []byte) (models.Block, error) {
+func ResolveTargetByHash(
+	db *database.Database,
+	hash []byte,
+) (models.Block, error) {
 	block, err := database.BlockByHash(db, hash)
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
@@ -283,7 +288,10 @@ func ResolveTargetByHash(db *database.Database, hash []byte) (models.Block, erro
 // empty) resolve to their nearest ancestor, since an operator invoking a
 // disaster-recovery truncate is very unlikely to know a block-populated
 // slot exactly and should not have to.
-func ResolveTargetBySlot(db *database.Database, slot uint64) (models.Block, error) {
+func ResolveTargetBySlot(
+	db *database.Database,
+	slot uint64,
+) (models.Block, error) {
 	tip, err := db.GetTip(nil)
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
@@ -477,7 +485,11 @@ func Truncate(
 
 	metadataTip, err := db.GetTip(nil)
 	if err != nil {
-		return 0, fmt.Errorf("%w: get metadata tip: %w", ErrTruncateNotStarted, err)
+		return 0, fmt.Errorf(
+			"%w: get metadata tip: %w",
+			ErrTruncateNotStarted,
+			err,
+		)
 	}
 	metadataTipBlock, err := database.BlockByPoint(db, metadataTip.Point)
 	if err != nil {
@@ -544,7 +556,8 @@ func Truncate(
 			err,
 		)
 	}
-	if onLineage.Slot != target.Slot || !bytes.Equal(onLineage.Hash, target.Hash) {
+	if onLineage.Slot != target.Slot ||
+		!bytes.Equal(onLineage.Hash, target.Hash) {
 		return 0, fmt.Errorf(
 			"%w: target at id=%d (slot=%d, hash=%x) does not match the "+
 				"block on the current chain at that id (slot=%d, hash=%x) "+
@@ -710,7 +723,10 @@ func finishPendingTruncate(
 		var affectedRefs []models.StakeCredentialRef
 		if delegatorInactivityEnabled {
 			var affErr error
-			affectedRefs, affErr = db.AccountsWitnessedAfterSlot(point.Slot, txn)
+			affectedRefs, affErr = db.AccountsWitnessedAfterSlot(
+				point.Slot,
+				txn,
+			)
 			if affErr != nil {
 				return fmt.Errorf(
 					"collect truncated-away witnessed accounts: %w",

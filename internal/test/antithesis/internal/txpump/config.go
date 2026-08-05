@@ -112,10 +112,15 @@ func LoadConfig() (*Config, error) {
 		CooldownMin:       500,
 		CooldownMax:       2000,
 		ConfirmationSlots: 30,
-		Types:             []string{"payment", "delegation", "governance", "plutus"},
-		LogDir:            envString("TXPUMP_LOG_DIR", "/logs"),
-		FallbackAddr:      envString("TXPUMP_FALLBACK_ADDR", ""),
-		StartupTimeout:    60 * time.Second,
+		Types: []string{
+			"payment",
+			"delegation",
+			"governance",
+			"plutus",
+		},
+		LogDir:         envString("TXPUMP_LOG_DIR", "/logs"),
+		FallbackAddr:   envString("TXPUMP_FALLBACK_ADDR", ""),
+		StartupTimeout: 60 * time.Second,
 		GenesisUTxOFile: envString(
 			"TXPUMP_GENESIS_UTXO_FILE", "",
 		),
@@ -235,7 +240,8 @@ func parseStartupTimeout(value string) (time.Duration, error) {
 	if err != nil || seconds < 0 || seconds > maxStartupTimeoutSeconds {
 		return 0, fmt.Errorf(
 			"TXPUMP_STARTUP_TIMEOUT: must be a non-negative integer (seconds) <= %d, got %q",
-			maxStartupTimeoutSeconds, value,
+			maxStartupTimeoutSeconds,
+			value,
 		)
 	}
 	return time.Duration(seconds) * time.Second, nil

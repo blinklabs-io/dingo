@@ -504,7 +504,10 @@ func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(
 	acct, err := db.GetAccountByCredential(0, cred, true, nil)
 	require.NoError(t, err)
 	require.Zero(t, acct.ExpirationEpoch)
-	marker, err := db.GetSyncState(database.DelegatorInactivityActivatedSyncKey, nil)
+	marker, err := db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Empty(t, marker)
 }

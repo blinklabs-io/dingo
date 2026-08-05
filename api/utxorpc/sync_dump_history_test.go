@@ -31,7 +31,9 @@ type fakeDumpHistoryIter struct {
 	idx   int
 }
 
-func (f *fakeDumpHistoryIter) Next(blocking bool) (*chain.ChainIteratorResult, error) {
+func (f *fakeDumpHistoryIter) Next(
+	blocking bool,
+) (*chain.ChainIteratorResult, error) {
 	if f.idx >= len(f.queue) {
 		return nil, chain.ErrIteratorChainTip
 	}

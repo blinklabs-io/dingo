@@ -52,7 +52,11 @@ func (s *Store) DropDeferredIndexes() error {
 				}
 				exists, err := s.deferredIndexExists(db, index)
 				if err != nil {
-					return fmt.Errorf("check deferred index %s: %w", index.Name, err)
+					return fmt.Errorf(
+						"check deferred index %s: %w",
+						index.Name,
+						err,
+					)
 				}
 				if !exists {
 					continue
@@ -67,7 +71,8 @@ func (s *Store) DropDeferredIndexes() error {
 					// keep them in place while deferring the rest of the
 					// manifest and let BuildDeferredIndexes treat them as
 					// already present.
-					if s.dialect.Name() == "mysql" && isMySQLForeignKeyIndexError(err) {
+					if s.dialect.Name() == "mysql" &&
+						isMySQLForeignKeyIndexError(err) {
 						continue
 					}
 					return fmt.Errorf(
@@ -119,12 +124,20 @@ func (s *Store) buildDeferredIndexes(
 			for _, index := range indexes {
 				exists, err := s.deferredIndexExists(db, index)
 				if err != nil {
-					return fmt.Errorf("check deferred index %s: %w", index.Name, err)
+					return fmt.Errorf(
+						"check deferred index %s: %w",
+						index.Name,
+						err,
+					)
 				}
 				if exists {
 					continue
 				}
-				statement := s.dialect.CreateIndexSQL(index.Name, index.Table, index.Columns)
+				statement := s.dialect.CreateIndexSQL(
+					index.Name,
+					index.Table,
+					index.Columns,
+				)
 				if _, err := db.ExecContext(
 					context.Background(),
 					statement,
@@ -153,7 +166,10 @@ func (s *Store) buildDeferredIndexes(
 	)
 }
 
-func (s *Store) deferredIndexExists(db queryer, index deferred.Index) (bool, error) {
+func (s *Store) deferredIndexExists(
+	db queryer,
+	index deferred.Index,
+) (bool, error) {
 	var found int
 	var query string
 	var args []any

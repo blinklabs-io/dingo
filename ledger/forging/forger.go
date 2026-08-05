@@ -164,7 +164,9 @@ type BlockValidator interface {
 // the given slot (respects the single-EB-per-slot rule and produce window).
 // A nil checker means Leios EB forging is disabled (relay or pre-Dijkstra era).
 type LeiosProduceChecker interface {
-	MayProduceEndorserBlock(slot uint64) (allowed bool, reason string, err error)
+	MayProduceEndorserBlock(
+		slot uint64,
+	) (allowed bool, reason string, err error)
 }
 
 // LeiosCertifiedEndorserBlock is a certified EB ready for inclusion in a
@@ -330,7 +332,9 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
-			return nil, errors.New("production mode requires loaded credentials")
+			return nil, errors.New(
+				"production mode requires loaded credentials",
+			)
 		}
 		if cfg.LeaderChecker == nil {
 			return nil, errors.New("production mode requires leader checker")
@@ -347,7 +351,9 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	}
 	if cfg.LeiosProduceChecker != nil {
 		if cfg.LeiosEBBroadcaster == nil {
-			return nil, errors.New("LeiosProduceChecker requires LeiosEBBroadcaster")
+			return nil, errors.New(
+				"LeiosProduceChecker requires LeiosEBBroadcaster",
+			)
 		}
 		if cfg.LeiosMempool == nil {
 			return nil, errors.New("LeiosProduceChecker requires LeiosMempool")
@@ -575,9 +581,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		if gap > f.forgeStaleGapThresholdSlots {
 			f.logger.Error(
 				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
-				"current_slot", currentSlot,
-				"tip_slot", tipSlot,
-				"slot_gap", gap,
+				"current_slot",
+				currentSlot,
+				"tip_slot",
+				tipSlot,
+				"slot_gap",
+				gap,
 			)
 		} else {
 			f.logger.Debug(
@@ -638,12 +647,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		var excludedTxHashes map[string]struct{}
 		canAnnounce := true
 		if embeddedEb != nil {
-			hashes, ok := f.leiosCerts.CertifiedEndorserBlockTxHashes(*embeddedEb)
+			hashes, ok := f.leiosCerts.CertifiedEndorserBlockTxHashes(
+				*embeddedEb,
+			)
 			if !ok {
 				f.logger.Warn(
 					"leios EB announcement skipped: certified closure unavailable for mempool rebase",
-					"slot", currentSlot,
-					"eb_hash", embeddedEb.String(),
+					"slot",
+					currentSlot,
+					"eb_hash",
+					embeddedEb.String(),
 				)
 				canAnnounce = false
 			}
@@ -655,7 +668,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			}
 		}
 		if canAnnounce {
-			announcement, err := f.checkAndForgeLeiosEB(currentSlot, excludedTxHashes)
+			announcement, err := f.checkAndForgeLeiosEB(
+				currentSlot,
+				excludedTxHashes,
+			)
 			if err != nil {
 				f.logger.Warn(
 					"leios endorser block production failed",
@@ -693,7 +709,11 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	f.updateKESMetrics(kesPeriod)
 
 	// Build the block
-	block, blockCbor, err := f.buildBlock(currentSlot, kesPeriod, leiosBlockData)
+	block, blockCbor, err := f.buildBlock(
+		currentSlot,
+		kesPeriod,
+		leiosBlockData,
+	)
 	if err != nil {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
@@ -712,7 +732,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		validationErr := f.blockValidator.ValidateForgedBlock(block, blockCbor)
 		validationDuration := time.Since(validateStart)
 		if f.metrics != nil {
-			f.metrics.forgeValidationDuration.Observe(validationDuration.Seconds())
+			f.metrics.forgeValidationDuration.Observe(
+				validationDuration.Seconds(),
+			)
 		}
 		if validationErr != nil {
 			f.incCouldNotForge()
@@ -726,7 +748,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 				"validation_duration", validationDuration,
 				"error", validationErr,
 			)
-			return fmt.Errorf("forged block self-validation failed: %w", validationErr)
+			return fmt.Errorf(
+				"forged block self-validation failed: %w",
+				validationErr,
+			)
 		}
 		f.logger.Info(
 			"forged block passed self-validation",
@@ -813,15 +838,18 @@ func (f *BlockForger) leiosBlockDataForSlot(
 	if err != nil {
 		f.logger.Warn(
 			"leios endorser block certificate skipped: parent announcement unavailable",
-			"slot", slot,
-			"error", err,
+			"slot",
+			slot,
+			"error",
+			err,
 		)
 		return LeiosBlockData{}, nil
 	}
 	if !ok {
 		f.logger.Debug(
 			"leios endorser block certificate skipped: parent has no announcement",
-			"slot", slot,
+			"slot",
+			slot,
 		)
 		return LeiosBlockData{}, nil
 	}
@@ -925,7 +953,10 @@ func (f *BlockForger) VRFProofForSlot(
 	}
 
 	// Create VRF input: MkInputVrf(slot, epochNonce)
-	alpha, err := vrf.MkInputVrf(int64(slot), epochNonce) // #nosec G115 -- validated above
+	alpha, err := vrf.MkInputVrf(
+		int64(slot),
+		epochNonce,
+	) // #nosec G115 -- validated above
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create VRF input: %w", err)
 	}
@@ -1003,7 +1034,8 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
 			if f.metrics != nil {
-				f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").Inc()
+				f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").
+					Inc()
 			}
 			return nil, nil
 		}

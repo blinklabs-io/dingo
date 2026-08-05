@@ -28,7 +28,10 @@ import (
 
 func TestHardForkDijkstraSkipsEmptyGenesis(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadDijkstraGenesisFromReader(strings.NewReader("{}")))
+	require.NoError(
+		t,
+		cfg.LoadDijkstraGenesisFromReader(strings.NewReader("{}")),
+	)
 
 	prev := &conway.ConwayProtocolParameters{
 		MinCommitteeSize:        7,

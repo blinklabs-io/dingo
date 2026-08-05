@@ -265,7 +265,10 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	}
 
 	if cfg.Plugins.Mempool.Provider != "default" {
-		t.Fatalf("expected CLI mempool provider override, got %q", cfg.Plugins.Mempool.Provider)
+		t.Fatalf(
+			"expected CLI mempool provider override, got %q",
+			cfg.Plugins.Mempool.Provider,
+		)
 	}
 	capacity, _, _ = cfg.MempoolSettings()
 	if capacity != 123456 {
@@ -343,13 +346,23 @@ func TestMempoolProviderSourcePrecedence(t *testing.T) {
 	)
 	cfg, err := LoadConfig(configFile)
 	require.NoError(t, err)
-	assert.Equal(t, "environment", cfg.Plugins.Mempool.Provider, "environment overrides YAML")
+	assert.Equal(
+		t,
+		"environment",
+		cfg.Plugins.Mempool.Provider,
+		"environment overrides YAML",
+	)
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
 	require.NoError(t, cmd.ParseFlags([]string{"--mempool=cli"}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
-	assert.Equal(t, "cli", cfg.Plugins.Mempool.Provider, "CLI overrides environment")
+	assert.Equal(
+		t,
+		"cli",
+		cfg.Plugins.Mempool.Provider,
+		"CLI overrides environment",
+	)
 }
 
 func TestDelegatorInactivityEnvBinding(t *testing.T) {
@@ -370,7 +383,10 @@ func TestDelegatorInactivityEnvBinding(t *testing.T) {
 		t.Fatal("expected env var to enable delegator inactivity")
 	}
 	if cfg.DelegatorInactivity != 90 {
-		t.Fatalf("expected delegatorInactivity=90, got %d", cfg.DelegatorInactivity)
+		t.Fatalf(
+			"expected delegatorInactivity=90, got %d",
+			cfg.DelegatorInactivity,
+		)
 	}
 }
 
@@ -753,7 +769,10 @@ func TestPipeline_NegativeHistoryExpiryFrequencyRejected(t *testing.T) {
 			}
 			cfg, err := loadConfigThroughPipeline(t, tc.yaml, tc.args)
 			if err == nil ||
-				!strings.Contains(err.Error(), "invalid historyExpiry.frequency") {
+				!strings.Contains(
+					err.Error(),
+					"invalid historyExpiry.frequency",
+				) {
 				t.Fatalf(
 					"expected invalid historyExpiry.frequency error, got: %v",
 					err,
@@ -829,6 +848,9 @@ func TestMinPoolMarginEnvBinding(t *testing.T) {
 		t.Fatalf("failed to load config: %v", err)
 	}
 	if cfg.MinPoolMargin != 150 {
-		t.Fatalf("expected env var to set minPoolMargin=150, got %d", cfg.MinPoolMargin)
+		t.Fatalf(
+			"expected env var to set minPoolMargin=150, got %d",
+			cfg.MinPoolMargin,
+		)
 	}
 }

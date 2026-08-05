@@ -79,7 +79,12 @@ func historicalRewardsAtBoundary(
 		for _, key := range keys[start:end] {
 			batchSelected[key] = struct{}{}
 		}
-		batch, err := historicalRewardsBatch(db, slot, boundarySlot, batchSelected)
+		batch, err := historicalRewardsBatch(
+			db,
+			slot,
+			boundarySlot,
+			batchSelected,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -103,7 +108,8 @@ func historicalRewardsBatch(
 	}
 	base := make(map[historicalRewardKey]uint64)
 	predicate, predicateArgs := historicalRewardCredentialPredicate(selected)
-	rows, err := db.QueryContext(context.Background(),
+	rows, err := db.QueryContext(
+		context.Background(),
 		"SELECT credential_tag, staking_key, reward FROM account WHERE "+predicate,
 		predicateArgs...)
 	if err != nil {
@@ -171,13 +177,20 @@ WHERE withdrawal = TRUE AND added_slot `+withdrawalOp+` ? AND (`+predicate+`)
 		}
 		previous := uint64(0)
 		if raw.Valid && raw.String != "" {
-			previous, err = parseUint64("historical previous reward", raw.String)
+			previous, err = parseUint64(
+				"historical previous reward",
+				raw.String,
+			)
 			if err != nil {
 				rows.Close()
 				return nil, err
 			}
 		}
-		withdrawals[ref] = historicalWithdrawal{slot: addedSlot, id: id, previous: previous}
+		withdrawals[ref] = historicalWithdrawal{
+			slot:     addedSlot,
+			id:       id,
+			previous: previous,
+		}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -445,7 +458,10 @@ FROM active_delegator_stake`,
 				amounts[ref] = 0
 			}
 			if rawAmount.Valid && rawAmount.String != "" {
-				value, err := parseUint64("historical UTxO amount", rawAmount.String)
+				value, err := parseUint64(
+					"historical UTxO amount",
+					rawAmount.String,
+				)
 				if err != nil {
 					rows.Close()
 					return nil, nil, err
@@ -544,7 +560,10 @@ FROM active_delegator_stake`,
 				amounts[ref] = 0
 			}
 			if rawAmount.Valid && rawAmount.String != "" {
-				value, err := parseUint64("historical UTxO amount", rawAmount.String)
+				value, err := parseUint64(
+					"historical UTxO amount",
+					rawAmount.String,
+				)
 				if err != nil {
 					rows.Close()
 					return nil, err
@@ -686,7 +705,10 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 				amountByInput[ref] = 0
 			}
 			if rawAmount.Valid && rawAmount.String != "" {
-				value, err := parseUint64("historical UTxO amount", rawAmount.String)
+				value, err := parseUint64(
+					"historical UTxO amount",
+					rawAmount.String,
+				)
 				if err != nil {
 					rows.Close()
 					return nil, err
@@ -721,7 +743,16 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 			if stake == 0 {
 				continue
 			}
-			ret = append(ret, &models.RewardStakeInput{PoolKeyHash: []byte(ref.pool), CredentialTag: ref.tag, StakingKey: []byte(ref.key), Stake: types.Uint64(stake), Registered: true})
+			ret = append(
+				ret,
+				&models.RewardStakeInput{
+					PoolKeyHash:   []byte(ref.pool),
+					CredentialTag: ref.tag,
+					StakingKey:    []byte(ref.key),
+					Stake:         types.Uint64(stake),
+					Registered:    true,
+				},
+			)
 		}
 	}
 	return ret, nil

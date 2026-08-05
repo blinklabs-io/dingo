@@ -32,10 +32,34 @@ func crossEraLedger(t *testing.T) *LedgerState {
 	t.Helper()
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
-			{EpochId: 0, StartSlot: 0, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
-			{EpochId: 1, StartSlot: 100, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
-			{EpochId: 2, StartSlot: 200, SlotLength: 1000, LengthInSlots: 432, EraId: 1},
-			{EpochId: 3, StartSlot: 632, SlotLength: 1000, LengthInSlots: 432, EraId: 1},
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    20_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    20_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1000,
+				LengthInSlots: 432,
+				EraId:         1,
+			},
+			{
+				EpochId:       3,
+				StartSlot:     632,
+				SlotLength:    1000,
+				LengthInSlots: 432,
+				EraId:         1,
+			},
 		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),

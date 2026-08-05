@@ -111,7 +111,8 @@ func MirrorToCloud(
 	); err != nil {
 		return fmt.Errorf(
 			"upload to %q succeeded, but recording the cloud-mirrored marker failed: %w",
-			snapshotCloudURI, err,
+			snapshotCloudURI,
+			err,
 		)
 	}
 	return nil

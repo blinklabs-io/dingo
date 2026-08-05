@@ -358,7 +358,11 @@ func TestOpCertSignatureVerification(t *testing.T) {
 	}
 
 	// Verify the signature using the verification logic
-	verifyCertData := []any{opCert.KESVKey, opCert.IssueNumber, opCert.KESPeriod}
+	verifyCertData := []any{
+		opCert.KESVKey,
+		opCert.IssueNumber,
+		opCert.KESPeriod,
+	}
 	verifyCertCbor, err := cbor.Encode(verifyCertData)
 	require.NoError(t, err)
 
@@ -395,16 +399,28 @@ func TestOpCertSignatureVerificationInvalidSignature(t *testing.T) {
 	}
 
 	// Verify with WRONG issue number - should fail
-	wrongCertData := []any{opCert.KESVKey, opCert.IssueNumber + 1, opCert.KESPeriod}
+	wrongCertData := []any{
+		opCert.KESVKey,
+		opCert.IssueNumber + 1,
+		opCert.KESPeriod,
+	}
 	wrongCertCbor, err := cbor.Encode(wrongCertData)
 	require.NoError(t, err)
 
 	pubKey := ed25519.PublicKey(opCert.ColdVKey)
 	valid := ed25519.Verify(pubKey, wrongCertCbor, opCert.Signature)
-	assert.False(t, valid, "OpCert signature should fail with wrong issue number")
+	assert.False(
+		t,
+		valid,
+		"OpCert signature should fail with wrong issue number",
+	)
 
 	// Verify with WRONG KES period - should fail
-	wrongCertData2 := []any{opCert.KESVKey, opCert.IssueNumber, opCert.KESPeriod + 1}
+	wrongCertData2 := []any{
+		opCert.KESVKey,
+		opCert.IssueNumber,
+		opCert.KESPeriod + 1,
+	}
 	wrongCertCbor2, err := cbor.Encode(wrongCertData2)
 	require.NoError(t, err)
 
@@ -551,8 +567,16 @@ func TestUpdateKESPeriodExhaustedWithOffset(t *testing.T) {
 	// exceeds the maximum.
 	pc.opCert.KESPeriod = 100
 	err := pc.UpdateKESPeriod(164)
-	assert.Error(t, err, "should fail when relative period exceeds max for depth 6")
-	assert.Contains(t, err.Error(), "failed to update KES key to period 64 (absolute 164)")
+	assert.Error(
+		t,
+		err,
+		"should fail when relative period exceeds max for depth 6",
+	)
+	assert.Contains(
+		t,
+		err.Error(),
+		"failed to update KES key to period 64 (absolute 164)",
+	)
 }
 
 func TestUpdateKESPeriodBeforeOpCertStart(t *testing.T) {
@@ -674,13 +698,17 @@ type fakeLedgerView struct {
 	calledSeq  bool
 }
 
-func (f *fakeLedgerView) PoolRegistrationVRFKeyHash(p [28]byte) ([32]byte, bool, error) {
+func (f *fakeLedgerView) PoolRegistrationVRFKeyHash(
+	p [28]byte,
+) ([32]byte, bool, error) {
 	f.calledPool = true
 	f.gotPoolID = p
 	return f.regVRFHash, f.registered, f.regErr
 }
 
-func (f *fakeLedgerView) LatestOpCertSequence(p [28]byte) (uint64, bool, error) {
+func (f *fakeLedgerView) LatestOpCertSequence(
+	p [28]byte,
+) (uint64, bool, error) {
 	f.calledSeq = true
 	return f.latestSeq, f.seqFound, f.seqErr
 }
@@ -703,18 +731,28 @@ func TestValidateAgainstLedger_PoolNotRegistered(t *testing.T) {
 		t.Errorf("ValidateAgainstLedger: %v", err)
 	}
 	if registered || matched {
-		t.Errorf("expected registered=false, matched=false; got %v %v", registered, matched)
+		t.Errorf(
+			"expected registered=false, matched=false; got %v %v",
+			registered,
+			matched,
+		)
 	}
 	if !view.calledPool {
 		t.Error("expected PoolRegistrationVRFKeyHash to be called")
 	}
 	if view.calledSeq {
-		t.Error("opcert sequence lookup should be skipped when pool not registered")
+		t.Error(
+			"opcert sequence lookup should be skipped when pool not registered",
+		)
 	}
 	var poolBytes [28]byte
 	copy(poolBytes[:], pc.poolID[:])
 	if view.gotPoolID != poolBytes {
-		t.Errorf("LedgerView received wrong pool id %x, want %x", view.gotPoolID, poolBytes)
+		t.Errorf(
+			"LedgerView received wrong pool id %x, want %x",
+			view.gotPoolID,
+			poolBytes,
+		)
 	}
 }
 
@@ -729,7 +767,11 @@ func TestValidateAgainstLedger_VRFMatch(t *testing.T) {
 		t.Fatalf("ValidateAgainstLedger: %v", err)
 	}
 	if !registered || !matched {
-		t.Errorf("expected registered=true, matched=true; got %v %v", registered, matched)
+		t.Errorf(
+			"expected registered=true, matched=true; got %v %v",
+			registered,
+			matched,
+		)
 	}
 }
 
@@ -762,10 +804,16 @@ func TestValidateAgainstLedger_ZeroVRFHashIsUnknown(t *testing.T) {
 		t.Errorf("ValidateAgainstLedger: %v", err)
 	}
 	if registered || matched {
-		t.Errorf("expected registered=false, matched=false; got %v %v", registered, matched)
+		t.Errorf(
+			"expected registered=false, matched=false; got %v %v",
+			registered,
+			matched,
+		)
 	}
 	if view.calledSeq {
-		t.Error("opcert sequence lookup should be skipped when VRF hash is unknown")
+		t.Error(
+			"opcert sequence lookup should be skipped when VRF hash is unknown",
+		)
 	}
 }
 
@@ -850,7 +898,11 @@ func TestValidateAgainstLedger_NoObservedOpCertSequence(t *testing.T) {
 		t.Errorf("ValidateAgainstLedger: %v", err)
 	}
 	if !registered || !matched {
-		t.Errorf("expected registered=true, matched=true; got %v %v", registered, matched)
+		t.Errorf(
+			"expected registered=true, matched=true; got %v %v",
+			registered,
+			matched,
+		)
 	}
 }
 

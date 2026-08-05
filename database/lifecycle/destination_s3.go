@@ -55,14 +55,20 @@ type s3Destination struct {
 func newS3Destination(uri *url.URL) (CloudDestination, error) {
 	bucket := uri.Host
 	if bucket == "" {
-		return nil, fmt.Errorf("s3 cloud destination %q: missing bucket", uri.String())
+		return nil, fmt.Errorf(
+			"s3 cloud destination %q: missing bucket",
+			uri.String(),
+		)
 	}
 	prefix := strings.Trim(uri.Path, "/")
 
 	ctx := context.Background()
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("s3 cloud destination: load default AWS config: %w", err)
+		return nil, fmt.Errorf(
+			"s3 cloud destination: load default AWS config: %w",
+			err,
+		)
 	}
 
 	// AWS_ENDPOINT (not a standard AWS SDK env var, so config.LoadDefaultConfig
@@ -121,14 +127,23 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 			return fmt.Errorf("open %q for upload: %w", localPath, err)
 		}
 		key := d.objectKey(entry.Name())
-		_, uploadErr := uploader.Upload(ctx, &s3.PutObjectInput{ //nolint:staticcheck
-			Bucket: &d.bucket,
-			Key:    &key,
-			Body:   f,
-		})
+		_, uploadErr := uploader.Upload(
+			ctx,
+			&s3.PutObjectInput{ //nolint:staticcheck
+				Bucket: &d.bucket,
+				Key:    &key,
+				Body:   f,
+			},
+		)
 		closeErr := f.Close()
 		if uploadErr != nil {
-			return fmt.Errorf("upload %q to s3://%s/%s: %w", localPath, d.bucket, key, uploadErr)
+			return fmt.Errorf(
+				"upload %q to s3://%s/%s: %w",
+				localPath,
+				d.bucket,
+				key,
+				uploadErr,
+			)
 		}
 		if closeErr != nil {
 			return fmt.Errorf("close %q after upload: %w", localPath, closeErr)
@@ -141,8 +156,13 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 // localDir. Keys containing a further path separator are skipped — a
 // snapshot directory's contents are flat, so any such key wasn't written by
 // UploadDir.
-func (d *s3Destination) DownloadDir(ctx context.Context, localDir string) error {
-	downloader := manager.NewDownloader(d.client) //nolint:staticcheck // see UploadDir's note on manager.Uploader
+func (d *s3Destination) DownloadDir(
+	ctx context.Context,
+	localDir string,
+) error {
+	downloader := manager.NewDownloader(
+		d.client,
+	) //nolint:staticcheck // see UploadDir's note on manager.Uploader
 	listInput := &s3.ListObjectsV2Input{Bucket: &d.bucket}
 	if d.prefix != "" {
 		p := d.prefix + "/"
@@ -170,16 +190,29 @@ func (d *s3Destination) DownloadDir(ctx context.Context, localDir string) error 
 			if err != nil {
 				return fmt.Errorf("create %q for download: %w", localPath, err)
 			}
-			_, downloadErr := downloader.Download(ctx, f, &s3.GetObjectInput{ //nolint:staticcheck
-				Bucket: &d.bucket,
-				Key:    obj.Key,
-			})
+			_, downloadErr := downloader.Download(
+				ctx,
+				f,
+				&s3.GetObjectInput{ //nolint:staticcheck
+					Bucket: &d.bucket,
+					Key:    obj.Key,
+				},
+			)
 			closeErr := f.Close()
 			if downloadErr != nil {
-				return fmt.Errorf("download s3://%s/%s: %w", d.bucket, *obj.Key, downloadErr)
+				return fmt.Errorf(
+					"download s3://%s/%s: %w",
+					d.bucket,
+					*obj.Key,
+					downloadErr,
+				)
 			}
 			if closeErr != nil {
-				return fmt.Errorf("close %q after download: %w", localPath, closeErr)
+				return fmt.Errorf(
+					"close %q after download: %w",
+					localPath,
+					closeErr,
+				)
 			}
 		}
 	}
@@ -191,7 +224,9 @@ func (d *s3Destination) DownloadDir(ctx context.Context, localDir string) error 
 // matching how SnapshotToCloud uploads — see its doc comment) via S3's
 // delimiter-based listing, then fetches and parses just each one's
 // manifest.json rather than downloading the whole snapshot.
-func (d *s3Destination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, error) {
+func (d *s3Destination) ListSnapshots(
+	ctx context.Context,
+) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
 		listPrefix = d.prefix + "/"
@@ -210,13 +245,21 @@ func (d *s3Destination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, err
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list s3://%s/%s: %w", d.bucket, d.prefix, err)
+			return nil, fmt.Errorf(
+				"list s3://%s/%s: %w",
+				d.bucket,
+				d.prefix,
+				err,
+			)
 		}
 		for _, cp := range page.CommonPrefixes {
 			if cp.Prefix == nil {
 				continue
 			}
-			snapshotID := strings.TrimSuffix(strings.TrimPrefix(*cp.Prefix, listPrefix), "/")
+			snapshotID := strings.TrimSuffix(
+				strings.TrimPrefix(*cp.Prefix, listPrefix),
+				"/",
+			)
 			if snapshotID == "" {
 				continue
 			}
@@ -242,7 +285,10 @@ func (d *s3Destination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, err
 				)
 				continue
 			}
-			entries = append(entries, SnapshotEntry{ID: snapshotID, Manifest: manifest})
+			entries = append(
+				entries,
+				SnapshotEntry{ID: snapshotID, Manifest: manifest},
+			)
 		}
 	}
 	return entries, errors.Join(problems...)
@@ -269,7 +315,10 @@ func isS3NotFoundError(err error) bool {
 // fetchManifest downloads and parses just the manifest.json for
 // snapshotID, without downloading the rest of that snapshot's (possibly
 // very large) blob/metadata backups.
-func (d *s3Destination) fetchManifest(ctx context.Context, snapshotID string) (Manifest, error) {
+func (d *s3Destination) fetchManifest(
+	ctx context.Context,
+	snapshotID string,
+) (Manifest, error) {
 	key := d.objectKey(path.Join(snapshotID, ManifestFileName))
 	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &d.bucket,
@@ -323,7 +372,12 @@ func (d *s3Destination) Delete(ctx context.Context) error {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return fmt.Errorf("list s3://%s/%s for delete: %w", d.bucket, d.prefix, err)
+			return fmt.Errorf(
+				"list s3://%s/%s for delete: %w",
+				d.bucket,
+				d.prefix,
+				err,
+			)
 		}
 		for _, obj := range page.Contents {
 			if obj.Key == nil {
@@ -333,7 +387,12 @@ func (d *s3Destination) Delete(ctx context.Context) error {
 				Bucket: &d.bucket,
 				Key:    obj.Key,
 			}); err != nil {
-				return fmt.Errorf("delete s3://%s/%s: %w", d.bucket, *obj.Key, err)
+				return fmt.Errorf(
+					"delete s3://%s/%s: %w",
+					d.bucket,
+					*obj.Key,
+					err,
+				)
 			}
 		}
 	}

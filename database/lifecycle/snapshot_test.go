@@ -37,7 +37,13 @@ func TestSnapshotWritesManifestAndBackupFiles(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "snap1")
 	m, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		context.Background(),
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)
@@ -60,7 +66,13 @@ func TestSnapshotRefusesExistingDirectory(t *testing.T) {
 	dir := t.TempDir() // already exists
 
 	_, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		context.Background(),
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
 	)
 	require.Error(t, err)
 }
@@ -76,7 +88,9 @@ func TestSnapshotRefusesExistingDirectory(t *testing.T) {
 // out from under it. This simulates the loser's view directly: a dir
 // that already contains another caller's file when Snapshot is invoked
 // must be refused without that file being removed.
-func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(t *testing.T) {
+func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 
 	dir := filepath.Join(t.TempDir(), "snap-contested")
@@ -85,7 +99,13 @@ func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(t *testing.T)
 	require.NoError(t, os.WriteFile(winnerFile, []byte("winner's data"), 0o644))
 
 	_, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		context.Background(),
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
 	)
 	require.Error(t, err)
 
@@ -126,7 +146,13 @@ func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
 			defer wg.Done()
 			<-start
 			_, err := lifecycle.Snapshot(
-				context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+				context.Background(),
+				db,
+				dir,
+				lifecycle.TriggerManual,
+				"test-version",
+				"badger",
+				"sqlite",
 			)
 			errs[i] = err
 		}(i)
@@ -140,13 +166,22 @@ func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
 			successes++
 		}
 	}
-	require.Equal(t, 1, successes, "exactly one concurrent Snapshot call to the same dir must succeed")
+	require.Equal(
+		t,
+		1,
+		successes,
+		"exactly one concurrent Snapshot call to the same dir must succeed",
+	)
 
 	require.DirExists(t, dir)
 	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
 	require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
 	m, err := lifecycle.ReadManifest(dir)
-	require.NoError(t, err, "the winner's manifest must be intact, not deleted by a losing caller")
+	require.NoError(
+		t,
+		err,
+		"the winner's manifest must be intact, not deleted by a losing caller",
+	)
 	require.NotZero(t, m.BlobBytes)
 	require.NotZero(t, m.MetadataBytes)
 }
@@ -191,13 +226,24 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "snap-concurrent")
 	_, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		context.Background(),
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
 	)
 	wg.Wait()
 	require.NoError(t, err)
 
 	restoredDir := filepath.Join(t.TempDir(), "restored")
-	_, err = lifecycle.Restore(context.Background(), newTestStorageHost(t), nil, dir, restoredDir,
+	_, err = lifecycle.Restore(
+		context.Background(),
+		newTestStorageHost(t),
+		nil,
+		dir,
+		restoredDir,
 		lifecycle.RestoreStorageConfig{},
 	)
 	require.NoError(t, err)
@@ -215,7 +261,13 @@ func TestSnapshotCleansUpOnFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := lifecycle.Snapshot(
-		ctx, db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		ctx,
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
 	)
 	require.Error(t, err)
 	require.NoDirExists(t, dir)

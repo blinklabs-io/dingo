@@ -892,7 +892,8 @@ database:
 	defer os.Remove(tmpFile)
 
 	_, err = LoadConfig(tmpFile)
-	if err == nil || !strings.Contains(err.Error(), "field database not found") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "field database not found") {
 		t.Fatalf("expected legacy database section rejection, got %v", err)
 	}
 }
@@ -1358,7 +1359,10 @@ network: "preview"
 		t.Fatalf("expected env midnight port 50070, got %d", cfg.Midnight.Port)
 	}
 	if cfg.Midnight.Host != "127.0.0.3" {
-		t.Fatalf("expected env midnight host 127.0.0.3, got %q", cfg.Midnight.Host)
+		t.Fatalf(
+			"expected env midnight host 127.0.0.3, got %q",
+			cfg.Midnight.Host,
+		)
 	}
 }
 
@@ -1435,7 +1439,12 @@ func TestLoad_MidnightNetworkDefaults(t *testing.T) {
 			want.Port = 0
 			want.Host = ""
 			if got != want {
-				t.Fatalf("network %q: expected %+v, got %+v", tc.network, want, got)
+				t.Fatalf(
+					"network %q: expected %+v, got %+v",
+					tc.network,
+					want,
+					got,
+				)
 			}
 		})
 	}
@@ -1458,7 +1467,10 @@ midnight:
 		t.Fatalf("load config: %v", err)
 	}
 	if cfg.Midnight.CNightPolicyID != "explicit-override" {
-		t.Fatalf("expected explicit override, got %q", cfg.Midnight.CNightPolicyID)
+		t.Fatalf(
+			"expected explicit override, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
 	}
 	// Other fields should still get the network default.
 	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["preview"].CouncilPolicyID {
@@ -1549,7 +1561,10 @@ func TestLoad_StorageModeDefault(t *testing.T) {
 	}
 
 	if cfg.StorageMode != "" {
-		t.Errorf("expected StorageMode default to be empty, got %q", cfg.StorageMode)
+		t.Errorf(
+			"expected StorageMode default to be empty, got %q",
+			cfg.StorageMode,
+		)
 	}
 }
 

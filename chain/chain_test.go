@@ -265,7 +265,10 @@ func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
 
 	block, err := c.BlockBeforeSlot(40)
 	if err != nil {
-		t.Fatalf("unexpected error looking up canonical block before slot: %s", err)
+		t.Fatalf(
+			"unexpected error looking up canonical block before slot: %s",
+			err,
+		)
 	}
 	if got, want := block.Slot, testBlocks[1].MockSlot; got != want {
 		t.Fatalf("unexpected canonical block slot: got %d, want %d", got, want)
@@ -305,11 +308,26 @@ func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 	}{
 		{name: "below all blocks", slot: 0, wantFound: false},
 		{name: "just above genesis", slot: 1, wantFound: true, wantSlot: 0},
-		{name: "at a block slot returns the prior block", slot: 20, wantFound: true, wantSlot: 0},
-		{name: "just above a block slot", slot: 21, wantFound: true, wantSlot: 20},
+		{
+			name:      "at a block slot returns the prior block",
+			slot:      20,
+			wantFound: true,
+			wantSlot:  0,
+		},
+		{
+			name:      "just above a block slot",
+			slot:      21,
+			wantFound: true,
+			wantSlot:  20,
+		},
 		{name: "between blocks", slot: 55, wantFound: true, wantSlot: 40},
 		{name: "just above the tip", slot: 101, wantFound: true, wantSlot: 100},
-		{name: "far above the tip", slot: 100_000, wantFound: true, wantSlot: 100},
+		{
+			name:      "far above the tip",
+			slot:      100_000,
+			wantFound: true,
+			wantSlot:  100,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -318,7 +336,9 @@ func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 				if !errors.Is(err, models.ErrBlockNotFound) {
 					t.Fatalf(
 						"slot %d: expected ErrBlockNotFound, got slot=%d err=%v",
-						tc.slot, block.Slot, err,
+						tc.slot,
+						block.Slot,
+						err,
 					)
 				}
 				return
@@ -389,7 +409,10 @@ func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
 		expectedIdx--
 	}
 	// Subsequent calls should keep returning ErrIteratorChainOrigin.
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after exhaustion, got %v",
 			err,
@@ -470,7 +493,10 @@ func TestChainIteratorReverseFromMiddleInclusive(t *testing.T) {
 			)
 		}
 	}
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after exhaustion, got %v",
 			err,
@@ -494,7 +520,10 @@ func TestChainIteratorReverseFromOrigin(t *testing.T) {
 		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
 	}
 	defer iter.Cancel()
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"reverse from origin should return ErrIteratorChainOrigin immediately, got %v",
 			err,
@@ -523,7 +552,10 @@ func TestChainIteratorReverseFromGenesisNonInclusive(t *testing.T) {
 	}
 	defer iter.Cancel()
 	// The genesis block has no predecessor; non-inclusive must terminate.
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"non-inclusive reverse from genesis: expected ErrIteratorChainOrigin, got %v",
 			err,
@@ -635,7 +667,8 @@ func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
 		if err != nil {
 			t.Fatalf(
 				"unexpected error continuing reverse after rollback at idx %d: %s",
-				i, err,
+				i,
+				err,
 			)
 		}
 		gotHash := hex.EncodeToString(next.Block.Hash)
@@ -647,7 +680,10 @@ func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
 			)
 		}
 	}
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after post-rollback exhaustion, got %v",
 			err,
@@ -691,7 +727,10 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 		t.Fatalf("unexpected rollback error: %s", err)
 	}
 	// The iterator must terminate at origin — chain is empty.
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after rollback to origin, got %v",
 			err,
@@ -707,7 +746,10 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 			)
 		}
 	}
-	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+	if _, err := iter.Next(false); !errors.Is(
+		err,
+		chain.ErrIteratorChainOrigin,
+	) {
 		t.Fatalf(
 			"reverse iterator must stay terminated after chain regrowth; got %v",
 			err,
@@ -897,7 +939,9 @@ func TestChainHeaderRange(t *testing.T) {
 	}
 }
 
-func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(t *testing.T) {
+func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(
+	t *testing.T,
+) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
@@ -1815,7 +1859,10 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 		}
 	}
 	for idx := uint64(4); idx <= 6; idx++ {
-		if _, err := db.BlockByIndex(idx, nil); !errors.Is(err, models.ErrBlockNotFound) {
+		if _, err := db.BlockByIndex(idx, nil); !errors.Is(
+			err,
+			models.ErrBlockNotFound,
+		) {
 			t.Fatalf(
 				"expected block index %d to be pruned after rewind, got: %v",
 				idx,
@@ -2117,7 +2164,11 @@ func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
 
 	const forkIdx = 2 // primary block 3 (0-based index 2)
 	if len(primaryBlocks) <= forkIdx {
-		t.Fatalf("expected at least %d primary blocks, got %d", forkIdx+1, len(primaryBlocks))
+		t.Fatalf(
+			"expected at least %d primary blocks, got %d",
+			forkIdx+1,
+			len(primaryBlocks),
+		)
 	}
 	forkPoint := ocommon.Point{
 		Slot: primaryBlocks[forkIdx].SlotNumber(),
@@ -2226,7 +2277,11 @@ func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
 
 	const forkIdx = 2 // primary block 3
 	if len(primaryBlocks) <= forkIdx {
-		t.Fatalf("expected at least %d primary blocks, got %d", forkIdx+1, len(primaryBlocks))
+		t.Fatalf(
+			"expected at least %d primary blocks, got %d",
+			forkIdx+1,
+			len(primaryBlocks),
+		)
 	}
 	forkPoint := ocommon.Point{
 		Slot: primaryBlocks[forkIdx].SlotNumber(),
@@ -2319,7 +2374,10 @@ func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
 		)
 	}
 	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
-		t.Fatalf("expected ErrIteratorChainTip after rollback signal, got: %v", err)
+		t.Fatalf(
+			"expected ErrIteratorChainTip after rollback signal, got: %v",
+			err,
+		)
 	}
 
 	// A fresh iterator should now reach exactly the rolled-back fork
@@ -2477,7 +2535,10 @@ func TestChainMultipleNonPrimaryChainsIndependentRollback(t *testing.T) {
 				)
 			}
 		}
-		if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		if _, err := iter.Next(false); !errors.Is(
+			err,
+			chain.ErrIteratorChainTip,
+		) {
 			t.Fatalf(
 				"%s expected ErrIteratorChainTip, got: %v",
 				name, err,

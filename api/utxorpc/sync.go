@@ -101,7 +101,9 @@ func (s *syncServiceServer) DumpHistory(
 	maxItems := req.Msg.GetMaxItems()     // uint32; 0 = omitted in protobuf
 	fieldMask := req.Msg.GetFieldMask()
 
-	maxAllowed := uint32(s.utxorpc.config.MaxHistoryItems) // #nosec G115 -- bounded by DefaultMaxHistoryItems (10000)
+	maxAllowed := uint32(
+		s.utxorpc.config.MaxHistoryItems,
+	) // #nosec G115 -- bounded by DefaultMaxHistoryItems (10000)
 
 	// Reject explicit max_items above server cap. Omitted field is 0; see
 	// effectiveDumpHistoryMaxItems.

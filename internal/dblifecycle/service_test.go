@@ -146,7 +146,10 @@ func TestServiceTruncateRequiresAtLeastOneTarget(t *testing.T) {
 // and sets the tip to the last one, mirroring
 // database/lifecycle_test.buildTestChain -- used to exercise ResolveTarget
 // against real, resolvable blocks.
-func buildResolveTargetTestChain(t *testing.T, n uint64) (*database.Database, []models.Block) {
+func buildResolveTargetTestChain(
+	t *testing.T,
+	n uint64,
+) (*database.Database, []models.Block) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
@@ -228,7 +231,12 @@ func TestServiceSnapshotRefusesCommitTimestampMismatch(t *testing.T) {
 	seedCommitTimestampMismatch(t, dir)
 
 	svc := dblifecycle.NewService(testConfig(dir), nil, nil)
-	_, err := svc.Snapshot(context.Background(), filepath.Join(t.TempDir(), "snap"), "", "")
+	_, err := svc.Snapshot(
+		context.Background(),
+		filepath.Join(t.TempDir(), "snap"),
+		"",
+		"",
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "inconsistent")
 }
@@ -296,7 +304,12 @@ func TestServiceDelegatesToLiveNodeWhenSet(t *testing.T) {
 	live := &fakeLiveNode{}
 	svc.SetLiveNode(live)
 
-	snapManifest, err := svc.Snapshot(context.Background(), "/some/dest/dir", "", "")
+	snapManifest, err := svc.Snapshot(
+		context.Background(),
+		"/some/dest/dir",
+		"",
+		"",
+	)
 	require.NoError(t, err)
 	require.True(t, live.snapshotCalled)
 	require.Equal(t, "/some/dest/dir", live.snapshotDir)
@@ -309,9 +322,12 @@ func TestServiceDelegatesToLiveNodeWhenSet(t *testing.T) {
 	require.Equal(t, "fake-live-restore", manifest.DingoVersion)
 
 	slot := uint64(42)
-	blocksRemoved, err := svc.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot: &slot,
-	})
+	blocksRemoved, err := svc.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{
+			Slot: &slot,
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), blocksRemoved)
 	require.True(t, live.truncateCalled)

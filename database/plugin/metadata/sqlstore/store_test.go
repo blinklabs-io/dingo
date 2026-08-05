@@ -126,7 +126,10 @@ func TestSumUint64RowsPreservesFullRange(t *testing.T) {
 	store := newTestStore(t)
 	_, err := store.writeDB.Exec("CREATE TABLE amounts (amount TEXT NOT NULL)")
 	require.NoError(t, err)
-	_, err = store.writeDB.Exec("INSERT INTO amounts (amount) VALUES (?)", "18446744073709551615")
+	_, err = store.writeDB.Exec(
+		"INSERT INTO amounts (amount) VALUES (?)",
+		"18446744073709551615",
+	)
 	require.NoError(t, err)
 	db, err := store.readDBFromTxn(nil)
 	require.NoError(t, err)
@@ -188,12 +191,15 @@ CREATE TABLE reward_live_stake (
 	key := []byte{0x03, 0x04}
 	_, err = store.writeDB.Exec(
 		"INSERT INTO account (credential_tag, staking_key, pool, active) VALUES (0, ?, ?, TRUE)",
-		key, pool,
+		key,
+		pool,
 	)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(
 		"INSERT INTO reward_live_stake (credential_tag, staking_key, utxo_stake, calculation_version) VALUES (0, ?, ?, ?)",
-		key, "9", models.RewardStakeCalculationVersion,
+		key,
+		"9",
+		models.RewardStakeCalculationVersion,
 	)
 	require.NoError(t, err)
 	stakes, delegators, err := store.GetStakeByPools([][]byte{pool}, nil)

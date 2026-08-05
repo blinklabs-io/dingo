@@ -233,7 +233,11 @@ const (
 // reflects the reward calculation alone: reserves lose incentives and regain
 // rewards not paid or sent to treasury, treasury receives the tax and
 // unspendable rewards, and fees are cleared.
-func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error) {
+func Calculate(
+	pots Pots,
+	snapshot Snapshot,
+	params Parameters,
+) (*Result, error) {
 	if err := validateParameters(params); err != nil {
 		return nil, err
 	}
@@ -261,7 +265,11 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 			ErrInvalidParameters,
 		)
 	}
-	efficiency := rewardEfficiency(totalBlocks, expectedBlocks, params.Decentralization)
+	efficiency := rewardEfficiency(
+		totalBlocks,
+		expectedBlocks,
+		params.Decentralization,
+	)
 	incentives, err := floorMulChecked(
 		minRat(oneRat(), efficiency),
 		params.MonetaryExpansion,
@@ -274,14 +282,20 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 	if overflow {
 		return nil, fmt.Errorf("%w: reward pot overflow", ErrInvalidParameters)
 	}
-	treasuryTax, err := floorMulChecked(params.TreasuryExpansion, uintRat(totalRewardPot))
+	treasuryTax, err := floorMulChecked(
+		params.TreasuryExpansion,
+		uintRat(totalRewardPot),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate treasury tax: %w", err)
 	}
 	availableRewards := totalRewardPot - treasuryTax
 	treasuryAfterTax, overflow := addUint64(pots.Treasury, treasuryTax)
 	if overflow {
-		return nil, fmt.Errorf("%w: treasury tax overflow", ErrInvalidParameters)
+		return nil, fmt.Errorf(
+			"%w: treasury tax overflow",
+			ErrInvalidParameters,
+		)
 	}
 
 	totalCirculation := params.MaxLovelaceSupply - pots.Reserves
@@ -450,7 +464,10 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 		result.PoolRewards[i] = poolReward
 	}
 
-	accounted, overflow := addUint64(result.EffectiveRewards, result.Unspendable)
+	accounted, overflow := addUint64(
+		result.EffectiveRewards,
+		result.Unspendable,
+	)
 	if overflow || accounted > result.AvailableRewards {
 		return nil, fmt.Errorf(
 			"%w: rewards exceed available pot",
@@ -592,7 +609,10 @@ func (r *Result) addUndistributedToReserves() error {
 func (r *Result) addUnspendableToTreasury() error {
 	treasury, overflow := addUint64(r.UpdatedPots.Treasury, r.Unspendable)
 	if overflow {
-		return fmt.Errorf("%w: unspendable treasury overflow", ErrInvalidParameters)
+		return fmt.Errorf(
+			"%w: unspendable treasury overflow",
+			ErrInvalidParameters,
+		)
 	}
 	r.UpdatedPots.Treasury = treasury
 	return nil
@@ -654,7 +674,11 @@ func (params Parameters) Validate() error {
 // it to the [0,1] interval and positive rejects a zero value. It returns an
 // ErrInvalidParameters error so callers can convert malformed snapshot/config
 // data into an error instead of dereferencing a nil *big.Rat.
-func validateRatParameter(name string, rat *big.Rat, unit, positive bool) error {
+func validateRatParameter(
+	name string,
+	rat *big.Rat,
+	unit, positive bool,
+) error {
 	if rat == nil {
 		return fmt.Errorf("%w: missing %s", ErrInvalidParameters, name)
 	}
@@ -716,7 +740,10 @@ func validateParameters(params Parameters) error {
 		}
 	}
 	if params.OptimalPoolCount == 0 {
-		return fmt.Errorf("%w: optimal pool count is zero", ErrInvalidParameters)
+		return fmt.Errorf(
+			"%w: optimal pool count is zero",
+			ErrInvalidParameters,
+		)
 	}
 	if params.EpochLength == 0 {
 		return fmt.Errorf("%w: epoch length is zero", ErrInvalidParameters)
@@ -932,7 +959,10 @@ func validateCredentialEligibility(
 	return nil
 }
 
-func poolDelegatorStake(delegators []Delegator, credential Credential) (uint64, bool) {
+func poolDelegatorStake(
+	delegators []Delegator,
+	credential Credential,
+) (uint64, bool) {
 	for _, delegator := range delegators {
 		if delegator.Credential == credential {
 			return delegator.Stake, true
@@ -1344,7 +1374,10 @@ func leaderRewardChecked(
 	}
 	ret, overflow := addUint64(cost, marginReward)
 	if overflow {
-		return 0, fmt.Errorf("%w: leader reward overflow", ErrRewardAmountOverflow)
+		return 0, fmt.Errorf(
+			"%w: leader reward overflow",
+			ErrRewardAmountOverflow,
+		)
 	}
 	return ret, nil
 }
@@ -1488,7 +1521,11 @@ func floorRatChecked(value *big.Rat) (uint64, error) {
 	den := value.Denom()
 	q := new(big.Int).Quo(num, den)
 	if !q.IsUint64() {
-		return 0, fmt.Errorf("%w: floor %s", ErrRewardAmountOverflow, q.String())
+		return 0, fmt.Errorf(
+			"%w: floor %s",
+			ErrRewardAmountOverflow,
+			q.String(),
+		)
 	}
 	return q.Uint64(), nil
 }

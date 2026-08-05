@@ -23,7 +23,9 @@ import (
 
 // GetMidnightCandidates returns the live, materialized UTxOs at the configured
 // committee-candidate address so the in-memory index survives restarts.
-func (d *Database) GetMidnightCandidates(address string) ([]models.Utxo, error) {
+func (d *Database) GetMidnightCandidates(
+	address string,
+) ([]models.Utxo, error) {
 	addr, err := gouroboros.NewAddress(address)
 	if err != nil {
 		return nil, fmt.Errorf("parse Midnight candidate address: %w", err)
@@ -51,7 +53,11 @@ func (d *Database) GetLatestMidnightGovernanceDatum(
 	datumType string,
 	blockNumber uint64,
 ) (*models.MidnightGovernanceDatum, error) {
-	return d.metadata.GetLatestMidnightGovernanceDatum(datumType, blockNumber, nil)
+	return d.metadata.GetLatestMidnightGovernanceDatum(
+		datumType,
+		blockNumber,
+		nil,
+	)
 }
 
 // GetLatestMidnightAriadneParams returns the most recently stored Ariadne

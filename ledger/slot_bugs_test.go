@@ -27,7 +27,10 @@ import (
 // futureSystemStartCfg returns a CardanoNodeConfig whose Shelley
 // SystemStart is in the future, simulating a node that booted before the
 // configured genesis time (clock skew, misconfig, or early bring-up).
-func futureSystemStartCfg(t *testing.T, future time.Time) *cardano.CardanoNodeConfig {
+func futureSystemStartCfg(
+	t *testing.T,
+	future time.Time,
+) *cardano.CardanoNodeConfig {
 	t.Helper()
 	var sb strings.Builder
 	sb.WriteString(`{
@@ -40,7 +43,10 @@ func futureSystemStartCfg(t *testing.T, future time.Time) *cardano.CardanoNodeCo
 	sb.WriteString(`"
 	}`)
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(sb.String())))
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(sb.String())),
+	)
 	return cfg
 }
 
@@ -71,9 +77,12 @@ func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
 	// Far-future time; well past any "near now" tolerance.
 	future := time.Now().Add(24 * time.Hour)
 	_, err := ls.TimeToSlot(future)
-	assert.Error(t, err,
+	assert.Error(
+		t,
+		err,
 		"TimeToSlot must reject far-future times when the epoch cache is empty; "+
-			"the nearNowSlot fallback is only for times within ±5s of now")
+			"the nearNowSlot fallback is only for times within ±5s of now",
+	)
 }
 
 // TestNearNowSlot_FutureSystemStartReturnsZero pins that nearNowSlot does
@@ -84,6 +93,10 @@ func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
 func TestNearNowSlot_FutureSystemStartReturnsZero(t *testing.T) {
 	cfg := futureSystemStartCfg(t, time.Now().Add(time.Hour))
 	got := nearNowSlot(cfg.ShelleyGenesis())
-	assert.Equal(t, uint64(0), got,
-		"nearNowSlot with SystemStart in the future must return 0, not a huge wrapped uint64")
+	assert.Equal(
+		t,
+		uint64(0),
+		got,
+		"nearNowSlot with SystemStart in the future must return 0, not a huge wrapped uint64",
+	)
 }

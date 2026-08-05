@@ -115,7 +115,10 @@ func TestNewEraMismatchError_ErrorStringMentionsBothEras(t *testing.T) {
 // data, not the unstructured strings the chain emitted before.
 func TestEraMismatchInterop_FullChain(t *testing.T) {
 	// Step 1: dingo produces typed error
-	original := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
+	original := newEraMismatchError(
+		eras.ShelleyEraDesc.Id,
+		eras.ByronEraDesc.Id,
+	)
 
 	// Step 2: mempool/forging wraps it (mirrors mempool.go:757
 	// `fmt.Errorf("validate transaction: %w", err)`).

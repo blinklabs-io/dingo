@@ -275,7 +275,10 @@ func LoadDRepVotingState(
 		// avoid the N+1 round-trip that the per-DRep lookup produced.
 		creds := make([]models.StakeCredentialRef, len(dreps))
 		for i, drep := range dreps {
-			creds[i] = models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
+			creds[i] = models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			}
 		}
 		powers, err = db.GetDRepVotingPowerBatch(creds, expiryEpoch, txn)
 		if err != nil {
@@ -335,7 +338,10 @@ func tallyDRepVotes(
 		}
 
 		for _, drep := range state.Dreps {
-			ref := models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
+			ref := models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			}
 			power := state.Powers[ref.MapKey()]
 			tally.DRepTotalStake += power
 

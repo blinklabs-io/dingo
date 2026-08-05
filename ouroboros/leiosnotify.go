@@ -355,7 +355,9 @@ func (o *Ouroboros) BroadcastEndorserBlock(
 	if err := o.storeLeiosEndorserBlock(point, data, txsRaw); err != nil {
 		return fmt.Errorf("store forged endorser block: %w", err)
 	}
-	o.leiosEBLog.append(leiosForgedEBEntry{point: &point, size: uint64(len(data))})
+	o.leiosEBLog.append(
+		leiosForgedEBEntry{point: &point, size: uint64(len(data))},
+	)
 	return nil
 }
 
@@ -1171,7 +1173,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	deferVerification bool,
 ) error {
 	if o.LedgerState == nil {
-		return errors.New("cannot accept leios announcement without ledger state")
+		return errors.New(
+			"cannot accept leios announcement without ledger state",
+		)
 	}
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
 	if err != nil {
@@ -1179,14 +1183,23 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()
 	if !ok {
-		return errors.New("ranking-block header has no valid endorser-block announcement")
+		return errors.New(
+			"ranking-block header has no valid endorser-block announcement",
+		)
 	}
 	currentSlot, slotErr := o.LedgerState.CurrentSlot()
 	if slotErr != nil {
-		return fmt.Errorf("read current slot for announcement validation: %w", slotErr)
+		return fmt.Errorf(
+			"read current slot for announcement validation: %w",
+			slotErr,
+		)
 	}
 	if header.SlotNumber() > currentSlot {
-		return fmt.Errorf("announcement slot %d is ahead of current slot %d", header.SlotNumber(), currentSlot)
+		return fmt.Errorf(
+			"announcement slot %d is ahead of current slot %d",
+			header.SlotNumber(),
+			currentSlot,
+		)
 	}
 	announcementStart, timeErr := o.LedgerState.SlotToTime(header.SlotNumber())
 	if timeErr != nil {
@@ -1194,7 +1207,10 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	}
 	age := time.Since(announcementStart)
 	if age < 0 {
-		return fmt.Errorf("announcement slot %d is in the future", header.SlotNumber())
+		return fmt.Errorf(
+			"announcement slot %d is in the future",
+			header.SlotNumber(),
+		)
 	}
 	if age > leiosNotifyMaxAnnouncementAge {
 		return fmt.Errorf("announcement is stale by %s", age)
@@ -1221,7 +1237,14 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if age > leiosNotifyRelayAnnouncementAge {
 		// The announcement is still valid for the receiver, but the w31
 		// relay bound prevents an old message from propagating indefinitely.
-		return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, false)
+		return o.recordLeiosAnnouncement(
+			raw,
+			ebHash,
+			ebSize,
+			header,
+			source,
+			false,
+		)
 	}
 	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
 }
@@ -1249,11 +1272,18 @@ func (o *Ouroboros) deferLeiosAnnouncement(
 // relayed before this validation succeeds.
 func (o *Ouroboros) retryDeferredLeiosAnnouncements() {
 	o.leiosDeferredMu.Lock()
-	pending := make(map[string]leiosDeferredAnnouncement, len(o.leiosDeferredAnnouncements))
+	pending := make(
+		map[string]leiosDeferredAnnouncement,
+		len(o.leiosDeferredAnnouncements),
+	)
 	maps.Copy(pending, o.leiosDeferredAnnouncements)
 	o.leiosDeferredMu.Unlock()
 	for key, announcement := range pending {
-		err := o.acceptLeiosAnnouncementInternal(announcement.raw, announcement.source, false)
+		err := o.acceptLeiosAnnouncementInternal(
+			announcement.raw,
+			announcement.source,
+			false,
+		)
 		if err == nil || !ledger.IsHeaderVerificationDeferred(err) {
 			o.leiosDeferredMu.Lock()
 			delete(o.leiosDeferredAnnouncements, key)
@@ -1288,7 +1318,10 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 			delete(o.leiosAnnouncements, key)
 		}
 	}
-	o.leiosAnnouncementSizes = make(map[string]uint64, len(o.leiosAnnouncements))
+	o.leiosAnnouncementSizes = make(
+		map[string]uint64,
+		len(o.leiosAnnouncements),
+	)
 	o.leiosAnnouncementElections = make(map[string]map[string]struct{})
 	for key, announcement := range o.leiosAnnouncements {
 		o.leiosAnnouncementSizes[string(announcement.ebHash.Bytes())] = announcement.ebSize
@@ -1325,12 +1358,18 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		o.leiosAnnouncementElections = make(map[string]map[string]struct{})
 	}
 	ebKey := string(ebHash.Bytes())
-	if previousSize, exists := o.leiosAnnouncementSizes[ebKey]; exists && previousSize != ebSize {
-		return errors.New("announcement size is inconsistent with a previously observed endorser block")
+	if previousSize, exists := o.leiosAnnouncementSizes[ebKey]; exists &&
+		previousSize != ebSize {
+		return errors.New(
+			"announcement size is inconsistent with a previously observed endorser block",
+		)
 	}
 	if previous, exists := o.leiosAnnouncements[key]; exists {
-		if previous.ebHash != ebHash || previous.ebSize != ebSize || string(previous.raw) != string(raw) {
-			return errors.New("announcement is inconsistent with a previously observed ranking block")
+		if previous.ebHash != ebHash || previous.ebSize != ebSize ||
+			string(previous.raw) != string(raw) {
+			return errors.New(
+				"announcement is inconsistent with a previously observed ranking block",
+			)
 		}
 		return nil
 	}
@@ -1342,16 +1381,22 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		o.leiosAnnouncementElections[electionKey] = electionAnnouncements
 	}
 	if len(electionAnnouncements) >= 2 {
-		return errors.New("announcement is the third distinct message for a previously observed election")
+		return errors.New(
+			"announcement is the third distinct message for a previously observed election",
+		)
 	}
 	electionAnnouncements[key] = struct{}{}
 	o.leiosAnnouncements[key] = leiosAnnouncement{
-		raw: append([]byte(nil), raw...), ebHash: ebHash, ebSize: ebSize, slot: header.SlotNumber(),
+		raw: append(
+			[]byte(nil),
+			raw...), ebHash: ebHash, ebSize: ebSize, slot: header.SlotNumber(),
 		electionKey: electionKey,
 	}
 	o.leiosAnnouncementSizes[ebKey] = ebSize
 	if relay {
-		o.leiosEBLog.append(leiosForgedEBEntry{announcement: append([]byte(nil), raw...)})
+		o.leiosEBLog.append(
+			leiosForgedEBEntry{announcement: append([]byte(nil), raw...)},
+		)
 	}
 	return nil
 }
@@ -1360,7 +1405,11 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 // ranking-block header for LeiosNotify diffusion.
 func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
 	if err := o.acceptLeiosAnnouncement(raw, "local"); err != nil {
-		o.config.Logger.Debug("suppressing local leios announcement", "error", err)
+		o.config.Logger.Debug(
+			"suppressing local leios announcement",
+			"error",
+			err,
+		)
 	}
 }
 

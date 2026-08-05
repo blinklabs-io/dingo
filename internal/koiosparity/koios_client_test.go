@@ -40,15 +40,17 @@ func newTestKoiosClient(baseURL string) *KoiosClient {
 
 func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
 	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if attempts.Add(1) == 1 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("<html>503 Service Unavailable</html>"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("<html>503 Service Unavailable</html>"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
@@ -60,21 +62,23 @@ func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
 
 func TestGetRetriesOnBodyReadFailure(t *testing.T) {
 	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if attempts.Add(1) == 1 {
-			// Declare a body longer than what's actually written so the
-			// server aborts the connection mid-transfer, forcing the
-			// client's io.ReadAll to fail with io.ErrUnexpectedEOF — a
-			// transient failure distinct from a non-2xx status or a
-			// connect-time transport error.
-			w.Header().Set("Content-Length", "1000")
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) == 1 {
+				// Declare a body longer than what's actually written so the
+				// server aborts the connection mid-transfer, forcing the
+				// client's io.ReadAll to fail with io.ErrUnexpectedEOF — a
+				// transient failure distinct from a non-2xx status or a
+				// connect-time transport error.
+				w.Header().Set("Content-Length", "1000")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":1}`))
+				return
+			}
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[{"epoch_no":1}`))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
-	}))
+			_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
@@ -87,11 +91,13 @@ func TestGetRetriesOnBodyReadFailure(t *testing.T) {
 
 func TestGetFailsAfterExhausting503Retries(t *testing.T) {
 	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("no server available"))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("no server available"))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
@@ -103,11 +109,13 @@ func TestGetFailsAfterExhausting503Retries(t *testing.T) {
 
 func TestGetDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
 	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte("Exceeded Tier Limit"))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("Exceeded Tier Limit"))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
@@ -115,8 +123,12 @@ func TestGetDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "daily tier quota exceeded"))
 	require.EqualValues(t, 1, attempts.Load())
-	require.ErrorIs(t, err, ErrKoiosPermanent,
-		"daily quota exhaustion must be classified permanent so Fetch aborts rather than retrying")
+	require.ErrorIs(
+		t,
+		err,
+		ErrKoiosPermanent,
+		"daily quota exhaustion must be classified permanent so Fetch aborts rather than retrying",
+	)
 }
 
 // TestGetDoesNotRetryOnAuthFailure covers the "hard 4xx" class (401/403 and
@@ -126,11 +138,13 @@ func TestGetDoesNotRetryOnDailyQuotaExceeded(t *testing.T) {
 // whole run instead of recording a misleading, isolated per-epoch failure.
 func TestGetDoesNotRetryOnAuthFailure(t *testing.T) {
 	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte("invalid API key"))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("invalid API key"))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
@@ -144,31 +158,38 @@ func TestGetDoesNotRetryOnAuthFailure(t *testing.T) {
 // transient failure that exhausts its retries (e.g. sustained 503s) must
 // remain an isolated, resumable per-epoch failure, not a hard abort.
 func TestGetExhausted503IsNotPermanent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("no server available"))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("no server available"))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
 	_, err := k.get(context.Background(), "/tip", -1, -1)
 	require.Error(t, err)
-	require.False(t, errors.Is(err, ErrKoiosPermanent),
-		"an exhausted transient 503 must remain retryable/isolated, not permanent")
+	require.False(
+		t,
+		errors.Is(err, ErrKoiosPermanent),
+		"an exhausted transient 503 must remain retryable/isolated, not permanent",
+	)
 }
 
 func TestGetRetriesBurst429HonoringRetryAfter(t *testing.T) {
 	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if attempts.Add(1) == 1 {
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte("Too many requests"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) == 1 {
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte("Too many requests"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)
@@ -198,19 +219,21 @@ func TestIsDailyQuotaExceeded(t *testing.T) {
 }
 
 func TestGetPoolFirstActiveEpochsTakesMinAcrossUpdates(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		// pool1re-registered: two updates, must take the earlier (500), not the
-		// current/latest one (1400) that /pool_list alone would report.
-		// pool1once: a single registration, no re-registration.
-		// pool1nullupdate: a null active_epoch_no row that must not corrupt the result.
-		_, _ = w.Write([]byte(`[
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// pool1re-registered: two updates, must take the earlier (500), not the
+			// current/latest one (1400) that /pool_list alone would report.
+			// pool1once: a single registration, no re-registration.
+			// pool1nullupdate: a null active_epoch_no row that must not corrupt the result.
+			_, _ = w.Write([]byte(`[
 			{"pool_id_bech32":"pool1re-registered","active_epoch_no":1400},
 			{"pool_id_bech32":"pool1re-registered","active_epoch_no":500},
 			{"pool_id_bech32":"pool1once","active_epoch_no":1356},
 			{"pool_id_bech32":"pool1nullupdate","active_epoch_no":null}
 		]`))
-	}))
+		}),
+	)
 	defer srv.Close()
 
 	k := newTestKoiosClient(srv.URL)

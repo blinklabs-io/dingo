@@ -52,10 +52,24 @@ func TestCompareEpochAggregatesIgnoresEpochInfoFeesAndRewards(t *testing.T) {
 		RewardAdaPotsPresent: true,
 	}
 
-	require.Empty(t, CompareEpochAggregates("preview", 10, koiosEpochInfo, dingo, nil, now, 0),
-		"epoch_info.fees/total_rewards must not be compared against reward_ada_pots")
-	require.Empty(t, CompareEpochTotals("preview", 10, koiosTotals, dingo, now),
-		"reward_ada_pots.Fees must match /totals.fees; totals.reward must not be compared at all")
+	require.Empty(
+		t,
+		CompareEpochAggregates(
+			"preview",
+			10,
+			koiosEpochInfo,
+			dingo,
+			nil,
+			now,
+			0,
+		),
+		"epoch_info.fees/total_rewards must not be compared against reward_ada_pots",
+	)
+	require.Empty(
+		t,
+		CompareEpochTotals("preview", 10, koiosTotals, dingo, now),
+		"reward_ada_pots.Fees must match /totals.fees; totals.reward must not be compared at all",
+	)
 }
 
 func TestCompareEpochTotals(t *testing.T) {
@@ -174,7 +188,11 @@ func TestCompareEpochTotalsRewardIsNeverCompared(t *testing.T) {
 	}
 
 	ms := CompareEpochTotals("preview", 12, koios, dingo, now)
-	require.Empty(t, ms, "totals_reward has no Dingo counterpart and must never be reported")
+	require.Empty(
+		t,
+		ms,
+		"totals_reward has no Dingo counterpart and must never be reported",
+	)
 }
 
 func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
@@ -196,7 +214,10 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 		FixedCost:      "340000000",
 		Margin:         "1/10",
 	}
-	require.Empty(t, ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}))
+	require.Empty(
+		t,
+		ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}),
+	)
 
 	dingo.FixedCost = "340000001"
 	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
@@ -360,7 +381,10 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 		MemberRewardPresent: true,
 		MemberRewardTotal:   "123456789",
 	}
-	require.Empty(t, ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}))
+	require.Empty(
+		t,
+		ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}),
+	)
 
 	// Reward calculation not yet finished for this pool/epoch: Dingo has no
 	// reward_pool_output row. This must NEVER read as a comparison pass —
@@ -369,7 +393,12 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	dingo.MemberRewardPresent = false
 	dingo.MemberRewardTotal = ""
 	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
-	require.Len(t, ms, 1, "a missing reward_pool_output row must never be silently skipped")
+	require.Len(
+		t,
+		ms,
+		1,
+		"a missing reward_pool_output row must never be silently skipped",
+	)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
 	require.Equal(t, StatusError, DetermineStatus(ms))

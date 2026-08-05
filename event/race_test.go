@@ -21,7 +21,9 @@ import (
 // Unsubscribe for a subId whose handler is still in flight, immediately
 // followed by UnsubscribeAndWait for the same subId) and confirms
 // UnsubscribeAndWait still blocks until the handler actually finishes.
-func TestUnsubscribeAndWaitStillWaitsAfterConcurrentPlainUnsubscribe(t *testing.T) {
+func TestUnsubscribeAndWaitStillWaitsAfterConcurrentPlainUnsubscribe(
+	t *testing.T,
+) {
 	eb := NewEventBus(nil, nil)
 	defer eb.Stop()
 	typ := EventType("race.unsubscribe-and-wait")
@@ -508,7 +510,11 @@ func TestSubscribeFuncDoneVisibleBeforeSubIdPublished(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			eb.SubscribeFuncWithBuffer(typ, DefaultSubscriberBuffer, func(Event) {})
+			eb.SubscribeFuncWithBuffer(
+				typ,
+				DefaultSubscriberBuffer,
+				func(Event) {},
+			)
 		}()
 		go func() {
 			defer wg.Done()

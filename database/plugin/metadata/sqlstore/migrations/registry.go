@@ -153,7 +153,11 @@ func translateSchemaSQL(statements []string, dialect string) []string {
 				value,
 				"VARCHAR(255)$1 DEFAULT '0'",
 			)
-			value = strings.ReplaceAll(value, "CREATE INDEX IF NOT EXISTS", "CREATE INDEX")
+			value = strings.ReplaceAll(
+				value,
+				"CREATE INDEX IF NOT EXISTS",
+				"CREATE INDEX",
+			)
 			value = strings.ReplaceAll(
 				value,
 				"CREATE UNIQUE INDEX IF NOT EXISTS",
@@ -195,18 +199,21 @@ func translateMySQLInlineKeys(
 	table string,
 	blobColumns map[string]map[string]struct{},
 ) string {
-	return mysqlInlineKeyPattern.ReplaceAllStringFunc(statement, func(value string) string {
-		match := mysqlInlineKeyPattern.FindStringSubmatch(value)
-		columns := strings.Split(match[2], ",")
-		for index, column := range columns {
-			trimmed := strings.TrimSpace(column)
-			name := strings.Trim(trimmed, "`")
-			if _, ok := blobColumns[table][name]; ok {
-				columns[index] = trimmed + "(255)"
+	return mysqlInlineKeyPattern.ReplaceAllStringFunc(
+		statement,
+		func(value string) string {
+			match := mysqlInlineKeyPattern.FindStringSubmatch(value)
+			columns := strings.Split(match[2], ",")
+			for index, column := range columns {
+				trimmed := strings.TrimSpace(column)
+				name := strings.Trim(trimmed, "`")
+				if _, ok := blobColumns[table][name]; ok {
+					columns[index] = trimmed + "(255)"
+				}
 			}
-		}
-		return match[1] + " (" + strings.Join(columns, ",") + ")"
-	})
+			return match[1] + " (" + strings.Join(columns, ",") + ")"
+		},
+	)
 }
 
 func schemaTableName(statement string) string {
@@ -276,7 +283,8 @@ func splitSQL(content string) ([]string, error) {
 			continue
 		}
 		if blockComment {
-			if character == '*' && idx+1 < len(content) && content[idx+1] == '/' {
+			if character == '*' && idx+1 < len(content) &&
+				content[idx+1] == '/' {
 				blockComment = false
 				idx++
 			}

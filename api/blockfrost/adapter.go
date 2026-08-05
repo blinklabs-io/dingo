@@ -1047,7 +1047,12 @@ func (a *NodeAdapter) AssetAddresses(
 			err,
 		)
 	}
-	holders, err := assetHoldersFromUtxos(policyIDBytes, assetName, utxos, params)
+	holders, err := assetHoldersFromUtxos(
+		policyIDBytes,
+		assetName,
+		utxos,
+		params,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"build asset holders for %s%x: %w",
@@ -1238,7 +1243,12 @@ func (a *NodeAdapter) drepByCredentialTag(
 	credentialTag uint8,
 ) (DRepInfo, error) {
 	db := a.ledgerState.Database()
-	drep, err := db.GetDrepByCredential(credentialTag, credential.Hash, true, nil)
+	drep, err := db.GetDrepByCredential(
+		credentialTag,
+		credential.Hash,
+		true,
+		nil,
+	)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
 			return DRepInfo{}, fmt.Errorf(
@@ -2013,7 +2023,9 @@ func (a *NodeAdapter) PoolsExtended() (
 		)
 	}
 	for _, snapshot := range snapshots {
-		activeStakeByPool[hex.EncodeToString(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
+		activeStakeByPool[hex.EncodeToString(snapshot.PoolKeyHash)] = uint64(
+			snapshot.TotalStake,
+		)
 	}
 
 	// live_saturation is a required, non-nullable float in the OpenAPI
@@ -2097,7 +2109,11 @@ func (a *NodeAdapter) PoolsExtended() (
 	for _, poolKeyHash := range poolKeyHashes {
 		pool, ok := poolsByHash[string(poolKeyHash)]
 		if !ok {
-			return nil, fmt.Errorf("get pool %x: %w", poolKeyHash, models.ErrPoolNotFound)
+			return nil, fmt.Errorf(
+				"get pool %x: %w",
+				poolKeyHash,
+				models.ErrPoolNotFound,
+			)
 		}
 		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pool.PoolKeyHash))
 		poolHex := hex.EncodeToString(pool.PoolKeyHash)
@@ -2618,8 +2634,10 @@ func (a *NodeAdapter) AccountRewardHistory(
 		if _, ok := blockfrostRewardTypes[rewardType]; !ok {
 			slog.Warn(
 				"account reward history: reward_type outside the Blockfrost account_reward_content enum",
-				"reward_type", row.RewardType,
-				"credential_tag", credentialTag,
+				"reward_type",
+				row.RewardType,
+				"credential_tag",
+				credentialTag,
 			)
 		}
 		ret = append(ret, AccountRewardHistoryInfo{
@@ -3007,7 +3025,11 @@ func (a *NodeAdapter) exactAddressBalance(
 	// ordering the SQL path provides.
 	merged := make(map[string]*models.AssetBalance)
 	for i := range ret.Assets {
-		key := string(ret.Assets[i].PolicyId) + "\x00" + string(ret.Assets[i].Name)
+		key := string(
+			ret.Assets[i].PolicyId,
+		) + "\x00" + string(
+			ret.Assets[i].Name,
+		)
 		if existing, ok := merged[key]; ok {
 			existing.Amount += ret.Assets[i].Amount
 			continue
@@ -3609,9 +3631,17 @@ func (a *NodeAdapter) TransactionSubmit(
 	}
 	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
 		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
-			return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrMempoolFull)
+			return "", fmt.Errorf(
+				"submit transaction to mempool: %w: %w",
+				err,
+				ErrMempoolFull,
+			)
 		}
-		return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrInvalidTransaction)
+		return "", fmt.Errorf(
+			"submit transaction to mempool: %w: %w",
+			err,
+			ErrInvalidTransaction,
+		)
 	}
 	return tx.Hash().String(), nil
 }
@@ -3743,12 +3773,21 @@ func (a *NodeAdapter) TransactionUTXOs(
 		)
 	}
 
-	inputs := make([]TransactionInputInfo, 0, len(txInputs)+len(txCollateral)+len(txReferenceInputs))
+	inputs := make(
+		[]TransactionInputInfo,
+		0,
+		len(txInputs)+len(txCollateral)+len(txReferenceInputs),
+	)
 	for _, input := range txInputs {
 		input.Cbor = inputCbor[utxoRef(input)]
 		info, err := a.transactionInputInfoFromUtxo(input, false, nil)
 		if err != nil {
-			return TransactionUTXOsInfo{}, fmt.Errorf("resolve input address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+			return TransactionUTXOsInfo{}, fmt.Errorf(
+				"resolve input address for %x:%d: %w",
+				input.TxId,
+				input.OutputIdx,
+				err,
+			)
 		}
 		inputs = append(inputs, info)
 	}
@@ -3756,16 +3795,30 @@ func (a *NodeAdapter) TransactionUTXOs(
 		input.Cbor = inputCbor[utxoRef(input)]
 		info, err := a.transactionInputInfoFromUtxo(input, true, nil)
 		if err != nil {
-			return TransactionUTXOsInfo{}, fmt.Errorf("resolve collateral address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+			return TransactionUTXOsInfo{}, fmt.Errorf(
+				"resolve collateral address for %x:%d: %w",
+				input.TxId,
+				input.OutputIdx,
+				err,
+			)
 		}
 		inputs = append(inputs, info)
 	}
 	referenceInput := true
 	for _, input := range txReferenceInputs {
 		input.Cbor = inputCbor[utxoRef(input)]
-		info, err := a.transactionInputInfoFromUtxo(input, false, &referenceInput)
+		info, err := a.transactionInputInfoFromUtxo(
+			input,
+			false,
+			&referenceInput,
+		)
 		if err != nil {
-			return TransactionUTXOsInfo{}, fmt.Errorf("resolve reference input address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+			return TransactionUTXOsInfo{}, fmt.Errorf(
+				"resolve reference input address for %x:%d: %w",
+				input.TxId,
+				input.OutputIdx,
+				err,
+			)
 		}
 		inputs = append(inputs, info)
 	}
@@ -4235,9 +4288,11 @@ func (a *NodeAdapter) TransactionRedeemers(
 			redeemer.ExUnitsCPU,
 		)
 		ret = append(ret, TransactionRedeemerInfo{
-			DatumHash:        redeemerMetadata.DatumHash,
-			TxIndex:          int(redeemer.Index),
-			Purpose:          redeemerPurpose(lcommon.RedeemerTag(redeemer.Tag)),
+			DatumHash: redeemerMetadata.DatumHash,
+			TxIndex:   int(redeemer.Index),
+			Purpose: redeemerPurpose(
+				lcommon.RedeemerTag(redeemer.Tag),
+			),
 			ScriptHash:       redeemerMetadata.ScriptHash,
 			RedeemerDataHash: hex.EncodeToString(dataHash.Bytes()),
 			UnitMem:          strconv.FormatUint(redeemer.ExUnitsMemory, 10),
@@ -4639,7 +4694,11 @@ func (a *NodeAdapter) addressFromUtxo(
 			return addr.String(), nil
 		}
 	}
-	return "", fmt.Errorf("address not resolvable for utxo %x:%d: CBOR unavailable and no payment key hash stored", utxo.TxId, utxo.OutputIdx)
+	return "", fmt.Errorf(
+		"address not resolvable for utxo %x:%d: CBOR unavailable and no payment key hash stored",
+		utxo.TxId,
+		utxo.OutputIdx,
+	)
 }
 
 func (a *NodeAdapter) networkID() uint8 {

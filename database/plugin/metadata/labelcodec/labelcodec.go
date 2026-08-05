@@ -77,7 +77,11 @@ func RawValues(
 
 	jsonValue, err := metadatumRawToJSON(rawValue)
 	if err != nil {
-		return nil, nil, fmt.Errorf("decode metadata label %d JSON: %w", label, err)
+		return nil, nil, fmt.Errorf(
+			"decode metadata label %d JSON: %w",
+			label,
+			err,
+		)
 	}
 
 	return json.RawMessage(jsonValue), append([]byte(nil), rawValue...), nil
@@ -112,7 +116,11 @@ func extractFromCbor(
 		rawValue := rawByLabel[label]
 		jsonValue, err := metadatumRawToJSON(rawValue)
 		if err != nil {
-			return nil, fmt.Errorf("decode metadata label %d JSON: %w", label, err)
+			return nil, fmt.Errorf(
+				"decode metadata label %d JSON: %w",
+				label,
+				err,
+			)
 		}
 		ret = append(ret, Entry{
 			Label:     label,
@@ -189,19 +197,34 @@ func extractFromMetadatum(
 			return nil, errors.New("invalid metadata label: nil integer value")
 		}
 		if keyInt.Value.Sign() < 0 || !keyInt.Value.IsUint64() {
-			return nil, fmt.Errorf("invalid metadata label: %s", keyInt.Value.String())
+			return nil, fmt.Errorf(
+				"invalid metadata label: %s",
+				keyInt.Value.String(),
+			)
 		}
 		cborValue, err := metadatumCbor(pair.Value)
 		if err != nil {
-			return nil, fmt.Errorf("encode metadata label %s value: %w", keyInt.Value.String(), err)
+			return nil, fmt.Errorf(
+				"encode metadata label %s value: %w",
+				keyInt.Value.String(),
+				err,
+			)
 		}
 		jsonValueAny, err := metadatumToJSONValue(pair.Value)
 		if err != nil {
-			return nil, fmt.Errorf("decode metadata label %s JSON: %w", keyInt.Value.String(), err)
+			return nil, fmt.Errorf(
+				"decode metadata label %s JSON: %w",
+				keyInt.Value.String(),
+				err,
+			)
 		}
 		jsonBytes, err := json.Marshal(jsonValueAny)
 		if err != nil {
-			return nil, fmt.Errorf("encode metadata label %s JSON: %w", keyInt.Value.String(), err)
+			return nil, fmt.Errorf(
+				"encode metadata label %s JSON: %w",
+				keyInt.Value.String(),
+				err,
+			)
 		}
 		ret = append(ret, Entry{
 			Label:     keyInt.Value.Uint64(),

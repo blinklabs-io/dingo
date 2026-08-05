@@ -90,7 +90,11 @@ func (d dialect) UpdatePlannerStats(ctx context.Context, exec Execer) error {
 
 func (d dialect) DropIndexSQL(name, table string) string {
 	if d.name == "mysql" {
-		return "DROP INDEX " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table)
+		return "DROP INDEX " + d.QuoteIdentifier(
+			name,
+		) + " ON " + d.QuoteIdentifier(
+			table,
+		)
 	}
 	return "DROP INDEX IF EXISTS " + d.QuoteIdentifier(name)
 }
@@ -119,11 +123,25 @@ func (d dialect) CreateIndexSQL(name, table string, columns []string) string {
 		}
 	}
 	if d.name == "mysql" {
-		return "CREATE INDEX " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table) +
-			" (" + strings.Join(quoted, ", ") + ")"
+		return "CREATE INDEX " + d.QuoteIdentifier(
+			name,
+		) + " ON " + d.QuoteIdentifier(
+			table,
+		) +
+			" (" + strings.Join(
+			quoted,
+			", ",
+		) + ")"
 	}
-	return "CREATE INDEX IF NOT EXISTS " + d.QuoteIdentifier(name) + " ON " + d.QuoteIdentifier(table) +
-		" (" + strings.Join(quoted, ", ") + ")"
+	return "CREATE INDEX IF NOT EXISTS " + d.QuoteIdentifier(
+		name,
+	) + " ON " + d.QuoteIdentifier(
+		table,
+	) +
+		" (" + strings.Join(
+		quoted,
+		", ",
+	) + ")"
 }
 
 func mysqlDeferredIndexPrefix(table, column string) bool {

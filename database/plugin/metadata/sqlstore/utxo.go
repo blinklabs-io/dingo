@@ -454,7 +454,10 @@ ORDER BY asset.policy_id, asset.name`),
 		if err != nil {
 			return ret, err
 		}
-		key := assetKey{policy: string(asset.PolicyId), name: string(asset.Name)}
+		key := assetKey{
+			policy: string(asset.PolicyId),
+			name:   string(asset.Name),
+		}
 		idx, ok := assetIndexes[key]
 		if !ok {
 			asset.Amount = amount
@@ -1279,7 +1282,10 @@ func (s *Store) loadUtxoAssets(
 	return s.loadUtxoAssetsPointers(db, utxos)
 }
 
-func (s *Store) loadUtxoAssetsBatch(db queryer, groups ...map[string][]models.Utxo) error {
+func (s *Store) loadUtxoAssetsBatch(
+	db queryer,
+	groups ...map[string][]models.Utxo,
+) error {
 	pointers := make([]*models.Utxo, 0)
 	for _, group := range groups {
 		for _, items := range group {
@@ -1318,7 +1324,9 @@ func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
 			args[i] = id
 		}
 		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(
-			"SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(end-start)+") ORDER BY id",
+			"SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
+				end-start,
+			)+") ORDER BY id",
 		), args...)
 		if err != nil {
 			return err
@@ -1343,7 +1351,15 @@ func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
 						return err
 					}
 				}
-				asset := models.Asset{Name: name, NameHex: nameHex, PolicyId: policyID, Fingerprint: fingerprint, ID: uint(id), UtxoID: uint(utxoID.Int64), Amount: types.Uint64(value)}
+				asset := models.Asset{
+					Name:        name,
+					NameHex:     nameHex,
+					PolicyId:    policyID,
+					Fingerprint: fingerprint,
+					ID:          uint(id),
+					UtxoID:      uint(utxoID.Int64),
+					Amount:      types.Uint64(value),
+				}
 				for _, utxo := range byID[asset.UtxoID] {
 					utxo.Assets = append(utxo.Assets, asset)
 				}

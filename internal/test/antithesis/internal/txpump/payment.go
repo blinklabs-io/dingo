@@ -112,7 +112,9 @@ func BuildPayment(p PaymentParams) (txBytes []byte, txID string, err error) {
 		return nil, "", errors.New("payment: at least one input required")
 	}
 	if len(p.ToAddr) == 0 {
-		return nil, "", errors.New("payment: recipient address must not be empty")
+		return nil, "", errors.New(
+			"payment: recipient address must not be empty",
+		)
 	}
 	if p.SendAmount < minSendAmount {
 		return nil, "", fmt.Errorf(

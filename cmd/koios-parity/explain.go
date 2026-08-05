@@ -36,7 +36,8 @@ Use --live to re-run the comparison against Dingo's database (requires access to
 
 	cmd.Flags().Uint64("epoch", 0, "epoch to explain (required)")
 	cmd.Flags().String("pool", "", "optional pool bech32 filter")
-	cmd.Flags().Bool("live", false, "re-compare against Dingo DB instead of cached results")
+	cmd.Flags().
+		Bool("live", false, "re-compare against Dingo DB instead of cached results")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	addDingoDBFlags(cmd)
 
@@ -66,14 +67,18 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	defer cache.Close() //nolint:errcheck
 
 	if live {
-		checkResult, checkErr := koiosparity.Check(cmd.Context(), koiosparity.CheckConfig{
-			Network:      network,
-			DingoDB:      resolveDingoDB(cmd),
-			CachePath:    cachePath,
-			All:          true,
-			FromEpoch:    epoch,
-			ThroughEpoch: epoch,
-		}, slog.Default())
+		checkResult, checkErr := koiosparity.Check(
+			cmd.Context(),
+			koiosparity.CheckConfig{
+				Network:      network,
+				DingoDB:      resolveDingoDB(cmd),
+				CachePath:    cachePath,
+				All:          true,
+				FromEpoch:    epoch,
+				ThroughEpoch: epoch,
+			},
+			slog.Default(),
+		)
 		if checkErr != nil {
 			return fmt.Errorf("live check: %w", checkErr)
 		}
@@ -84,7 +89,11 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 		// and prints "no mismatches recorded", indistinguishable from a real
 		// pass, even though no live comparison ever ran.
 		if checkResult.EpochsChecked == 0 {
-			return fmt.Errorf("epoch %d has not been fetched for network %q; run `koios-parity fetch` first", epoch, network)
+			return fmt.Errorf(
+				"epoch %d has not been fetched for network %q; run `koios-parity fetch` first",
+				epoch,
+				network,
+			)
 		}
 	}
 

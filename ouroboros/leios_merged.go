@@ -308,7 +308,9 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 // loadLeiosEBFromDB loads a Leios endorser block's manifest (and txs, if
 // stored) from the persistent blob store and caches the result in memory.
 // Returns (nil, false) when the blob store has no manifest for this hash.
-func (o *Ouroboros) loadLeiosEBFromDB(hash []byte) (*leiosEndorserBlockData, bool) {
+func (o *Ouroboros) loadLeiosEBFromDB(
+	hash []byte,
+) (*leiosEndorserBlockData, bool) {
 	db := o.leiosDatabase()
 	if db == nil {
 		return nil, false
@@ -362,7 +364,8 @@ func (o *Ouroboros) loadLeiosEBFromDB(hash []byte) (*leiosEndorserBlockData, boo
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	// Only cache if no fresher entry has appeared while we were loading.
-	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil || existing.expired(time.Now()) {
+	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil ||
+		existing.expired(time.Now()) {
 		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 		for _, key := range cacheKeys {
 			o.leiosEndorserBlocks[key] = data
@@ -790,8 +793,10 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 		o.recordLeiosCertRbOutcome("unresolved")
 		o.config.Logger.Warn(
 			"certified ranking block with unresolvable endorser reference over NtC chainsync; closing connection so the client retries rather than recording a block with no transactions",
-			"slot", block.Slot,
-			"hash", hex.EncodeToString(block.Hash),
+			"slot",
+			block.Slot,
+			"hash",
+			hex.EncodeToString(block.Hash),
 		)
 		return nil, fmt.Errorf(
 			"%w: certified block slot %d hash %s has no resolvable endorser reference",
@@ -838,10 +843,14 @@ func (o *Ouroboros) serveLeiosCertRbWithWait(
 	o.recordLeiosCertRbWait("timeout", waited)
 	o.config.Logger.Warn(
 		"endorser closure unresolved for CertRB within wait window; closing NtC chainsync connection so the client retries rather than recording a block with no transactions",
-		"slot", block.Slot,
-		"hash", hex.EncodeToString(block.Hash),
-		"eb_hash", ebHash.String(),
-		"waited", waited,
+		"slot",
+		block.Slot,
+		"hash",
+		hex.EncodeToString(block.Hash),
+		"eb_hash",
+		ebHash.String(),
+		"waited",
+		waited,
 	)
 	return nil, fmt.Errorf(
 		"%w: slot %d hash %s eb %s (waited %s)",

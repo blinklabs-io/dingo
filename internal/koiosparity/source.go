@@ -117,7 +117,9 @@ type DatabaseSource struct {
 // a RewardParitySource. db must not be nil.
 func NewDatabaseSource(db *database.Database) (*DatabaseSource, error) {
 	if db == nil {
-		return nil, errors.New("koiosparity: DatabaseSource requires a non-nil database")
+		return nil, errors.New(
+			"koiosparity: DatabaseSource requires a non-nil database",
+		)
 	}
 	return &DatabaseSource{db: db}, nil
 }
@@ -178,7 +180,10 @@ func (s *DatabaseSource) GetEpochData(
 	}
 
 	data := &DingoEpochData{
-		TotalActiveStake: strconv.FormatUint(uint64(summary.TotalActiveStake), 10),
+		TotalActiveStake: strconv.FormatUint(
+			uint64(summary.TotalActiveStake),
+			10,
+		),
 	}
 
 	pots, err := meta.GetRewardAdaPots(epoch, txn.Metadata())
@@ -214,7 +219,11 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
-		return nil, fmt.Errorf("reward_pool_input stake epoch %d: %w", stakeEpoch, err)
+		return nil, fmt.Errorf(
+			"reward_pool_input stake epoch %d: %w",
+			stakeEpoch,
+			err,
+		)
 	}
 	m := make(map[string]*DingoPoolEpochData, len(stakeInputs))
 	for _, inp := range stakeInputs {
@@ -227,7 +236,11 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 
 	paramInputs, err := meta.GetRewardPoolInputs(paramEpoch, txn.Metadata())
 	if err != nil {
-		return nil, fmt.Errorf("reward_pool_input param epoch %d: %w", paramEpoch, err)
+		return nil, fmt.Errorf(
+			"reward_pool_input param epoch %d: %w",
+			paramEpoch,
+			err,
+		)
 	}
 	for _, inp := range paramInputs {
 		key := hex.EncodeToString(inp.PoolKeyHash)
@@ -248,7 +261,11 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 
 	outputs, err := meta.GetRewardPoolOutputs(stakeEpoch, txn.Metadata())
 	if err != nil {
-		return nil, fmt.Errorf("reward_pool_output epoch %d: %w", stakeEpoch, err)
+		return nil, fmt.Errorf(
+			"reward_pool_output epoch %d: %w",
+			stakeEpoch,
+			err,
+		)
 	}
 	for _, out := range outputs {
 		key := hex.EncodeToString(out.PoolKeyHash)
@@ -258,7 +275,10 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			m[key] = data
 		}
 		data.MemberRewardPresent = true
-		data.MemberRewardTotal = strconv.FormatUint(uint64(out.MemberRewardTotal), 10)
+		data.MemberRewardTotal = strconv.FormatUint(
+			uint64(out.MemberRewardTotal),
+			10,
+		)
 	}
 	return m, nil
 }

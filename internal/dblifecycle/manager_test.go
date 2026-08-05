@@ -55,10 +55,13 @@ func newManagerTestDB(t *testing.T) *database.Database {
 func publishEpochTransition(eb *event.EventBus, newEpoch uint64) {
 	eb.Publish(
 		event.EpochTransitionEventType,
-		event.NewEvent(event.EpochTransitionEventType, event.EpochTransitionEvent{
-			PreviousEpoch: newEpoch - 1,
-			NewEpoch:      newEpoch,
-		}),
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{
+				PreviousEpoch: newEpoch - 1,
+				NewEpoch:      newEpoch,
+			},
+		),
 	)
 }
 
@@ -103,7 +106,9 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 	publishEpochTransition(eb, 5)
 
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-5", "manifest.json"))
+		_, err := os.Stat(
+			filepath.Join(snapshotDir, "epoch-5", "manifest.json"),
+		)
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 }
@@ -128,7 +133,9 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 	publishEpochTransition(eb, 4) // 4 % 2 == 0, must be captured
 
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-4", "manifest.json"))
+		_, err := os.Stat(
+			filepath.Join(snapshotDir, "epoch-4", "manifest.json"),
+		)
 		return err == nil
 	}, 30*time.Second, 10*time.Millisecond)
 
@@ -153,7 +160,9 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 
 	publishEpochTransition(eb, 7)
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-7", "manifest.json"))
+		_, err := os.Stat(
+			filepath.Join(snapshotDir, "epoch-7", "manifest.json"),
+		)
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 
@@ -163,7 +172,9 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 	publishEpochTransition(eb, 7)
 	publishEpochTransition(eb, 8)
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-8", "manifest.json"))
+		_, err := os.Stat(
+			filepath.Join(snapshotDir, "epoch-8", "manifest.json"),
+		)
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 }
@@ -377,7 +388,10 @@ type panickingCloudDestination struct {
 	panicOnDirBase string
 }
 
-func (d panickingCloudDestination) UploadDir(_ context.Context, localDir string) error {
+func (d panickingCloudDestination) UploadDir(
+	_ context.Context,
+	localDir string,
+) error {
 	if filepath.Base(localDir) == d.panicOnDirBase {
 		panic("simulated cloud destination bug")
 	}
@@ -437,7 +451,10 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 	// to catch.
 	publishEpochTransition(eb, 20)
 	require.Eventually(t, func() bool {
-		return strings.Contains(logBuf.String(), "SubscribeFunc handler panicked")
+		return strings.Contains(
+			logBuf.String(),
+			"SubscribeFunc handler panicked",
+		)
 	}, 5*time.Second, 10*time.Millisecond, "the panic must be caught and logged by the EventBus")
 
 	// The manager's dispatch must still be alive and fully, normally
@@ -449,7 +466,9 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 	// completion right after the panic.
 	publishEpochTransition(eb, 21)
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-21", "manifest.json"))
+		_, err := os.Stat(
+			filepath.Join(snapshotDir, "epoch-21", "manifest.json"),
+		)
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 	require.Equal(
@@ -515,11 +534,16 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 
 	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
-		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
+		return strings.Contains(
+			logBuf.String(),
+			"automatic database snapshot failed",
+		)
 	}, 15*time.Second, 10*time.Millisecond)
 
 	require.NotContains(
-		t, logBuf.String(), "already exists, skipping",
+		t,
+		logBuf.String(),
+		"already exists, skipping",
 		"a cloud-upload failure must not be silently treated as idempotent already-exists skip",
 	)
 }
@@ -576,7 +600,9 @@ func init() {
 // running against it. This is exactly the shape of a real node shutdown:
 // the top-level context gets cancelled, and Stop() is called on every
 // subsystem separately with no guaranteed ordering between the two.
-func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(t *testing.T) {
+func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
+	t *testing.T,
+) {
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -649,7 +675,9 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(t *t
 	releaseDest()
 
 	testutil.RequireReceive(
-		t, stopDone, time.Second,
+		t,
+		stopDone,
+		time.Second,
 		"Stop must return promptly once the in-flight handler actually finishes",
 	)
 }
@@ -717,7 +745,9 @@ func init() {
 // transient failure, redelivering the same epoch event actually retries
 // (and this time succeeds at) the cloud mirror, from the existing local
 // copy, without redoing the local snapshot.
-func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *testing.T) {
+func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
+	t *testing.T,
+) {
 	resetFlakyCloudState(&flakyCloudFailed, &flakyCloudMu)
 	db := newManagerTestDB(t)
 
@@ -740,12 +770,20 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *tes
 	// First delivery: local write succeeds, cloud upload fails.
 	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
-		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
+		return strings.Contains(
+			logBuf.String(),
+			"automatic database snapshot failed",
+		)
 	}, 5*time.Second, 10*time.Millisecond)
 
 	entries, err := os.ReadDir(snapshotDir)
 	require.NoError(t, err)
-	require.Len(t, entries, 1, "the local snapshot must still exist despite the cloud failure")
+	require.Len(
+		t,
+		entries,
+		1,
+		"the local snapshot must still exist despite the cloud failure",
+	)
 	destDir := filepath.Join(snapshotDir, entries[0].Name())
 	require.False(
 		t, lifecycle.IsCloudMirrored(destDir),
@@ -772,7 +810,9 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(t *tes
 	entries, err = os.ReadDir(snapshotDir)
 	require.NoError(t, err)
 	require.Len(
-		t, entries, 1,
+		t,
+		entries,
+		1,
 		"the retry must reuse the existing local snapshot directory, not create a second one",
 	)
 }
@@ -797,7 +837,9 @@ func init() {
 // advancing). This proves epoch 10's transition notices and retries epoch
 // 9's stuck local-only snapshot, without epoch 9's own event ever being
 // redelivered.
-func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(t *testing.T) {
+func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
+	t *testing.T,
+) {
 	resetFlakyCloudState(&flakyCloud2Failed, &flakyCloud2Mu)
 	db := newManagerTestDB(t)
 
@@ -819,7 +861,10 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(t *testin
 
 	publishEpochTransition(eb, 9)
 	require.Eventually(t, func() bool {
-		return strings.Contains(logBuf.String(), "automatic database snapshot failed")
+		return strings.Contains(
+			logBuf.String(),
+			"automatic database snapshot failed",
+		)
 	}, 15*time.Second, 10*time.Millisecond)
 
 	destDir := filepath.Join(snapshotDir, "epoch-9")
@@ -900,7 +945,15 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 	logger2 := slog.New(slog.NewTextHandler(logBuf2, nil))
 	eb2 := event.NewEventBus(nil, logger2)
 	defer eb2.Stop()
-	m2 := dblifecycle.NewManager(db, eb2, cfg, "badger", "sqlite", testDestinationRegistry, logger2)
+	m2 := dblifecycle.NewManager(
+		db,
+		eb2,
+		cfg,
+		"badger",
+		"sqlite",
+		testDestinationRegistry,
+		logger2,
+	)
 	require.NoError(t, m2.Start(context.Background()))
 	defer m2.Stop()
 
@@ -1102,12 +1155,15 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 	// the cloud.
 	publishEpochTransition(eb, 2)
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(cloudPrefixDir, "epoch-2", "manifest.json"))
+		_, err := os.Stat(
+			filepath.Join(cloudPrefixDir, "epoch-2", "manifest.json"),
+		)
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 
 	require.DirExists(
-		t, epoch1Dir,
+		t,
+		epoch1Dir,
 		"epoch-1's local copy must survive pruning since it was never mirrored to the cloud",
 	)
 
@@ -1142,7 +1198,9 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 // incorporated into the remote upload path as an extra path segment ahead
 // of the snapshot's own ID, giving each node using a distinct prefix a
 // disjoint remote location.
-func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(t *testing.T) {
+func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
+	t *testing.T,
+) {
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -1171,13 +1229,18 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(t *testing.T)
 	// collide.
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(
-			cloudBackingDir, "shared-prefix", "node-a", "epoch-5", "manifest.json",
+			cloudBackingDir,
+			"shared-prefix",
+			"node-a",
+			"epoch-5",
+			"manifest.json",
 		))
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 
 	require.NoDirExists(
-		t, filepath.Join(cloudBackingDir, "shared-prefix", "epoch-5"),
+		t,
+		filepath.Join(cloudBackingDir, "shared-prefix", "epoch-5"),
 		"must not upload directly under the shared base destination, bypassing the per-node prefix",
 	)
 }
@@ -1236,7 +1299,9 @@ func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
 	defer m.Stop()
 
 	require.Contains(
-		t, logBuf.String(), "snapshotCloudDestinationPrefix",
+		t,
+		logBuf.String(),
+		"snapshotCloudDestinationPrefix",
 		"must warn when a cloud destination is configured without a distinguishing per-node prefix",
 	)
 }
@@ -1263,7 +1328,9 @@ func TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet(t *testing.T) {
 	defer m.Stop()
 
 	require.NotContains(
-		t, logBuf.String(), "snapshotCloudDestinationPrefix",
+		t,
+		logBuf.String(),
+		"snapshotCloudDestinationPrefix",
 		"must not warn when a distinguishing per-node prefix is already configured",
 	)
 }
@@ -1320,7 +1387,8 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		return localErr == nil
 	}, 5*time.Second, 10*time.Millisecond)
 	require.DirExists(
-		t, filepath.Join(cloudPrefixDir, "epoch-1"),
+		t,
+		filepath.Join(cloudPrefixDir, "epoch-1"),
 		"cloud mirror must survive a failed delete attempt too, not just the local copy",
 	)
 

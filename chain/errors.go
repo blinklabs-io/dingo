@@ -132,7 +132,8 @@ func NewBlockNumberNotContiguousError(
 	}
 }
 
-func (e BlockNumberNotContiguousError) BlockHash() string   { return e.blockHash }
+func (e BlockNumberNotContiguousError) BlockHash() string { return e.blockHash }
+
 func (e BlockNumberNotContiguousError) BlockNumber() uint64 { return e.blockNumber }
 func (e BlockNumberNotContiguousError) ParentNumber() uint64 {
 	return e.parentNumber

@@ -76,8 +76,10 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 
 	poolHash := testPoolKeyHash(t, 0x01)
 
-	blocksAtStakeEpoch := uint64(999) // decoy: must never surface as blocks_produced
-	blocksAtParamEpoch := uint64(4)   // real: epoch 10's actual block count
+	blocksAtStakeEpoch := uint64(
+		999,
+	) // decoy: must never surface as blocks_produced
+	blocksAtParamEpoch := uint64(4) // real: epoch 10's actual block count
 
 	// Decoy row at the naive "same epoch as Koios" (10). Every field here is
 	// wrong; if the map ever reads from epoch 10 directly instead of 9/11,
@@ -111,9 +113,11 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 	// Param epoch (11 = K+1): BlocksProduced/Margin/FixedCost are the real
 	// values describing epoch 10.
 	require.NoError(t, gdb.Create(&models.RewardPoolInput{
-		Epoch:          11,
-		PoolKeyHash:    poolHash,
-		DelegatedStake: types.Uint64(222), // irrelevant at this epoch; must not surface
+		Epoch:       11,
+		PoolKeyHash: poolHash,
+		DelegatedStake: types.Uint64(
+			222,
+		), // irrelevant at this epoch; must not surface
 		Cost:           types.Uint64(340_000_000),
 		Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
 		BlocksProduced: &blocksAtParamEpoch,
@@ -126,23 +130,42 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 	paramEpoch := koiosParamEpoch(koiosEpoch)
 	require.Equal(t, uint64(11), paramEpoch)
 
-	m, err := dingo.GetPoolEpochDataMap(context.Background(), stakeEpoch, paramEpoch)
+	m, err := dingo.GetPoolEpochDataMap(
+		context.Background(),
+		stakeEpoch,
+		paramEpoch,
+	)
 	require.NoError(t, err)
 
 	key := hex.EncodeToString(poolHash)
 	data, ok := m[key]
 	require.True(t, ok)
 
-	require.Equal(t, "5000000", data.DelegatedStake, "delegated_stake must come from the stake epoch (K-1), not K")
+	require.Equal(
+		t,
+		"5000000",
+		data.DelegatedStake,
+		"delegated_stake must come from the stake epoch (K-1), not K",
+	)
 	require.Equal(t, uint64(7), data.DelegatorCount)
 
 	require.True(t, data.ParamsPresent)
-	require.Equal(t, blocksAtParamEpoch, data.BlocksProduced, "blocks_produced must come from the param epoch (K+1), not K")
+	require.Equal(
+		t,
+		blocksAtParamEpoch,
+		data.BlocksProduced,
+		"blocks_produced must come from the param epoch (K+1), not K",
+	)
 	require.Equal(t, "340000000", data.FixedCost)
 	require.Equal(t, "1/10", data.Margin)
 
 	require.True(t, data.MemberRewardPresent)
-	require.Equal(t, "123456", data.MemberRewardTotal, "member_rewards must come from reward_pool_output at the stake epoch (K-1)")
+	require.Equal(
+		t,
+		"123456",
+		data.MemberRewardTotal,
+		"member_rewards must come from reward_pool_output at the stake epoch (K-1)",
+	)
 }
 
 // TestGetPoolEpochDataMapMissingParamEpochRow proves a pool with a stake
@@ -206,7 +229,11 @@ func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
 	key := hex.EncodeToString(poolHash)
 	data, ok := m[key]
 	require.True(t, ok)
-	require.False(t, data.StakePresent, "no reward_pool_input row at the stake epoch yet")
+	require.False(
+		t,
+		data.StakePresent,
+		"no reward_pool_input row at the stake epoch yet",
+	)
 	require.Equal(t, "", data.DelegatedStake)
 	require.Equal(t, uint64(0), data.DelegatorCount)
 
@@ -232,9 +259,11 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 		SnapshotReady:    true,
 	}).Error)
 	require.NoError(t, gdb.Create(&models.EpochSummary{
-		Epoch:            10,
-		TotalActiveStake: types.Uint64(99_999_999), // decoy: must not be read for K=10's stake
-		SnapshotReady:    true,
+		Epoch: 10,
+		TotalActiveStake: types.Uint64(
+			99_999_999,
+		), // decoy: must not be read for K=10's stake
+		SnapshotReady: true,
 	}).Error)
 
 	koiosEpoch := uint64(10)

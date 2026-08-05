@@ -60,7 +60,12 @@ func (a *archiveServiceHandler) FetchBlock(
 		point := common.NewPoint(b.GetSlot(), hash)
 		signedURL, metadata, err := database.BlockURL(ctx, db, point)
 		if err != nil {
-			return nil, fmt.Errorf("failed getting signed url for block [%d, %s]: %w", point.Slot, point.Hash, err)
+			return nil, fmt.Errorf(
+				"failed getting signed url for block [%d, %s]: %w",
+				point.Slot,
+				point.Hash,
+				err,
+			)
 		}
 
 		blockType := metadata.Type

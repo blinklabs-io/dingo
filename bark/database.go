@@ -325,7 +325,10 @@ func (h *databaseServiceHandler) pruneOperations() {
 		done := op.hasCompleted
 		op.mu.Unlock()
 		if done {
-			terminal = append(terminal, terminalOp{id: id, startedAt: op.startedAt})
+			terminal = append(
+				terminal,
+				terminalOp{id: id, startedAt: op.startedAt},
+			)
 		}
 	}
 	sort.Slice(terminal, func(i, j int) bool {
@@ -345,7 +348,9 @@ func (h *databaseServiceHandler) finishOperation() {
 	h.mu.Unlock()
 }
 
-func (h *databaseServiceHandler) lookupOperation(id string) (*operation, error) {
+func (h *databaseServiceHandler) lookupOperation(
+	id string,
+) (*operation, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	op, ok := h.operations[id]
@@ -379,7 +384,9 @@ func runProtected(fn func() error) (err error) {
 // configured SnapshotDir. snapshotID comes from an RPC request, so this
 // rejects a path-traversal attempt (e.g. "../../etc") rather than trusting
 // it to already be a safe single path component.
-func (h *databaseServiceHandler) resolveSnapshotDir(snapshotID string) (string, error) {
+func (h *databaseServiceHandler) resolveSnapshotDir(
+	snapshotID string,
+) (string, error) {
 	if snapshotID == "" {
 		return "", connect.NewError(
 			connect.CodeInvalidArgument,
@@ -451,7 +458,10 @@ func (h *databaseServiceHandler) GetSnapshotStatus(
 
 // snapshotInfoFromEntry converts a lifecycle.SnapshotEntry into the proto
 // SnapshotInfo shape.
-func snapshotInfoFromEntry(dir string, e lifecycle.SnapshotEntry) *databasev1alpha1.SnapshotInfo {
+func snapshotInfoFromEntry(
+	dir string,
+	e lifecycle.SnapshotEntry,
+) *databasev1alpha1.SnapshotInfo {
 	m := e.Manifest
 	return &databasev1alpha1.SnapshotInfo{
 		SnapshotId:  e.ID,
@@ -462,7 +472,9 @@ func snapshotInfoFromEntry(dir string, e lifecycle.SnapshotEntry) *databasev1alp
 			Slot:        new(m.TipSlot),
 			BlockNumber: new(m.TipBlockNumber),
 		},
-		SizeBytes: uint64(m.BlobBytes + m.MetadataBytes), //nolint:gosec // G115: file sizes are never negative
+		SizeBytes: uint64(
+			m.BlobBytes + m.MetadataBytes,
+		), //nolint:gosec // G115: file sizes are never negative
 		Checksum:  "sha256:" + m.Checksum,
 		CreatedAt: timestamppb.New(m.CreatedAt),
 		Location:  dir,
@@ -518,8 +530,10 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 		}
 		h.bark.config.Logger.Warn(
 			"list snapshots: some entries could not be read, omitting them from the catalog",
-			"component", "bark",
-			"error", err,
+			"component",
+			"bark",
+			"error",
+			err,
 		)
 	}
 	if offset > len(entries) {
@@ -540,7 +554,10 @@ func (h *databaseServiceHandler) snapshotCatalogPage(
 	for _, e := range entries[offset:end] {
 		infos = append(
 			infos,
-			snapshotInfoFromEntry(filepath.Join(h.bark.config.SnapshotDir, e.ID), e),
+			snapshotInfoFromEntry(
+				filepath.Join(h.bark.config.SnapshotDir, e.ID),
+				e,
+			),
 		)
 	}
 	return infos, nextToken, nil
@@ -603,8 +620,10 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		}
 		h.bark.config.Logger.Warn(
 			"list snapshots: some entries could not be read, omitting them from the catalog",
-			"component", "bark",
-			"error", err,
+			"component",
+			"bark",
+			"error",
+			err,
 		)
 	}
 
@@ -619,7 +638,9 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 	}
 
 	cloudEntries, ok, err := lifecycle.ListCloudSnapshots(
-		ctx, h.bark.config.DestinationRegistry, h.bark.config.SnapshotCloudDestination,
+		ctx,
+		h.bark.config.DestinationRegistry,
+		h.bark.config.SnapshotCloudDestination,
 	)
 	if err != nil {
 		// A cloud listing failure is typically connectivity/auth (the same
@@ -645,14 +666,19 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 			}
 			seen[e.ID] = true
 			items = append(items, snapshotCatalogItem{
-				location: lifecycle.JoinCloudURI(h.bark.config.SnapshotCloudDestination, e.ID),
-				entry:    e,
+				location: lifecycle.JoinCloudURI(
+					h.bark.config.SnapshotCloudDestination,
+					e.ID,
+				),
+				entry: e,
 			})
 		}
 	}
 
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].entry.Manifest.CreatedAt.After(items[j].entry.Manifest.CreatedAt)
+		return items[i].entry.Manifest.CreatedAt.After(
+			items[j].entry.Manifest.CreatedAt,
+		)
 	})
 
 	if offset > len(items) {
@@ -721,8 +747,15 @@ func (h *databaseServiceHandler) cloudSnapshotExists(
 	if h.bark.config.SnapshotCloudDestination == "" {
 		return "", false, nil
 	}
-	cloudURI = lifecycle.JoinCloudURI(h.bark.config.SnapshotCloudDestination, snapshotID)
-	_, ok, fetchErr := lifecycle.FetchCloudManifest(ctx, h.bark.config.DestinationRegistry, cloudURI)
+	cloudURI = lifecycle.JoinCloudURI(
+		h.bark.config.SnapshotCloudDestination,
+		snapshotID,
+	)
+	_, ok, fetchErr := lifecycle.FetchCloudManifest(
+		ctx,
+		h.bark.config.DestinationRegistry,
+		cloudURI,
+	)
 	if !ok {
 		return cloudURI, false, nil
 	}
@@ -862,7 +895,11 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 		}
 	}
 	if cloudExists {
-		ok, delErr := lifecycle.DeleteCloudSnapshot(ctx, h.bark.config.DestinationRegistry, cloudURI)
+		ok, delErr := lifecycle.DeleteCloudSnapshot(
+			ctx,
+			h.bark.config.DestinationRegistry,
+			cloudURI,
+		)
 		if delErr != nil {
 			return nil, connect.NewError(
 				connect.CodeInternal,
@@ -874,7 +911,8 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 				connect.CodeUnimplemented,
 				fmt.Errorf(
 					"snapshot %q exists at %q but its destination type doesn't support deletion",
-					snapshotID, cloudURI,
+					snapshotID,
+					cloudURI,
 				),
 			)
 		}
@@ -948,7 +986,11 @@ func (h *databaseServiceHandler) VerifySnapshot(
 		defer h.finishOperation()
 		op.setRunning()
 		op.complete(runProtected(func() error {
-			return verifySnapshotIntegrity(opCtx, h.bark.config.DestinationRegistry, source)
+			return verifySnapshotIntegrity(
+				opCtx,
+				h.bark.config.DestinationRegistry,
+				source,
+			)
 		}), 0)
 	}()
 
@@ -1087,7 +1129,10 @@ func (h *databaseServiceHandler) Truncate(
 		var blocksRemoved uint64
 		err := runProtected(func() error {
 			var truncErr error
-			blocksRemoved, truncErr = h.bark.config.Lifecycle.Truncate(ctx, target)
+			blocksRemoved, truncErr = h.bark.config.Lifecycle.Truncate(
+				ctx,
+				target,
+			)
 			return truncErr
 		})
 		op.complete(err, blocksRemoved)
@@ -1265,10 +1310,15 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 	// (0, nil), so this degrades to 0 for those rather than erroring.
 	var sizeBytes uint64
 	if blobSize, err := db.Blob().DiskSize(); err == nil && blobSize > 0 {
-		sizeBytes += uint64(blobSize) //nolint:gosec // G115: guarded by blobSize > 0 above
+		sizeBytes += uint64(
+			blobSize,
+		) //nolint:gosec // G115: guarded by blobSize > 0 above
 	}
-	if metadataSize, err := db.Metadata().DiskSize(); err == nil && metadataSize > 0 {
-		sizeBytes += uint64(metadataSize) //nolint:gosec // G115: guarded by metadataSize > 0 above
+	if metadataSize, err := db.Metadata().DiskSize(); err == nil &&
+		metadataSize > 0 {
+		sizeBytes += uint64(
+			metadataSize,
+		) //nolint:gosec // G115: guarded by metadataSize > 0 above
 	}
 
 	resp := &databasev1alpha1.GetDatabaseInfoResponse{

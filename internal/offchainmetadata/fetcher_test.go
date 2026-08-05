@@ -408,12 +408,14 @@ func TestNewRejectsCustomRoundTripperWhenPrivateAddressesBlocked(t *testing.T) {
 	_, err := New(Config{
 		Store: fakeStore{},
 		HTTPClient: &http.Client{
-			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(bytes.NewReader(nil)),
-				}, nil
-			}),
+			Transport: roundTripFunc(
+				func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(bytes.NewReader(nil)),
+					}, nil
+				},
+			),
 		},
 	})
 
