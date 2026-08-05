@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
@@ -31,16 +33,20 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// setupTestStore creates an in-memory sqlite metadata store with the schema
-// migrated, so tests can seed midnight_* tables directly.
-func setupTestStore(t *testing.T) *sqlite.MetadataStoreSqlite {
+// setupTestStore creates an in-memory SQLite metadata store. Startup runs the
+// same explicit schema migrations used by production.
+func setupTestStore(t *testing.T) *sqlstore.Store {
 	t.Helper()
-	store, err := sqlite.New("", slog.New(slog.NewTextHandler(os.Stderr, nil)), nil)
+	store, err := sqlite.NewSQLStore(
+		sqlite.Config{},
+		metadata.ProviderDependencies{
+			Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		},
+	)
 	require.NoError(t, err)
-	require.NoError(t, store.Start())
-	require.NoError(t, store.DB().AutoMigrate(models.MigrateModels...))
+	require.NoError(t, store.Start(context.Background()))
 	t.Cleanup(func() {
-		store.Close() //nolint:errcheck
+		require.NoError(t, store.Close())
 	})
 	return store
 }
@@ -48,7 +54,7 @@ func setupTestStore(t *testing.T) *sqlite.MetadataStoreSqlite {
 // startTestServerWithMetadata starts a server backed by md (with no block
 // resolver configured) and returns its dial address. The server is stopped
 // on test cleanup.
-func startTestServerWithMetadata(t *testing.T, md *sqlite.MetadataStoreSqlite) string {
+func startTestServerWithMetadata(t *testing.T, md *sqlstore.Store) string {
 	t.Helper()
 	return startTestServerConfig(t, server.Config{Metadata: md})
 }
@@ -62,11 +68,16 @@ func hashForByte(b byte) []byte {
 func TestGetAssetCreates_EmptyDatabase(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{UtxoCapacity: 10})
+	resp, err := client.GetAssetCreates(
+		ctx,
+		&midnight.AssetCreatesRequest{UtxoCapacity: 10},
+	)
 	require.NoError(t, err)
 	require.Empty(t, resp.GetCreates())
 }
@@ -82,18 +93,23 @@ func TestGetAssetCreates_CursorPagination(t *testing.T) {
 		block uint64
 		tx    uint32
 	}{{1, 0}, {1, 1}, {2, 0}, {3, 0}} {
-		require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
-			Address:     []byte{0x01},
-			Quantity:    uint64(i + 1),
-			TxHash:      hashForByte(byte(i + 1)),
-			OutputIndex: 0,
-			BlockNumber: p.block,
-			BlockHash:   hashForByte(byte(p.block)),
-			TxIndex:     p.tx,
-		}))
+		require.NoError(
+			t,
+			store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+				Address:     []byte{0x01},
+				Quantity:    uint64(i + 1),
+				TxHash:      hashForByte(byte(i + 1)),
+				OutputIndex: 0,
+				BlockNumber: p.block,
+				BlockHash:   hashForByte(byte(p.block)),
+				TxIndex:     p.tx,
+			}),
+		)
 	}
 
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -118,7 +134,9 @@ func TestGetAssetCreates_CursorPagination(t *testing.T) {
 			got = append(got, pos{c.GetBlockNumber(), c.GetTxIndex()})
 		}
 		last := resp.GetCreates()[len(resp.GetCreates())-1]
-		startBlock, startTxIndex = uint32(last.GetBlockNumber()), last.GetTxIndex()
+		startBlock, startTxIndex = uint32(
+			last.GetBlockNumber(),
+		), last.GetTxIndex()
 	}
 
 	require.Equal(t, []pos{{1, 0}, {1, 1}, {2, 0}, {3, 0}}, got)
@@ -127,11 +145,16 @@ func TestGetAssetCreates_CursorPagination(t *testing.T) {
 func TestGetAssetSpends_EmptyDatabase(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.GetAssetSpends(ctx, &midnight.AssetSpendsRequest{UtxoCapacity: 10})
+	resp, err := client.GetAssetSpends(
+		ctx,
+		&midnight.AssetSpendsRequest{UtxoCapacity: 10},
+	)
 	require.NoError(t, err)
 	require.Empty(t, resp.GetSpends())
 }
@@ -139,11 +162,16 @@ func TestGetAssetSpends_EmptyDatabase(t *testing.T) {
 func TestGetRegistrations_EmptyDatabase(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.GetRegistrations(ctx, &midnight.RegistrationsRequest{UtxoCapacity: 10})
+	resp, err := client.GetRegistrations(
+		ctx,
+		&midnight.RegistrationsRequest{UtxoCapacity: 10},
+	)
 	require.NoError(t, err)
 	require.Empty(t, resp.GetRegistrations())
 }
@@ -151,11 +179,16 @@ func TestGetRegistrations_EmptyDatabase(t *testing.T) {
 func TestGetDeregistrations_EmptyDatabase(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.GetDeregistrations(ctx, &midnight.DeregistrationsRequest{UtxoCapacity: 10})
+	resp, err := client.GetDeregistrations(
+		ctx,
+		&midnight.DeregistrationsRequest{UtxoCapacity: 10},
+	)
 	require.NoError(t, err)
 	require.Empty(t, resp.GetDeregistrations())
 }
@@ -163,11 +196,16 @@ func TestGetDeregistrations_EmptyDatabase(t *testing.T) {
 func TestGetUtxoEvents_EmptyDatabase(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{TxCapacity: 10})
+	resp, err := client.GetUtxoEvents(
+		ctx,
+		&midnight.UtxoEventsRequest{TxCapacity: 10},
+	)
 	require.NoError(t, err)
 	require.Empty(t, resp.GetEvents())
 	require.Nil(t, resp.GetNextPosition())
@@ -181,48 +219,65 @@ func TestGetUtxoEvents_KindOrderTieBreak(t *testing.T) {
 	store := setupTestStore(t)
 
 	const block, tx = uint64(5), uint32(2)
-	require.NoError(t, store.CreateMidnightDeregistration(nil, &models.MidnightDeregistration{
-		FullDatum:   []byte{0xd0},
-		TxHash:      hashForByte(1),
-		UtxoTxHash:  hashForByte(2),
-		UtxoIndex:   0,
-		BlockNumber: block,
-		BlockHash:   hashForByte(byte(block)),
-		TxIndex:     tx,
-	}))
-	require.NoError(t, store.CreateMidnightRegistration(nil, &models.MidnightRegistration{
-		FullDatum:   []byte{0xd1},
-		TxHash:      hashForByte(3),
-		OutputIndex: 0,
-		BlockNumber: block,
-		BlockHash:   hashForByte(byte(block)),
-		TxIndex:     tx,
-	}))
-	require.NoError(t, store.CreateMidnightAssetSpend(nil, &models.MidnightAssetSpend{
-		Address:        []byte{0x01},
-		Quantity:       1,
-		SpendingTxHash: hashForByte(4),
-		UtxoTxHash:     hashForByte(5),
-		UtxoIndex:      0,
-		BlockNumber:    block,
-		BlockHash:      hashForByte(byte(block)),
-		TxIndex:        tx,
-	}))
-	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
-		Address:     []byte{0x01},
-		Quantity:    1,
-		TxHash:      hashForByte(6),
-		OutputIndex: 0,
-		BlockNumber: block,
-		BlockHash:   hashForByte(byte(block)),
-		TxIndex:     tx,
-	}))
+	require.NoError(
+		t,
+		store.CreateMidnightDeregistration(nil, &models.MidnightDeregistration{
+			FullDatum:   []byte{0xd0},
+			TxHash:      hashForByte(1),
+			UtxoTxHash:  hashForByte(2),
+			UtxoIndex:   0,
+			BlockNumber: block,
+			BlockHash:   hashForByte(byte(block)),
+			TxIndex:     tx,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightRegistration(nil, &models.MidnightRegistration{
+			FullDatum:   []byte{0xd1},
+			TxHash:      hashForByte(3),
+			OutputIndex: 0,
+			BlockNumber: block,
+			BlockHash:   hashForByte(byte(block)),
+			TxIndex:     tx,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightAssetSpend(nil, &models.MidnightAssetSpend{
+			Address:        []byte{0x01},
+			Quantity:       1,
+			SpendingTxHash: hashForByte(4),
+			UtxoTxHash:     hashForByte(5),
+			UtxoIndex:      0,
+			BlockNumber:    block,
+			BlockHash:      hashForByte(byte(block)),
+			TxIndex:        tx,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    1,
+			TxHash:      hashForByte(6),
+			OutputIndex: 0,
+			BlockNumber: block,
+			BlockHash:   hashForByte(byte(block)),
+			TxIndex:     tx,
+		}),
+	)
 
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{TxCapacity: 10})
+	resp, err := client.GetUtxoEvents(
+		ctx,
+		&midnight.UtxoEventsRequest{TxCapacity: 10},
+	)
 	require.NoError(t, err)
 	require.Len(t, resp.GetEvents(), 4)
 
@@ -244,39 +299,53 @@ func TestGetUtxoEvents_CursorPagination(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
-	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
-		Address:     []byte{0x01},
-		Quantity:    1,
-		TxHash:      hashForByte(1),
-		OutputIndex: 0,
-		BlockNumber: 1,
-		BlockHash:   hashForByte(1),
-		TxIndex:     0,
-	}))
-	require.NoError(t, store.CreateMidnightRegistration(nil, &models.MidnightRegistration{
-		FullDatum:   []byte{0xd1},
-		TxHash:      hashForByte(2),
-		OutputIndex: 0,
-		BlockNumber: 1,
-		BlockHash:   hashForByte(1),
-		TxIndex:     1,
-	}))
-	require.NoError(t, store.CreateMidnightAssetSpend(nil, &models.MidnightAssetSpend{
-		Address:        []byte{0x01},
-		Quantity:       1,
-		SpendingTxHash: hashForByte(3),
-		UtxoTxHash:     hashForByte(4),
-		UtxoIndex:      0,
-		BlockNumber:    2,
-		BlockHash:      hashForByte(2),
-		TxIndex:        0,
-	}))
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    1,
+			TxHash:      hashForByte(1),
+			OutputIndex: 0,
+			BlockNumber: 1,
+			BlockHash:   hashForByte(1),
+			TxIndex:     0,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightRegistration(nil, &models.MidnightRegistration{
+			FullDatum:   []byte{0xd1},
+			TxHash:      hashForByte(2),
+			OutputIndex: 0,
+			BlockNumber: 1,
+			BlockHash:   hashForByte(1),
+			TxIndex:     1,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightAssetSpend(nil, &models.MidnightAssetSpend{
+			Address:        []byte{0x01},
+			Quantity:       1,
+			SpendingTxHash: hashForByte(3),
+			UtxoTxHash:     hashForByte(4),
+			UtxoIndex:      0,
+			BlockNumber:    2,
+			BlockHash:      hashForByte(2),
+			TxIndex:        0,
+		}),
+	)
 
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	page1, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{TxCapacity: 2})
+	page1, err := client.GetUtxoEvents(
+		ctx,
+		&midnight.UtxoEventsRequest{TxCapacity: 2},
+	)
 	require.NoError(t, err)
 	require.Len(t, page1.GetEvents(), 2)
 	require.NotNil(t, page1.GetEvents()[0].GetAssetCreate())
@@ -308,44 +377,63 @@ func TestGetUtxoEvents_TxCapacityDoesNotSplitTxGroup(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
-	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
-		Address:     []byte{0x01},
-		Quantity:    1,
-		TxHash:      hashForByte(1),
-		OutputIndex: 0,
-		BlockNumber: 1,
-		BlockHash:   hashForByte(1),
-		TxIndex:     0,
-	}))
-	require.NoError(t, store.CreateMidnightRegistration(nil, &models.MidnightRegistration{
-		FullDatum:   []byte{0xd1},
-		TxHash:      hashForByte(2),
-		OutputIndex: 0,
-		BlockNumber: 1,
-		BlockHash:   hashForByte(1),
-		TxIndex:     0,
-	}))
-	require.NoError(t, store.CreateMidnightAssetSpend(nil, &models.MidnightAssetSpend{
-		Address:        []byte{0x01},
-		Quantity:       1,
-		SpendingTxHash: hashForByte(3),
-		UtxoTxHash:     hashForByte(4),
-		UtxoIndex:      0,
-		BlockNumber:    2,
-		BlockHash:      hashForByte(2),
-		TxIndex:        0,
-	}))
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    1,
+			TxHash:      hashForByte(1),
+			OutputIndex: 0,
+			BlockNumber: 1,
+			BlockHash:   hashForByte(1),
+			TxIndex:     0,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightRegistration(nil, &models.MidnightRegistration{
+			FullDatum:   []byte{0xd1},
+			TxHash:      hashForByte(2),
+			OutputIndex: 0,
+			BlockNumber: 1,
+			BlockHash:   hashForByte(1),
+			TxIndex:     0,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightAssetSpend(nil, &models.MidnightAssetSpend{
+			Address:        []byte{0x01},
+			Quantity:       1,
+			SpendingTxHash: hashForByte(3),
+			UtxoTxHash:     hashForByte(4),
+			UtxoIndex:      0,
+			BlockNumber:    2,
+			BlockHash:      hashForByte(2),
+			TxIndex:        0,
+		}),
+	)
 
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// tx_capacity=1 would naturally cut after just the create, splitting
 	// the (1,0) group; the handler must extend to include the registration
 	// too, without pulling in the unrelated spend at (2,0).
-	resp, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{TxCapacity: 1})
+	resp, err := client.GetUtxoEvents(
+		ctx,
+		&midnight.UtxoEventsRequest{TxCapacity: 1},
+	)
 	require.NoError(t, err)
-	require.Len(t, resp.GetEvents(), 2, "must extend past tx_capacity to include the full (1,0) group")
+	require.Len(
+		t,
+		resp.GetEvents(),
+		2,
+		"must extend past tx_capacity to include the full (1,0) group",
+	)
 	require.NotNil(t, resp.GetEvents()[0].GetAssetCreate())
 	require.NotNil(t, resp.GetEvents()[1].GetRegistration())
 
@@ -359,7 +447,12 @@ func TestGetUtxoEvents_TxCapacityDoesNotSplitTxGroup(t *testing.T) {
 		StartPosition: next,
 	})
 	require.NoError(t, err)
-	require.Len(t, page2.GetEvents(), 1, "resuming must find exactly the spend, with no duplicates")
+	require.Len(
+		t,
+		page2.GetEvents(),
+		1,
+		"resuming must find exactly the spend, with no duplicates",
+	)
 	require.NotNil(t, page2.GetEvents()[0].GetAssetSpend())
 }
 
@@ -369,7 +462,9 @@ func TestGetUtxoEvents_TxCapacityDoesNotSplitTxGroup(t *testing.T) {
 func TestGetUtxoEvents_EndBlockHashRequiresResolver(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -390,24 +485,30 @@ func TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 
-	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
-		Address:     []byte{0x01},
-		Quantity:    1,
-		TxHash:      hashForByte(1),
-		OutputIndex: 0,
-		BlockNumber: 1,
-		BlockHash:   hashForByte(1),
-		TxIndex:     0,
-	}))
-	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
-		Address:     []byte{0x01},
-		Quantity:    1,
-		TxHash:      hashForByte(2),
-		OutputIndex: 0,
-		BlockNumber: 3,
-		BlockHash:   hashForByte(3),
-		TxIndex:     0,
-	}))
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    1,
+			TxHash:      hashForByte(1),
+			OutputIndex: 0,
+			BlockNumber: 1,
+			BlockHash:   hashForByte(1),
+			TxIndex:     0,
+		}),
+	)
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    1,
+			TxHash:      hashForByte(2),
+			OutputIndex: 0,
+			BlockNumber: 3,
+			BlockHash:   hashForByte(3),
+			TxIndex:     0,
+		}),
+	)
 
 	// Block 2 is resolvable on-chain but has zero Midnight events of its
 	// own.
@@ -432,8 +533,17 @@ func TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents(t *testing.T) {
 		EndBlockHash: hashForByte(2),
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.GetEvents(), 1, "must include block 1's create but exclude block 3's, even though the boundary block 2 has no events of its own")
-	require.Equal(t, uint64(1), resp.GetEvents()[0].GetAssetCreate().GetBlockNumber())
+	require.Len(
+		t,
+		resp.GetEvents(),
+		1,
+		"must include block 1's create but exclude block 3's, even though the boundary block 2 has no events of its own",
+	)
+	require.Equal(
+		t,
+		uint64(1),
+		resp.GetEvents()[0].GetAssetCreate().GetBlockNumber(),
+	)
 }
 
 // spyEventStore wraps a real store and records the txn passed to
@@ -441,14 +551,14 @@ func TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents(t *testing.T) {
 // GetUtxoEvents shares exactly one read transaction across all four tables
 // instead of passing nil (a separate, independently-timed read) to each.
 type spyEventStore struct {
-	*sqlite.MetadataStoreSqlite
+	*sqlstore.Store
 	readTxnCalls int
 	seenTxns     []types.Txn
 }
 
 func (s *spyEventStore) ReadTransaction() types.Txn {
 	s.readTxnCalls++
-	return s.MetadataStoreSqlite.ReadTransaction()
+	return s.Store.ReadTransaction()
 }
 
 func (s *spyEventStore) FindMidnightAssetCreatesFrom(
@@ -458,7 +568,12 @@ func (s *spyEventStore) FindMidnightAssetCreatesFrom(
 	txn types.Txn,
 ) ([]models.MidnightAssetCreate, error) {
 	s.seenTxns = append(s.seenTxns, txn)
-	return s.MetadataStoreSqlite.FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)
+	return s.Store.FindMidnightAssetCreatesFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 }
 
 func (s *spyEventStore) FindMidnightAssetSpendsFrom(
@@ -468,7 +583,12 @@ func (s *spyEventStore) FindMidnightAssetSpendsFrom(
 	txn types.Txn,
 ) ([]models.MidnightAssetSpend, error) {
 	s.seenTxns = append(s.seenTxns, txn)
-	return s.MetadataStoreSqlite.FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, txn)
+	return s.Store.FindMidnightAssetSpendsFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 }
 
 func (s *spyEventStore) FindMidnightRegistrationsFrom(
@@ -478,7 +598,12 @@ func (s *spyEventStore) FindMidnightRegistrationsFrom(
 	txn types.Txn,
 ) ([]models.MidnightRegistration, error) {
 	s.seenTxns = append(s.seenTxns, txn)
-	return s.MetadataStoreSqlite.FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, txn)
+	return s.Store.FindMidnightRegistrationsFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 }
 
 func (s *spyEventStore) FindMidnightDeregistrationsFrom(
@@ -488,7 +613,12 @@ func (s *spyEventStore) FindMidnightDeregistrationsFrom(
 	txn types.Txn,
 ) ([]models.MidnightDeregistration, error) {
 	s.seenTxns = append(s.seenTxns, txn)
-	return s.MetadataStoreSqlite.FindMidnightDeregistrationsFrom(startBlock, startTxIndex, limit, txn)
+	return s.Store.FindMidnightDeregistrationsFrom(
+		startBlock,
+		startTxIndex,
+		limit,
+		txn,
+	)
 }
 
 // TestGetUtxoEvents_SharesOneReadTransactionAcrossTables verifies GetUtxoEvents
@@ -499,19 +629,39 @@ func (s *spyEventStore) FindMidnightDeregistrationsFrom(
 func TestGetUtxoEvents_SharesOneReadTransactionAcrossTables(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	spy := &spyEventStore{MetadataStoreSqlite: store}
+	spy := &spyEventStore{Store: store}
 
-	client := midnight.NewMidnightStateClient(dial(t, startTestServerConfig(t, server.Config{Metadata: spy})))
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerConfig(t, server.Config{Metadata: spy})),
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{TxCapacity: 10})
+	_, err := client.GetUtxoEvents(
+		ctx,
+		&midnight.UtxoEventsRequest{TxCapacity: 10},
+	)
 	require.NoError(t, err)
 
-	require.Equal(t, 1, spy.readTxnCalls, "GetUtxoEvents must open exactly one read transaction")
+	require.Equal(
+		t,
+		1,
+		spy.readTxnCalls,
+		"GetUtxoEvents must open exactly one read transaction",
+	)
 	require.Len(t, spy.seenTxns, 4, "all four Find*From calls must have run")
 	for i, txn := range spy.seenTxns {
-		require.NotNil(t, txn, "call %d must receive the shared transaction, not nil", i)
-		require.True(t, txn == spy.seenTxns[0], "call %d must receive the SAME transaction object as the others", i)
+		require.NotNil(
+			t,
+			txn,
+			"call %d must receive the shared transaction, not nil",
+			i,
+		)
+		require.True(
+			t,
+			txn == spy.seenTxns[0],
+			"call %d must receive the SAME transaction object as the others",
+			i,
+		)
 	}
 }

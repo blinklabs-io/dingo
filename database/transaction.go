@@ -281,7 +281,10 @@ func (d *Database) SetTransactionWithOpts(
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
-		return fmt.Errorf("set transaction metadata: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 
 	if updateEpoch > 0 && tx.IsValid() {
@@ -334,7 +337,10 @@ func (d *Database) SetTransactionMetadataOnly(
 		certDeposits,
 		metadataTxn,
 	); err != nil {
-		return fmt.Errorf("set transaction metadata only: %w", err)
+		return fmt.Errorf(
+			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
+			tx.Hash(), idx, point.Slot, err,
+		)
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -498,6 +504,10 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
+	// Read the Mithril trust boundary once: below it, absent producer rows are
+	// legitimately expected (the snapshot does not carry pre-boundary history);
+	// past it the node should hold complete producer history.
+	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
 		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
@@ -558,9 +568,40 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
 			continue
 		}
+		// Steady-state at-tip validated application (issue #3005): a consumed
+		// input whose producer row is absent from the metadata store must never
+		// be recovered from the append-only blob store here. The blob retains
+		// blocks from abandoned forks, so recovering the producer would import a
+		// UTxO the applied chain never produced and persist an
+		// input-conservation violation. Past the Mithril boundary the producer
+		// is guaranteed to already be applied and live, so an absent row means
+		// the applied ledger has diverged from the header chain. Abort the
+		// block's transaction so the inconsistent state is never persisted and
+		// the node stalls loudly for resync rather than baking in a fork that
+		// later requires a rollback deeper than the security parameter K.
+		if opts.StrictAppliedInputConservation &&
+			d.config.StrictUtxoValidation &&
+			point.Slot > mithrilBoundarySlot {
+			return fmt.Errorf(
+				"consumed utxo %s not present in applied ledger at slot %d: "+
+					"refusing to recover it from the blob store and persist an "+
+					"input-conservation violation (issue #3005): %w",
+				input.String(),
+				point.Slot,
+				ErrUtxoNotFound,
+			)
+		}
+		// For a validated block past the Mithril trust boundary, refuse to
+		// blob-recover a producer that is not on the applied primary chain
+		// (issue #3005 cross-fork splice). This covers the catch-up case that
+		// the at-tip StrictAppliedInputConservation guard above does not reach:
+		// there reachedTip is not latched, so the guard is off, and a fork
+		// switched to during catch-up could otherwise silently resurrect an
+		// abandoned-fork producer from the append-only blob store.
 		recoveredUtxo, err := d.recoverConsumedUtxo(
 			input,
 			txn,
+			d.config.StrictUtxoValidation && point.Slot > mithrilBoundarySlot,
 		)
 		if err != nil {
 			// Past the Mithril trust boundary the node should have complete
@@ -570,7 +611,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// is recorded and we did not sync from genesis) the UTxO may
 			// legitimately predate the data we imported.
 			if d.config.StrictUtxoValidation &&
-				point.Slot > d.MithrilTrustBoundarySlot(txn) {
+				point.Slot > mithrilBoundarySlot {
 				return fmt.Errorf(
 					"consumed utxo %s not found at slot %d and could not be recovered: %w",
 					input.String(),
@@ -684,7 +725,10 @@ func (d *Database) ensureGapConsumedUtxos(
 				continue
 			}
 		}
-		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn)
+		// Mithril gap-closure recovers producers from imported history that
+		// legitimately has no block-index entry, so the primary-chain
+		// membership check is not applied on this path.
+		recoveredUtxo, err := d.recoverConsumedUtxo(input, txn, false)
 		if err != nil {
 			return fmt.Errorf(
 				"recover gap input utxo %s at slot %d: %w",
@@ -716,9 +760,78 @@ func (d *Database) ensureGapConsumedUtxos(
 	return nil
 }
 
+// recoveredProducerOnPrimaryChain reports whether the block that produced a
+// blob-recovered UTxO is the block currently indexed on the applied primary
+// chain at that height. The append-only blob store retains blocks from
+// abandoned forks, so a producer found in the blob is not necessarily on the
+// applied chain. Mirrors LedgerState.primaryChainContainsPoint at the database
+// layer: BlockByIndex reveals which block is canonical at the producer's
+// height, and a hash mismatch means the producer was abandoned.
+//
+// The producer's block ID is supplied by the caller rather than resolved here.
+// Every recovery path has already loaded the producer -- from the blob's block
+// metadata in the offset case, or as a *models.Block in the others -- so
+// looking it up again by point would download the same full block CBOR from
+// cold cloud storage a second time, once per recovered input, on exactly the
+// Mithril catch-up path this check runs on.
+func (d *Database) recoveredProducerOnPrimaryChain(
+	txn *Txn,
+	producerID uint64,
+	hash []byte,
+) (bool, error) {
+	indexed, err := d.BlockByIndex(producerID, txn)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return bytes.Equal(indexed.Hash, hash), nil
+}
+
+// refuseOffPrimaryChainProducer returns a wrapped ErrUtxoNotFound when the
+// producer block of a blob-recovered consumed input is not on the applied
+// primary chain. Recovering such a producer would splice in a UTxO the applied
+// chain never produced (issue #3005 cross-fork input-conservation violation).
+// It is enforced for validated blocks past the Mithril trust boundary, where
+// the producer must be a live, applied, on-chain UTxO, so an abandoned-fork
+// producer is never legitimate. Below the boundary and on the Mithril
+// gap-closure path the check is not applied, because imported history need not
+// carry a block-index entry for the producer.
+func (d *Database) refuseOffPrimaryChainProducer(
+	txn *Txn,
+	producerID uint64,
+	slot uint64,
+	hash []byte,
+	input lcommon.TransactionInput,
+) error {
+	onChain, err := d.recoveredProducerOnPrimaryChain(txn, producerID, hash)
+	if err != nil {
+		return fmt.Errorf(
+			"check producer primary-chain membership for %s: %w",
+			input.String(),
+			err,
+		)
+	}
+	if !onChain {
+		return fmt.Errorf(
+			"producer block %x at slot %d for consumed utxo %s is not on the "+
+				"applied primary chain: refusing abandoned-fork blob recovery "+
+				"that would persist an input-conservation violation "+
+				"(issue #3005): %w",
+			hash,
+			slot,
+			input.String(),
+			ErrUtxoNotFound,
+		)
+	}
+	return nil
+}
+
 func (d *Database) recoverConsumedUtxo(
 	input lcommon.TransactionInput,
 	txn *Txn,
+	enforcePrimaryChain bool,
 ) (*models.Utxo, error) {
 	blob := txn.DB().Blob()
 	if blob == nil {
@@ -744,7 +857,7 @@ func (d *Database) recoverConsumedUtxo(
 		if err != nil {
 			return nil, fmt.Errorf("decode utxo offset: %w", err)
 		}
-		blockCbor, _, err := blob.GetBlock(
+		blockCbor, producerMeta, err := blob.GetBlock(
 			blobTxn,
 			offset.BlockSlot,
 			offset.BlockHash[:],
@@ -763,6 +876,17 @@ func (d *Database) recoverConsumedUtxo(
 		}
 		outputCbor = blockCbor[offset.ByteOffset:end]
 		addedSlot = offset.BlockSlot
+		if enforcePrimaryChain {
+			if err := d.refuseOffPrimaryChainProducer(
+				txn,
+				producerMeta.ID,
+				offset.BlockSlot,
+				offset.BlockHash[:],
+				input,
+			); err != nil {
+				return nil, err
+			}
+		}
 	case err == nil:
 		// Legacy format: raw output CBOR is already present in utxoData.
 		// Resolve the producer slot so addedSlot reflects when the UTxO
@@ -786,6 +910,29 @@ func (d *Database) recoverConsumedUtxo(
 			return nil, ErrUtxoNotFound
 		}
 		addedSlot = slot
+		if enforcePrimaryChain {
+			// The legacy metadata slot lookup yields neither the producer
+			// block hash nor its ID, so resolve the producer block to check
+			// primary-chain membership. Legacy raw-CBOR blob entries do not
+			// occur past the Mithril boundary in practice, so this extra
+			// lookup is exceptional.
+			prodBlock, bErr := utxoRecoveryBlockForTx(
+				txn.DB(), txn, ledgerInputIDBytes(input),
+			)
+			if bErr != nil {
+				return nil, fmt.Errorf(
+					"resolve producer block for primary-chain check: %w", bErr,
+				)
+			}
+			if prodBlock == nil {
+				return nil, ErrUtxoNotFound
+			}
+			if err := d.refuseOffPrimaryChainProducer(
+				txn, prodBlock.ID, prodBlock.Slot, prodBlock.Hash, input,
+			); err != nil {
+				return nil, err
+			}
+		}
 	default:
 		block, err := utxoRecoveryBlockForTx(
 			txn.DB(),
@@ -815,6 +962,13 @@ func (d *Database) recoverConsumedUtxo(
 			return nil, err
 		}
 		addedSlot = block.Slot
+		if enforcePrimaryChain {
+			if err := d.refuseOffPrimaryChainProducer(
+				txn, block.ID, block.Slot, block.Hash, input,
+			); err != nil {
+				return nil, err
+			}
+		}
 		indexer := NewBlockIndexer(block.Slot, block.Hash)
 		offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
 		if indexErr == nil {

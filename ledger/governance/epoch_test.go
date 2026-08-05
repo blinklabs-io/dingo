@@ -38,11 +38,11 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	rewardAddrBytes, err := rewardAddr.Bytes()
 	require.NoError(t, err)
 
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(5),
 		Active:     true,
-	}).Error)
+	}))
 
 	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
 		Deposit:       7,
@@ -60,11 +60,11 @@ func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x31)
 	rewardAddrBytes := buildRewardAddr(t, stakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	txHash := testBytes(32, 0x32)
 	first := &models.GovernanceProposal{
@@ -87,13 +87,20 @@ func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(18), uint64(account.Reward))
 
+	rows, err := store.raw.Query(`
+SELECT tx_hash, amount FROM account_reward_delta
+WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
+		0, stakeCred, uint64(123),
+	)
+	require.NoError(t, err)
 	var deltas []models.AccountRewardDelta
-	require.NoError(t, store.DB().Where(
-		"credential_tag = ? AND staking_key = ? AND added_slot = ?",
-		0,
-		stakeCred,
-		uint64(123),
-	).Find(&deltas).Error)
+	for rows.Next() {
+		var delta models.AccountRewardDelta
+		require.NoError(t, rows.Scan(&delta.TxHash, &delta.Amount))
+		deltas = append(deltas, delta)
+	}
+	require.NoError(t, rows.Close())
+	require.NoError(t, rows.Err())
 	require.Len(t, deltas, 2)
 	assert.NotEqual(
 		t,
@@ -144,11 +151,11 @@ func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 	rewardAddrBytes, err := rewardAddr.Bytes()
 	require.NoError(t, err)
 
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(5),
 		Active:     true,
-	}).Error)
+	}))
 	txHash := testBytes(32, 3)
 	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
 		TxHash:        txHash,
@@ -343,11 +350,11 @@ func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 	require.NoError(t, err)
 	rewardAddrBytes, err := rewardAddr.Bytes()
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 	withdrawalCbor, err := cbor.Encode(
 		&lcommon.TreasuryWithdrawalGovAction{
 			Type:        2,
@@ -449,11 +456,11 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 	require.NoError(t, err)
 	withdrawAddrBytes, err := withdrawAddr.Bytes()
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: withdrawStakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	constitutionAction := &lcommon.NewConstitutionGovAction{Type: 5}
 	constitutionAction.Constitution.Anchor.Url =
@@ -546,15 +553,16 @@ func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(
 	require.NoError(t, err)
 	rewardAddrBytes, err := rewardAddr.Bytes()
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(5),
 		Active:     true,
-	}).Error)
-	require.NoError(t, store.DB().
-		Model(&models.Account{}).
-		Where("staking_key = ?", stakeCred).
-		Update("active", false).Error)
+	}))
+	_, err = store.raw.Exec(
+		"UPDATE account SET active = FALSE WHERE staking_key = ?",
+		stakeCred,
+	)
+	require.NoError(t, err)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
@@ -590,11 +598,11 @@ func TestRewardCreditsRollbackBySlot(t *testing.T) {
 	rewardAddrBytes, err := rewardAddr.Bytes()
 	require.NoError(t, err)
 
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(5),
 		Active:     true,
-	}).Error)
+	}))
 
 	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
 		Deposit:       7,
@@ -611,7 +619,7 @@ func TestRewardCreditsRollbackBySlot(t *testing.T) {
 
 func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 	db, store := newTallyTestDB(t)
-	require.NoError(t, store.DB().Create(&[]models.Drep{
+	for _, drep := range []models.Drep{
 		{
 			Credential:  testBytes(28, 1),
 			ExpiryEpoch: 0,
@@ -627,7 +635,9 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 			ExpiryEpoch: 11,
 			Active:      true,
 		},
-	}).Error)
+	} {
+		require.NoError(t, store.CreateDrep(nil, &drep))
+	}
 
 	count, err := countActiveDReps(db, nil, 10)
 	require.NoError(t, err)
@@ -708,11 +718,11 @@ func TestProcessEpochOrphanedChildRemovedAndRefunded(t *testing.T) {
 
 	stakeCred := testBytes(28, 50)
 	returnAddr := buildRewardAddr(t, stakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	ratifiedEpoch := uint64(4)
 	ratifiedSlot := uint64(400)
@@ -775,11 +785,11 @@ func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
 
 	parentStakeCred := testBytes(28, 53)
 	parentReturnAddr := buildRewardAddr(t, parentStakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: parentStakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	missingStakeCred := testBytes(28, 54)
 	missingReturnAddr := buildRewardAddr(t, missingStakeCred)
@@ -823,7 +833,12 @@ func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
 
-	missing, err := store.GetAccountByCredential(0, missingStakeCred, false, nil)
+	missing, err := store.GetAccountByCredential(
+		0,
+		missingStakeCred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Nil(t, missing, "orphan refund must not create a reward account")
 
@@ -841,11 +856,11 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 
 	stakeCred := testBytes(28, 57)
 	returnAddr := buildRewardAddr(t, stakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	ratifiedEpoch := uint64(4)
 	ratifiedSlot := uint64(400)
@@ -912,11 +927,11 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 
 	stakeCred := testBytes(28, 61)
 	returnAddr := buildRewardAddr(t, stakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	ratifiedEpoch := uint64(4)
 	ratifiedSlot := uint64(400)
@@ -967,11 +982,11 @@ func TestProcessEpochOrphanedChildRestoredOnRollback(t *testing.T) {
 
 	stakeCred := testBytes(28, 64)
 	returnAddr := buildRewardAddr(t, stakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	ratifiedEpoch := uint64(4)
 	ratifiedSlot := uint64(400)
@@ -1008,14 +1023,22 @@ func TestProcessEpochOrphanedChildRestoredOnRollback(t *testing.T) {
 
 	child, err := db.GetGovernanceProposal(childHash, 0, nil)
 	require.NoError(t, err)
-	require.NotNil(t, child.ExpiredEpoch, "child must be orphaned before rollback")
+	require.NotNil(
+		t,
+		child.ExpiredEpoch,
+		"child must be orphaned before rollback",
+	)
 
 	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(499, nil))
 	require.NoError(t, db.DeleteAccountRewardsAfterSlot(499, nil))
 
 	child, err = db.GetGovernanceProposal(childHash, 0, nil)
 	require.NoError(t, err)
-	assert.Nil(t, child.ExpiredEpoch, "orphaned status must be reversed by rollback")
+	assert.Nil(
+		t,
+		child.ExpiredEpoch,
+		"orphaned status must be reversed by rollback",
+	)
 	assert.Nil(t, child.ExpiredSlot)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -1032,11 +1055,11 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 
 	stakeCred := testBytes(28, 67)
 	returnAddr := buildRewardAddr(t, stakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
-	}).Error)
+	}))
 
 	parentHash := testBytes(32, 68)
 	childHash := testBytes(32, 69)

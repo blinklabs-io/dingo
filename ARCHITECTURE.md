@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-07-29
+Last reviewed: 2026-08-03
 
 ## In-process plugin host
 
@@ -31,6 +31,44 @@ Composition injects the application `databasePath` into both storage provider
 dependency bundles, preserving `CARDANO_DATABASE_PATH` and `--data-dir` as a
 shortcut for both stores. Local providers can independently override that
 fallback through their typed `dataDir` configuration.
+
+### Shared metadata SQL store
+
+The shared `database/plugin/metadata/sqlstore` package is the composition
+boundary for relational metadata. It owns
+`database/sql` pools, store-owned transactions, savepoints, readiness, and
+business orchestration. A small dialect capability handles placeholder
+rebinding, identifier quoting, parameter limits, read-only isolation, bulk
+session tuning, and planner statistics. Generated query packages remain
+internal so generated row types cannot leak into ledger or API packages.
+
+The SQLite provider is a thin factory around the pure-Go driver. It configures
+one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
+locking, query tracing, and daily `VACUUM`. The tagged PostgreSQL/MySQL
+factories configure their direct drivers, pools, advisory migration locks, and
+repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
+business behavior is implemented once in `sqlstore` and dialect translation is
+limited to SQL mechanics.
+
+The public compatibility interface is decomposing into narrow
+`LifecycleStore`, `SettingsStore`, `TransactionStore`, and `SlotRangeStore`
+capabilities so components need not inherit the full historical metadata
+surface. Concrete SQL handles are not exposed; repository tests use internal
+fixtures when schema seeding or assertions require raw SQL.
+
+Startup reserves the write connection, acquires the backend migration lock,
+rejects unversioned metadata tables (users must delete the data directory,
+including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
+advertising readiness. The initial schema release is `v1alpha1` (integer
+migration version 1); subsequent schema work advances the ordered migration
+registry. It then checks the read pool. File-backed SQLite uses a
+cross-process lock file; isolated in-memory databases use a process lock. A
+failed or interrupted phase leaves readiness false and carries the migration
+version and phase in the returned error. Backfill data and its opaque cursor
+checkpoint commit atomically in one transaction. Shutdown serializes with
+startup and passes its lifecycle context through maintenance cancellation;
+bulk-load tuning is scoped to a dedicated write connection and restored before
+the connection is released.
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -177,8 +215,8 @@ graph LR
     db_blob["database/plugin/blob"]
     db_blob_impl["database/plugin/blob/{aws,badger,gcs}"]
     db_meta["database/plugin/metadata"]
-    db_meta_impl["database/plugin/metadata/{mysql,postgres,sqlite}"]
-    db_meta_util["database/plugin/metadata/{importutil,labelcodec}"]
+    db_meta_impl["database/plugin/metadata/{sqlite,sqlstore}"]
+    db_meta_util["database/plugin/metadata/{deferred,labelcodec}"]
     db_immutable["database/immutable"]
     cardano_cfg["config/cardano"]
     ev["event"]
@@ -355,6 +393,17 @@ point.
 
 Connection lifecycle, protocol multiplexing, and peer governance.
 
+The connection manager wraps TCP bearers with an idle-aware write deadline at
+both accept and dial boundaries, for NtC and N2N alike. Each write refreshes the
+two-minute deadline just before the syscall, so a peer that stops reading cannot
+hold a protocol goroutine in `Write` forever while healthy long-lived Ouroboros
+sessions are unaffected. Read deadlines stay with the muxer, which sets its own
+per-segment deadline as slowloris protection; refreshing a read deadline per
+`Read` would override that protocol-managed bound and let a peer dribbling bytes
+keep a segment read open indefinitely. Helpers needing the concrete socket type
+(SO_LINGER, Unix peer credentials) unwrap through the wrapper, so wrapping an
+accepted connection never silently disables them.
+
 ```mermaid
 graph TB
     subgraph "Peer Governor"
@@ -507,8 +556,9 @@ dingo/
 │       │   └── gcs/     # Google Cloud Storage
 │       └── metadata/    # Metadata contract and providers
 │           ├── sqlite/  # SQLite (default)
-│           ├── postgres/# PostgreSQL (tag-gated)
-│           └── mysql/   # MySQL (tag-gated)
+│           ├── sqlstore/# Shared database/sql behavior and migrations
+│           ├── postgres/# PostgreSQL adapter (tag-gated)
+│           └── mysql/   # MySQL adapter (tag-gated)
 ├── plugin/              # Generic instance-owned provider host
 ├── internal/plugins/    # Explicit compiled-in provider composition
 ├── event/               # Event bus for decoupled communication
@@ -888,18 +938,18 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     |   (blocks, UTxOs, txs)     |  (indexes, state)|
     -------------------------------------------------
     | Plugins:                    | Plugins:          |
-    |  - Badger (default)         |  - SQLite (default)|
-    |  - AWS S3 (tag-gated)       |  - PostgreSQL (tag-gated)|
-    |  - Google Cloud Storage (tag-gated)|  - MySQL (tag-gated)|
+    |  - Badger (default)         |  - SQLite|
+    |  - AWS S3 (tag-gated)       |            |
+    |  - Google Cloud Storage (tag-gated)|     |
     -------------------------------------------------
 ```
 
 Badger and SQLite are always compiled into Dingo. The non-default blob plugins
-(`s3` and `gcs`) and metadata plugins (`postgres` and `mysql`) are compiled
-only when the `dingo_extra_plugins` build tag is enabled; project builds, CI,
-and release binaries opt into that tag, while a plain `go build ./cmd/dingo`
-omits the cloud blob SDKs and SQL driver dependencies for non-default metadata
-stores.
+(`s3` and `gcs`) and PostgreSQL/MySQL metadata providers are compiled only when
+the `dingo_extra_plugins` build tag is enabled; project builds and CI still
+compile that boundary, while a plain `go build ./cmd/dingo` omits the cloud
+SDKs and non-default SQL drivers. Every compiled metadata provider passes the
+readiness gate after its dialect-specific migration completes.
 
 ### Cross-Store Commit Ordering
 
@@ -1502,16 +1552,40 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 
 Before resolving or eagerly forecasting an epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
-The in-memory summary uses the same configured era safe zone and
-`TransitionInfo` as the NtC era-history query: an unknown transition is bounded
+The in-memory summary reads the same configured era safe zone and
+`TransitionInfo` as the NtC era-history query, but the two horizons are not
+interchangeable: the NtC query answers a point in time, while the live summary
+must stay ahead of header processing. An unknown transition is bounded in both
 from the applied tip by the era's stability window (`3k/f` for Shelley and
-later), a known transition is bounded at the announced era boundary, and an
-impossible transition keeps the same rolling safe-zone bound so live slot
-processing can cross a confirmed same-era epoch boundary. (The point-in-time
-NtC query may conservatively stop its reported range at that confirmed
-boundary.) A header at or past the live bound fails with
+later). An impossible transition diverges — the NtC query reports the confirmed
+current-epoch end measured from the era start, whereas the live summary treats
+it as unknown and rolls the safe zone forward from the tip, so live slot
+processing can cross a confirmed same-era epoch boundary. A known transition is
+bounded at the announced era boundary for the NtC query, while the live summary
+additionally appends the successor era starting at that boundary so the header
+horizon reaches past the transition. This is required for liveness: the rollover
+into the first post-boundary epoch is deterministic within the stability window,
+so its header can be verified, and without the extra epoch the gate would reject
+that first header and the node could never apply the block that consumes the
+transition and extends era history (a boundary deadlock). The successor era
+takes the next era's params by configured shape order (not `EraID + 1`, which
+would break on non-contiguous era IDs), falling back to the current era's params
+when the ledger already occupies the last modeled era. `hardfork.SuccessorEra`
+bounds it by the successor's own safe zone measured from the boundary, which
+always snaps up to at least the end of the first post-boundary epoch; the
+successor stays open only when the resolved safe zone is zero
+(`UnsafeIndefiniteSafeZone`), the same rule `BuildSummary` applies to the
+current era. Where that live bound is finite, a header past it fails with
 `hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
-epoch/nonce cache. Candidate fork blockfetch begins after fork resolution has
+epoch/nonce cache. That past-horizon failure is classified as a deferred
+condition (wrapped in `errHeaderVerificationDeferred`), not a peer fault: during
+catch-up the header chain legitimately runs ahead of the applied tip and crosses
+epoch boundaries, so the block is kept queued for in-order re-verification once
+the applied tip advances into range, and the peer that served it is not
+recycled. Recycling honest peers on these benign past-horizon rejections would
+starve the peer pool the block and Leios endorser-block fetch depend on and
+deadlock catch-up at each epoch boundary. Candidate fork blockfetch begins after
+fork resolution has
 rolled the applied chain back to its common ancestor, so permitted epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
@@ -1520,9 +1594,21 @@ Genesis-overlay activity is resolved separately from the forward protocol-
 parameter forecast: header validation first uses the epoch containing the
 slot and reads that epoch's effective parameter row, so an epoch-boundary
 decentralization update cannot be mistaken for the prior epoch's overlay
-schedule. If the target epoch is not authoritative yet, blockfetch defers the
-stateful overlay decision until ledger apply; full historical validation and
-the normal leader checks remain enabled.
+schedule. When the target epoch's parameter row is not persisted yet (a
+from-genesis node still one epoch behind the header it is checking),
+`ProtocolParamsForSlot` forecasts it: for a slot one epoch ahead it applies,
+on top of any era `HardForkFunc`, the pending in-era protocol-parameter update
+the rollover will enact at that boundary. The forecast mirrors the rollover's
+enactment exactly — it selects the proposals submitted in the current epoch
+(Shelley update system: a proposal submitted in epoch `e` is enacted as epoch
+`e+1`'s parameters), applies the same `UpdateQuorum` rule, and reads the
+already-collected proposals — but is pure and read-only (it clones before the
+era update function, which mutates in place, and never writes). This yields the
+correct post-update decentralization for the next epoch's overlay check without
+requiring the epoch row first, which previously deadlocked a from-genesis sync
+at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
+decision until ledger apply when even the forecast cannot resolve it; full
+historical validation and the normal leader checks remain enabled.
 
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
@@ -2374,6 +2460,17 @@ available. Exiting bootstrap preserves bootstrap peer identity for recovery and
 lowers bootstrap chain-selection priority instead of making connected bootstrap
 ChainSync streams ineligible.
 
+Peer performance EMAs decay toward score-neutral baselines after inactivity,
+with a five-minute half-life. Latency decays toward the neutral 200 ms rather
+than the 1000 ms penalty applied to a never-measured peer, so aging out stale
+history does not itself demote a peer that was merely quiet. Decay runs both
+when a fresh observation arrives and at the start of each scoring cycle
+(reconcile and both churn tickers), so a peer that goes silent cannot hold a
+stale favorable score while ranking against active peers. A peer with no
+observations at all keeps its initial score and continues to rank below observed
+peers. A peer's old successful history therefore cannot absorb an unbounded run
+of new failures before churn policy reacts.
+
 ## Transaction Mempool
 
 `mempool.Service` is the backend-neutral contract used by node composition.
@@ -2433,6 +2530,21 @@ them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 `mempool.remove_tx` events remain backend-neutral;
 `dingo_metrics_mempool_info{implementation="fifo|dag"}` identifies the
 selected backend.
+
+Each transaction-submission consumer retains a bounded cache of transaction
+bodies (1,024 entries by default; `MempoolConfig.ConsumerCacheSize` can lower or
+raise it for embedded users). The bound is enforced by declining to advertise,
+not by eviction: a body is only ever served to the peer from this cache, and
+dropping one already advertised would silently omit a transaction the peer
+legitimately requested. A non-blocking `NextTx` returns nil once the cache is
+full; a blocking one parks until a slot frees rather than answering empty, since
+the peer's pull loop has no backoff for an empty reply and would spin
+request/reply without pacing. Shutdown releases a parked waiter. Serving a
+body or the peer acknowledging its ids frees slots and reopens the window. The
+protocol request window is far below the default limit, so this bounds an
+aggressive peer rather than affecting normal relay. Explicit cache removal and
+clearing preserve the same per-consumer semantics while preventing an idle
+connection from growing memory without limit.
 
 Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
 clearing transaction and consumer state; later transaction admission returns
@@ -2706,6 +2818,38 @@ pre-intersect UTxOs are intentionally absent. Gap-block ingestion
 and the chain tip) is unconditionally strict already, since that range is
 always expected to be fully recoverable from the snapshot import.
 
+That default recovery is deliberately one-sided: it only fires when the produced
+`utxo` row is *absent* from the metadata store, and it rebuilds it from the
+blob store, which is append-only and retains blocks from abandoned forks. In
+steady-state, at-tip, validated block application that recovery must never run:
+every consumed input's producer is already applied and live in the metadata
+store. An absent metadata row alone does not prove divergence — it is also the
+normal state of an in-flight/intra-block producer whose row has not been flushed
+yet — but the guard runs only after the same-slot repair and the
+`HasInFlightProducer` intra-block check, so by the time it fires the row is
+absent *and* not in-flight/intra-block, which past the Mithril boundary means
+the applied ledger has diverged from the header chain (issue #3005). Recovering
+the producer from a fork block the applied chain never followed would then
+import a UTxO the chain never produced and persist an
+input-conservation violation — which, once it accumulates past the security
+parameter K, wedges the node behind the rollback-exceeds-K guard with no legal
+recovery. The ledger closes this by setting
+`BatchedTxIngestOpts.StrictAppliedInputConservation` on the delta apply whenever
+the block is validated and the node has reached tip
+(`shouldValidate && (reachedTip || reachesTip)`, `ledgerProcessBlock`, where
+`reachesTip` is the per-block at-tip signal that guards the transition batch —
+the first batch whose blocks cross the tip cutoff — since `reachedTip` is only
+stored true after that batch commits); with that flag and
+`StrictUtxoValidation` both set, `ensureTransactionConsumedUtxos` refuses to
+recover an absent producer past the Mithril boundary and instead errors, which
+aborts the block's transaction so the inconsistent state is never committed and
+the node stalls loudly for resync rather than baking in a beyond-K fork. The
+flag is left off for from-genesis bootstrap and Mithril gap-closure (both run
+before `reachedTip`) and for non-validated/trusted replay and Leios
+endorser-block apply, where an absent producer is legitimately recovered, so
+this is the primary #3005 prevention while the K-guard and the non-convergence
+recovery hold remain as backstops.
+
 Certified immutable blocks after the selected anchor remain in the primary
 chain, but Mithril sync leaves the metadata ledger tip at the anchor. Normal
 node startup therefore replays that stable suffix through the ordinary ledger
@@ -2741,8 +2885,8 @@ bootstrap boundary escapes it), wedging the node at the tip of the following
 epoch. For an empty closing epoch (no blocks of its own) the previous carried
 nonce is passed through unchanged.
 
-In API storage mode, the SQLite metadata plugin can defer selected query indexes
-during bulk load. Deferred indexes are classified as critical or lazy in
+In API storage mode, the shared SQL metadata providers can defer selected query
+indexes during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries
 and rollback predicates, while lazy indexes cover secondary query paths. The
 metadata plugin exposes `BuildCriticalDeferredIndexes` for the critical subset
@@ -2751,7 +2895,9 @@ critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the marker is
 cleared only after the full manifest has been rebuilt. Core-mode startup still
-repairs the full manifest synchronously before serving.
+repairs the full manifest synchronously before serving. On MySQL, InnoDB
+requires indexes supporting foreign-key child columns, so the dialect leaves
+those indexes in place while deferring the remaining manifest entries.
 
 ## External Interfaces
 
@@ -2892,7 +3038,7 @@ Implements the Mesh (formerly Rosetta) API specification for wallet integration 
 
 ### UTxO RPC (`api/utxorpc/`)
 
-A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. Supports optional TLS.
+A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces; v1beta's additional `QueryService.ReadState` method currently returns `UNIMPLEMENTED`. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. Supports optional TLS.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
@@ -2909,9 +3055,9 @@ below; both modes share the same `internal/koiosparity` comparison logic
 
 ```
 internal/koiosparity/      # shared library
-  cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
+  cache.go                 # SQLite cache schema + CRUD (database/sql)
   koios_client.go          # Koios v1 REST client with pagination + retry
-  dingo_db.go              # read-only GORM access to Dingo's metadata database
+  dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
   check.go                 # parity check orchestration (pool-level comparison)
@@ -3956,10 +4102,10 @@ rows (including `RewardAccountOutput`) above the rollback slot in every mode.
 
 ### Reward Metadata State
 
-The metadata plugins persist ADA pots, reward snapshot metadata, per-pool
-inputs, and a live per-credential stake aggregate. SQLite, MySQL, and
-PostgreSQL share reward-state query behavior through
-`database/plugin/metadata/internal/`.
+The shared metadata store persists ADA pots, reward snapshot metadata,
+per-pool inputs, and a live per-credential stake aggregate. Reward-state query
+behavior lives in `database/plugin/metadata/sqlstore` and is exercised through
+the SQLite contract suite.
 
 `RewardLiveStake` supplies the credential-level input bundle for reward
 snapshots; the leader-election Mark snapshot remains on its independent,
@@ -4340,8 +4486,8 @@ row/unique-key lock remains held until commit. This lets the fallback persist
 those rows without leaving a durable `reward_snapshot` row that falsely implies
 reward inputs exist. Because the marker or temporary guard is the first row both
 paths write, they acquire the `reward_snapshot` key/row lock in the same order,
-which keeps a concurrent authoritative-vs-fallback capture both race-free and
-deadlock-free on MySQL/Postgres; SQLite is already serial.
+which keeps a concurrent authoritative-vs-fallback capture race-free; SQLite
+serializes writers.
 `handleEpochTransition`'s pre-check that skips the fallback when an
 authoritative row exists is a best-effort optimization — the transactional
 marker/guard claim, not that read, is what closes the race.
@@ -4351,8 +4497,7 @@ consensus-critical epoch-boundary code (it changes the Mark `PoolStakeSnapshot`
 that leader election reads, and the exact SNAP-point placement affects
 Shelley-era replay once the reward-calculation consumer lands). It must be run
 through the DevNet harness (`internal/test/devnet/`) against cardano-node before
-merge; unit and conformance tests do not exercise the concurrent MySQL/Postgres
-capture paths.
+merge; unit and conformance tests do not exercise full multi-node timing.
 
 ### Epoch Boundary State Transitions
 

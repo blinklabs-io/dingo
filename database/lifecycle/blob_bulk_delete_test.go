@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -624,9 +625,18 @@ func (c *cloudLikeBlobStore) NewTransaction(readWrite bool) types.Txn {
 	}
 }
 
+// wrappedTxn is implemented by the test transaction wrappers below so the
+// forwarding blob store can hand the plugin its own concrete transaction type,
+// which every plugin type-asserts.
+type wrappedTxn interface {
+	innerTxn() types.Txn
+}
+
+func (t *cloudLikeTxn) innerTxn() types.Txn { return t.real }
+
 func unwrapCloudLikeTxn(txn types.Txn) types.Txn {
-	if c, ok := txn.(*cloudLikeTxn); ok {
-		return c.real
+	if c, ok := txn.(wrappedTxn); ok {
+		return c.innerTxn()
 	}
 	return txn
 }
@@ -862,4 +872,149 @@ func TestDeleteBlocksAfterHonestlyReportsProgressOnCloudLikeMidBatchFailureAndRe
 		require.ErrorIsf(t, err, models.ErrBlockNotFound,
 			"block %d should have been deleted", id)
 	}
+}
+
+// partialCommitTxn models the one case where a staging blob store really does
+// leave its backing store partially mutated: Commit applied some of the batch
+// and its own compensation could not undo it. It reports RollbackIsNoop false,
+// like the real cloud plugins now do, so this exercises the ErrPartialCommit
+// path rather than the irreversible-store path.
+type partialCommitTxn struct {
+	real      types.Txn
+	store     *partialCommitBlobStore
+	readWrite bool
+	finished  bool
+}
+
+func (t *partialCommitTxn) Commit() error {
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	if err := t.real.Commit(); err != nil {
+		return err
+	}
+	if !t.readWrite || !t.store.shouldFail() {
+		return nil
+	}
+	// Applied, then failed to fully compensate.
+	return fmt.Errorf(
+		"%w: simulated compensation failure",
+		types.ErrPartialCommit,
+	)
+}
+
+func (t *partialCommitTxn) Rollback() error {
+	if t.finished {
+		return nil
+	}
+	t.finished = true
+	return t.real.Rollback()
+}
+
+// RollbackIsNoop matches the real cloud plugins after they moved to staged
+// mutations: a discarded transaction issues no backing-store writes.
+func (t *partialCommitTxn) RollbackIsNoop() bool { return false }
+
+// partialCommitBlobStore reuses cloudLikeBlobStore's method forwarding (every
+// call unwraps to the real plugin transaction) and only swaps in a different
+// transaction type.
+type partialCommitBlobStore struct {
+	*cloudLikeBlobStore
+	// armed gates the injected failure so test setup (BlockCreate) commits
+	// normally. Once armed, failAfter read-write commits succeed and every
+	// later one reports a partial commit, so a test can let one delete batch
+	// land cleanly before the next fails.
+	armed     atomic.Bool
+	failAfter int64
+	commits   atomic.Int64
+}
+
+func (c *partialCommitBlobStore) shouldFail() bool {
+	if !c.armed.Load() {
+		return false
+	}
+	return c.commits.Add(1) > c.failAfter
+}
+
+func (c *partialCommitBlobStore) NewTransaction(readWrite bool) types.Txn {
+	return &partialCommitTxn{
+		real:      c.BlobStore.NewTransaction(readWrite),
+		store:     c,
+		readWrite: readWrite,
+	}
+}
+
+func (t *partialCommitTxn) innerTxn() types.Txn { return t.real }
+
+func newPartialCommitTestDB(
+	t *testing.T,
+) (*database.Database, *partialCommitBlobStore) {
+	t.Helper()
+	config := &database.Config{DataDir: t.TempDir()}
+	host := plugin.NewHost()
+	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, sqlite.RegisterProvider(host))
+
+	realBlob, err := plugin.Resolve[blob.BlobStore](
+		context.Background(), host,
+		plugin.CapabilityStorageBlob, "badger", nil,
+		blob.ProviderDependencies{DataDir: config.DataDir},
+	)
+	require.NoError(t, err)
+
+	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
+		context.Background(), host,
+		plugin.CapabilityStorageMetadata, "sqlite", nil,
+		metadata.ProviderDependencies{DataDir: config.DataDir},
+	)
+	require.NoError(t, err)
+
+	blobStore := &partialCommitBlobStore{
+		cloudLikeBlobStore: &cloudLikeBlobStore{BlobStore: realBlob},
+	}
+	db, err := database.New(
+		config,
+		database.Stores{
+			Blob:     blobStore,
+			Metadata: metadataStore,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+		_ = host.Stop(context.Background())
+	})
+	return db, blobStore
+}
+
+// TestDeleteBlocksAfterDoesNotClaimExactCountOnPartialCommit pins the lower-bound
+// contract for the returned count. A commit that applied part of a batch and
+// could not compensate leaves an unknown subset removed, so that batch must
+// contribute nothing rather than have its full staged count claimed — while
+// batches that did commit are still reported. Guards both directions: an
+// over-claim (adding the failed batch) and an under-claim (dropping the clean
+// one).
+func TestDeleteBlocksAfterDoesNotClaimExactCountOnPartialCommit(t *testing.T) {
+	db, blobStore := newPartialCommitTestDB(t)
+	const numBlocks = 4
+	for id := uint64(1); id <= numBlocks; id++ {
+		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
+	}
+
+	// batchSize 2 gives two delete batches: the first commits cleanly, the
+	// second reports a partial commit.
+	blobStore.failAfter = 1
+	blobStore.commits.Store(0)
+	blobStore.armed.Store(true)
+
+	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
+		context.Background(), db, 0, numBlocks, 2,
+	)
+	require.ErrorIs(t, err, types.ErrPartialCommit)
+	require.Equal(
+		t, uint64(2), blocksDeleted,
+		"the committed batch counts; the partially applied one contributes "+
+			"nothing because how much of it survived is not reported",
+	)
 }

@@ -16,6 +16,7 @@ package plugin
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -62,17 +63,15 @@ func ApplyEnvironment(capability Capability, selection *Selection, environ []str
 				selection.Config = make(map[string]any)
 			}
 			components := strings.Split(fieldPath, "_")
-			for _, component := range components {
-				if component == "" {
-					// Repeated or leading/trailing underscores (e.g.
-					// DATA__DIR or DATA_DIR_) would otherwise silently
-					// collapse to a valid field name and override the
-					// wrong setting. Fail startup on the typo instead.
-					return fmt.Errorf(
-						"malformed plugin config environment path %s: empty path component",
-						name,
-					)
-				}
+			if slices.Contains(components, "") {
+				// Repeated or leading/trailing underscores (e.g.
+				// DATA__DIR or DATA_DIR_) would otherwise silently
+				// collapse to a valid field name and override the
+				// wrong setting. Fail startup on the typo instead.
+				return fmt.Errorf(
+					"malformed plugin config environment path %s: empty path component",
+					name,
+				)
 			}
 			var scalar any
 			if err := yaml.Unmarshal([]byte(value), &scalar); err != nil {

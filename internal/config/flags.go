@@ -36,7 +36,7 @@ const (
 type flagSpec struct {
 	field    string
 	name     string
-	register func(*pflag.FlagSet)
+	register func(*pflag.FlagSet, *Config)
 	apply    func(*pflag.FlagSet, *Config) error
 }
 
@@ -217,8 +217,11 @@ var flagSpecs = []flagSpec{
 func RegisterFlags(cmd *cobra.Command) {
 	flags := cmd.PersistentFlags()
 	flags.SortFlags = false
+	// One snapshot for the whole loop. GetConfig deep-copies, so calling it
+	// per flag would deep-clone the config once per registered flag.
+	defaults := GetConfig()
 	for _, spec := range flagSpecs {
-		spec.register(flags)
+		spec.register(flags, defaults)
 	}
 }
 
@@ -236,7 +239,9 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)
 	}
 	applyMidnightNetworkDefaults(cfg)
-	globalConfig = cfg
+	configMu.Lock()
+	globalConfig = cloneConfig(cfg)
+	configMu.Unlock()
 	// Topology is not resolved here: Network and Topology are final at
 	// this point, but the merged configuration has not been validated
 	// yet, so cmd/dingo loads topology once after ApplyDefaults and
@@ -252,8 +257,10 @@ func fieldByPath(v reflect.Value, path string) reflect.Value {
 	return v
 }
 
-func defaultValue(field string) reflect.Value {
-	return fieldByPath(reflect.ValueOf(globalConfig).Elem(), field)
+// defaultValue reads a field's default from the snapshot the caller took, so
+// flag registration does not clone the config once per flag.
+func defaultValue(defaults *Config, field string) reflect.Value {
+	return fieldByPath(reflect.ValueOf(defaults).Elem(), field)
 }
 
 func targetValue(cfg *Config, field string) reflect.Value {
@@ -264,8 +271,8 @@ func stringFlag(field, name, shorthand, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			def := defaultValue(field).String()
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			def := defaultValue(defaults, field).String()
 			if shorthand != "" {
 				f.StringP(name, shorthand, def, help)
 				return
@@ -290,8 +297,8 @@ func stringSliceFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			def := defaultValue(field).Interface().([]string)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			def := defaultValue(defaults, field).Interface().([]string)
 			f.StringSlice(name, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
@@ -312,8 +319,8 @@ func stringToStringFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			def, _ := defaultValue(field).
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			def, _ := defaultValue(defaults, field).
 				Interface().(map[string]string)
 			f.StringToString(name, def, help)
 		},
@@ -383,8 +390,8 @@ func boolFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Bool(name, defaultValue(field).Bool(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Bool(name, defaultValue(defaults, field).Bool(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -408,7 +415,7 @@ func boolPtrFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
+		register: func(f *pflag.FlagSet, defaults *Config) {
 			f.Bool(name, false, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
@@ -429,8 +436,8 @@ func intFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Int(name, int(defaultValue(field).Int()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Int(name, int(defaultValue(defaults, field).Int()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -450,8 +457,8 @@ func int64Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Int64(name, defaultValue(field).Int(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Int64(name, defaultValue(defaults, field).Int(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -471,8 +478,8 @@ func uintFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Uint(name, uint(defaultValue(field).Uint()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -494,8 +501,8 @@ func uint32Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Uint(name, uint(defaultValue(field).Uint()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -521,8 +528,8 @@ func uint64Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Uint64(name, defaultValue(field).Uint(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Uint64(name, defaultValue(defaults, field).Uint(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -542,8 +549,8 @@ func float64Flag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Float64(name, defaultValue(field).Float(), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Float64(name, defaultValue(defaults, field).Float(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
@@ -563,8 +570,8 @@ func durationFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet) {
-			f.Duration(name, time.Duration(defaultValue(field).Int()), help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.Duration(name, time.Duration(defaultValue(defaults, field).Int()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {

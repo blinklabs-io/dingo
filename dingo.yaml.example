@@ -288,12 +288,15 @@ intersectTip: false
 forgeSyncToleranceSlots: 0
 forgeStaleGapThresholdSlots: 0
 
-# Operational mode: "serve" (default), "load", "dev", or "leios"
+# Application-wide operational mode for a bare dingo invocation:
+# "serve" (default), "load", "dev", or "leios"
 # - serve: Full node with network connectivity (default)
 # - load: Batch import from ImmutableDB (requires immutableDbPath)
 # - dev: Development mode (forge blocks, disable outbound, skip topology)
 # - leios: Full node with experimental Leios/Dijkstra protocol support
-# Note: CLI commands (serve, load) take priority over this setting
+# Explicit subcommands select their own effective operation; for example,
+# "dingo sync" runs in sync mode. Node role, storage, API, and validation
+# settings do not select a run mode.
 #
 # Can be overridden with the DINGO_RUN_MODE environment variable
 # CLI: --run-mode

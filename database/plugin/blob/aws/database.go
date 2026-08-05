@@ -19,12 +19,15 @@ package aws
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -34,6 +37,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -54,13 +58,39 @@ type BlobStoreS3 struct {
 	timeout       time.Duration
 }
 
-// s3Txn wraps S3 operations to satisfy types.Txn and types.BlobTx
-// Operations are not atomic but respect the transaction interface used by the
-// database layer.
+const maxBlobReadBytes int64 = 256 << 20
+
+func readBlobBody(r io.Reader) ([]byte, error) {
+	return readBlobBodyWithLimit(r, maxBlobReadBytes)
+}
+
+func readBlobBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
+	return data, nil
+}
+
+// s3Txn stages S3 operations until commit. Commit applies the staged object
+// changes in a deterministic order and compensates already-applied changes if
+// a later cloud operation fails.
 type s3Txn struct {
 	store     *BlobStoreS3
 	finished  bool
 	readWrite bool
+	pending   map[string]s3PendingChange
+}
+
+type s3PendingChange struct {
+	value   []byte
+	deleted bool
 }
 
 // New creates a new S3-backed blob store and dataDir must be "s3://bucket" or "s3://bucket/prefix"
@@ -147,7 +177,11 @@ func (d *BlobStoreS3) Sync() error {
 
 // NewTransaction returns a lightweight transaction wrapper.
 func (d *BlobStoreS3) NewTransaction(readWrite bool) types.Txn {
-	return &s3Txn{store: d, readWrite: readWrite}
+	return &s3Txn{
+		store:     d,
+		readWrite: readWrite,
+		pending:   make(map[string]s3PendingChange),
+	}
 }
 
 func (t *s3Txn) assertWritable() error {
@@ -174,13 +208,69 @@ func (d *BlobStoreS3) validateTxn(txn types.Txn) (*s3Txn, error) {
 	return t, nil
 }
 
-// Get retrieves a value from S3 within a transaction
-func (d *BlobStoreS3) Get(txn types.Txn, key []byte) ([]byte, error) {
-	if _, err := d.validateTxn(txn); err != nil {
-		return nil, err
+func (t *s3Txn) stageSet(key, value []byte) {
+	t.pending[string(key)] = s3PendingChange{
+		value: append([]byte(nil), value...),
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
+}
+
+func (t *s3Txn) stageDelete(key []byte) {
+	t.pending[string(key)] = s3PendingChange{deleted: true}
+}
+
+// stagedDeleted reports whether the transaction has staged a delete for key.
+// Iterators skip such keys: listing one would surface a key whose value reads
+// back as missing, since the value path resolves staged changes.
+func stagedDeleted(txn types.Txn, key string) bool {
+	t, ok := txn.(*s3Txn)
+	if !ok || t.finished || t.pending == nil {
+		return false
+	}
+	change, staged := t.pending[key]
+	return staged && change.deleted
+}
+
+// stagedValue reports this transaction's staged state for key. deleted is
+// reported separately from value because a staged zero-length write is a real
+// value, not a deletion: collapsing the two on a nil value would make Set of an
+// empty blob read back as missing until commit.
+func (t *s3Txn) stagedValue(key []byte) (value []byte, deleted, staged bool) {
+	change, ok := t.pending[string(key)]
+	if !ok {
+		return nil, false, false
+	}
+	if change.deleted {
+		return nil, true, true
+	}
+	return append([]byte{}, change.value...), false, true
+}
+
+func (d *BlobStoreS3) deleteObject(ctx context.Context, key string) error {
+	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(d.bucket),
+		Key:    new(d.fullKey(key)),
+	})
+	if isS3NotFound(err) {
+		return types.ErrBlobKeyNotFound
+	}
+	return err
+}
+
+// resolveKey reads key through the transaction: a value staged by this
+// transaction wins over the bucket, and a staged delete reads as missing. Every
+// typed getter goes through this so a read-after-write inside one transaction
+// behaves like the badger plugin instead of returning pre-transaction state.
+func (d *BlobStoreS3) resolveKey(
+	ctx context.Context,
+	t *s3Txn,
+	key []byte,
+) ([]byte, error) {
+	if value, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		return value, nil
+	}
 	data, err := d.getInternal(ctx, string(key))
 	if err != nil {
 		if isS3NotFound(err) {
@@ -189,6 +279,17 @@ func (d *BlobStoreS3) Get(txn types.Txn, key []byte) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// Get retrieves a value from S3 within a transaction
+func (d *BlobStoreS3) Get(txn types.Txn, key []byte) ([]byte, error) {
+	t, err := d.validateTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	return d.resolveKey(ctx, t, key)
 }
 
 // Set stores a key-value pair in S3 within a transaction
@@ -200,11 +301,7 @@ func (d *BlobStoreS3) Set(txn types.Txn, key, val []byte) error {
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
-	if err := d.Put(ctx, string(key), val); err != nil {
-		return err
-	}
+	t.stageSet(key, val)
 	return nil
 }
 
@@ -217,19 +314,26 @@ func (d *BlobStoreS3) Delete(txn types.Txn, key []byte) error {
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
-	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(key))),
-	})
-	if err != nil {
-		if isS3NotFound(err) {
+	if _, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return types.ErrBlobKeyNotFound
 		}
-		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
+		t.stageDelete(key)
+		return nil
+	}
+	ctx, cancel := d.opContext()
+	defer cancel()
+	// Probe with object metadata rather than a bounded read: a blob larger
+	// than the read cap must still be deletable, and an ordinary delete
+	// should not pay for a full GET. Matches the GCS plugin.
+	exists, err := d.objectExists(ctx, string(key))
+	if err != nil {
 		return err
 	}
+	if !exists {
+		return types.ErrBlobKeyNotFound
+	}
+	t.stageDelete(key)
 	return nil
 }
 
@@ -248,7 +352,16 @@ func (d *BlobStoreS3) NewIterator(
 	if _, err := d.validateTxn(txn); err != nil {
 		return &s3ErrorIterator{err: err}
 	}
-	keys, err := d.listKeys(opts)
+	if !opts.Reverse {
+		iterator := &s3StreamIterator{
+			store:  d,
+			txn:    txn,
+			prefix: opts.Prefix,
+		}
+		iterator.Rewind()
+		return iterator
+	}
+	reverseKeys, err := d.listKeysToFile(opts)
 	if err != nil {
 		d.logger.Errorf("s3 list failed: %v", err)
 		return &s3Iterator{
@@ -259,8 +372,198 @@ func (d *BlobStoreS3) NewIterator(
 			txn:     txn,
 		}
 	}
-	return &s3Iterator{store: d, keys: keys, reverse: opts.Reverse, txn: txn}
+	iterator := &s3ReverseIterator{store: d, txn: txn, keys: reverseKeys}
+	iterator.Rewind()
+	return iterator
 }
+
+type s3StreamIterator struct {
+	store     *BlobStoreS3
+	txn       types.Txn
+	prefix    []byte
+	paginator *s3.ListObjectsV2Paginator
+	page      []s3types.Object
+	pageIdx   int
+	seek      string
+	key       string
+	valid     bool
+	err       error
+	cancel    context.CancelFunc
+}
+
+func (it *s3StreamIterator) reset(seek []byte) {
+	if it.cancel != nil {
+		it.cancel()
+	}
+	ctx, cancel := it.store.opContext()
+	it.cancel = cancel
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(it.store.bucket),
+	}
+	if prefix := it.store.fullKey(string(it.prefix)); prefix != "" {
+		input.Prefix = aws.String(prefix)
+	} else if it.store.prefix != "" {
+		input.Prefix = aws.String(it.store.prefix)
+	}
+	it.paginator = s3.NewListObjectsV2Paginator(it.store.client, input)
+	it.page = nil
+	it.pageIdx = 0
+	it.seek = string(seek)
+	it.key = ""
+	it.valid = false
+	it.err = nil
+	it.advance(ctx)
+}
+
+func (it *s3StreamIterator) advance(ctx context.Context) {
+	if it.err != nil || it.paginator == nil {
+		return
+	}
+	for {
+		if it.pageIdx >= len(it.page) {
+			if !it.paginator.HasMorePages() {
+				it.valid = false
+				return
+			}
+			page, err := it.paginator.NextPage(ctx)
+			if err != nil {
+				it.err = err
+				it.valid = false
+				return
+			}
+			it.page = page.Contents
+			it.pageIdx = 0
+		}
+		objectKey := strings.TrimPrefix(
+			aws.ToString(it.page[it.pageIdx].Key),
+			it.store.prefix,
+		)
+		it.pageIdx++
+		externalKey, err := hex.DecodeString(objectKey)
+		if err != nil {
+			it.err = fmt.Errorf("error decoding s3 key: %w", err)
+			it.valid = false
+			return
+		}
+		it.key = string(externalKey)
+		if it.seek != "" && it.key < it.seek {
+			continue
+		}
+		if stagedDeleted(it.txn, it.key) {
+			continue
+		}
+		it.valid = true
+		return
+	}
+}
+
+func (it *s3StreamIterator) Rewind() { it.reset(nil) }
+
+func (it *s3StreamIterator) Seek(prefix []byte) { it.reset(prefix) }
+
+func (it *s3StreamIterator) Valid() bool {
+	return it.err == nil && it.valid
+}
+
+func (it *s3StreamIterator) ValidForPrefix(prefix []byte) bool {
+	return it.Valid() && strings.HasPrefix(it.key, string(prefix))
+}
+
+func (it *s3StreamIterator) Next() {
+	if it.cancel == nil {
+		return
+	}
+	ctx, cancel := it.store.opContext()
+	defer cancel()
+	it.advance(ctx)
+}
+
+func (it *s3StreamIterator) Item() types.BlobItem {
+	if !it.Valid() {
+		return nil
+	}
+	return &s3Item{store: it.store, txn: it.txn, key: it.key}
+}
+
+func (it *s3StreamIterator) Close() {
+	if it.cancel != nil {
+		it.cancel()
+		it.cancel = nil
+	}
+	it.paginator = nil
+	it.valid = false
+}
+
+func (it *s3StreamIterator) Err() error { return it.err }
+
+type s3ReverseIterator struct {
+	store *BlobStoreS3
+	txn   types.Txn
+	keys  *reverseKeyFile
+	key   string
+	valid bool
+	err   error
+}
+
+func (it *s3ReverseIterator) advance() {
+	for {
+		key, valid, err := it.keys.nextReverse()
+		if err != nil {
+			it.err = err
+			it.valid = false
+			return
+		}
+		if valid && stagedDeleted(it.txn, key) {
+			continue
+		}
+		it.key = key
+		it.valid = valid
+		return
+	}
+}
+
+func (it *s3ReverseIterator) Rewind() {
+	it.keys.pos = 0
+	it.keys.initialized = false
+	it.valid = false
+	it.advance()
+}
+
+func (it *s3ReverseIterator) Seek(prefix []byte) {
+	it.Rewind()
+	for it.Valid() && it.key > string(prefix) {
+		it.advance()
+	}
+}
+
+func (it *s3ReverseIterator) Valid() bool {
+	return it.err == nil && it.valid
+}
+
+func (it *s3ReverseIterator) ValidForPrefix(prefix []byte) bool {
+	return it.Valid() && strings.HasPrefix(it.key, string(prefix))
+}
+
+func (it *s3ReverseIterator) Next() { it.advance() }
+
+func (it *s3ReverseIterator) Item() types.BlobItem {
+	if !it.Valid() {
+		return nil
+	}
+	return &s3Item{store: it.store, txn: it.txn, key: it.key}
+}
+
+func (it *s3ReverseIterator) Close() {
+	if it.keys != nil && it.keys.file != nil {
+		name := it.keys.file.Name()
+		_ = it.keys.file.Close()
+		_ = os.Remove(name)
+		it.keys.file = nil
+	}
+	it.valid = false
+}
+
+func (it *s3ReverseIterator) Err() error { return it.err }
 
 // SetBlock stores a block with its metadata and index
 func (d *BlobStoreS3) SetBlock(
@@ -280,23 +583,15 @@ func (d *BlobStoreS3) SetBlock(
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
 	// Block content by point
 	key := types.BlockBlobKey(slot, hash)
-	if err := d.Put(ctx, string(key), cborData); err != nil {
-		return err
-	}
+	t.stageSet(key, cborData)
 	// Block index to point key
 	indexKey := types.BlockBlobIndexKey(id)
-	if err := d.Put(ctx, string(indexKey), key); err != nil {
-		return err
-	}
+	t.stageSet(indexKey, key)
 	// Hash-to-block-key index for O(1) BlockByHash lookups
 	hashIndexKey := types.BlockHashIndexKey(hash)
-	if err := d.Put(ctx, string(hashIndexKey), key); err != nil {
-		return err
-	}
+	t.stageSet(hashIndexKey, key)
 	// Block metadata by point
 	metadataKey := types.BlockBlobMetadataKey(key)
 	tmpMetadata := types.BlockMetadata{
@@ -309,9 +604,7 @@ func (d *BlobStoreS3) SetBlock(
 	if err != nil {
 		return err
 	}
-	if err := d.Put(ctx, string(metadataKey), tmpMetadataBytes); err != nil {
-		return err
-	}
+	t.stageSet(metadataKey, tmpMetadataBytes)
 	return nil
 }
 
@@ -321,17 +614,15 @@ func (d *BlobStoreS3) GetBlock(
 	slot uint64,
 	hash []byte,
 ) ([]byte, types.BlockMetadata, error) {
-	if _, err := d.validateTxn(txn); err != nil {
+	t, err := d.validateTxn(txn)
+	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.BlockBlobKey(slot, hash)
-	cborData, err := d.getInternal(ctx, string(key))
+	cborData, err := d.resolveKey(ctx, t, key)
 	if err != nil {
-		if isS3NotFound(err) {
-			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
-		}
 		return nil, types.BlockMetadata{}, err
 	}
 	if types.IsBlockTombstone(cborData) {
@@ -339,11 +630,8 @@ func (d *BlobStoreS3) GetBlock(
 			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
-	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
+	metadataBytes, err := d.resolveKey(ctx, t, metadataKey)
 	if err != nil {
-		if isS3NotFound(err) {
-			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
-		}
 		return nil, types.BlockMetadata{}, err
 	}
 	var tmpMetadata types.BlockMetadata
@@ -367,36 +655,14 @@ func (d *BlobStoreS3) DeleteBlock(
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
 	key := types.BlockBlobKey(slot, hash)
-	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(key))),
-	}); err != nil && !isS3NotFound(err) {
-		return err
-	}
 	indexKey := types.BlockBlobIndexKey(id)
-	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(indexKey))),
-	}); err != nil && !isS3NotFound(err) {
-		return err
-	}
 	metadataKey := types.BlockBlobMetadataKey(key)
-	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(metadataKey))),
-	}); err != nil && !isS3NotFound(err) {
-		return err
-	}
 	hashIndexKey := types.BlockHashIndexKey(hash)
-	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(hashIndexKey))),
-	}); err != nil && !isS3NotFound(err) {
-		return err
-	}
+	t.stageDelete(key)
+	t.stageDelete(indexKey)
+	t.stageDelete(metadataKey)
+	t.stageDelete(hashIndexKey)
 	return nil
 }
 
@@ -427,19 +693,10 @@ func (d *BlobStoreS3) TombstoneBlock(
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
 	key := types.BlockBlobKey(slot, hash)
-	if err := d.Put(ctx, string(key), types.BlockTombstone()); err != nil {
-		return err
-	}
 	metadataKey := types.BlockBlobMetadataKey(key)
-	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(metadataKey))),
-	}); err != nil && !isS3NotFound(err) {
-		return err
-	}
+	t.stageSet(key, types.BlockTombstone())
+	t.stageDelete(metadataKey)
 	return nil
 }
 
@@ -457,10 +714,9 @@ func (d *BlobStoreS3) SetUtxo(
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
 	key := types.UtxoBlobKey(txId, outputIdx)
-	return d.Put(ctx, string(key), cborData)
+	t.stageSet(key, cborData)
+	return nil
 }
 
 // GetUtxo retrieves a UTxO's CBOR data
@@ -469,20 +725,14 @@ func (d *BlobStoreS3) GetUtxo(
 	txId []byte,
 	outputIdx uint32,
 ) ([]byte, error) {
-	if _, err := d.validateTxn(txn); err != nil {
+	t, err := d.validateTxn(txn)
+	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.UtxoBlobKey(txId, outputIdx)
-	data, err := d.getInternal(ctx, string(key))
-	if err != nil {
-		if isS3NotFound(err) {
-			return nil, types.ErrBlobKeyNotFound
-		}
-		return nil, err
-	}
-	return data, nil
+	return d.resolveKey(ctx, t, key)
 }
 
 // DeleteUtxo removes a UTxO's data
@@ -498,17 +748,8 @@ func (d *BlobStoreS3) DeleteUtxo(
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
 	key := types.UtxoBlobKey(txId, outputIdx)
-	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(key))),
-	})
-	if err != nil && !isS3NotFound(err) {
-		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
-		return err
-	}
+	t.stageDelete(key)
 	return nil
 }
 
@@ -525,12 +766,8 @@ func (d *BlobStoreS3) SetTx(
 	if err := t.assertWritable(); err != nil {
 		return fmt.Errorf("SetTx: assert writable: %w", err)
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
 	key := types.TxBlobKey(txHash)
-	if err := d.Put(ctx, string(key), offsetData); err != nil {
-		return fmt.Errorf("SetTx: put tx blob %s: %w", key, err)
-	}
+	t.stageSet(key, offsetData)
 	return nil
 }
 
@@ -539,17 +776,15 @@ func (d *BlobStoreS3) GetTx(
 	txn types.Txn,
 	txHash []byte,
 ) ([]byte, error) {
-	if _, err := d.validateTxn(txn); err != nil {
+	t, err := d.validateTxn(txn)
+	if err != nil {
 		return nil, fmt.Errorf("GetTx: validate txn: %w", err)
 	}
 	ctx, cancel := d.opContext()
 	defer cancel()
 	key := types.TxBlobKey(txHash)
-	data, err := d.getInternal(ctx, string(key))
+	data, err := d.resolveKey(ctx, t, key)
 	if err != nil {
-		if isS3NotFound(err) {
-			return nil, fmt.Errorf("GetTx: tx blob %s: %w", key, types.ErrBlobKeyNotFound)
-		}
 		return nil, fmt.Errorf("GetTx: get tx blob %s: %w", key, err)
 	}
 	return data, nil
@@ -567,23 +802,118 @@ func (d *BlobStoreS3) DeleteTx(
 	if err := t.assertWritable(); err != nil {
 		return fmt.Errorf("DeleteTx: assert writable: %w", err)
 	}
-	ctx, cancel := d.opContext()
-	defer cancel()
 	key := types.TxBlobKey(txHash)
-	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    new(d.fullKey(string(key))),
-	})
-	if err != nil && !isS3NotFound(err) {
-		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
-		return fmt.Errorf("DeleteTx: delete tx blob %s: %w", key, err)
-	}
+	t.stageDelete(key)
 	return nil
 }
 
 func (t *s3Txn) Commit() error {
 	if t.finished {
 		return nil
+	}
+	ctx, cancel := t.store.opContext()
+	defer cancel()
+	keys := make([]string, 0, len(t.pending))
+	for key := range t.pending {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Build the compensation log before applying anything. Existence is probed
+	// with HeadObject rather than a full GET, and a prior value is downloaded
+	// only for the keys this commit overwrites or deletes — spooled to disk, so
+	// a multi-key block commit does not retain object payloads in memory.
+	comp, err := compensate.NewLog("dingo-s3-commit-")
+	if err != nil {
+		t.finished = true
+		return err
+	}
+	defer func() {
+		if closeErr := comp.Close(); closeErr != nil {
+			t.store.logger.Errorf(
+				"failed to release S3 commit compensation log: %v",
+				closeErr,
+			)
+		}
+	}()
+	for _, key := range keys {
+		exists, err := t.store.objectExists(ctx, key)
+		if err != nil {
+			t.finished = true
+			return fmt.Errorf(
+				"commit S3 blob transaction: probe %q: %w",
+				key,
+				err,
+			)
+		}
+		if !exists {
+			comp.RecordMissing(key)
+			continue
+		}
+		if err := t.store.spoolPriorValue(ctx, comp, key); err != nil {
+			if errors.Is(err, types.ErrBlobKeyNotFound) {
+				// Raced with an external delete between probe and spool; the
+				// undo for this key is a delete either way.
+				comp.RecordMissing(key)
+				continue
+			}
+			t.finished = true
+			return fmt.Errorf(
+				"commit S3 blob transaction: read prior value of %q: %w",
+				key,
+				err,
+			)
+		}
+	}
+
+	for i, key := range keys {
+		change := t.pending[key]
+		var err error
+		if change.deleted {
+			err = t.store.deleteObject(ctx, key)
+			if errors.Is(err, types.ErrBlobKeyNotFound) {
+				err = nil
+			}
+		} else {
+			err = t.store.Put(ctx, key, change.value)
+		}
+		if err != nil {
+			t.finished = true
+			commitErr := fmt.Errorf("commit S3 blob transaction: %w", err)
+			// Compensate on a fresh context. Reusing the commit context would
+			// make every restore fail instantly when the commit failed because
+			// that context expired, which is exactly when compensation matters.
+			undoCtx, undoCancel := t.store.opContext()
+			defer undoCancel()
+			undoErr := comp.Undo(
+				i,
+				func(key string, value *io.SectionReader, size int64) error {
+					return t.store.putStream(undoCtx, key, value, size)
+				},
+				func(key string) error {
+					delErr := t.store.deleteObject(undoCtx, key)
+					if errors.Is(delErr, types.ErrBlobKeyNotFound) {
+						return nil
+					}
+					return delErr
+				},
+			)
+			if undoErr == nil {
+				return commitErr
+			}
+			// The bucket is left partially applied. Report it as such instead
+			// of only logging, so callers do not treat this as a clean abort.
+			t.store.logger.Errorf(
+				"failed to compensate S3 blob transaction: %v",
+				undoErr,
+			)
+			return fmt.Errorf(
+				"%w: %w (compensation failed: %w)",
+				types.ErrPartialCommit,
+				commitErr,
+				undoErr,
+			)
+		}
 	}
 	t.finished = true
 	return nil
@@ -594,11 +924,15 @@ func (t *s3Txn) Rollback() error {
 		return nil
 	}
 	t.finished = true
+	t.pending = nil
 	return nil
 }
 
+// RollbackIsNoop reports false: this transaction stages mutations and applies
+// them only in Commit, so Rollback discards the staged work without issuing any
+// S3 request. It reported true when Set/Delete wrote through immediately.
 func (t *s3Txn) RollbackIsNoop() bool {
-	return true
+	return false
 }
 
 type s3Iterator struct {
@@ -721,10 +1055,18 @@ func isS3NotFound(err error) bool {
 	return errors.As(err, &noSuchKey)
 }
 
-func (d *BlobStoreS3) listKeys(
+func (d *BlobStoreS3) listKeysToFile(
 	opts types.BlobIteratorOptions,
-) ([]string, error) {
-	// TODO: Consider longer timeout or no timeout for large buckets with many pages
+) (*reverseKeyFile, error) {
+	file, err := os.CreateTemp("", "dingo-s3-iterator-")
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func(err error) error {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return err
+	}
 	ctx, cancel := d.opContext()
 	defer cancel()
 	prefix := d.fullKey(string(opts.Prefix))
@@ -737,28 +1079,72 @@ func (d *BlobStoreS3) listKeys(
 		input.Prefix = aws.String(d.prefix)
 	}
 	paginator := s3.NewListObjectsV2Paginator(d.client, input)
-	keys := make([]string, 0)
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			return nil, cleanup(err)
 		}
 		for _, obj := range page.Contents {
 			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
 			externalKey, err := hex.DecodeString(key)
 			if err != nil {
-				return nil, fmt.Errorf("error decoding s3 key: %w", err)
+				return nil, cleanup(fmt.Errorf("error decoding s3 key: %w", err))
 			}
-			keys = append(keys, string(externalKey))
+			if err := writeReverseKey(file, string(externalKey)); err != nil {
+				return nil, cleanup(err)
+			}
 		}
 	}
-	sort.Strings(keys)
-	if opts.Reverse {
-		for i, j := 0, len(keys)-1; i < j; i, j = i+1, j-1 {
-			keys[i], keys[j] = keys[j], keys[i]
-		}
+	return &reverseKeyFile{file: file}, nil
+}
+
+type reverseKeyFile struct {
+	file        *os.File
+	pos         int64
+	initialized bool
+}
+
+func writeReverseKey(file *os.File, key string) error {
+	if len(key) > math.MaxUint32 {
+		return fmt.Errorf("key length %d exceeds uint32 maximum", len(key))
 	}
-	return keys, nil
+	length := make([]byte, 4)
+	// #nosec G115 -- length is bounds-checked against math.MaxUint32 above.
+	binary.BigEndian.PutUint32(length, uint32(len(key)))
+	if _, err := file.Write(length); err != nil {
+		return err
+	}
+	if _, err := file.WriteString(key); err != nil {
+		return err
+	}
+	_, err := file.Write(length)
+	return err
+}
+
+func (f *reverseKeyFile) nextReverse() (string, bool, error) {
+	if !f.initialized {
+		info, err := f.file.Stat()
+		if err != nil {
+			return "", false, err
+		}
+		f.pos = info.Size()
+		f.initialized = true
+	}
+	if f.pos == 0 {
+		return "", false, nil
+	}
+	trailer := make([]byte, 4)
+	if _, err := f.file.ReadAt(trailer, f.pos-4); err != nil {
+		return "", false, err
+	}
+	length := int64(binary.BigEndian.Uint32(trailer))
+	start := f.pos - 4 - length - 4
+	key := make([]byte, length)
+	if _, err := f.file.ReadAt(key, start+4); err != nil {
+		return "", false, err
+	}
+	f.pos = start
+	return string(key), true, nil
 }
 
 func (d *BlobStoreS3) init() error {
@@ -790,6 +1176,26 @@ func (d *BlobStoreS3) fullKey(key string) string {
 	return d.prefix + hex.EncodeToString([]byte(key))
 }
 
+// objectExists reports whether key has an object, without downloading it. Used
+// where only presence matters (existence checks, commit compensation planning)
+// so object size never determines memory use.
+func (d *BlobStoreS3) objectExists(
+	ctx context.Context,
+	key string,
+) (bool, error) {
+	_, err := d.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &d.bucket,
+		Key:    new(d.fullKey(key)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // getInternal reads the value at key.
 func (d *BlobStoreS3) getInternal(
 	ctx context.Context,
@@ -807,13 +1213,59 @@ func (d *BlobStoreS3) getInternal(
 	}
 	defer out.Body.Close()
 
-	data, err := io.ReadAll(out.Body)
+	data, err := readBlobBody(out.Body)
 	if err != nil {
 		d.logger.Errorf("s3 read %q failed: %v", key, err)
 		return nil, err
 	}
 	d.logger.Debugf("s3 get %q ok (%d bytes)", key, len(data))
 	return data, nil
+}
+
+// spoolPriorValue streams key's current object into the compensation log. The
+// body is copied straight to disk rather than through readBlobBody: that cap
+// bounds memory for ordinary reads, and applying it here would make an object
+// larger than the cap impossible to overwrite or delete inside a transaction.
+func (d *BlobStoreS3) spoolPriorValue(
+	ctx context.Context,
+	comp *compensate.Log,
+	key string,
+) error {
+	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &d.bucket,
+		Key:    new(d.fullKey(key)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return types.ErrBlobKeyNotFound
+		}
+		d.logger.Errorf("s3 get %q failed: %v", key, err)
+		return err
+	}
+	defer out.Body.Close()
+	return comp.RecordValueFrom(key, out.Body)
+}
+
+// putStream writes key from a reader of known length. Compensation uses this so
+// restoring a large prior value streams out of the spool file instead of being
+// materialized in memory. The reader is seekable, which the SDK needs to retry
+// or re-sign a request body.
+func (d *BlobStoreS3) putStream(
+	ctx context.Context,
+	key string,
+	body io.ReadSeeker,
+	size int64,
+) error {
+	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        &d.bucket,
+		Key:           new(d.fullKey(key)),
+		Body:          body,
+		ContentLength: &size,
+	})
+	if err != nil {
+		d.logger.Errorf("s3 put %q failed: %v", key, err)
+	}
+	return err
 }
 
 // Put writes a value to key.
@@ -895,20 +1347,35 @@ func (d *BlobStoreS3) GetBlockURL(
 	txn types.Txn,
 	point ocommon.Point,
 ) (types.SignedURL, types.BlockMetadata, error) {
-	if _, err := d.validateTxn(txn); err != nil {
+	t, err := d.validateTxn(txn)
+	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("s3: invalid transaction: %w", err)
 	}
 
 	key := types.BlockBlobKey(point.Slot, point.Hash)
 
-	metadataKey := types.BlockBlobMetadataKey(key)
-	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
-	if err != nil {
-		if isS3NotFound(err) {
+	// A signed URL points at a bucket object, so it cannot represent a write
+	// this transaction has staged but not committed. Reject that explicitly
+	// rather than handing back a URL that would 404.
+	if _, deleted, staged := t.stagedValue(key); staged {
+		if deleted {
 			return types.SignedURL{}, types.BlockMetadata{},
-				fmt.Errorf("s3: block metadata not found for key: %w",
-					errors.Join(err, types.ErrBlobKeyNotFound))
+				fmt.Errorf("s3: block deleted in this transaction: %w",
+					types.ErrBlobKeyNotFound)
+		}
+		return types.SignedURL{}, types.BlockMetadata{}, fmt.Errorf(
+			"s3: block staged in this transaction is not signable until commit: %w",
+			types.ErrBlobKeyNotFound,
+		)
+	}
+
+	metadataKey := types.BlockBlobMetadataKey(key)
+	metadataBytes, err := d.resolveKey(ctx, t, metadataKey)
+	if err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return types.SignedURL{}, types.BlockMetadata{},
+				fmt.Errorf("s3: block metadata not found for key: %w", err)
 		}
 		return types.SignedURL{}, types.BlockMetadata{},
 			fmt.Errorf("s3: failed getting block metadata: %w", err)

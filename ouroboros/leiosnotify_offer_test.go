@@ -68,6 +68,7 @@ func TestLeiosForgedEBOfferEmptyEntryNil(t *testing.T) {
 func TestLeiosForgedEBOfferAnnouncement(t *testing.T) {
 	raw := []byte{0x82, 0x01, 0x02}
 	msg := leiosForgedEBOffer(&leiosForgedEBEntry{announcement: raw})
+	require.NotNil(t, msg)
 	require.Equal(t, uint8(oleiosnotify.MessageTypeBlockAnnouncement), msg.Type())
 	announcement, ok := msg.(*oleiosnotify.MsgBlockAnnouncement)
 	require.True(t, ok)

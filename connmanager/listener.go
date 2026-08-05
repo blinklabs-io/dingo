@@ -197,6 +197,14 @@ func (c *ConnectionManager) startListener(
 			// Successful accept - reset consecutive error count
 			consecutiveErrors = 0
 
+			// Bound socket writes before either path can hand the
+			// bearer to a protocol goroutine. This must cover NtC as
+			// well as N2N: a local client that stops reading wedges a
+			// write just like a remote peer does. Helpers below that
+			// need the concrete socket type (SO_LINGER, Unix peer
+			// credentials) unwrap through the wrapper.
+			conn = withSocketDeadlines(conn)
+
 			// NtC (node-to-client) connections bypass the inbound
 			// slot budget and per-IP rate limiting — they are local
 			// clients (wallets, tools), not network peers.

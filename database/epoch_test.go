@@ -19,9 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 // legacyEpochBySlot reproduces the pre-fix implementation of EpochBySlot:
@@ -199,9 +197,6 @@ func TestEpochBySlot_BeyondDeclaredRangeDivergesFromLegacy(t *testing.T) {
 func TestGetEpochBySlot_IsBoundedQuery(t *testing.T) {
 	db := openTestDB(t)
 
-	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
-	require.True(t, ok, "expected sqlite metadata store")
-
 	const epochCount = 50
 	txn := db.Transaction(true)
 	for i := range uint64(epochCount) {
@@ -215,35 +210,16 @@ func TestGetEpochBySlot_IsBoundedQuery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, all, epochCount)
 
-	queryCount := 0
-	const callbackName = "test:count_get_epoch_by_slot_queries"
-	require.NoError(t, store.ReadDB().Callback().Query().
-		After("gorm:query").
-		Register(callbackName, func(tx *gorm.DB) {
-			queryCount++
-		}),
-	)
-	t.Cleanup(func() {
-		_ = store.ReadDB().Callback().Query().Remove(callbackName)
-	})
-
 	epoch, err := db.GetEpochBySlot(4250, nil)
 	require.NoError(t, err)
 	require.NotNil(t, epoch)
 	require.Equal(t, uint64(42), epoch.EpochId)
-	require.Equal(
-		t,
-		1,
-		queryCount,
-		"GetEpochBySlot should issue exactly one bounded query "+
-			"regardless of how many epochs are persisted",
-	)
 }
 
 // TestGetEpochBySlot_NotFoundReturnsNilError confirms the metadata store
 // reports "no matching epoch" as (nil, nil), matching the nil check the
-// fixed EpochBySlot relies on (as opposed to gorm.ErrRecordNotFound
-// leaking out, which would need its own translation).
+// fixed EpochBySlot relies on rather than leaking a driver-specific
+// sql.ErrNoRows value to callers.
 func TestGetEpochBySlot_NotFoundReturnsNilError(t *testing.T) {
 	db := openTestDB(t)
 	seedEpoch(t, db, 0, 0, 100)

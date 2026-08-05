@@ -35,16 +35,12 @@ type Epoch struct {
 	// this value. This field is nil for epoch 0 (equivalent to NeutralNonce /
 	// identity).
 	LastEpochBlockNonce []byte
-	ID                  uint `gorm:"primarykey"`
-	// NOTE: we would normally use this as the primary key, but GORM doesn't
-	// like a primary key value of 0
-	EpochId       uint64 `gorm:"uniqueIndex"`
+	ID                  uint
+	// EpochId is a ledger identifier where zero is valid, so the SQL schema
+	// uses the separate surrogate ID as its primary key.
+	EpochId       uint64
 	StartSlot     uint64
 	EraId         uint
 	SlotLength    uint
 	LengthInSlots uint
-}
-
-func (Epoch) TableName() string {
-	return "epoch"
 }

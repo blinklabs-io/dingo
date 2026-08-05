@@ -17,15 +17,15 @@ package models
 import "github.com/blinklabs-io/dingo/database/types"
 
 type MoveInstantaneousRewards struct {
-	Rewards       []MoveInstantaneousRewardsReward `gorm:"foreignKey:MIRID;constraint:OnDelete:CASCADE"`
-	Pot           uint                             `gorm:"index"`
-	CertificateID uint                             `gorm:"index"`
-	ID            uint                             `gorm:"primarykey"`
-	AddedSlot     uint64                           `gorm:"index"`
+	Rewards       []MoveInstantaneousRewardsReward
+	Pot           uint
+	CertificateID uint
+	ID            uint
+	AddedSlot     uint64
 	// OtherPot holds the lovelace amount for a pot-to-pot transfer (non-zero
 	// only when the cert moves coins between treasury and reserves rather than
 	// distributing to staking credentials).
-	OtherPot types.Uint64 `gorm:"default:0"`
+	OtherPot types.Uint64
 }
 
 // MIREffect is the processed form of a single MIR certificate used by the
@@ -50,18 +50,10 @@ type MIRReward struct {
 	Amount        uint64
 }
 
-func (MoveInstantaneousRewards) TableName() string {
-	return "move_instantaneous_rewards"
-}
-
 type MoveInstantaneousRewardsReward struct {
-	Credential    []byte `gorm:"index:idx_mir_reward_credential,priority:2;size:28"`
-	CredentialTag uint8  `gorm:"index:idx_mir_reward_credential,priority:1;not null;default:0"`
+	Credential    []byte
+	CredentialTag uint8
 	Amount        types.Uint64
-	ID            uint `gorm:"primarykey"`
-	MIRID         uint `gorm:"index"`
-}
-
-func (MoveInstantaneousRewardsReward) TableName() string {
-	return "move_instantaneous_rewards_reward"
+	ID            uint
+	MIRID         uint
 }

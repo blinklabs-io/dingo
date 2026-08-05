@@ -17,7 +17,6 @@ package koiosparity
 import (
 	"context"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"math/big"
 	"path/filepath"
@@ -26,9 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 // newTestDingoDataDir creates an empty-but-valid Dingo metadata.sqlite (WAL
@@ -40,13 +37,8 @@ import (
 func newTestDingoDataDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata.sqlite")
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", path)), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.EpochSummary{}, &models.RewardAdaPots{}))
-	sqlDB, err := db.DB()
-	require.NoError(t, err)
-	require.NoError(t, sqlDB.Close())
+	gdb := openTestSQLDB(t, dir, false)
+	require.NoError(t, gdb.Close())
 	return dir
 }
 
@@ -176,23 +168,14 @@ func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
 }
 
 // newTestDingoDB creates an empty, WAL-mode, schema-migrated Dingo
-// metadata.sqlite (matching newTestDingoDataDir) but returns a writable GORM
+// metadata.sqlite (matching newTestDingoDataDir) but returns a writable SQL
 // handle to it too, so a test can seed reward_pool_input/reward_pool_output/
 // epoch_summary rows directly before Check opens its own read-only
 // connection against the same file.
-func newTestDingoDB(t *testing.T) (dataDir string, gdb *gorm.DB) {
+func newTestDingoDB(t *testing.T) (dataDir string, gdb *testDB) {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata.sqlite")
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", path)), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(
-		&models.EpochSummary{},
-		&models.RewardAdaPots{},
-		&models.RewardPoolInput{},
-		&models.RewardPoolOutput{},
-	))
-	return dir, db
+	return dir, openTestSQLDB(t, dir, true)
 }
 
 // TestCheckAlignsRewardScheduleEpochsEndToEnd is an end-to-end boundary test

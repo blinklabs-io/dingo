@@ -23,13 +23,12 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 // newTestDatabaseSourceDB creates a real, in-process *database.Database
 // (Badger blob + SQLite metadata, matching ledger/snapshot's own test
 // pattern) for exercising DatabaseSource against the same storage stack a
-// live node uses, rather than a bare gorm connection.
+// live node uses, rather than a bare raw connection.
 func newTestDatabaseSourceDB(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -37,14 +36,20 @@ func newTestDatabaseSourceDB(t *testing.T) *database.Database {
 	return db
 }
 
-// sourceGormDB reaches into the metadata store's underlying *gorm.DB so the
-// test can seed rows directly, mirroring
-// ledger/snapshot/calculator_test.go's snapshotGormDB helper.
-func sourceGormDB(t *testing.T, db *database.Database) *gorm.DB {
+// sourceGormDB reaches into the metadata store's underlying SQLite file so
+// the test can seed rows directly via raw SQL, mirroring
+// ledger/snapshot/calculator_test.go's snapshotSQLDB helper. Post-#3054 (the
+// GORM metadata store rewrite to sqlc-generated sqlstore), the metadata
+// store no longer exposes a *gorm.DB, so this reaches through
+// dbtest.RawSQLiteMetadata instead and wraps it in the same testDB seeding
+// helper dingo_db_test.go uses. The name is kept (rather than renamed to
+// sourceSQLDB) to minimize churn in call sites that still read naturally as
+// "the test's handle for seeding the source's DB".
+func sourceGormDB(t *testing.T, db *database.Database) *testDB {
 	t.Helper()
-	provider, ok := db.Metadata().(interface{ DB() *gorm.DB })
-	require.True(t, ok, "metadata store should expose DB() for test seeding")
-	return provider.DB()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	return &testDB{db: raw}
 }
 
 func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {

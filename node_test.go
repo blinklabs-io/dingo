@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	metadatasqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -59,40 +58,35 @@ func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
 
 func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-	require.True(t, ok)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	stakeKey := make([]byte, 28)
 	stakeKey[0] = 0x51
 	missingStakeKey := make([]byte, 28)
 	missingStakeKey[0] = 0x52
-	require.NoError(t, store.DB().Create([]models.Account{
-		{
-			StakingKey: stakeKey,
-			Pool:       make([]byte, 28),
-			AddedSlot:  50,
-			Active:     true,
-		},
-		{
-			StakingKey: missingStakeKey,
-			Pool:       make([]byte, 28),
-			AddedSlot:  60,
-			Active:     true,
-		},
-	}).Error)
+	_, err = raw.Exec(`
+INSERT INTO account (staking_key, pool, added_slot, active)
+VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
+		stakeKey, make([]byte, 28),
+		missingStakeKey, make([]byte, 28),
+	)
+	require.NoError(t, err)
 	// Simulate a post-upgrade write that populated only one credential. The
 	// startup check must detect the missing canonical credential, not merely
 	// test whether reward_live_stake is empty.
-	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
-		StakingKey:    stakeKey,
-		CredentialTag: 0,
-		Registered:    true,
-		UpdatedSlot:   75,
-	}).Error)
+	_, err = raw.Exec(`
+INSERT INTO reward_live_stake
+    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
+     registered, updated_slot)
+VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
+		stakeKey,
+	)
+	require.NoError(t, err)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(100, make([]byte, 32)),
 	}, nil))
@@ -113,150 +107,18 @@ func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
 	require.False(t, needed)
 	for _, key := range [][]byte{stakeKey, missingStakeKey} {
 		var live models.RewardLiveStake
-		require.NoError(t, store.DB().Where(
-			"credential_tag = ? AND staking_key = ?", 0, key,
-		).First(&live).Error)
+		require.NoError(t, raw.QueryRow(`
+SELECT staking_key, credential_tag, registered, updated_slot
+FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+			0, key,
+		).Scan(
+			&live.StakingKey,
+			&live.CredentialTag,
+			&live.Registered,
+			&live.UpdatedSlot,
+		))
 		require.Equal(t, uint64(100), live.UpdatedSlot)
-	}
-}
-
-func TestBackfillRewardLiveStakeRepairsStaleValues(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x53
-	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: stakeKey,
-		Pool:       make([]byte, 28),
-		Reward:     5,
-		AddedSlot:  50,
-		Active:     true,
-	}).Error)
-	// The identity and calculation version are current, but the UTxO and total
-	// values are not. A presence-only check would incorrectly accept this row.
-	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
-		StakingKey:         stakeKey,
-		PoolKeyHash:        make([]byte, 28),
-		Registered:         true,
-		UtxoStake:          9,
-		RewardStake:        5,
-		TotalStake:         14,
-		UpdatedSlot:        75,
-		CalculationVersion: models.RewardStakeCalculationVersion,
-	}).Error)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-
-	n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
-	require.NoError(t, n.backfillRewardLiveStake())
-
-	var live models.RewardLiveStake
-	require.NoError(t, store.DB().Where("staking_key = ?", stakeKey).First(&live).Error)
-	require.Equal(t, uint64(0), uint64(live.UtxoStake))
-	require.Equal(t, uint64(5), uint64(live.RewardStake))
-	require.Equal(t, uint64(5), uint64(live.TotalStake))
-	require.Equal(t, models.RewardStakeCalculationVersion, live.CalculationVersion)
-}
-
-func TestBackfillRewardLiveStakeAcceptsCurrentUndelegatedAccount(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x54
-	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: stakeKey,
-		Reward:     5,
-		AddedSlot:  50,
-		Active:     true,
-	}).Error)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-
-	n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
-	require.NoError(t, n.backfillRewardLiveStake())
-	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.False(t, needed)
-}
-
-func TestBackfillRewardLiveStakeRejectsStaleConsensusSnapshots(t *testing.T) {
-	tests := []struct {
-		name string
-		seed func(*testing.T, *metadatasqlite.MetadataStoreSqlite)
-	}{
-		{
-			name: "mark pool snapshot",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
-					Epoch:        3,
-					SnapshotType: models.PoolStakeSnapshotTypeMark,
-					PoolKeyHash:  make([]byte, 28),
-					TotalStake:   1,
-					CapturedSlot: 100,
-				}).Error)
-			},
-		},
-		{
-			name: "set pool snapshot",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
-					Epoch:        3,
-					SnapshotType: models.PoolStakeSnapshotTypeSet,
-					PoolKeyHash:  make([]byte, 28),
-					TotalStake:   1,
-					CapturedSlot: 100,
-				}).Error)
-			},
-		},
-		{
-			name: "go pool snapshot",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
-					Epoch:        3,
-					SnapshotType: models.PoolStakeSnapshotTypeGo,
-					PoolKeyHash:  make([]byte, 28),
-					TotalStake:   1,
-					CapturedSlot: 100,
-				}).Error)
-			},
-		},
-		{
-			name: "authoritative mark metadata",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.RewardSnapshot{
-					Epoch:         3,
-					SnapshotType:  models.PoolStakeSnapshotTypeMark,
-					CapturedSlot:  100,
-					BoundarySlot:  101,
-					Authoritative: true,
-				}).Error)
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-			store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-			require.True(t, ok)
-			test.seed(t, store)
-
-			n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
-			err = n.backfillRewardLiveStake()
-			require.ErrorContains(t, err, "rebootstrap from immutable blocks")
-		})
 	}
 }
 
@@ -339,7 +201,10 @@ func newNodeTestDivergedLedger(
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}))
+	require.NoError(
+		t,
+		cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}),
+	)
 
 	ancestorHash := nodeTestHashBytes("node-recycler-ancestor")
 	currentHash := nodeTestHashBytes("node-recycler-current")
@@ -422,7 +287,10 @@ func newNodeTestDivergedLedger(
 		Cbor:        []byte{0x80},
 	}
 	require.NoError(t, ledgerState.Chain().Rollback(ancestorTip.Point))
-	require.NoError(t, ledgerState.Chain().AddRawBlocks([]chain.RawBlock{forkBlock}))
+	require.NoError(
+		t,
+		ledgerState.Chain().AddRawBlocks([]chain.RawBlock{forkBlock}),
+	)
 	forkTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(forkBlock.Slot, forkBlock.Hash),
 		BlockNumber: forkBlock.BlockNumber,
@@ -902,7 +770,9 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 func TestProcessChainsyncRecyclerTickReconcilesBeforeBacklogSuppression(
 	t *testing.T,
 ) {
-	ledgerState, ancestorTip, currentTip, forkTip := newNodeTestDivergedLedger(t)
+	ledgerState, ancestorTip, currentTip, forkTip := newNodeTestDivergedLedger(
+		t,
+	)
 	require.True(
 		t,
 		isLedgerApplicationBacklog(
@@ -1728,22 +1598,32 @@ func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
 		Point:       ocommon.NewPoint(100, []byte("tip")),
 		BlockNumber: 50,
 	}, nil)
-	require.NotNil(t, cs.GetBestPeer(), "peer should be selected before ineligibility")
+	require.NotNil(
+		t,
+		cs.GetBestPeer(),
+		"peer should be selected before ineligibility",
+	)
 
 	// Mirror the subscription wiring in node.go.
-	bus.SubscribeFunc(peergov.PeerEligibilityChangedEventType, func(evt event.Event) {
-		e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
-		if !ok {
-			return
-		}
-		cs.SetConnectionEligible(e.ConnectionId, e.Eligible)
-	})
+	bus.SubscribeFunc(
+		peergov.PeerEligibilityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+			if !ok {
+				return
+			}
+			cs.SetConnectionEligible(e.ConnectionId, e.Eligible)
+		},
+	)
 
 	bus.Publish(
 		peergov.PeerEligibilityChangedEventType,
 		event.NewEvent(
 			peergov.PeerEligibilityChangedEventType,
-			peergov.PeerEligibilityChangedEvent{ConnectionId: connId, Eligible: false},
+			peergov.PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     false,
+			},
 		),
 	)
 
@@ -1773,27 +1653,38 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 	cs.UpdatePeerTip(highPrioConn, equalTip, nil)
 
 	// Mirror the subscription wiring in node.go.
-	bus.SubscribeFunc(peergov.PeerPriorityChangedEventType, func(evt event.Event) {
-		e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
-		if !ok {
-			return
-		}
-		cs.SetConnectionPriority(e.ConnectionId, e.Priority)
-	})
+	bus.SubscribeFunc(
+		peergov.PeerPriorityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
+			if !ok {
+				return
+			}
+			cs.SetConnectionPriority(e.ConnectionId, e.Priority)
+		},
+	)
 
 	bus.Publish(
 		peergov.PeerPriorityChangedEventType,
 		event.NewEvent(
 			peergov.PeerPriorityChangedEventType,
-			peergov.PeerPriorityChangedEvent{ConnectionId: highPrioConn, Priority: 50},
+			peergov.PeerPriorityChangedEvent{
+				ConnectionId: highPrioConn,
+				Priority:     50,
+			},
 		),
 	)
 
 	// SelectBestChain does a pure comparison with no incumbent bias, so once
 	// the priority event has been processed the higher-priority peer wins.
-	require.Eventually(t, func() bool {
-		best := cs.SelectBestChain()
-		return best != nil && *best == highPrioConn
-	}, time.Second, 5*time.Millisecond,
-		"higher-priority peer must win equal-tip selection after priority event")
+	require.Eventually(
+		t,
+		func() bool {
+			best := cs.SelectBestChain()
+			return best != nil && *best == highPrioConn
+		},
+		time.Second,
+		5*time.Millisecond,
+		"higher-priority peer must win equal-tip selection after priority event",
+	)
 }

@@ -112,6 +112,10 @@ func TestHardForkBabbageDoesNotMutatePreviousCostModels(t *testing.T) {
 	got, err := eras.HardForkBabbage(nil, prev)
 	require.NoError(t, err)
 	pp := got.(*babbage.BabbageProtocolParameters)
+	if pp.CostModels == nil || prev.CostModels == nil ||
+		pp.CostModels[0] == nil || prev.CostModels[0] == nil {
+		t.Fatal("expected cost models")
+	}
 	pp.CostModels[0][0] = 9
 	pp.CostModels[2] = []int64{4}
 
@@ -133,6 +137,10 @@ func TestHardForkConwayDoesNotMutatePreviousCostModels(t *testing.T) {
 	got, err := eras.HardForkConway(&cardano.CardanoNodeConfig{}, prev)
 	require.NoError(t, err)
 	pp := got.(*conway.ConwayProtocolParameters)
+	if pp.CostModels == nil || prev.CostModels == nil ||
+		pp.CostModels[0] == nil || prev.CostModels[0] == nil {
+		t.Fatal("expected cost models")
+	}
 	pp.CostModels[0][0] = 9
 	pp.CostModels[2] = []int64{4}
 

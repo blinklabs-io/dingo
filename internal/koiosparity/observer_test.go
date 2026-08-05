@@ -143,9 +143,10 @@ func seedDingoEpochAggregate(
 func setDingoActiveStake(t *testing.T, source *DatabaseSource, koiosEpoch, activeStake uint64) {
 	t.Helper()
 	gormDB := sourceGormDB(t, source.db)
-	require.NoError(t, gormDB.Model(&models.EpochSummary{}).
-		Where("epoch = ?", koiosEpoch-1).
-		Update("total_active_stake", types.Uint64(activeStake)).Error)
+	require.NoError(t, gormDB.Exec(
+		`UPDATE epoch_summary SET total_active_stake = ? WHERE epoch = ?`,
+		types.Uint64(activeStake), koiosEpoch-1,
+	).Error)
 }
 
 func newTestObserver(

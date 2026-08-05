@@ -138,6 +138,9 @@ func (d *Database) checkNodeSettings() error {
 		}
 	}
 
+	if persisted == nil {
+		return errors.New("node settings unexpectedly missing")
+	}
 	var mismatches []string
 	if persisted.StorageMode != configured.StorageMode {
 		mismatches = append(mismatches, fmt.Sprintf(
