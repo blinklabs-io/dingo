@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
@@ -317,11 +318,16 @@ func ValidateTxAlonzo(
 				return err
 			}
 			if usedBudget.Steps > redeemer.ExUnits.Steps || usedBudget.Memory > redeemer.ExUnits.Memory {
-				return fmt.Errorf(
-					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-					usedBudget.Steps, usedBudget.Memory,
-					redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-				)
+				return conway.PlutusScriptFailedError{
+					ScriptHash: tmpScript.Hash(),
+					Tag:        redeemer.Tag,
+					Index:      redeemer.Index,
+					Err: fmt.Errorf(
+						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+						usedBudget.Steps, usedBudget.Memory,
+						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+					),
+				}
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
