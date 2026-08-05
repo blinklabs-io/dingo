@@ -753,7 +753,21 @@ block references an endorser block (`ledger/leios_apply.go`), `SetGenesisCbor`
 writes a standalone CBOR blob under a `bp` + `(endorser-block slot,
 endorser-block hash)` key. That `bp` value is the endorser-block offset blob
 used by cold extraction, not a chain block and not the transaction metadata
-rows. Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
+rows. This `bp` blob is committed in its own blob transaction, not in the
+shared block-processing transaction that covers up to a full 50-block chunk:
+every certified endorser block in a chunk would otherwise pile its full blob
+(plus one `DOFF` entry per endorser transaction and per produced output) into
+that single transaction, and on a dense Leios backlog the accumulated writes
+exceed Badger's per-transaction budget (`ErrTxnTooBig`), wedging the chunk. The
+blob is content-addressed and idempotent (`ID=0`, off the chain index), so an
+independent commit is safe — the endorser transactions' `DOFF` ledger effects
+still go into the shared transaction under the ranking block's point, so
+rollback semantics are unchanged; a blob orphaned by a crash or rollback is
+harmless and overwritten identically on re-apply. Because a separately
+committed blob is not visible to the shared transaction's start-of-transaction
+snapshot, the apply path seeds the Tier-2 block cache
+(`TieredCborCache.SeedBlockCbor`) with the blob bytes so an intra-batch
+validation read on the CIP path resolves the endorser-block CBOR from cache. Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
 keys and deliberately omits the `bi`/`bh` index keys, so the chain iterator
 never treats it as a chain block. Its `bp..._metadata` carries `ID=0` (real
 ranking blocks created via `BlockCreate` get `ID >= 1`), which is also how the

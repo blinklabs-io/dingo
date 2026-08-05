@@ -739,6 +739,28 @@ func makeUtxoKey(txId []byte, outputIdx uint32) []byte {
 	return key
 }
 
+// SeedBlockCbor inserts a block's raw CBOR into the Tier-2 block LRU so that a
+// subsequent DOFF-offset resolution for a UTxO or transaction that lives in
+// this block hits the cache instead of reading the block back from a blob
+// transaction.
+//
+// It is used after an endorser-block blob is committed in its own blob
+// transaction (rather than in the shared block-processing transaction): a
+// separately committed blob is not visible to the shared transaction's
+// start-of-transaction snapshot, so an intra-batch validation read on the
+// CIP-conformant Leios path would otherwise miss it. Seeding the LRU with the
+// bytes already in hand makes that read resolve from Tier 2. This is
+// best-effort — the entry may be evicted — but the blob is durably committed,
+// so any later transaction started after the commit resolves it normally
+// through the cold-extract path.
+func (c *TieredCborCache) SeedBlockCbor(
+	slot uint64,
+	hash [32]byte,
+	rawBytes []byte,
+) {
+	c.blockLRU.Put(slot, hash, newCachedBlock(rawBytes))
+}
+
 // newCachedBlock creates a new CachedBlock with the given raw CBOR data.
 // The TxIndex and OutputIndex maps are initialized empty for later population.
 func newCachedBlock(rawBytes []byte) *CachedBlock {
