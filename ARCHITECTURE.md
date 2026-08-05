@@ -3055,8 +3055,13 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
 An operator tool that validates Dingo's closed-epoch reward inputs against Koios
-reference data on preview and preprod networks. It is not part of the node
-process; it is a standalone binary built from `cmd/koios-parity/`.
+reference data on preview and preprod networks. Its original, still-supported
+form is a standalone binary built from `cmd/koios-parity/` that polls a
+separately synced copy of Dingo's metadata database. Dingo #3098 added a
+second, in-process mode — an epoch-boundary observer the node itself can
+register from its own `Run()` composition — described in its own subsection
+below; both modes share the same `internal/koiosparity` comparison logic
+(`compare.go`/`check.go`) so a mismatch means the same thing either way.
 
 **Architecture:**
 
@@ -3333,6 +3338,169 @@ retried on the next tick instead of being cached as permanently skipped. A
 retrying it every tick would not change the outcome.
 
 **Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
+
+#### In-process epoch-boundary observer (dingo #3098)
+
+The standalone CLI above polls a metadata database that was populated by a
+*separate* Dingo process — real, but structurally a second, independently
+synced copy of the truth. Dingo #3098 adds a mode where the node validates
+its own committed reward state as it advances, with no export step and no
+second sync:
+
+- **`RewardParitySource`** (`internal/koiosparity/source.go`) is the
+  interface `check.go`'s comparison functions (`checkEpoch`/`CheckEpoch`)
+  consume instead of a concrete `*DingoDB`. `DingoDB` (the standalone CLI's
+  read-only GORM connection to a separate database file) and
+  `DatabaseSource` (below) both implement it, so the comparison logic itself
+  is identical regardless of which one backs a given run.
+- **`DatabaseSource`** (same file) is the narrow, in-process adapter: it
+  wraps an already-open, live `*database.Database` and reads
+  `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
+  `reward_account_output` through the existing typed `MetadataStore`
+  accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
+  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`) inside a fresh read-only
+  transaction per call — the same tables `ledger/snapshot/rotation.go`
+  already populates at every epoch boundary, with no new table and no
+  metadata export. `GetRewardAccountOutputs` is exposed on the interface now
+  (unused by any comparison yet) so #3097's per-account exact-parity check
+  can be wired in later without revisiting this abstraction.
+  - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
+    `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
+    for only a rolling 4-epoch window in core storage mode (API mode retains
+    `reward_account_output` without bound instead); `reward_pool_input`/
+    `reward_pool_output` are not pruned by that path at all. `DatabaseSource`
+    does not race this in any special, same-transaction way — it just reads
+    whatever is currently committed. What actually satisfies "available
+    before cleanup" is that the observer (below) processes a newly closed
+    epoch promptly after its own event fires, many epochs before that
+    epoch's rows would age out of the window; a read made long after they
+    have aged out comes back as absent (`nil`/`*Present == false`), the same
+    signal already used for "not yet computed" — never an error, and never
+    to be confused with a same-transaction guarantee.
+- **`Observer`** (`internal/koiosparity/observer.go`) subscribes
+  `HandleEpochTransitionEvent` to `event.EpochTransitionEventType` on the
+  node's own `event.EventBus` — the same bus and event every other component
+  uses (`ledger/state.go` publishes it, after the epoch-boundary write
+  transaction has committed and the ledger lock (`ls.Unlock()`) has already
+  been released — see the "authoritative epoch-boundary snapshot capture"
+  ordering in `node.go`). The handler itself never does Koios/database I/O:
+  it only records the closed epoch (`event.EpochTransitionEvent
+  .PreviousEpoch`) into a pending set and wakes a background goroutine,
+  which does the actual fetch+check work. This keeps EventBus dispatch to
+  this subscriber fast regardless of how long a Koios round trip takes, and
+  guarantees network I/O only ever starts once the transaction that produced
+  the event has already committed — never while holding the ledger write
+  transaction or lock.
+  - **Backlog and checkpointing.** `Start` seeds the pending set from every
+    epoch the cache (`cache.db`) has not yet fetched/checked, up to
+    `Source.GetLatestEpoch() - 1` (a floor derived from Dingo's own current
+    epoch number, not an exact koios-epoch bound — good enough for a
+    one-time historical backfill on first attach, since anything it
+    undershoots by a small margin is still covered by the live event
+    subscription going forward). No separate checkpoint file exists: the
+    cache's own persisted `check_epoch_status`/`koios_epoch_info` rows are
+    the sole resumable state, matching the issue's "persist only the minimal
+    resumable checkpoint state actually needed."
+  - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
+    not a single high-water-mark counter, so a burst of events collapses
+    duplicates (dingo's own block-based and slot-clock-based epoch.transition
+    emissions for the same boundary) into one entry, while distinct epochs
+    queued in the same tick are all still processed, in order, none skipped.
+    Critically, `CheckEpoch` is always invoked unconditionally for a
+    re-signaled epoch (bypassing `GetEpochsNeedingCheck`'s Koios-freshness
+    gate, which is about the *reference* side going stale, not the Dingo
+    side) — so a rollback that replays an epoch's boundary with corrected
+    committed state and re-emits its `event.EpochTransitionEvent` gets
+    re-validated against that corrected state rather than trusting a stale
+    prior `PASS`.
+  - **Strict mode** (`ObserverConfig.Strict`, the default via
+    `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to `n.cancel`
+    — exactly once, on the first Koios/tool error or exact parity mismatch,
+    and stops processing the rest of the current batch; this is what makes a
+    mismatch "stop the node" rather than "log and continue as ordinary
+    operation." Non-strict mode (available, not the default) records the
+    same failure in the cache and keeps validating subsequent epochs — an
+    explicit opt-in for advisory/observability-only use.
+  - **Fetch retry.** A single epoch's Koios fetch can fail transiently
+    because Koios's own backend has not finished closing that epoch out yet
+    (`fetchEpoch`'s `end_time==0` rejection) — expected mainly near live
+    chain tip. `fetchIfNeeded` retries this (and any other non-permanent
+    error) a bounded number of times with a fixed delay before giving up; a
+    permanent error (`ErrKoiosPermanent`) is never retried. The pool universe
+    (`GetAllHistoricalPoolIDs`/`GetPoolFirstActiveEpochs`, via
+    `resolvePoolUniverse`) is resolved at most once across that whole retry
+    loop and reused via `FetchEpochWithPools`, rather than re-run on every
+    attempt the way the simpler `FetchEpochWithClient` primitive does — a
+    bounded retry loop hammering both full Koios scans on every attempt would
+    burn meaningfully more of the daily rate-limit/quota budget than the
+    per-epoch fetch itself does.
+- **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
+  `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
+  both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
+  `SetEpochBoundarySnapshotHook`) first, then builds a `DatabaseSource` from
+  its own `n.db`, constructs the `Observer`, and subscribes it to
+  `n.eventBus` — all of this before `n.ledgerState.Start` (whose slot-clock/
+  block-processing goroutines are what can first publish
+  `event.EpochTransitionEvent`). This ordering — hooks configured → observer
+  subscribed → ledger started — matters: an epoch boundary reached before the
+  snapshot hooks exist would fall back to the event-driven capture only, and
+  the observer would validate an epoch whose reward rows the snapshot manager
+  never got a chance to commit via those hooks, a false parity failure that
+  can trip strict mode. `Run()`'s own `started` stack registers
+  `Observer.Stop` only for the startup-failure/panic rollback path (unwound
+  if a later step in `Run()` fails); the path every real shutdown actually
+  takes — `Node.Stop()`, SIGINT/SIGTERM, and `n.cancel()` (including the
+  observer's own strict-mode `FatalFunc`) — goes through
+  `node_shutdown.go`'s `shutdown()`, which stops the observer in phase 1,
+  same as `dbLifecycleMgr`/`offchainMetadataFetcher`, and unconditionally
+  before phase 3 closes `n.db`/`n.pluginHost` — the store `DatabaseSource`
+  reads from. `Observer.Stop` itself always blocks until its background
+  goroutine has actually exited (not just been signaled) before releasing
+  the Koios cache, so this ordering is race-free even under a slow in-flight
+  Koios/DB call. `Observer.Stop` is also idempotent — it signals its
+  background goroutine via a `context.CancelFunc` (safe to invoke more than
+  once) rather than closing an owned channel — because a startup failure that
+  occurs after the observer has started but before `Run()` finishes (e.g.
+  `n.ledgerState.Start` failing later in the same `Run()`) makes *both* the
+  `started`-stack cleanup path and, if the caller also calls `Node.Stop()` on
+  the same instance, `shutdown()`'s path invoke `Observer.Stop` on the same
+  `Observer`; without idempotency the second call would panic closing an
+  already-closed channel. All of this is gated entirely on
+  `KoiosParityConfig.Enabled`
+  (`dingo.yaml`'s `koiosParity:` section /
+  `DINGO_KOIOS_PARITY_*`/`--koios-parity-*`), default `false`. No Koios HTTP
+  client, node-lifecycle control, or EventBus subscription lives in
+  `ledger/`/`database/` — it is all constructed and wired from this
+  composition boundary, the same place every other cross-component adapter
+  in this repo (`internal/dblifecycle`, `internal/historyexpiry`,
+  `internal/offchainmetadata`) is. This is a one-off validation aid, not a
+  permanent Dingo subsystem — SQLite (or whichever metadata backend the node
+  itself runs) remains the only backend involved, since `DatabaseSource`
+  reads the live node's own store rather than opening a second connection.
+  - **Live database Restore/Truncate.** `node_lifecycle.go`'s
+    `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
+    background goroutine has exited, same as `shutdown()`) and unsubscribes
+    its `event.EpochTransitionEventType` handler (`UnsubscribeAndWait`,
+    tracked via `n.koiosParitySubId`) before the in-flight `Restore`/
+    `Truncate` closes `n.db` out from under it — otherwise the observer would
+    keep running against a stale, soon-to-be-closed database, and its
+    subscription would leak on the never-recreated `n.eventBus`.
+    `reinitializeBackgroundManagers` rebuilds the snapshot-manager hooks,
+    then (if `KoiosParityConfig.Enabled`) calls the same
+    `startKoiosParityObserver` helper `Run()` uses to recreate the `Observer`
+    against the fresh `n.db` and resubscribe it, before restarting
+    `n.ledgerState` — mirroring `Run()`'s own hooks-then-observer-then-ledger
+    ordering above so a live rebuild cannot reintroduce the same race.
+- **Out of scope for #3098** (left for #3097/#3099, and explicitly not
+  blocked by this design): per-account exact parity (`RewardParitySource`
+  already exposes `GetRewardAccountOutputs` for this) and chunked/paginated/
+  resumable large-account Koios fetches. `Observer.fetchIfNeeded` avoids
+  repeating the pool-universe scan across its own bounded retry loop (see
+  above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve or
+  reuse that universe only within a single `fetchIfNeeded` call, not across
+  distinct epochs or fetch runs — a deliberate simplicity trade-off for this
+  one-off validation use case, not a resumability guarantee; #3099 owns
+  making that path chunked/paginated/resumable across epochs.
 
 ### Bark (`bark/`)
 

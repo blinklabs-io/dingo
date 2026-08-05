@@ -109,6 +109,15 @@ var flagSpecs = []flagSpec{
 	boolFlag("HistoryExpiry.Enabled", "history-expiry-enabled", "enable local immutable block history expiry"),
 	durationFlag("HistoryExpiry.Frequency", "history-expiry-frequency", "history expiry scan frequency"),
 
+	// Koios reward-parity observer (dingo #3098; one-off validation aid, not a
+	// permanent subsystem)
+	boolFlag("KoiosParity.Enabled", "koios-parity-enabled", "validate closed-epoch reward state against Koios reference data as the node advances"),
+	stringFlag("KoiosParity.Network", "koios-parity-network", "", "Koios network to validate against: preview or preprod (default: node's own --network)"),
+	stringFlag("KoiosParity.CachePath", "koios-parity-cache-path", "", "Koios reference cache.db path (default: {data-dir}/.koios/cache.db)"),
+	stringFlag("KoiosParity.APIKey", "koios-parity-api-key", "", "Koios Bearer token for rate-limited access"),
+	boolFlag("KoiosParity.Strict", "koios-parity-strict", "stop/cancel the node on the first Koios/tool error or exact parity mismatch"),
+	intFlag("KoiosParity.GraceHours", "koios-parity-grace-hours", "hours after an epoch closes during which a missing Dingo-side row is treated as sync lag, not a failure"),
+
 	// Peer governance
 	intFlag("TargetNumberOfKnownPeers", "target-known-peers", "target number of known peers"),
 	intFlag("TargetNumberOfEstablishedPeers", "target-established-peers", "target number of established peers"),

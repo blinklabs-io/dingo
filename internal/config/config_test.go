@@ -58,6 +58,7 @@ func resetGlobalConfig() {
 		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		HistoryExpiry:               DefaultHistoryExpiryConfig(),
+		KoiosParity:                 DefaultKoiosParityConfig(),
 		Midnight:                    DefaultMidnightConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
@@ -178,6 +179,7 @@ mithril:
 			PromotionMinDiversityGroups: 4,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
+		KoiosParity:   DefaultKoiosParityConfig(),
 		Midnight: MidnightConfig{
 			Port:                        50052,
 			Host:                        "127.0.0.1",
@@ -289,6 +291,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		BackfillBatchSize:    100,
 		GenesisBootstrap:     DefaultGenesisBootstrapConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
+		KoiosParity:          DefaultKoiosParityConfig(),
 		Midnight: func() MidnightConfig {
 			m := midnightNetworkDefaults["preview"]
 			m.Port = DefaultMidnightConfig().Port

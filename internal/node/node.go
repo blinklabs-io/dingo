@@ -340,6 +340,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				Enabled:   cfg.HistoryExpiry.Enabled,
 				Frequency: cfg.HistoryExpiry.Frequency,
 			}),
+			dingo.WithKoiosParity(dingo.KoiosParityConfig{
+				Enabled:    cfg.KoiosParity.Enabled,
+				Network:    cfg.KoiosParity.Network,
+				CachePath:  cfg.KoiosParity.CachePath,
+				APIKey:     cfg.KoiosParity.APIKey,
+				Strict:     cfg.KoiosParity.Strict,
+				GraceHours: cfg.KoiosParity.GraceHours,
+			}),
 			dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 			dingo.WithOffchainMetadataConfig(
 				dingo.OffchainMetadataConfig{
