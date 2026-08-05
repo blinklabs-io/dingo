@@ -2664,3 +2664,116 @@ func TestCheckPoolMarginFloor(t *testing.T) {
 			[]lcommon.Certificate{nilReg}, nil))
 	})
 }
+
+// TestConwayTxInfoCachePropagatesProtocolMajor guards the wiring that carries
+// the active major protocol version into the PlutusV1/V2 script context.
+// gouroboros renders txInfoMint differently from PV10 (Plomin) on: V1/V2 gain a
+// zero-lovelace ada entry, matching cardano-ledger's transMintValue. That
+// rendering is selected by TxInfo.ProtocolMajor, whose zero value means
+// "pre-Plomin". dingo builds the Conway script context itself rather than going
+// through gouroboros' conway.UtxoValidatePlutusScripts, so leaving the field
+// unset silently evaluates every PV10+ V1/V2 script against a pre-Plomin
+// context, changing both the ex-units charged and the script result.
+func TestConwayTxInfoCachePropagatesProtocolMajor(t *testing.T) {
+	input := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			fee:       big.NewInt(0),
+			witnesses: &mockWitnessSet{},
+		},
+		inputs: []lcommon.TransactionInput{input},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(input, newTestOutput(1_000_000))
+	resolved := []lcommon.Utxo{{Id: input, Output: newTestOutput(1_000_000)}}
+
+	// The mint rendering differs even for a tx that mints nothing, so no mint
+	// fixture is needed to observe the two renderings.
+	build := func(t *testing.T, major uint) (script.TxInfoV1, script.TxInfoV2) {
+		t.Helper()
+		cache := newConwayTxInfoCache(ls, tx, resolved, major)
+		v1, err := cache.v1()
+		require.NoError(t, err)
+		v2, err := cache.v2()
+		require.NoError(t, err)
+		require.Equal(t, major, v1.ProtocolMajor)
+		require.Equal(t, major, v2.ProtocolMajor)
+		return v1, v2
+	}
+
+	preV1, preV2 := build(t, lcommon.ProtocolVersionConway)
+	postV1, postV2 := build(t, lcommon.ProtocolVersionPlomin)
+
+	assert.NotEqual(
+		t,
+		preV1.ToPlutusData(),
+		postV1.ToPlutusData(),
+		"PV10 must render a different V1 txInfoMint than PV9",
+	)
+	assert.NotEqual(
+		t,
+		preV2.ToPlutusData(),
+		postV2.ToPlutusData(),
+		"PV10 must render a different V2 txInfoMint than PV9",
+	)
+}
+
+// TestValidateTxPlutusConwayUsesPparamsProtocolMajor asserts the protocol major
+// reaches the cache from the protocol parameters rather than defaulting to
+// zero, which is what makes the rendering above reachable in production.
+func TestValidateTxPlutusConwayUsesPparamsProtocolMajor(t *testing.T) {
+	input := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			fee:       big.NewInt(0),
+			witnesses: &mockWitnessSet{},
+		},
+		inputs: []lcommon.TransactionInput{input},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(input, newTestOutput(1_000_000))
+
+	plutusCtx, err := newConwayPlutusValidationContext(tx, ls)
+	require.NoError(t, err)
+	pp := &conway.ConwayProtocolParameters{}
+	pp.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
+
+	cache := newConwayTxInfoCache(
+		ls,
+		tx,
+		plutusCtx.scriptInputs.resolvedAllInputs,
+		pp.ProtocolVersion.Major,
+	)
+	v1, err := cache.v1()
+	require.NoError(t, err)
+
+	assert.Equal(t, lcommon.ProtocolVersionPlomin, v1.ProtocolMajor)
+}
+
+// TestConwayPlutusRejectsNilPparams covers the typed-nil pointer case: a nil
+// *conway.ConwayProtocolParameters satisfies the protocol-parameters type
+// assertion, and the Conway plutus path now dereferences pparams to read the
+// protocol major, so an unguarded nil would panic instead of erroring.
+func TestConwayPlutusRejectsNilPparams(t *testing.T) {
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			fee:       big.NewInt(0),
+			witnesses: &mockWitnessSet{},
+		},
+	}
+	ls := newMockLedgerState()
+	var nilPparams *conway.ConwayProtocolParameters
+
+	assert.Equal(
+		t,
+		ErrIncompatibleProtocolParams,
+		ValidateTxPlutusConway(tx, 0, ls, nilPparams),
+	)
+	assert.ErrorIs(
+		t,
+		ValidateTxConway(tx, 0, ls, nilPparams),
+		ErrIncompatibleProtocolParams,
+	)
+	_, _, _, err := EvaluateTxConway(tx, ls, nilPparams)
+	assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+}
