@@ -270,7 +270,7 @@ func (b *Bark) Start(ctx context.Context) error {
 			newDatabaseServiceHandler(b),
 			compress1KB,
 			connect.WithInterceptors(newOperatorAuthInterceptor(
-				b.config.Logger, destructiveDatabaseProcedures,
+				b.config.Logger, destructiveDatabaseProcedures, readOnlyDatabaseProcedures,
 			)),
 		)
 		mux.Handle(databasePath, databaseHandler)

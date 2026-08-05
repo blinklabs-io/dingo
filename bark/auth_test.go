@@ -79,21 +79,31 @@ func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(t *testing.T) 
 	}
 }
 
-// readOnlyDatabaseProcedures is every DatabaseService RPC that is NOT in
-// auth.go's destructiveDatabaseProcedures -- status/catalog RPCs that never
-// require a verified client certificate. Listed explicitly (rather than
-// e.g. "everything not destructive") so
-// TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod can detect a
-// brand-new RPC that landed in neither set.
-var readOnlyDatabaseProcedures = map[string]bool{
-	databaseconnect.DatabaseServiceGetSnapshotStatusProcedure:       true,
-	databaseconnect.DatabaseServiceListSnapshotsProcedure:           true,
-	databaseconnect.DatabaseServiceGetRestoreStatusProcedure:        true,
-	databaseconnect.DatabaseServiceListAvailableSnapshotsProcedure:  true,
-	databaseconnect.DatabaseServiceGetTruncateStatusProcedure:       true,
-	databaseconnect.DatabaseServiceStreamOperationProgressProcedure: true,
-	databaseconnect.DatabaseServiceGetOperationHistoryProcedure:     true,
-	databaseconnect.DatabaseServiceGetDatabaseInfoProcedure:         true,
+// TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure pins the
+// runtime property that makes readOnlyDatabaseProcedures an allowlist
+// rather than destructiveDatabaseProcedures a denylist: a procedure name
+// present in NEITHER map -- standing in for a new DatabaseService RPC added
+// to the proto without updating either one -- must still require a
+// verified client certificate, exactly like a known destructive procedure,
+// not be silently let through the way "allow unless listed as destructive"
+// would. TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod is
+// what keeps that situation from actually arising in practice, but this
+// test pins that authorize itself does not depend on that check having
+// run.
+func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(t *testing.T) {
+	const unclassified = "/bark.v1alpha1.database.DatabaseService/SomeFutureRPC"
+	require.False(t, destructiveDatabaseProcedures[unclassified])
+	require.False(t, readOnlyDatabaseProcedures[unclassified])
+
+	interceptor := &operatorAuthInterceptor{
+		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		destructive: destructiveDatabaseProcedures,
+		readOnly:    readOnlyDatabaseProcedures,
+	}
+
+	err := interceptor.authorize(context.Background(), unclassified)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 }
 
 // TestPeerCertContextMiddleware_KeysOffVerifiedChains pins the exact bug
@@ -115,6 +125,7 @@ func TestPeerCertContextMiddleware_KeysOffVerifiedChains(t *testing.T) {
 	interceptor := &operatorAuthInterceptor{
 		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		destructive: destructiveDatabaseProcedures,
+		readOnly:    readOnlyDatabaseProcedures,
 	}
 
 	cases := []struct {

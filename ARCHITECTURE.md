@@ -3597,12 +3597,18 @@ connection presented a verified client certificate — plus, for audit
 logging, its Subject Common Name and a SHA-256 fingerprint — into the
 request context. `newOperatorAuthInterceptor`, wired via
 `connect.WithInterceptors` when `databaseconnect.NewDatabaseServiceHandler`
-is constructed, checks the called procedure's name against a fixed
-destructive-procedure set and rejects with `connect.CodeUnauthenticated` if
-the context shows no verified certificate; every destructive call, accepted
-or rejected, is logged with the caller's certificate identity (or its
-absence), since `GetOperationHistory` has no notion of caller identity of
-its own. Because this all sits beneath `*http.Server`, one check covers
+is constructed, is deny-by-default: it exempts a procedure from requiring a
+verified certificate only if it's named in an explicit `readOnlyDatabaseProcedures`
+allowlist, not merely because it's absent from `destructiveDatabaseProcedures`
+— so a DatabaseService RPC added later without updating either map still
+requires authentication like a known destructive one, rather than silently
+passing through unauthenticated. It rejects with `connect.CodeUnauthenticated`
+if the context shows no verified certificate; every non-read-only call,
+accepted or rejected, is logged with the caller's certificate identity (or
+its absence), since `GetOperationHistory` has no notion of caller identity of
+its own — an unclassified procedure is additionally logged as such, so an
+operator notices and fixes the classification even though it's already
+being safely rejected. Because this all sits beneath `*http.Server`, one check covers
 Connect, gRPC, and gRPC-Web alike — they're just HTTP requests distinguished
 by content type once they reach the generated handler, not separate code
 paths needing separate wiring. The interceptor implements the full

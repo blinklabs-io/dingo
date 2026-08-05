@@ -29,13 +29,13 @@ import (
 
 // destructiveDatabaseProcedures is the set of DatabaseService RPCs that
 // mutate state, consume significant resources, or interfere with another
-// caller's in-flight operation — as opposed to the service's read-only
-// status/catalog RPCs (ListSnapshots, ListAvailableSnapshots,
-// GetSnapshotStatus, GetRestoreStatus, GetTruncateStatus,
-// StreamOperationProgress, GetOperationHistory, GetDatabaseInfo) and the
-// entirely-read-only ArchiveService, none of which appear here.
-// newOperatorAuthInterceptor requires a verified mTLS client certificate for
-// every procedure in this set.
+// caller's in-flight operation — as opposed to the entirely-read-only
+// ArchiveService and this file's own readOnlyDatabaseProcedures. It exists
+// for audit-log clarity and as the thing
+// TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod keeps
+// up to date with the proto's actual method list; operatorAuthInterceptor's
+// runtime decision does NOT key off this map — see readOnlyDatabaseProcedures
+// and authorize's doc comment for why.
 //
 // CreateSnapshot/VerifySnapshot go beyond the literal "restore, truncate,
 // delete snapshots, or cancel operations" examples in the issue this guards
@@ -51,6 +51,25 @@ var destructiveDatabaseProcedures = map[string]bool{
 	databaseconnect.DatabaseServiceRestoreProcedure:         true,
 	databaseconnect.DatabaseServiceTruncateProcedure:        true,
 	databaseconnect.DatabaseServiceCancelOperationProcedure: true,
+}
+
+// readOnlyDatabaseProcedures is the only set of DatabaseService procedures
+// operatorAuthInterceptor.authorize exempts from requiring a verified mTLS
+// client certificate. This is deliberately an allowlist, not the inverse of
+// destructiveDatabaseProcedures: a procedure absent from BOTH maps — e.g. a
+// new DatabaseService RPC added to the proto without updating either one —
+// is still required to authenticate, the same as a known-destructive one.
+// See authorize's doc comment for why the runtime check is structured this
+// way.
+var readOnlyDatabaseProcedures = map[string]bool{
+	databaseconnect.DatabaseServiceGetSnapshotStatusProcedure:       true,
+	databaseconnect.DatabaseServiceListSnapshotsProcedure:           true,
+	databaseconnect.DatabaseServiceGetRestoreStatusProcedure:        true,
+	databaseconnect.DatabaseServiceListAvailableSnapshotsProcedure:  true,
+	databaseconnect.DatabaseServiceGetTruncateStatusProcedure:       true,
+	databaseconnect.DatabaseServiceStreamOperationProgressProcedure: true,
+	databaseconnect.DatabaseServiceGetOperationHistoryProcedure:     true,
+	databaseconnect.DatabaseServiceGetDatabaseInfoProcedure:         true,
 }
 
 // peerIdentity is what peerCertContextMiddleware extracts from a verified
@@ -138,9 +157,9 @@ var errAnonymousDestructiveCall = errors.New(
 )
 
 // newOperatorAuthInterceptor returns a connect.Interceptor that rejects any
-// call to a procedure in destructive with connect.CodeUnauthenticated
+// call to a procedure not in readOnly with connect.CodeUnauthenticated
 // unless peerCertContextMiddleware recorded a verified client certificate
-// on the request's connection. Every destructive call — accepted or
+// on the request's connection. Every non-read-only call — accepted or
 // rejected — is logged with the caller's certificate identity (or its
 // absence), so an operator can audit who ran a Restore/Truncate/
 // DeleteSnapshot/etc. after the fact; GetOperationHistory (database.go) has
@@ -155,18 +174,44 @@ var errAnonymousDestructiveCall = errors.New(
 func newOperatorAuthInterceptor(
 	logger *slog.Logger,
 	destructive map[string]bool,
+	readOnly map[string]bool,
 ) connect.Interceptor {
-	return &operatorAuthInterceptor{logger: logger, destructive: destructive}
+	return &operatorAuthInterceptor{logger: logger, destructive: destructive, readOnly: readOnly}
 }
 
 type operatorAuthInterceptor struct {
 	logger      *slog.Logger
 	destructive map[string]bool
+	readOnly    map[string]bool
 }
 
+// authorize is deliberately deny-by-default: it allows a procedure through
+// unauthenticated only if readOnly explicitly names it, not merely because
+// destructive doesn't. That means a DatabaseService RPC absent from BOTH
+// maps — most plausibly a new one added to the proto without updating
+// either — still requires a verified certificate, the same as a known
+// destructive one, instead of silently passing through unauthenticated the
+// way an "allow unless listed as destructive" check would. This mirrors
+// peerCertContextMiddleware's own fail-closed default (an absent/failed
+// verification leaves peerIdentity.Verified false, never true).
+// TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod keeps
+// destructive/readOnly's classification of every current method accurate
+// and pins that neither map is ever missing one, but this function's
+// runtime behavior does not depend on that test having run: an
+// unclassified procedure here is logged (so an operator notices and fixes
+// the classification) and still authenticated exactly like a known
+// destructive one, never allowed through by default.
 func (i *operatorAuthInterceptor) authorize(ctx context.Context, procedure string) error {
-	if !i.destructive[procedure] {
+	if i.readOnly[procedure] {
 		return nil
+	}
+	if !i.destructive[procedure] {
+		i.logger.Warn(
+			"unclassified DatabaseService procedure treated as destructive (fail closed) — "+
+				"add it to destructiveDatabaseProcedures or readOnlyDatabaseProcedures in bark/auth.go",
+			"component", "bark",
+			"procedure", procedure,
+		)
 	}
 	id := peerIdentityFromContext(ctx)
 	if !id.Verified {
