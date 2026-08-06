@@ -1688,13 +1688,6 @@ func synthesizeRetiredScheduledPools(
 		}
 		pool := activePoolDistr[i]
 		if len(pool.PoolKeyHash) != poolKeyHashSize {
-			cfg.Logger.Warn(
-				"skipping malformed active pool distribution entry",
-				"index", i,
-				"field", "pool_key_hash",
-				"actual_length", len(pool.PoolKeyHash),
-				"expected_length", poolKeyHashSize,
-			)
 			continue
 		}
 		if len(pool.VrfKeyHash) != vrfKeyHashSize {
