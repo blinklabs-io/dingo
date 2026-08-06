@@ -2909,10 +2909,19 @@ table as it selects them and hands back the open files, because a returned name
 would be resolved again by whoever read it. It also verifies every component on
 the way down — ledger directory, slot directory, state, table — since `os.Root`
 confines traversal to the root but still follows a symlink whose target stays
-inside it, and extraction never writes a symlink. A planted one is refused
-rather than followed, and a table that is a symlink fails the snapshot instead
-of being reported absent: a caller cannot otherwise tell "this snapshot has no
-table" from "this snapshot's table is somebody else's".
+inside it, and extraction never writes a symlink.
+
+Each candidate is settled by *opening* it rather than by inspecting it and
+opening it afterwards: asking whether `ledger` is a directory and later opening
+`ledger` are two questions, and a writer between them can make the answers
+describe different directories — the second still verified, just not the one the
+choice was made about. So a slot directory holding no state is skipped and the
+next one down tried, while a symlink or a substitution fails the snapshot
+outright. Falling back there would hand the choice of ledger state to whoever
+planted it, since making the newest unusable would be enough to select an older
+one. A symlinked UTxO table fails for the same reason rather than being reported
+absent: a caller cannot otherwise tell "this snapshot has no table" from "this
+snapshot's table is somebody else's".
 
 The ancillary tree matters most here, because what binds it is a signature. One
 handle spans the cache-reuse check, the manifest verification, and the import,

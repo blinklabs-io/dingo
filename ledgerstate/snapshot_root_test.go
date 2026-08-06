@@ -358,3 +358,63 @@ func TestOpenSnapshotAtOrBeforeLegacyStateHasNoTable(t *testing.T) {
 		t.Fatalf("expected the legacy state, got %q", string(got))
 	}
 }
+
+// TestOpenSnapshotAtOrBeforeSkipsStatelessSlotDir pins that a slot directory
+// holding no state is not a candidate, and the next one down is used. Opening
+// as we select has to keep that behaviour: it is what the old predicate pass
+// decided, and a run of incomplete slot directories is ordinary.
+func TestOpenSnapshotAtOrBeforeSkipsStatelessSlotDir(t *testing.T) {
+	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
+	// A newer slot directory that was never finished.
+	if err := os.MkdirAll(
+		filepath.Join(dir, "ledger", "200"), 0o750,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer files.Close()
+	got, err := io.ReadAll(files.State)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if string(got) != "older" {
+		t.Fatalf("expected the complete older state, got %q", string(got))
+	}
+}
+
+// TestOpenSnapshotAtOrBeforeRefusesRatherThanFallingBack pins the other half:
+// a newest slot directory whose state is planted fails the snapshot instead of
+// silently selecting an older one.
+//
+// Falling back would hand the choice of ledger state to whoever planted it —
+// making the newest unusable is then enough to pick which state gets imported,
+// which is a decision no attacker should get to make.
+func TestOpenSnapshotAtOrBeforeRefusesRatherThanFallingBack(t *testing.T) {
+	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
+	newer := filepath.Join(dir, "ledger", "200")
+	if err := os.MkdirAll(newer, 0o750); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(newer, "real"), []byte("theirs"), 0o640,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	requireSymlink(t, "real", filepath.Join(newer, "state"))
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err == nil {
+		files.Close()
+		t.Fatal(
+			"a planted newest state must fail the snapshot, not fall back " +
+				"to an older one",
+		)
+	}
+	if !errors.Is(err, ErrUnsafeSnapshotPath) {
+		t.Fatalf("expected ErrUnsafeSnapshotPath, got %v", err)
+	}
+}

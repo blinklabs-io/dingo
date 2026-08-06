@@ -135,23 +135,6 @@ func openVerifiedFile(dir *os.Root, name string) (*os.File, error) {
 	return f, nil
 }
 
-// isVerifiedEntry reports whether rel, relative to root, is an entry of the
-// wanted kind reachable without crossing a symlink. It is the predicate form of
-// the opens above, for deciding between candidates before committing to one.
-func isVerifiedEntry(root *os.Root, rel string, wantDir bool) bool {
-	dirRel, name := path.Split(rel)
-	dir, err := openVerifiedDirPath(root, path.Clean(dirRel))
-	if err != nil {
-		return false
-	}
-	defer dir.Close()
-	info, err := dir.Lstat(name)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 {
-		return false
-	}
-	return info.IsDir() == wantDir
-}
-
 // SnapshotFiles is a ledger state snapshot opened during discovery: the files
 // themselves, not names for them.
 //
@@ -185,15 +168,23 @@ func (s *SnapshotFiles) Close() {
 	}
 }
 
-// findLedgerDirIn is findLedgerDir resolved through root, returning the
-// slash-separated path of the ledger directory relative to it.
-func findLedgerDirIn(root *os.Root) (string, error) {
-	for _, c := range []string{"ledger", "db/ledger"} {
-		if isVerifiedEntry(root, c, true) {
-			return c, nil
+// openLedgerDirIn is findLedgerDir resolved through root, returning the ledger
+// directory open rather than a name for it, plus that name for messages.
+//
+// Each candidate is opened to decide it, not inspected and then opened. Asking
+// whether "ledger" is a directory and later opening "ledger" are two questions,
+// and a writer between them can make the answers describe different
+// directories — the second would still be verified, just not the one the choice
+// was made about. The caller closes the result.
+func openLedgerDirIn(root *os.Root) (*os.Root, string, error) {
+	for _, rel := range []string{"ledger", "db/ledger"} {
+		dir, err := openVerifiedDirPath(root, rel)
+		if err != nil {
+			continue
 		}
+		return dir, rel, nil
 	}
-	return "", fmt.Errorf(
+	return nil, "", fmt.Errorf(
 		"%w under %s (checked ledger/ and db/ledger/)",
 		ErrLedgerDirNotFound,
 		root.Name(),
@@ -214,13 +205,9 @@ func OpenSnapshotAtOrBefore(
 	root *os.Root,
 	maxSlot uint64,
 ) (*SnapshotFiles, error) {
-	ledgerRel, err := findLedgerDirIn(root)
+	ledgerRoot, ledgerRel, err := openLedgerDirIn(root)
 	if err != nil {
 		return nil, err
-	}
-	ledgerRoot, err := openVerifiedDirPath(root, ledgerRel)
-	if err != nil {
-		return nil, fmt.Errorf("opening ledger directory: %w", err)
 	}
 	defer ledgerRoot.Close()
 
@@ -243,12 +230,13 @@ func OpenSnapshotAtOrBefore(
 			continue
 		}
 		if e.IsDir() {
-			// UTxO-HD format: directory named by slot number
-			if isVerifiedEntry(
-				ledgerRoot, path.Join(name, "state"), false,
-			) {
-				utxoHDDirs = append(utxoHDDirs, name)
-			}
+			// UTxO-HD format: directory named by slot number. Whether it
+			// actually holds a state is settled by opening it below, not by a
+			// check here that the open would then have to repeat.
+			//
+			// ReadDir reports a symlink as its own type rather than as the
+			// directory it points at, so one never reaches this branch.
+			utxoHDDirs = append(utxoHDDirs, name)
 			continue
 		}
 		// Legacy format: .lstate files or numeric slot filenames
@@ -259,9 +247,22 @@ func OpenSnapshotAtOrBefore(
 		}
 	}
 
-	// Prefer UTxO-HD format (newer)
-	if utxoHDDirs = sortNumericDesc(utxoHDDirs); len(utxoHDDirs) > 0 {
-		return openUTxOHDSnapshot(ledgerRoot, ledgerRel, utxoHDDirs[0])
+	// Prefer UTxO-HD format (newer), newest slot first.
+	//
+	// A slot directory holding no state is not a candidate and the next one
+	// down is tried; anything else — a symlink, a substitution, an unreadable
+	// state — fails the snapshot rather than quietly selecting an older one.
+	// Falling through on those would let planted content decide which ledger
+	// state gets imported, by making the newest one unusable.
+	for _, slotDir := range sortNumericDesc(utxoHDDirs) {
+		files, err := openUTxOHDSnapshot(ledgerRoot, ledgerRel, slotDir)
+		if err == nil {
+			return files, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		return nil, err
 	}
 
 	if legacyFiles = sortNumericSuffixDesc(legacyFiles); len(legacyFiles) > 0 {
