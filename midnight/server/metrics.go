@@ -17,12 +17,22 @@ package server
 import (
 	"context"
 	"path"
+	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/grpc"
 )
+
+// midnightStateMethodPrefix matches info.FullMethod for MidnightState's own
+// RPCs. Start's grpc.UnaryInterceptor wraps the whole *grpc.Server, and the
+// health and reflection services registered alongside MidnightState (see
+// Start) share this same interceptor chain, so without this filter a health
+// probe or reflection call would show up in these metrics as if it were
+// MidnightState API traffic.
+var midnightStateMethodPrefix = "/" + midnight.MidnightState_ServiceDesc.ServiceName + "/"
 
 // serverMetrics holds the Prometheus instruments for the MidnightState gRPC
 // server.
@@ -53,13 +63,18 @@ func newServerMetrics(reg prometheus.Registerer) *serverMetrics {
 }
 
 // unaryInterceptor records request count and latency for every unary
-// MidnightState RPC (the service has no streaming methods).
+// MidnightState RPC (the service has no streaming methods). Health and
+// reflection calls share this interceptor chain but are passed straight to
+// handler, unrecorded -- see midnightStateMethodPrefix.
 func (m *serverMetrics) unaryInterceptor(
 	ctx context.Context,
 	req any,
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
 ) (any, error) {
+	if !strings.HasPrefix(info.FullMethod, midnightStateMethodPrefix) {
+		return handler(ctx, req)
+	}
 	method := path.Base(info.FullMethod)
 	start := time.Now()
 	resp, err := handler(ctx, req)

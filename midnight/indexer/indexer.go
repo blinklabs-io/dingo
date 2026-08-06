@@ -647,6 +647,12 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 // Order: undo spends/deregistrations first (restore UTxOs), then undo
 // creates/registrations (remove UTxOs), so a UTxO created and spent within
 // the same block ends up correctly absent from memory after the rollback.
+//
+// This deletes rows a prior, already-committed call to processBlock counted
+// via recordBlockEvents. blocksIndexed/eventsTotal are intentionally not
+// decremented here -- see newIndexerMetrics -- so a chain reorg leaves both
+// counters ahead of the database's live row counts by however much this
+// rollback just removed.
 func (idx *Indexer) rollbackBlock(block models.Block) {
 	if idx.cnightEnabled {
 		spends, err := idx.config.Metadata.DeleteMidnightAssetSpendsByBlock(
@@ -1157,6 +1163,20 @@ func (idx *Indexer) processBlock(
 	// eventsTotal metric only after txn.Commit succeeds below -- a block
 	// that fails and rolls back must not have already-incremented counts
 	// for rows that never actually persisted.
+	//
+	// Each processTx/processOutput write site increments counts once per
+	// successful Create* call, regardless of whether that call actually
+	// inserted a new row or was a no-op against an existing one: the
+	// CreateMidnight* methods are idempotent (ON CONFLICT DO NOTHING, see
+	// DATABASE.md's Midnight Indexer section) so a crash-restart backfill
+	// replaying a block already indexed before the last persisted checkpoint
+	// returns success without inserting anything. counts (and so
+	// eventsTotal) does not distinguish that case from a genuine new row --
+	// doing so precisely would require CreateMidnight* to report whether it
+	// actually inserted, which the metadata.MetadataStore interface does not
+	// expose today. The overcount this can produce is bounded by how far
+	// backfill's replay window can lag the true last-processed block, not by
+	// total chain length.
 	counts := make(map[string]int, 4)
 	for i, tx := range txs {
 		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch, txn, journal, counts); err != nil { //nolint:gosec

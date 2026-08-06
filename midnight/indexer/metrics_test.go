@@ -49,10 +49,12 @@ func TestRecordBlockEvents_IncrementsBlocksAndLabelsEvents(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(m.eventsTotal.WithLabelValues("registration")),
 	)
-	// A type never recorded must not appear as a zero-value series.
-	assert.Equal(t, 0, int(testutil.ToFloat64(
-		m.eventsTotal.WithLabelValues("deregistration"),
-	)))
+	// A type never recorded must not appear as a series at all. Checked by
+	// count, not by reading WithLabelValues("deregistration") directly --
+	// WithLabelValues lazily creates the child series it looks up, so reading
+	// one that was never recorded would create it and then trivially observe
+	// the zero value it just created, proving nothing.
+	assert.Equal(t, 3, testutil.CollectAndCount(m.eventsTotal))
 }
 
 // TestRecordBlockEvents_IgnoresNonPositiveCounts verifies a zero count never

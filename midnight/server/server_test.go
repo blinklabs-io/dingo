@@ -167,6 +167,47 @@ func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
 	)
 }
 
+// Health and reflection share this server's interceptor chain but must never
+// show up in the MidnightState request/latency metrics -- otherwise routine
+// health-check polling would pollute a metric meant to reflect real
+// MidnightState API usage. Call a health Check first (must not be recorded),
+// then a real MidnightState RPC (must be the only thing recorded).
+func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hc := healthpb.NewHealthClient(dial(t, addr))
+	_, err := hc.Check(ctx, &healthpb.HealthCheckRequest{})
+	require.NoError(t, err)
+
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+	_, err = client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() != "dingo_midnight_grpc_requests_total" {
+			continue
+		}
+		require.Len(
+			t,
+			mf.GetMetric(),
+			1,
+			"only the MidnightState RPC must be recorded, not the health Check",
+		)
+		for _, label := range mf.GetMetric()[0].GetLabel() {
+			if label.GetName() == "method" {
+				require.Equal(t, "GetAssetCreates", label.GetValue())
+			}
+		}
+	}
+}
+
 // The health service must report SERVING for both the overall server and the
 // MidnightState service by name.
 func TestHealthCheckServing(t *testing.T) {
