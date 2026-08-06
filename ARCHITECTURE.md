@@ -4047,7 +4047,37 @@ every handshake failed on a network-magic mismatch, and the node could
 not sync with anything despite `cfg.Network` itself being correct.
 `PublishConfig` closes that gap by keeping the snapshot and the pointer in
 lockstep on every `Apply` return, not just the ones that changed
-something. Once every
+something.
+
+`Apply` overriding `cfg.Network` from a persisted gate has the same
+implication for the network-keyed Midnight constants
+(`internal/config`'s `midnightNetworkDefaults`,
+`applyMidnightNetworkDefaults`/`clearMidnightNetworkDefaults`) that it has
+for topology above: `LoadConfig` derives those constants once for whatever
+network was configured at that point, and `ApplyFlags` only re-derives them
+when a CLI flag changed `Network` — neither one runs again after `Apply`
+changes `Network` a third time. Left alone, an operator who enables
+Midnight (`midnight.enabled`) but leaves `Network` at its built-in default
+would keep the *previous* default network's constants after a bare resume,
+because `applyMidnightNetworkDefaults` only fills fields that are still
+empty and the stale values are not. `Apply` closes this the same way
+`ApplyFlags` already does for its own `Network`-changing case: after the
+override loop above runs (and before returning `nil`, so the corrected
+values are in place before the `PublishConfig` defer fires), it calls the
+exported `config.ReapplyMidnightNetworkDefaults(cfg, previousNetwork)`,
+which clears the previous network's still-default values
+(`clearMidnightNetworkDefaults`, skipping any field the config file set —
+`midnightYAMLFieldSet`) and re-fills from the new network
+(`applyMidnightNetworkDefaults`). This runs unconditionally, independent of
+whether Midnight ends up enabled, so the published config snapshot is
+internally consistent either way. An operator-configured Midnight value is
+never touched by this: it was never empty to begin with, so
+`applyMidnightNetworkDefaults`'s empty-field check alone would already
+leave it alone, and `clearMidnightNetworkDefaults`'s YAML-field check
+additionally refuses to clear it even in the coincidental case where an
+explicit value happens to equal the previous network's default.
+
+Once every
 source is merged, `Config.ApplyDefaults()` fills in unset values whose
 defaults are derived from other settings (an empty `runMode` selects `serve`;
 `plugins.mempool.config.capacity` defaults by run mode — Leios raises it — and the watermarks,

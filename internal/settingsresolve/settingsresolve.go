@@ -163,6 +163,7 @@ func Apply(cfg *config.Config) (err error) {
 	if len(result.Mismatches) > 0 {
 		return mismatchError(result.Mismatches, bindings, provenance)
 	}
+	previousNetwork := cfg.Network
 	for name, effective := range result.Effective {
 		if effective == configured[name] {
 			continue
@@ -171,6 +172,17 @@ func Apply(cfg *config.Config) (err error) {
 			binding.applyEffective(cfg, effective)
 		}
 	}
+	// The loop above may have just changed cfg.Network from a persisted
+	// gate (the "network" binding). The network-keyed Midnight constants
+	// (internal/config's midnightNetworkDefaults) were derived for whatever
+	// network was configured before this function ran, so they must be
+	// re-derived for the effective network now -- otherwise an operator who
+	// enables Midnight but leaves Network at its built-in default keeps the
+	// wrong network's constants after a bare resume. This runs
+	// unconditionally, not just when Midnight is enabled, so the config
+	// snapshot stays internally consistent regardless of whether Midnight
+	// ends up starting.
+	config.ReapplyMidnightNetworkDefaults(cfg, previousNetwork)
 	return nil
 }
 

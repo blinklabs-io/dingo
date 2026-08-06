@@ -804,6 +804,23 @@ func clearMidnightNetworkDefaults(cfg *Config, network string) {
 	}
 }
 
+// ReapplyMidnightNetworkDefaults re-derives the network-keyed Midnight
+// defaults after a caller has changed cfg.Network. ApplyFlags already does
+// this inline for a CLI flag that changes Network; this exported wrapper
+// gives any other caller that changes cfg.Network after LoadConfig/ApplyFlags
+// have run (e.g. internal/settingsresolve.Apply resuming Network from a
+// persisted gate) the same re-derivation, so the previous network's
+// constants do not linger under the new network. Explicitly configured
+// values are preserved: clearMidnightNetworkDefaults skips any field the
+// config file set (midnightYAMLFieldSet), and applyMidnightNetworkDefaults
+// only fills fields that are still empty.
+func ReapplyMidnightNetworkDefaults(cfg *Config, previousNetwork string) {
+	if cfg.Network != previousNetwork {
+		clearMidnightNetworkDefaults(cfg, previousNetwork)
+	}
+	applyMidnightNetworkDefaults(cfg)
+}
+
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
 type MithrilConfig struct {
 	// Enabled controls whether Mithril integration is available.

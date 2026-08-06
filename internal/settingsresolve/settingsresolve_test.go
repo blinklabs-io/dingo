@@ -309,3 +309,131 @@ func TestApplyResumesAPIStorageModePublishesToGetConfig(t *testing.T) {
 		"Apply must publish its override, not just set it on the cfg pointer",
 	)
 }
+
+// TestApplyReDerivesMidnightDefaultsOnResumedNetwork pins the fix for the
+// bug this task exists to close: settingsresolve.Apply resuming cfg.Network
+// from a persisted gate did not re-derive the network-keyed Midnight
+// constants (internal/config's midnightNetworkDefaults), so an operator
+// with Midnight enabled who leaves Network at its built-in default kept the
+// *previous default network's* constants after a bare resume, even though
+// cfg.Network itself correctly became the resumed network. config.LoadConfig
+// reproduces exactly what a bare `dingo` invocation has already done by the
+// time Apply runs: Network at its built-in default (preview) with preview's
+// Midnight constants already filled in.
+func TestApplyReDerivesMidnightDefaultsOnResumedNetwork(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := seedDatabase(t, map[string]string{"network": "mainnet"})
+
+	cfg, err := config.LoadConfig("")
+	require.NoError(t, err)
+	require.Equal(t, "preview", cfg.Network)
+	cfg.Midnight.Enabled = true
+	previewPolicy := cfg.Midnight.CNightPolicyID
+	require.NotEmpty(t, previewPolicy)
+	// preview sets CommitteeCandidateAddress but mainnet does not (see the
+	// ground-truth load below), so this also proves the stale preview value
+	// gets cleared, not just left alongside a filled-in mainnet value.
+	require.NotEmpty(t, cfg.Midnight.CommitteeCandidateAddress)
+	cfg.DatabasePath = dir
+
+	require.NoError(t, settingsresolve.Apply(cfg))
+	require.Equal(t, "mainnet", cfg.Network)
+
+	// Ground truth for mainnet's Midnight constants, loaded independently
+	// the same way a fresh `dingo -n mainnet` would derive them.
+	tmpDir := t.TempDir()
+	mainnetYAML := filepath.Join(tmpDir, "mainnet.yaml")
+	require.NoError(
+		t,
+		os.WriteFile(mainnetYAML, []byte("network: mainnet\n"), 0o600),
+	)
+	mainnetCfg, err := config.LoadConfig(mainnetYAML)
+	require.NoError(t, err)
+
+	require.Equal(
+		t,
+		mainnetCfg.Midnight.CNightPolicyID,
+		cfg.Midnight.CNightPolicyID,
+	)
+	require.NotEqual(t, previewPolicy, cfg.Midnight.CNightPolicyID)
+	require.Equal(
+		t,
+		mainnetCfg.Midnight.CouncilPolicyID,
+		cfg.Midnight.CouncilPolicyID,
+	)
+	require.Equal(
+		t,
+		mainnetCfg.Midnight.TechnicalCommitteeAddress,
+		cfg.Midnight.TechnicalCommitteeAddress,
+	)
+	require.Empty(
+		t,
+		cfg.Midnight.CommitteeCandidateAddress,
+		"stale preview CommitteeCandidateAddress must be cleared, not carried over to mainnet",
+	)
+	require.True(
+		t,
+		cfg.Midnight.Enabled,
+		"Midnight.Enabled must not be touched by Apply",
+	)
+}
+
+// TestApplyPreservesExplicitMidnightFieldOnResumedNetwork is the
+// explicit-value-preservation half of the same fix: an operator-configured
+// Midnight value (set via the YAML config file) must survive a resumed
+// network change untouched, while every other, unconfigured Midnight
+// constant still moves to the resumed network's defaults.
+func TestApplyPreservesExplicitMidnightFieldOnResumedNetwork(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := seedDatabase(t, map[string]string{"network": "mainnet"})
+
+	baseline, err := config.LoadConfig("")
+	require.NoError(t, err)
+	previewPolicy := baseline.Midnight.CNightPolicyID
+	require.NotEmpty(t, previewPolicy)
+
+	tmpDir := t.TempDir()
+	yamlFile := filepath.Join(tmpDir, "dingo.yaml")
+	require.NoError(t, os.WriteFile(yamlFile, []byte(
+		"midnight:\n  enabled: true\n  cnightPolicyId: \""+previewPolicy+"\"\n",
+	), 0o600))
+
+	cfg, err := config.LoadConfig(yamlFile)
+	require.NoError(t, err)
+	require.Equal(t, "preview", cfg.Network)
+	require.True(t, cfg.Midnight.Enabled)
+	require.Equal(t, previewPolicy, cfg.Midnight.CNightPolicyID)
+	cfg.DatabasePath = dir
+
+	require.NoError(t, settingsresolve.Apply(cfg))
+	require.Equal(t, "mainnet", cfg.Network)
+
+	// The explicit YAML value must survive the resumed network change
+	// untouched, even though it happens to equal preview's own default.
+	require.Equal(
+		t,
+		previewPolicy,
+		cfg.Midnight.CNightPolicyID,
+		"explicit midnight.cnightPolicyId must not be clobbered by a resumed network change",
+	)
+
+	// Every other, unconfigured Midnight field must still move to the
+	// resumed network's defaults.
+	mainnetYAML := filepath.Join(tmpDir, "mainnet.yaml")
+	require.NoError(
+		t,
+		os.WriteFile(mainnetYAML, []byte("network: mainnet\n"), 0o600),
+	)
+	mainnetCfg, err := config.LoadConfig(mainnetYAML)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		mainnetCfg.Midnight.CouncilPolicyID,
+		cfg.Midnight.CouncilPolicyID,
+	)
+	require.NotEqual(
+		t,
+		baseline.Midnight.CouncilPolicyID,
+		cfg.Midnight.CouncilPolicyID,
+	)
+}
