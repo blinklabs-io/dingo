@@ -352,3 +352,67 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 		assert.ErrorContains(t, err, "parsing ledger state")
 	})
 }
+
+// TestImportLedgerStateWillNotLookPastAVerifiedTree covers the downgrade an
+// emptied ancillary tree could otherwise force.
+//
+// A verified ancillary tree's contents are covered by the ancillary key's
+// signature; the extraction directory's are not. If emptying the first made the
+// import read the second, whoever emptied it would have chosen the source. So
+// nothing is looked at after a verified tree, even when it yields no state.
+//
+// Unverified is the opposite case and must still fall through: that is how the
+// v1 layout works, its ledger state living in the main archive, and it also
+// covers an ancillary tree holding only states newer than the certified tip.
+func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	run := func(t *testing.T, verified bool) error {
+		t.Helper()
+		// An ancillary tree with a ledger directory but nothing in it: what an
+		// emptied tree, or one holding only volatile states, looks like.
+		anc := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(anc, "ledger"), 0o750))
+		ancRoot, err := openVerifiedDir(anc)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ancRoot.Close() })
+
+		extractDir := t.TempDir()
+		slotDir := filepath.Join(extractDir, "db", "ledger", "100")
+		require.NoError(t, os.MkdirAll(slotDir, 0o750))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(slotDir, "state"), []byte{0x81, 0x00}, 0o640,
+		))
+		extractRoot, err := openVerifiedDir(extractDir)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = extractRoot.Close() })
+
+		_, _, err = importLedgerState(
+			t.Context(), nil, discard, nil,
+			&BootstrapResult{
+				AncillaryDir:      anc,
+				AncillaryRoot:     ancRoot,
+				AncillaryVerified: verified,
+				ExtractDir:        extractDir,
+				ExtractRoot:       extractRoot,
+			},
+			false, ^uint64(0), nil,
+		)
+		require.Error(t, err)
+		return err
+	}
+
+	t.Run("verified tree ends the search", func(t *testing.T) {
+		assert.ErrorContains(t, run(t, true),
+			"refusing to import one from elsewhere",
+			"an emptied verified tree must not send the import to an "+
+				"unsigned one")
+	})
+
+	t.Run("unverified tree falls through", func(t *testing.T) {
+		// Reaches the parser on the extraction directory's state, so the
+		// refusal above is about the signature and not about the fallback
+		// being unreachable.
+		assert.ErrorContains(t, run(t, false), "parsing ledger state")
+	})
+}

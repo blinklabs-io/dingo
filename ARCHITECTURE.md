@@ -2927,9 +2927,17 @@ directories — which layout (`ledger/` before `db/ledger/`) and which tree (the
 ancillary one before the extraction directory) are picked the same way. Only a
 candidate that is genuinely absent moves on to the next; one that exists and is
 unusable fails the lookup. Otherwise making a candidate unopenable is a way of
-selecting the one after it, and the ancillary tree is the one a signature
-covers, so steering the search onto the unsigned extraction directory would be
-worth something. Falling back there would hand the choice of ledger state to whoever
+selecting the one after it.
+
+Tree selection carries one rule more, because emptying a tree is destruction
+rather than planting and would otherwise slip past the above. Nothing is looked
+at after an ancillary tree whose contents the ancillary key signed
+(`AncillaryVerified`), even when it yields no state: the extraction directory is
+not covered by that signature, so falling through would let whoever emptied the
+first tree choose the second. Where nothing was verified there is no downgrade
+to make and the fallback stays — v1 keeps its ledger state in the main archive,
+so looking there is how that layout works at all, and it is also what covers an
+ancillary tree holding only states newer than the certified tip. Falling back there would hand the choice of ledger state to whoever
 planted it, since making the newest unusable would be enough to select an older
 one. A symlinked UTxO table fails for the same reason rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this

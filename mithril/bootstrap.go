@@ -195,6 +195,16 @@ type BootstrapResult struct {
 	// the tree the signed manifest was checked against is the tree that gets
 	// loaded. Nil when no ancillary data was obtained.
 	AncillaryRoot *os.Root
+	// AncillaryVerified reports that the ancillary tree's contents were checked
+	// against the signed ancillary manifest (a verified v2 bootstrap).
+	//
+	// The ledger-state import will not look past a verified tree that yields no
+	// state. Falling through would move the import from a tree covered by a
+	// signature to one that is not, and an attacker who can empty the first can
+	// then choose the second. Where nothing was verified there is no such
+	// downgrade, and the fallback stays available — v1 keeps its ledger state
+	// in the main archive, so looking there is how that layout works at all.
+	AncillaryVerified bool
 	// ExtractRoot is an open handle on ExtractDir.
 	//
 	// The ledger-state import falls back to the main extraction directory when

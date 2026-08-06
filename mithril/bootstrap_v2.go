@@ -381,12 +381,16 @@ func bootstrapV2(
 				CardanoNodeVersion: artifact.CardanoNodeVersion,
 			},
 		},
-		ImmutableDir:         immutableTree.Path(),
-		ImmutableRoot:        immutableTree.Root(),
-		ExtractDir:           extractDir,
-		ExtractRoot:          extractTree,
-		AncillaryDir:         ancillaryTree.Path(),
-		AncillaryRoot:        ancillaryTree.Root(),
+		ImmutableDir:  immutableTree.Path(),
+		ImmutableRoot: immutableTree.Root(),
+		ExtractDir:    extractDir,
+		ExtractRoot:   extractTree,
+		AncillaryDir:  ancillaryTree.Path(),
+		AncillaryRoot: ancillaryTree.Root(),
+		// Both paths that accept an ancillary tree run it through
+		// verifyAncillaryExtraction first, which checks the signed manifest
+		// when the bootstrap is a verified one and is a no-op otherwise.
+		AncillaryVerified:    ancillaryTree != nil && cfg.VerifyCertificateChain,
 		AncillaryArchivePath: ancillaryArchivePath,
 	}
 	if createdTempDir {

@@ -199,19 +199,22 @@ func importLedgerState(
 	type searchTree struct {
 		name string
 		root *os.Root
+		// verified reports that this tree's contents were checked against the
+		// signed ancillary manifest. Nothing is looked at after one of these.
+		verified bool
 	}
 	searchTrees := []searchTree{}
 	if result.AncillaryRoot != nil {
-		searchTrees = append(
-			searchTrees,
-			searchTree{result.AncillaryDir, result.AncillaryRoot},
-		)
+		searchTrees = append(searchTrees, searchTree{
+			result.AncillaryDir,
+			result.AncillaryRoot,
+			result.AncillaryVerified,
+		})
 	}
 	if result.ExtractRoot != nil {
-		searchTrees = append(
-			searchTrees,
-			searchTree{result.ExtractDir, result.ExtractRoot},
-		)
+		searchTrees = append(searchTrees, searchTree{
+			result.ExtractDir, result.ExtractRoot, false,
+		})
 	}
 	if len(searchTrees) == 0 {
 		return 0, nil, errors.New(
@@ -237,11 +240,28 @@ func importLedgerState(
 		// holding something unusable — a symlink, a substitution, a state that
 		// exists but will not open — fails the import, because falling through
 		// would let a planted ancillary tree choose the extraction directory
-		// as the source instead. The ancillary tree is the one covered by a
-		// signature, so that swap is worth something to an attacker.
+		// as the source instead.
 		if !errors.Is(findErr, ledgerstate.ErrNoUsableLedgerState) {
 			return 0, nil, fmt.Errorf(
 				"inspecting ledger state in %s: %w", tree.name, findErr,
+			)
+		}
+		// Nor is anything looked at after a tree whose contents a signature
+		// covers. Emptying it is destruction rather than planting, but the
+		// effect would be the same: the import would move from the tree the
+		// ancillary key signed to one nothing vouches for, and whoever emptied
+		// the first would have chosen the second.
+		//
+		// An unverified tree yielding nothing is different — there is no
+		// downgrade to make, and the fallback is how the v1 layout works, its
+		// ledger state living in the main archive rather than the ancillary
+		// one. It also covers the ancillary tree holding only states newer
+		// than the certified tip, which is ordinary and not adversarial.
+		if tree.verified {
+			return 0, nil, fmt.Errorf(
+				"verified ancillary data in %s has no usable ledger state; "+
+					"refusing to import one from elsewhere: %w",
+				tree.name, findErr,
 			)
 		}
 		logger.Debug(
