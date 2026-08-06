@@ -117,6 +117,29 @@ func TestApplyResumesNetworkFromDefault(t *testing.T) {
 	require.Equal(t, "preprod", cfg.Network)
 }
 
+func TestApplyRejectsMalformedCarriedGateValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		gate  string
+		value string
+	}{
+		{name: "pledge leverage", gate: "pledge_leverage", value: "on:not-a-number"},
+		{name: "delegator inactivity", gate: "delegator_inactivity", value: "on:not-a-number"},
+		{name: "minimum pool margin", gate: "min_pool_margin", value: "on:not-a-number"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateConfigSnapshot(t)
+			dir := seedDatabase(t, map[string]string{tc.gate: tc.value})
+			cfg := config.GetConfig()
+			cfg.DatabasePath = dir
+			err := settingsresolve.Apply(cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.gate)
+		})
+	}
+}
+
 func TestApplyRejectsExplicitConflict(t *testing.T) {
 	isolateConfigSnapshot(t)
 	dir := seedDatabase(t, map[string]string{"network": "preprod"})

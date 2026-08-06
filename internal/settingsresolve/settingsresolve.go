@@ -169,6 +169,15 @@ func Apply(cfg *config.Config) (err error) {
 			continue
 		}
 		if binding, ok := bindings[name]; ok {
+			if binding.validateEffective != nil {
+				if err := binding.validateEffective(effective); err != nil {
+					return fmt.Errorf(
+						"settingsresolve: invalid persisted %s gate: %w",
+						name,
+						err,
+					)
+				}
+			}
 			binding.applyEffective(cfg, effective)
 		}
 	}
@@ -372,6 +381,9 @@ type gateBinding struct {
 	configuredValue func(cfg *config.Config) (string, bool)
 	// applyEffective writes an overridden value back onto cfg.
 	applyEffective func(cfg *config.Config, value string)
+	// validateEffective rejects malformed carried values before applyEffective
+	// can partially update a companion enabled/value configuration pair.
+	validateEffective func(value string) error
 }
 
 func gateBindings() []gateBinding {
@@ -477,6 +489,14 @@ func gateBindings() []gateBinding {
 					cfg.PledgeLeverage = uint(parsed)
 				}
 			},
+			validateEffective: func(value string) error {
+				_, carried := decodeLatchBool(value)
+				if carried == "" {
+					return nil
+				}
+				_, err := strconv.ParseUint(carried, 10, strconv.IntSize)
+				return err
+			},
 		},
 		{
 			name:       "full_pot_rewards",
@@ -514,6 +534,14 @@ func gateBindings() []gateBinding {
 					cfg.DelegatorInactivity = parsed
 				}
 			},
+			validateEffective: func(value string) error {
+				_, carried := decodeLatchBool(value)
+				if carried == "" {
+					return nil
+				}
+				_, err := strconv.ParseUint(carried, 10, 64)
+				return err
+			},
 		},
 		{
 			name:       "min_pool_margin",
@@ -537,6 +565,14 @@ func gateBindings() []gateBinding {
 				); err == nil {
 					cfg.MinPoolMargin = uint(parsed)
 				}
+			},
+			validateEffective: func(value string) error {
+				enabled, carried := decodeLatchBool(value)
+				if !enabled || carried == "" {
+					return nil
+				}
+				_, err := strconv.ParseUint(carried, 10, strconv.IntSize)
+				return err
 			},
 		},
 	}
