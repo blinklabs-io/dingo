@@ -86,3 +86,53 @@ func TestSkipDijkstraTxValidationScope(t *testing.T) {
 		}
 	})
 }
+
+// TestDijkstraTxValidationErrorsAreTrustedRegardlessOfProfile pins the
+// profile-independent half of the Dijkstra trust behaviour, which is easy to
+// miss when reading SkipDijkstraTxValidation alone.
+//
+// A Dijkstra per-transaction validation failure is logged and trusted rather
+// than rejecting the block on *every* profile, not just the Musashi prototype.
+// The consequence is that SkipDijkstraTxValidation decides whether the rule set
+// runs, not whether a bad Dijkstra transaction is rejected: on the Dijkstra
+// path both settings accept the block. Pre-Dijkstra eras are unaffected and
+// still reject.
+//
+// This is current, deliberate behaviour — a Dijkstra block is admitted by its
+// Leios certificate and its endorser block may be only partially resolvable —
+// but it was meant to be tightened by item 5 of #2587, which was closed with
+// that item outstanding. This test exists so that tightening is a deliberate,
+// test-visible change rather than a silent one; when enforcement lands, this
+// test should fail and be rewritten, not deleted quietly.
+func TestDijkstraTxValidationErrorsAreTrustedRegardlessOfProfile(t *testing.T) {
+	for _, profile := range []struct {
+		name string
+		skip bool
+	}{
+		{"musashi prototype profile", true},
+		{"standard profile", false},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			ls := &LedgerState{
+				config: LedgerStateConfig{
+					SkipDijkstraTxValidation: profile.skip,
+				},
+			}
+			assert.True(
+				t,
+				ls.trustDijkstraTxValidationError(dijkstra.EraIdDijkstra),
+				"Dijkstra validation failures are trusted on every profile",
+			)
+			assert.False(
+				t,
+				ls.trustDijkstraTxValidationError(conway.EraIdConway),
+				"Conway validation failures must still reject the block",
+			)
+			assert.False(
+				t,
+				ls.trustDijkstraTxValidationError(babbage.EraIdBabbage),
+				"Babbage validation failures must still reject the block",
+			)
+		})
+	}
+}

@@ -4186,8 +4186,8 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 	return shouldValidate && (ls.reachedTip.Load() || reachesTip)
 }
 
-// skipDijkstraTxValidation reports whether per-transaction validation is
-// skipped for a transaction being validated under era eraId.
+// skipDijkstraTxValidation reports whether the per-transaction rule set is
+// *run* for a transaction being validated under era eraId.
 //
 // This is the ledger half of the Musashi prototype's accepted non-validating
 // behaviour (see LedgerStateConfig.SkipDijkstraTxValidation), and its scope is
@@ -4200,9 +4200,37 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // likewise unaffected: KES, VRF proof, registered-VRF-key binding and opcert
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
+//
+// Note what this flag does *not* decide: whether a Dijkstra validation failure
+// rejects the block. That is trustDijkstraTxValidationError, which is
+// profile-independent — so on the Dijkstra path the accept/reject outcome is
+// the same either way, and this flag only governs whether the rules are run at
+// all (CPU cost and disagreement logging).
 func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
+}
+
+// trustDijkstraTxValidationError reports whether a per-transaction validation
+// failure under era eraId is logged and trusted instead of rejecting the block.
+//
+// This is deliberately *not* gated on the network profile or on
+// SkipDijkstraTxValidation: a Dijkstra block reaches here only because it was
+// admitted to the chain by its Leios certificate, an endorser block may be only
+// partially resolvable, and the certificate/validation surface is still
+// evolving — so rewinding a certified chain on a disagreement is not yet the
+// right response on any profile. Dijkstra is only in the active era table when
+// EnableDijkstra is set (Musashi, runMode "leios", or startEra "dijkstra"), so
+// a default preview/preprod/mainnet node never reaches this path.
+//
+// The consequence for the trust boundary is worth stating plainly:
+// SkipDijkstraTxValidation changes whether the rules run, not whether a bad
+// Dijkstra transaction is rejected. Tightening this to enforce was item 5 of
+// #2587, which was closed without that item being done; it needs its own
+// change, with DevNet/Leios validation, rather than riding along with a
+// configuration-boundary fix.
+func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
+	return eraId == dijkstra.EraIdDijkstra
 }
 
 func (ls *LedgerState) ledgerProcessBlock(
@@ -4558,7 +4586,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// tighten to enforce once endorser-block availability and
 				// Leios certificate validation are complete.
 				if err != nil &&
-					validationEra.Id == dijkstra.EraIdDijkstra {
+					ls.trustDijkstraTxValidationError(validationEra.Id) {
 					ls.config.Logger.Warn(
 						"Dijkstra tx validation disagreement (trusting Leios-certified block)",
 						"component",

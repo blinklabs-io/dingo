@@ -4161,15 +4161,32 @@ on by the network profile itself rather than by operator configuration:
   not yet computed — which spuriously rejects the dominant pool's eligible
   blocks on Musashi's concentrated topology. Every cryptographic header check
   (KES, VRF proof, registered-VRF-key binding, opcert) still applies.
-- `SkipDijkstraTxValidation` skips the per-transaction rule set for
+- `SkipDijkstraTxValidation` skips *running* the per-transaction rule set for
   **Dijkstra-era transactions only** (`LedgerState.skipDijkstraTxValidation`);
   Conway and earlier are still validated on a Musashi node. The prototype
   stores but never applies endorser transactions, so ranking-block transactions
   spending endorser-resident outputs are unresolvable and would disagree on
   essentially every transaction — and be trusted anyway.
 
-Because these two make a node accept blocks and transactions a validating
-ledger would reject, the profile boundary is enforced rather than documented.
+That last point deserves emphasis, because it is easy to misread the flag as
+controlling acceptance. It does not. A Dijkstra per-transaction validation
+failure is logged and trusted rather than rejecting the block on **every**
+profile, not only on Musashi
+(`LedgerState.trustDijkstraTxValidationError`) — a Dijkstra block is admitted
+to the chain by its Leios certificate, its endorser block may be only partially
+resolvable, and the certificate surface is still evolving, so rewinding a
+certified chain on a disagreement is not yet the right response anywhere. So on
+the Dijkstra path the accept/reject outcome is the same either way, and
+`SkipDijkstraTxValidation` governs only whether the rules run at all (CPU cost
+and disagreement logging). Enforcing instead of trusting was item 5 of #2587,
+which was closed with that item outstanding; it needs its own change, validated
+on DevNet. Exposure is bounded meanwhile: Dijkstra enters the active era table
+only under `EnableDijkstra` (Musashi, `runMode: "leios"`, or `startEra:
+"dijkstra"`), so a default preview/preprod/mainnet node never reaches that path.
+
+Because these two settings make a node accept blocks and transactions a
+validating ledger would reject, the profile boundary is enforced rather than
+documented.
 Musashi is matched on *either* half of its identity — the network name
 `musashi` or network magic 164 — so a configuration supplying one half
 alongside a different predefined network is rejected at startup
