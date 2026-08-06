@@ -41,6 +41,14 @@ const poolOpCertSequenceIndex = "idx_pool_opcert_sequence_pool_sequence"
 // table itself is an index carrying both columns it reads, which lets the
 // aggregate run without touching a single row.
 //
+// What this does NOT claim is that the aggregate stops being linear in the
+// table. SQLite has no loose index scan, so the plan below is a full scan of
+// the index -- every entry visited, none of the rows. MySQL 8 can skip through
+// the same index a group at a time; SQLite reads it end to end. The win pinned
+// here is dropping the row fetches, not dropping the scan, and it is worth
+// having because this is a one-shot query behind `leadership-schedule` rather
+// than something on a hot path.
+//
 // The plan is asserted rather than the index's mere existence: an index no
 // planner chooses is a write cost with no read benefit. It is EXPLAINed from
 // the store's own exported statement rather than a copy of it, so the plan
@@ -78,6 +86,15 @@ func TestLatestPoolOpCertSequencesReadsIndexOnly(t *testing.T) {
 
 	assert.Contains(t, details, "COVERING INDEX "+poolOpCertSequenceIndex,
 		"the counter aggregate must read the index alone, not the table:\n%s",
+		details,
+	)
+	// "COVERING INDEX" alone would still be satisfied by a plan that fell back
+	// to sorting for the GROUP BY, which is the cost the index exists to avoid:
+	// the entries already arrive grouped by pool_key_hash and ascending in
+	// sequence, so the aggregate folds them as it goes.
+	assert.NotContains(t, details, "USE TEMP B-TREE",
+		"the index's column order must supply the GROUP BY, so no sort is "+
+			"materialised:\n%s",
 		details,
 	)
 }

@@ -297,8 +297,11 @@ func translateMySQLIndexColumns(
 // loadOptionalSQL loads a migration resource that a version need not ship,
 // returning no statements when the file is absent. Only a missing file is
 // tolerated: an unreadable or unparseable one is still an error.
+//
+// Existence is tested with fs.Stat rather than Open so the probe does not open
+// a handle the caller then has to remember to close.
 func loadOptionalSQL(path string) ([]string, error) {
-	if _, err := migrationSQL.Open(path); err != nil {
+	if _, err := fs.Stat(migrationSQL, path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}

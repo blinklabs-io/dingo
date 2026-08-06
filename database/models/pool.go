@@ -58,9 +58,17 @@ type Pool struct {
 // highest-sequence-per-pool fold behind GetChainDepState's counters, which has
 // no slot bound to narrow it because every row it holds is at or below the tip.
 // Carrying the sequence beside the pool key hash lets that fold run without
-// reading a single row -- and lets MySQL skip through the index a pool at a
-// time rather than scanning it whole. Migration v2 declares it; the schema
-// lives in SQL rather than in tags on this struct.
+// reading a single row, and in the index's own order, so the GROUP BY needs no
+// sort.
+//
+// It does not make the fold sublinear everywhere. MySQL 8 can skip through the
+// index a pool at a time; SQLite has no loose index scan and reads it end to
+// end, so there the win is dropping the row fetches rather than dropping the
+// scan. Worth the write cost for a one-shot query behind
+// `leadership-schedule`; it would not be for something on a hot path.
+//
+// Migration v2 declares it; the schema lives in SQL rather than in tags on this
+// struct.
 type PoolOpCertSequence struct {
 	PoolKeyHash []byte
 	ID          uint

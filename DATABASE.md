@@ -65,6 +65,16 @@ accumulated schema rather than against their own statements — a version
 indexing a blob column it did not create would otherwise emit a key MySQL
 rejects.
 
+Upgrading to `v2alpha1` builds that index over the whole of
+`pool_opcert_sequence`, which holds one row per block for the life of the chain
+— millions of rows on a synced mainnet database. The build runs inside
+`Store.Start()`, before the store accepts readers or writers, so the first
+start after upgrading stalls for as long as the backend takes to index that
+table, with no incremental progress reported. It is a one-time cost per
+database and is not repeated on later starts. Operators upgrading a large
+mainnet node should expect that pause rather than read it as a hang; a fresh
+database creates the index as part of its initial schema and never sees it.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
