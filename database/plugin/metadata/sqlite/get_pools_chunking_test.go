@@ -89,3 +89,82 @@ func TestGetPoolsChunksBeyondParameterLimit(t *testing.T) {
 			"pool %d must be present across the chunk boundary", i)
 	}
 }
+
+// TestGetPoolsDeduplicatesRepeatedHashesAcrossChunks covers a hash named more
+// than once in the same request.
+//
+// A single `IN (...)` has set semantics: listing a value twice still matches
+// its row once. Chunking silently dropped that, because a hash landing in two
+// different chunks matches in both and the results are concatenated. The
+// caller then sees the same pool twice from a request that, unchunked, would
+// have returned it once.
+//
+// The duplicate is worse than a repeat. loadPoolsAssociations keys its pool-ID
+// map by ID and so retains only the last index for a repeated pool, leaving
+// the earlier copy with its registrations and retirements empty -- a pool that
+// reads as never registered. Anything deciding on len(pool.Registration), as
+// registeredPoolVrfKeyHash does, gets a different answer depending on which
+// copy it happens to look at.
+//
+// The repeat is placed at both ends of the request so the two occurrences fall
+// in different chunks; within one chunk SQL would have collapsed them anyway,
+// which is exactly the behaviour being restored.
+func TestGetPoolsDeduplicatesRepeatedHashesAcrossChunks(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	const poolCount = 1200
+	hashes := make([]lcommon.PoolKeyHash, 0, poolCount+1)
+	for i := range poolCount {
+		raw := make([]byte, 28)
+		binary.BigEndian.PutUint32(raw, uint32(i)+1)
+		pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(raw))
+		hashes = append(hashes, pkh)
+
+		vrf := make([]byte, 32)
+		binary.BigEndian.PutUint32(vrf, uint32(i)+1)
+		require.NoError(t, store.ImportPool(
+			&models.Pool{
+				PoolKeyHash:   raw,
+				VrfKeyHash:    vrf,
+				RewardAccount: raw,
+			},
+			&models.PoolRegistration{
+				PoolKeyHash:   raw,
+				VrfKeyHash:    vrf,
+				RewardAccount: raw,
+				AddedSlot:     uint64(i),
+			},
+			nil,
+		))
+	}
+	// The first pool again, at the end, so its two mentions straddle the
+	// 999-parameter split.
+	repeated := hashes[0]
+	hashes = append(hashes, repeated)
+
+	pools, err := store.GetPools(hashes, nil)
+	require.NoError(t, err)
+
+	counts := make(map[string]int, len(pools))
+	for _, pool := range pools {
+		counts[string(pool.PoolKeyHash)]++
+	}
+	assert.Equal(t, 1, counts[string(repeated.Bytes())],
+		"a hash named twice must still match its row once, as a single IN "+
+			"list would have done")
+	assert.Equal(t, poolCount, len(pools),
+		"the result is one row per distinct pool requested, not per mention")
+
+	// The copy that survives must be the hydrated one. Under the duplicate
+	// this assertion is what fails first in practice: one of the two copies
+	// carries no registration at all.
+	for _, pool := range pools {
+		if string(pool.PoolKeyHash) != string(repeated.Bytes()) {
+			continue
+		}
+		assert.NotEmpty(t, pool.Registration,
+			"the returned pool must carry its registrations; an unhydrated "+
+				"duplicate reads as a pool that was never registered")
+	}
+}

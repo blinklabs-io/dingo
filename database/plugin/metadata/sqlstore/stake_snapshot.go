@@ -195,12 +195,30 @@ func (s *Store) GetPoolStakeSnapshotsForPools(
 	if err != nil {
 		return nil, err
 	}
+	// Deduplicated before chunking, which is what keeps chunking invisible to
+	// the caller. A single `IN (...)` has set semantics -- naming a pool twice
+	// still matches its row once -- but two mentions landing in different
+	// chunks match in both, and the chunks are concatenated.
+	//
+	// This list is not the node's to choose: it arrives from the wire as the
+	// pool filter on GetPoolDistr2, and PoolFilter hands back the client's
+	// items verbatim without collapsing repeats, so a caller may name a pool
+	// as many times as it likes.
+	unique := make([][]byte, 0, len(poolKeyHashes))
+	seen := make(map[string]struct{}, len(poolKeyHashes))
+	for _, hash := range poolKeyHashes {
+		if _, ok := seen[string(hash)]; ok {
+			continue
+		}
+		seen[string(hash)] = struct{}{}
+		unique = append(unique, hash)
+	}
 	// Two parameters are spent on the epoch and snapshot type before any pool
 	// key hash is bound.
 	chunkSize := max(s.dialect.ParameterLimit()-2, 1)
-	for start := 0; start < len(poolKeyHashes); start += chunkSize {
-		end := min(start+chunkSize, len(poolKeyHashes))
-		chunk := poolKeyHashes[start:end]
+	for start := 0; start < len(unique); start += chunkSize {
+		end := min(start+chunkSize, len(unique))
+		chunk := unique[start:end]
 		args := make([]any, 0, len(chunk)+2)
 		args = append(args, sqlEpoch, snapshotType)
 		placeholders := make([]string, 0, len(chunk))

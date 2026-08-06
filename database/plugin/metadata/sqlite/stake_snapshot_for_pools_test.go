@@ -135,3 +135,48 @@ func TestGetPoolStakeSnapshotsForPoolsChunksBeyondParameterLimit(t *testing.T) {
 			"pool %d must carry its own stake", i)
 	}
 }
+
+// TestGetPoolStakeSnapshotsForPoolsDeduplicatesRepeatedHashes covers a pool
+// named more than once in the same filter.
+//
+// This list is not the node's to choose: it arrives from the wire as the pool
+// filter on GetPoolDistr2, and PoolFilter hands back the client's items
+// verbatim without collapsing repeats. A client may therefore name a pool
+// twice, and nothing upstream stops it.
+//
+// A single `IN (...)` would match that pool's row once regardless. Chunking
+// breaks that when the two mentions fall either side of a split, since each
+// chunk matches independently and the results are concatenated. The store's
+// contract is one row per distinct pool it holds, so the repeats collapse
+// before the list is chunked rather than after.
+func TestGetPoolStakeSnapshotsForPoolsDeduplicatesRepeatedHashes(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	const epoch = 4
+	const poolCount = 1500
+	hashes := seedMarkSnapshots(t, store, epoch, poolCount)
+
+	// The first pool named again at the end, so its two mentions straddle the
+	// 997-parameter split. Within one chunk SQL collapses them anyway, which
+	// is the behaviour being restored.
+	requested := append(append([][]byte{}, hashes...), hashes[0])
+
+	got, err := store.GetPoolStakeSnapshotsForPools(
+		epoch,
+		"mark",
+		requested,
+		nil,
+	)
+	require.NoError(t, err)
+
+	counts := make(map[string]int, len(got))
+	for _, snapshot := range got {
+		counts[string(snapshot.PoolKeyHash)]++
+	}
+	assert.Equal(t, 1, counts[string(hashes[0])],
+		"a pool named twice must still yield one row, as a single IN list "+
+			"would have done")
+	assert.Equal(t, poolCount, len(got),
+		"the result is one row per distinct pool held, not per mention")
+}

@@ -268,9 +268,26 @@ func (s *Store) GetPools(
 	if err != nil {
 		return nil, err
 	}
-	hashes := make([]any, len(poolKeyHashes))
+	// Deduplicated before chunking, which is what keeps chunking invisible to
+	// the caller. A single `IN (...)` has set semantics -- naming a value twice
+	// still matches its row once -- but two mentions landing in different
+	// chunks match in both, and the chunks are concatenated. The caller would
+	// then get a pool twice from a request that, unchunked, returned it once.
+	//
+	// The repeat does more damage than it looks. loadPoolsAssociations keys its
+	// index by pool ID and so keeps only the last position for a repeated pool,
+	// leaving the earlier copy with empty registrations and retirements. Callers
+	// deciding on len(pool.Registration), as registeredPoolVrfKeyHash does,
+	// would then get an answer that depends on which copy they reached.
+	hashes := make([]any, 0, len(poolKeyHashes))
+	seen := make(map[string]struct{}, len(poolKeyHashes))
 	for i := range poolKeyHashes {
-		hashes[i] = poolKeyHashes[i].Bytes()
+		raw := poolKeyHashes[i].Bytes()
+		if _, ok := seen[string(raw)]; ok {
+			continue
+		}
+		seen[string(raw)] = struct{}{}
+		hashes = append(hashes, raw)
 	}
 	// Chunked over the same bound loadPoolsAssociations below uses. Callers
 	// name every pool on the chain -- the pool distribution behind
