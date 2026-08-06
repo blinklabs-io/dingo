@@ -97,6 +97,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Design Patterns](#design-patterns)
 - [Threading and Concurrency](#threading-and-concurrency)
 - [Configuration](#configuration)
+  - [Musashi prototype profile boundary](#musashi-prototype-profile-boundary)
 - [Stake Snapshots](#stake-snapshots)
 
 ## Overview
@@ -4142,6 +4143,60 @@ process may actually bind: root, Windows, and Linux `CAP_NET_BIND_SERVICE`
 allow any port, and otherwise Linux uses the kernel's
 `net.ipv4.ip_unprivileged_port_start` cutoff (1024 by default; container
 runtimes commonly set 0).
+
+### Musashi prototype profile boundary
+
+**Operational warning: the `musashi` network is a prototype profile that
+disables parts of consensus and ledger validation. It is not Cardano
+ledger/consensus compliant and must never be pointed at a production or
+production-like network.**
+
+The Musashi testnet (the IOG Leios prototype network) is the one network
+profile that relaxes validation. Two `LedgerStateConfig` settings are switched
+on by the network profile itself rather than by operator configuration:
+
+- `SkipLeaderStakeThresholdCheck` downgrades a failed Praos stake-derived
+  leader-eligibility check from a header rejection to a logged warning. Needed
+  because dingo's leadership stake is delegated UTxO only — staking rewards are
+  not yet computed — which spuriously rejects the dominant pool's eligible
+  blocks on Musashi's concentrated topology. Every cryptographic header check
+  (KES, VRF proof, registered-VRF-key binding, opcert) still applies.
+- `SkipDijkstraTxValidation` skips the per-transaction rule set for
+  **Dijkstra-era transactions only** (`LedgerState.skipDijkstraTxValidation`);
+  Conway and earlier are still validated on a Musashi node. The prototype
+  stores but never applies endorser transactions, so ranking-block transactions
+  spending endorser-resident outputs are unresolvable and would disagree on
+  essentially every transaction — and be trusted anyway.
+
+Because these two make a node accept blocks and transactions a validating
+ledger would reject, the profile boundary is enforced rather than documented.
+Musashi is matched on *either* half of its identity — the network name
+`musashi` or network magic 164 — so a configuration supplying one half
+alongside a different predefined network is rejected at startup
+(`internal/config.MusashiNetworkIdentityConflict`, checked from both
+`Config.Validate` and `Node.configValidate`). That closes two directions:
+
+- `--network preview --network-magic 164` would otherwise run the prototype's
+  non-validating rules on a node the operator configured as preview; and
+- `--network musashi --network-magic 2` is worse, because the handshake uses
+  the magic: the node would actually join preview while trusting the
+  prototype's rules.
+
+There is deliberately no unsafe opt-in override for this check, unlike the
+operator-set CIP-0163 full-pot rewards gate — the two identities are mutually
+exclusive, so a conflict is always a misconfiguration rather than a deliberate
+choice. A custom name paired with magic 164 (a private Musashi mirror), or the
+`musashi` name with an unregistered magic, remains valid; devnet is excluded
+for the same reason it is excluded from `FullPotRewardsStandardNetwork`.
+
+The wiring sites (`node.go`'s `Run` and `node_lifecycle.go`'s live
+restore/truncate reconstruction) gate both settings on
+`Config.prototypeTrustBypassesEnabled`, which requires an unambiguous Musashi
+identity. That is stricter than `Config.isMusashiNetwork`, which treats either
+half as Musashi and drives era-table and mini-protocol selection where a
+half-match is wrong but not unsafe. The stricter predicate keeps the bypasses
+off even for an embedder that constructs a `Config` directly and never calls
+`Validate`.
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)

@@ -527,8 +527,8 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 			EndorserBlockFetcher:          n.ouroboros.FetchEndorserBlockByPoint,
 			EndorserBlockWaitSlots:        n.leiosPipelineTiming().CertifyByDeadlineSlots,
 			LeiosApplyEndorserBlockTxs:    !n.config.isMusashiNetwork(),
-			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
-			SkipDijkstraTxValidation:      n.config.isMusashiNetwork(),
+			SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
+			SkipDijkstraTxValidation:      n.config.prototypeTrustBypassesEnabled(),
 			// These six must mirror Run()'s construction exactly: they're
 			// operator-configured reward/pool-validation feature flags
 			// (CIP-23 min pool margin, CIP-50 pledge leverage, CIP-0163

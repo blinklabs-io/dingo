@@ -438,7 +438,9 @@ type LedgerStateConfig struct {
 	// the local pool stake-threshold check while d remains active.
 	// Interim measure until reward calculation lands and reward balances can be
 	// included in the leadership stake. Set from the network in node.go (true
-	// on musashi, false otherwise).
+	// on musashi, false otherwise) via Config.prototypeTrustBypassesEnabled,
+	// which requires an unambiguous Musashi identity so this can never be
+	// reached from a preview/preprod/mainnet configuration.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. dingo already trusts (logs, does not reject)
@@ -448,8 +450,12 @@ type LedgerStateConfig struct {
 	// (Musashi) certified closure and ranking-block transactions are trusted in
 	// the same way. Running dingo's rule set only to discard any disagreement is
 	// wasted work that prevents the node from reaching tip under load. Set true
-	// on Musashi in node.go. Interim until the Leios certificate / endorser-
-	// availability surface is complete (#2587).
+	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
+	// requires an unambiguous Musashi identity so this can never be reached
+	// from a preview/preprod/mainnet configuration. Applies to Dijkstra-era
+	// transactions only — see LedgerState.skipDijkstraTxValidation. Interim
+	// until the Leios certificate / endorser-availability surface is complete
+	// (#2587).
 	SkipDijkstraTxValidation bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
@@ -4180,6 +4186,25 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 	return shouldValidate && (ls.reachedTip.Load() || reachesTip)
 }
 
+// skipDijkstraTxValidation reports whether per-transaction validation is
+// skipped for a transaction being validated under era eraId.
+//
+// This is the ledger half of the Musashi prototype's accepted non-validating
+// behaviour (see LedgerStateConfig.SkipDijkstraTxValidation), and its scope is
+// deliberately narrow: the bypass applies to Dijkstra-era transactions only.
+// Transactions validated under any earlier era — Conway and before — still run
+// their full rule set even when the prototype flag is set, because the
+// prototype's trust argument (endorser transactions are stored but never
+// applied, so ranking-block transactions that spend endorser-resident outputs
+// are unresolvable) exists only in Dijkstra/Leios. Header validation is
+// likewise unaffected: KES, VRF proof, registered-VRF-key binding and opcert
+// checks all still apply, and only the stake-derived leader threshold is
+// downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
+func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
+	return eraId == dijkstra.EraIdDijkstra &&
+		ls.config.SkipDijkstraTxValidation
+}
+
 func (ls *LedgerState) ledgerProcessBlock(
 	txn *database.Txn,
 	point ocommon.Point,
@@ -4473,8 +4498,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// throughput below the block-production rate, so skip it. The normal
 			// CIP-conformant / Dijkstra path applies endorser txs (complete UTxO)
 			// and validates normally — it is never skipped here.
-			skipDijkstraValidation := validationEra.Id == dijkstra.EraIdDijkstra &&
-				ls.config.SkipDijkstraTxValidation
+			skipDijkstraValidation := ls.skipDijkstraTxValidation(
+				validationEra.Id,
+			)
 			if validationEra.ValidateTxFunc != nil && !skipDijkstraValidation {
 				// Use the previous era's protocol
 				// parameters when validating an era-1
