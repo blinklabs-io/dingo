@@ -222,7 +222,7 @@ func TestEnforceNodeSettingsPhase2GatesDoNotLeakIntoPhase1(t *testing.T) {
 	// Reopen the way mithril/sync.go:1200 and
 	// database/lifecycle/restore.go:609 do: only DataDir, Logger,
 	// StorageMode, and Network. If either gate leaked into phase 1's
-	// checkNodeSettings this reopen would fail: history_expiry_active would
+	// CheckNodeSettings this reopen would fail: history_expiry_active would
 	// compute "off" from the zero value (a forbidden latch reversal against
 	// the "on" just recorded), and the validation taints would compute "on"
 	// from zero-value bools (rejected against the "off" -- untainted --

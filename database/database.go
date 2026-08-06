@@ -223,7 +223,7 @@ func (d *Database) init() error {
 		return err
 	}
 	// Check immutable settings have not changed since initial sync
-	if err := d.checkNodeSettings(); err != nil {
+	if err := d.CheckNodeSettings(); err != nil {
 		return err
 	}
 	return nil

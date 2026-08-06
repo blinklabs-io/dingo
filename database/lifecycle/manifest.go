@@ -83,7 +83,7 @@ type Manifest struct {
 
 	// StorageMode/Network mirror types.NodeSettings so a restore can
 	// refuse an incompatible target before opening the restored store;
-	// database.New's own checkNodeSettings then re-validates them for
+	// database.New's own CheckNodeSettings then re-validates them for
 	// free once the restored store is opened for real.
 	StorageMode string `json:"storageMode"`
 	Network     string `json:"network"`
@@ -223,7 +223,7 @@ func (m Manifest) CheckGateMatch(configured nodesettings.Values) error {
 // RestoreValidated) before targetDataDir is touched in any way: unlike the
 // live-node restore path, which always opens the restored copy through
 // database.New using the node's own real configured plugins (so
-// checkNodeSettings catches a mismatch immediately), an offline restore
+// CheckNodeSettings catches a mismatch immediately), an offline restore
 // has no such automatic check — Restore's own validateRestoredDatabase
 // only opens the result using the manifest's own recorded plugins, which
 // is a self-consistency check, not a check against what the caller

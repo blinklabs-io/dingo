@@ -15,10 +15,16 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -270,4 +276,133 @@ func TestPhase1SkipsHistoryExpiryGateOnPartialReopen(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, closeTestDatabase(reopened))
+}
+
+// openForRecoveryTest opens a database directly through New, the same way
+// node.go does, rather than through newTestDatabase: newTestDatabase
+// discards the returned *Database on any error, but node.go's
+// dbNeedsRecovery path -- and this test -- specifically needs the
+// *Database New still returns alongside a CommitTimestampError, since a
+// database on that path is available for recovery rather than closed.
+func openForRecoveryTest(
+	tb testing.TB,
+	config *Config,
+) (*Database, error) {
+	tb.Helper()
+	host := plugin.NewHost()
+	require.NoError(tb, badger.RegisterProvider(host))
+	require.NoError(tb, sqlite.RegisterProvider(host))
+	blobStore, err := plugin.Resolve[blob.BlobStore](
+		context.Background(), host,
+		plugin.CapabilityStorageBlob, "badger", nil,
+		blob.ProviderDependencies{
+			DataDir: config.DataDir, StorageMode: config.StorageMode,
+		},
+	)
+	require.NoError(tb, err)
+	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
+		context.Background(), host,
+		plugin.CapabilityStorageMetadata, "sqlite", nil,
+		metadata.ProviderDependencies{
+			DataDir: config.DataDir, StorageMode: config.StorageMode,
+		},
+	)
+	require.NoError(tb, err)
+	db, dbErr := New(config, Stores{Blob: blobStore, Metadata: metadataStore})
+	tb.Cleanup(func() {
+		_ = closeTestDatabase(db)
+		_ = host.Stop(context.Background())
+	})
+	if db != nil {
+		testDatabaseHosts.Store(db, host)
+	}
+	return db, dbErr
+}
+
+// TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable pins the
+// P1 fix: database.New returns a CommitTimestampError before it ever calls
+// CheckNodeSettings (checkCommitTimestamp runs first in init and returns
+// immediately on failure), so phase 1 -- and the gates only it validates,
+// like blob_plugin -- goes completely unchecked for that entire open. This
+// reproduces that gap directly (a commit-timestamp mismatch combined with a
+// blob_plugin change reports only CommitTimestampError, never the gate
+// mismatch), then proves the fix: calling the now-exported
+// CheckNodeSettings on the *Database New still returned -- exactly what
+// node.go's dbNeedsRecovery path does once RecoverCommitTimestampConflict
+// succeeds -- does catch it.
+func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
+	t *testing.T,
+) {
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{
+		DataDir:        dataDir,
+		StorageMode:    "core",
+		Network:        "preprod",
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	gates, err := db.Metadata().GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "badger", gates["blob_plugin"])
+
+	// Induce a commit-timestamp mismatch the same way
+	// TestCheckCommitTimestamp_MetadataOnly does: give metadata a commit
+	// timestamp with none on the blob side.
+	metaTxn := db.Metadata().Transaction()
+	require.NoError(t, db.Metadata().SetCommitTimestamp(123456789, metaTxn))
+	require.NoError(t, metaTxn.Commit())
+	require.NoError(t, closeTestDatabase(db))
+
+	// Reopen with a changed blob_plugin. On a healthy reopen this alone
+	// would be a NodeSettingsError from phase 1. Here, the commit-timestamp
+	// mismatch above makes checkCommitTimestamp fail first, and init
+	// returns immediately without ever reaching CheckNodeSettings.
+	reopened, reopenErr := openForRecoveryTest(t, &Config{
+		DataDir:        dataDir,
+		StorageMode:    "core",
+		Network:        "preprod",
+		BlobPlugin:     "gcs",
+		MetadataPlugin: "sqlite",
+	})
+	require.Error(t, reopenErr)
+	var cte CommitTimestampError
+	require.ErrorAs(
+		t,
+		reopenErr,
+		&cte,
+		"phase 1 must not run before the commit-timestamp conflict is "+
+			"resolved, so the error on this open must be exactly "+
+			"CommitTimestampError, not a NodeSettingsError from the "+
+			"blob_plugin change",
+	)
+	var settingsErr NodeSettingsError
+	require.False(
+		t,
+		errors.As(reopenErr, &settingsErr),
+		"the blob_plugin mismatch must not have been reported yet -- "+
+			"phase 1 has not run on this open at all",
+	)
+	require.NotNil(
+		t,
+		reopened,
+		"New must still return the *Database on a CommitTimestampError so "+
+			"the caller can recover it, per node.go's dbNeedsRecovery path",
+	)
+
+	// This is the fix: node.go calls CheckNodeSettings explicitly once
+	// RecoverCommitTimestampConflict succeeds. Simulate that here directly
+	// against the *Database New returned above, without needing a real
+	// ledgerState-driven recovery run (recovery repairs the commit
+	// timestamp, an orthogonal concern from the blob_plugin gate this
+	// checks).
+	checkErr := reopened.CheckNodeSettings()
+	require.True(
+		t,
+		errors.As(checkErr, &settingsErr),
+		"re-invoking CheckNodeSettings after recovery must catch the "+
+			"blob_plugin change phase 1 never got to see: got %v",
+		checkErr,
+	)
+	require.Contains(t, settingsErr.Error(), "blob plugin")
 }

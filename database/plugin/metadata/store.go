@@ -58,7 +58,7 @@ type SettingsStore interface {
 	// idempotent insert that succeeds on repeated calls. If the row
 	// already exists, implementations must not overwrite immutable
 	// fields and should only populate network fields when they are
-	// currently unset so callers like checkNodeSettings can perform
+	// currently unset so callers like CheckNodeSettings can perform
 	// a one-time network backfill.
 	SetNodeSettings(*types.NodeSettings) error
 

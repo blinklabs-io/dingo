@@ -26,11 +26,11 @@ import (
 // minimum pool margin, and the two validation taints). It is called once
 // during node startup, after the cardano config has been parsed and before
 // the ledger applies its first block; by that point phase 1
-// (database.New's checkNodeSettings) has already validated everything a bare
+// (database.New's CheckNodeSettings) has already validated everything a bare
 // database open can know.
 //
 // Every value in values is treated as explicit, the same rule
-// checkNodeSettings applies to phase 1's gates: the caller here is node.go,
+// CheckNodeSettings applies to phase 1's gates: the caller here is node.go,
 // which assembles values from the fully-resolved node configuration rather
 // than from a partial Config, so there is no "not yet known" case to leave
 // room for.
@@ -56,7 +56,7 @@ func (d *Database) EnforceNodeSettings(values nodesettings.Values) error {
 			return err
 		}
 		// Verify every write actually landed, the same read-back
-		// checkNodeSettings does and for the same reason: node_settings'
+		// CheckNodeSettings does and for the same reason: node_settings'
 		// immutable-after-first-insert row previously made exactly this
 		// kind of write silently no-op (see writeGateValues's doc
 		// comment).

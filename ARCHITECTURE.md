@@ -4099,7 +4099,7 @@ enforces `database/nodesettings.Gates()` in two phases, split by what each
 stage can know rather than by gate importance.
 
 Phase 1 runs inside `database.New` (`database/commit_timestamp.go`'s
-`checkNodeSettings`) and validates every gate a bare database open can
+`CheckNodeSettings`) and validates every gate a bare database open can
 supply — `storage_mode`, `network`, `network_magic`, `start_era`, the plugin
 selections, and `blob_store_id` — persisting first-start values via
 `writeGateValues`. It deliberately excludes every bool-derived gate
@@ -4180,6 +4180,29 @@ startup happened to reach, not the epoch it actually took effect in. A
 mismatch found by the deferred call fails startup the same way the normal
 path's does, by returning an error out of `Run`, which unwinds through the
 same `started` cleanup stack every other startup failure does.
+
+The recovery path defers phase 1 the same way, and for a reason that is
+easy to miss: `database.New`'s `init` calls `checkCommitTimestamp` before
+`CheckNodeSettings`, and returns immediately on a `CommitTimestampError`
+without ever reaching phase 1 — so on the recovery path, phase 1 has not
+merely been deferred by `New`, it has not run at all for that startup.
+Nothing in the original recovery flow re-ran it afterward, which meant
+`storage_mode`, `network`, `network_magic`, `start_era`, the plugin
+selections, and `blob_store_id` all went completely unenforced for the
+entire recovery run. This mattered most for the plugin gates: a fresh or
+swapped blob store's `GetCommitTimestamp` returns `(0, nil)`, which against
+a non-zero metadata timestamp is exactly a `CommitTimestampError` — so
+swapping the blob provider was one of the most direct ways to land on this
+path, and `blob_plugin`/`blob_store_id`, the gates that would have caught
+it, were exactly the ones going unchecked. `Node.Run` now calls the
+exported `(*database.Database).CheckNodeSettings` explicitly on the
+`dbNeedsRecovery` path, immediately after
+`RecoverCommitTimestampConflict()` succeeds and before the deferred phase 2
+call described above — re-running phase 1 there is safe because any
+database that can reach a genuine commit-timestamp mismatch has already
+completed one successful full open, so `blob_store_id` is already
+persisted: an unchanged blob store reads the same id back, and a swapped
+one mismatches against the persisted id, the correct loud failure.
 
 ## Stake Snapshots
 

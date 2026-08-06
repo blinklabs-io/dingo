@@ -447,10 +447,14 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	if dbNeedsRecovery {
 		// A database awaiting recovery has a known-inconsistent commit
-		// state. Enforcing phase 2 gates against it here could report a
-		// spurious gate error that masks the recovery path that is about
-		// to repair it, so enforcement is deferred until
-		// RecoverCommitTimestampConflict has run, below.
+		// state. Enforcing gates against it here could report a spurious
+		// mismatch that masks the recovery path that is about to repair
+		// it, so both phases are deferred until
+		// RecoverCommitTimestampConflict has run, below. database.New
+		// never got to call phase 1 (CheckNodeSettings) on this path
+		// either -- checkCommitTimestamp failed first and New returned
+		// immediately -- so phase 1 is not just deferred here, it has not
+		// run for this startup at all until the deferred call below.
 		n.config.logger.Info(
 			"node settings gate enforcement deferred until database recovery completes",
 		)
@@ -778,6 +782,19 @@ func (n *Node) Run(ctx context.Context) error {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		// The deferred phase 1 pass: database.New returned before ever
+		// calling CheckNodeSettings on this path (checkCommitTimestamp
+		// fails first, and New returns its error immediately rather than
+		// continuing on to phase 1), so storage_mode, network,
+		// network_magic, start_era, and the plugin selections have not
+		// been validated or persisted for this startup at all. The
+		// database is consistent now that recovery has completed, so it
+		// is safe to run that check here, before the deferred phase 2
+		// pass below.
+		n.config.logger.Info("running deferred node settings phase 1 check")
+		if err := n.db.CheckNodeSettings(); err != nil {
+			return fmt.Errorf("node settings phase 1: %w", err)
 		}
 		// The deferred phase 2 pass from above: the database is
 		// consistent now, so a gate mismatch can no longer be confused

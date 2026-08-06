@@ -341,11 +341,18 @@ func (d *Database) currentEpochSlot() (epoch uint64, slot uint64) {
 	return ep.EpochId, slot
 }
 
-// checkNodeSettings validates the gates a bare database open can know and
+// CheckNodeSettings validates the gates a bare database open can know and
 // persists them on first start. Every value it supplies is treated as
 // explicit: any override against a built-in default has already happened in
 // the configuration layer, so this is a strict re-validation.
-func (d *Database) checkNodeSettings() error {
+//
+// It is normally called once, by New (via init), and callers do not invoke
+// it directly on that path. It is exported so node.go can re-invoke it after
+// a commit-timestamp recovery: New returns before ever calling this when
+// checkCommitTimestamp fails, so a startup that takes the recovery path
+// never runs phase 1 on its own -- see node.go's dbNeedsRecovery handling,
+// which calls this explicitly once RecoverCommitTimestampConflict succeeds.
+func (d *Database) CheckNodeSettings() error {
 	persisted, err := d.persistedGateValues()
 	if err != nil {
 		return err
