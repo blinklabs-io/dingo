@@ -15,8 +15,7 @@
 package ledger
 
 import (
-	"errors"
-	"fmt"
+	"encoding/hex"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
@@ -25,15 +24,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
-)
-
-// ErrPoolDistrUnregisteredPool reports a pool holding stake in the snapshot
-// with no registration on record. The pool cannot be given a VRF key hash, and
-// the total active stake is summed over the whole snapshot, so omitting it
-// would leave the reported fractions summing to less than one with nothing
-// saying so.
-var ErrPoolDistrUnregisteredPool = errors.New(
-	"pool holds snapshot stake but has no registration",
 )
 
 // queryShelleyPoolDistr2 answers GetPoolDistr2, the stake distribution across
@@ -59,28 +49,16 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
-	// The epoch comes from the tip inside this transaction rather than from
-	// the in-memory consensus snapshot. The snapshot is the cheaper source,
-	// but it is published after the database write that advances the chain, so
-	// reading it before opening the transaction lets the two sit on opposite
-	// sides of an epoch boundary. What that costs is invisible downstream: the
-	// stake rows for the wrong epoch still produce a well-formed distribution
-	// summing to one, so cardano-cli computes a leadership schedule that is
-	// wrong rather than absent. This is the same pairing
-	// queryShelleyDebugChainDepState resolves by taking its tip and epoch from
-	// the one transaction.
-	tip, err := ls.db.GetTip(txn)
+	// The epoch comes from the tip inside this transaction rather than from the
+	// in-memory consensus snapshot; see epochAtTip for why. A chain that has
+	// applied no blocks has no epoch record covering its tip, and epoch zero is
+	// the right answer there -- which is what the snapshot's zero value gave
+	// before.
+	_, current, err := ls.epochAtTip(txn)
 	if err != nil {
 		return nil, err
 	}
-	// A chain that has applied no blocks has no epoch record covering its tip.
-	// Epoch zero is the right answer there, and is what the snapshot's zero
-	// value gave before.
 	var epoch uint64
-	current, err := ls.db.GetEpochBySlot(tip.Point.Slot, txn)
-	if err != nil {
-		return nil, err
-	}
 	if current != nil {
 		epoch = current.EpochId
 	}
@@ -112,6 +90,22 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 	// NonZero Coin and cardano-cli's decoder rejects zero outright. A chain
 	// whose first snapshot has not been taken yet would otherwise produce a
 	// reply the caller cannot decode at all.
+	//
+	// Note this total does not come from the rows read above. For a mark
+	// snapshot GetTotalActiveStake prefers epoch_summary.total_active_stake
+	// when that row is marked ready, falling back to summing the snapshot rows
+	// only when it is not -- so the fractions below are a ratio across two
+	// tables, and one transaction makes that pair consistent rather than equal.
+	//
+	// They are equal by construction: snapshot rotation writes both in the same
+	// transaction from one calculation, the summary's total being the running
+	// sum of the very PoolStakes the rows are built from. The one thing that
+	// separates them is cleanupOldSnapshots, which prunes snapshot rows below
+	// currentEpoch-3 while deliberately retaining every epoch_summary row --
+	// and snapshotEpoch here is praos.StakeSnapshotEpoch, currentEpoch-1, which
+	// is always inside that retained window. Moving either bound breaks the
+	// equality, which is what
+	// TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady is for.
 	totalActiveStake, err := ls.totalActiveStake(snapshotEpoch, true, metaTxn)
 	if err != nil {
 		return nil, err
@@ -143,19 +137,34 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 		stake := stakeByPool[string(pkh.Bytes())]
 		vrf, ok := vrfByPool[pkh]
 		if !ok {
-			// Dropping the pool would be worse than failing. Its stake is
-			// still counted in TotalActiveStake, which is summed over the
-			// whole snapshot, so the remaining fractions would sum to less
-			// than one and the caller would have no way to tell. Reporting it
-			// with a zero VRF hash is no better, since that reads as a real
-			// key. This is a database inconsistency rather than a routine
-			// case, so it fails loudly.
-			return nil, fmt.Errorf(
-				"%w: pool %x at epoch %d",
-				ErrPoolDistrUnregisteredPool,
-				pkh.Bytes(),
-				snapshotEpoch,
+			// A pool holding snapshot stake with no registration on record
+			// cannot be given a VRF key hash, and reporting it with a zero one
+			// is no better, since that reads as a real key. So it is left out
+			// and the omission is logged rather than inferred.
+			//
+			// Omitting it costs less than it appears to. Its stake stays in
+			// TotalActiveStake, so the reported fractions sum to slightly less
+			// than one -- but a caller computing a leadership schedule checks
+			// its OWN fraction, which is its stake over that same unchanged
+			// total and so is unaffected by another pool being absent.
+			//
+			// Failing instead would cost far more. An error here does not fail
+			// one query: it aborts the LocalStateQuery protocol, the node drops
+			// the connection, and cardano-cli reports only a closed bearer --
+			// the exact opaque failure #2997 was filed for. Worse, the
+			// unfiltered form of this query covers every pool in the snapshot,
+			// so one unregistered pool anywhere on the chain would break
+			// leadership-schedule for every operator rather than for the one
+			// pool concerned. The same reasoning keeps chainDepStateLabNonce
+			// serving a slightly stale value instead of aborting.
+			ls.config.Logger.Warn(
+				"omitting pool with snapshot stake but no registration",
+				"pool", hex.EncodeToString(pkh.Bytes()),
+				"stake", stake,
+				"epoch", snapshotEpoch,
+				"component", "ledger",
 			)
+			continue
 		}
 		result.Pools[ledger.PoolId(pkh)] = olocalstatequery.PoolDistr2IndividualStake{
 			StakeFraction:  stakeFraction(stake, totalActiveStake),

@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"io"
+	"log/slog"
 	"math/big"
 	"testing"
 
@@ -40,6 +42,26 @@ func poolDistr2Query() *olocalstatequery.BlockQuery {
 			},
 		},
 	}
+}
+
+// newPoolDistr2Ledger builds the ledger state these tests query.
+//
+// The handler logs the pools it cannot report, and NewLedgerState defaults a
+// nil logger so the rest of the ledger need not guard every call. These tests
+// construct LedgerState directly and so have to supply one themselves.
+func newPoolDistr2Ledger(
+	t *testing.T,
+	db *database.Database,
+) *LedgerState {
+	t.Helper()
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	return ls
 }
 
 // seedPoolDistr2Fixture registers a pool with a known VRF hash and gives it
@@ -111,8 +133,7 @@ func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
 	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
 	pkhB := seedPoolDistr2Fixture(t, db, poolB, vrfB, 1_000_000, snapshotEpoch)
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newPoolDistr2Ledger(t, db)
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
@@ -200,8 +221,7 @@ func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
 	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
 	pkhB := seedPoolDistr2Fixture(t, db, poolB, vrfB, 1_000_000, snapshotEpoch)
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newPoolDistr2Ledger(t, db)
 
 	result, err := ls.Query(poolDistr2QueryFor(pkhA))
 	require.NoError(t, err)
@@ -258,8 +278,7 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(t *testing.T) 
 	const snapshotEpoch = 0
 	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newPoolDistr2Ledger(t, db)
 
 	result, err := ls.Query(poolDistr2QueryFor(pkhA, unknownPkh))
 	require.NoError(t, err,
@@ -282,8 +301,7 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(t *testing.T) 
 // before its first snapshot is taken. Dividing by the total would panic.
 func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	db := newTestDB(t)
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newPoolDistr2Ledger(t, db)
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err,
@@ -300,43 +318,87 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 	assert.Empty(t, distr.Pools)
 }
 
-// TestQueryShelleyPoolDistr2_RejectsPoolWithoutRegistration covers a pool that
-// holds snapshot stake but has no registration on record.
+// TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting
+// covers a pool that holds snapshot stake but has no registration on record.
 //
-// Such a pool cannot be given a VRF key hash, and dropping it silently is
-// worse than it sounds: TotalActiveStake is summed over the whole snapshot and
-// still counts that pool's stake, so the reported fractions would sum to less
-// than one with nothing in the reply saying so. A caller would compute a
-// leadership schedule against a denominator covering stake it cannot see.
+// Such a pool cannot be given a VRF key hash, and reporting one of zeroes would
+// read as a real key, so it is left out. What matters is that leaving it out is
+// all that happens: the rest of the distribution is still served.
 //
-// The state is a database inconsistency rather than a routine case, so it
-// fails loudly instead of producing a quietly wrong distribution.
-func TestQueryShelleyPoolDistr2_RejectsPoolWithoutRegistration(t *testing.T) {
+// Returning an error instead would not fail this one query. The LocalStateQuery
+// server propagates a query error as a protocol error, so the node drops the
+// connection and cardano-cli reports only a closed bearer -- which is exactly
+// the opaque failure #2997 was filed for. Because the unfiltered form of this
+// query covers every pool in the snapshot, one unregistered pool anywhere on
+// the chain would take leadership-schedule down for every operator.
+//
+// The fixture therefore pairs the orphan with a healthy pool and asserts the
+// healthy one still answers. Asserting only the orphan's absence would pass
+// just as well against a handler that returned nothing at all.
+func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 
 	orphan := make([]byte, 28)
 	for i := range orphan {
 		orphan[i] = 0x77
 	}
-	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(orphan))
+	orphanPkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(orphan))
 	// Stake in the snapshot, but no pool or registration row to match it.
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
 			Epoch:        0,
 			SnapshotType: snapshotTypeMark,
-			PoolKeyHash:  pkh.Bytes(),
+			PoolKeyHash:  orphanPkh.Bytes(),
 			TotalStake:   dbtypes.Uint64(5_000_000),
 			CapturedSlot: 1,
 		},
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	healthy := make([]byte, 28)
+	for i := range healthy {
+		healthy[i] = 0x88
+	}
+	healthyVrf := make([]byte, 32)
+	for i := range healthyVrf {
+		healthyVrf[i] = 0x99
+	}
+	healthyPkh := seedPoolDistr2Fixture(
+		t, db, healthy, healthyVrf, 5_000_000, 0,
+	)
 
-	_, err := ls.Query(poolDistr2Query())
-	require.ErrorIs(t, err, ErrPoolDistrUnregisteredPool,
-		"a pool with stake but no registration must not be dropped silently")
+	ls := newPoolDistr2Ledger(t, db)
+
+	result, err := ls.Query(poolDistr2Query())
+	require.NoError(t, err,
+		"an unregistered pool must not abort the protocol and drop the "+
+			"client's connection")
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
+	require.True(t, ok)
+
+	_, present := distr.Pools[lcommon.PoolId(orphanPkh)]
+	assert.False(t, present,
+		"a pool with no registration has no VRF key to report, so it is "+
+			"omitted rather than given one of zeroes")
+
+	entry, present := distr.Pools[lcommon.PoolId(healthyPkh)]
+	require.True(t, present,
+		"the rest of the distribution must still be served")
+	assert.Equal(t, uint64(5_000_000), entry.TotalPoolStake)
+	// The omitted pool's stake stays in the total, so this pool's own fraction
+	// is unchanged by the omission -- which is why omitting is safe for a
+	// caller checking its own leadership.
+	assert.Equal(t, uint64(10_000_000), distr.TotalActiveStake,
+		"the total is summed over the whole snapshot, including the pool "+
+			"that could not be reported")
+	require.NotNil(t, entry.StakeFraction)
+	assert.Equal(t, 0, entry.StakeFraction.Cmp(big.NewRat(1, 2)),
+		"the reported pool's own fraction is its stake over the unchanged "+
+			"total, got %s", entry.StakeFraction.Rat)
 }
 
 // TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey covers a pool whose
@@ -387,8 +449,7 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
+	ls := newPoolDistr2Ledger(t, db)
 
 	result, err := ls.Query(poolDistr2Query())
 	require.NoError(t, err)
@@ -559,8 +620,9 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 		nil,
 	))
 
-	ls := &LedgerState{db: db}
-	// The snapshot the query must NOT read the epoch from.
+	ls := newPoolDistr2Ledger(t, db)
+	// The snapshot the query must NOT read the epoch from. Republished after
+	// the helper's own publication so this value is the one on record.
 	ls.currentEpoch = models.Epoch{EpochId: staleEpoch}
 	ls.publishSnapshotsLocked()
 
@@ -579,4 +641,96 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 	assert.Equal(t, uint64(3_000_000), distr.TotalActiveStake,
 		"the total has to be summed over that same snapshot, or the "+
 			"fractions are shares of a denominator from another epoch")
+}
+
+// TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady covers the
+// total-active-stake read on the path a synced node actually takes.
+//
+// The per-pool stakes come from pool_stake_snapshot, but the total does not:
+// GetTotalActiveStake short-circuits to epoch_summary.total_active_stake
+// whenever that row exists with snapshot_ready set, and only falls back to
+// summing the snapshot rows when it does not. Two tables, and the reply's
+// fractions are meaningful only while they agree -- reading both under one
+// transaction makes the pair consistent, not equal.
+//
+// Every other test here leaves epoch_summary empty and so silently exercises
+// the SUM fallback, which is the path a synced node never takes. This one
+// writes the row.
+//
+// The two agree by construction rather than by luck, and it is worth recording
+// why. Snapshot rotation writes both in one transaction from one calculation:
+// epoch_summary.total_active_stake is distribution.TotalStake, the running sum
+// of the same distribution.PoolStakes the rows are built from. They could only
+// drift if the rows were removed while the summary stayed, which is exactly
+// what cleanupOldSnapshots does -- but it prunes below currentEpoch-3 and
+// deliberately retains epoch_summary for the life of the database, while this
+// query reads praos.StakeSnapshotEpoch (currentEpoch-1). The epoch it asks
+// about is always inside the retained window. This test is what would fail if
+// either of those bounds moved.
+func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	vrfA := make([]byte, 32)
+	for i := range vrfA {
+		vrfA[i] = 0xA1
+	}
+	vrfB := make([]byte, 32)
+	for i := range vrfB {
+		vrfB[i] = 0xB1
+	}
+	poolA := make([]byte, 28)
+	for i := range poolA {
+		poolA[i] = 0x41
+	}
+	poolB := make([]byte, 28)
+	for i := range poolB {
+		poolB[i] = 0x42
+	}
+
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
+	pkhB := seedPoolDistr2Fixture(t, db, poolB, vrfB, 1_000_000, snapshotEpoch)
+
+	// What rotation writes beside the rows: the same total, marked ready, which
+	// is what makes GetTotalActiveStake prefer it over summing.
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{
+			Epoch:            snapshotEpoch,
+			TotalActiveStake: dbtypes.Uint64(4_000_000),
+			TotalPoolCount:   2,
+			TotalDelegators:  0,
+			BoundarySlot:     1,
+			SnapshotReady:    true,
+		},
+		nil,
+	))
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	result, err := ls.Query(poolDistr2Query())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
+	require.True(t, ok)
+
+	assert.Equal(t, uint64(4_000_000), distr.TotalActiveStake,
+		"the total must equal the sum of the snapshot rows the per-pool "+
+			"stakes came from, whichever source served it")
+
+	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
+	require.True(t, ok, "pool A missing from the distribution")
+	entryB, ok := distr.Pools[lcommon.PoolId(pkhB)]
+	require.True(t, ok, "pool B missing from the distribution")
+
+	// The invariant the query exists to preserve, asserted against the summary
+	// rather than against a total this same reply just summed for itself.
+	require.NotNil(t, entryA.StakeFraction)
+	require.NotNil(t, entryB.StakeFraction)
+	sum := new(big.Rat).Add(entryA.StakeFraction.Rat, entryB.StakeFraction.Rat)
+	assert.Equal(t, 0, sum.Cmp(big.NewRat(1, 1)),
+		"fractions taken over the summary's total must still sum to one, "+
+			"got %s", sum)
 }

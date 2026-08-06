@@ -1790,6 +1790,20 @@ trips the node makes. A requested pool with no row in the
 snapshot is omitted rather than reported at zero stake, matching the node's
 restriction of the distribution to the requested keys.
 
+Both leaves degrade rather than abort on inconsistent data, and that is a
+protocol constraint rather than a preference. The LocalStateQuery server
+propagates a handler error as a protocol error, so returning one does not fail
+a single query — the node drops the client's connection and `cardano-cli`
+reports only a closed bearer, which is the failure mode #2997 was filed for.
+`GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
+has no registration to supply a VRF key hash (the unfiltered form covers every
+pool on the chain, so aborting would take `leadership-schedule` down for every
+operator over one bad row), and `GetChainDepState` logs and skips an op-cert
+counter whose issuer key is not a pool key hash. Omitting a pool leaves the
+reported fractions summing to slightly under one, since its stake stays in
+`TotalActiveStake`; a caller checking its own leadership is unaffected, because
+its own fraction is its stake over that same unchanged total.
+
 ## Chain Management
 
 The `ChainManager` (`chain/manager.go`) manages multiple chains:

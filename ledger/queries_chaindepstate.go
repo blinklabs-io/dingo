@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -100,6 +101,41 @@ type versionedChainDepState struct {
 	Inner   any
 }
 
+// epochAtTip reads the tip and the epoch record containing it from one
+// transaction, for a query that has to describe both together.
+//
+// The in-memory tip and epoch snapshots are the cheaper source, but they are
+// published after the database write that advances the chain, so a slot or
+// epoch number taken from them and paired with rows read here can straddle an
+// epoch boundary. What that costs is silent in both queries that need it: the
+// chain-dependent state would carry a populated last slot beside a neutral
+// epoch nonce, and the pool distribution would carry stake rows belonging to an
+// epoch other than the one it names. Either way cardano-cli computes a
+// leadership schedule that is wrong rather than absent.
+//
+// Resolving the epoch from the tip's slot rather than from an epoch number read
+// elsewhere is what makes the pairing exact.
+//
+// A nil epoch record means no record covers the tip. The chain cannot reach
+// that state part-way through an epoch -- applying a block requires that
+// epoch's nonce to check the producer's leader VRF, and the nonce lives in the
+// record, so the record exists before the tip can enter the epoch. What remains
+// is the chain that has applied no blocks at all, where the callers' neutral
+// and zero defaults are the right answer.
+func (ls *LedgerState) epochAtTip(
+	txn *database.Txn,
+) (ochainsync.Tip, *models.Epoch, error) {
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
+	current, err := ls.db.GetEpochBySlot(tip.Point.Slot, txn)
+	if err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
+	return tip, current, nil
+}
+
 // nonceFromBytes converts a stored nonce into its wire form. An absent or
 // empty value is the neutral nonce, which is how the ledger represents "no
 // nonce yet" — notably at genesis and before the first epoch boundary.
@@ -120,19 +156,13 @@ func nonceFromBytes(b []byte) lcommon.Nonce {
 // unsupported query aborts the LocalStateQuery protocol, the node drops the
 // connection, and the caller sees only a closed bearer.
 func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
-	// Every value in the reply is read from this one transaction, tip
-	// included. The in-memory tip and epoch snapshots would be the cheaper
-	// source, but they are published after the database write that advances
-	// the chain, so pairing a slot or epoch number from them with nonces read
-	// here can straddle an epoch boundary. The worst of that is silent: an
-	// epoch the snapshot has reached but this transaction has not yet seen has
-	// no record to read, and the reply would carry a populated last slot
-	// beside a neutral epoch nonce -- from which cardano-cli computes a
-	// leadership schedule that is wrong rather than absent.
+	// Every value in the reply is read from this one transaction, tip and epoch
+	// included; see epochAtTip for why neither may come from the in-memory
+	// snapshots.
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 
-	tip, err := ls.db.GetTip(txn)
+	tip, current, err := ls.epochAtTip(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -143,21 +173,6 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	}
 
 	counters, err := ls.chainDepStateOpCertCounters(txn)
-	if err != nil {
-		return nil, err
-	}
-
-	// The epoch containing the tip, so the nonces belong to the same slot the
-	// reply reports. Resolving it from the slot rather than from an epoch
-	// number read elsewhere is what makes the pairing exact.
-	//
-	// A tip with no epoch record covering it would leave every nonce neutral,
-	// but the chain cannot reach that state: applying a block in an epoch
-	// requires that epoch's nonce to check the producer's leader VRF, and the
-	// nonce lives in the record. The record therefore exists before the tip
-	// can enter the epoch. What remains is the chain that has applied no
-	// blocks at all, where neutral is the right answer.
-	current, err := ls.db.GetEpochBySlot(tip.Point.Slot, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -254,9 +269,14 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 }
 
 // foldEndSlotForTip converts a tip slot into the exclusive end bound that
-// includes the tip's own block. It saturates rather than wrapping, since a
-// wrap to zero would fold no blocks at all and report the epoch's opening
-// values as though they were current.
+// includes the tip's own block.
+//
+// It saturates rather than wrapping. A wrap to zero would fold no blocks at
+// all and report the epoch's opening values as though they were current, which
+// is the silent-wrong-answer failure this whole reply is written to avoid.
+// Saturating instead loses only the tip block itself, and only at a slot no
+// chain reaches: computeCandidateNonceAsOf clamps any bound past the epoch's
+// end back to it, so the fold still covers the epoch.
 func foldEndSlotForTip(tipSlot uint64) uint64 {
 	if tipSlot == ^uint64(0) {
 		return tipSlot
@@ -351,6 +371,25 @@ func (ls *LedgerState) chainDepStateOpCertCounters(txn *database.Txn) (
 	counters := make(map[lcommon.Blake2b224]uint64, len(sequences))
 	for keyHash, sequence := range sequences {
 		if len(keyHash) != lcommon.Blake2b224Size {
+			// A stored issuer key that is not a pool key hash cannot be put in
+			// a map keyed by one, and padding or truncating it would report a
+			// counter against a cold key that is not the one the row meant.
+			// Skipping it leaves that key with no counter, which reads as "no
+			// certificate accepted yet" and so is permissive against a block
+			// claiming it -- worth a log rather than a silent drop.
+			//
+			// Logged rather than returned for the same reason
+			// queryShelleyPoolDistr2 omits an unregistered pool: an error here
+			// aborts the LocalStateQuery protocol and drops the client's
+			// connection, which would turn one malformed row into a total
+			// failure of leadership-schedule.
+			ls.config.Logger.Warn(
+				"skipping op-cert counter with malformed issuer key",
+				"key_hash", hex.EncodeToString([]byte(keyHash)),
+				"key_hash_len", len(keyHash),
+				"sequence", sequence,
+				"component", "ledger",
+			)
 			continue
 		}
 		counters[lcommon.NewBlake2b224([]byte(keyHash))] = sequence
