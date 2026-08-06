@@ -53,6 +53,22 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 		{name: "custom private net", network: "private-net", networkMagic: 9999},
 		{name: "unset"},
 
+		// Devnet is excluded from the conflict set, for the same reason
+		// FullPotRewardsStandardNetwork excludes it: it is a local test
+		// network, not a production-like profile worth refusing to start for.
+		// These two cases are the only ones that reach either devnet guard —
+		// plain "devnet"/42 carries no Musashi half and returns before them.
+		{
+			name:         "devnet name with prototype magic",
+			network:      "devnet",
+			networkMagic: 164,
+		},
+		{
+			name:         "prototype name with devnet magic",
+			network:      "musashi",
+			networkMagic: 42,
+		},
+
 		// Conflicts: a standard network wearing the prototype's magic.
 		{
 			name:         "preview name with prototype magic",
@@ -153,6 +169,22 @@ func TestMusashiPrototypeNetwork(t *testing.T) {
 			name:         "prototype name with unregistered magic",
 			network:      "musashi",
 			networkMagic: 9999,
+			want:         true,
+		},
+		// Consequence of the devnet exclusion: because neither pairing is a
+		// conflict, both still resolve to the prototype network and would run
+		// with the bypasses. That is acceptable precisely because devnet is a
+		// local test network.
+		{
+			name:         "devnet name with prototype magic",
+			network:      "devnet",
+			networkMagic: 164,
+			want:         true,
+		},
+		{
+			name:         "prototype name with devnet magic",
+			network:      "musashi",
+			networkMagic: 42,
 			want:         true,
 		},
 		// A conflicting identity is not the prototype network: the bypasses
