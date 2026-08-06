@@ -2971,6 +2971,37 @@ the load would succeed, having read a directory nothing checked. For the same
 reason `node.WithImmutableDB` treats a nil argument as an error rather than as a
 pathname fallback.
 
+#### What a failed ancillary download leaves behind
+
+The ancillary downloaders (`downloadAncillary` for v1, `downloadAncillaryV2`
+for v2) return the archive path alongside every error, not only on success.
+`Bootstrap` records it into `BootstrapResult.AncillaryArchivePath` whenever it
+is non-empty, and `Cleanup` removes the archive and the extracted tree as two
+separate paths.
+
+That has to hold for each failure after the download begins, because each one
+leaves a file:
+
+| failure | what is on disk |
+|---|---|
+| every download location failed | a partial file — `DownloadSnapshot` resumes, so it deliberately does not remove one, and it returns no path for it |
+| extraction failed | the complete archive |
+| extracted tree holds no ledger state | the complete archive; the tree is removed here |
+| ancillary manifest unverified (v2) | the complete archive; the tree is removed here |
+
+The last two are the ones that read as already cleaned up and are not: removing
+the extraction is not removing the archive it came from. An error that returns
+no path strands the download in the directory the operator supplied, where
+nothing else sweeps it — invisible only when `DownloadDir` was left unset and
+the auto-created temp directory goes wholesale.
+
+The path reported on a failed download is asked of the downloader
+(`downloadDestinationPath`) rather than assembled at the call site. The filename
+carries the network name, which comes from the aggregator, and the downloader
+reduces it to its last element before writing; joining it raw would name a
+different file for a network like `../../etc` — one outside the download
+directory, which `Cleanup` would then remove.
+
 ### Catch-up vs bootstrap dispatch
 
 `mithril.Sync` (the `dingo mithril sync` entry point) selects what to do from

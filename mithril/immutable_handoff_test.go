@@ -594,3 +594,60 @@ func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T)
 		"a network name with a separator must not move the reported "+
 			"archive out of the download directory: got %s", archPath)
 }
+
+// TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified pins the v2
+// manifest-verification failure onto the same contract as every other failure
+// after a download has begun: the archive is still named, so Cleanup can remove
+// it.
+//
+// This path is the one that had to be special-cased into the rule rather than
+// falling out of it. Verification failing means the extracted tree is
+// destroyed, and destroying the tree reads as having cleaned up — but the
+// archive it came from is a separate file, removed only because bootstrapV2
+// recorded the path this returns. Clearing the path here leaves a complete
+// ancillary download in an operator-supplied directory, which nothing
+// afterwards sweeps.
+func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
+	// Ledger state present, so the tree gets past the usability check and the
+	// missing manifest is what fails — the case this test is about.
+	archive := writeTestArchive(t, map[string]string{
+		"ledger/100/state": "ledger state data",
+	})
+	data, err := os.ReadFile(archive)
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(data)
+		},
+	))
+	defer srv.Close()
+
+	downloadDir := t.TempDir()
+	tree, archPath, err := downloadAncillaryV2(
+		t.Context(),
+		BootstrapConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			// Verification on is what reaches the manifest check at all; with
+			// it off the archive would simply be accepted.
+			VerifyCertificateChain:   true,
+			AncillaryVerificationKey: "unused, the manifest is missing",
+		},
+		&CardanoDatabaseSnapshot{
+			Hash:    "abc123",
+			Network: "preprod",
+			Ancillary: CardanoDatabaseAncillary{
+				Locations: []CardanoDatabaseLocation{{URI: srv.URL}},
+			},
+		},
+		downloadDir,
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "ancillary manifest")
+	assert.Nil(t, tree, "an unverified tree must not be returned")
+	require.NotEmpty(t, archPath,
+		"the downloaded archive must still be reported so it gets cleaned up")
+	_, statErr := os.Stat(archPath)
+	assert.NoError(t, statErr,
+		"the reported path must be the archive that is actually there")
+}

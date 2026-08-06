@@ -1295,7 +1295,11 @@ func downloadAncillaryV2(
 		// picked up by the resume path on a later run.
 		extracted.Close()
 		os.RemoveAll(ancillaryDir)
-		return nil, "", verifyErr
+		// The extraction goes, the archive stays — and stays reported.
+		// Cleanup removes the two separately, so an unverified manifest that
+		// cleared this path would leave the download behind in a directory the
+		// operator supplied and nothing else sweeps.
+		return nil, ancillaryPath, verifyErr
 	}
 
 	cfg.Logger.Info(
