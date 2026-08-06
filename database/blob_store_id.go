@@ -53,5 +53,18 @@ func (d *Database) blobStoreID() (string, error) {
 		_ = writeTxn.Rollback()
 		return "", fmt.Errorf("commit blob store id: %w", err)
 	}
+	// Force this identity write to disk before the caller can hand it to
+	// writeGateValues, which latches it into the metadata store as a Frozen
+	// gate. Badger is opened with SyncWrites=false (see the doc comment on
+	// BlobStoreBadger.Sync), so without this call the commit above only
+	// guarantees the key survives a process crash, not an unclean host
+	// shutdown -- the same durability gap txn.go's combined commit path
+	// closes with an identical Sync call between the blob commit and the
+	// metadata commit that depends on it. Losing this specific key after the
+	// gate has already latched is permanent: the next startup mints a new
+	// id, which can never match the Frozen gate again.
+	if err := d.Blob().Sync(); err != nil {
+		return "", fmt.Errorf("sync blob store id: %w", err)
+	}
 	return minted, nil
 }

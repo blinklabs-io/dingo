@@ -277,3 +277,34 @@ func TestCheckGateMatchToleratesGateMissingFromOlderSnapshot(t *testing.T) {
 		"start_era":     "dijkstra", // absent from the manifest
 	}))
 }
+
+// TestCheckGateMatchAcceptsPermittedLatchUpgrade is a regression test:
+// CheckGateMatch used to compare LatchBool gates with raw equality, which
+// rejected restoring a snapshot recorded "off" onto a target configured
+// "on" even though nodesettings.Evaluate permits exactly that one-way
+// upgrade at startup (LatchBool moves off-to-on, never back). Restore must
+// agree with startup enforcement instead of being stricter than it.
+func TestCheckGateMatchAcceptsPermittedLatchUpgrade(t *testing.T) {
+	m := lifecycle.Manifest{Gates: nodesettings.Values{
+		"history_expiry_active": "off",
+	}}
+	require.NoError(t, m.CheckGateMatch(nodesettings.Values{
+		"history_expiry_active": "on",
+	}))
+}
+
+// TestCheckGateMatchRejectsForbiddenLatchDowngrade verifies the other
+// direction still fails: a snapshot recorded "on" restored onto a target
+// configured "off" is the direction LatchBool forbids (it cannot be turned
+// off once a database has run with it on), so applying the registry's
+// policy instead of raw equality must not accidentally loosen this side.
+func TestCheckGateMatchRejectsForbiddenLatchDowngrade(t *testing.T) {
+	m := lifecycle.Manifest{Gates: nodesettings.Values{
+		"history_expiry_active": "on",
+	}}
+	err := m.CheckGateMatch(nodesettings.Values{
+		"history_expiry_active": "off",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "history_expiry_active")
+}

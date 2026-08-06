@@ -370,6 +370,14 @@ func (d *Database) evaluateAndPersistGates(
 		return NodeSettingsError{Mismatches: mismatches}
 	}
 	if len(result.Writes) == 0 {
+		// No gate needs writing, but the dbinfo sidecar is a separate,
+		// independently-deletable file: an operator who removes it on an
+		// otherwise steady-state database must still get it back, or the
+		// pre-open metadata-plugin check in internal/settingsresolve stays
+		// silently disabled from here on (see writeDBInfoSidecar's doc
+		// comment for the two guards that make this a no-op everywhere it
+		// should be).
+		d.writeDBInfoSidecar()
 		return nil
 	}
 	if err := d.writeGateValues(result.Writes); err != nil {

@@ -15,6 +15,8 @@
 package database
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/dbinfo"
@@ -94,4 +96,46 @@ func TestWriteDBInfoSidecarNeverOverwritesExisting(t *testing.T) {
 		info.MetadataPlugin,
 		"an existing sidecar naming a different plugin must never be overwritten",
 	)
+}
+
+// TestWriteDBInfoSidecarRecreatedOnSteadyStateStart is a regression test for
+// a bug where evaluateAndPersistGates returned early whenever there was
+// nothing new to write to node_settings_gate -- the normal case for every
+// start after the first -- without ever reaching writeGateValues, the only
+// place that called writeDBInfoSidecar. An operator who deleted the sidecar
+// (or lost it to a partial restore) would never get it back on any later
+// steady-state start, silently disabling internal/settingsresolve's
+// pre-open metadata-plugin check from then on.
+func TestWriteDBInfoSidecarRecreatedOnSteadyStateStart(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := &Config{
+		DataDir:        dataDir,
+		StorageMode:    "core",
+		Network:        "preprod",
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	}
+
+	db, err := newTestDatabase(t, cfg)
+	require.NoError(t, err)
+	require.NoError(t, closeTestDatabase(db))
+
+	sidecarPath := filepath.Join(dataDir, dbinfo.FileName)
+	_, err = os.Stat(sidecarPath)
+	require.NoError(t, err, "sidecar must exist after the first start")
+	require.NoError(t, os.Remove(sidecarPath))
+
+	// Reopen with the identical config: every gate already matches what is
+	// persisted, so this start has nothing to write to node_settings_gate.
+	reopened, err := newTestDatabase(t, cfg)
+	require.NoError(t, err)
+	require.NoError(t, closeTestDatabase(reopened))
+
+	info, err := dbinfo.Read(dataDir)
+	require.NoError(
+		t,
+		err,
+		"a deleted sidecar must be recreated even when no gate needed writing",
+	)
+	require.Equal(t, "sqlite", info.MetadataPlugin)
 }

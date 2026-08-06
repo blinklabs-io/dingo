@@ -418,30 +418,84 @@ func TestRegisterFlags_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
 
 // TestApplyFlags_MidnightEnabledFlag pins --midnight-enabled/
 // DINGO_MIDNIGHT_ENABLED end to end: default false, a flag can turn it on,
-// and (mirroring the other Midnight flags) the flag only takes effect when
-// actually passed.
+// the env var can turn it on without any flag, and (mirroring the other
+// Midnight flags) a registered-but-unparsed flag never overrides whatever
+// LoadConfig already resolved from the env var.
 func TestApplyFlags_MidnightEnabledFlag(t *testing.T) {
-	resetGlobalConfig()
+	t.Run("defaults to false", func(t *testing.T) {
+		resetGlobalConfig()
 
-	cfg, err := LoadConfig("")
-	if err != nil {
-		t.Fatalf("failed to load config: %v", err)
-	}
-	if cfg.Midnight.Enabled {
-		t.Fatal("expected midnight.enabled to default to false")
-	}
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if cfg.Midnight.Enabled {
+			t.Fatal("expected midnight.enabled to default to false")
+		}
+	})
 
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	if err := cmd.ParseFlags([]string{"--midnight-enabled=true"}); err != nil {
-		t.Fatalf("failed to parse flags: %v", err)
-	}
-	if err := ApplyFlags(cmd, cfg); err != nil {
-		t.Fatalf("failed to apply flags: %v", err)
-	}
-	if !cfg.Midnight.Enabled {
-		t.Fatal("expected --midnight-enabled=true to enable Midnight")
-	}
+	t.Run("flag passed enables it", func(t *testing.T) {
+		resetGlobalConfig()
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		if err := cmd.ParseFlags([]string{"--midnight-enabled=true"}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+		if err := ApplyFlags(cmd, cfg); err != nil {
+			t.Fatalf("failed to apply flags: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal("expected --midnight-enabled=true to enable Midnight")
+		}
+	})
+
+	t.Run("env var enables it without any flag", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_MIDNIGHT_ENABLED", "true")
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal("expected DINGO_MIDNIGHT_ENABLED=true to enable Midnight")
+		}
+	})
+
+	t.Run("unparsed flag does not override the env var", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_MIDNIGHT_ENABLED", "true")
+
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		// --midnight-enabled is registered but deliberately never parsed
+		// here, the same as a real run where the operator never passes it.
+		// ApplyFlags's Changed(name) gate must leave cfg exactly as
+		// LoadConfig resolved it from the env var above, not reset it to
+		// the flag's own default.
+		if err := ApplyFlags(cmd, cfg); err != nil {
+			t.Fatalf("failed to apply flags: %v", err)
+		}
+		if !cfg.Midnight.Enabled {
+			t.Fatal(
+				"expected ApplyFlags to leave midnight.enabled=true from " +
+					"the env var alone when --midnight-enabled was never passed",
+			)
+		}
+	})
 }
 
 func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {

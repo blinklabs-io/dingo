@@ -15,16 +15,10 @@
 package database
 
 import (
-	"context"
 	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
-	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -283,40 +277,15 @@ func TestPhase1SkipsHistoryExpiryGateOnPartialReopen(t *testing.T) {
 // discards the returned *Database on any error, but node.go's
 // dbNeedsRecovery path -- and this test -- specifically needs the
 // *Database New still returns alongside a CommitTimestampError, since a
-// database on that path is available for recovery rather than closed.
+// database on that path is available for recovery rather than closed. See
+// newTestDatabaseWithHost's doc comment (test_database_test.go) for the
+// keepOnError contract this delegates to.
 func openForRecoveryTest(
 	tb testing.TB,
 	config *Config,
 ) (*Database, error) {
 	tb.Helper()
-	host := plugin.NewHost()
-	require.NoError(tb, badger.RegisterProvider(host))
-	require.NoError(tb, sqlite.RegisterProvider(host))
-	blobStore, err := plugin.Resolve[blob.BlobStore](
-		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
-		blob.ProviderDependencies{
-			DataDir: config.DataDir, StorageMode: config.StorageMode,
-		},
-	)
-	require.NoError(tb, err)
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{
-			DataDir: config.DataDir, StorageMode: config.StorageMode,
-		},
-	)
-	require.NoError(tb, err)
-	db, dbErr := New(config, Stores{Blob: blobStore, Metadata: metadataStore})
-	tb.Cleanup(func() {
-		_ = closeTestDatabase(db)
-		_ = host.Stop(context.Background())
-	})
-	if db != nil {
-		testDatabaseHosts.Store(db, host)
-	}
-	return db, dbErr
+	return newTestDatabaseWithHost(tb, config, true)
 }
 
 // TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable pins the

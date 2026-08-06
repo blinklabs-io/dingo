@@ -178,35 +178,59 @@ func (m Manifest) CheckPluginMatch(blobPlugin, metadataPlugin string) error {
 }
 
 // CheckGateMatch returns an error if any gate present in both m.Gates and
-// configured disagrees. A gate present in only one of the two maps is not
-// an error: that is what lets an older snapshot (missing a gate a newer
-// dingo would record) restore under that newer dingo, and a newer
-// snapshot restore when the caller has no way to supply every gate it
-// recorded (e.g. no cardano config loaded, so no genesis hashes).
+// configured is incompatible under the registry's own decision policy
+// (nodesettings.Evaluate/Gate.apply) — the same policy startup enforcement
+// applies via evaluateAndPersistGates — rather than raw equality. Raw
+// equality was too strict for a LatchBool gate: restoring a snapshot
+// recorded "off" onto a target configured "on" is exactly the one-way
+// latch upgrade Evaluate permits at startup, and rejecting it here would
+// make offline restore refuse a resume that a live database.New against
+// the same manifest values would accept.
+//
+// A gate present in only one of the two maps is not an error: that is what
+// lets an older snapshot (missing a gate a newer dingo would record)
+// restore under that newer dingo, and a newer snapshot restore when the
+// caller has no way to supply every gate it recorded (e.g. no cardano
+// config loaded, so no genesis hashes). Evaluate already treats a gate
+// absent from configured as skipped, and a gate absent from persisted (the
+// manifest) as an ordinary first-write with no mismatch, so both
+// directions of "only one side has it" fall out of Evaluate for free.
 //
 // blob_store_id is never compared, even when present in both maps: the
 // restored blob store IS the snapshot's, so its identity always differs
 // from whatever the caller had, and comparing it would fail every
 // restore. metadata_plugin and blob_plugin are excluded too, since
 // CheckPluginMatch already reports those — comparing them again here
-// would just report the same mismatch twice.
+// would just report the same mismatch twice. All three are filtered out of
+// configured before Evaluate ever sees them, rather than skipped
+// after-the-fact, so Evaluate cannot mint a Write for them either.
+//
+// Every gate configured supplies is marked explicit for this call, the same
+// as database.New's own strict validation: CheckGateMatch is a
+// compatibility check, not a resume, so OverrideEligible's "fall back to
+// whatever is persisted" behavior must never mask a real mismatch here.
 func (m Manifest) CheckGateMatch(configured nodesettings.Values) error {
-	var mismatches []string
+	filtered := make(nodesettings.Values, len(configured))
 	for name, want := range configured {
 		switch name {
 		case "blob_store_id", "metadata_plugin", "blob_plugin":
 			continue
 		}
-		got, ok := m.Gates[name]
-		if !ok || got == want {
-			continue
-		}
-		mismatches = append(mismatches, fmt.Sprintf(
-			"%s: manifest %q, target %q", name, got, want,
-		))
+		filtered[name] = want
 	}
-	if len(mismatches) == 0 {
+	explicit := make(map[string]bool, len(filtered))
+	for name := range filtered {
+		explicit[name] = true
+	}
+	result := nodesettings.Evaluate(m.Gates, filtered, explicit)
+	if len(result.Mismatches) == 0 {
 		return nil
+	}
+	mismatches := make([]string, 0, len(result.Mismatches))
+	for _, mm := range result.Mismatches {
+		mismatches = append(mismatches, fmt.Sprintf(
+			"%s: manifest %q, target %q", mm.Gate, mm.Persisted, mm.Configured,
+		))
 	}
 	// Map iteration order is random; sort so the error message is
 	// deterministic across calls.

@@ -617,6 +617,7 @@ func (c *Config) syncCompatFields() {
 		GraceHours: c.cfg.KoiosParity.GraceHours,
 	}
 	c.midnight = MidnightConfig{
+		Enabled:                     c.cfg.Midnight.Enabled,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,

@@ -4154,10 +4154,13 @@ wrong provider first would silently create a fresh, empty database beside
 the real one instead of ever reaching `node_settings_gate`'s own
 `metadata_plugin` gate, which would otherwise have caught the mismatch. The
 sidecar itself is written by `database/commit_timestamp.go`'s
-`writeGateValues`, alongside the write that records the `metadata_plugin`
-gate, guarded so it is never written with an empty plugin name (the partial
-`Config`s `mithril/sync.go` and `database/lifecycle/restore.go` reopen with)
-and never overwrites a sidecar that is already present. A database
+`writeDBInfoSidecar`, guarded so it is never written with an empty plugin
+name (the partial `Config`s `mithril/sync.go` and `database/lifecycle/restore.go`
+reopen with) and never overwrites a sidecar that is already present.
+`evaluateAndPersistGates` calls it on every open, not only one that writes a
+gate to `node_settings_gate` — a steady-state start with nothing new to
+persist still restores a sidecar an operator deleted, rather than leaving
+this pre-open check silently disabled from then on. A database
 directory that does not exist, or one this process cannot open for any
 reason, makes `settingsresolve.Apply` a silent no-op — a corrupt or in-use
 database is `database.New`'s problem to report properly, and failing here

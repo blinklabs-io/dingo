@@ -16,6 +16,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -161,4 +162,47 @@ func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
 	var settingsErr NodeSettingsError
 	require.ErrorAs(t, err, &settingsErr)
 	require.Contains(t, settingsErr.Error(), "blob store ID")
+}
+
+// TestBlobStoreIDSyncsAfterMint is a regression test for a durability gap:
+// blobStoreID committed its mint without ever syncing the blob store, so on
+// an unclean host shutdown the id could survive only in Badger's unsynced
+// WAL (SyncWrites=false) while a later, already-fsynced metadata write
+// latched it into the Frozen blob_store_id gate. Losing the unsynced id
+// after that point is permanent -- the next start mints a new one that can
+// never match the gate again. Syncing before returning closes that window,
+// mirroring the identical blob-then-sync-then-metadata barrier txn.go
+// applies to combined commits.
+func TestBlobStoreIDSyncsAfterMint(t *testing.T) {
+	store := &mockBlobStore{}
+	db := &Database{blob: store}
+
+	id, err := db.blobStoreID()
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+	require.Equal(t, 1, store.syncCount)
+	// txns[0] is the read-only lookup that finds nothing and rolls back;
+	// txns[1] is the mint's write transaction. Sync must observe it already
+	// committed.
+	require.Len(t, store.txns, 2)
+	require.Equal(
+		t,
+		1,
+		store.txns[1].commitCount,
+		"sync must run after the mint commit, not before it",
+	)
+}
+
+// TestBlobStoreIDSyncFailurePropagates confirms a failed sync surfaces as an
+// error from blobStoreID rather than being swallowed, so phase1GateValues's
+// existing "log and skip the gate" handling -- not a false success --
+// applies to this failure. blobStoreID must never claim an id is durable
+// when Sync could not confirm it.
+func TestBlobStoreIDSyncFailurePropagates(t *testing.T) {
+	syncErr := errors.New("simulated sync failure")
+	store := &mockBlobStore{syncErr: syncErr}
+	db := &Database{blob: store}
+
+	_, err := db.blobStoreID()
+	require.ErrorIs(t, err, syncErr)
 }
