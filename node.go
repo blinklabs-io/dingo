@@ -273,12 +273,16 @@ func (n *Node) apiPluginSelection(
 // effectiveBarkHost decides the interface Bark actually binds to.
 // configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when
 // set -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
-// database lifecycle service's destructive, unauthenticated Restore/Truncate
-// RPCs will be mounted), this defaults to loopback-only rather than letting
-// bark.go's own empty-Host default ("0.0.0.0") expose them on every
+// database lifecycle service's destructive Restore/Truncate/CreateSnapshot/
+// etc. RPCs will be mounted), this defaults to loopback-only rather than
+// letting bark.go's own empty-Host default ("0.0.0.0") expose them on every
 // interface; with no lifecycle service mounted, "" is returned unchanged so
 // bark's own existing default behavior (all interfaces) is preserved for
-// deployments only using it for the read-only Archive service.
+// deployments only using it for the read-only Archive service. Bind address
+// is a network control, independent of the mTLS client-certificate
+// authentication check Bark.Start enforces whenever lifecycleEnabled (see
+// BarkConfig.TlsClientCAFilePath) -- this default narrows exposure as
+// defense in depth, it is not what makes those RPCs safe to reach.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost
@@ -1501,7 +1505,7 @@ func (n *Node) Run(ctx context.Context) error {
 		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
-				"bark database lifecycle service (Restore/Truncate) defaults to a loopback-only bind since no --bark-host was set; these RPCs are unauthenticated, so widen this only behind your own trusted network/auth controls",
+				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; its destructive RPCs also require a verified mTLS client certificate (--bark-client-ca-file-path) independent of bind address, but widen this bind only behind your own trusted network controls",
 				"component",
 				"bark",
 			)
@@ -1511,6 +1515,7 @@ func (n *Node) Run(ctx context.Context) error {
 			DB:                  db,
 			TlsCertFilePath:     n.config.tlsCertFilePath,
 			TlsKeyFilePath:      n.config.tlsKeyFilePath,
+			TlsClientCAFilePath: n.config.barkClientCAFilePath,
 			Host:                barkHost,
 			Port:                n.config.barkPort,
 			CORSAllowedOrigins:  n.config.corsAllowedOrigins,

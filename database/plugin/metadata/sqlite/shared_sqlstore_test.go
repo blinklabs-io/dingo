@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,7 +68,12 @@ func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
 	require.NoError(t, readDB.QueryRow(
 		"SELECT COUNT(*) FROM schema_migrations WHERE phase = 'complete'",
 	).Scan(&migrationCount))
-	require.Equal(t, 2, migrationCount)
+	// A fresh database runs every registered migration, so the count is taken
+	// from the registry rather than written out: what is under test here is
+	// that startup completed all of them, not how many there currently are.
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	require.Equal(t, len(registry), migrationCount)
 
 	size, err := store.DiskSize()
 	require.NoError(t, err)

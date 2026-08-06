@@ -453,6 +453,17 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// LatestPoolOpCertSequences returns the highest observed op-cert sequence
+	// for every pool that has issued a block, keyed by pool key hash. Pools
+	// that have never issued one are absent rather than reported as zero.
+	//
+	// The set is not restricted to currently registered pools: the chain's
+	// accepted issue number for a cold key survives the pool leaving the
+	// active set, and is still enforced against any block claiming that key.
+	LatestPoolOpCertSequences(
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer
 	// rows in the inclusive slot range, ordered by slot and pool key hash.
 	GetPoolBlockIssuersInSlotRange(
@@ -1671,6 +1682,17 @@ type MetadataStore interface {
 	GetPoolStakeSnapshotsByEpoch(
 		uint64, // epoch
 		string, // snapshotType
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
+	// GetPoolStakeSnapshotsForPools retrieves the snapshot rows for just the
+	// pools named, for a caller wanting a bounded subset rather than a whole
+	// epoch. A pool the snapshot has no row for is absent from the result.
+	// The read is chunked rather than issued once per pool named.
+	GetPoolStakeSnapshotsForPools(
+		uint64, // epoch
+		string, // snapshotType
+		[][]byte, // poolKeyHashes
 		types.Txn,
 	) ([]*models.PoolStakeSnapshot, error)
 

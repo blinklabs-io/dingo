@@ -463,6 +463,10 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		return ls.queryShelleyFilteredVoteDelegatees(q.Credentials.Items())
 	case *olocalstatequery.ShelleyGetProposalsQuery:
 		return ls.queryShelleyGetProposals(q.ActionIds.Items())
+	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
+		return ls.queryShelleyDebugChainDepState()
+	case *olocalstatequery.ShelleyPoolDistr2Query:
+		return ls.queryShelleyPoolDistr2(q)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -472,7 +476,6 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
-		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
@@ -710,6 +713,44 @@ func (ls *LedgerState) poolSnapshotStake(
 		return 0, nil
 	}
 	return uint64(snapshot.TotalStake), nil
+}
+
+// markStakeForPools reads the mark snapshot for just the pools named, keyed by
+// pool key hash the way markStakeByPool keys the whole snapshot.
+//
+// A pool with no row in the snapshot is left out rather than reported with zero
+// stake. The two are different answers: the distribution describes the pools
+// the snapshot holds, so a caller naming one it does not hold has to see it
+// missing rather than be handed a fraction of zero for a pool the node will
+// never elect.
+//
+// The rows come back in one bounded read rather than a query per pool. Both
+// costs are worth avoiding here: reading the whole snapshot to discard most of
+// it does work the request did not ask for, while a per-pool loop lets the
+// caller's filter length decide how many round trips the node makes.
+func (ls *LedgerState) markStakeForPools(
+	epoch uint64,
+	poolIds []ledger.PoolId,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	hashes := make([][]byte, 0, len(poolIds))
+	for _, poolId := range poolIds {
+		hashes = append(hashes, lcommon.PoolKeyHash(poolId).Bytes())
+	}
+	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsForPools(
+		epoch,
+		snapshotTypeMark,
+		hashes,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	byPool := make(map[string]uint64, len(snapshots))
+	for _, snapshot := range snapshots {
+		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
+	}
+	return byPool, nil
 }
 
 // totalActiveStake returns the total mark-snapshot stake at the given epoch,

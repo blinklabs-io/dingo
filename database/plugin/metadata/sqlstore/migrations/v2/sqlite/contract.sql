@@ -1,1 +1,0 @@
--- Version 2 (v2) has no post-backfill SQLite contract statements.
