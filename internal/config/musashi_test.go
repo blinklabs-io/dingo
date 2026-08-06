@@ -113,6 +113,13 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 
 // TestMusashiPrototypeNetwork pins which identities count as the prototype
 // network at all. Preview and preprod must never qualify.
+//
+// Note the asymmetry between the two kinds of half-match, which is the whole
+// point of the rule: a half-match is a misconfiguration only when the *other*
+// half names a different predefined network. A custom name on magic 164, or
+// the "musashi" name on an unregistered magic, is a private prototype
+// deployment rather than a mistake, so it still counts as the prototype
+// network — magic 164 *is* Musashi, whatever an operator calls it locally.
 func TestMusashiPrototypeNetwork(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -133,6 +140,21 @@ func TestMusashiPrototypeNetwork(t *testing.T) {
 		{name: "mainnet", network: "mainnet", networkMagic: 764824073},
 		{name: "devnet", network: "devnet", networkMagic: 42},
 		{name: "unset"},
+		// Half-matches against a *custom* identity are private prototype
+		// deployments (e.g. a Musashi mirror), not misconfigurations, so they
+		// remain the prototype network.
+		{
+			name:         "custom name with prototype magic",
+			network:      "musashi-mirror",
+			networkMagic: 164,
+			want:         true,
+		},
+		{
+			name:         "prototype name with unregistered magic",
+			network:      "musashi",
+			networkMagic: 9999,
+			want:         true,
+		},
 		// A conflicting identity is not the prototype network: the bypasses
 		// must stay off even if startup validation was never run.
 		{name: "preview with prototype magic", network: "preview", networkMagic: 164},

@@ -4187,7 +4187,8 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 }
 
 // skipDijkstraTxValidation reports whether the per-transaction rule set is
-// *run* for a transaction being validated under era eraId.
+// *skipped* for a transaction being validated under era eraId — true means
+// ValidateTxFunc is not called for it.
 //
 // This is the ledger half of the Musashi prototype's accepted non-validating
 // behaviour (see LedgerStateConfig.SkipDijkstraTxValidation), and its scope is
