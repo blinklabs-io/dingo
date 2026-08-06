@@ -185,14 +185,35 @@ func Apply(cfg *config.Config) (err error) {
 func checkMetadataPluginSidecar(cfg *config.Config) error {
 	info, err := dbinfo.Read(cfg.DatabasePath)
 	if err != nil {
+		// ErrIncompleteSidecar is not one of the advisory cases below: it
+		// means a sidecar file exists but was never completed with a
+		// plugin name (interrupted write, hand edit, or a future writer
+		// bug), which is indistinguishable from "sidecar absent" unless
+		// this is checked explicitly -- and "absent" is exactly what falls
+		// through to the no-op default below. Warning and proceeding on
+		// this specific error would resolve whatever metadata plugin is
+		// configured and run its migrations as a side effect, silently
+		// creating a fresh, empty database beside the real one if that
+		// configured plugin happens to be wrong -- precisely the outcome
+		// this whole check exists to prevent. So this one fails startup
+		// instead.
+		if errors.Is(err, dbinfo.ErrIncompleteSidecar) {
+			return fmt.Errorf(
+				"settingsresolve: %w; refusing to guess a metadata plugin "+
+					"for %q",
+				err, cfg.DatabasePath,
+			)
+		}
 		// dbinfo.Read returns a nil error for a simply-missing sidecar (the
-		// common, unremarkable case for a database that predates it); an
-		// error here only ever means a sidecar that is present but corrupt
-		// or from a FormatVersion this build does not understand. That
-		// silently and permanently disables this pre-open check, so it is
-		// worth a Warn rather than a Debug: an operator should be able to
-		// see why database.New's mismatch detection stopped catching a
-		// wrong-plugin start before it creates a fresh, empty database.
+		// common, unremarkable case for a database that predates it); every
+		// other error here means a sidecar that is present but corrupt or
+		// from a FormatVersion this build does not understand -- a
+		// deliberate forward-compatibility choice, not a case to fail
+		// startup over. That silently and permanently disables this
+		// pre-open check, so it is worth a Warn rather than a Debug: an
+		// operator should be able to see why database.New's mismatch
+		// detection stopped catching a wrong-plugin start before it creates
+		// a fresh, empty database.
 		slog.Warn(
 			"settingsresolve: dbinfo sidecar present but unreadable; "+
 				"pre-open metadata plugin check disabled",

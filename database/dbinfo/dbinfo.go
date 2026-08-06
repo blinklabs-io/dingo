@@ -48,6 +48,24 @@ const FileName = "dingo.dbinfo"
 // accepts on Read.
 const CurrentFormatVersion = 1
 
+// ErrIncompleteSidecar marks a sidecar whose FormatVersion this build
+// recognises but whose MetadataPlugin is missing, JSON null, or the empty
+// string. Read returns it (wrapped with the sidecar's path) instead of a
+// zero Info and a nil error, because a zero Info is exactly what Read
+// returns for a sidecar that is simply absent -- and the caller,
+// internal/settingsresolve's checkMetadataPluginSidecar, treats "absent" as
+// "nothing to check, proceed." A sidecar file that exists but never got a
+// plugin name written into it (interrupted Write, hand-edited, or a future
+// writer bug) must not be indistinguishable from that, since proceeding
+// resolves whatever metadata plugin is configured and runs its migrations
+// as a side effect -- silently creating a fresh, empty database beside the
+// real one if the configured plugin is wrong. Callers that want the old
+// "advisory, ignore it" behavior for this case specifically should not get
+// it; see checkMetadataPluginSidecar's errors.Is handling.
+var ErrIncompleteSidecar = errors.New(
+	"dbinfo: sidecar is missing its metadata plugin",
+)
+
 // Info is the sidecar's entire content. It deliberately carries nothing
 // beyond a format version and the metadata plugin name -- no credentials,
 // connection string, or hostname -- since a data directory may be backed
@@ -71,6 +89,9 @@ func Path(dataDir string) string {
 // Write does not stamp or validate info.FormatVersion; callers pass
 // CurrentFormatVersion themselves.
 func Write(dataDir string, info Info) error {
+	if dataDir == "" {
+		return errors.New("dbinfo: dataDir must not be empty")
+	}
 	data, err := json.Marshal(info)
 	if err != nil {
 		return fmt.Errorf("marshal dbinfo: %w", err)
@@ -118,7 +139,11 @@ func Write(dataDir string, info Info) error {
 // zero Info and a nil error: the sidecar is advisory, and a database that
 // predates it (or has otherwise lost it) must still open normally. An
 // unrecognised FormatVersion is an error, since this build has no way to
-// know what a newer or unknown format actually means.
+// know what a newer or unknown format actually means. A sidecar whose
+// FormatVersion this build does recognise but whose MetadataPlugin is
+// missing, JSON null, or empty returns ErrIncompleteSidecar (wrapped with
+// path) rather than a zero Info and a nil error -- see ErrIncompleteSidecar's
+// doc comment for why that distinction matters.
 func Read(dataDir string) (Info, error) {
 	path := Path(dataDir)
 	data, err := os.ReadFile(path)
@@ -137,6 +162,9 @@ func Read(dataDir string) (Info, error) {
 			"dbinfo %q: unrecognised format version %d",
 			path, info.FormatVersion,
 		)
+	}
+	if info.MetadataPlugin == "" {
+		return Info{}, fmt.Errorf("dbinfo %q: %w", path, ErrIncompleteSidecar)
 	}
 	return info, nil
 }

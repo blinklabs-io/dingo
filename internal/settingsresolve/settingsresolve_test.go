@@ -207,6 +207,50 @@ func TestApplyRejectsMetadataPluginMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "postgres")
 }
 
+// TestApplyFailsOnIncompleteSidecar pins the P1 half of the dbinfo fix that
+// actually matters: dbinfo.Read alone returning ErrIncompleteSidecar for a
+// sidecar missing its plugin name changes nothing on its own, because
+// checkMetadataPluginSidecar previously treated every Read error --
+// including this one -- as advisory (Warn and proceed). A bare "dingo" run
+// against a postgres-provisioned directory whose sidecar never got its
+// plugin name written would then fall through here, resolve the configured
+// sqlite provider, and run its migrations -- creating a fresh, empty
+// database beside the real one, exactly the outcome the sidecar exists to
+// prevent. This asserts Apply now fails closed instead.
+func TestApplyFailsOnIncompleteSidecar(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := t.TempDir()
+	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{
+		FormatVersion:  dbinfo.CurrentFormatVersion,
+		MetadataPlugin: "",
+	}))
+	cfg := config.GetConfig()
+	cfg.DatabasePath = dir
+	cfg.Plugins.Storage.Metadata.Provider = "sqlite"
+	err := settingsresolve.Apply(cfg)
+	require.Error(t, err)
+}
+
+// TestApplyProceedsOnUnreadableSidecar pins the other half of the same
+// fix, in the opposite direction: a sidecar this build cannot read for a
+// reason unrelated to ErrIncompleteSidecar -- here, an unrecognised newer
+// FormatVersion -- must keep today's deliberate forward-compatibility
+// behavior of warning and proceeding, not fail startup. Only the
+// incomplete-sidecar case changes.
+func TestApplyProceedsOnUnreadableSidecar(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := seedDatabase(t, map[string]string{"network": "preprod"})
+	require.NoError(t, dbinfo.Write(dir, dbinfo.Info{
+		FormatVersion:  dbinfo.CurrentFormatVersion + 1,
+		MetadataPlugin: "sqlite",
+	}))
+	cfg := config.GetConfig()
+	cfg.DatabasePath = dir
+	cfg.Network = "preview"
+	require.NoError(t, settingsresolve.Apply(cfg))
+	require.Equal(t, "preprod", cfg.Network)
+}
+
 // TestApplyResumesNetworkFromDefaultPublishesToGetConfig pins a real bug
 // found by running the end-to-end scenario against the real binary: Apply
 // overriding cfg.Network was not enough on its own. cmd/dingo's
