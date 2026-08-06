@@ -1142,7 +1142,9 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 	)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 	clock.nowFunc = func() time.Time {
-		return provider.systemStart.Add(time.Duration(currentSlot) * time.Second)
+		return provider.systemStart.Add(
+			time.Duration(currentSlot) * time.Second,
+		)
 	}
 
 	ls := &LedgerState{
@@ -1255,7 +1257,9 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 	)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 	clock.nowFunc = func() time.Time {
-		return provider.systemStart.Add(time.Duration(currentSlot) * time.Second)
+		return provider.systemStart.Add(
+			time.Duration(currentSlot) * time.Second,
+		)
 	}
 
 	ls := &LedgerState{
@@ -1582,7 +1586,9 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 
 // TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations verifies that
 // shutdown remains panic-free while operations are still queued or running.
-func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(t *testing.T) {
+func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
+	t *testing.T,
+) {
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 2
 	config.TaskQueueSize = 20
@@ -3203,7 +3209,10 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 	tipBlock := blocks[len(blocks)-1]
-	require.NoError(t, db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil))
+	require.NoError(
+		t,
+		db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       makeTestPoint(tipBlock),
 		BlockNumber: tipBlock.Number,
@@ -3279,7 +3288,12 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 
 	for _, block := range blocks {
 		_, err := database.BlockByPoint(db, makeTestPoint(block))
-		assert.NoError(t, err, "block at slot %d should still exist", block.Slot)
+		assert.NoError(
+			t,
+			err,
+			"block at slot %d should still exist",
+			block.Slot,
+		)
 	}
 }
 
@@ -3334,7 +3348,11 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 }
 
 // newTestEpoch is a convenience builder for models.Epoch.
-func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.Epoch {
+func newTestEpoch(
+	id, startSlot uint64,
+	lengthInSlots uint,
+	eraId uint,
+) models.Epoch {
 	return models.Epoch{
 		EpochId:       id,
 		StartSlot:     startSlot,
@@ -3357,7 +3375,9 @@ func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.E
 //	safeZone = ceil(3*432/0.05) = 25_920
 //	epoch: startSlot=100_000, length=432_000, end=532_000
 //	tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.T) {
+func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(
+	t *testing.T,
+) {
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3369,8 +3389,13 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			epochStart,
+			epochLen,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
@@ -3389,7 +3414,9 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 
 // TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd verifies
 // that TransitionImpossible is set when safeEndSlot > epochEndSlot.
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.T) {
+func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(
+	t *testing.T,
+) {
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3400,8 +3427,13 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			epochStart,
+			epochLen,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
@@ -3419,7 +3451,9 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 
 // TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch verifies
 // that TransitionImpossible is NOT set when safeEndSlot < epochEndSlot.
-func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T) {
+func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(
+	t *testing.T,
+) {
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3429,8 +3463,13 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			epochStart,
+			epochLen,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
@@ -3452,8 +3491,13 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			100_000,
+			432_000,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			// tipSlot past the safe-zone boundary → would normally trigger Impossible
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
@@ -3477,8 +3521,13 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			100_000,
+			432_000,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
 		},
@@ -3698,7 +3747,11 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 
 	var eraTransitions []*EraTransitionResult
 	rolloverResult := &EpochRolloverResult{
-		NewCurrentEpoch:   models.Epoch{EpochId: 501, StartSlot: 532_000, LengthInSlots: 432_000},
+		NewCurrentEpoch: models.Epoch{
+			EpochId:       501,
+			StartSlot:     532_000,
+			LengthInSlots: 432_000,
+		},
 		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 501}},
@@ -3718,13 +3771,20 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 			ls.transitionInfo = hardfork.NewTransitionUnknown()
 		}
 	}
-	if len(eraTransitions) == 0 && rolloverResult != nil && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+	if len(eraTransitions) == 0 && rolloverResult != nil &&
+		rolloverResult.HardFork != nil {
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"plain epoch rollover must reset TransitionImpossible to TransitionUnknown")
+	assert.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"plain epoch rollover must reset TransitionImpossible to TransitionUnknown",
+	)
 }
 
 // TestApplyEraTransition_ClearsTransitionKnown verifies that
@@ -3878,12 +3938,18 @@ func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"era transition must clear transitionInfo even when rolloverResult.HardFork is set")
+	assert.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"era transition must clear transitionInfo even when rolloverResult.HardFork is set",
+	)
 }
 
 // TestRolloverCommit_HardForkWithoutEraTransition verifies that
@@ -3917,12 +3983,18 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
-	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
-		"version bump at epoch boundary without era transition must set TransitionKnown")
+	assert.Equal(
+		t,
+		hardfork.TransitionKnown,
+		ls.transitionInfo.State,
+		"version bump at epoch boundary without era transition must set TransitionKnown",
+	)
 	assert.Equal(t, uint64(500), ls.transitionInfo.KnownEpoch)
 }
 
@@ -3953,7 +4025,9 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
@@ -4314,7 +4388,9 @@ func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
 // dbWorkerPool left the persisted block-ID index permanently inconsistent
 // with the in-memory tip already advanced for it -- a corruption no retry
 // recovers from, unlike a transient timing issue.
-func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(t *testing.T) {
+func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
+	t *testing.T,
+) {
 	origTimeout := CloseProcessBlocksDrainTimeout
 	CloseProcessBlocksDrainTimeout = 10 * time.Millisecond
 	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })

@@ -279,7 +279,8 @@ func (e *Election) Start(ctx context.Context) error {
 	if nonceReadyCh == nil {
 		e.logger.Warn(
 			"event bus not available, next-epoch precompute will not be tracked",
-			"component", "leader",
+			"component",
+			"leader",
 		)
 	} else {
 		e.wg.Go(func() {
@@ -311,9 +312,12 @@ func (e *Election) Start(ctx context.Context) error {
 		}
 		e.logger.Info(
 			"next epoch nonce already stable at startup, precomputing leader schedule",
-			"component", "leader",
-			"current_epoch", currentEpoch,
-			"ready_epoch", nextEpoch,
+			"component",
+			"leader",
+			"current_epoch",
+			currentEpoch,
+			"ready_epoch",
+			nextEpoch,
 		)
 	}
 
@@ -769,7 +773,9 @@ func (e *Election) computeSchedule(
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
 		if e.metrics != nil {
-			e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
+			e.metrics.stakeLookupDuration.Observe(
+				time.Since(stakeLookupStart).Seconds(),
+			)
 		}
 		return nil, fmt.Errorf("get pool stake: %w", err)
 	}
@@ -784,9 +790,12 @@ func (e *Election) computeSchedule(
 	if poolStake == 0 {
 		e.logger.Info(
 			"pool has no stake in active snapshot, skipping schedule computation",
-			"component", "leader",
-			"epoch", currentEpoch,
-			"snapshot_epoch", snapshotEpoch,
+			"component",
+			"leader",
+			"epoch",
+			currentEpoch,
+			"snapshot_epoch",
+			snapshotEpoch,
 		)
 		return nil, nil
 	}
@@ -794,7 +803,9 @@ func (e *Election) computeSchedule(
 	// Get total stake from the active snapshot.
 	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
 	if e.metrics != nil {
-		e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
+		e.metrics.stakeLookupDuration.Observe(
+			time.Since(stakeLookupStart).Seconds(),
+		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get total stake: %w", err)
@@ -862,7 +873,9 @@ func (e *Election) computeSchedule(
 		mode,
 	)
 	if e.metrics != nil {
-		e.metrics.vrfEvalDurationSeconds.Observe(time.Since(vrfEvalStart).Seconds())
+		e.metrics.vrfEvalDurationSeconds.Observe(
+			time.Since(vrfEvalStart).Seconds(),
+		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("calculate schedule: %w", err)

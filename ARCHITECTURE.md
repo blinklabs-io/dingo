@@ -745,8 +745,10 @@ When `Node.Run()` is called, components are initialized in this order:
  3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
  5. LedgerState creation, followed by mempool provider resolution
- 6. Bark remote archive adapter and History Expiry worker (if configured)
- 7. Database recovery, if startup detects a recoverable timestamp conflict
+ 6. Bark remote archive adapter, then database recovery if startup detects a
+    recoverable timestamp conflict
+ 7. History Expiry worker (if configured), after recovery has settled the
+    ledger tip and blob contents
  8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
     backfill + EventBus subscription (if API storage mode).
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
@@ -810,6 +812,12 @@ When `Node.Run()` is called, components are initialized in this order:
 25. Block forger + leader election (if block producer mode)
 26. Wait for shutdown signal
 ```
+
+Mempool revalidation uses a private candidate overlay while admissions and
+removals continue on the live pool. Mutations are recorded in an ordered
+journal and replayed in bounded batches before the candidate is published. A
+busy pass that cannot catch up leaves the live pool unchanged and is retried
+after a later chain update; it is not a failed admission or a partial swap.
 
 ### Shutdown Flow
 
@@ -1539,6 +1547,8 @@ For the current respun prototype, the notify vote dialect is specifically the th
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
+Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest, and `ValidateTxConway` already returned early for them. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
+
 ### Checkpoint Enforcement
 
 When a network config supplies a `CheckpointsFile` (mainnet and preview ship one), `config/cardano` verifies its `CheckpointsFileHash` and loads it into a block-number to block-hash map, exposed via `CardanoNodeConfig.Checkpoints()`. `LedgerState` caches the map at construction, and `ledgerProcessBlock` (`ledger/state.go`) rejects any inbound block whose height matches a checkpoint but whose hash differs, in every validation mode, before header or transaction validation runs. This is an envelope-validity guard against following a chain that diverges from the known-good chain at a checkpointed height; honest chains always agree with the shipped checkpoints, so the rule never rejects a canonical block. Byron epoch boundary blocks share the preceding block's number and are skipped to avoid a false mismatch.
@@ -1614,9 +1624,21 @@ Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
 already materialized epoch directly from the immutable epoch cache before
 forecasting. The operational slot clock is the deliberate exception to
-wall-clock forecast refusal: a near-now `TimeToSlot` call extrapolates the
-current era while a stale node catches up, but arbitrary time queries and all
-header validation remain bounded. Blockfrost epoch/era end timestamps are
+wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
+extrapolate the current era while a stale node catches up, but arbitrary time
+queries and all header validation remain bounded. The accepted window is one
+slot length plus a fixed tolerance rather than a fixed 5s, because the clock
+resolves the *next* boundary -- up to one slot length ahead -- and a fixed
+window would reject that on any era with longer slots (Byron is 20s in real
+Cardano shapes). Both directions are needed
+because the clock's tick loop converts now to a slot and then that slot back to
+a time; with only the first, the clock could not resolve the next slot boundary
+and retried every 100ms for the whole catch-up instead of ticking.
+`SlotToEpoch` is deliberately not extrapolated -- a tick's `Epoch` and
+`IsEpochStart` drive subscriber epoch-boundary work, so a fabricated epoch would
+be worse than no tick. While the applied era history does not reach the current
+slot the clock emits no tick and reports entering and leaving that state once
+each, rather than an error per slot. Blockfrost epoch/era end timestamps are
 calculated as interval endpoints from cached epoch durations rather than
 treating the exclusive end as a forecastable header slot.
 When the next-epoch nonce becomes stable before that header horizon opens,
@@ -1664,6 +1686,29 @@ dependency across two points in the pipeline:
 - Candidate nonce: frozen at the stability window cutoff
 - Epoch nonce: derived from candidate nonce and previous epoch's last block hash
 
+The `epoch` row's evolving and candidate values are the pair the epoch opened
+with; nothing rewrites them as blocks land, so they are checkpoints rather than
+current state. A reader that needs the pair part-way through an epoch — the
+`GetChainDepState` local-state query, at its acquired tip — calls
+`computeCandidateNonceAsOf`, which folds the same blocks the boundary
+computation would but stops early. `computeCandidateNonce` is that function
+stopped at the epoch's end, so the freeze rule and both the stored-nonce and
+CBOR-decode lookup paths are shared and cannot drift between the query and
+consensus. The candidate's freeze cutoff comes from the full epoch length in
+both cases: where the epoch ends is what fixes it, not how far a given call
+folds.
+
+Stopping early takes two bounds, because the blob store these lookups address
+is not bounded by the chain's tip — a rollback leaves the abandoned blocks in
+place until they are overwritten, and a stored fork holds blocks the chain never
+adopted. The evolving nonce therefore takes the last block before the fold's
+end rather than before the epoch's end, and the candidate takes the last block
+before `min(freeze cutoff, fold end)`: past the cutoff the candidate has frozen
+and the cutoff binds, but before it the candidate still tracks the evolving
+nonce and only the fold's end keeps a stored block above the tip out of it.
+Folding to the epoch's end collapses both bounds to what the boundary
+computation has always used.
+
 The previous epoch's last-block hash is resolved through the active chain index
 (`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
 retain synthetic endorser/genesis blobs and fork blobs that are useful for other
@@ -1710,6 +1755,60 @@ totals. For protocol version 11 and later, requested pools whose mark, set,
 and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
+
+`GetChainDepState` and `GetPoolDistr2` back `cardano-cli query
+leadership-schedule`, which reads the epoch nonce from the first and the stake
+distribution from the second.
+
+`GetChainDepState` serialises the consensus chain-dependent state, and which
+record it writes depends on the era at the acquired tip: Shelley through Alonzo
+take the TPraos layout (`encodeVersion 1` wrapping a nested `PrtclState`),
+Babbage onwards the Praos one (`encodeVersion 0` wrapping a flat eight-field
+record whose extra nonces TPraos does not carry). The version tag selects the
+shape rather than merely labelling it, so a node serving the wrong one during a
+sync through the TPraos eras hands the client a payload it cannot read as
+promised. Which era is which is not restated for the wire: the layout is chosen
+from `consensusModeForEraID`, the same mapping `ConsensusModeForEpoch` uses to
+decide how leader eligibility is checked, so the protocol the reply names and
+the protocol the node elects under cannot disagree. Byron, which ran PBFT and
+has no state of this shape, maps to CPraos there and so takes the modern layout,
+along with any era not explicitly listed.
+
+`GetPoolDistr2` reports each pool's share of the active stake from the mark
+snapshot at `praos.StakeSnapshotEpoch` — the snapshot leader election itself
+reads — rather than from live stake, so a schedule computed from it agrees with
+what the node will accept. Which epoch that is comes from the tip read inside
+the query's own transaction, not from the in-memory consensus snapshot: the
+snapshot is published after the write that advances the chain, so the two can
+sit on opposite sides of an epoch boundary, and stake rows read for the wrong
+epoch still yield a well-formed distribution summing to one. Like
+`GetChainDepState`'s tip-and-epoch pairing, the fix is to take both from the
+same transaction. Each pool's VRF key hash is resolved through
+`registeredPoolVrfKeyHash`, the same function header validation uses, so the
+key the reply names is the key a block must carry to be accepted. A query
+carrying a pool filter reads only the snapshot rows for the pools it names,
+through `GetPoolStakeSnapshotsForPools`; the unfiltered form — the one
+`leadership-schedule` sends — takes the whole-epoch read instead. Neither is a
+query per pool: the filtered read is chunked over the backend's parameter
+limit, as is the `GetPools` VRF-key lookup that follows it, so what the
+caller's filter length decides is how many rows come back, not how many round
+trips the node makes. A requested pool with no row in the
+snapshot is omitted rather than reported at zero stake, matching the node's
+restriction of the distribution to the requested keys.
+
+Both leaves degrade rather than abort on inconsistent data, and that is a
+protocol constraint rather than a preference. The LocalStateQuery server
+propagates a handler error as a protocol error, so returning one does not fail
+a single query — the node drops the client's connection and `cardano-cli`
+reports only a closed bearer, which is the failure mode #2997 was filed for.
+`GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
+has no registration to supply a VRF key hash (the unfiltered form covers every
+pool on the chain, so aborting would take `leadership-schedule` down for every
+operator over one bad row), and `GetChainDepState` logs and skips an op-cert
+counter whose issuer key is not a pool key hash. Omitting a pool leaves the
+reported fractions summing to slightly under one, since its stake stays in
+`TotalActiveStake`; a caller checking its own leadership is unaffected, because
+its own fraction is its stake over that same unchanged total.
 
 ## Chain Management
 
@@ -2557,7 +2656,15 @@ revalidation does not hold that gate while it validates the whole pool. Both
 backends briefly snapshot their live state, build a private candidate while
 admissions and removals continue, and replay concurrent changes from a monotonic
 mutation journal. Bounded catch-up loops apply large deltas off the gate and
-leave only a limited residual for the final critical section.
+leave only a limited residual for the final critical section. Each round replays
+at most `revalidationDeltaCap` mutations so the loop can observe and reconcile
+new ones, and the total round budget scales with the observed backlog rather
+than being fixed: a fixed budget capped one pass at
+`revalidationDeltaCap x rounds` mutations, and because every attempt restarts
+from a fresh journal, a sustained backlog past that ceiling made each pass give
+up without ever publishing -- no invalid-transaction removal and no DAG rebuild
+-- which is the load the enlarged journal exists to buffer. The journal cap
+remains the ultimate bound: once it overflows the candidate is abandoned.
 
 The shared bounded journal aborts a candidate instead of growing without limit,
 and `plugins.mempool.config.revalidationDeltaCap` controls the residual mutation
@@ -3043,8 +3150,13 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
 An operator tool that validates Dingo's closed-epoch reward inputs against Koios
-reference data on preview and preprod networks. It is not part of the node
-process; it is a standalone binary built from `cmd/koios-parity/`.
+reference data on preview and preprod networks. Its original, still-supported
+form is a standalone binary built from `cmd/koios-parity/` that polls a
+separately synced copy of Dingo's metadata database. Dingo #3098 added a
+second, in-process mode — an epoch-boundary observer the node itself can
+register from its own `Run()` composition — described in its own subsection
+below; both modes share the same `internal/koiosparity` comparison logic
+(`compare.go`/`check.go`) so a mismatch means the same thing either way.
 
 **Architecture:**
 
@@ -3322,6 +3434,169 @@ retrying it every tick would not change the outcome.
 
 **Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
 
+#### In-process epoch-boundary observer (dingo #3098)
+
+The standalone CLI above polls a metadata database that was populated by a
+*separate* Dingo process — real, but structurally a second, independently
+synced copy of the truth. Dingo #3098 adds a mode where the node validates
+its own committed reward state as it advances, with no export step and no
+second sync:
+
+- **`RewardParitySource`** (`internal/koiosparity/source.go`) is the
+  interface `check.go`'s comparison functions (`checkEpoch`/`CheckEpoch`)
+  consume instead of a concrete `*DingoDB`. `DingoDB` (the standalone CLI's
+  read-only `database/sql` connection to a separate database file) and
+  `DatabaseSource` (below) both implement it, so the comparison logic itself
+  is identical regardless of which one backs a given run.
+- **`DatabaseSource`** (same file) is the narrow, in-process adapter: it
+  wraps an already-open, live `*database.Database` and reads
+  `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
+  `reward_account_output` through the existing typed `MetadataStore`
+  accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
+  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`) inside a fresh read-only
+  transaction per call — the same tables `ledger/snapshot/rotation.go`
+  already populates at every epoch boundary, with no new table and no
+  metadata export. `GetRewardAccountOutputs` is exposed on the interface now
+  (unused by any comparison yet) so #3097's per-account exact-parity check
+  can be wired in later without revisiting this abstraction.
+  - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
+    `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
+    for only a rolling 4-epoch window in core storage mode (API mode retains
+    `reward_account_output` without bound instead); `reward_pool_input`/
+    `reward_pool_output` are not pruned by that path at all. `DatabaseSource`
+    does not race this in any special, same-transaction way — it just reads
+    whatever is currently committed. What actually satisfies "available
+    before cleanup" is that the observer (below) processes a newly closed
+    epoch promptly after its own event fires, many epochs before that
+    epoch's rows would age out of the window; a read made long after they
+    have aged out comes back as absent (`nil`/`*Present == false`), the same
+    signal already used for "not yet computed" — never an error, and never
+    to be confused with a same-transaction guarantee.
+- **`Observer`** (`internal/koiosparity/observer.go`) subscribes
+  `HandleEpochTransitionEvent` to `event.EpochTransitionEventType` on the
+  node's own `event.EventBus` — the same bus and event every other component
+  uses (`ledger/state.go` publishes it, after the epoch-boundary write
+  transaction has committed and the ledger lock (`ls.Unlock()`) has already
+  been released — see the "authoritative epoch-boundary snapshot capture"
+  ordering in `node.go`). The handler itself never does Koios/database I/O:
+  it only records the closed epoch (`event.EpochTransitionEvent
+  .PreviousEpoch`) into a pending set and wakes a background goroutine,
+  which does the actual fetch+check work. This keeps EventBus dispatch to
+  this subscriber fast regardless of how long a Koios round trip takes, and
+  guarantees network I/O only ever starts once the transaction that produced
+  the event has already committed — never while holding the ledger write
+  transaction or lock.
+  - **Backlog and checkpointing.** `Start` seeds the pending set from every
+    epoch the cache (`cache.db`) has not yet fetched/checked, up to
+    `Source.GetLatestEpoch() - 1` (a floor derived from Dingo's own current
+    epoch number, not an exact koios-epoch bound — good enough for a
+    one-time historical backfill on first attach, since anything it
+    undershoots by a small margin is still covered by the live event
+    subscription going forward). No separate checkpoint file exists: the
+    cache's own persisted `check_epoch_status`/`koios_epoch_info` rows are
+    the sole resumable state, matching the issue's "persist only the minimal
+    resumable checkpoint state actually needed."
+  - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
+    not a single high-water-mark counter, so a burst of events collapses
+    duplicates (dingo's own block-based and slot-clock-based epoch.transition
+    emissions for the same boundary) into one entry, while distinct epochs
+    queued in the same tick are all still processed, in order, none skipped.
+    Critically, `CheckEpoch` is always invoked unconditionally for a
+    re-signaled epoch (bypassing `GetEpochsNeedingCheck`'s Koios-freshness
+    gate, which is about the *reference* side going stale, not the Dingo
+    side) — so a rollback that replays an epoch's boundary with corrected
+    committed state and re-emits its `event.EpochTransitionEvent` gets
+    re-validated against that corrected state rather than trusting a stale
+    prior `PASS`.
+  - **Strict mode** (`ObserverConfig.Strict`, the default via
+    `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to `n.cancel`
+    — exactly once, on the first Koios/tool error or exact parity mismatch,
+    and stops processing the rest of the current batch; this is what makes a
+    mismatch "stop the node" rather than "log and continue as ordinary
+    operation." Non-strict mode (available, not the default) records the
+    same failure in the cache and keeps validating subsequent epochs — an
+    explicit opt-in for advisory/observability-only use.
+  - **Fetch retry.** A single epoch's Koios fetch can fail transiently
+    because Koios's own backend has not finished closing that epoch out yet
+    (`fetchEpoch`'s `end_time==0` rejection) — expected mainly near live
+    chain tip. `fetchIfNeeded` retries this (and any other non-permanent
+    error) a bounded number of times with a fixed delay before giving up; a
+    permanent error (`ErrKoiosPermanent`) is never retried. The pool universe
+    (`GetAllHistoricalPoolIDs`/`GetPoolFirstActiveEpochs`, via
+    `resolvePoolUniverse`) is resolved at most once across that whole retry
+    loop and reused via `FetchEpochWithPools`, rather than re-run on every
+    attempt the way the simpler `FetchEpochWithClient` primitive does — a
+    bounded retry loop hammering both full Koios scans on every attempt would
+    burn meaningfully more of the daily rate-limit/quota budget than the
+    per-epoch fetch itself does.
+- **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
+  `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
+  both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
+  `SetEpochBoundarySnapshotHook`) first, then builds a `DatabaseSource` from
+  its own `n.db`, constructs the `Observer`, and subscribes it to
+  `n.eventBus` — all of this before `n.ledgerState.Start` (whose slot-clock/
+  block-processing goroutines are what can first publish
+  `event.EpochTransitionEvent`). This ordering — hooks configured → observer
+  subscribed → ledger started — matters: an epoch boundary reached before the
+  snapshot hooks exist would fall back to the event-driven capture only, and
+  the observer would validate an epoch whose reward rows the snapshot manager
+  never got a chance to commit via those hooks, a false parity failure that
+  can trip strict mode. `Run()`'s own `started` stack registers
+  `Observer.Stop` only for the startup-failure/panic rollback path (unwound
+  if a later step in `Run()` fails); the path every real shutdown actually
+  takes — `Node.Stop()`, SIGINT/SIGTERM, and `n.cancel()` (including the
+  observer's own strict-mode `FatalFunc`) — goes through
+  `node_shutdown.go`'s `shutdown()`, which stops the observer in phase 1,
+  same as `dbLifecycleMgr`/`offchainMetadataFetcher`, and unconditionally
+  before phase 3 closes `n.db`/`n.pluginHost` — the store `DatabaseSource`
+  reads from. `Observer.Stop` itself always blocks until its background
+  goroutine has actually exited (not just been signaled) before releasing
+  the Koios cache, so this ordering is race-free even under a slow in-flight
+  Koios/DB call. `Observer.Stop` is also idempotent — it signals its
+  background goroutine via a `context.CancelFunc` (safe to invoke more than
+  once) rather than closing an owned channel — because a startup failure that
+  occurs after the observer has started but before `Run()` finishes (e.g.
+  `n.ledgerState.Start` failing later in the same `Run()`) makes *both* the
+  `started`-stack cleanup path and, if the caller also calls `Node.Stop()` on
+  the same instance, `shutdown()`'s path invoke `Observer.Stop` on the same
+  `Observer`; without idempotency the second call would panic closing an
+  already-closed channel. All of this is gated entirely on
+  `KoiosParityConfig.Enabled`
+  (`dingo.yaml`'s `koiosParity:` section /
+  `DINGO_KOIOS_PARITY_*`/`--koios-parity-*`), default `false`. No Koios HTTP
+  client, node-lifecycle control, or EventBus subscription lives in
+  `ledger/`/`database/` — it is all constructed and wired from this
+  composition boundary, the same place every other cross-component adapter
+  in this repo (`internal/dblifecycle`, `internal/historyexpiry`,
+  `internal/offchainmetadata`) is. This is a one-off validation aid, not a
+  permanent Dingo subsystem — SQLite (or whichever metadata backend the node
+  itself runs) remains the only backend involved, since `DatabaseSource`
+  reads the live node's own store rather than opening a second connection.
+  - **Live database Restore/Truncate.** `node_lifecycle.go`'s
+    `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
+    background goroutine has exited, same as `shutdown()`) and unsubscribes
+    its `event.EpochTransitionEventType` handler (`UnsubscribeAndWait`,
+    tracked via `n.koiosParitySubId`) before the in-flight `Restore`/
+    `Truncate` closes `n.db` out from under it — otherwise the observer would
+    keep running against a stale, soon-to-be-closed database, and its
+    subscription would leak on the never-recreated `n.eventBus`.
+    `reinitializeBackgroundManagers` rebuilds the snapshot-manager hooks,
+    then (if `KoiosParityConfig.Enabled`) calls the same
+    `startKoiosParityObserver` helper `Run()` uses to recreate the `Observer`
+    against the fresh `n.db` and resubscribe it, before restarting
+    `n.ledgerState` — mirroring `Run()`'s own hooks-then-observer-then-ledger
+    ordering above so a live rebuild cannot reintroduce the same race.
+- **Out of scope for #3098** (left for #3097/#3099, and explicitly not
+  blocked by this design): per-account exact parity (`RewardParitySource`
+  already exposes `GetRewardAccountOutputs` for this) and chunked/paginated/
+  resumable large-account Koios fetches. `Observer.fetchIfNeeded` avoids
+  repeating the pool-universe scan across its own bounded retry loop (see
+  above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve or
+  reuse that universe only within a single `fetchIfNeeded` call, not across
+  distinct epochs or fetch runs — a deliberate simplicity trade-off for this
+  one-off validation use case, not a resumability guarantee; #3099 owns
+  making that path chunked/paginated/resumable across epochs.
+
 ### Bark (`bark/`)
 
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
@@ -3377,21 +3652,78 @@ bark#16/PR#28) alongside the Archive service, when `node.go`'s `Run()`
 constructs a `dblifecycle.Service` bound to the node via `SetLiveNode` and a
 `databaseLifecycle.snapshotDir` is configured — this is what a remote
 `dingoctl` (see dingoctl#5) drives to trigger a live Snapshot/Restore/Truncate
-without SSH access to the node. These RPCs carry no authentication of their
-own, so `Run()`'s `effectiveBarkHost` defaults Bark's bind address to
-loopback-only (`127.0.0.1`) whenever this service is mounted, instead of
-bark.go's own empty-`Host` default (`0.0.0.0`, all interfaces) — an operator
-must set `--bark-host`/`DINGO_BARK_HOST` explicitly to widen that, at which
-point it is a deliberate choice made behind their own network/auth controls,
-not an accidental default. A node using Bark only for the read-only Archive
-service (no `snapshotDir` configured) is unaffected and keeps the previous
-all-interfaces default. Every mutating RPC
+without SSH access to the node. `Run()`'s `effectiveBarkHost` additionally
+defaults Bark's bind address to loopback-only (`127.0.0.1`) whenever this
+service is mounted, instead of bark.go's own empty-`Host` default
+(`0.0.0.0`, all interfaces) — an operator must set `--bark-host`/
+`DINGO_BARK_HOST` explicitly to widen that. A node using Bark only for the
+read-only Archive service (no `snapshotDir` configured) is unaffected and
+keeps the previous all-interfaces default. Every mutating RPC
 (CreateSnapshot/Restore/Truncate/VerifySnapshot) returns an `operation_id`
 immediately while the actual work runs in a detached goroutine; a single
 in-memory job tracker (`databaseServiceHandler`) enforces the service's
 documented "one operation at a time" invariant (a second call while one is
 running gets `FAILED_PRECONDITION`) and is the backing store for
 `GetOperationHistory` (in-memory only — does not survive a bark restart).
+
+**Authentication** (`bark/auth.go`, dingo#2988). Bind address alone doesn't
+authenticate a caller, so the DatabaseService's destructive RPCs
+(`CreateSnapshot`, `DeleteSnapshot`, `VerifySnapshot`, `Restore`, `Truncate`,
+`CancelOperation` — everything except the read-only status/catalog RPCs and
+the entirely-read-only `ArchiveService`) additionally require mTLS client
+certificate authentication, independent of bind address. `BarkConfig.
+TlsClientCAFilePath` supplies a PEM CA bundle; `startServer` loads it into an
+`x509.CertPool` and sets the listener's `ClientAuth` to
+`tls.VerifyClientCertIfGiven` — "if given," not "required," because
+read-only RPCs on the same listener must keep working for a caller with no
+client cert at all. Go's TLS stack still fully chain-verifies any certificate
+that *is* presented against `ClientCAs` during the handshake itself, before
+any HTTP request is processed, so a certificate signed by an untrusted CA
+never reaches the request layer regardless of which RPC it's calling.
+
+Because Connect's `AnyRequest`/`StreamingHandlerConn` don't expose the
+underlying `tls.ConnectionState`, `peerCertContextMiddleware` wraps the mux
+(alongside the existing `httpcors.Handler` wrap) and stashes whether the
+connection presented a verified client certificate — plus, for audit
+logging, its Subject Common Name and a SHA-256 fingerprint — into the
+request context. `newOperatorAuthInterceptor`, wired via
+`connect.WithInterceptors` when `databaseconnect.NewDatabaseServiceHandler`
+is constructed, is deny-by-default: it exempts a procedure from requiring a
+verified certificate only if it's named in an explicit `readOnlyDatabaseProcedures`
+allowlist, not merely because it's absent from `destructiveDatabaseProcedures`
+— so a DatabaseService RPC added later without updating either map still
+requires authentication like a known destructive one, rather than silently
+passing through unauthenticated. It rejects with `connect.CodeUnauthenticated`
+if the context shows no verified certificate; every non-read-only call,
+accepted or rejected, is logged with the caller's certificate identity (or
+its absence), since `GetOperationHistory` has no notion of caller identity of
+its own — an unclassified procedure is additionally logged as such, so an
+operator notices and fixes the classification even though it's already
+being safely rejected. Because this all sits beneath `*http.Server`, one check covers
+Connect, gRPC, and gRPC-Web alike — they're just HTTP requests distinguished
+by content type once they reach the generated handler, not separate code
+paths needing separate wiring. The interceptor implements the full
+`connect.Interceptor` interface (including the no-op-today
+`WrapStreamingHandler`/`WrapStreamingClient` paths) so the same
+interceptor and destructive-procedure-set pattern is reusable for bark#17's
+proposed `LifecycleService`, which calls for the identical "no anonymous
+calls" requirement.
+
+`Start` (not `NewBark`) fails closed: mounting `Lifecycle` without
+`TlsClientCAFilePath` (or without `TlsCertFilePath`/`TlsKeyFilePath` — mTLS
+has no meaning without the server's own TLS listener underneath it) is
+refused rather than silently serving those RPCs unauthenticated. The check
+lives at `Start`, not construction, because a `databaseServiceHandler` built
+via `newDatabaseServiceHandler` and exercised through direct in-process Go
+calls — as most of this package's own handler-level tests do — never goes
+through `Start`'s mux/interceptor wiring and so is never actually
+network-reachable in the first place; `internal/config/validate.go` also
+checks the same invariant upfront (`barkPort` + `databaseLifecycle.
+snapshotDir` set without `barkClientCaFilePath`), so a misconfigured `dingo`
+invocation fails fast at the CLI rather than deep inside `Node.Run()`.
+`dingoctl`'s existing `--client-cert`/`--client-key`/`--ca-cert` flags
+(`dingoctl/internal/client/tls.go`) are the client side of this — no new
+dingoctl plumbing was needed.
 
 There is no separate snapshot catalog store: a `CreateSnapshot`-generated
 `snapshot_id` is literally its directory name under `SnapshotDir`, and

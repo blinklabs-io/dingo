@@ -237,33 +237,57 @@ func reconcileStaleLedgerState(
 
 	// Phase 2: apply all the inactive-markings atomically.
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("reconcile cancelled before applying stale markers: %w", err)
+		return fmt.Errorf(
+			"reconcile cancelled before applying stale markers: %w",
+			err,
+		)
 	}
 	wtxn := db.MetadataTxn(true)
 	defer wtxn.Release()
 	if err := store.MarkUtxosDeletedAtSlot(
 		wtxn.Metadata(), staleUtxos, tipSlot,
 	); err != nil {
-		return fmt.Errorf("tombstoning %d stale UTxOs: %w", len(staleUtxos), err)
+		return fmt.Errorf(
+			"tombstoning %d stale UTxOs: %w",
+			len(staleUtxos),
+			err,
+		)
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("reconcile cancelled before applying stale markers: %w", err)
+		return fmt.Errorf(
+			"reconcile cancelled before applying stale markers: %w",
+			err,
+		)
 	}
 	if err := store.DeactivateAccounts(
 		wtxn.Metadata(), staleAccts,
 	); err != nil {
-		return fmt.Errorf("deactivating %d stale accounts: %w", len(staleAccts), err)
+		return fmt.Errorf(
+			"deactivating %d stale accounts: %w",
+			len(staleAccts),
+			err,
+		)
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("reconcile cancelled before applying stale markers: %w", err)
+		return fmt.Errorf(
+			"reconcile cancelled before applying stale markers: %w",
+			err,
+		)
 	}
 	if err := store.DeactivateDreps(
 		wtxn.Metadata(), staleDreps,
 	); err != nil {
-		return fmt.Errorf("deactivating %d stale DReps: %w", len(staleDreps), err)
+		return fmt.Errorf(
+			"deactivating %d stale DReps: %w",
+			len(staleDreps),
+			err,
+		)
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("reconcile cancelled before applying stale markers: %w", err)
+		return fmt.Errorf(
+			"reconcile cancelled before applying stale markers: %w",
+			err,
+		)
 	}
 	if err := store.RetirePools(
 		wtxn.Metadata(), stalePools, tipEpoch, tipSlot,
@@ -271,7 +295,10 @@ func reconcileStaleLedgerState(
 		return fmt.Errorf("retiring %d stale pools: %w", len(stalePools), err)
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("reconcile cancelled before applying stale markers: %w", err)
+		return fmt.Errorf(
+			"reconcile cancelled before applying stale markers: %w",
+			err,
+		)
 	}
 	if err := wtxn.Commit(); err != nil {
 		return fmt.Errorf("committing reconcile: %w", err)

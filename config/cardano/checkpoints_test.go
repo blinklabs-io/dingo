@@ -81,7 +81,9 @@ func TestParseCheckpointsRejectsWrongHash(t *testing.T) {
 	require.EqualError(
 		t,
 		err,
-		"checkpoints file hash mismatch: expected deadbeef, computed "+blake2b256Hex(data),
+		"checkpoints file hash mismatch: expected deadbeef, computed "+blake2b256Hex(
+			data,
+		),
 	)
 }
 

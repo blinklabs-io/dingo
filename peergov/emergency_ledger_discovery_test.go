@@ -58,7 +58,9 @@ func countPeersBySource(pg *PeerGovernor, src PeerSource) int {
 func fiftyLedgerRelays() []PoolRelay {
 	relays := make([]PoolRelay, 50)
 	for i := range relays {
-		ip := net.ParseIP("44.0." + strconv.Itoa(i/2) + "." + strconv.Itoa(i%2+1))
+		ip := net.ParseIP(
+			"44.0." + strconv.Itoa(i/2) + "." + strconv.Itoa(i%2+1),
+		)
 		relays[i] = PoolRelay{IPv4: &ip, Port: 3001}
 	}
 	return relays
@@ -158,8 +160,12 @@ func TestDiscoverLedgerPeers_EmergencyBypassesSatisfiedTarget(t *testing.T) {
 
 	pg.discoverLedgerPeers()
 
-	assert.Greater(t, countPeersBySource(pg, PeerSourceP2PLedger), 2,
-		"urgent discovery must add fresh ledger peers even when target appears satisfied")
+	assert.Greater(
+		t,
+		countPeersBySource(pg, PeerSourceP2PLedger),
+		2,
+		"urgent discovery must add fresh ledger peers even when target appears satisfied",
+	)
 }
 
 func TestDiscoverLedgerPeers_EmergencyLogField(t *testing.T) {
@@ -196,13 +202,20 @@ func TestDiscoverLedgerPeers_NoBypassWhenNotUrgent(t *testing.T) {
 			currentSlot: 1000,
 		},
 	})
-	addEligibleUpstreamPeers(pg, pg.config.MinHotPeers) // at hot target: not urgent
+	addEligibleUpstreamPeers(
+		pg,
+		pg.config.MinHotPeers,
+	) // at hot target: not urgent
 	// Refreshed 1 minute ago: inside the hourly interval, so a non-urgent node
 	// must not discover (no emergency bypass applies).
 	pg.lastLedgerPeerRefresh.Store(time.Now().Add(-1 * time.Minute).UnixNano())
 
 	pg.discoverLedgerPeers()
 
-	assert.Equal(t, 0, countPeersBySource(pg, PeerSourceP2PLedger),
-		"non-urgent node must respect the refresh interval and add no ledger peers")
+	assert.Equal(
+		t,
+		0,
+		countPeersBySource(pg, PeerSourceP2PLedger),
+		"non-urgent node must respect the refresh interval and add no ledger peers",
+	)
 }

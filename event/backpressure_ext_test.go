@@ -377,10 +377,15 @@ func TestBackpressureMetrics(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		return counterValue(t, reg, "event_delivery_blocked_total", map[string]string{
-			"type": string(testEvtType),
-			"kind": "in-memory",
-		}) >= 1
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
 	}, 2*time.Second, 5*time.Millisecond,
 		"a backpressured delivery should be counted",
 	)
@@ -431,9 +436,14 @@ func TestAsyncEnqueueBlockedMetric(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		return counterValue(t, reg, "event_async_enqueue_blocked_total", map[string]string{
-			"type": string(testEvtType),
-		}) >= 1
+		return counterValue(
+			t,
+			reg,
+			"event_async_enqueue_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+			},
+		) >= 1
 	}, 5*time.Second, 10*time.Millisecond,
 		"a backpressured async enqueue should be counted",
 	)

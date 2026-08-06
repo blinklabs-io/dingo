@@ -94,11 +94,19 @@ func TestLoadConfig_RejectsInvalidStartupTimeout(t *testing.T) {
 }
 
 func TestParseStartupTimeoutBounds(t *testing.T) {
-	timeout, err := parseStartupTimeout(strconv.FormatInt(maxStartupTimeoutSeconds, 10))
+	timeout, err := parseStartupTimeout(
+		strconv.FormatInt(maxStartupTimeoutSeconds, 10),
+	)
 	require.NoError(t, err)
-	require.Equal(t, time.Duration(maxStartupTimeoutSeconds)*time.Second, timeout)
+	require.Equal(
+		t,
+		time.Duration(maxStartupTimeoutSeconds)*time.Second,
+		timeout,
+	)
 
-	_, err = parseStartupTimeout(strconv.FormatInt(maxStartupTimeoutSeconds+1, 10))
+	_, err = parseStartupTimeout(
+		strconv.FormatInt(maxStartupTimeoutSeconds+1, 10),
+	)
 	require.Error(t, err)
 	_, err = parseStartupTimeout("-1")
 	require.Error(t, err)

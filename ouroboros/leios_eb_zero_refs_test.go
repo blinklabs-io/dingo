@@ -84,7 +84,12 @@ func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 
 		// Array-wrapped shape (CIP-0164 / dingo).
 		decoded, err := lcommon.NewLeiosEndorserBlockFromCbor(arrayWrapped)
-		require.NoErrorf(t, err, "array-wrapped decode failed for %d refs", refCount)
+		require.NoErrorf(
+			t,
+			err,
+			"array-wrapped decode failed for %d refs",
+			refCount,
+		)
 		require.Lenf(
 			t,
 			decoded.TransactionReferences,

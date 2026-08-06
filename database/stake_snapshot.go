@@ -90,7 +90,10 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	// Group snapshots per pool key so a single pool with multiple
 	// snapshot rows (e.g. mark/set/go imported together) is resolved
 	// once and then fanned out.
-	snapshotsByPool := make(map[string][]*models.PoolStakeSnapshot, len(snapshots))
+	snapshotsByPool := make(
+		map[string][]*models.PoolStakeSnapshot,
+		len(snapshots),
+	)
 	pkhs := make([]lcommon.PoolKeyHash, 0, len(snapshots))
 	for _, s := range snapshots {
 		// Reset to ensure callers can re-run resolution without

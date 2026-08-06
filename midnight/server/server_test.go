@@ -184,7 +184,10 @@ func TestShutdownOnContextCancel(t *testing.T) {
 
 	// While running, the stub answers Unimplemented.
 	client := midnight.NewMidnightStateClient(dial(t, addr))
-	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	callCtx, callCancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
 	defer callCancel()
 	_, err = client.GetAssetCreates(callCtx, &midnight.AssetCreatesRequest{})
 	require.Equal(t, codes.Unimplemented, status.Code(err))
@@ -207,7 +210,10 @@ func TestShutdownOnContextCancel(t *testing.T) {
 			200*time.Millisecond,
 		)
 		defer probeCancel()
-		_, probeErr := c.GetAssetCreates(probeCtx, &midnight.AssetCreatesRequest{})
+		_, probeErr := c.GetAssetCreates(
+			probeCtx,
+			&midnight.AssetCreatesRequest{},
+		)
 		return status.Code(probeErr) != codes.Unimplemented
 	}, 5*time.Second, "server did not shut down after context cancel")
 }

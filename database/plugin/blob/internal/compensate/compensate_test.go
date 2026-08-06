@@ -58,7 +58,11 @@ func TestUndoReversesRecordedChanges(t *testing.T) {
 				return err
 			}
 			if int64(len(got)) != size {
-				return fmt.Errorf("size %d does not match %d bytes read", size, len(got))
+				return fmt.Errorf(
+					"size %d does not match %d bytes read",
+					size,
+					len(got),
+				)
 			}
 			calls = append(calls, undoCall{key: key, value: string(got)})
 			return nil
@@ -232,7 +236,10 @@ func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
 	// Exceed the plugins' bounded-read limit without allocating it: a repeating
 	// reader of known length stands in for a large object.
 	const size = int64(256<<20) + 1024
-	require.NoError(t, log.RecordValueFrom("huge", &patternReader{remaining: size}))
+	require.NoError(
+		t,
+		log.RecordValueFrom("huge", &patternReader{remaining: size}),
+	)
 	assert.Equal(t, 1, log.Len())
 
 	info, err := os.Stat(log.file.Name())
@@ -266,7 +273,11 @@ func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
 			}
 			restoredLen = off
 			if off != size {
-				return fmt.Errorf("size %d does not match %d bytes read", size, off)
+				return fmt.Errorf(
+					"size %d does not match %d bytes read",
+					size,
+					off,
+				)
 			}
 			return nil
 		},
@@ -327,7 +338,10 @@ func (r *patternReader) Read(p []byte) (int, error) {
 func TestUndoStreamsRestoreWithoutMaterializing(t *testing.T) {
 	log := newTestLog(t)
 	const size = int64(256<<20) + 4096
-	require.NoError(t, log.RecordValueFrom("huge", &patternReader{remaining: size}))
+	require.NoError(
+		t,
+		log.RecordValueFrom("huge", &patternReader{remaining: size}),
+	)
 
 	var reportedSize, streamed int64
 	require.NoError(t, log.Undo(

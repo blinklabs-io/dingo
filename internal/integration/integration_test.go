@@ -49,8 +49,14 @@ func TestPluginSystemIntegration(t *testing.T) {
 		context.Background(),
 		&database.Config{DataDir: t.TempDir()},
 		internalplugins.StorageSelections{
-			Blob:     plugin.Selection{Provider: "badger", Config: map[string]any{}},
-			Metadata: plugin.Selection{Provider: "sqlite", Config: map[string]any{}},
+			Blob: plugin.Selection{
+				Provider: "badger",
+				Config:   map[string]any{},
+			},
+			Metadata: plugin.Selection{
+				Provider: "sqlite",
+				Config:   map[string]any{},
+			},
 		},
 		internalplugins.StorageDependencies{DataDir: t.TempDir()},
 	)
@@ -85,20 +91,31 @@ func TestStorageBackends(t *testing.T) {
 				context.Background(),
 				&database.Config{DataDir: dataDir},
 				internalplugins.StorageSelections{
-					Blob:     plugin.Selection{Provider: "badger", Config: map[string]any{}},
-					Metadata: plugin.Selection{Provider: "sqlite", Config: map[string]any{}},
+					Blob: plugin.Selection{
+						Provider: "badger",
+						Config:   map[string]any{},
+					},
+					Metadata: plugin.Selection{
+						Provider: "sqlite",
+						Config:   map[string]any{},
+					},
 				},
 				internalplugins.StorageDependencies{DataDir: dataDir},
 			)
 			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, runtime.Close(context.Background())) })
+			t.Cleanup(
+				func() { require.NoError(t, runtime.Close(context.Background())) },
+			)
 
 			blocks, err := loadBlockData(10)
 			require.NoError(t, err)
 			for i := range 10 {
 				txn := runtime.Database.Transaction(true)
 				key := fmt.Appendf(nil, "block-%d", i)
-				require.NoError(t, txn.DB().Blob().Set(txn.Blob(), key, blocks[i]))
+				require.NoError(
+					t,
+					txn.DB().Blob().Set(txn.Blob(), key, blocks[i]),
+				)
 				require.NoError(t, txn.Commit())
 			}
 		})

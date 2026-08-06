@@ -56,14 +56,23 @@ type gcsDestination struct {
 func newGCSDestination(uri *url.URL) (CloudDestination, error) {
 	bucketName := uri.Host
 	if bucketName == "" {
-		return nil, fmt.Errorf("gcs cloud destination %q: missing bucket", uri.String())
+		return nil, fmt.Errorf(
+			"gcs cloud destination %q: missing bucket",
+			uri.String(),
+		)
 	}
 	prefix := strings.Trim(uri.Path, "/")
 
 	ctx := context.Background()
-	client, err := storage.NewGRPCClient(ctx, option.WithScopes(storage.ScopeReadWrite))
+	client, err := storage.NewGRPCClient(
+		ctx,
+		option.WithScopes(storage.ScopeReadWrite),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("gcs cloud destination: create storage client: %w", err)
+		return nil, fmt.Errorf(
+			"gcs cloud destination: create storage client: %w",
+			err,
+		)
 	}
 	return &gcsDestination{
 		client: client,
@@ -108,10 +117,19 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 		closeWErr := w.Close()
 		closeFErr := f.Close()
 		if copyErr != nil {
-			return fmt.Errorf("upload %q to gcs object %q: %w", localPath, key, copyErr)
+			return fmt.Errorf(
+				"upload %q to gcs object %q: %w",
+				localPath,
+				key,
+				copyErr,
+			)
 		}
 		if closeWErr != nil {
-			return fmt.Errorf("close gcs object %q after upload: %w", key, closeWErr)
+			return fmt.Errorf(
+				"close gcs object %q after upload: %w",
+				key,
+				closeWErr,
+			)
 		}
 		if closeFErr != nil {
 			return fmt.Errorf("close %q after upload: %w", localPath, closeFErr)
@@ -124,7 +142,10 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 // localDir. Keys containing a further path separator are skipped — a
 // snapshot directory's contents are flat, so any such key wasn't written by
 // UploadDir.
-func (d *gcsDestination) DownloadDir(ctx context.Context, localDir string) error {
+func (d *gcsDestination) DownloadDir(
+	ctx context.Context,
+	localDir string,
+) error {
 	query := &storage.Query{}
 	if d.prefix != "" {
 		query.Prefix = d.prefix + "/"
@@ -153,7 +174,11 @@ func (d *gcsDestination) DownloadDir(ctx context.Context, localDir string) error
 		r, err := d.bucket.Object(attrs.Name).NewReader(ctx)
 		if err != nil {
 			_ = f.Close()
-			return fmt.Errorf("open gcs object %q for download: %w", attrs.Name, err)
+			return fmt.Errorf(
+				"open gcs object %q for download: %w",
+				attrs.Name,
+				err,
+			)
 		}
 		_, copyErr := io.Copy(f, r)
 		closeRErr := r.Close()
@@ -162,10 +187,18 @@ func (d *gcsDestination) DownloadDir(ctx context.Context, localDir string) error
 			return fmt.Errorf("download gcs object %q: %w", attrs.Name, copyErr)
 		}
 		if closeRErr != nil {
-			return fmt.Errorf("close gcs object %q reader: %w", attrs.Name, closeRErr)
+			return fmt.Errorf(
+				"close gcs object %q reader: %w",
+				attrs.Name,
+				closeRErr,
+			)
 		}
 		if closeFErr != nil {
-			return fmt.Errorf("close %q after download: %w", localPath, closeFErr)
+			return fmt.Errorf(
+				"close %q after download: %w",
+				localPath,
+				closeFErr,
+			)
 		}
 	}
 	return nil
@@ -176,12 +209,17 @@ func (d *gcsDestination) DownloadDir(ctx context.Context, localDir string) error
 // matching how SnapshotToCloud uploads — see its doc comment) via GCS's
 // delimiter-based listing, then fetches and parses just each one's
 // manifest.json rather than downloading the whole snapshot.
-func (d *gcsDestination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, error) {
+func (d *gcsDestination) ListSnapshots(
+	ctx context.Context,
+) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
 		listPrefix = d.prefix + "/"
 	}
-	it := d.bucket.Objects(ctx, &storage.Query{Prefix: listPrefix, Delimiter: "/"})
+	it := d.bucket.Objects(
+		ctx,
+		&storage.Query{Prefix: listPrefix, Delimiter: "/"},
+	)
 	var entries []SnapshotEntry
 	var problems []error
 	for {
@@ -190,7 +228,11 @@ func (d *gcsDestination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, er
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("list gcs objects under %q: %w", d.prefix, err)
+			return nil, fmt.Errorf(
+				"list gcs objects under %q: %w",
+				d.prefix,
+				err,
+			)
 		}
 		// With Delimiter set, a synthetic "directory entry" (Prefix set,
 		// every other field empty) represents one sub-path; a real object
@@ -199,7 +241,10 @@ func (d *gcsDestination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, er
 		if attrs.Prefix == "" {
 			continue
 		}
-		snapshotID := strings.TrimSuffix(strings.TrimPrefix(attrs.Prefix, listPrefix), "/")
+		snapshotID := strings.TrimSuffix(
+			strings.TrimPrefix(attrs.Prefix, listPrefix),
+			"/",
+		)
 		if snapshotID == "" {
 			continue
 		}
@@ -224,7 +269,10 @@ func (d *gcsDestination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, er
 			)
 			continue
 		}
-		entries = append(entries, SnapshotEntry{ID: snapshotID, Manifest: manifest})
+		entries = append(
+			entries,
+			SnapshotEntry{ID: snapshotID, Manifest: manifest},
+		)
 	}
 	return entries, errors.Join(problems...)
 }
@@ -232,7 +280,10 @@ func (d *gcsDestination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, er
 // fetchManifest downloads and parses just the manifest.json for
 // snapshotID, without downloading the rest of that snapshot's (possibly
 // very large) blob/metadata backups.
-func (d *gcsDestination) fetchManifest(ctx context.Context, snapshotID string) (Manifest, error) {
+func (d *gcsDestination) fetchManifest(
+	ctx context.Context,
+	snapshotID string,
+) (Manifest, error) {
 	key := d.objectKey(path.Join(snapshotID, ManifestFileName))
 	r, err := d.bucket.Object(key).NewReader(ctx)
 	if err != nil {
@@ -281,7 +332,11 @@ func (d *gcsDestination) Delete(ctx context.Context) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("list gcs objects under %q for delete: %w", d.prefix, err)
+			return fmt.Errorf(
+				"list gcs objects under %q for delete: %w",
+				d.prefix,
+				err,
+			)
 		}
 		if err := d.bucket.Object(attrs.Name).Delete(ctx); err != nil {
 			return fmt.Errorf("delete gcs object %q: %w", attrs.Name, err)

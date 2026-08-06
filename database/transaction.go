@@ -339,7 +339,10 @@ func (d *Database) SetTransactionMetadataOnly(
 	); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
-			tx.Hash(), idx, point.Slot, err,
+			tx.Hash(),
+			idx,
+			point.Slot,
+			err,
 		)
 	}
 	if owned {

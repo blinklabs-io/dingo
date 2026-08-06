@@ -119,7 +119,11 @@ func (p *Pump) Run(ctx context.Context) error {
 					NodeAddr:      client.Addr(),
 					WorkloadTypes: append([]string(nil), p.cfg.Types...),
 				}); logErr != nil {
-					p.logger.Error("txlog readiness write failed", "err", logErr)
+					p.logger.Error(
+						"txlog readiness write failed",
+						"err",
+						logErr,
+					)
 				}
 			}
 		}
@@ -275,7 +279,9 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 	if upper < minSendAmount {
 		upper = minSendAmount
 	}
-	sendAmount := uint64(IntRange(int(minSendAmount), int(upper))) //nolint:gosec // IntRange always returns non-negative
+	sendAmount := uint64(
+		IntRange(int(minSendAmount), int(upper)),
+	) //nolint:gosec // IntRange always returns non-negative
 
 	required := sendAmount + MinFee
 	inputs, change, err := p.wallet.SelectCoins(required)
@@ -410,7 +416,13 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 
 	changeAddr := deterministicAddr(inputs[0].TxHash)
 
-	txBytes, err := BuildDelegationTx(inputs, stakeKeyHash, poolKeyHash, MinFee, changeAddr)
+	txBytes, err := BuildDelegationTx(
+		inputs,
+		stakeKeyHash,
+		poolKeyHash,
+		MinFee,
+		changeAddr,
+	)
 	if err != nil {
 		p.logger.Error("build delegation failed", "err", err)
 		p.wallet.ReturnUTxOs(inputs)
@@ -499,7 +511,13 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 	}
 
 	if buildErr != nil {
-		p.logger.Error("build governance tx failed", "kind", txKind, "err", buildErr)
+		p.logger.Error(
+			"build governance tx failed",
+			"kind",
+			txKind,
+			"err",
+			buildErr,
+		)
 		p.wallet.ReturnUTxOs(inputs)
 		return false
 	}
@@ -606,7 +624,13 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 	}
 
 	if buildErr != nil {
-		p.logger.Error("build plutus tx failed", "kind", txKind, "err", buildErr)
+		p.logger.Error(
+			"build plutus tx failed",
+			"kind",
+			txKind,
+			"err",
+			buildErr,
+		)
 		if txKind == "plutus_lock" {
 			p.wallet.ReturnUTxOs(inputs)
 		} else {

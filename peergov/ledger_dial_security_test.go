@@ -37,7 +37,9 @@ import (
 // must return that same IP without consulting the resolver again. A
 // compromised authoritative DNS server that answers a second lookup with an
 // internal address must have no effect, because no second lookup happens.
-func TestResolveLedgerDialTarget_LockedInIPUnaffectedByRebindAttempt(t *testing.T) {
+func TestResolveLedgerDialTarget_LockedInIPUnaffectedByRebindAttempt(
+	t *testing.T,
+) {
 	calls := 0
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
@@ -57,7 +59,12 @@ func TestResolveLedgerDialTarget_LockedInIPUnaffectedByRebindAttempt(t *testing.
 	got, err := pg.resolveLedgerDialTarget(context.Background(), peer)
 	require.NoError(t, err)
 	assert.Equal(t, "198.51.100.7:3001", got)
-	assert.Equal(t, 0, calls, "a locked-in IP must not trigger a fresh DNS lookup")
+	assert.Equal(
+		t,
+		0,
+		calls,
+		"a locked-in IP must not trigger a fresh DNS lookup",
+	)
 	assert.Equal(t, "198.51.100.7:3001", peer.NormalizedAddress)
 }
 
@@ -66,7 +73,9 @@ func TestResolveLedgerDialTarget_LockedInIPUnaffectedByRebindAttempt(t *testing.
 // still a hostname, the first dial attempt resolves once, checks routability,
 // and writes the resolved IP back so every later attempt reuses it instead of
 // resolving again.
-func TestResolveLedgerDialTarget_LocksInResolutionOnFallbackHostname(t *testing.T) {
+func TestResolveLedgerDialTarget_LocksInResolutionOnFallbackHostname(
+	t *testing.T,
+) {
 	calls := 0
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
@@ -106,7 +115,9 @@ func TestResolveLedgerDialTarget_LocksInResolutionOnFallbackHostname(t *testing.
 // yields a non-routable IP, the dial is refused rather than silently probing
 // a private address, and the hostname is left un-locked so a later attempt
 // gets a fresh chance to resolve to something routable.
-func TestResolveLedgerDialTarget_RejectsUnroutableResolutionAndDoesNotLockIn(t *testing.T) {
+func TestResolveLedgerDialTarget_RejectsUnroutableResolutionAndDoesNotLockIn(
+	t *testing.T,
+) {
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("10.1.2.3")}, nil
@@ -135,7 +146,9 @@ func TestResolveLedgerDialTarget_RejectsUnroutableResolutionAndDoesNotLockIn(t *
 // resolver error on the fallback path is surfaced (so the caller applies its
 // normal dial-failure backoff) instead of falling back to dialing the raw
 // hostname, which would hand resolution back to the OS resolver unchecked.
-func TestResolveLedgerDialTarget_ResolutionFailurePropagatesError(t *testing.T) {
+func TestResolveLedgerDialTarget_ResolutionFailurePropagatesError(
+	t *testing.T,
+) {
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
 		return nil, errors.New("lookup failed")
@@ -160,7 +173,9 @@ func TestResolveLedgerDialTarget_ResolutionFailurePropagatesError(t *testing.T) 
 // NormalizedAddress is already locked to a dead loopback IP must have its
 // dial fail against that IP; the injected resolver — which would answer with
 // a completely different address — must never be consulted.
-func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(t *testing.T) {
+func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(
+	t *testing.T,
+) {
 	calls := 0
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
@@ -208,13 +223,18 @@ func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(t *test
 
 	go pg.createOutboundConnection(target, false)
 
-	require.Eventually(t, func() bool {
-		pg.mu.Lock()
-		defer pg.mu.Unlock()
-		_, denied := pg.denyList[deadDialAddress]
-		return denied
-	}, 5*time.Second, 10*time.Millisecond,
-		"failed dial to the locked-in address must still drive the normal deny path")
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			_, denied := pg.denyList[deadDialAddress]
+			return denied
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"failed dial to the locked-in address must still drive the normal deny path",
+	)
 
 	assert.Equal(
 		t,
@@ -307,14 +327,19 @@ func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityChecked
 
 	go pg.createOutboundConnection(target, false)
 
-	require.Eventually(t, func() bool {
-		return strings.Contains(
-			logBuf.String(),
-			"establishing TCP connection to: "+resolvedAddr,
-		)
-	}, 5*time.Second, 10*time.Millisecond,
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"establishing TCP connection to: "+resolvedAddr,
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
 		"the connection manager must dial exactly the IP resolveLedgerDialTarget "+
-			"resolved and routability-checked, not a separately re-resolved value")
+			"resolved and routability-checked, not a separately re-resolved value",
+	)
 
 	cancel()
 }
@@ -325,7 +350,9 @@ func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityChecked
 // resolveDialAddress, this resolution never runs again for the peer's
 // lifetime, so pinning to the first (possibly unusable) DNS answer would
 // strand a v4-only host on an IPv6 record forever.
-func TestResolveLedgerDialTarget_FallbackPrefersLocallySupportedFamily(t *testing.T) {
+func TestResolveLedgerDialTarget_FallbackPrefersLocallySupportedFamily(
+	t *testing.T,
+) {
 	setLocalAddrFamilies(t, true, false) // v4-only host
 
 	oldLookupIPAddr := lookupIPAddr

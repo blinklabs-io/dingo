@@ -55,7 +55,11 @@ func TestMarshalBlockMetadataRoundTrip(t *testing.T) {
 		t.Fatalf("expected Height %d, got %d", expected.Height, decoded.Height)
 	}
 	if !bytes.Equal(decoded.PrevHash, expected.PrevHash) {
-		t.Fatalf("expected PrevHash %x, got %x", expected.PrevHash, decoded.PrevHash)
+		t.Fatalf(
+			"expected PrevHash %x, got %x",
+			expected.PrevHash,
+			decoded.PrevHash,
+		)
 	}
 }
 
@@ -86,7 +90,11 @@ func TestUnmarshalBlockMetadataLegacyCbor(t *testing.T) {
 		t.Fatalf("expected Height %d, got %d", expected.Height, decoded.Height)
 	}
 	if !bytes.Equal(decoded.PrevHash, expected.PrevHash) {
-		t.Fatalf("expected PrevHash %x, got %x", expected.PrevHash, decoded.PrevHash)
+		t.Fatalf(
+			"expected PrevHash %x, got %x",
+			expected.PrevHash,
+			decoded.PrevHash,
+		)
 	}
 }
 

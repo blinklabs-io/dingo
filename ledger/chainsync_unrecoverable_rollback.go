@@ -123,7 +123,9 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 		ls.metrics.unrecoverableRollbacks.Inc()
 	}
 	now := time.Now()
-	if now.Sub(ls.lastUnrecoverableRollbackLog) < unrecoverableRollbackLogInterval {
+	if now.Sub(
+		ls.lastUnrecoverableRollbackLog,
+	) < unrecoverableRollbackLogInterval {
 		return
 	}
 	ls.lastUnrecoverableRollbackLog = now

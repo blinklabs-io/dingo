@@ -54,6 +54,27 @@ in the v1alpha1 `utxo_reference_input` association table so multiple
 transactions can reference one output; the legacy single-column marker is not
 used by the new store.
 
+`v2alpha1`, integer version 2, adds
+`idx_pool_opcert_sequence_pool_sequence` (see `pool_opcert_sequence` below).
+It is a separate version rather than an edit to v1 because a completed
+migration's checksum is fixed: changing v1's DDL would make every database
+that had already run it fail startup on checksum drift. Only the initial
+version contains `CREATE TABLE` statements, and MySQL derives its blob-column
+prefix lengths by reading them, so later versions are translated against the
+accumulated schema rather than against their own statements — a version
+indexing a blob column it did not create would otherwise emit a key MySQL
+rejects.
+
+Upgrading to `v2alpha1` builds that index over the whole of
+`pool_opcert_sequence`, which holds one row per block for the life of the chain
+— millions of rows on a synced mainnet database. The build runs inside
+`Store.Start()`, before the store accepts readers or writers, so the first
+start after upgrading stalls for as long as the backend takes to index that
+table, with no incremental progress reported. It is a one-time cost per
+database and is not repeated on later starts. Operators upgrading a large
+mainnet node should expect that pause rather than read it as a hang; a fresh
+database creates the index as part of its initial schema and never sees it.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
@@ -502,7 +523,7 @@ PostgreSQL/MySQL repeatable-read read-only transactions.
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic reconcile retirements written by a Mithril v2 catch-up have `certificate_id = 0` and no `certs` row (`epoch`/`added_slot` are the catch-up tip); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. |
-| `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot` | Observed operational certificate sequence by slot. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. |
+| `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query; because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v2alpha1`. The cost is one further index maintained per minted block. |
 
 ### DReps, Governance, and Committee
 
@@ -541,7 +562,7 @@ process the same pointer unless the claim expires before a result is recorded.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `calculation_version`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. Authoritative `"mark"` rows aggregate the transactionally maintained `reward_live_stake` rows at the exact rollover SNAP point; a late fallback whose tip has passed `captured_slot` uses historical delegation, UTxO liveness, and reward deltas instead. `calculation_version` identifies the stake-accounting algorithm for Mark/Set/Go rows; zero denotes pre-provenance data. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Mark snapshot refreshes atomically replace all rows for the same `(epoch, snapshot_type)` before inserting the freshly captured set, so disappeared pools cannot remain in the snapshot. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
+| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `calculation_version`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. Authoritative `"mark"` rows aggregate the transactionally maintained `reward_live_stake` rows at the exact rollover SNAP point; a late fallback whose tip has passed `captured_slot` uses historical delegation, UTxO liveness, and reward deltas instead. `calculation_version` identifies the stake-accounting algorithm for Mark/Set/Go rows; zero denotes pre-provenance data. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Mark snapshot refreshes atomically replace all rows for the same `(epoch, snapshot_type)` before inserting the freshly captured set, so disappeared pools cannot remain in the snapshot. `GetPoolStakeSnapshotsForPools` reads a named subset for one `(epoch, snapshot_type)` via `pool_key_hash IN (...)` on the unique key, chunked over the dialect's parameter limit (999 on SQLite, 65535 on PostgreSQL/MySQL) so a long filter costs a bounded number of statements rather than one per pool; `GetPoolDistr2`'s pool filter is the caller. A named pool with no row is absent from the result rather than returned at zero stake. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
 | `epoch_summary` | `id`, `epoch`, `total_active_stake`, `total_pool_count`, `total_delegators`, `epoch_nonce`, `boundary_slot`, `snapshot_ready` | PK `id`; unique `epoch` | Aggregate epoch snapshot state, written by the same transaction that captures the Mark snapshot. Retained for the life of the database (see the retention note below), so it is the durable record of every epoch boundary the node captured and a missing row means the boundary was never captured. Re-crossing a boundary after a rollback upserts the row, replacing the stake/pool/delegator totals, nonce, and boundary slot; `snapshot_ready` is sticky (`snapshot_ready OR excluded.snapshot_ready`) so a later partial write cannot clear it. `GetTotalActiveStake` reads `total_active_stake` from here for `"mark"` queries whenever `snapshot_ready` is set, which keeps historical epoch totals answerable after the per-pool rows are pruned. |
 | `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot`, `calculation_version` | PK `id`; unique `(credential_tag, staking_key)`; index `(pool_key_hash, credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. `calculation_version` is set on every rebuild and incremental update. Authoritative epoch-boundary capture reads all registered, delegated rows through `GetLiveStakeInputsForPools`: zero-stake rows contribute to Mark delegator counts, while positive rows also become `reward_stake_input`. The pool/credential index supports this ordered boundary scan without retaining the legacy index on `total_stake`. Startup compares calculation version, keys, values, registration, and delegation state with canonical metadata and rebuilds on any mismatch. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. |
 | `reward_ada_pots` | `id`, `epoch`, `treasury`, `reserves`, `fees`, `rewards`, `captured_slot` | PK `id`; unique `epoch`; index `captured_slot` | Reward ADA pots captured at an epoch boundary. Reward application reads the row for its pots epoch and skips the epoch when it is absent. Retained for the life of the database (see the retention note below). |
@@ -753,7 +774,26 @@ block references an endorser block (`ledger/leios_apply.go`), `SetGenesisCbor`
 writes a standalone CBOR blob under a `bp` + `(endorser-block slot,
 endorser-block hash)` key. That `bp` value is the endorser-block offset blob
 used by cold extraction, not a chain block and not the transaction metadata
-rows. Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
+rows. Which transaction commits this `bp` blob depends on the apply path
+(`LeiosApplyEndorserBlockTxs`). On the Haskell-conformant path (Musashi,
+`LeiosApplyEndorserBlockTxs` false) it is committed in its own blob transaction,
+not in the shared block-processing transaction that covers up to a full 50-block
+chunk: every certified endorser block in a chunk would otherwise pile its full
+blob (plus one `DOFF` entry per endorser transaction and per produced output)
+into that single transaction, and on a dense Leios backlog the accumulated
+writes exceed Badger's per-transaction budget (`ErrTxnTooBig`), wedging the
+chunk. That path applies the endorser transactions without validation and never
+reads the blob back within the chunk, and the blob is content-addressed and
+idempotent (`ID=0`, off the chain index), so an independent commit is safe — the
+endorser transactions' `DOFF` ledger effects still go into the shared
+transaction under the ranking block's point, so rollback semantics are
+unchanged; a blob orphaned by a crash or rollback is harmless and overwritten
+identically on re-apply. On the CIP-conformant path
+(`LeiosApplyEndorserBlockTxs` true) the endorser transactions are validated and
+a later block in the same chunk that spends an endorser-block-produced output
+reads the blob back through the shared transaction, so the blob stays in the
+shared transaction to be resolvable via read-your-writes (a separately committed
+blob is not visible to that transaction's start-of-transaction snapshot). Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
 keys and deliberately omits the `bi`/`bh` index keys, so the chain iterator
 never treats it as a chain block. Its `bp..._metadata` carries `ID=0` (real
 ranking blocks created via `BlockCreate` get `ID >= 1`), which is also how the
@@ -923,6 +963,14 @@ matching `bh` entry for each block). The
 `dingo_database_block_hash_index_hits_total` and
 `dingo_database_block_hash_index_misses_total` counters expose the hit and
 miss rates so operators can tell whether a backfill is needed.
+
+A caller that already knows the slot as well as the hash — anything holding a
+point, such as the tip — should use `BlockByPointTxn` rather than
+`BlockByHash`. It builds the `bp` key from slot and hash and reads the blob
+directly, so it neither consults the index nor scans, and it returns the block
+on a database whose index has not been backfilled. Reserve the by-hash lookup
+for callers that genuinely have only a hash, and treat its `ErrBlockNotFound`
+as "not reachable by hash" rather than "not present".
 
 ## SQL Examples Mirroring the Go API
 

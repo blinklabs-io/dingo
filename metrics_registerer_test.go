@@ -105,7 +105,9 @@ func TestRebuildableRegistererRegisterIsAtomicWithUnregisterAll(t *testing.T) {
 
 	require.NoError(t, <-registerErr)
 	testutil.RequireReceive(
-		t, unregisterAllDone, time.Second,
+		t,
+		unregisterAllDone,
+		time.Second,
 		"unregisterAll must complete once the concurrent Register call finishes",
 	)
 }
@@ -139,9 +141,12 @@ func TestRetainedComponentPromRegistryBypassesRebuildableWrapper(t *testing.T) {
 
 	// n.ouroboros -- retained, never rebuilt -- must register through
 	// retainedComponentPromRegistry instead.
-	require.NoError(t, n.retainedComponentPromRegistry().Register(prometheus.NewGauge(
-		prometheus.GaugeOpts{Name: "test_retained_component_gauge"},
-	)))
+	require.NoError(
+		t,
+		n.retainedComponentPromRegistry().Register(prometheus.NewGauge(
+			prometheus.GaugeOpts{Name: "test_retained_component_gauge"},
+		)),
+	)
 
 	// Simulate node_lifecycle.go's cleanup before a live rebuild.
 	n.rebuildableMetrics.unregisterAll()

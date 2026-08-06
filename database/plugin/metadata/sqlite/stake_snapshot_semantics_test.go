@@ -35,7 +35,9 @@ type sqliteTestResult struct{ Error error }
 // same database/sql schema as production.
 type sqliteTestDB struct{ db *sql.DB }
 
-func setupStakeSnapshotTestStore(t *testing.T) (*sqlstore.Store, *sqliteTestDB) {
+func setupStakeSnapshotTestStore(
+	t *testing.T,
+) (*sqlstore.Store, *sqliteTestDB) {
 	t.Helper()
 	store, db, _, err := openSQLStore(
 		Config{DataDir: t.TempDir()},
@@ -105,7 +107,11 @@ type sqliteTestQuery struct {
 	args []any
 }
 
-func (d *sqliteTestDB) Model(any) *sqliteTestQuery { return &sqliteTestQuery{db: d} }
+func (d *sqliteTestDB) Model(
+	any,
+) *sqliteTestQuery {
+	return &sqliteTestQuery{db: d}
+}
 
 func (q *sqliteTestQuery) Where(_ string, args ...any) *sqliteTestQuery {
 	q.args = args
@@ -115,14 +121,22 @@ func (q *sqliteTestQuery) Where(_ string, args ...any) *sqliteTestQuery {
 func (q *sqliteTestQuery) Updates(values map[string]any) sqliteTestResult {
 	_, err := q.db.db.Exec(
 		"UPDATE account SET drep = ?, added_slot = ? WHERE credential_tag = ? AND staking_key = ?",
-		values["drep"], values["added_slot"], q.args[0], q.args[1],
+		values["drep"],
+		values["added_slot"],
+		q.args[0],
+		q.args[1],
 	)
 	return sqliteTestResult{Error: err}
 }
 
 func createTestTransaction(db *sqliteTestDB, txID uint, slot uint64) error {
-	_, err := db.db.Exec(`INSERT INTO "transaction" (id, hash, slot, block_index, valid)
-        VALUES (?, ?, ?, 0, 1)`, txID, []byte(fmt.Sprintf("tx-%d", txID)), slot)
+	_, err := db.db.Exec(
+		`INSERT INTO "transaction" (id, hash, slot, block_index, valid)
+        VALUES (?, ?, ?, 0, 1)`,
+		txID,
+		[]byte(fmt.Sprintf("tx-%d", txID)),
+		slot,
+	)
 	return err
 }
 
@@ -395,8 +409,12 @@ func TestEpochBoundaryStakeRetainsBoundaryRewardUpdate(t *testing.T) {
 		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(150), stakes[string(pool)],
-		"the boundary query must retain the pre-SNAP reward update and drop the rest")
+	require.Equal(
+		t,
+		uint64(150),
+		stakes[string(pool)],
+		"the boundary query must retain the pre-SNAP reward update and drop the rest",
+	)
 	require.Equal(t, uint64(1), delegators[string(pool)])
 
 	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(

@@ -212,7 +212,9 @@ func dijkstraBlockTransactionCbor(
 			return nil, fmt.Errorf("decode Dijkstra is_valid: %w", decErr)
 		}
 		if !isValid {
-			return nil, errors.New("dijkstra admitted transaction has is_valid=false")
+			return nil, errors.New(
+				"dijkstra admitted transaction has is_valid=false",
+			)
 		}
 		blockTxCbor, err := cbor.Encode([]cbor.RawMessage{
 			parts[0],
@@ -288,5 +290,8 @@ func forgedBlockDiagnostics(blockCbor []byte) string {
 		res.Root != nil {
 		return res.Root.FormatDiagnosticPretty(opts)
 	}
-	return fmt.Sprintf("<diagnostics unavailable for %d-byte block>", len(blockCbor))
+	return fmt.Sprintf(
+		"<diagnostics unavailable for %d-byte block>",
+		len(blockCbor),
+	)
 }

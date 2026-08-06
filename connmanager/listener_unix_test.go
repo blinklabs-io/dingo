@@ -83,7 +83,11 @@ func TestStartListener_UnixSocket_RemovesStaleSocketFile(t *testing.T) {
 	cm := NewConnectionManager(cfg)
 	ctx := context.Background()
 	err = cm.Start(ctx)
-	require.NoError(t, err, "Start should succeed when stale socket file is removed")
+	require.NoError(
+		t,
+		err,
+		"Start should succeed when stale socket file is removed",
+	)
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -146,7 +150,11 @@ func TestStartListener_UnixSocket_ErrorOnNonSocketFile(t *testing.T) {
 	cm := NewConnectionManager(cfg)
 	ctx := context.Background()
 	err = cm.Start(ctx)
-	require.Error(t, err, "Start should fail when socket path is a non-socket file")
+	require.Error(
+		t,
+		err,
+		"Start should fail when socket path is a non-socket file",
+	)
 	assert.Contains(t, err.Error(), "exists and is not a unix socket")
 }
 

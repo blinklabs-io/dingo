@@ -667,7 +667,11 @@ func TestIPRateLimitFairnessUnderConnectionChurn(t *testing.T) {
 		require.True(t, cm.acquireIPSlot(ipA))
 		require.False(t, cm.acquireIPSlot(ipA), "IP A should hit its own cap")
 		// IP B must still be able to acquire while A is saturated.
-		require.True(t, cm.acquireIPSlot(ipB), "IP B progress must be independent of IP A saturation")
+		require.True(
+			t,
+			cm.acquireIPSlot(ipB),
+			"IP B progress must be independent of IP A saturation",
+		)
 		cm.releaseIPSlot(ipB)
 		cm.releaseIPSlot(ipA)
 		cm.releaseIPSlot(ipA)

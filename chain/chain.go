@@ -1395,7 +1395,10 @@ func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
 
 // holdsBlockAtIndexLocked is the lock-preserving form used by rollback paths
 // that already hold c.mutex and c.manager.mutex.
-func (c *Chain) holdsBlockAtIndexLocked(blockIndex uint64, blockHash []byte) bool {
+func (c *Chain) holdsBlockAtIndexLocked(
+	blockIndex uint64,
+	blockHash []byte,
+) bool {
 	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
 		return false
 	}

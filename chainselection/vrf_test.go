@@ -189,10 +189,18 @@ func TestComparePraosTipsSameIssuerSlotHigherOCertWins(t *testing.T) {
 	}
 	issuer := []byte("issuer")
 	oursView := NewPraosTiebreakerViewFull(
-		ours, issuer, 1, make64ByteVRFFirstByte(0xAA), PraosTiebreakerConfigConway(),
+		ours,
+		issuer,
+		1,
+		make64ByteVRFFirstByte(0xAA),
+		PraosTiebreakerConfigConway(),
 	)
 	candidateView := NewPraosTiebreakerViewFull(
-		candidate, issuer, 2, make64ByteVRFFirstByte(0xAA), PraosTiebreakerConfigConway(),
+		candidate,
+		issuer,
+		2,
+		make64ByteVRFFirstByte(0xAA),
+		PraosTiebreakerConfigConway(),
 	)
 
 	result := ComparePraosTips(ours, candidate, oursView, candidateView)

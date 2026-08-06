@@ -244,7 +244,11 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint(100), result.(*shelley.ShelleyProtocolParameters).MinFeeA)
+	require.Equal(
+		t,
+		uint(100),
+		result.(*shelley.ShelleyProtocolParameters).MinFeeA,
+	)
 
 	stored, err := db.GetPParams(
 		4,
@@ -258,7 +262,11 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
-	require.Equal(t, uint(100), stored.(*shelley.ShelleyProtocolParameters).MinFeeA)
+	require.Equal(
+		t,
+		uint(100),
+		stored.(*shelley.ShelleyProtocolParameters).MinFeeA,
+	)
 }
 
 func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
@@ -322,7 +330,11 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
-	require.Equal(t, uint(100), stored.(*shelley.ShelleyProtocolParameters).MinFeeA)
+	require.Equal(
+		t,
+		uint(100),
+		stored.(*shelley.ShelleyProtocolParameters).MinFeeA,
+	)
 }
 
 func TestComputeAndApplyPParamUpdates_FiltersEpoch(
@@ -652,7 +664,10 @@ func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
 		MinFeeA: &newMinFeeA,
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.SetPParamUpdate([]byte{0x01}, updateCbor, 300, 3, nil))
+	require.NoError(
+		t,
+		db.SetPParamUpdate([]byte{0x01}, updateCbor, 300, 3, nil),
+	)
 
 	currentPParams := &shelley.ShelleyProtocolParameters{MinFeeA: 44}
 	decodeFunc, updateFunc := shelleyForecastFuncs()

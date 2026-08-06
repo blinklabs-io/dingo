@@ -302,9 +302,12 @@ func (p *PeerGovernor) createOutboundConnection(
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: inbound reusable topology connections already satisfy valency, suppressing outbound attempts",
-				"address", peer.Address,
-				"group", currentPeer.GroupID,
-				"valency", currentPeer.Valency,
+				"address",
+				peer.Address,
+				"group",
+				currentPeer.GroupID,
+				"valency",
+				currentPeer.Valency,
 			)
 			return
 		}
@@ -316,7 +319,8 @@ func (p *PeerGovernor) createOutboundConnection(
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: peer already connected via reusable duplex connection, stopping outbound attempts",
-				"address", peer.Address,
+				"address",
+				peer.Address,
 			)
 			return
 		}
@@ -335,7 +339,8 @@ func (p *PeerGovernor) createOutboundConnection(
 			p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
 			p.config.Logger.Info(
 				"outbound: inbound from same peer address exists before negotiation completes, waiting",
-				"address", peer.Address,
+				"address",
+				peer.Address,
 			)
 			select {
 			case <-stopCh:
@@ -436,7 +441,8 @@ func (p *PeerGovernor) createOutboundConnection(
 			if p.ctx.Err() != nil {
 				p.config.Logger.Debug(
 					"outbound: connection attempt canceled, governor context done",
-					"address", peer.Address,
+					"address",
+					peer.Address,
 				)
 				return
 			}
@@ -497,10 +503,13 @@ func (p *PeerGovernor) createOutboundConnection(
 			p.mu.Unlock()
 			if !currentPeerConnKnown &&
 				p.config.ConnManager != nil &&
-				p.config.ConnManager.HasInboundPeerAddress(peer.NormalizedAddress) {
+				p.config.ConnManager.HasInboundPeerAddress(
+					peer.NormalizedAddress,
+				) {
 				p.config.Logger.Info(
 					"outbound: dial failed while exact inbound peer address is still negotiating, waiting",
-					"address", peer.Address,
+					"address",
+					peer.Address,
 				)
 				continue
 			}
@@ -553,9 +562,12 @@ func (p *PeerGovernor) createOutboundConnection(
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: dropping never-connected discovered/public-root peer after failed connection",
-				"address", peerAddress,
-				"source", peerSource.String(),
-				"deny_duration", p.config.DenyDuration,
+				"address",
+				peerAddress,
+				"source",
+				peerSource.String(),
+				"deny_duration",
+				p.config.DenyDuration,
 			)
 			p.publishEvent(
 				PeerRemovedEventType,
@@ -840,7 +852,9 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			// Reset burst when reconnects are no longer clustered inside the
 			// inbound cooldown window.
 			if !peer.LastInboundDisconnect.IsZero() &&
-				connClosedAt.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
+				connClosedAt.Sub(
+					peer.LastInboundDisconnect,
+				) >= p.config.InboundCooldown {
 				peer.InboundShortLivedCount = 0
 			}
 			if !peer.InboundConnectedAt.IsZero() &&
@@ -874,10 +888,14 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				if connDur < 0 {
 					p.config.Logger.Warn(
 						"connection close timestamp predates connection start, clamping duration",
-						"address", peer.Address,
-						"connected_at", peer.ConnectedAt,
-						"closed_at", connClosedAt,
-						"raw_duration", connDur,
+						"address",
+						peer.Address,
+						"connected_at",
+						peer.ConnectedAt,
+						"closed_at",
+						connClosedAt,
+						"raw_duration",
+						connDur,
 					)
 					connDur = 0
 				}
@@ -964,7 +982,12 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	defer p.mu.Unlock()
 	expiry := time.Now().Add(duration)
 	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
-		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
+		p.addPeerDenyKeysLocked(
+			p.peers[idx],
+			expiry,
+			normalized,
+			hostnameNormalized,
+		)
 	} else if idx := p.peerIndexByConnectionRemoteAddressLocked(
 		normalized,
 		hostnameNormalized,
@@ -1031,7 +1054,8 @@ func (p *PeerGovernor) peerIndexByConnectionRemoteAddressLocked(
 			if address == "" {
 				continue
 			}
-			if address == remoteNormalized || address == remoteHostnameNormalized {
+			if address == remoteNormalized ||
+				address == remoteHostnameNormalized {
 				return i
 			}
 		}

@@ -52,7 +52,10 @@ func devnetCredPaths() (vrf, kes, opcert string) {
 // genesis that is plausible for the devnet opcert (KESPeriod=0,
 // IssueNumber=0). systemStart slightly in the past, slotsPerKESPeriod
 // generous so the opcert is current rather than expired.
-func shelleyGenesisCfgForBP(t *testing.T, systemStart time.Time) *cardano.CardanoNodeConfig {
+func shelleyGenesisCfgForBP(
+	t *testing.T,
+	systemStart time.Time,
+) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
@@ -76,7 +79,9 @@ func newTestNodeForBP(
 ) *Node {
 	t.Helper()
 	cfg := Config{
-		logger:                        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		blockProducer:                 enabled,
 		shelleyVRFKey:                 vrf,
 		shelleyKESKey:                 kes,

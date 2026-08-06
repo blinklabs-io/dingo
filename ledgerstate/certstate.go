@@ -856,7 +856,10 @@ func parsePoolParams(
 		params[5+leiosOffset],
 	)
 	if !ok {
-		return nil, fmt.Errorf("decoding reward account for pool %x", poolKeyHash)
+		return nil, fmt.Errorf(
+			"decoding reward account for pool %x",
+			poolKeyHash,
+		)
 	}
 	pool.RewardAccount = rewardAccount
 	pool.RewardAccountCredentialTag = rewardAccountTag
@@ -1487,7 +1490,9 @@ func parseDRepDelegation(data []byte) (Credential, error) {
 		)
 	}
 	if len(elems) < 1 {
-		return Credential{}, errors.New("drep delegation has 0 elements, expected at least 1")
+		return Credential{}, errors.New(
+			"drep delegation has 0 elements, expected at least 1",
+		)
 	}
 
 	var drepType uint64

@@ -65,7 +65,9 @@ func TestVerifyOpCertColdSignature_RealCardanoCliCert(t *testing.T) {
 		return b
 	}
 	opCert := &gledger.OpCert{
-		KesVkey:     mustHex("4cd49bb05e9885142fe7af1481107995298771fd1a24e72b506a4d600ee2b312"),
+		KesVkey: mustHex(
+			"4cd49bb05e9885142fe7af1481107995298771fd1a24e72b506a4d600ee2b312",
+		),
 		IssueNumber: 0,
 		KesPeriod:   0,
 		ColdSignature: mustHex(
@@ -139,7 +141,9 @@ func TestVerifyOpCertHeaderCrypto_ExpiredKESPeriod(t *testing.T) {
 // expiry check degrades gracefully when the genesis parameter is unavailable:
 // the same far-future slot that expired above passes when maxKesEvolutions is
 // zero, leaving the lighter future-cert guard inside VerifyBlock in charge.
-func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(t *testing.T) {
+func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(
+	t *testing.T,
+) {
 	tb := createTestBlock(t, [32]byte{14}, 16, tamperNone)
 	const slotsPerKesPeriod = uint64(100)
 	err := verifyOpCertHeaderCrypto(

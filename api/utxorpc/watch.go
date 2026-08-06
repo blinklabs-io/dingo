@@ -308,7 +308,10 @@ func (s *watchServiceServer) WatchTx(
 				}()
 			}
 
-			historyMsgs, found := watchTxBuildRollbackMessages(&history, next.Point)
+			historyMsgs, found := watchTxBuildRollbackMessages(
+				&history,
+				next.Point,
+			)
 			msgs = append(msgs, historyMsgs...)
 			if !found && fetchCh != nil {
 				fetched := <-fetchCh

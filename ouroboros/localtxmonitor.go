@@ -25,7 +25,9 @@ import (
 func (o *Ouroboros) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {
 	return []olocaltxmonitor.LocalTxMonitorOptionFunc{
 		olocaltxmonitor.WithGetMempoolFunc(
-			o.instrumentLocaltxmonitorGetMempool(o.localtxmonitorServerGetMempool),
+			o.instrumentLocaltxmonitorGetMempool(
+				o.localtxmonitorServerGetMempool,
+			),
 		),
 	}
 }
@@ -60,5 +62,7 @@ func (o *Ouroboros) localtxmonitorServerGetMempool(
 			Tx:    mempoolTxs[i].Cbor,
 		}
 	}
-	return tip.Point.Slot, uint32(capacity), retTxs, nil // #nosec G115 -- range checked above
+	return tip.Point.Slot, uint32(
+		capacity,
+	), retTxs, nil // #nosec G115 -- range checked above
 }

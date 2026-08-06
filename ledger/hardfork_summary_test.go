@@ -40,9 +40,27 @@ func minimalShelleyGenesisCfg(t *testing.T) *cardano.CardanoNodeConfig {
 func TestHardForkSummary_SingleEra(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
-			{EpochId: 0, StartSlot: 0, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
-			{EpochId: 1, StartSlot: 100, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
-			{EpochId: 2, StartSlot: 200, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
 		},
 		currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
 		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(250, []byte("tip"))},
@@ -55,12 +73,20 @@ func TestHardForkSummary_SingleEra(t *testing.T) {
 	sum, err := ls.HardForkSummary()
 	require.NoError(t, err)
 	require.NotNil(t, sum)
-	assert.Equal(t, time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC), sum.SystemStart)
+	assert.Equal(
+		t,
+		time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC),
+		sum.SystemStart,
+	)
 
 	require.Len(t, sum.Eras, 1)
 	era := sum.Eras[0]
 	assert.Equal(t, uint(1), era.EraID)
-	assert.Equal(t, hardfork.Bound{RelativeTime: 0, Slot: 0, Epoch: 0}, era.Start)
+	assert.Equal(
+		t,
+		hardfork.Bound{RelativeTime: 0, Slot: 0, Epoch: 0},
+		era.Start,
+	)
 	require.NotNil(t, era.End, "current era should be safe-zone bounded")
 	assert.Equal(t, uint64(26_200), era.End.Slot)
 	assert.Equal(t, uint64(262), era.End.Epoch)
@@ -76,11 +102,35 @@ func TestHardForkSummary_TwoEras(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			// Byron-ish: EraId=0, 20s slots, 100 slots/epoch
-			{EpochId: 0, StartSlot: 0, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
-			{EpochId: 1, StartSlot: 100, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    20_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    20_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
 			// Shelley-ish: EraId=1, starts at slot 200, 1s slots, 432 slots/epoch
-			{EpochId: 2, StartSlot: 200, SlotLength: 1000, LengthInSlots: 432, EraId: 1},
-			{EpochId: 3, StartSlot: 632, SlotLength: 1000, LengthInSlots: 432, EraId: 1},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1000,
+				LengthInSlots: 432,
+				EraId:         1,
+			},
+			{
+				EpochId:       3,
+				StartSlot:     632,
+				SlotLength:    1000,
+				LengthInSlots: 432,
+				EraId:         1,
+			},
 		},
 		currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
 		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(700, []byte("tip"))},
@@ -96,7 +146,11 @@ func TestHardForkSummary_TwoEras(t *testing.T) {
 
 	byron := sum.Eras[0]
 	assert.Equal(t, uint(0), byron.EraID)
-	assert.Equal(t, hardfork.Bound{RelativeTime: 0, Slot: 0, Epoch: 0}, byron.Start)
+	assert.Equal(
+		t,
+		hardfork.Bound{RelativeTime: 0, Slot: 0, Epoch: 0},
+		byron.Start,
+	)
 	require.NotNil(t, byron.End, "past era must be bounded")
 	// Byron spans 2 epochs × 100 slots × 20s = 4000s, ending at slot 200, epoch 2.
 	assert.Equal(t, hardfork.Bound{
@@ -142,9 +196,17 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
-			{EpochId: 0, StartSlot: 0, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
 		},
-		config: LedgerStateConfig{CardanoNodeConfig: &cardano.CardanoNodeConfig{}},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
+		},
 	}
 	ls.publishSnapshotsLocked()
 	sum, err := ls.HardForkSummary()
@@ -159,11 +221,19 @@ func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
 func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
-			{EpochId: 5, StartSlot: 500, SlotLength: 1000, LengthInSlots: 100, EraId: 1},
+			{
+				EpochId:       5,
+				StartSlot:     500,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
 		},
 		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
 		transitionInfo: hardfork.NewTransitionKnown(7),
-		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(550, []byte("tip"))},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(550, []byte("tip")),
+		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
@@ -239,7 +309,9 @@ func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
 		}},
 		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
 		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
-		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(688, []byte("tip"))},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(688, []byte("tip")),
+		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
@@ -284,7 +356,11 @@ func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
 	assert.Nil(t, sum.Eras[1].End)
 	assert.Equal(t, sum.Eras[0].EraID, sum.Eras[1].EraID)
 	assert.Equal(t, sum.Eras[0].Params.EpochSize, sum.Eras[1].Params.EpochSize)
-	assert.Equal(t, sum.Eras[0].Params.SlotLength, sum.Eras[1].Params.SlotLength)
+	assert.Equal(
+		t,
+		sum.Eras[0].Params.SlotLength,
+		sum.Eras[1].Params.SlotLength,
+	)
 }
 
 // TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone asserts the
@@ -294,7 +370,9 @@ func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
 // whole first post-boundary epoch (the liveness requirement), while slots beyond
 // the successor's own safe zone are rejected as past-horizon rather than
 // silently accepted.
-func TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone(t *testing.T) {
+func TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone(
+	t *testing.T,
+) {
 	const (
 		epochSize     = uint64(100)
 		safeZoneSlots = uint64(250)
@@ -314,7 +392,9 @@ func TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone(t *testing.T)
 		}},
 		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
 		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
-		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(688, []byte("tip"))},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(688, []byte("tip")),
+		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
@@ -386,7 +466,9 @@ func TestHardForkSummary_KnownTransitionSuccessorByShapeOrder(t *testing.T) {
 		}},
 		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
 		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
-		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(688, []byte("tip"))},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(688, []byte("tip")),
+		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
@@ -460,7 +542,9 @@ func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
 		}},
 		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
 		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
-		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
@@ -512,7 +596,9 @@ func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
 // snaps up to the start of epoch 9, so slot 900 and beyond are past-horizon
 // again. Without this, an accidentally open successor would still satisfy the
 // in-window assertions.
-func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(t *testing.T) {
+func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
+	t *testing.T,
+) {
 	const (
 		epochSize  = uint64(100)
 		safeZone   = uint64(250)
@@ -534,7 +620,9 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(t *testing.T) 
 		}},
 		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
 		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
-		currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},

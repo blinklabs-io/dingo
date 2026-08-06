@@ -48,12 +48,29 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 		StakingKey:    stakingKey,
 		Active:        true,
 	}))
-	require.NoError(t, db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
-		{Epoch: 10, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolKey,
-			RewardType: "member", Amount: 1_000_000, Spendable: true},
-		{Epoch: 11, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolKey,
-			RewardType: "member", Amount: 9_999_999, Spendable: false},
-	}, nil))
+	require.NoError(
+		t,
+		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+			{
+				Epoch:         10,
+				CredentialTag: 0,
+				StakingKey:    stakingKey,
+				PoolKeyHash:   poolKey,
+				RewardType:    "member",
+				Amount:        1_000_000,
+				Spendable:     true,
+			},
+			{
+				Epoch:         11,
+				CredentialTag: 0,
+				StakingKey:    stakingKey,
+				PoolKeyHash:   poolKey,
+				RewardType:    "member",
+				Amount:        9_999_999,
+				Spendable:     false,
+			},
+		}, nil),
+	)
 
 	rows, total, err := adapter.AccountRewardHistory(
 		newRewardHistoryStakeAddress(t, stakingKey),
@@ -74,12 +91,30 @@ func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
 		StakingKey:    stakingKey,
 		Active:        true,
 	}))
-	require.NoError(t, db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
-		{Epoch: 10, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolKey,
-			RewardType: "member", Amount: 1_000_000, Spendable: true},
-		{Epoch: 11, CredentialTag: 0, StakingKey: stakingKey, PoolKeyHash: poolKey,
-			RewardType: "leader", Amount: 9_999_999, Spendable: true, Guarded: true},
-	}, nil))
+	require.NoError(
+		t,
+		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+			{
+				Epoch:         10,
+				CredentialTag: 0,
+				StakingKey:    stakingKey,
+				PoolKeyHash:   poolKey,
+				RewardType:    "member",
+				Amount:        1_000_000,
+				Spendable:     true,
+			},
+			{
+				Epoch:         11,
+				CredentialTag: 0,
+				StakingKey:    stakingKey,
+				PoolKeyHash:   poolKey,
+				RewardType:    "leader",
+				Amount:        9_999_999,
+				Spendable:     true,
+				Guarded:       true,
+			},
+		}, nil),
+	)
 
 	rows, total, err := adapter.AccountRewardHistory(
 		newRewardHistoryStakeAddress(t, stakingKey),

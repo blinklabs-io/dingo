@@ -24,7 +24,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newSettingsTestDB(t *testing.T, dataDir, storageMode, network string) (*Database, error) {
+func newSettingsTestDB(
+	t *testing.T,
+	dataDir, storageMode, network string,
+) (*Database, error) {
 	t.Helper()
 	return newTestDatabase(t, &Config{
 		DataDir:     dataDir,

@@ -926,7 +926,10 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	if cs.securityParam > 0 {
 		bestBlock := cs.bestKnownBlockNumber()
 		if bestBlock > 0 &&
-			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) < bestBlock {
+			safeAddUint64(
+				peerTip.Tip.BlockNumber,
+				cs.securityParam,
+			) < bestBlock {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping peer behind best known tip",
@@ -1380,7 +1383,8 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	previousBest := cs.bestPeerConn
 	if previousBest != nil && *previousBest != *newBest {
 		previousPeerTip, ok := cs.peerTips[*previousBest]
-		if ok && cs.isPeerSelectableLocked(*previousBest, previousPeerTip, false) {
+		if ok &&
+			cs.isPeerSelectableLocked(*previousBest, previousPeerTip, false) {
 			newPeerTip, ok := cs.peerTips[*newBest]
 			if !ok {
 				return false, nil, nil, corroborationEvent

@@ -139,7 +139,15 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	)
 	_ = txn.Rollback()
 	txn.Release()
-	assertProductionWrap(t, batchErr, inner, "batch idx", idxStr, slotStr, txHashStr)
+	assertProductionWrap(
+		t,
+		batchErr,
+		inner,
+		"batch idx",
+		idxStr,
+		slotStr,
+		txHashStr,
+	)
 
 	// --- Path 2: block (transaction.go: SetTransaction) ---
 	// Non-batched form uses the same setup, but the wrap-site prefix is
@@ -157,7 +165,15 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	)
 	_ = txn2.Rollback()
 	txn2.Release()
-	assertProductionWrap(t, blockErr, inner, "block idx", idxStr, slotStr, txHashStr)
+	assertProductionWrap(
+		t,
+		blockErr,
+		inner,
+		"block idx",
+		idxStr,
+		slotStr,
+		txHashStr,
+	)
 
 	// --- Path 3: metadata-only (transaction.go: SetTransactionMetadataOnly) ---
 	// Simpler path — no offsets or consumed-input recovery — but must still
@@ -173,7 +189,15 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	_ = txn3.Rollback()
 	txn3.Release()
 	require.Error(t, metaErr)
-	assertProductionWrap(t, metaErr, inner, "block idx", idxStr, slotStr, txHashStr)
+	assertProductionWrap(
+		t,
+		metaErr,
+		inner,
+		"block idx",
+		idxStr,
+		slotStr,
+		txHashStr,
+	)
 	// The "only" wrap has a distinguishing marker in addition to the shared
 	// tx/idx/slot fields — pin it too so the two block-idx sites can't
 	// collapse into the same wording without failing this test.
@@ -199,7 +223,11 @@ func assertProductionWrap(
 	idxLabel, idxStr, slotStr, txHashStr string,
 ) {
 	t.Helper()
-	require.Error(t, wrapped, "expected non-nil error from production wrap site")
+	require.Error(
+		t,
+		wrapped,
+		"expected non-nil error from production wrap site",
+	)
 	require.Truef(
 		t,
 		errors.Is(wrapped, inner),
@@ -207,8 +235,22 @@ func assertProductionWrap(
 		wrapped.Error(),
 	)
 	msg := wrapped.Error()
-	require.Contains(t, msg, txHashStr, "wrap missing tx hash %q; got %q", txHashStr, msg)
-	require.Contains(t, msg, idxLabel, "wrap missing %q label; got %q", idxLabel, msg)
+	require.Contains(
+		t,
+		msg,
+		txHashStr,
+		"wrap missing tx hash %q; got %q",
+		txHashStr,
+		msg,
+	)
+	require.Contains(
+		t,
+		msg,
+		idxLabel,
+		"wrap missing %q label; got %q",
+		idxLabel,
+		msg,
+	)
 	require.Contains(t, msg, idxLabel+" "+idxStr,
 		"wrap missing %q with numeric value %q; got %q", idxLabel, idxStr, msg)
 	require.Contains(t, msg, "slot "+slotStr,

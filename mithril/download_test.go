@@ -152,7 +152,8 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch requestCount.Add(1) {
 			case 1:
-				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(fullContent)))
+				w.Header().
+					Set("Content-Length", fmt.Sprintf("%d", len(fullContent)))
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(fullContent[:3])
 				if flusher, ok := w.(http.Flusher); ok {
@@ -397,7 +398,11 @@ func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if requestCount.Add(1) == 1 {
-				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				http.Error(
+					w,
+					"temporarily unavailable",
+					http.StatusServiceUnavailable,
+				)
 				return
 			}
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -414,7 +419,12 @@ func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
 		MaxTransientRetries: 2,
 	})
 	require.NoError(t, err)
-	require.Equal(t, int32(2), requestCount.Load(), "expected one retry after transient 503")
+	require.Equal(
+		t,
+		int32(2),
+		requestCount.Load(),
+		"expected one retry after transient 503",
+	)
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -441,7 +451,12 @@ func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "429")
 	// 1 original attempt + 2 retries = 3 total requests
-	require.Equal(t, int32(3), requestCount.Load(), "expected 1 attempt + 2 retries")
+	require.Equal(
+		t,
+		int32(3),
+		requestCount.Load(),
+		"expected 1 attempt + 2 retries",
+	)
 }
 
 func TestIsTransientDownloadError(t *testing.T) {
@@ -461,13 +476,19 @@ func TestIsTransientDownloadError(t *testing.T) {
 			transient: true,
 		},
 		{
-			name:      "unexpected EOF",
-			err:       fmt.Errorf("writing snapshot data: %w", io.ErrUnexpectedEOF),
+			name: "unexpected EOF",
+			err: fmt.Errorf(
+				"writing snapshot data: %w",
+				io.ErrUnexpectedEOF,
+			),
 			transient: true,
 		},
 		{
-			name:      "connection reset",
-			err:       fmt.Errorf("downloading snapshot: %w", syscall.ECONNRESET),
+			name: "connection reset",
+			err: fmt.Errorf(
+				"downloading snapshot: %w",
+				syscall.ECONNRESET,
+			),
 			transient: true,
 		},
 		{
@@ -788,7 +809,12 @@ func TestExtractArchive(t *testing.T) {
 	require.NoError(t, err)
 
 	extractDir := filepath.Join(tmpDir, "extracted")
-	result, err := ExtractArchive(context.Background(), archivePath, extractDir, nil)
+	result, err := ExtractArchive(
+		context.Background(),
+		archivePath,
+		extractDir,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, extractDir, result)
 

@@ -200,7 +200,10 @@ func openStore(
 // ensureDatabaseExists provisions a configured database before opening the
 // metadata pool. MySQL rejects Ping when the DBName in a DSN is absent, so
 // connect once without a default schema and create it explicitly.
-func ensureDatabaseExists(ctx context.Context, dsn, configuredName string) error {
+func ensureDatabaseExists(
+	ctx context.Context,
+	dsn, configuredName string,
+) error {
 	driverConfig, err := mysqldriver.ParseDSN(dsn)
 	if err != nil {
 		return fmt.Errorf("parse MySQL DSN: %w", err)
@@ -236,7 +239,11 @@ func ensureDatabaseExists(ctx context.Context, dsn, configuredName string) error
 		}
 		var mysqlErr *mysqldriver.MySQLError
 		if !errors.As(pingErr, &mysqlErr) || mysqlErr.Number != 1049 {
-			return fmt.Errorf("ping MySQL metadata database %q: %w", dbName, pingErr)
+			return fmt.Errorf(
+				"ping MySQL metadata database %q: %w",
+				dbName,
+				pingErr,
+			)
 		}
 	}
 	driverConfig.DBName = ""

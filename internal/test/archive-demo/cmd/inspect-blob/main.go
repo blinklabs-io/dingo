@@ -75,7 +75,12 @@ func main() {
 	cbor, _, err := store.GetBlock(txn, *slot, hash)
 	switch {
 	case err == nil && len(cbor) > 0:
-		fmt.Printf("present: slot=%d hash=%s bytes=%d\n", *slot, *hashHex, len(cbor))
+		fmt.Printf(
+			"present: slot=%d hash=%s bytes=%d\n",
+			*slot,
+			*hashHex,
+			len(cbor),
+		)
 		os.Exit(0)
 	case err == nil:
 		fmt.Println("absent: nil cbor")

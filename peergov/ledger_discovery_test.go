@@ -243,7 +243,9 @@ func TestDiscoverLedgerPeers_PeerCapInteraction(t *testing.T) {
 	}
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		EventBus:                 newMockEventBus(),
 		UseLedgerAfterSlot:       0,
 		LedgerPeerTarget:         15,

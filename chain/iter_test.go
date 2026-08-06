@@ -154,7 +154,10 @@ func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
 	require.NoError(t, err)
 	c := cm.PrimaryChain()
 
-	iter, err := c.FromPoint(ocommon.NewPoint(blocks[1].Slot, ledgerTipHash), false)
+	iter, err := c.FromPoint(
+		ocommon.NewPoint(blocks[1].Slot, ledgerTipHash),
+		false,
+	)
 	require.NoError(t, err)
 	defer iter.Cancel()
 

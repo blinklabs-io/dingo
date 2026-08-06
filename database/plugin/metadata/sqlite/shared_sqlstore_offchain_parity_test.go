@@ -136,7 +136,11 @@ func exerciseOffchainStore(t *testing.T, store offchainStore) offchainState {
 	require.NotNil(t, ret.fetched)
 	require.Equal(t, models.OffchainMetadataStatusFetched, ret.fetched.Status)
 	require.Equal(t, url, ret.fetched.URL)
-	require.Equal(t, models.OffchainMetadataSourceConstitution, ret.fetched.SourceType)
+	require.Equal(
+		t,
+		models.OffchainMetadataSourceConstitution,
+		ret.fetched.SourceType,
+	)
 	require.Equal(t, "application/json", ret.fetched.ContentType)
 	require.Equal(t, hash, ret.fetched.Hash)
 	require.Equal(t, bytes.Repeat([]byte{0x24}, 32), ret.fetched.BodyHash)

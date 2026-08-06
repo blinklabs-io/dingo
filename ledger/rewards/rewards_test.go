@@ -51,8 +51,18 @@ func TestCalculateMatchesShelleyPoolRewardFormula(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: member, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -89,7 +99,9 @@ func TestCalculateMatchesShelleyPoolRewardFormula(t *testing.T) {
 	require.Equal(t, uint64(37049), result.AccountRewards[1].Amount)
 }
 
-func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(t *testing.T) {
+func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(
+	t *testing.T,
+) {
 	poolID := testPoolID(1)
 	ownerKey := testCredential(0, 2)
 	scriptWithOwnerHash := testCredential(1, 2)
@@ -117,7 +129,12 @@ func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(t *testing
 						ownerKey: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerKey, Stake: 0, Registered: true, Eligible: true},
+						{
+							Credential: ownerKey,
+							Stake:      0,
+							Registered: true,
+							Eligible:   true,
+						},
 						{
 							Credential: scriptWithOwnerHash,
 							Stake:      1_000,
@@ -165,7 +182,12 @@ func TestCalculatePledgeFailureZerosPoolReward(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -205,8 +227,18 @@ func TestCalculatePoolRewardAtOrBelowCostPaysOnlyLeader(t *testing.T) {
 						leader: {},
 					},
 					Delegators: []Delegator{
-						{Credential: leader, Stake: 500, Registered: true, Eligible: true},
-						{Credential: member, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: leader,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -284,7 +316,12 @@ func TestCalculateTreasuryTaxUsesIncentivesAndFees(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -327,7 +364,12 @@ func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -341,7 +383,9 @@ func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
 	require.Equal(t, uint64(1_000_000), result.Incentives)
 }
 
-func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T) {
+func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
+	t *testing.T,
+) {
 	poolID := testPoolID(1)
 	owner := testCredential(0, 2)
 	params := testParams()
@@ -363,7 +407,12 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T)
 					owner: {},
 				},
 				Delegators: []Delegator{
-					{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+					{
+						Credential: owner,
+						Stake:      500,
+						Registered: true,
+						Eligible:   true,
+					},
 				},
 			},
 		},
@@ -422,8 +471,18 @@ func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
-						{Credential: member, Stake: 500, Registered: false, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -479,8 +538,18 @@ func TestCalculatePotDeltasMatchReferenceSemantics(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: member, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -571,8 +640,18 @@ func TestCalculatePreBabbageFilteredRewardsReturnToReserves(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
-						{Credential: member, Stake: 500, Registered: false, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -618,8 +697,18 @@ func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: false},
-						{Credential: member, Stake: 500, Registered: true, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: true,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -637,7 +726,9 @@ func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
 	require.Equal(t, uint64(83_342), result.UpdatedPots.Treasury)
 }
 
-func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(t *testing.T) {
+func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(
+	t *testing.T,
+) {
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -666,8 +757,18 @@ func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(t *testi
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: true},
-						{Credential: member, Stake: 500, Registered: false, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -712,8 +813,18 @@ func TestCalculateShelleyFiltersMultipleRewardsForSameCredential(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -762,7 +873,12 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -781,7 +897,12 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -803,7 +924,9 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
 }
 
-func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) {
+func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(
+	t *testing.T,
+) {
 	shared := testCredential(0, 3)
 	ownerA := testCredential(0, 1)
 	ownerB := testCredential(0, 2)
@@ -833,8 +956,18 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: false, Eligible: false},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -853,7 +986,12 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -874,7 +1012,9 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
 }
 
-func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(t *testing.T) {
+func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
+	t *testing.T,
+) {
 	shared := testCredential(0, 3)
 	ownerA := testCredential(0, 1)
 	ownerB := testCredential(0, 2)
@@ -904,8 +1044,18 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -924,7 +1074,12 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -944,7 +1099,9 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
 }
 
-func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(t *testing.T) {
+func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(
+	t *testing.T,
+) {
 	owner := testCredential(0, 2)
 	shared := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -972,8 +1129,18 @@ func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(t *testing.T
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
-						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: shared,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -1023,7 +1190,12 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -1042,7 +1214,12 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -1092,7 +1269,12 @@ func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 						ownerB: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerB,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 				{
@@ -1110,7 +1292,12 @@ func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 						ownerA: {},
 					},
 					Delegators: []Delegator{
-						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+						{
+							Credential: ownerA,
+							Stake:      500,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -1853,8 +2040,18 @@ func TestCalculateRejectsUnspendableTreasuryOverflow(t *testing.T) {
 						owner: {},
 					},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
-						{Credential: member, Stake: 500, Registered: false, Eligible: false},
+						{
+							Credential: owner,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
+						{
+							Credential: member,
+							Stake:      500,
+							Registered: false,
+							Eligible:   false,
+						},
 					},
 				},
 			},
@@ -1943,8 +2140,18 @@ func minMarginCalc(margin, minPoolMargin *big.Rat) (*Result, error) {
 					RewardAccountEligible:   true,
 					Owners:                  map[Credential]struct{}{owner: {}},
 					Delegators: []Delegator{
-						{Credential: owner, Stake: 100, Registered: true, Eligible: true},
-						{Credential: member, Stake: 900, Registered: true, Eligible: true},
+						{
+							Credential: owner,
+							Stake:      100,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      900,
+							Registered: true,
+							Eligible:   true,
+						},
 					},
 				},
 			},
@@ -1953,7 +2160,11 @@ func minMarginCalc(margin, minPoolMargin *big.Rat) (*Result, error) {
 	)
 }
 
-func minMarginMemberReward(t *testing.T, result *Result, cred Credential) uint64 {
+func minMarginMemberReward(
+	t *testing.T,
+	result *Result,
+	cred Credential,
+) uint64 {
 	t.Helper()
 	for _, r := range result.AccountRewards {
 		if r.Credential == cred && r.Type == RewardTypeMember {
@@ -1972,7 +2183,10 @@ func TestEffectiveMargin(t *testing.T) {
 		Parameters{MinPoolMargin: big.NewRat(1, 100)}.effectiveMargin(margin)))
 	require.Zero(t, floor.Cmp(
 		Parameters{MinPoolMargin: floor}.effectiveMargin(margin)))
-	require.Zero(t, floor.Cmp(Parameters{MinPoolMargin: floor}.effectiveMargin(nil)))
+	require.Zero(
+		t,
+		floor.Cmp(Parameters{MinPoolMargin: floor}.effectiveMargin(nil)),
+	)
 	require.Zero(t, new(big.Rat).Cmp(Parameters{}.effectiveMargin(nil)))
 }
 
@@ -2239,8 +2453,18 @@ func fullPotTwoPoolSnapshot() Snapshot {
 				RewardAccountEligible:   true,
 				Owners:                  map[Credential]struct{}{ownerA: {}},
 				Delegators: []Delegator{
-					{Credential: ownerA, Stake: 100, Registered: true, Eligible: true},
-					{Credential: memberA, Stake: 500, Registered: true, Eligible: true},
+					{
+						Credential: ownerA,
+						Stake:      100,
+						Registered: true,
+						Eligible:   true,
+					},
+					{
+						Credential: memberA,
+						Stake:      500,
+						Registered: true,
+						Eligible:   true,
+					},
 				},
 			},
 			{
@@ -2257,8 +2481,18 @@ func fullPotTwoPoolSnapshot() Snapshot {
 				RewardAccountEligible:   true,
 				Owners:                  map[Credential]struct{}{ownerB: {}},
 				Delegators: []Delegator{
-					{Credential: ownerB, Stake: 50, Registered: true, Eligible: true},
-					{Credential: memberB, Stake: 350, Registered: true, Eligible: true},
+					{
+						Credential: ownerB,
+						Stake:      50,
+						Registered: true,
+						Eligible:   true,
+					},
+					{
+						Credential: memberB,
+						Stake:      350,
+						Registered: true,
+						Eligible:   true,
+					},
 				},
 			},
 		},
@@ -2348,7 +2582,12 @@ func TestCalculateFullPotNoBaseRewardFallsBackToReserves(t *testing.T) {
 				TotalBlocks:    10,
 				Owners:         map[Credential]struct{}{owner: {}},
 				Delegators: []Delegator{
-					{Credential: owner, Stake: 100, Registered: true, Eligible: true},
+					{
+						Credential: owner,
+						Stake:      100,
+						Registered: true,
+						Eligible:   true,
+					},
 				},
 			},
 		},
@@ -2378,7 +2617,10 @@ func TestCalculateFullPotComposesWithMinPoolMargin(t *testing.T) {
 	snap := fullPotTwoPoolSnapshot() // pools register margin 1/10, IDs 0x01 < 0x02
 	params := testParams()
 	params.FullPotRewardsEnabled = true
-	params.MinPoolMargin = big.NewRat(1, 5) // 20% floor, above the pools' 10% margin
+	params.MinPoolMargin = big.NewRat(
+		1,
+		5,
+	) // 20% floor, above the pools' 10% margin
 
 	result, err := Calculate(Pots{Reserves: 100_000_000}, snap, params)
 	require.NoError(t, err)
@@ -2401,7 +2643,12 @@ func TestCalculateFullPotComposesWithMinPoolMargin(t *testing.T) {
 		require.Equal(t, floored, pr.LeaderReward,
 			"pool %d scaled leader must use the CIP-23 effective margin", i)
 		// And the floor actually shifts the split (leader gets more than at 1/10).
-		require.Greater(t, floored, unfloored,
-			"pool %d floor must raise the leader share above the registered margin", i)
+		require.Greater(
+			t,
+			floored,
+			unfloored,
+			"pool %d floor must raise the leader share above the registered margin",
+			i,
+		)
 	}
 }

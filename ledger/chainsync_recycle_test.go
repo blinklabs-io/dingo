@@ -81,7 +81,12 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	got := testutil.RequireReceive(t, recycled, 2*time.Second, "recycle event not published")
+	got := testutil.RequireReceive(
+		t,
+		recycled,
+		2*time.Second,
+		"recycle event not published",
+	)
 	assert.Equal(t, connId, got.ConnectionId)
 	assert.Equal(t, "header_verification_failure", got.Reason)
 }
@@ -229,7 +234,9 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 // TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent verifies that
 // a block header crypto verification failure on the blockfetch path publishes a
 // ledger.ConnectionRecycleRequestedEvent with reason "block_header_verification_failure".
-func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
+func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
+	t *testing.T,
+) {
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -266,7 +273,12 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) 
 		},
 	))
 
-	got := testutil.RequireReceive(t, recycled, 2*time.Second, "recycle event not published")
+	got := testutil.RequireReceive(
+		t,
+		recycled,
+		2*time.Second,
+		"recycle event not published",
+	)
 	assert.Equal(t, connId, got.ConnectionId)
 	assert.Equal(t, "block_header_verification_failure", got.Reason)
 }

@@ -201,7 +201,14 @@ func TestTruncateReportsActualDeletedCountForSparseIndex(t *testing.T) {
 	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
 	target := f.blocks[2] // ID 3
 
-	blocksRemoved, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
+	blocksRemoved, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		target,
+		0,
+		false,
+		0,
+	)
 	require.NoError(t, err)
 	require.Equal(
 		t, uint64(3), blocksRemoved,
@@ -326,7 +333,14 @@ func TestTruncateRejectsTargetInUnappliedBlobTail(t *testing.T) {
 func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
 	f := buildTestChain(t, 3)
 	aheadTarget := testBlock(99, 0x63)
-	_, err := lifecycle.Truncate(context.Background(), f.db, aheadTarget, 0, false, 0)
+	_, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		aheadTarget,
+		0,
+		false,
+		0,
+	)
 	require.Error(t, err)
 }
 
@@ -347,9 +361,19 @@ func TestTruncateRejectsTargetWithMismatchedHash(t *testing.T) {
 	f := buildTestChain(t, 5)
 
 	target := f.blocks[2]
-	target.Hash = bytes.Repeat([]byte{0xFF}, 32) // does not match what's stored at this ID
+	target.Hash = bytes.Repeat(
+		[]byte{0xFF},
+		32,
+	) // does not match what's stored at this ID
 
-	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
+	_, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		target,
+		0,
+		false,
+		0,
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 
@@ -373,7 +397,14 @@ func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
 	target := f.blocks[2]
 	target.Slot = target.Slot + 1 // does not match what's stored at this ID
 
-	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
+	_, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		target,
+		0,
+		false,
+		0,
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 
@@ -397,7 +428,14 @@ func TestTruncateRejectsTipIDTargetWithMismatchedHash(t *testing.T) {
 	target := f.blocks[len(f.blocks)-1] // the tip's own ID
 	target.Hash = bytes.Repeat([]byte{0xFF}, 32)
 
-	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
+	_, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		target,
+		0,
+		false,
+		0,
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 
@@ -416,7 +454,14 @@ func TestTruncateRejectsTipIDTargetWithMismatchedSlot(t *testing.T) {
 	target := f.blocks[len(f.blocks)-1] // the tip's own ID
 	target.Slot = target.Slot + 1
 
-	_, err := lifecycle.Truncate(context.Background(), f.db, target, 0, false, 0)
+	_, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		target,
+		0,
+		false,
+		0,
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 
@@ -471,7 +516,14 @@ func TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock(t *testing.T) {
 	// A target with no same-slot successor (block2 itself: block3's slot
 	// differs) must still be allowed -- the rejection is specific to the
 	// same-slot case, not a blanket block on this chain.
-	blocksRemoved, err := lifecycle.Truncate(context.Background(), db, block2, 0, false, 0)
+	blocksRemoved, err := lifecycle.Truncate(
+		context.Background(),
+		db,
+		block2,
+		0,
+		false,
+		0,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), blocksRemoved)
 }
@@ -486,7 +538,14 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 	))
 
 	// blocks[2] is before the boundary; truncating there must be refused.
-	_, err := lifecycle.Truncate(context.Background(), f.db, f.blocks[2], 0, false, 0)
+	_, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		f.blocks[2],
+		0,
+		false,
+		0,
+	)
 	require.Error(t, err)
 
 	// blocks[3] is exactly at the boundary and must be allowed.
@@ -767,7 +826,9 @@ func TestTruncateResumesWhenBlobTipWasAheadOfMetadataTip(t *testing.T) {
 // not leave a durable pending marker behind: without this, a caller would
 // be forced to "resume" an operation that in fact never touched the
 // database at all.
-func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(t *testing.T) {
+func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
+	t *testing.T,
+) {
 	f := buildTestChain(t, 5)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -779,5 +840,9 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(t *testing.T) 
 
 	pending, err := lifecycle.GetPendingTruncate(f.db)
 	require.NoError(t, err)
-	require.Nil(t, pending, "a pre-cancelled Truncate must not record a pending marker")
+	require.Nil(
+		t,
+		pending,
+		"a pre-cancelled Truncate must not record a pending marker",
+	)
 }

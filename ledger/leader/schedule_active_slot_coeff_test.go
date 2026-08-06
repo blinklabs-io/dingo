@@ -60,7 +60,9 @@ var coeffTestPoolID = func() lcommon.PoolKeyHash {
 // the same one-sided signature reported in dingo #2798, so the direction is
 // worth pinning even though the magnitude here (~5.6e-17 relative) is far too
 // small to account for the three phantom slots per epoch reported there.
-func TestFloat64ActiveSlotCoeffRoundTripOverstatesGenesisThreshold(t *testing.T) {
+func TestFloat64ActiveSlotCoeffRoundTripOverstatesGenesisThreshold(
+	t *testing.T,
+) {
 	genesisCoeff := big.NewRat(1, 20)
 
 	// The exact float64 round trip the leader schedule used to perform:
@@ -172,7 +174,9 @@ func TestCalculateScheduleFallsBackToFloatActiveSlotCoeff(t *testing.T) {
 // TestCalculateScheduleRejectsOutOfRangeRationalActiveSlotCoeff keeps the
 // (0, 1] validation applied to the exact rational path too, so a malformed
 // genesis cannot silently produce a degenerate threshold.
-func TestCalculateScheduleRejectsOutOfRangeRationalActiveSlotCoeff(t *testing.T) {
+func TestCalculateScheduleRejectsOutOfRangeRationalActiveSlotCoeff(
+	t *testing.T,
+) {
 	for name, coeff := range map[string]*big.Rat{
 		"zero":     new(big.Rat),
 		"negative": big.NewRat(-1, 20),

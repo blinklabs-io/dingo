@@ -291,7 +291,10 @@ func (pc *PoolCredentials) VRFProve(alpha []byte) ([]byte, []byte, error) {
 // to evolve the key to the correct period. The kes.Sign function expects the key
 // to already be at the relative period within the opcert window when an opcert
 // is loaded.
-func (pc *PoolCredentials) KESSign(period uint64, message []byte) ([]byte, error) {
+func (pc *PoolCredentials) KESSign(
+	period uint64,
+	message []byte,
+) ([]byte, error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
 
@@ -410,7 +413,9 @@ func (pc *PoolCredentials) ValidateOpCert() error {
 
 	// Verify KES public key matches OpCert's KES vkey
 	if !bytes.Equal(pc.kesVKey, pc.opCert.KESVKey) {
-		return errors.New("KES verification key mismatch: loaded key does not match OpCert.KESVKey")
+		return errors.New(
+			"KES verification key mismatch: loaded key does not match OpCert.KESVKey",
+		)
 	}
 
 	// Verify cold key signature over the raw signable representation:
@@ -428,7 +433,9 @@ func (pc *PoolCredentials) ValidateOpCert() error {
 	binary.BigEndian.PutUint64(certBody[32:40], pc.opCert.IssueNumber)
 	binary.BigEndian.PutUint64(certBody[40:48], pc.opCert.KESPeriod)
 	if !ed25519.Verify(pc.opCert.ColdVKey, certBody[:], pc.opCert.Signature) {
-		return errors.New("OpCert signature verification failed: cold key signature is invalid")
+		return errors.New(
+			"OpCert signature verification failed: cold key signature is invalid",
+		)
 	}
 
 	return nil
@@ -498,7 +505,9 @@ func (pc *PoolCredentials) ValidateKESPeriod(
 		current >= pc.opCert.KESPeriod+maxEvolutions {
 		return fmt.Errorf(
 			"opcert KES period %d has expired (current %d, max evolutions %d); rotate the operational certificate",
-			pc.opCert.KESPeriod, current, maxEvolutions,
+			pc.opCert.KESPeriod,
+			current,
+			maxEvolutions,
 		)
 	}
 	return nil
@@ -512,12 +521,16 @@ type LedgerView interface {
 	// PoolRegistrationVRFKeyHash returns the VRF key hash recorded on
 	// the most recent active pool registration certificate for poolID.
 	// found is false when the pool has no on-chain registration yet.
-	PoolRegistrationVRFKeyHash(poolID [28]byte) (vrfKeyHash [32]byte, found bool, err error)
+	PoolRegistrationVRFKeyHash(
+		poolID [28]byte,
+	) (vrfKeyHash [32]byte, found bool, err error)
 	// LatestOpCertSequence returns the highest opcert IssueNumber
 	// observed on chain for poolID. found is false when on-chain
 	// counter tracking is not implemented or this pool has never
 	// minted a block.
-	LatestOpCertSequence(poolID [28]byte) (sequence uint64, found bool, err error)
+	LatestOpCertSequence(
+		poolID [28]byte,
+	) (sequence uint64, found bool, err error)
 }
 
 // ValidateAgainstLedger cross-checks the loaded credentials against

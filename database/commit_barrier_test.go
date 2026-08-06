@@ -118,7 +118,12 @@ func TestBlobOnlyTxnDoesNotBlockOnPendingPauseCommits(t *testing.T) {
 		close(pauseStarted)
 		paused <- db.PauseCommits()
 	}()
-	testutil.RequireReceive(t, pauseStarted, time.Second, "PauseCommits goroutine must start")
+	testutil.RequireReceive(
+		t,
+		pauseStarted,
+		time.Second,
+		"PauseCommits goroutine must start",
+	)
 	testutil.RequireNoReceive(
 		t,
 		paused,

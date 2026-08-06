@@ -36,19 +36,30 @@ type UtxorpcLedgerState interface {
 	BlockByHash(hash []byte) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
 	Datum(hash []byte) (*models.Datum, error)
-	EvaluateTx(tx lcommon.Transaction) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
+	EvaluateTx(
+		tx lcommon.Transaction,
+	) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
 	GetBlock(point ocommon.Point) (models.Block, error)
-	GetChainFromPointContext(ctx context.Context, point ocommon.Point, inclusive bool) (*chain.ChainIterator, error)
+	GetChainFromPointContext(
+		ctx context.Context,
+		point ocommon.Point,
+		inclusive bool,
+	) (*chain.ChainIterator, error)
 	GetCurrentPParams() lcommon.ProtocolParameters
 	GetEpochs() ([]models.Epoch, error)
 	GetIntersectPoint(points []ocommon.Point) (*ocommon.Point, error)
-	GetPParamsForEpoch(epoch uint64, era eras.EraDesc) (lcommon.ProtocolParameters, error)
+	GetPParamsForEpoch(
+		epoch uint64,
+		era eras.EraDesc,
+	) (lcommon.ProtocolParameters, error)
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip
 	TransactionByHash(hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
-	UtxosByAddressWithOrdering(q *models.UtxoWithOrderingQuery) ([]models.UtxoWithOrdering, error)
+	UtxosByAddressWithOrdering(
+		q *models.UtxoWithOrderingQuery,
+	) ([]models.UtxoWithOrdering, error)
 }
 
 // UtxorpcMempool is the subset of mempool.Mempool needed by the UTxO RPC
@@ -61,6 +72,9 @@ type UtxorpcMempool interface {
 // UtxorpcEventBus is the subset of event.EventBus needed by the UTxO RPC
 // server.
 type UtxorpcEventBus interface {
-	SubscribeFunc(eventType event.EventType, handlerFunc event.EventHandlerFunc) event.EventSubscriberId
+	SubscribeFunc(
+		eventType event.EventType,
+		handlerFunc event.EventHandlerFunc,
+	) event.EventSubscriberId
 	Unsubscribe(eventType event.EventType, subId event.EventSubscriberId)
 }

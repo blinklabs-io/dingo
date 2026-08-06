@@ -42,29 +42,49 @@ func (s *Store) hydrateTransactionSlice(
 		transactions[i].Collateral = nil
 		transactions[i].ReferenceInputs = nil
 	}
-	outputs, err := s.transactionUtxosBatch(db, "transaction_id", ids, func(u *models.Utxo) string {
-		if u.TransactionID == nil {
-			return ""
-		}
-		return strconv.FormatUint(uint64(*u.TransactionID), 10)
-	})
+	outputs, err := s.transactionUtxosBatch(
+		db,
+		"transaction_id",
+		ids,
+		func(u *models.Utxo) string {
+			if u.TransactionID == nil {
+				return ""
+			}
+			return strconv.FormatUint(uint64(*u.TransactionID), 10)
+		},
+	)
 	if err != nil {
 		return err
 	}
-	returns, err := s.transactionUtxosBatch(db, "collateral_return_for_tx_id", ids, func(u *models.Utxo) string {
-		if u.CollateralReturnForTxID == nil {
-			return ""
-		}
-		return strconv.FormatUint(uint64(*u.CollateralReturnForTxID), 10)
-	})
+	returns, err := s.transactionUtxosBatch(
+		db,
+		"collateral_return_for_tx_id",
+		ids,
+		func(u *models.Utxo) string {
+			if u.CollateralReturnForTxID == nil {
+				return ""
+			}
+			return strconv.FormatUint(uint64(*u.CollateralReturnForTxID), 10)
+		},
+	)
 	if err != nil {
 		return err
 	}
-	inputs, err := s.transactionUtxosBatch(db, "spent_at_tx_id", hashes, func(u *models.Utxo) string { return string(u.SpentAtTxId) })
+	inputs, err := s.transactionUtxosBatch(
+		db,
+		"spent_at_tx_id",
+		hashes,
+		func(u *models.Utxo) string { return string(u.SpentAtTxId) },
+	)
 	if err != nil {
 		return err
 	}
-	collateral, err := s.transactionUtxosBatch(db, "collateral_by_tx_id", hashes, func(u *models.Utxo) string { return string(u.CollateralByTxId) })
+	collateral, err := s.transactionUtxosBatch(
+		db,
+		"collateral_by_tx_id",
+		hashes,
+		func(u *models.Utxo) string { return string(u.CollateralByTxId) },
+	)
 	if err != nil {
 		return err
 	}
@@ -143,7 +163,10 @@ func (s *Store) hydrateTransactionSlice(
 // referenceInputsBatch reads the durable many-to-many reference-input edges.
 // The legacy UTxO column remains populated for compatibility, but cannot
 // represent two transactions referencing the same output.
-func (s *Store) referenceInputsBatch(db queryer, hashes []any) (map[string][]models.Utxo, error) {
+func (s *Store) referenceInputsBatch(
+	db queryer,
+	hashes []any,
+) (map[string][]models.Utxo, error) {
 	result := make(map[string][]models.Utxo)
 	if len(hashes) == 0 {
 		return result, nil
@@ -154,7 +177,10 @@ func (s *Store) referenceInputsBatch(db queryer, hashes []any) (map[string][]mod
 FROM utxo AS utxo
 JOIN utxo_reference_input AS r ON r.utxo_id = utxo.id
 WHERE r.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
-		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(query), hashes[start:end]...)
+		rows, err := db.QueryContext(
+			context.Background(),
+			s.dialect.Rebind(query),
+			hashes[start:end]...)
 		if err != nil {
 			return nil, err
 		}
@@ -169,7 +195,10 @@ WHERE r.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.
 				rows.Close()
 				return nil, err
 			}
-			result[string(row.reference)] = append(result[string(row.reference)], *item)
+			result[string(row.reference)] = append(
+				result[string(row.reference)],
+				*item,
+			)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -187,7 +216,9 @@ type sqliteUtxoReferenceRow struct {
 	reference []byte
 }
 
-func scanSQLiteUtxoWithReference(rows *sql.Rows) (sqliteUtxoReferenceRow, error) {
+func scanSQLiteUtxoWithReference(
+	rows *sql.Rows,
+) (sqliteUtxoReferenceRow, error) {
 	var row sqliteUtxoReferenceRow
 	if err := rows.Scan(
 		&row.utxo.TransactionID,
@@ -213,14 +244,24 @@ func scanSQLiteUtxoWithReference(rows *sql.Rows) (sqliteUtxoReferenceRow, error)
 	return row, nil
 }
 
-func (s *Store) transactionIDRows(db queryer, columns, table string, ids []any, fn func(*sql.Rows) error) error {
+func (s *Store) transactionIDRows(
+	db queryer,
+	columns, table string,
+	ids []any,
+	fn func(*sql.Rows) error,
+) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(ids))
-		query := "SELECT " + columns + " FROM " + table + " WHERE transaction_id IN (" + bindPlaceholders(end-start) + ") ORDER BY id"
-		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(query), ids[start:end]...)
+		query := "SELECT " + columns + " FROM " + table + " WHERE transaction_id IN (" + bindPlaceholders(
+			end-start,
+		) + ") ORDER BY id"
+		rows, err := db.QueryContext(
+			context.Background(),
+			s.dialect.Rebind(query),
+			ids[start:end]...)
 		if err != nil {
 			return err
 		}
@@ -240,83 +281,133 @@ func (s *Store) transactionIDRows(db queryer, columns, table string, ids []any, 
 	return nil
 }
 
-func (s *Store) loadTransactionCertificatesBatch(db queryer, ids []any) (map[string][]models.Certificate, error) {
+func (s *Store) loadTransactionCertificatesBatch(
+	db queryer,
+	ids []any,
+) (map[string][]models.Certificate, error) {
 	ret := make(map[string][]models.Certificate)
-	err := s.transactionIDRows(db, "block_hash, id, transaction_id, certificate_id, slot, cert_index, cert_type", "certs", ids, func(rows *sql.Rows) error {
-		for rows.Next() {
-			var item models.Certificate
-			if err := rows.Scan(&item.BlockHash, &item.ID, &item.TransactionID, &item.CertificateID, &item.Slot, &item.CertIndex, &item.CertType); err != nil {
-				return err
+	err := s.transactionIDRows(
+		db,
+		"block_hash, id, transaction_id, certificate_id, slot, cert_index, cert_type",
+		"certs",
+		ids,
+		func(rows *sql.Rows) error {
+			for rows.Next() {
+				var item models.Certificate
+				if err := rows.Scan(&item.BlockHash, &item.ID, &item.TransactionID, &item.CertificateID, &item.Slot, &item.CertIndex, &item.CertType); err != nil {
+					return err
+				}
+				ret[strconv.FormatUint(uint64(item.TransactionID), 10)] = append(
+					ret[strconv.FormatUint(uint64(item.TransactionID), 10)],
+					item,
+				)
 			}
-			ret[strconv.FormatUint(uint64(item.TransactionID), 10)] = append(ret[strconv.FormatUint(uint64(item.TransactionID), 10)], item)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		},
+	)
 	return ret, err
 }
 
-func (s *Store) loadTransactionKeyWitnessesBatch(db queryer, ids []any) (map[string][]models.KeyWitness, error) {
+func (s *Store) loadTransactionKeyWitnessesBatch(
+	db queryer,
+	ids []any,
+) (map[string][]models.KeyWitness, error) {
 	ret := make(map[string][]models.KeyWitness)
-	err := s.transactionIDRows(db, "vkey, signature, public_key, chain_code, attributes, id, transaction_id, type", "key_witness", ids, func(rows *sql.Rows) error {
-		for rows.Next() {
-			var item models.KeyWitness
-			if err := rows.Scan(&item.Vkey, &item.Signature, &item.PublicKey, &item.ChainCode, &item.Attributes, &item.ID, &item.TransactionID, &item.Type); err != nil {
-				return err
+	err := s.transactionIDRows(
+		db,
+		"vkey, signature, public_key, chain_code, attributes, id, transaction_id, type",
+		"key_witness",
+		ids,
+		func(rows *sql.Rows) error {
+			for rows.Next() {
+				var item models.KeyWitness
+				if err := rows.Scan(&item.Vkey, &item.Signature, &item.PublicKey, &item.ChainCode, &item.Attributes, &item.ID, &item.TransactionID, &item.Type); err != nil {
+					return err
+				}
+				key := strconv.FormatUint(uint64(item.TransactionID), 10)
+				ret[key] = append(ret[key], item)
 			}
-			key := strconv.FormatUint(uint64(item.TransactionID), 10)
-			ret[key] = append(ret[key], item)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		},
+	)
 	return ret, err
 }
 
-func (s *Store) loadTransactionWitnessScriptsBatch(db queryer, ids []any) (map[string][]models.WitnessScripts, error) {
+func (s *Store) loadTransactionWitnessScriptsBatch(
+	db queryer,
+	ids []any,
+) (map[string][]models.WitnessScripts, error) {
 	ret := make(map[string][]models.WitnessScripts)
-	err := s.transactionIDRows(db, "script_hash, id, transaction_id, type", "witness_scripts", ids, func(rows *sql.Rows) error {
-		for rows.Next() {
-			var item models.WitnessScripts
-			if err := rows.Scan(&item.ScriptHash, &item.ID, &item.TransactionID, &item.Type); err != nil {
-				return err
+	err := s.transactionIDRows(
+		db,
+		"script_hash, id, transaction_id, type",
+		"witness_scripts",
+		ids,
+		func(rows *sql.Rows) error {
+			for rows.Next() {
+				var item models.WitnessScripts
+				if err := rows.Scan(&item.ScriptHash, &item.ID, &item.TransactionID, &item.Type); err != nil {
+					return err
+				}
+				key := strconv.FormatUint(uint64(item.TransactionID), 10)
+				ret[key] = append(ret[key], item)
 			}
-			key := strconv.FormatUint(uint64(item.TransactionID), 10)
-			ret[key] = append(ret[key], item)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		},
+	)
 	return ret, err
 }
 
-func (s *Store) loadTransactionRedeemersBatch(db queryer, ids []any) (map[string][]models.Redeemer, error) {
+func (s *Store) loadTransactionRedeemersBatch(
+	db queryer,
+	ids []any,
+) (map[string][]models.Redeemer, error) {
 	ret := make(map[string][]models.Redeemer)
-	columns := "data, id, transaction_id, ex_units_memory, ex_units_cpu, " + s.dialect.QuoteIdentifier("index") + ", tag"
-	err := s.transactionIDRows(db, columns, "redeemer", ids, func(rows *sql.Rows) error {
-		for rows.Next() {
-			var item models.Redeemer
-			if err := rows.Scan(&item.Data, &item.ID, &item.TransactionID, &item.ExUnitsMemory, &item.ExUnitsCPU, &item.Index, &item.Tag); err != nil {
-				return err
+	columns := "data, id, transaction_id, ex_units_memory, ex_units_cpu, " + s.dialect.QuoteIdentifier(
+		"index",
+	) + ", tag"
+	err := s.transactionIDRows(
+		db,
+		columns,
+		"redeemer",
+		ids,
+		func(rows *sql.Rows) error {
+			for rows.Next() {
+				var item models.Redeemer
+				if err := rows.Scan(&item.Data, &item.ID, &item.TransactionID, &item.ExUnitsMemory, &item.ExUnitsCPU, &item.Index, &item.Tag); err != nil {
+					return err
+				}
+				key := strconv.FormatUint(uint64(item.TransactionID), 10)
+				ret[key] = append(ret[key], item)
 			}
-			key := strconv.FormatUint(uint64(item.TransactionID), 10)
-			ret[key] = append(ret[key], item)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		},
+	)
 	return ret, err
 }
 
-func (s *Store) loadTransactionPlutusDataBatch(db queryer, ids []any) (map[string][]models.PlutusData, error) {
+func (s *Store) loadTransactionPlutusDataBatch(
+	db queryer,
+	ids []any,
+) (map[string][]models.PlutusData, error) {
 	ret := make(map[string][]models.PlutusData)
-	err := s.transactionIDRows(db, "data, id, transaction_id", "plutus_data", ids, func(rows *sql.Rows) error {
-		for rows.Next() {
-			var item models.PlutusData
-			if err := rows.Scan(&item.Data, &item.ID, &item.TransactionID); err != nil {
-				return err
+	err := s.transactionIDRows(
+		db,
+		"data, id, transaction_id",
+		"plutus_data",
+		ids,
+		func(rows *sql.Rows) error {
+			for rows.Next() {
+				var item models.PlutusData
+				if err := rows.Scan(&item.Data, &item.ID, &item.TransactionID); err != nil {
+					return err
+				}
+				key := strconv.FormatUint(uint64(item.TransactionID), 10)
+				ret[key] = append(ret[key], item)
 			}
-			key := strconv.FormatUint(uint64(item.TransactionID), 10)
-			ret[key] = append(ret[key], item)
-		}
-		return rows.Err()
-	})
+			return rows.Err()
+		},
+	)
 	return ret, err
 }
 
@@ -335,15 +426,25 @@ func (s *Store) hydrateTransaction(
 // transactionUtxosBatch loads all UTxO associations for a transaction slice
 // in parameter-limited batches. The result key is either a transaction ID or
 // hash, as selected by key.
-func (s *Store) transactionUtxosBatch(db queryer, column string, args []any, key func(*models.Utxo) string) (map[string][]models.Utxo, error) {
+func (s *Store) transactionUtxosBatch(
+	db queryer,
+	column string,
+	args []any,
+	key func(*models.Utxo) string,
+) (map[string][]models.Utxo, error) {
 	result := make(map[string][]models.Utxo)
 	if len(args) == 0 {
 		return result, nil
 	}
 	for start := 0; start < len(args); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(args))
-		query := "SELECT " + sqliteUtxoColumns + " FROM utxo WHERE " + column + " IN (" + bindPlaceholders(end-start) + ") ORDER BY id"
-		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(query), args[start:end]...)
+		query := "SELECT " + sqliteUtxoColumns + " FROM utxo WHERE " + column + " IN (" + bindPlaceholders(
+			end-start,
+		) + ") ORDER BY id"
+		rows, err := db.QueryContext(
+			context.Background(),
+			s.dialect.Rebind(query),
+			args[start:end]...)
 		if err != nil {
 			return nil, err
 		}

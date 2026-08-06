@@ -79,6 +79,35 @@ type HistoryExpiryConfig struct {
 	Frequency time.Duration
 }
 
+// KoiosParityConfig controls the optional in-process Koios reward-parity
+// observer (dingo #3098). When Enabled, Run() subscribes an observer to the
+// node's own EventBus (event.EpochTransitionEventType) that validates each
+// newly closed epoch's committed reward state directly against Koios
+// reference data as the node advances — see internal/koiosparity and
+// ARCHITECTURE.md's "Koios Parity Tracker" section. This is a one-off
+// validation aid, not a permanent subsystem; leave Enabled false for normal
+// node operation.
+type KoiosParityConfig struct {
+	// Enabled subscribes the observer to epoch.transition when true.
+	Enabled bool
+	// Network is the Koios network to validate against ("preview" or
+	// "preprod"). Empty defaults to this Config's own Network.
+	Network string
+	// CachePath is the Koios reference cache.db path. Empty defaults to
+	// {DatabasePath}/.koios/cache.db.
+	CachePath string
+	// APIKey is the Koios Bearer token for higher-rate-limit access.
+	APIKey string
+	// Strict stops/cancels the node on the first Koios/tool error or exact
+	// parity mismatch rather than logging it and continuing normal
+	// operation.
+	Strict bool
+	// GraceHours is the window after an epoch closes during which a missing
+	// Dingo-side row is treated as reference/sync lag rather than a
+	// failure. 0 selects the default (24).
+	GraceHours int
+}
+
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
 // Zero values use the internal fetcher defaults.
 type OffchainMetadataConfig struct {
@@ -145,8 +174,10 @@ type Config struct {
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
+	barkClientCAFilePath                                                                string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
+	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
@@ -418,14 +449,25 @@ func (n *Node) configValidate() error {
 		)
 	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
-		return fmt.Errorf("min pool margin (%d) must be in [0, 10000] basis points", n.config.cfg.MinPoolMargin)
+		return fmt.Errorf(
+			"min pool margin (%d) must be in [0, 10000] basis points",
+			n.config.cfg.MinPoolMargin,
+		)
 	}
-	if n.config.cfg.PledgeLeverageEnabled && (n.config.cfg.PledgeLeverage < 1 || n.config.cfg.PledgeLeverage > 10_000) {
-		return fmt.Errorf("pledge leverage (%d) must be in [1, 10000] when enabled", n.config.cfg.PledgeLeverage)
+	if n.config.cfg.PledgeLeverageEnabled &&
+		(n.config.cfg.PledgeLeverage < 1 || n.config.cfg.PledgeLeverage > 10_000) {
+		return fmt.Errorf(
+			"pledge leverage (%d) must be in [1, 10000] when enabled",
+			n.config.cfg.PledgeLeverage,
+		)
 	}
-	if n.config.cfg.FullPotRewardsEnabled && !n.config.cfg.UnsafeFullPotRewardsOnStandardNetworks {
+	if n.config.cfg.FullPotRewardsEnabled &&
+		!n.config.cfg.UnsafeFullPotRewardsOnStandardNetworks {
 		if network, ok := internalconfig.FullPotRewardsStandardNetwork(n.config.cfg.Network, n.config.cfg.NetworkMagic); ok {
-			return fmt.Errorf("full pot rewards are not permitted on standard network %q without unsafe full-pot rewards opt-in", network)
+			return fmt.Errorf(
+				"full pot rewards are not permitted on standard network %q without unsafe full-pot rewards opt-in",
+				network,
+			)
 		}
 	}
 	// In core mode, ignore API ports — they are only used in API mode.
@@ -483,23 +525,44 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			Chainsync:          internalconfig.DefaultChainsyncConfig(),
 			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
 			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
+			KoiosParity:        internalconfig.DefaultKoiosParityConfig(),
 			Logging:            internalconfig.DefaultLoggingConfig(),
 			Midnight:           internalconfig.DefaultMidnightConfig(),
 			CORSAllowedOrigins: []string{"*"},
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
-					Blob:     hostplugin.Selection{Provider: "badger", Config: map[string]any{}},
-					Metadata: hostplugin.Selection{Provider: "sqlite", Config: map[string]any{}},
+					Blob: hostplugin.Selection{
+						Provider: "badger",
+						Config:   map[string]any{},
+					},
+					Metadata: hostplugin.Selection{
+						Provider: "sqlite",
+						Config:   map[string]any{},
+					},
 				},
-				Mempool: hostplugin.Selection{Provider: "default", Config: map[string]any{
-					"capacity":           int64(internalconfig.DefaultMempoolCapacityPraos),
-					"evictionWatermark":  internalconfig.DefaultEvictionWatermark,
-					"rejectionWatermark": internalconfig.DefaultRejectionWatermark,
-				}},
+				Mempool: hostplugin.Selection{
+					Provider: "default",
+					Config: map[string]any{
+						"capacity": int64(
+							internalconfig.DefaultMempoolCapacityPraos,
+						),
+						"evictionWatermark":  internalconfig.DefaultEvictionWatermark,
+						"rejectionWatermark": internalconfig.DefaultRejectionWatermark,
+					},
+				},
 				API: internalconfig.APIPluginsConfig{
-					Blockfrost: hostplugin.Selection{Provider: "builtin", Config: map[string]any{"port": uint(3000)}},
-					Mesh:       hostplugin.Selection{Provider: "builtin", Config: map[string]any{"port": uint(8080)}},
-					Utxorpc:    hostplugin.Selection{Provider: "builtin", Config: map[string]any{"port": uint(9090)}},
+					Blockfrost: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(3000)},
+					},
+					Mesh: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(8080)},
+					},
+					Utxorpc: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(9090)},
+					},
 				},
 			},
 		},
@@ -521,23 +584,63 @@ func (c *Config) syncCompatFields() {
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
+	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
-	c.runMode, c.startEra, c.storageMode = string(c.cfg.RunMode), c.cfg.StartEra, StorageMode(c.cfg.StorageMode)
-	if c.runMode == string(internalconfig.RunModeLeios) && pluginInt64(c.cfg.Plugins.Mempool.Config["capacity"]) == internalconfig.DefaultMempoolCapacityPraos {
-		c.cfg.Plugins.Mempool.Config["capacity"] = int64(internalconfig.DefaultMempoolCapacityLeios)
+	c.runMode, c.startEra, c.storageMode = string(
+		c.cfg.RunMode,
+	), c.cfg.StartEra, StorageMode(
+		c.cfg.StorageMode,
+	)
+	if c.runMode == string(internalconfig.RunModeLeios) &&
+		pluginInt64(
+			c.cfg.Plugins.Mempool.Config["capacity"],
+		) == internalconfig.DefaultMempoolCapacityPraos {
+		c.cfg.Plugins.Mempool.Config["capacity"] = int64(
+			internalconfig.DefaultMempoolCapacityLeios,
+		)
 	}
-	c.historyExpiry = HistoryExpiryConfig{Enabled: c.cfg.HistoryExpiry.Enabled, Frequency: c.cfg.HistoryExpiry.Frequency}
-	c.midnight = MidnightConfig{Port: c.cfg.Midnight.Port, Host: c.cfg.Midnight.Host, CNightPolicyID: c.cfg.Midnight.CNightPolicyID, CNightAssetName: c.cfg.Midnight.CNightAssetName, MappingValidatorAddress: c.cfg.Midnight.MappingValidatorAddress, AuthTokenPolicyID: c.cfg.Midnight.AuthTokenPolicyID, AuthTokenAssetName: c.cfg.Midnight.AuthTokenAssetName, CommitteeCandidateAddress: c.cfg.Midnight.CommitteeCandidateAddress, TechnicalCommitteeAddress: c.cfg.Midnight.TechnicalCommitteeAddress, TechnicalCommitteePolicyID: c.cfg.Midnight.TechnicalCommitteePolicyID, CouncilAddress: c.cfg.Midnight.CouncilAddress, CouncilPolicyID: c.cfg.Midnight.CouncilPolicyID, PermissionedCandidatePolicy: c.cfg.Midnight.PermissionedCandidatePolicy}
+	c.historyExpiry = HistoryExpiryConfig{
+		Enabled:   c.cfg.HistoryExpiry.Enabled,
+		Frequency: c.cfg.HistoryExpiry.Frequency,
+	}
+	c.koiosParity = KoiosParityConfig{
+		Enabled:    c.cfg.KoiosParity.Enabled,
+		Network:    c.cfg.KoiosParity.Network,
+		CachePath:  c.cfg.KoiosParity.CachePath,
+		APIKey:     c.cfg.KoiosParity.APIKey,
+		Strict:     c.cfg.KoiosParity.Strict,
+		GraceHours: c.cfg.KoiosParity.GraceHours,
+	}
+	c.midnight = MidnightConfig{
+		Port:                        c.cfg.Midnight.Port,
+		Host:                        c.cfg.Midnight.Host,
+		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
+		CNightAssetName:             c.cfg.Midnight.CNightAssetName,
+		MappingValidatorAddress:     c.cfg.Midnight.MappingValidatorAddress,
+		AuthTokenPolicyID:           c.cfg.Midnight.AuthTokenPolicyID,
+		AuthTokenAssetName:          c.cfg.Midnight.AuthTokenAssetName,
+		CommitteeCandidateAddress:   c.cfg.Midnight.CommitteeCandidateAddress,
+		TechnicalCommitteeAddress:   c.cfg.Midnight.TechnicalCommitteeAddress,
+		TechnicalCommitteePolicyID:  c.cfg.Midnight.TechnicalCommitteePolicyID,
+		CouncilAddress:              c.cfg.Midnight.CouncilAddress,
+		CouncilPolicyID:             c.cfg.Midnight.CouncilPolicyID,
+		PermissionedCandidatePolicy: c.cfg.Midnight.PermissionedCandidatePolicy,
+	}
 	c.shutdownTimeout, c.chainsyncMaxClients = 0, c.cfg.Chainsync.MaxClients
 	if c.cfg.ShutdownTimeout != "" {
 		c.shutdownTimeout, _ = time.ParseDuration(c.cfg.ShutdownTimeout)
 	}
 	c.chainsyncStallTimeout = c.ChainsyncStallTimeoutDuration()
-	c.chainsyncStrategy, _ = chainsync.ParseHeaderSyncStrategy(c.cfg.Chainsync.Strategy)
-	c.DatabaseWorkerPoolConfig = ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: c.cfg.DatabaseWorkers, TaskQueueSize: c.cfg.DatabaseQueueSize}
+	c.chainsyncStrategy, _ = chainsync.ParseHeaderSyncStrategy(
+		c.cfg.Chainsync.Strategy,
+	)
+	c.DatabaseWorkerPoolConfig = ledger.DatabaseWorkerPoolConfig{
+		WorkerPoolSize: c.cfg.DatabaseWorkers,
+		TaskQueueSize:  c.cfg.DatabaseQueueSize,
+	}
 	c.targetNumberOfKnownPeers, c.targetNumberOfEstablishedPeers, c.targetNumberOfActivePeers = c.cfg.TargetNumberOfKnownPeers, c.cfg.TargetNumberOfEstablishedPeers, c.cfg.TargetNumberOfActivePeers
 	c.activePeersTopologyQuota, c.activePeersGossipQuota, c.activePeersLedgerQuota = c.cfg.ActivePeersTopologyQuota, c.cfg.ActivePeersGossipQuota, c.cfg.ActivePeersLedgerQuota
 	c.minHotPeers, c.reconcileInterval, c.inactivityTimeout = c.cfg.MinHotPeers, c.cfg.ReconcileInterval, c.cfg.InactivityTimeout
@@ -560,14 +663,22 @@ func (c *Config) syncCompatFields() {
 	}
 }
 
-func WithPluginSelection(capability hostplugin.Capability, selection hostplugin.Selection) ConfigOptionFunc {
+func WithPluginSelection(
+	capability hostplugin.Capability,
+	selection hostplugin.Selection,
+) ConfigOptionFunc {
 	return func(c *Config) {
 		if c.cfg == nil {
 			*c = NewConfig()
 		}
 		if capability == hostplugin.CapabilityMempool {
-			if selection.Config == nil && (selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
-				selection.Config = map[string]any{"capacity": int64(internalconfig.DefaultMempoolCapacityPraos)}
+			if selection.Config == nil &&
+				(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
+				selection.Config = map[string]any{
+					"capacity": int64(
+						internalconfig.DefaultMempoolCapacityPraos,
+					),
+				}
 			}
 		}
 		selection.Config = clonePluginConfig(selection.Config)
@@ -674,7 +785,10 @@ func NewConfigFromInternal(
 	if cfg.Chainsync.StallTimeout != "" {
 		d, err := time.ParseDuration(cfg.Chainsync.StallTimeout)
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid chainsync stall timeout: %w", err)
+			return Config{}, fmt.Errorf(
+				"invalid chainsync stall timeout: %w",
+				err,
+			)
 		}
 		chainsyncDur = d
 	} else {
@@ -1238,12 +1352,43 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
+// WithBarkClientCAFilePath sets the PEM CA bundle Bark verifies client
+// certificates (mTLS) against. Required whenever the database lifecycle
+// service is mounted — see BarkConfig.TlsClientCAFilePath's doc comment in
+// bark/bark.go for what this gates.
+func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkClientCAFilePath = path
+		c.barkClientCAFilePath = path
+	}
+}
+
 // WithHistoryExpiry configures local immutable block history expiry.
 func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.HistoryExpiry = internalconfig.HistoryExpiryConfig{
 			Enabled:   cfg.Enabled,
 			Frequency: cfg.Frequency,
+		}
+	}
+}
+
+// WithKoiosParity configures the optional in-process Koios reward-parity
+// observer (dingo #3098). See KoiosParityConfig's doc comment. This is how a
+// library caller (or internal/node's composition of a real dingo.yaml/env
+// config) enables live-driven parity validation for the node Run() starts —
+// the one-off validation run and a normal sync share the same process and
+// authoritative state path rather than requiring a second, separately
+// synced Dingo instance.
+func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
+			Enabled:    cfg.Enabled,
+			Network:    cfg.Network,
+			CachePath:  cfg.CachePath,
+			APIKey:     cfg.APIKey,
+			Strict:     cfg.Strict,
+			GraceHours: cfg.GraceHours,
 		}
 	}
 }
@@ -1359,7 +1504,10 @@ func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 
 // WithCacheConfig sets the CBOR cache sizes for block LRU,
 // hot UTxO, and hot TX caches.
-func WithCacheConfig(blockLRU, hotUtxo, hotTx int, hotTxMaxBytes int64) ConfigOptionFunc {
+func WithCacheConfig(
+	blockLRU, hotUtxo, hotTx int,
+	hotTxMaxBytes int64,
+) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Cache.BlockLRUEntries = blockLRU
 		c.cfg.Cache.HotUtxoEntries = hotUtxo

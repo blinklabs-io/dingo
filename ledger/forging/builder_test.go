@@ -52,7 +52,9 @@ func (m *mockPParamsProvider) GetCurrentPParams() lcommon.ProtocolParameters {
 	return m.pparams
 }
 
-func (m *mockPParamsProvider) ProtocolParamsForSlot(_ uint64) lcommon.ProtocolParameters {
+func (m *mockPParamsProvider) ProtocolParamsForSlot(
+	_ uint64,
+) lcommon.ProtocolParameters {
 	return m.pparams
 }
 
@@ -699,7 +701,12 @@ func TestBuildBlockCborRoundTrip(t *testing.T) {
 		assert.Equal(t, 0, len(decodedBlock.Transactions()))
 
 		reencodedCbor := decodedBlock.Cbor()
-		assert.Equal(t, blockCbor, reencodedCbor, "CBOR round-trip should produce identical bytes")
+		assert.Equal(
+			t,
+			blockCbor,
+			reencodedCbor,
+			"CBOR round-trip should produce identical bytes",
+		)
 	})
 
 	t.Run("with transactions", func(t *testing.T) {
@@ -737,7 +744,12 @@ func TestBuildBlockCborRoundTrip(t *testing.T) {
 		assert.Equal(t, 2, len(decodedBlock.Transactions()))
 
 		reencodedCbor := decodedBlock.Cbor()
-		assert.Equal(t, blockCbor, reencodedCbor, "CBOR round-trip should produce identical bytes")
+		assert.Equal(
+			t,
+			blockCbor,
+			reencodedCbor,
+			"CBOR round-trip should produce identical bytes",
+		)
 	})
 }
 
@@ -811,17 +823,24 @@ func TestComputeConwayBlockBodyHashProducesValidatingBlock(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.NotZero(t, bodySize)
-	assert.NotEqual(t, lcommon.Blake2b256{}, bodyHash, "must not be the zero placeholder")
+	assert.NotEqual(
+		t,
+		lcommon.Blake2b256{},
+		bodyHash,
+		"must not be the zero placeholder",
+	)
 
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
-				BlockNumber:   101,
-				Slot:          1001,
-				PrevHash:      lcommon.NewBlake2b256(make([]byte, 32)),
-				IssuerVkey:    lcommon.IssuerVkey{},
-				VrfKey:        []byte{},
-				VrfResult:     lcommon.VrfResult{Output: lcommon.Blake2b256{}.Bytes()},
+				BlockNumber: 101,
+				Slot:        1001,
+				PrevHash:    lcommon.NewBlake2b256(make([]byte, 32)),
+				IssuerVkey:  lcommon.IssuerVkey{},
+				VrfKey:      []byte{},
+				VrfResult: lcommon.VrfResult{
+					Output: lcommon.Blake2b256{}.Bytes(),
+				},
 				BlockBodySize: bodySize,
 				BlockBodyHash: bodyHash,
 				OpCert:        babbage.BabbageOpCert{},

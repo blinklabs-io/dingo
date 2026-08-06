@@ -687,7 +687,8 @@ func (lv *LedgerView) DRepDelegation(
 	// No DRep delegation: an empty credential together with the default
 	// key-hash type. An always-abstain / always-no-confidence delegation
 	// carries no credential but a non-default type, so it is a delegation.
-	if len(account.Drep) == 0 && account.DrepType == models.DrepTypeAddrKeyHash {
+	if len(account.Drep) == 0 &&
+		account.DrepType == models.DrepTypeAddrKeyHash {
 		return nil, nil
 	}
 	// DrepType is a small ledger enum (0-3); guard the narrowing conversion
@@ -835,7 +836,12 @@ func (lv *LedgerView) GetDRepVotingPower(
 ) (uint64, error) {
 	// expiryEpoch 0: this point-in-time API query is not gated by the
 	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
-	power, err := lv.ls.db.GetDRepVotingPower(credentialTag, drepCredential, 0, lv.txn)
+	power, err := lv.ls.db.GetDRepVotingPower(
+		credentialTag,
+		drepCredential,
+		0,
+		lv.txn,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}

@@ -296,8 +296,10 @@ func TestCompatProtocolParamsResponse(t *testing.T) {
 
 func TestCompatMetadataTransactionJSONResponse(t *testing.T) {
 	ours := MetadataTransactionJSONResponse{
-		TxHash:       "abc123",
-		JSONMetadata: json.RawMessage(`{"name":"nft-one","image":"ipfs://cid"}`),
+		TxHash: "abc123",
+		JSONMetadata: json.RawMessage(
+			`{"name":"nft-one","image":"ipfs://cid"}`,
+		),
 	}
 
 	data, err := json.Marshal(ours)
@@ -339,13 +341,15 @@ func TestCompatTransactionResponse(t *testing.T) {
 	invalidBefore := "100"
 	invalidHereafter := "200"
 	ours := TransactionResponse{
-		Hash:             "txhash1",
-		Block:            "blockhash1",
-		Slot:             123,
-		BlockHeight:      45,
-		BlockTime:        1700000000,
-		Index:            2,
-		OutputAmount:     []AddressAmountResponse{{Unit: "lovelace", Quantity: "5000"}},
+		Hash:        "txhash1",
+		Block:       "blockhash1",
+		Slot:        123,
+		BlockHeight: 45,
+		BlockTime:   1700000000,
+		Index:       2,
+		OutputAmount: []AddressAmountResponse{
+			{Unit: "lovelace", Quantity: "5000"},
+		},
 		Fees:             "170000",
 		Deposit:          "0",
 		Size:             512,

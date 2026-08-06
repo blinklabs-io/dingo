@@ -22,7 +22,12 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSlotCalc(t *testing.T) {
@@ -319,4 +324,160 @@ func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
 	if epoch.EpochId != 5 {
 		t.Errorf("expected epoch 5, got %d", epoch.EpochId)
 	}
+}
+
+// slotToTimeBehindHorizonState builds a ledger whose applied tip is near
+// genesis, with an injected wall clock far ahead of it, so the forecast horizon
+// is deterministically behind the current slot regardless of when the suite
+// runs.
+func slotToTimeBehindHorizonState(
+	t *testing.T,
+	slotLengthMs uint,
+	slotsAhead uint64,
+) (*LedgerState, uint64, time.Time) {
+	t.Helper()
+	cfg := newTestEraHistoryCfg(t)
+	systemStart := cfg.ShelleyGenesis().SystemStart
+	slotLength := time.Duration(slotLengthMs) * time.Millisecond
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    slotLengthMs,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("tip"))},
+		config:     LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+	// A fixed clock slotsAhead slots past genesis: hermetic, and far enough
+	// ahead that the era's safe zone cannot cover it.
+	now := systemStart.Add(time.Duration(slotsAhead) * slotLength)
+	ls.nowFunc = func() time.Time { return now }
+	ls.publishSnapshotsLocked()
+	return ls, slotsAhead, now
+}
+
+// TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon is the regression test
+// for the slot clock spinning on "failed to get next slot time" for the whole
+// of a from-genesis sync or a `dingo load`.
+//
+// The clock's tick loop calls TimeToSlot(now) and then SlotToTime(slot+1). The
+// first has a near-now current-era extrapolation for exactly this case; the
+// second did not, so on a ledger whose applied tip is still near genesis while
+// the wall clock is far ahead, every tick logged an error and retried after
+// 100ms instead of sleeping to the next slot boundary.
+func TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon(t *testing.T) {
+	const slotLengthMs = 1000
+	ls, nowSlot, now := slotToTimeBehindHorizonState(
+		t, slotLengthMs, 5_000_000,
+	)
+	nextSlot := nowSlot + 1
+
+	// Confirm the premise: that slot really is past the bounded horizon, so
+	// this test cannot silently become vacuous.
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	_, horizonErr := sum.SlotToTime(nextSlot)
+	require.ErrorIs(t, horizonErr, hardfork.ErrPastHorizon,
+		"premise: the next wall-clock slot must be past the forecast horizon")
+
+	// SlotToTime must still resolve it, by extrapolating the current era.
+	when, err := ls.SlotToTime(nextSlot)
+	require.NoError(t, err,
+		"the slot clock must be able to resolve the next slot while behind")
+	assert.Equal(t, now.Add(time.Second), when,
+		"the next slot starts exactly one slot length after now")
+
+	// Consecutive slots stay one slot length apart.
+	next2, err := ls.SlotToTime(nextSlot + 1)
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, next2.Sub(when))
+
+	// An arbitrary future slot stays bounded: the escape hatch is only for
+	// operational timing, not a general weakening of the horizon.
+	_, err = ls.SlotToTime(nextSlot + 1_000_000)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a far-future slot must still be past the horizon")
+
+	// Slot 0 keeps its genesis special case.
+	genesis, err := ls.SlotToTime(0)
+	require.NoError(t, err)
+	assert.Equal(t, ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart,
+		genesis)
+
+	// A slot inside the horizon is still answered by the bounded Summary.
+	inHorizon, err := ls.SlotToTime(100)
+	require.NoError(t, err)
+	assert.Equal(t,
+		ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart.
+			Add(100*time.Second),
+		inHorizon)
+}
+
+// TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras covers eras whose slot length
+// exceeds the fixed 5s near-now window. Byron is 20s per slot in real Cardano
+// shapes, so the next slot boundary sits 20s in the future: gating on a fixed
+// window rejected it, SlotToTime returned ErrPastHorizon, and the clock fell
+// back into the 100ms error-retry loop this fallback exists to avoid.
+func TestSlotToTimeExtrapolatesNextSlotOnLongSlotEras(t *testing.T) {
+	const (
+		byronSlotLengthMs = 20_000
+		byronSlotLength   = 20 * time.Second
+	)
+	ls, nowSlot, now := slotToTimeBehindHorizonState(
+		t, byronSlotLengthMs, 5_000_000,
+	)
+	nextSlot := nowSlot + 1
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	_, horizonErr := sum.SlotToTime(nextSlot)
+	require.ErrorIs(t, horizonErr, hardfork.ErrPastHorizon, "premise")
+
+	// The next boundary is a full 20s ahead -- well outside the 5s window.
+	when, err := ls.SlotToTime(nextSlot)
+	require.NoError(t, err,
+		"a 20s-slot era's next boundary must still resolve")
+	assert.Equal(t, now.Add(byronSlotLength), when)
+	assert.Greater(t, when.Sub(now), operationalWindow,
+		"premise: the next boundary is beyond the fixed near-now window")
+
+	// The inverse must accept the same boundary: SlotToTime and TimeToSlot are
+	// a pair, so a fixed window on the reverse direction would reject the very
+	// time SlotToTime just returned.
+	backSlot, err := ls.TimeToSlot(when)
+	require.NoError(t, err,
+		"TimeToSlot must accept the boundary SlotToTime returned")
+	assert.Equal(t, nextSlot, backSlot, "the pair must round-trip")
+
+	// Still bounded in both directions: many slot lengths away is rejected.
+	_, err = ls.SlotToTime(nextSlot + 100)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	_, err = ls.TimeToSlot(now.Add(100 * byronSlotLength))
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a time many slot lengths ahead must still be refused as past-horizon")
+}
+
+// The window scales with slot length but stays a bounded operational window.
+func TestWithinOperationalWindowScalesWithSlotLength(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// With no slot length it is the plain near-now window.
+	assert.True(t, isNearNow(now, now.Add(4*time.Second)))
+	assert.False(t, isNearNow(now, now.Add(6*time.Second)))
+
+	// A 20s era admits its own next boundary...
+	assert.True(t, withinOperationalWindow(
+		now, now.Add(20*time.Second), 20*time.Second))
+	// ...and still rejects times many slot lengths out.
+	assert.False(t, withinOperationalWindow(
+		now, now.Add(5*time.Minute), 20*time.Second))
+	// Symmetric in the past direction.
+	assert.True(t, withinOperationalWindow(
+		now, now.Add(-20*time.Second), 20*time.Second))
+	assert.False(t, withinOperationalWindow(
+		now, now.Add(-5*time.Minute), 20*time.Second))
 }

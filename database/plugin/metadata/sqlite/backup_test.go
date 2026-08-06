@@ -35,7 +35,10 @@ func newBackupStore(t *testing.T, dataDir string) interface {
 	RestoreFrom(context.Context, string) error
 } {
 	t.Helper()
-	store, err := NewSQLStore(Config{DataDir: dataDir}, metadata.ProviderDependencies{})
+	store, err := NewSQLStore(
+		Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
 	require.NoError(t, err)
 	return store
 }
@@ -103,7 +106,10 @@ func TestRestoreRejectsExistingDestination(t *testing.T) {
 
 func TestContextReaderStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	reader := &contextReader{ctx: ctx, r: bytes.NewReader(bytes.Repeat([]byte("x"), 32))}
+	reader := &contextReader{
+		ctx: ctx,
+		r:   bytes.NewReader(bytes.Repeat([]byte("x"), 32)),
+	}
 	buf := make([]byte, 8)
 	_, err := reader.Read(buf)
 	require.NoError(t, err)
@@ -122,14 +128,20 @@ func TestCopyFileAndDurableDirectory(t *testing.T) {
 	data, err := os.ReadFile(dst)
 	require.NoError(t, err)
 	require.Equal(t, []byte("hello"), data)
-	require.NoError(t, createDirDurable(filepath.Join(t.TempDir(), "nested", "dir")))
+	require.NoError(
+		t,
+		createDirDurable(filepath.Join(t.TempDir(), "nested", "dir")),
+	)
 }
 
 func TestCopyReaderToFileRemovesPartialDestinationOnCancellation(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "dst.bin")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	require.Error(t, copyReaderToFile(ctx, bytes.NewReader([]byte("hello")), dst))
+	require.Error(
+		t,
+		copyReaderToFile(ctx, bytes.NewReader([]byte("hello")), dst),
+	)
 	_, err := os.Stat(dst)
 	require.True(t, os.IsNotExist(err))
 }

@@ -155,6 +155,39 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
+	// The Koios parity observer (dingo #3098) reads Dingo's committed reward
+	// state through a RewardParitySource backed directly by n.db, the same
+	// way snapshotMgr above does -- it must be fully stopped (Observer.Stop
+	// blocks until its background goroutine has actually exited) and its
+	// event.EpochTransitionEventType subscription torn down before n.db is
+	// closed below, or it would keep running against a stale, soon-to-be-
+	// closed database and its subscription would leak (the EventBus itself
+	// is never recreated across a live restore/truncate cycle). It is
+	// rebuilt against the new n.db and resubscribed by
+	// reinitializeBackgroundManagers, mirroring reinitializeMidnightIndexer's
+	// stop-here/rebuild-there split for the same reason.
+	if n.koiosParityObserver != nil {
+		stopCtx, cancel := context.WithTimeout(
+			ctx,
+			n.configuredShutdownTimeout(),
+		)
+		stopErr := n.koiosParityObserver.Stop(stopCtx)
+		cancel()
+		if stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("koios parity observer shutdown: %w", stopErr),
+			)
+		}
+		n.koiosParityObserver = nil
+	}
+	if n.koiosParitySubId != 0 {
+		n.eventBus.UnsubscribeAndWait(
+			event.EpochTransitionEventType,
+			n.koiosParitySubId,
+		)
+		n.koiosParitySubId = 0
+	}
 	if n.dbLifecycleMgr != nil {
 		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
 			err = errors.Join(
@@ -579,7 +612,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 				if n.chainsyncState == nil {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
-				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(connId, hash)
+				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(
+					connId,
+					hash,
+				)
 				if !ok {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
@@ -628,6 +664,14 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
+	// Recovery changes both the ledger tip and blob contents. Complete it
+	// before starting background maintenance that reads or prunes either store.
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+
 	if n.config.historyExpiry.Enabled {
 		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
@@ -644,11 +688,6 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		}
 	}
 
-	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
-			return fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}
@@ -715,15 +754,16 @@ func (n *Node) reinitializeMidnightIndexer() error {
 	return nil
 }
 
-// reinitializeBackgroundManagers starts n.ledgerState (deferred until here
-// so the Midnight indexer's subscription already exists), then rebuilds
-// the stake-snapshot manager, the database-lifecycle manager, and (if
-// enabled) the Leios vote/pipeline managers — matching Run()'s order.
+// reinitializeBackgroundManagers rebuilds the stake-snapshot manager and
+// wires both its epoch-boundary hooks (the stake hook and the capture
+// hook), (re)starts the optional Koios parity observer (dingo #3098) if
+// configured, then starts n.ledgerState -- in that order, matching Run()'s
+// own "hooks configured → observer subscribed → ledger started" sequencing
+// (node.go), so an epoch boundary reached immediately after restart can
+// never fire before both snapshot hooks or the parity observer's
+// subscription exist. It then restarts the database-lifecycle manager and
+// (if enabled) the Leios vote/pipeline managers, matching Run()'s order.
 func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
-	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to restart ledger: %w", err)
-	}
-
 	n.snapshotMgr = snapshot.NewManager(n.db, n.eventBus, n.config.logger)
 	// Mirror the CIP-0163 reward-account inactivity gate into snapshot
 	// capture so it matches the ledger config that drives account expiry
@@ -739,11 +779,45 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Reinstall both epoch-boundary hooks, in the same order and with the
+	// same bodies as Run() (node.go): the stake hook first, so the
+	// authoritative SNAP-point stake read (after MIR, before POOLREAP/
+	// enactment) is captured via ComputeEpochBoundarySnapshot, then the
+	// capture hook, which stages that snapshot atomically as part of the
+	// same rollover transaction. A live Restore/Truncate must not leave
+	// only the capture hook installed -- without the paired stake hook,
+	// the next epoch boundary would fall back to reconstructing stake
+	// instead of using the SNAP-point capture, producing snapshot/reward
+	// state inconsistent with a normal (non-restored) startup and able to
+	// trip false mismatches in the Koios parity observer/check.
+	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 	n.ledgerState.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+
+	// Rebuild the Koios parity observer (if enabled) against the fresh
+	// n.db a live restore/truncate just reinitialized, and resubscribe it to
+	// event.EpochTransitionEventType, before n.ledgerState.Start below --
+	// quiesceForLiveLifecycleOp already stopped and unsubscribed the old
+	// one (bound to the now-closed pre-rebuild n.db) as part of tearing
+	// storage down. startKoiosParityObserver sets n.koiosParityObserver/
+	// n.koiosParitySubId itself, identical to Run()'s own call.
+	if n.config.koiosParity.Enabled {
+		if err := n.startKoiosParityObserver(); err != nil {
+			return fmt.Errorf("restarting koios parity observer: %w", err)
+		}
+	}
+
+	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to restart ledger: %w", err)
+	}
+
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
 			return err
@@ -1009,7 +1083,10 @@ func (n *Node) reinitializeAPIServers() error {
 			},
 		)
 		if err != nil {
-			return fmt.Errorf("failed to recreate midnight gRPC server: %w", err)
+			return fmt.Errorf(
+				"failed to recreate midnight gRPC server: %w",
+				err,
+			)
 		}
 		if err := n.midnightServer.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("restarting midnight gRPC server: %w", err)
@@ -1188,7 +1265,9 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 // (node.go) but parameterized so a temporary handle (e.g. Truncate's
 // tmpDB, or Restore's staging-directory validation) can target a
 // different directory than n.config.dataDir.
-func (n *Node) storageDependencies(dataDir string) internalplugins.StorageDependencies {
+func (n *Node) storageDependencies(
+	dataDir string,
+) internalplugins.StorageDependencies {
 	return internalplugins.StorageDependencies{
 		DataDir:        dataDir,
 		RunMode:        n.config.runMode,
@@ -1566,7 +1645,9 @@ var syncDataDirParent = fsyncdir.Sync
 // reconcileInterruptedLiveRestoreSwap is what makes every one of those
 // intermediate states — including one this fsync doesn't quite manage to
 // make durable before a crash — safe to resume from at the next startup.
-func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err error) {
+func (n *Node) swapInRestoredDataDir(
+	stagingDir string,
+) (backupDir string, err error) {
 	dataDir := n.config.dataDir
 	parentDir := filepath.Dir(dataDir)
 	backupDir = dataDir + preRestoreBackupSuffix
@@ -1584,13 +1665,19 @@ func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err e
 		if rbErr := os.Rename(backupDir, dataDir); rbErr != nil {
 			return "", fmt.Errorf(
 				"%w: sync %q after moving aside current data directory: %w (rollback also failed: %w; original data preserved at %q)",
-				errRestoreSwapUnrecoverable, parentDir, err, rbErr, backupDir,
+				errRestoreSwapUnrecoverable,
+				parentDir,
+				err,
+				rbErr,
+				backupDir,
 			)
 		}
 		if syncErr := syncDataDirParent(parentDir); syncErr != nil {
 			return "", fmt.Errorf(
 				"sync %q after moving aside current data directory: %w (rolled back, but sync after rollback failed too: %w)",
-				parentDir, err, syncErr,
+				parentDir,
+				err,
+				syncErr,
 			)
 		}
 		return "", fmt.Errorf(
@@ -1602,13 +1689,18 @@ func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err e
 		if rbErr := os.Rename(backupDir, dataDir); rbErr != nil {
 			return "", fmt.Errorf(
 				"%w: activate restored data directory: %w (rollback also failed: %w; restored data preserved at %q)",
-				errRestoreSwapUnrecoverable, err, rbErr, stagingDir,
+				errRestoreSwapUnrecoverable,
+				err,
+				rbErr,
+				stagingDir,
 			)
 		}
 		if syncErr := syncDataDirParent(parentDir); syncErr != nil {
 			return "", fmt.Errorf(
 				"activate restored data directory: %w (rolled back, but sync %q after rollback failed: %w)",
-				err, parentDir, syncErr,
+				err,
+				parentDir,
+				syncErr,
 			)
 		}
 		return "", fmt.Errorf("activate restored data directory: %w", err)
@@ -1663,7 +1755,11 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 	case os.IsNotExist(backupErr):
 		return nil
 	case backupErr != nil:
-		return fmt.Errorf("stat pre-restore backup %q: %w", backupDir, backupErr)
+		return fmt.Errorf(
+			"stat pre-restore backup %q: %w",
+			backupDir,
+			backupErr,
+		)
 	}
 
 	_, dataErr := os.Stat(dataDir)
