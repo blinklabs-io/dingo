@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 3)
+	require.Len(t, registry, 2)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 302)
@@ -36,11 +36,6 @@ func TestSQLiteRegistry(t *testing.T) {
 	// v2 adds an index and nothing else, so it ships no contract.sql; the
 	// loader has to read that absence as empty rather than as an error.
 	require.Empty(t, registry[1].SQL["sqlite"].Contract)
-	require.Equal(t, 3, registry[2].Version)
-	require.Equal(t, "v3alpha1", registry[2].Name)
-	// v3 creates node_settings_gate and likewise ships no contract.sql.
-	require.Len(t, registry[2].SQL["sqlite"].Expand, 1)
-	require.Empty(t, registry[2].SQL["sqlite"].Contract)
 }
 
 // TestMySQLTranslationPrefixesBlobIndexAddedByLaterVersion pins the schema
@@ -55,7 +50,7 @@ func TestMySQLTranslationPrefixesBlobIndexAddedByLaterVersion(t *testing.T) {
 	t.Parallel()
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 3)
+	require.Len(t, registry, 2)
 
 	statements := registry[1].SQL["mysql"].Expand
 	require.Len(t, statements, 1)

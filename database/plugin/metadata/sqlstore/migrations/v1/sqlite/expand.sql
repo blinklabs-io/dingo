@@ -2,6 +2,7 @@
 -- This file is immutable after release; changes are detected by its checksum.
 CREATE TABLE IF NOT EXISTS `commit_timestamp` (`id` integer PRIMARY KEY AUTOINCREMENT,`timestamp` integer);
 CREATE TABLE IF NOT EXISTS `node_settings` (`id` integer PRIMARY KEY AUTOINCREMENT,`storage_mode` text NOT NULL,`network` text NOT NULL);
+CREATE TABLE IF NOT EXISTS `node_settings_gate` (`name` text NOT NULL,`value` text NOT NULL,`recorded_epoch` integer NOT NULL,`recorded_slot` integer NOT NULL,PRIMARY KEY (`name`));
 CREATE TABLE IF NOT EXISTS `account` (`staking_key` blob,`credential_tag` integer NOT NULL DEFAULT 0,`pool` blob,`drep` blob,`id` integer PRIMARY KEY AUTOINCREMENT,`added_slot` integer,`created_slot` integer NOT NULL DEFAULT 0,`certificate_id` integer,`reward` text,`drep_type` integer DEFAULT 0,`active` numeric DEFAULT true,`expiration_epoch` integer DEFAULT 0);
 CREATE INDEX IF NOT EXISTS `idx_account_expiration_epoch` ON `account`(`expiration_epoch`);
 CREATE INDEX IF NOT EXISTS `idx_account_certificate_id` ON `account`(`certificate_id`);

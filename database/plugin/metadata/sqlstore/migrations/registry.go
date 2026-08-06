@@ -29,9 +29,8 @@ import (
 var migrationSQL embed.FS
 
 const (
-	initialSchemaRelease    = "v1alpha1"
-	opCertIndexRelease      = "v2alpha1"
-	nodeSettingsGateRelease = "v3alpha1"
+	initialSchemaRelease = "v1alpha1"
+	opCertIndexRelease   = "v2alpha1"
 )
 
 // schemaVersions names every migration in ascending version order. A version
@@ -44,7 +43,6 @@ var schemaVersions = []struct {
 }{
 	{Version: 1, Name: initialSchemaRelease, Dir: "v1"},
 	{Version: 2, Name: opCertIndexRelease, Dir: "v2"},
-	{Version: 3, Name: nodeSettingsGateRelease, Dir: "v3"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

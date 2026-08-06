@@ -52,9 +52,9 @@ blob stores) and resync from genesis. This keeps startup deterministic and avoid
 fragile compatibility layer for obsolete schemas. Reference inputs are stored
 in the v1alpha1 `utxo_reference_input` association table so multiple
 transactions can reference one output; the legacy single-column marker is not
-used by the new store. Release `v3alpha1` (integer version 3) adds the
-`node_settings_gate` table described below; it applies on top of the earlier
-versions for both fresh and existing databases and has no backfill.
+used by the new store. `v1alpha1` also creates the `node_settings_gate` table
+described below: the schema is unreleased, so a new table belongs in the
+initial version rather than in a version of its own.
 
 `v2alpha1`, integer version 2, adds
 `idx_pool_opcert_sequence_pool_sequence` (see `pool_opcert_sequence` below).
