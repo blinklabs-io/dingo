@@ -67,7 +67,7 @@ type Pool struct {
 // scan. Worth the write cost for a one-shot query behind
 // `leadership-schedule`; it would not be for something on a hot path.
 //
-// Migration v2 declares it; the schema lives in SQL rather than in tags on this
+// Migration v1 declares it; the schema lives in SQL rather than in tags on this
 // struct.
 type PoolOpCertSequence struct {
 	PoolKeyHash []byte
