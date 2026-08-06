@@ -66,6 +66,17 @@ func TestEffectiveStorageMode(t *testing.T) {
 			"api",
 			dingo.StorageModeAPI,
 		},
+		{
+			// internal/node.Run normalizes an unset mode to core before
+			// WithStorageMode, so this helper must return core too, not "".
+			// It returned "" before, and converged with Run only because
+			// database.New applies its own empty-to-core default -- leaving
+			// this helper's contract resting on a third component's default.
+			"serve mode normalizes unset mode to core",
+			config.RunModeServe,
+			"",
+			dingo.StorageModeCore,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

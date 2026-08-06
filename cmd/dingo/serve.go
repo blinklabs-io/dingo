@@ -344,6 +344,17 @@ func resumeBackfill(
 // enforcement against the gate this preflight just recorded.
 func effectiveStorageMode(cfg *config.Config) dingo.StorageMode {
 	mode := dingo.StorageMode(cfg.StorageMode)
+	// internal/node.Run normalizes an unset mode to core before it reaches
+	// WithStorageMode, so do the same here rather than returning "". The
+	// values happen to converge today only because database.New applies its
+	// own empty-to-core default, and leaning on that would leave this
+	// helper's contract -- return exactly what node.Run will open with --
+	// dependent on a third component's default staying put. storage_mode is
+	// a one-way latch, so a future divergence here is not the kind that
+	// merely looks untidy.
+	if mode == "" {
+		mode = dingo.StorageModeCore
+	}
 	if cfg.RunMode.IsDevMode() && !mode.IsAPI() {
 		return dingo.StorageModeAPI
 	}
