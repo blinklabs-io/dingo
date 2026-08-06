@@ -750,7 +750,8 @@ When `Node.Run()` is called, components are initialized in this order:
  7. History Expiry worker (if configured), after recovery has settled the
     ledger tip and blob contents
  8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
-    backfill + EventBus subscription (if API storage mode).
+    backfill + EventBus subscription (if `midnight.enabled` AND API storage
+    mode; both are required).
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
     Technical Committee and Council governance datums, Ariadne permissioned-candidate
     parameters, and committee-candidate UTxO snapshots (taken at epoch boundaries via
@@ -3649,7 +3650,24 @@ panic (Badger) instead of a clean unavailable response.
 ### Midnight Indexer (`midnight/indexer/`)
 
 An optional block scanner that indexes Midnight chain events into multiple
-`midnight_*` metadata tables. It subscribes to `ledger.block`
+`midnight_*` metadata tables. Starting it requires BOTH `midnight.enabled`
+(`MidnightConfig.Enabled`, default false) AND API storage mode; storage mode
+alone is no longer sufficient. This is deliberately more restrictive than
+the Midnight gRPC server's own gate (`storageMode.IsAPI() && midnight.port
+> 0`, unchanged), which does not consult `midnight.enabled`: the server
+only serves whatever the `midnight_*` tables already hold, so it is not
+tied to the flag that starts the scanner writing to them.
+
+**Breaking change**: before `midnight.enabled` existed, the indexer started
+automatically for every API-storage-mode node. An existing api-mode
+deployment that relied on that implicit start must now set
+`midnight.enabled: true` (or `--midnight-enabled` / `DINGO_MIDNIGHT_ENABLED`)
+explicitly, or the indexer silently stops running on upgrade even though
+storage mode has not changed. `Config.Validate` rejects the reverse
+mistake (`midnight.enabled: true` with a non-api storage mode) at startup
+with a message naming both settings.
+
+Once eligible to run, it subscribes to `ledger.block`
 (`ledger.BlockEventType`) and for each applied block scans every transaction:
 
 - **cNIGHT create**: an output carrying the configured `cnight_policy_id` +

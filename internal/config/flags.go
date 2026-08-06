@@ -236,6 +236,11 @@ var flagSpecs = []flagSpec{
 		"offchain-metadata-allow-private-addresses",
 		"allow off-chain metadata fetches to private, loopback, and link-local addresses",
 	),
+	boolFlag(
+		"Midnight.Enabled",
+		"midnight-enabled",
+		`enable the Midnight indexer (requires storageMode "api")`,
+	),
 	uintFlag(
 		"Midnight.Port",
 		"midnight-port",

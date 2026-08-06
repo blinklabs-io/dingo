@@ -428,12 +428,15 @@ genesisBootstrap:
   corroborationPeers: 0
 
 # Midnight indexer configuration
-# Indexing is active only in API storage mode. Setting port to 0 disables
-# the Midnight gRPC server while leaving indexing eligible to run.
-# CLI: --midnight-port, --midnight-host
-# Env: DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
+# Indexing requires BOTH enabled: true AND API storage mode; either alone is
+# not enough. Setting port to 0 disables the Midnight gRPC server while
+# leaving indexing eligible to run.
+# CLI: --midnight-enabled, --midnight-port, --midnight-host
+# Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
 # Address and policy fields are YAML only.
 midnight:
+  # Enable the Midnight indexer. Default: false.
+  enabled: false
   # gRPC listen port
   port: 50051
   # gRPC listen address

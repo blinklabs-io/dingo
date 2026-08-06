@@ -407,11 +407,17 @@ func DefaultLoggingConfig() LoggingConfig {
 }
 
 // MidnightConfig holds configuration for the Midnight indexer and its
-// optional gRPC API surface. Indexing is only active when Dingo is running
-// in API storage mode; Port 0 disables only the gRPC server.
+// optional gRPC API surface. Indexing is only active when Enabled is true
+// AND Dingo is running in API storage mode -- both are required, since the
+// indexer depends on the API-mode indexes to function; Validate rejects
+// Enabled without API storage mode. Port 0 disables only the gRPC server.
 type MidnightConfig struct {
-	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
+	// Enabled opts into running the Midnight indexer. Default false: an
+	// api-mode deployment that wants Midnight indexing must set this
+	// explicitly.
+	Enabled bool   `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	Port    uint   `yaml:"port"    envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host    string `yaml:"host"    envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`

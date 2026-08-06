@@ -838,8 +838,11 @@ func (n *Node) Run(ctx context.Context) error {
 	// (b) the EventBus subscription exists before any BlockActionApply events
 	// can be emitted, eliminating the startup gap identified in #2114. The
 	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
-	// Ariadne/candidate rows.
-	if n.config.storageMode.IsAPI() {
+	// Ariadne/candidate rows. Both the explicit opt-in and API storage mode
+	// are required: the indexer depends on the api-mode indexes to function,
+	// and storage mode alone is no longer sufficient to start it (an api-mode
+	// deployment may not want Midnight indexing at all).
+	if n.config.midnight.Enabled && n.config.storageMode.IsAPI() {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
