@@ -69,15 +69,17 @@ func NewPoolCredentials() *PoolCredentials {
 
 // LoadFromFiles loads all pool credentials from the specified file paths.
 // Uses Bursa to parse cardano-cli format key files.
-func (pc *PoolCredentials) LoadFromFiles(
+// loadVRFAndOpCertLocked loads the VRF signing key and the operational
+// certificate and derives the pool ID. Both credential loaders need exactly
+// this; only the KES handling differs between them, so keeping one copy means a
+// change to key-size checks, opcert parsing or pool-ID derivation cannot apply
+// to one path and silently miss the other.
+//
+// The caller must hold pc.mu.
+func (pc *PoolCredentials) loadVRFAndOpCertLocked(
 	vrfSKeyPath string,
-	kesSKeyPath string,
 	opCertPath string,
 ) error {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	// Load VRF signing key
 	vrfKey, err := bursa.LoadKeyFromFile(vrfSKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load VRF signing key: %w", err)
@@ -91,6 +93,35 @@ func (pc *PoolCredentials) LoadFromFiles(
 	}
 	pc.vrfSKey = vrfKey.SKey
 	pc.vrfVKey = vrfKey.VKey
+
+	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
+	if err != nil {
+		return fmt.Errorf("failed to load operational certificate: %w", err)
+	}
+	pc.opCert = &OpCert{
+		KESVKey:     opCertKey.VKey,
+		IssueNumber: opCertKey.OpCertIssueNumber,
+		KESPeriod:   opCertKey.OpCertKesPeriod,
+		Signature:   opCertKey.OpCertSignature,
+		ColdVKey:    opCertKey.OpCertColdVKey,
+	}
+
+	// Derive pool ID from cold verification key (Blake2b-224 hash)
+	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash(pc.opCert.ColdVKey))
+	return nil
+}
+
+func (pc *PoolCredentials) LoadFromFiles(
+	vrfSKeyPath string,
+	kesSKeyPath string,
+	opCertPath string,
+) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	if err := pc.loadVRFAndOpCertLocked(vrfSKeyPath, opCertPath); err != nil {
+		return err
+	}
 
 	// Load KES signing key
 	kesKey, err := bursa.LoadKeyFromFile(kesSKeyPath)
@@ -110,22 +141,6 @@ func (pc *PoolCredentials) LoadFromFiles(
 		Data:   kesKey.SKey,
 	}
 	pc.kesVKey = kesKey.VKey
-
-	// Load operational certificate
-	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
-	if err != nil {
-		return fmt.Errorf("failed to load operational certificate: %w", err)
-	}
-	pc.opCert = &OpCert{
-		KESVKey:     opCertKey.VKey,
-		IssueNumber: opCertKey.OpCertIssueNumber,
-		KESPeriod:   opCertKey.OpCertKesPeriod,
-		Signature:   opCertKey.OpCertSignature,
-		ColdVKey:    opCertKey.OpCertColdVKey,
-	}
-
-	// Derive pool ID from cold verification key (Blake2b-224 hash)
-	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash(pc.opCert.ColdVKey))
 
 	// Validate that OpCert KES vkey matches the loaded KES key
 	if !bytes.Equal(pc.kesVKey, pc.opCert.KESVKey) {
@@ -220,40 +235,13 @@ func (pc *PoolCredentials) LoadVRFAndOpCert(
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	// Load VRF signing key
-	vrfKey, err := bursa.LoadKeyFromFile(vrfSKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to load VRF signing key: %w", err)
-	}
-	if len(vrfKey.SKey) != vrf.SeedSize {
-		return fmt.Errorf(
-			"invalid VRF key size: expected %d, got %d",
-			vrf.SeedSize,
-			len(vrfKey.SKey),
-		)
-	}
-	pc.vrfSKey = vrfKey.SKey
-	pc.vrfVKey = vrfKey.VKey
-
-	// Load operational certificate
-	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
-	if err != nil {
-		return fmt.Errorf("failed to load operational certificate: %w", err)
-	}
-	pc.opCert = &OpCert{
-		KESVKey:     opCertKey.VKey,
-		IssueNumber: opCertKey.OpCertIssueNumber,
-		KESPeriod:   opCertKey.OpCertKesPeriod,
-		Signature:   opCertKey.OpCertSignature,
-		ColdVKey:    opCertKey.OpCertColdVKey,
+	if err := pc.loadVRFAndOpCertLocked(vrfSKeyPath, opCertPath); err != nil {
+		return err
 	}
 	// The KES verification key is committed to by the opcert; the local KES
 	// signing key is intentionally left nil (held by the agent).
 	pc.kesVKey = pc.opCert.KESVKey
 	pc.kesSKey = nil
-
-	// Derive pool ID from cold verification key (Blake2b-224 hash)
-	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash(pc.opCert.ColdVKey))
 
 	return nil
 }

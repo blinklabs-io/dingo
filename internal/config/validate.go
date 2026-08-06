@@ -390,7 +390,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		if c.ShelleyVRFKey == "" {
 			missing = append(missing, "shelleyVrfKey")
 		}
-		if c.ShelleyKESKey == "" {
+		// The KES signing key is only required when the key is local. With a
+		// KES agent socket configured the key lives with the agent, which is
+		// the whole point of that flag; requiring both made the agent-only
+		// configuration impossible to start.
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
 			missing = append(missing, "shelleyKesKey")
 		}
 		if c.ShelleyOperationalCertificate == "" {

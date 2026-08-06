@@ -48,6 +48,9 @@ const (
 	defaultMinReconnect = 500 * time.Millisecond
 	defaultMaxReconnect = 5 * time.Second
 	defaultSignTimeout  = 5 * time.Second
+	// defaultHandshakeTimeout bounds the Hello exchange so an agent that
+	// accepts the socket without speaking cannot wedge the client.
+	defaultHandshakeTimeout = 5 * time.Second
 )
 
 // Config configures a Client.
@@ -72,6 +75,9 @@ type Config struct {
 	// defaults.
 	MinReconnect time.Duration
 	MaxReconnect time.Duration
+	// HandshakeTimeout bounds the Hello exchange on a freshly accepted
+	// connection. Zero uses the default.
+	HandshakeTimeout time.Duration
 }
 
 // Client sources KES material from a bursa KES agent and implements
@@ -97,6 +103,16 @@ type Client struct {
 
 	startOnce sync.Once
 	started   bool
+	// closed is set by Close. Once set, no further key push may be applied,
+	// so a push already in flight cannot repopulate key material after the
+	// shutdown wipe.
+	closed bool
+	// stop cancels the background loop's own context, so Close stops the
+	// loop rather than leaving it running against a cancelled-later node
+	// context. conn is the loop's current connection, closed by Close and by
+	// the single cancellation watcher so a blocked read always unblocks.
+	stop context.CancelFunc
+	conn net.Conn
 }
 
 var _ forging.KESSigner = (*Client)(nil)
@@ -139,6 +155,9 @@ func New(cfg Config) (*Client, error) {
 	if cfg.SignTimeout <= 0 {
 		cfg.SignTimeout = defaultSignTimeout
 	}
+	if cfg.HandshakeTimeout <= 0 {
+		cfg.HandshakeTimeout = defaultHandshakeTimeout
+	}
 	return &Client{
 		cfg:     cfg,
 		logger:  logger.With("component", "kesagent"),
@@ -153,16 +172,43 @@ func New(cfg Config) (*Client, error) {
 // runs until ctx is cancelled. Calling Start more than once is a no-op.
 func (c *Client) Start(ctx context.Context) {
 	c.startOnce.Do(func() {
+		// A per-client context so Close stops this loop even when the caller's
+		// context outlives the client, which happens on a live restore or
+		// truncate: the node context survives and a fresh client replaces this
+		// one, leaving the old loop dialling and re-populating key material in
+		// an object nothing wipes.
+		runCtx, cancel := context.WithCancel(ctx)
 		c.mu.Lock()
 		c.started = true
+		c.stop = cancel
 		c.mu.Unlock()
+		// One watcher for the client's lifetime, not one per reconnect. It
+		// closes whatever connection the loop currently holds, which unblocks
+		// a read parked in readFrame.
+		go func() {
+			<-runCtx.Done()
+			c.mu.Lock()
+			conn := c.conn
+			c.mu.Unlock()
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}()
 		switch c.cfg.Mode {
 		case ModeServeKey:
-			go c.runServeKey(ctx)
+			go c.runServeKey(runCtx)
 		case ModeSign:
-			go c.runSign(ctx)
+			go c.runSign(runCtx)
 		}
 	})
+}
+
+// setConn records the loop's current connection so the cancellation watcher
+// and Close can unblock a parked read. Passing nil clears it.
+func (c *Client) setConn(conn net.Conn) {
+	c.mu.Lock()
+	c.conn = conn
+	c.mu.Unlock()
 }
 
 // dial connects to the agent and reads/verifies the Hello handshake.
@@ -180,11 +226,29 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kesagent: dial: %w", err)
 	}
+	// Bound the handshake. An agent that accepts the socket and never sends
+	// Hello would otherwise park this read forever, and because it happens
+	// before the loop records the connection, cancelling the context could not
+	// reach it either. Close on cancellation as well, so a shutdown mid
+	// handshake does not wait out the deadline.
+	handshakeDone := make(chan struct{})
+	defer close(handshakeDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-handshakeDone:
+		}
+	}()
+	_ = conn.SetReadDeadline(time.Now().Add(c.cfg.HandshakeTimeout))
 	var hello Hello
 	if err := readFrame(conn, &hello); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("kesagent: read hello: %w", err)
 	}
+	// Clear the deadline: subsequent reads are long-lived by design in
+	// serve-key mode, and bounded per request in sign mode.
+	_ = conn.SetReadDeadline(time.Time{})
 	if hello.Protocol != ProtocolID {
 		_ = conn.Close()
 		return nil, fmt.Errorf(
@@ -223,15 +287,15 @@ func (c *Client) runServeKey(ctx context.Context) {
 		}
 		c.logger.Info("connected to KES agent (serve-key)")
 		backoff = c.cfg.MinReconnect
-		// Stop the read loop promptly on cancellation.
-		go func() {
-			<-ctx.Done()
-			_ = conn.Close()
-		}()
+		// Recorded rather than watched per connection: the single watcher
+		// started by Start closes whatever is current, so reconnects do not
+		// accumulate goroutines.
+		c.setConn(conn)
 		for {
 			var kp KeyPush
 			if err := readFrame(conn, &kp); err != nil {
 				_ = conn.Close()
+				c.setConn(nil)
 				if ctx.Err() == nil {
 					c.logger.Warn("KES agent connection lost; reconnecting", "error", err)
 				}
@@ -245,9 +309,23 @@ func (c *Client) runServeKey(ctx context.Context) {
 // applyKeyPush installs a pushed key into local state after cross-checking it
 // against the operational certificate.
 func (c *Client) applyKeyPush(kp KeyPush) {
-	if len(kp.KESVKey) > 0 && !bytes.Equal(kp.KESVKey, c.kesVKey) {
+	// Refuse anything that is not a key push. Trusting the frame's contents
+	// without checking what it claims to be would let a mislabelled or
+	// out-of-band frame install key material.
+	if kp.Type != "" && kp.Type != KeyPushType {
 		c.logger.Error(
-			"ignoring KES key push: pushed KES vkey does not match operational certificate",
+			"ignoring KES key push: unexpected frame type",
+			"type", kp.Type,
+		)
+		wipe(kp.KESSignKey)
+		return
+	}
+	// Compare unconditionally. Treating an absent vkey as "nothing to check"
+	// let a push with no vkey skip the operational-certificate cross-check
+	// entirely and be installed as trusted.
+	if !bytes.Equal(kp.KESVKey, c.kesVKey) {
+		c.logger.Error(
+			"ignoring KES key push: pushed KES vkey missing or does not match operational certificate",
 		)
 		wipe(kp.KESSignKey)
 		return
@@ -265,23 +343,56 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 	if depth == 0 {
 		depth = kes.CardanoKesDepth
 	}
+	// Validate the key's layout before it can reach kes.Sign. A short or
+	// malformed buffer indexes out of range while deriving the public key, so
+	// the size check has to come first.
+	if want := secretKeySize(depth); len(kp.KESSignKey) != want {
+		c.logger.Error(
+			"ignoring KES key push: unexpected signing key size",
+			"size", len(kp.KESSignKey),
+			"want", want,
+			"depth", depth,
+		)
+		wipe(kp.KESSignKey)
+		return
+	}
+	// Derive the public key from the pushed secret and require it to match the
+	// operational certificate. The vkey compared above is only what the agent
+	// asserts; this checks the key actually sent.
+	candidate := &kes.SecretKey{
+		Depth:  depth,
+		Period: kp.Period - c.start,
+		Data:   bytes.Clone(kp.KESSignKey),
+	}
+	derived := kes.PublicKey(candidate)
+	if !bytes.Equal(derived, c.kesVKey) {
+		c.logger.Error(
+			"ignoring KES key push: signing key does not derive the operational certificate's KES vkey",
+		)
+		wipe(candidate.Data)
+		wipe(kp.KESSignKey)
+		return
+	}
 	internal := kp.Period - c.start
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A push racing shutdown must not repopulate key material after the wipe.
+	if c.closed {
+		wipe(candidate.Data)
+		wipe(kp.KESSignKey)
+		return
+	}
 	// Reject a push that would move the key backward (stale/duplicate).
 	if c.kesSKey != nil && internal < c.kesSKey.Period {
+		wipe(candidate.Data)
 		wipe(kp.KESSignKey)
 		return
 	}
 	if c.kesSKey != nil {
 		wipe(c.kesSKey.Data)
 	}
-	c.kesSKey = &kes.SecretKey{
-		Depth:  depth,
-		Period: internal,
-		Data:   bytes.Clone(kp.KESSignKey),
-	}
+	c.kesSKey = candidate
 	wipe(kp.KESSignKey)
 	c.logger.Info("received KES key from agent", "absolute_period", kp.Period)
 }
@@ -314,13 +425,21 @@ func (c *Client) runSign(ctx context.Context) {
 				}
 				c.logger.Info("connected to KES agent (sign)")
 				conn = newConn
+				// Recorded so the client's cancellation watcher can close a
+				// connection parked in readFrame; otherwise a shutdown while a
+				// request is in flight leaks this goroutine and the socket
+				// until the agent replies.
+				c.setConn(conn)
 				backoff = c.cfg.MinReconnect
 			}
-			sig, err := roundTripSign(conn, req.period, req.msg)
+			sig, err := roundTripSign(
+				conn, req.period, req.msg, c.cfg.SignTimeout,
+			)
 			if err != nil {
 				// Transport error: drop the connection so the next request
 				// reconnects.
 				_ = conn.Close()
+				c.setConn(nil)
 				conn = nil
 				c.logger.Warn("KES agent sign failed; will reconnect", "error", err)
 			}
@@ -330,9 +449,26 @@ func (c *Client) runSign(ctx context.Context) {
 }
 
 // roundTripSign performs one sign request/response over conn.
-func roundTripSign(conn net.Conn, period uint64, msg []byte) ([]byte, error) {
+func roundTripSign(
+	conn net.Conn,
+	period uint64,
+	msg []byte,
+	timeout time.Duration,
+) ([]byte, error) {
+	// Bound the round trip. Without this an agent that accepts a request and
+	// never replies parks the pump forever: the caller's SignTimeout only
+	// abandons its own wait, so every later request then fails to queue.
+	if timeout > 0 {
+		deadline := time.Now().Add(timeout)
+		_ = conn.SetWriteDeadline(deadline)
+		_ = conn.SetReadDeadline(deadline)
+		defer func() {
+			_ = conn.SetWriteDeadline(time.Time{})
+			_ = conn.SetReadDeadline(time.Time{})
+		}()
+	}
 	if err := writeFrame(conn, SignRequest{
-		Type:    "sign_request",
+		Type:    SignRequestType,
 		Period:  period,
 		Message: msg,
 	}); err != nil {
@@ -346,6 +482,25 @@ func roundTripSign(conn net.Conn, period uint64, msg []byte) ([]byte, error) {
 		// An agent-level error (e.g. exhausted key) is not a transport
 		// failure; surface it without dropping the connection.
 		return nil, fmt.Errorf("kesagent: agent sign error: %s", resp.Error)
+	}
+	// Validate the reply rather than trusting whatever came back. A
+	// mislabelled frame, a reply for a different period, or an empty
+	// signature would otherwise be reported as a successful signature and
+	// only surface as an invalid block.
+	if resp.Type != "" && resp.Type != SignResponseType {
+		return nil, fmt.Errorf(
+			"kesagent: unexpected response type %q (want %q)",
+			resp.Type, SignResponseType,
+		)
+	}
+	if resp.Period != period {
+		return nil, fmt.Errorf(
+			"kesagent: response period %d does not match request period %d",
+			resp.Period, period,
+		)
+	}
+	if len(resp.Signature) == 0 {
+		return nil, errors.New("kesagent: agent returned an empty signature")
 	}
 	return resp.Signature, nil
 }
@@ -500,13 +655,48 @@ func (c *Client) HasKey() bool {
 }
 
 // Close wipes any locally held key material.
+// Close stops the background loop and wipes any key material the client holds.
+// It is safe to call more than once, and safe to call on a client that was
+// never started.
+//
+// Stopping the loop is part of the contract, not a nicety: the node context can
+// outlive a client (a live restore or truncate replaces the client while the
+// node keeps running), and a loop left running would keep dialling the agent
+// and repopulating key material in an object nothing wipes. Marking the client
+// closed also stops a push already in flight from landing after the wipe.
 func (c *Client) Close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.closed = true
+	stop := c.stop
+	conn := c.conn
+	c.conn = nil
 	if c.kesSKey != nil {
 		wipe(c.kesSKey.Data)
 		c.kesSKey = nil
 	}
+	c.mu.Unlock()
+
+	if stop != nil {
+		stop()
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
+// secretKeySize mirrors the KES secret key layout: a 32-byte seed plus, at each
+// level, a seed and the two child public keys. The gouroboros helper is
+// unexported, and the length has to be known before handing a pushed buffer to
+// key derivation, which indexes into it.
+func secretKeySize(depth uint64) int {
+	const (
+		ed25519KeySize = 32
+		perLevel       = 96
+	)
+	if depth == 0 {
+		return ed25519KeySize
+	}
+	return ed25519KeySize + int(depth)*perLevel // #nosec G115 -- depth is bounded by the caller
 }
 
 func wipe(b []byte) {

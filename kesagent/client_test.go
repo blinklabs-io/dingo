@@ -16,7 +16,6 @@ package kesagent
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"net"
 	"path/filepath"
@@ -25,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/gouroboros/kes"
 )
@@ -93,27 +93,23 @@ func startFakeAgent(t *testing.T, mode string, handler func(index int, conn net.
 		t.Fatalf("listen: %v", err)
 	}
 	a := &fakeAgent{ln: ln, handler: handler}
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
+	a.wg.Go(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
 			idx := int(atomic.AddInt32(&a.conns, 1)) - 1
-			a.wg.Add(1)
-			go func() {
-				defer a.wg.Done()
+			a.wg.Go(func() {
 				defer func() { _ = conn.Close() }()
 				// Every connection starts with the Hello handshake.
 				if err := writeFrame(conn, Hello{Protocol: ProtocolID, Mode: mode}); err != nil {
 					return
 				}
 				handler(idx, conn)
-			}()
+			})
 		}
-	}()
+	})
 	t.Cleanup(func() {
 		_ = ln.Close()
 		a.wg.Wait()
@@ -125,16 +121,11 @@ func (a *fakeAgent) socket() string { return a.ln.Addr().String() }
 
 // --- tests --------------------------------------------------------------
 
+// waitFor defers to the shared helper so these tests poll the same way the
+// rest of the repo does, rather than hand-rolling a sleep loop.
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("condition not met within %s", d)
+	testutil.WaitForCondition(t, cond, d, "condition not met")
 }
 
 func TestPoolCredentialsSatisfiesKESSigner(t *testing.T) {
@@ -167,9 +158,7 @@ func TestServeKeyModeSignsAndVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	client.Start(ctx)
+	client.Start(t.Context())
 
 	waitFor(t, 2*time.Second, client.HasKey)
 
@@ -194,12 +183,18 @@ func TestServeKeyModePicksUpRePush(t *testing.T) {
 	vkey, master, opcert := newTestKES(t, start)
 
 	// The agent pushes at period 1, then re-pushes (evolves) at period 4.
+	// The second push waits for the test to observe the first, so the ordering
+	// is a handoff rather than a race against a fixed delay.
 	pushed := make(chan uint64, 4)
+	releaseSecond := make(chan struct{})
 	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
 		for _, p := range []uint64{1, 4} {
+			if p == 4 {
+				<-releaseSecond
+			}
 			evolved := evolveClone(t, master, p-start)
 			if err := writeFrame(conn, KeyPush{
-				Type:       "key_push",
+				Type:       KeyPushType,
 				Period:     p,
 				Depth:      kes.CardanoKesDepth,
 				KESSignKey: evolved.Data,
@@ -208,7 +203,6 @@ func TestServeKeyModePicksUpRePush(t *testing.T) {
 				return
 			}
 			pushed <- p
-			time.Sleep(20 * time.Millisecond)
 		}
 		buf := make([]byte, 1)
 		_, _ = conn.Read(buf)
@@ -218,9 +212,12 @@ func TestServeKeyModePicksUpRePush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	client.Start(ctx)
+	client.Start(t.Context())
+
+	// Wait for the first push to land, then let the agent send the second, so
+	// the observed jump to period 4 can only come from the re-push.
+	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+	close(releaseSecond)
 
 	// The re-pushed (evolved) key advances the client's held period without
 	// any local KESSign-driven evolution.
@@ -265,9 +262,7 @@ func TestSignModeForwardsAndVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	client.Start(ctx)
+	client.Start(t.Context())
 
 	// UpdateKESPeriod is a no-op in sign mode; the agent owns evolution.
 	if err := client.UpdateKESPeriod(7); err != nil {
@@ -321,9 +316,7 @@ func TestServeKeyModeReconnectsAfterDrop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	client.Start(ctx)
+	client.Start(t.Context())
 
 	// After the dropped first connection, the client reconnects and receives
 	// the period-5 key.
@@ -367,9 +360,7 @@ func TestSignModeReconnectsAfterDrop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	client.Start(ctx)
+	client.Start(t.Context())
 
 	const period = uint64(3)
 	msg := []byte("reconnect header")
@@ -394,38 +385,222 @@ func TestSignModeReconnectsAfterDrop(t *testing.T) {
 
 func TestServeKeyRejectsMismatchedKESVKey(t *testing.T) {
 	const start = uint64(0)
-	_, master, opcert := newTestKES(t, start)
+	vkey, master, opcert := newTestKES(t, start)
 	// A different key whose vkey will not match the opcert.
 	otherVKey, otherMaster, _ := newTestKES(t, start)
 
+	// The agent sends the mismatched push first, then a legitimate one. Waiting
+	// for the legitimate key to be installed proves the mismatched push was
+	// already received and discarded, which a fixed sleep followed by
+	// HasKey() == false cannot show: that assertion also holds before the push
+	// arrives at all.
 	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
-		evolved := evolveClone(t, otherMaster, 0)
+		bad := evolveClone(t, otherMaster, 3)
 		_ = writeFrame(conn, KeyPush{
-			Type:       "key_push",
-			Period:     0,
+			Type:       KeyPushType,
+			Period:     3,
 			Depth:      kes.CardanoKesDepth,
-			KESSignKey: evolved.Data,
+			KESSignKey: bad.Data,
 			KESVKey:    otherVKey,
+		})
+		good := evolveClone(t, master, 1)
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: good.Data,
+			KESVKey:    vkey,
 		})
 		buf := make([]byte, 1)
 		_, _ = conn.Read(buf)
 	})
-	_ = master
 
 	client, err := New(Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	client.Start(ctx)
+	client.Start(t.Context())
 
-	// Give the client time to receive and reject the mismatched push.
-	time.Sleep(200 * time.Millisecond)
-	if client.HasKey() {
-		t.Fatal("client should have rejected the mismatched KES key")
+	// Pinning the period is what makes this a rejection test: the bad push
+	// claims a later period, so had it been accepted the legitimate push that
+	// follows would have been refused as moving backward, leaving the bad key
+	// installed.
+	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+
+	// The held key must be the legitimate one: it has to verify against the
+	// opcert's vkey, which the rejected key cannot do.
+	msg := []byte("after rejected push")
+	sig, err := client.KESSign(1, msg)
+	if err != nil {
+		t.Fatalf("sign with the accepted key: %v", err)
 	}
-	if _, err := client.KESSign(0, []byte("x")); err == nil {
-		t.Fatal("expected sign to fail with no accepted key")
+	if !kes.VerifySignedKES(vkey, 1, msg, sig) {
+		t.Fatal("held key is not the one committed to by the opcert")
+	}
+	if kes.VerifySignedKES(otherVKey, 1, msg, sig) {
+		t.Fatal("mismatched key was installed")
+	}
+}
+
+// TestServeKeyRejectsPushWithoutKESVKey covers the push that declares no
+// verification key. Treating an absent vkey as "nothing to check" let such a
+// push skip the operational-certificate cross-check entirely and be installed
+// as trusted.
+func TestServeKeyRejectsPushWithoutKESVKey(t *testing.T) {
+	const start = uint64(0)
+	vkey, master, opcert := newTestKES(t, start)
+
+	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
+		// The legitimate key, but with no verification key declared. Using the
+		// real key is deliberate: it isolates the vkey comparison, since a
+		// foreign key would be caught by the derivation check regardless.
+		bad := evolveClone(t, master, 3)
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     3,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: bad.Data,
+			// No KESVKey at all.
+		})
+		good := evolveClone(t, master, 1)
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: good.Data,
+			KESVKey:    vkey,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	})
+
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert},
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	// Pinning the period is what makes this a rejection test: the bad push
+	// claims a later period, so had it been accepted the legitimate push that
+	// follows would have been refused as moving backward, leaving the bad key
+	// installed.
+	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+
+	msg := []byte("after vkey-less push")
+	sig, err := client.KESSign(1, msg)
+	if err != nil {
+		t.Fatalf("sign with the accepted key: %v", err)
+	}
+	if !kes.VerifySignedKES(vkey, 1, msg, sig) {
+		t.Fatal("a push without a vkey was installed")
+	}
+}
+
+// TestServeKeyRejectsKeyNotDerivingOpCertVKey covers a push that declares the
+// right verification key but carries a different secret key. The declared vkey
+// is only what the agent asserts, so the key actually sent has to be checked
+// against the operational certificate as well.
+func TestServeKeyRejectsKeyNotDerivingOpCertVKey(t *testing.T) {
+	const start = uint64(0)
+	vkey, master, opcert := newTestKES(t, start)
+	_, otherMaster, _ := newTestKES(t, start)
+
+	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
+		impostor := evolveClone(t, otherMaster, 3)
+		_ = writeFrame(conn, KeyPush{
+			Type:   KeyPushType,
+			Period: 3,
+			Depth:  kes.CardanoKesDepth,
+			// Someone else's secret key, presented under our vkey.
+			KESSignKey: impostor.Data,
+			KESVKey:    vkey,
+		})
+		good := evolveClone(t, master, 1)
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: good.Data,
+			KESVKey:    vkey,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	})
+
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert},
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	// Pinning the period is what makes this a rejection test: the bad push
+	// claims a later period, so had it been accepted the legitimate push that
+	// follows would have been refused as moving backward, leaving the bad key
+	// installed.
+	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+
+	msg := []byte("after impostor push")
+	sig, err := client.KESSign(1, msg)
+	if err != nil {
+		t.Fatalf("sign with the accepted key: %v", err)
+	}
+	if !kes.VerifySignedKES(vkey, 1, msg, sig) {
+		t.Fatal("a key that does not derive the opcert vkey was installed")
+	}
+}
+
+// TestServeKeyRejectsMalformedKeyWithoutPanic covers a truncated key. Key
+// derivation indexes into the buffer, so a short one has to be rejected on
+// size before it reaches that code, or the node panics rather than declining
+// the push.
+func TestServeKeyRejectsMalformedKeyWithoutPanic(t *testing.T) {
+	const start = uint64(0)
+	vkey, master, opcert := newTestKES(t, start)
+
+	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     3,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: []byte{0x01, 0x02, 0x03},
+			KESVKey:    vkey,
+		})
+		good := evolveClone(t, master, 1)
+		_ = writeFrame(conn, KeyPush{
+			Type:       KeyPushType,
+			Period:     1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: good.Data,
+			KESVKey:    vkey,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	})
+
+	client, err := New(
+		Config{SocketPath: agent.socket(), Mode: ModeServeKey, OpCert: opcert},
+	)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	// Pinning the period is what makes this a rejection test: the bad push
+	// claims a later period, so had it been accepted the legitimate push that
+	// follows would have been refused as moving backward, leaving the bad key
+	// installed.
+	waitFor(t, 2*time.Second, func() bool { return client.CurrentPeriod() == 1 })
+
+	msg := []byte("after malformed push")
+	sig, err := client.KESSign(1, msg)
+	if err != nil {
+		t.Fatalf("sign with the accepted key: %v", err)
+	}
+	if !kes.VerifySignedKES(vkey, 1, msg, sig) {
+		t.Fatal("a malformed key was installed")
 	}
 }

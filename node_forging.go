@@ -239,12 +239,24 @@ func (n *Node) kesAgentEnabled() bool {
 
 // kesAgentMode returns the configured KES agent service mode, defaulting to
 // serve-key when a socket is set without an explicit mode.
-func (n *Node) kesAgentMode() string {
+// kesAgentMode resolves the configured agent mode. An unset value defaults to
+// serve-key; anything else must be an exact match, so a typo fails at startup
+// with a clear message instead of silently selecting serve-key and surfacing
+// later as a confusing handshake mismatch (or, against a serve-key agent,
+// appearing to work).
+func (n *Node) kesAgentMode() (string, error) {
 	switch n.config.shelleyKESAgentMode {
-	case kesagent.ModeSign:
-		return kesagent.ModeSign
+	case "":
+		return kesagent.ModeServeKey, nil
+	case kesagent.ModeServeKey, kesagent.ModeSign:
+		return n.config.shelleyKESAgentMode, nil
 	default:
-		return kesagent.ModeServeKey
+		return "", fmt.Errorf(
+			"invalid KES agent mode %q: want %q or %q",
+			n.config.shelleyKESAgentMode,
+			kesagent.ModeServeKey,
+			kesagent.ModeSign,
+		)
 	}
 }
 
@@ -262,9 +274,13 @@ func (n *Node) newKESAgentSigner(
 			"KES agent mode requires an operational certificate",
 		)
 	}
+	mode, err := n.kesAgentMode()
+	if err != nil {
+		return nil, err
+	}
 	client, err := kesagent.New(kesagent.Config{
 		SocketPath: n.config.shelleyKESAgentSocket,
-		Mode:       n.kesAgentMode(),
+		Mode:       mode,
 		OpCert:     opCert,
 		Logger:     n.config.logger,
 	})
@@ -276,7 +292,7 @@ func (n *Node) newKESAgentSigner(
 		"KES signing key sourced from agent",
 		"component", "node",
 		"socket", n.config.shelleyKESAgentSocket,
-		"mode", n.kesAgentMode(),
+		"mode", mode,
 	)
 	return client, nil
 }

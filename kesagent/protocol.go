@@ -75,6 +75,14 @@ type Hello struct {
 // KeyPush is sent by the server in serve-key mode to deliver the current KES
 // signing key, its verification key, its absolute KES period, and the
 // operational certificate.
+// Frame type identifiers. A frame's declared type is checked before its
+// contents are trusted.
+const (
+	KeyPushType      = "key_push"
+	SignRequestType  = "sign_request"
+	SignResponseType = "sign_response"
+)
+
 type KeyPush struct {
 	Type       string `json:"type"` // "key_push"
 	Period     uint64 `json:"period"`
