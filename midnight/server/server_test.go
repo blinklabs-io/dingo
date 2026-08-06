@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -107,6 +108,63 @@ func TestStubServiceReturnsUnimplemented(t *testing.T) {
 	_, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
+// A real RPC through a real dialed connection must be recorded by the
+// metrics interceptor Start wires into the server's grpc.ServerOption list --
+// not just by calling the interceptor function directly. The RPC itself
+// returning Unimplemented (no Metadata backing configured) is irrelevant:
+// the interceptor records every request regardless of the handler's outcome.
+func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var foundCount, foundDuration bool
+	for _, mf := range families {
+		for _, metric := range mf.GetMetric() {
+			var isGetAssetCreates bool
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "method" &&
+					label.GetValue() == "GetAssetCreates" {
+					isGetAssetCreates = true
+				}
+			}
+			if !isGetAssetCreates {
+				continue
+			}
+			switch mf.GetName() {
+			case "dingo_midnight_grpc_requests_total":
+				foundCount = true
+				require.Equal(t, float64(1), metric.GetCounter().GetValue())
+			case "dingo_midnight_grpc_request_duration_seconds":
+				foundDuration = true
+				require.Equal(
+					t,
+					uint64(1),
+					metric.GetHistogram().GetSampleCount(),
+				)
+			}
+		}
+	}
+	require.True(
+		t,
+		foundCount,
+		"expected dingo_midnight_grpc_requests_total{method=\"GetAssetCreates\"} after a real RPC",
+	)
+	require.True(
+		t,
+		foundDuration,
+		"expected dingo_midnight_grpc_request_duration_seconds{method=\"GetAssetCreates\"} after a real RPC",
+	)
 }
 
 // The health service must report SERVING for both the overall server and the
