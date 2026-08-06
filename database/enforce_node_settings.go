@@ -15,8 +15,6 @@
 package database
 
 import (
-	"fmt"
-
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
@@ -34,50 +32,10 @@ import (
 // which assembles values from the fully-resolved node configuration rather
 // than from a partial Config, so there is no "not yet known" case to leave
 // room for.
+//
+// The read/evaluate/persist/verify body is shared with CheckNodeSettings via
+// evaluateAndPersistGates (database/commit_timestamp.go); this is just that
+// call with phase 2's configured map.
 func (d *Database) EnforceNodeSettings(values nodesettings.Values) error {
-	persisted, err := d.persistedGateValues()
-	if err != nil {
-		return err
-	}
-	explicit := make(map[string]bool, len(values))
-	for name := range values {
-		explicit[name] = true
-	}
-	result := nodesettings.Evaluate(persisted, values, explicit)
-	if len(result.Mismatches) > 0 {
-		mismatches := make([]string, 0, len(result.Mismatches))
-		for _, mismatch := range result.Mismatches {
-			mismatches = append(mismatches, mismatch.String())
-		}
-		return NodeSettingsError{Mismatches: mismatches}
-	}
-	if len(result.Writes) > 0 {
-		if err := d.writeGateValues(result.Writes); err != nil {
-			return err
-		}
-		// Verify every write actually landed, the same read-back
-		// CheckNodeSettings does and for the same reason: node_settings'
-		// immutable-after-first-insert row previously made exactly this
-		// kind of write silently no-op (see writeGateValues's doc
-		// comment).
-		persistedAfter, err := d.persistedGateValues()
-		if err != nil {
-			return err
-		}
-		for name, want := range result.Writes {
-			if got := persistedAfter[name]; got != want {
-				return fmt.Errorf(
-					"node settings gate %q did not persist: wrote %q, read back %q",
-					name,
-					want,
-					got,
-				)
-			}
-		}
-		d.logger.Info(
-			"node settings gates recorded",
-			"gates", len(result.Writes),
-		)
-	}
-	return nil
+	return d.evaluateAndPersistGates(values)
 }

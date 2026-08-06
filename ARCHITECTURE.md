@@ -4204,6 +4204,12 @@ completed one successful full open, so `blob_store_id` is already
 persisted: an unchanged blob store reads the same id back, and a swapped
 one mismatches against the persisted id, the correct loud failure.
 
+Both phases share one `evaluateAndPersistGates` helper
+(`database/commit_timestamp.go`) for the read-persisted/evaluate/
+fail-on-mismatch/write/verify-write body; `CheckNodeSettings` and
+`EnforceNodeSettings` differ only in which `nodesettings.Values` map they
+pass in.
+
 ## Stake Snapshots
 
 Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
