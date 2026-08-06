@@ -1640,6 +1640,22 @@ the node-level leader adapter derives only the immediate next Praos epoch's
 slot range from the current epoch dimensions so schedule precomputation can
 proceed without broadening general ledger forecasts.
 
+All of the above (`SlotToTime`, `TimeToSlot`, `SlotToEpoch`, `EpochInfo`, the
+near-now extrapolation, and `EndorserBlockWaitDuration`) is implemented by
+`SlotTimeConverter` (`ledger/slot_time_converter.go`), not directly on
+`LedgerState`. This is the first subsystem extracted from `LedgerState` under
+the ongoing decomposition tracked by issue #2254 (the read-mostly
+consensus/tip-state snapshot mechanism described above under "Genesis-overlay
+activity" predates this and was extracted separately). `SlotTimeConverter`
+holds no lock of its own and depends on `LedgerState` only through three
+narrow read-only callbacks (`HardForkSummary`, `ShelleyGenesis`, `EpochCache`)
+injected via `SlotTimeConverterDeps`, so it never reaches back into
+`LedgerState`'s locking or working state directly. `LedgerState` builds it
+eagerly in `NewLedgerState` and holds it behind the thin, delegating wrapper
+methods (`ledger/slot.go`) that keep its own public API unchanged; `SlotClock`
+consumes it directly through a `slotTimeConverterProvider` adapter
+(`ledger/slot_clock.go`) rather than looping back through `LedgerState`.
+
 ### Operational Certificate Validation
 
 Inbound operational-certificate (opcert) validation is split by its data

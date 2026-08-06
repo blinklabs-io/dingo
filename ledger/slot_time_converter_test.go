@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -183,15 +184,19 @@ func TestSlotTimeConverter_EpochInfoPrefersCache(t *testing.T) {
 			EraId:         4,
 		},
 	}
+	summaryCalls := 0
 	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
 		EpochCache: func() []models.Epoch { return cached },
 		HardForkSummary: func() (*hardfork.Summary, error) {
+			summaryCalls++
 			return nil, errors.New("must not be consulted")
 		},
 	})
 
 	info, err := conv.EpochInfo(7)
 	require.NoError(t, err)
+	assert.Zero(t, summaryCalls,
+		"a cache hit must not consult the hardfork summary")
 	assert.Equal(t, cached[0].StartSlot, info.StartSlot)
 	assert.Equal(t, cached[0].LengthInSlots, info.LengthInSlots)
 }
@@ -252,4 +257,56 @@ func TestSlotTimeConverter_EndorserBlockWaitDuration(t *testing.T) {
 	})
 	assert.Equal(t, time.Duration(0), noGenesis.EndorserBlockWaitDuration(5),
 		"missing genesis must disable the wait rather than panic")
+}
+
+// TestSlotTimeConverter_EndorserBlockWaitDurationOverflow proves that a
+// waitSlots value large enough to overflow the wait-slots*slotLength
+// multiplication is rejected (returns 0) instead of silently wrapping to a
+// negative time.Duration.
+func TestSlotTimeConverter_EndorserBlockWaitDurationOverflow(t *testing.T) {
+	genesis := testShelleyGenesis(t)
+	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
+		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
+	})
+
+	got := conv.EndorserBlockWaitDuration(math.MaxUint64)
+	assert.Equal(
+		t,
+		time.Duration(0),
+		got,
+		"an overflowing waitSlots must disable the wait rather than wrap negative",
+	)
+}
+
+// TestSlotTimeConverter_TimeToSlotNearNowUsesInjectedClock proves that
+// TimeToSlot's near-now fallback (taken when the hardfork summary is
+// unavailable) derives the returned slot from the converter's own clock, not
+// the real wall clock — so a test-injected nowFunc consistently gates and
+// computes the fallback from the same time.
+func TestSlotTimeConverter_TimeToSlotNearNowUsesInjectedClock(t *testing.T) {
+	genesis := testShelleyGenesis(t)
+	// A synthetic "now" far from the real wall clock: if the fallback ever
+	// read time.Since(SystemStart) directly, this would compute a wildly
+	// different (and likely far-future-looking) slot than the one implied by
+	// the injected clock.
+	fakeNow := genesis.SystemStart.Add(365 * 24 * time.Hour)
+
+	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
+		ShelleyGenesis: func() *shelley.ShelleyGenesis { return genesis },
+		HardForkSummary: func() (*hardfork.Summary, error) {
+			return nil, errors.New("no epochs in cache")
+		},
+	})
+	conv.nowFunc = func() time.Time { return fakeNow }
+
+	slot, err := conv.TimeToSlot(fakeNow)
+	require.NoError(t, err)
+
+	slotLenMs := shelleySlotLengthMs(genesis)
+	require.Positive(t, slotLenMs)
+	wantSlot := uint64(fakeNow.Sub(genesis.SystemStart)/time.Millisecond) /
+		slotLenMs
+	assert.Equal(t, wantSlot, slot,
+		"the near-now fallback must derive its slot from the injected clock, "+
+			"not the real wall clock")
 }

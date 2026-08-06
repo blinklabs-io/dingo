@@ -184,9 +184,9 @@ func (c *SlotTimeConverter) TimeToSlot(t time.Time) (uint64, error) {
 	sum, err := c.hardForkSummary()
 	if err != nil {
 		if isNearNow(c.now(), t) {
-			return nearNowSlot(shelleyGenesis), nil
+			return nearNowSlot(shelleyGenesis, c.now()), nil
 		}
-		return 0, errors.New("time not found in known epochs")
+		return 0, fmt.Errorf("time not found in known epochs: %w", err)
 	}
 	slot, sumErr := sum.TimeToSlot(t)
 	if sumErr != nil {
@@ -308,7 +308,13 @@ func (c *SlotTimeConverter) EndorserBlockWaitDuration(
 	if slotLen <= 0 {
 		return 0
 	}
-	// waitSlots is a small protocol window.
+	// Keep the multiplication inside time.Duration's range; a configured
+	// waitSlots large enough to overflow is a misconfiguration, so disable
+	// the wait rather than return a wrapped (possibly negative) duration.
+	if waitSlots > uint64(math.MaxInt64)/uint64(slotLen) {
+		return 0
+	}
+	// waitSlots is now bounded above, so the conversion cannot overflow.
 	// #nosec G115
 	return time.Duration(waitSlots) * slotLen
 }
@@ -432,18 +438,23 @@ func shelleySlotLengthMs(sg *shelley.ShelleyGenesis) uint64 {
 	).Uint64()
 }
 
-// nearNowSlot estimates the current slot from the Shelley genesis slot length,
-// used as a fallback when the epoch cache is empty and the caller asks about
-// a time within 5s of now.
-func nearNowSlot(sg *shelley.ShelleyGenesis) uint64 {
+// nearNowSlot estimates the current slot from the Shelley genesis slot
+// length, used as a fallback when the epoch cache is empty and the caller
+// asks about a time within 5s of now.
+//
+// now is the converter's clock (see SlotTimeConverter.now), not the real wall
+// clock: TimeToSlot gates this fallback with isNearNow(c.now(), t), so the
+// slot this computes must be derived from that same clock or a test-injected
+// nowFunc would desync the gate from the computation.
+func nearNowSlot(sg *shelley.ShelleyGenesis, now time.Time) uint64 {
 	slotLenMs := shelleySlotLengthMs(sg)
 	if slotLenMs == 0 {
 		return 0
 	}
 	// If SystemStart is in the future (clock skew or node started before the
-	// configured genesis), time.Since is negative; don't wrap it through
+	// configured genesis), elapsed is negative; don't wrap it through
 	// uint64 — return 0 so callers see "genesis hasn't happened yet".
-	elapsed := time.Since(sg.SystemStart)
+	elapsed := now.Sub(sg.SystemStart)
 	if elapsed <= 0 {
 		return 0
 	}

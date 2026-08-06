@@ -22,19 +22,21 @@ import (
 )
 
 // timeConv returns this LedgerState's SlotTimeConverter, building and caching
-// it on first access. The converter's dependencies close back over ls to read
-// era history and genesis fresh on every call, so this lazy accessor exists
-// only to give bare-constructed LedgerStates (as used throughout this
-// package's tests) a converter without requiring NewLedgerState.
+// it on first access via timeConverterOnce. The converter's dependencies
+// close back over ls to read era history and genesis fresh on every call, so
+// this lazy accessor exists only to give bare-constructed LedgerStates (as
+// used throughout this package's tests) a converter without requiring
+// NewLedgerState; production callers get the converter built eagerly by
+// NewLedgerState, so this is a formality for them.
 //
-// Not safe to race with itself: production callers get the converter built
-// eagerly by NewLedgerState, and test-only construction is single-threaded
-// before any concurrent access begins (the same contract the replaced nowFunc
-// field relied on).
+// sync.Once makes the lazy build itself race-free regardless of caller
+// discipline, rather than relying on test code never racing the first call.
 func (ls *LedgerState) timeConv() *SlotTimeConverter {
-	if ls.timeConverter == nil {
-		ls.timeConverter = ls.newTimeConverter()
-	}
+	ls.timeConverterOnce.Do(func() {
+		if ls.timeConverter == nil {
+			ls.timeConverter = ls.newTimeConverter()
+		}
+	})
 	return ls.timeConverter
 }
 

@@ -590,9 +590,12 @@ type LedgerState struct {
 	tip       atomic.Pointer[tipSnapshot]
 	// timeConverter owns slot/wall-clock time conversion (SlotToTime,
 	// TimeToSlot, SlotToEpoch, EpochInfo) and the operational near-now
-	// fallbacks used while the applied ledger is behind the wall clock. Built
-	// lazily via timeConv(); see slot.go.
-	timeConverter *SlotTimeConverter
+	// fallbacks used while the applied ledger is behind the wall clock.
+	// NewLedgerState builds it eagerly; timeConv() (see slot.go) only lazily
+	// builds it for bare-constructed LedgerStates that skip NewLedgerState
+	// (test-only), guarded by timeConverterOnce.
+	timeConverter     *SlotTimeConverter
+	timeConverterOnce sync.Once
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
