@@ -15,11 +15,15 @@
 package database
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/dbinfo"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,7 +38,7 @@ func TestWriteDBInfoSidecarOnFirstStart(t *testing.T) {
 		StorageMode:    "core",
 		Network:        "preprod",
 		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		MetadataPlugin: sqlite.ProviderName,
 	})
 	require.NoError(t, err)
 	require.NoError(t, closeTestDatabase(db))
@@ -188,6 +192,21 @@ func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
 		MetadataPlugin: "sqlite",
 	})
 	require.Error(t, err)
+	func() {
+		host := plugin.NewHost()
+		require.NoError(t, sqlite.RegisterProvider(host))
+		defer func() { require.NoError(t, host.Stop(context.Background())) }()
+		store, resolveErr := plugin.Resolve[metadata.MetadataStore](
+			context.Background(), host,
+			plugin.CapabilityStorageMetadata, sqlite.ProviderName, nil,
+			metadata.ProviderDependencies{DataDir: metaDir},
+		)
+		require.NoError(t, resolveErr)
+		gates, getErr := store.GetNodeSettingsGates()
+		require.NoError(t, getErr)
+		_, hasMetadataPluginGate := gates["metadata_plugin"]
+		require.False(t, hasMetadataPluginGate)
+	}()
 
 	dataDir := t.TempDir()
 	db, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
@@ -195,13 +214,13 @@ func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
 		StorageMode:    "core",
 		Network:        "preprod",
 		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		MetadataPlugin: sqlite.ProviderName,
 	})
 	require.NoError(t, err)
 
 	gates, err := db.Metadata().GetNodeSettingsGates()
 	require.NoError(t, err)
-	require.Equal(t, "sqlite", gates["metadata_plugin"])
+	require.Equal(t, sqlite.ProviderName, gates["metadata_plugin"])
 }
 
 // TestExistingDatabaseSidecarFailureIsNonFatal pins the other half of

@@ -22,6 +22,9 @@ import (
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
 
+// ProviderName is the plugin selector used to register SQLite metadata.
+const ProviderName = "sqlite"
+
 // Config contains SQLite-specific configuration.
 type Config struct {
 	// DataDir overrides the application-wide database path for this provider.
@@ -39,7 +42,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 		host,
 		hostplugin.Descriptor{
 			Capability:  hostplugin.CapabilityStorageMetadata,
-			Name:        "sqlite",
+			Name:        ProviderName,
 			Description: "SQLite relational database",
 		},
 		func() Config { return Config{} },

@@ -226,6 +226,18 @@ var errNodeSettingsGateInitializationLost = errors.New(
 	"node settings gate initialization lost race",
 )
 
+func isOnlyNodeSettingsGateInitializationRace(err error) bool {
+	if err == errNodeSettingsGateInitializationLost {
+		return true
+	}
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) {
+		return false
+	}
+	causes := joined.Unwrap()
+	return len(causes) == 1 && causes[0] == errNodeSettingsGateInitializationLost
+}
+
 // InsertNodeSettingsGatesIfAbsent inserts a complete first-fill set in one
 // transaction. A concurrent initializer may win the conditional insert for
 // one or more names; in that case the transaction is rolled back so this
@@ -275,7 +287,7 @@ func (s *Store) InsertNodeSettingsGatesIfAbsent(
 			return nil
 		},
 	)
-	if errors.Is(err, errNodeSettingsGateInitializationLost) {
+	if isOnlyNodeSettingsGateInitializationRace(err) {
 		return false, nil
 	}
 	if err != nil {

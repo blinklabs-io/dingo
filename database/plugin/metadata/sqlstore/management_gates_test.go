@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -183,4 +184,10 @@ func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
 		winningSet = sets[1]
 	}
 	require.Equal(t, winningSet, gates)
+}
+
+func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
+	rollbackErr := errors.New("rollback failed")
+	err := errors.Join(errNodeSettingsGateInitializationLost, rollbackErr)
+	require.False(t, isOnlyNodeSettingsGateInitializationRace(err))
 }
