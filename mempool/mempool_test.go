@@ -17,6 +17,7 @@ package mempool
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -4008,4 +4009,251 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnStop(t *testing.T) {
 	assert.Nil(t, dingotestutil.RequireReceive(
 		t, got, 2*time.Second, "blocking NextTx released by shutdown",
 	), "shutdown returns nil rather than a transaction")
+}
+
+// blockingRejectingValidator blocks until released like
+// blockingSessionValidator, then reports one designated transaction invalid so
+// a test can observe whether revalidation actually published its result.
+type blockingRejectingValidator struct {
+	started    chan struct{}
+	release    chan struct{}
+	startOnce  sync.Once
+	rejectHash string
+}
+
+func newBlockingRejectingValidator(
+	rejectHash string,
+) *blockingRejectingValidator {
+	return &blockingRejectingValidator{
+		started:    make(chan struct{}),
+		release:    make(chan struct{}),
+		rejectHash: rejectHash,
+	}
+}
+
+func (v *blockingRejectingValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *blockingRejectingValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	return nil
+}
+
+func (v *blockingRejectingValidator) WithTxValidationSession(
+	fn func(
+		func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error,
+		func() bool,
+	) error,
+) error {
+	v.startOnce.Do(func() { close(v.started) })
+	validate := func(
+		tx gledger.Transaction,
+		_ map[string]struct{},
+		_ map[string]lcommon.Utxo,
+	) error {
+		<-v.release
+		if tx != nil && tx.Hash().String() == v.rejectHash {
+			return errors.New("simulated invalid transaction")
+		}
+		return nil
+	}
+	return fn(validate, func() bool { return true })
+}
+
+// TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget covers the
+// catch-up budget scaling with the observed backlog.
+//
+// Replay is bounded per round so the loop can observe new mutations, but with a
+// fixed round count the total budget is cap*rounds. A backlog larger than that
+// made every attempt bail with errRevalidationCatchup, and because
+// rebuildOverlay swallows that error and each attempt restarts from a fresh
+// journal, no progress ever carried across attempts: the revalidated pool was
+// never published, so invalid transactions were never removed and the DAG was
+// never rebuilt. That is precisely the sustained-load regime the enlarged
+// journal cap exists to buffer.
+func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
+	t *testing.T,
+) {
+	m := newTestMempool(t)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	invalidHash := m.Transactions()[0].Hash
+
+	validator := newBlockingRejectingValidator(invalidHash)
+	m.validator = validator
+	// One mutation per round, so the fixed budget would be
+	// maxRevalidationCatchupRounds mutations in total.
+	m.revalidationDeltaCap = 1
+	backlog := maxRevalidationCatchupRounds * 3
+
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(
+		t, validator.started, 2*time.Second, "revalidation start",
+	)
+
+	// Queue a backlog well past the fixed round budget. Removals of hashes
+	// absent from the pool are inert replays, so they exercise the budget
+	// without changing what the candidate should conclude.
+	m.mutationMutex.Lock()
+	for i := range backlog {
+		m.recordMutationLocked(mempoolMutation{
+			removed: map[string]struct{}{
+				fmt.Sprintf("absent-%d", i): {},
+			},
+		})
+	}
+	m.mutationMutex.Unlock()
+
+	close(validator.release)
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(
+			t, rebuildDone, 10*time.Second, "rebuild completion",
+		),
+	)
+
+	// Converged and published: the invalid transaction is gone.
+	assert.Empty(
+		t, m.Transactions(),
+		"revalidation must publish its result and drop the invalid tx "+
+			"even when the mutation backlog exceeds one round budget",
+	)
+	assert.Empty(t, m.overlay.applied)
+}
+
+// catchupBudget must include rounds already spent. Without that term, a backlog
+// arriving late in an already-enlarged budget computes a total no larger than
+// the current one, so the budget never grows and the loop bails with
+// errRevalidationCatchup even though the work would have fit.
+func TestCatchupBudgetAccountsForRoundsAlreadySpent(t *testing.T) {
+	const deltaCap = 64
+
+	// A backlog seen at round 0 needs its own rounds plus the base budget.
+	atStart := catchupBudget(0, 10_000, deltaCap)
+	assert.Equal(t, 157+maxRevalidationCatchupRounds, atStart)
+
+	// The same backlog seen deep into an enlarged budget needs strictly more,
+	// because the earlier rounds are gone.
+	deepIn := catchupBudget(150, 10_000, deltaCap)
+	assert.Greater(t, deepIn, atStart,
+		"a late backlog must demand more total rounds than an early one")
+	assert.Equal(t, 150+157+maxRevalidationCatchupRounds, deepIn)
+
+	// The regression: a budget already enlarged for the first backlog must be
+	// exceeded by the same backlog arriving near its end, or the loop bails.
+	assert.Greater(t, deepIn, atStart,
+		"the recomputed budget must exceed the one already in effect")
+
+	// Degenerate caps do not divide by zero or stall.
+	assert.Positive(t, catchupBudget(0, 10, 0))
+	assert.Equal(t, maxRevalidationCatchupRounds, catchupBudget(0, 0, deltaCap))
+}
+
+// TestCatchupBudgetAlwaysExceedsCurrentRound pins the property the catch-up
+// loop actually depends on, as opposed to the arithmetic pinned above: while
+// any work is pending, the recomputed budget is strictly greater than the round
+// the loop has reached, so `round < catchupRounds` can never end the loop. The
+// terminators are an empty journal, the journal cap, or a replay error. If this
+// ever fails, the loop gained a new exit that the surrounding comments and the
+// ARCHITECTURE.md note do not describe.
+func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
+	for _, deltaCap := range []int{1, 8, 64, 4096} {
+		for _, round := range []int{0, 1, 17, 1_000, 100_000} {
+			for _, pending := range []int{1, 2, 63, 64, 65, 1 << 20} {
+				got := catchupBudget(round, pending, deltaCap)
+				assert.Greater(t, got, round,
+					"deltaCap=%d round=%d pending=%d: a pending backlog must leave headroom",
+					deltaCap, round, pending,
+				)
+			}
+		}
+	}
+
+	// With nothing pending the budget stops growing, which is what lets the
+	// loop finish once it samples an empty journal.
+	assert.Equal(
+		t,
+		1_000+maxRevalidationCatchupRounds,
+		catchupBudget(1_000, 0, 64),
+	)
+}
+
+// TestMutationWindowReturnsEmptyNotNil covers mutationWindow's documented
+// never-nil contract. No production path reaches it today, because the caller
+// takes the finalize branch when pending is zero, so without this the contract
+// would be uncovered if that ever changes.
+func TestMutationWindowReturnsEmptyNotNil(t *testing.T) {
+	journal := []mempoolMutation{{seq: 1}, {seq: 2}}
+
+	// Caught up: sequence at or beyond the newest entry.
+	window, pending := mutationWindow(journal, 2, 64)
+	assert.NotNil(t, window)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+
+	// Empty journal.
+	window, pending = mutationWindow([]mempoolMutation{}, 0, 64)
+	assert.NotNil(t, window)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+}
+
+// mutationWindow must bound what it clones. Cloning the whole remaining suffix
+// each round, under mutationMutex, made a large journal quadratic in scans and
+// allocations and blocked admissions and removals.
+func TestMutationWindowClonesOnlyTheBoundedWindow(t *testing.T) {
+	journal := make([]mempoolMutation, 0, 1000)
+	for i := 1; i <= 1000; i++ {
+		journal = append(journal, mempoolMutation{seq: uint64(i)})
+	}
+
+	window, pending := mutationWindow(journal, 0, 10)
+	assert.Len(t, window, 10, "the window is bounded by limit")
+	assert.Equal(t, 1000, pending, "pending reports the whole backlog")
+	assert.Equal(t, uint64(1), window[0].seq)
+	assert.Equal(t, uint64(10), window[9].seq)
+
+	// Resuming after the applied prefix skips it without rescanning from 0.
+	window, pending = mutationWindow(journal, 500, 10)
+	assert.Len(t, window, 10)
+	assert.Equal(t, 500, pending)
+	assert.Equal(t, uint64(501), window[0].seq)
+
+	// A tail shorter than the limit returns just the tail.
+	window, pending = mutationWindow(journal, 995, 10)
+	assert.Len(t, window, 5)
+	assert.Equal(t, 5, pending)
+
+	// Fully drained.
+	window, pending = mutationWindow(journal, 1000, 10)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+
+	// A degenerate limit still makes progress rather than returning nothing.
+	window, _ = mutationWindow(journal, 0, 0)
+	assert.Len(t, window, 1)
+
+	// The window is a copy: mutating it must not touch the journal.
+	window, _ = mutationWindow(journal, 0, 3)
+	window[0].seq = 9999
+	assert.Equal(t, uint64(1), journal[0].seq)
 }
