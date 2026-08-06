@@ -49,7 +49,13 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap1")
 	_, err := lifecycle.Snapshot(
-		context.Background(), src, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		src,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
@@ -84,7 +90,11 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = lifecycle.Restore(
-		context.Background(), host, testDestinationRegistry, snapshotDir, targetDir,
+		context.Background(),
+		host,
+		testDestinationRegistry,
+		snapshotDir,
+		targetDir,
 		lifecycle.RestoreStorageConfig{},
 	)
 	require.NoError(t, err)

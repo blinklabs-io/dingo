@@ -392,7 +392,10 @@ func newErroringIteratorTestDB(
 	db, err := database.New(
 		config,
 		database.Stores{
-			Blob:     &erroringIteratorBlobStore{BlobStore: realBlob, err: iterErr},
+			Blob: &erroringIteratorBlobStore{
+				BlobStore: realBlob,
+				err:       iterErr,
+			},
 			Metadata: metadataStore,
 		},
 	)
@@ -513,7 +516,11 @@ func newMidWalkErrorTestDB(
 	db, err := database.New(
 		config,
 		database.Stores{
-			Blob:     &midWalkErrorBlobStore{BlobStore: realBlob, n: n, err: iterErr},
+			Blob: &midWalkErrorBlobStore{
+				BlobStore: realBlob,
+				n:         n,
+				err:       iterErr,
+			},
 			Metadata: metadataStore,
 		},
 	)

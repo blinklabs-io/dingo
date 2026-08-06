@@ -130,7 +130,9 @@ func TestBuildBlockSupportsAllEras(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-				Mempool:         &mockMempool{transactions: []MempoolTransaction{}},
+				Mempool: &mockMempool{
+					transactions: []MempoolTransaction{},
+				},
 				PParamsProvider: &mockPParamsProvider{pparams: tc.pparams},
 				ChainTip: &mockChainTip{
 					tip: ochainsync.Tip{
@@ -238,7 +240,11 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 	// mismatch means the network would reject the block.
 	dblock := block.(*dijkstra.DijkstraBlock)
 	certified, present := dblock.BlockHeader.LeiosCertified()
-	require.True(t, present, "Dijkstra forge must emit the Leios header extension")
+	require.True(
+		t,
+		present,
+		"Dijkstra forge must emit the Leios header extension",
+	)
 	assert.False(t, certified)
 	_, _, announced := dblock.BlockHeader.LeiosAnnouncement()
 	assert.False(t, announced)
@@ -352,7 +358,9 @@ func TestBuildBlockDijkstraRejectsOversizeLeiosAnnouncement(t *testing.T) {
 	assert.ErrorContains(t, err, "leios announcement size exceeds uint32")
 }
 
-func TestBuildBlockDijkstraCertifiesAndAnnouncesLeiosEndorserBlocks(t *testing.T) {
+func TestBuildBlockDijkstraCertifiesAndAnnouncesLeiosEndorserBlocks(
+	t *testing.T,
+) {
 	creds := setupTestCredentials(t)
 	txCbor := makeMinimalTxCbor(t, 0x01, 0)
 	pparams := &dijkstra.DijkstraProtocolParameters{
@@ -407,8 +415,10 @@ func TestBuildBlockDijkstraCertifiesAndAnnouncesLeiosEndorserBlocks(t *testing.T
 			Size: 1234,
 		},
 		Certificate: &lcommon.LeiosEbCertificate{
-			SlotNo:              900,
-			EndorserBlockHash:   lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
+			SlotNo: 900,
+			EndorserBlockHash: lcommon.NewBlake2b256(
+				make([]byte, lcommon.Blake2b256Size),
+			),
 			Signers:             []byte{0x80},
 			AggregatedSignature: signature,
 		},
@@ -425,7 +435,11 @@ func TestBuildBlockDijkstraCertifiesAndAnnouncesLeiosEndorserBlocks(t *testing.T
 	assert.Equal(t, uint64(1234), gotSize)
 	require.NotNil(t, dblock.BlockBody.LeiosCertificate)
 	assert.Equal(t, []byte{0x80}, dblock.BlockBody.LeiosCertificate.Signers)
-	assert.Equal(t, signature, dblock.BlockBody.LeiosCertificate.AggregatedSignature)
+	assert.Equal(
+		t,
+		signature,
+		dblock.BlockBody.LeiosCertificate.AggregatedSignature,
+	)
 	assert.Empty(t, dblock.Transactions())
 	assert.Equal(t, dblock.BlockBodyHash(), dblock.CalculatedBlockBodyHash())
 }

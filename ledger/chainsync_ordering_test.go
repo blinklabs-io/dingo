@@ -28,11 +28,20 @@ import (
 // wantOrder. It returns seen (which markers were found) and observed (the
 // markers in source order by first occurrence). Only the markers present in
 // wantOrder are considered.
-func observeProcessEpochRolloverCallOrder(t *testing.T, targetFunc string, wantOrder []string) (seen map[string]bool, observed []string) {
+func observeProcessEpochRolloverCallOrder(
+	t *testing.T,
+	targetFunc string,
+	wantOrder []string,
+) (seen map[string]bool, observed []string) {
 	t.Helper()
 
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "chainsync.go", nil, parser.SkipObjectResolution)
+	file, err := parser.ParseFile(
+		fset,
+		"chainsync.go",
+		nil,
+		parser.SkipObjectResolution,
+	)
 	require.NoError(t, err, "parse chainsync.go")
 
 	var fnDecl *ast.FuncDecl
@@ -132,7 +141,11 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 		"applyIntraEraHardForkRule",           // (8) per-major-version HARDFORK rule
 	}
 
-	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)
+	seen, observed := observeProcessEpochRolloverCallOrder(
+		t,
+		targetFunc,
+		wantOrder,
+	)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],
@@ -176,7 +189,11 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
 	}
 
-	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)
+	seen, observed := observeProcessEpochRolloverCallOrder(
+		t,
+		targetFunc,
+		wantOrder,
+	)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],

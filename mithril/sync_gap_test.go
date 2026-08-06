@@ -505,9 +505,24 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 	// boundary is unambiguous. CBOR/type don't need to parse — the
 	// blob store treats them as opaque bytes.
 	blocks := []models.Block{
-		{Slot: 100, Hash: testGapHash32("blk-100"), Cbor: []byte{0x82, 0x01}, Type: 1},
-		{Slot: 200, Hash: testGapHash32("blk-200"), Cbor: []byte{0x82, 0x02}, Type: 1},
-		{Slot: 300, Hash: testGapHash32("blk-300"), Cbor: []byte{0x82, 0x03}, Type: 1},
+		{
+			Slot: 100,
+			Hash: testGapHash32("blk-100"),
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		},
+		{
+			Slot: 200,
+			Hash: testGapHash32("blk-200"),
+			Cbor: []byte{0x82, 0x02},
+			Type: 1,
+		},
+		{
+			Slot: 300,
+			Hash: testGapHash32("blk-300"),
+			Cbor: []byte{0x82, 0x03},
+			Type: 1,
+		},
 	}
 	for _, b := range blocks {
 		require.NoError(t, db.BlockCreate(b, nil))
@@ -538,9 +553,24 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 	defer dbtest.CloseDatabase(db)
 
 	blocks := []models.Block{
-		{Slot: 100, Hash: testGapHash32("blk-100"), Cbor: []byte{0x82, 0x01}, Type: 1},
-		{Slot: 200, Hash: testGapHash32("blk-200"), Cbor: []byte{0x82, 0x02}, Type: 1},
-		{Slot: 300, Hash: testGapHash32("blk-300"), Cbor: []byte{0x82, 0x03}, Type: 1},
+		{
+			Slot: 100,
+			Hash: testGapHash32("blk-100"),
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		},
+		{
+			Slot: 200,
+			Hash: testGapHash32("blk-200"),
+			Cbor: []byte{0x82, 0x02},
+			Type: 1,
+		},
+		{
+			Slot: 300,
+			Hash: testGapHash32("blk-300"),
+			Cbor: []byte{0x82, 0x03},
+			Type: 1,
+		},
 	}
 	for _, b := range blocks {
 		require.NoError(t, db.BlockCreate(b, nil))

@@ -45,7 +45,9 @@ var errHaltLedgerPipeline = errors.New(
 // nextBlockIndex skipped ahead past the first new fork block and is now
 // returning a block that extends a branch we are no longer on. The ledger
 // pipeline must restart so its iterator rewinds to the current tip.
-var errStaleChainIterator = errors.New("block does not fit chain tip: stale iterator after rollback")
+var errStaleChainIterator = errors.New(
+	"block does not fit chain tip: stale iterator after rollback",
+)
 
 type txValidationError struct {
 	BlockPoint ocommon.Point
@@ -157,7 +159,9 @@ type replayRecoveryChainTx struct {
 	Tx    lcommon.Transaction
 }
 
-func collectReferencedInputs(tx lcommon.Transaction) []lcommon.TransactionInput {
+func collectReferencedInputs(
+	tx lcommon.Transaction,
+) []lcommon.TransactionInput {
 	var ret []lcommon.TransactionInput
 	seen := make(map[string]struct{})
 	appendInputs := func(inputs []lcommon.TransactionInput) {
@@ -254,31 +258,51 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	}
 	ls.config.Logger.Warn(
 		"detected inconsistent local ledger state during replay, "+recoveryAction,
-		"component", "ledger",
-		"recovery_strategy", candidate.Strategy,
-		"tx_hash", hex.EncodeToString(validationErr.TxHash),
-		"failing_block_slot", validationErr.BlockPoint.Slot,
-		"missing_input", candidate.Input.String(),
-		"producer_tx_hash", producerTxHash,
-		"producer_block_slot", candidate.ProducerBlock.Slot,
-		"rollback_slot", rewindPoint.Slot,
-		"rollback_hash", hex.EncodeToString(rewindPoint.Hash),
-		"holding", replayHolding,
+		"component",
+		"ledger",
+		"recovery_strategy",
+		candidate.Strategy,
+		"tx_hash",
+		hex.EncodeToString(validationErr.TxHash),
+		"failing_block_slot",
+		validationErr.BlockPoint.Slot,
+		"missing_input",
+		candidate.Input.String(),
+		"producer_tx_hash",
+		producerTxHash,
+		"producer_block_slot",
+		candidate.ProducerBlock.Slot,
+		"rollback_slot",
+		rewindPoint.Slot,
+		"rollback_hash",
+		hex.EncodeToString(rewindPoint.Hash),
+		"holding",
+		replayHolding,
 	)
 	if replayHolding {
 		ls.metrics.replayRecoveryNonConverging.Inc()
 		ls.config.Logger.Warn(
 			"replay recovery not converging after unresolved-producer failures, holding at applied ledger tip",
-			"component", "ledger",
-			"tx_hash", hex.EncodeToString(validationErr.TxHash),
-			"failing_block_slot", validationErr.BlockPoint.Slot,
-			"ledger_tip_slot", ledgerTip.Point.Slot,
-			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
-			"primary_chain_tip_slot", ls.chain.Tip().Point.Slot,
-			"primary_chain_already_held", primaryChainAlreadyHeld,
-			"no_progress_count", ls.replayRecoveryNoProgressCount,
-			"fallback_rollback_slot", candidate.RollbackPoint.Slot,
-			"hint", "forcing a fresh chainsync intersection; persistent failures may require operator intervention",
+			"component",
+			"ledger",
+			"tx_hash",
+			hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot",
+			validationErr.BlockPoint.Slot,
+			"ledger_tip_slot",
+			ledgerTip.Point.Slot,
+			"ledger_tip_hash",
+			hex.EncodeToString(ledgerTip.Point.Hash),
+			"primary_chain_tip_slot",
+			ls.chain.Tip().Point.Slot,
+			"primary_chain_already_held",
+			primaryChainAlreadyHeld,
+			"no_progress_count",
+			ls.replayRecoveryNoProgressCount,
+			"fallback_rollback_slot",
+			candidate.RollbackPoint.Slot,
+			"hint",
+			"forcing a fresh chainsync intersection; persistent failures may require operator intervention",
 		)
 		// Peer rotation is the escape mechanism for a held recovery. Publish
 		// it before the rollback calls so an unexpected local rollback error
@@ -467,18 +491,30 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
 			ls.config.Logger.Warn(
 				"detected replay recovery below Mithril trust boundary, rejecting peer chain",
-				"component", "ledger",
-				"recovery_strategy", candidate.Strategy,
-				"tx_hash", hex.EncodeToString(validationErr.TxHash),
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"missing_input", candidate.Input.String(),
-				"producer_tx_hash", producerTxHash,
-				"producer_block_slot", candidate.ProducerBlock.Slot,
-				"rollback_slot", candidate.RollbackPoint.Slot,
-				"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
-				"mithril_ledger_slot", mithrilLedgerSlot,
-				"rewind_target_slot", rewindPoint.Slot,
-				"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+				"component",
+				"ledger",
+				"recovery_strategy",
+				candidate.Strategy,
+				"tx_hash",
+				hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"missing_input",
+				candidate.Input.String(),
+				"producer_tx_hash",
+				producerTxHash,
+				"producer_block_slot",
+				candidate.ProducerBlock.Slot,
+				"rollback_slot",
+				candidate.RollbackPoint.Slot,
+				"rollback_hash",
+				hex.EncodeToString(candidate.RollbackPoint.Hash),
+				"mithril_ledger_slot",
+				mithrilLedgerSlot,
+				"rewind_target_slot",
+				rewindPoint.Slot,
+				"rewind_target_hash",
+				hex.EncodeToString(rewindPoint.Hash),
 			)
 		},
 	)
@@ -526,13 +562,18 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		if attempts > maxAtTipRecoveryAttempts {
 			ls.config.Logger.Warn(
 				"at-tip recovery exhausted scheduled rewind attempts, retrying with deepest rewind",
-				"component", "ledger",
-				"failing_slot", validationErr.BlockPoint.Slot,
-				"failing_block_hash", hex.EncodeToString(
+				"component",
+				"ledger",
+				"failing_slot",
+				validationErr.BlockPoint.Slot,
+				"failing_block_hash",
+				hex.EncodeToString(
 					validationErr.BlockPoint.Hash,
 				),
-				"tx_hash", hex.EncodeToString(validationErr.TxHash),
-				"attempts", attempts,
+				"tx_hash",
+				hex.EncodeToString(validationErr.TxHash),
+				"attempts",
+				attempts,
 			)
 			attempts = maxAtTipRecoveryAttempts
 		}
@@ -609,14 +650,22 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		ls.metrics.atTipRecoveryNonConverging.Inc()
 		ls.config.Logger.Warn(
 			"at-tip recovery not converging across distinct validation failures, holding at ledger tip instead of rewinding primary chain deeper",
-			"component", "ledger",
-			"tx_hash", hex.EncodeToString(validationErr.TxHash),
-			"failing_block_slot", validationErr.BlockPoint.Slot,
-			"ledger_tip_slot", ledgerTip.Point.Slot,
-			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
-			"primary_chain_tip_slot", chainTip.Point.Slot,
-			"descent_count", ls.atTipRecoveryDescentCount,
-			"hint", "local ledger validation likely diverging from the network; operator intervention may be required",
+			"component",
+			"ledger",
+			"tx_hash",
+			hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot",
+			validationErr.BlockPoint.Slot,
+			"ledger_tip_slot",
+			ledgerTip.Point.Slot,
+			"ledger_tip_hash",
+			hex.EncodeToString(ledgerTip.Point.Hash),
+			"primary_chain_tip_slot",
+			chainTip.Point.Slot,
+			"descent_count",
+			ls.atTipRecoveryDescentCount,
+			"hint",
+			"local ledger validation likely diverging from the network; operator intervention may be required",
 		)
 	}
 	ls.config.Logger.Warn(
@@ -683,20 +732,34 @@ func (ls *LedgerState) rejectAtTipRecoveryAtMithrilBoundary(
 		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
 			ls.config.Logger.Warn(
 				"at-tip validation recovery would cross Mithril trust boundary, rejecting peer chain",
-				"component", "ledger",
-				"tx_hash", hex.EncodeToString(validationErr.TxHash),
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"failing_block_hash", hex.EncodeToString(validationErr.BlockPoint.Hash),
-				"ledger_tip_slot", ledgerTip.Point.Slot,
-				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
-				"primary_chain_tip_slot", chainTip.Point.Slot,
-				"primary_chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-				"requested_rewind_slot", requestedRewindPoint.Slot,
-				"requested_rewind_hash", hex.EncodeToString(requestedRewindPoint.Hash),
-				"mithril_ledger_slot", mithrilLedgerSlot,
-				"rewind_target_slot", rewindPoint.Slot,
-				"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
-				"attempt", attempts,
+				"component",
+				"ledger",
+				"tx_hash",
+				hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"failing_block_hash",
+				hex.EncodeToString(validationErr.BlockPoint.Hash),
+				"ledger_tip_slot",
+				ledgerTip.Point.Slot,
+				"ledger_tip_hash",
+				hex.EncodeToString(ledgerTip.Point.Hash),
+				"primary_chain_tip_slot",
+				chainTip.Point.Slot,
+				"primary_chain_tip_hash",
+				hex.EncodeToString(chainTip.Point.Hash),
+				"requested_rewind_slot",
+				requestedRewindPoint.Slot,
+				"requested_rewind_hash",
+				hex.EncodeToString(requestedRewindPoint.Hash),
+				"mithril_ledger_slot",
+				mithrilLedgerSlot,
+				"rewind_target_slot",
+				rewindPoint.Slot,
+				"rewind_target_hash",
+				hex.EncodeToString(rewindPoint.Hash),
+				"attempt",
+				attempts,
 			)
 		},
 	)
@@ -755,7 +818,9 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 // below targetSlot, used to compute deeper rewind anchors during
 // at-tip validation recovery. Falls back to slot 0 if no earlier
 // committed block can be located.
-func (ls *LedgerState) findRewindPoint(targetSlot uint64) (ocommon.Point, error) {
+func (ls *LedgerState) findRewindPoint(
+	targetSlot uint64,
+) (ocommon.Point, error) {
 	if ls.chain == nil {
 		return ocommon.Point{Slot: targetSlot}, nil
 	}
@@ -772,13 +837,19 @@ func (ls *LedgerState) findRewindPoint(targetSlot uint64) (ocommon.Point, error)
 func (ls *LedgerState) findReplayRecoveryCandidate(
 	validationErr *txValidationError,
 ) (*replayRecoveryCandidate, error) {
-	chainIndex, err := ls.buildReplayRecoveryChainIndex(validationErr.BlockPoint)
+	chainIndex, err := ls.buildReplayRecoveryChainIndex(
+		validationErr.BlockPoint,
+	)
 	if err != nil {
 		return nil, err
 	}
 	var candidate *replayRecoveryCandidate
 	var unresolvedInputs []lcommon.TransactionInput
-	pendingInputs := make([]replayRecoveryPendingInput, 0, len(validationErr.Inputs))
+	pendingInputs := make(
+		[]replayRecoveryPendingInput,
+		0,
+		len(validationErr.Inputs),
+	)
 	for _, input := range validationErr.Inputs {
 		pendingInputs = append(pendingInputs, replayRecoveryPendingInput{
 			Input:   input,

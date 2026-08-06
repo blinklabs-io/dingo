@@ -549,7 +549,8 @@ func (c *ConnectionManager) ResolvedListeners() []ListenerConfig {
 		// Listener -- an already address-configured entry (Listener nil)
 		// already rebinds correctly on its own via ListenNetwork/
 		// ListenAddress and needs no help.
-		if cfg.Listener != nil && i < len(c.listeners) && c.listeners[i] != nil {
+		if cfg.Listener != nil && i < len(c.listeners) &&
+			c.listeners[i] != nil {
 			addr := c.listeners[i].Addr()
 			cfg.Listener = nil
 			cfg.ListenAddress = addr.String()

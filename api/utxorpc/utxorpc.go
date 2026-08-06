@@ -378,6 +378,18 @@ func betaVersionedQueryHandler(
 	betaPath string,
 	options connect.HandlerOption,
 ) http.Handler {
+	queryFile := betaquery.File_utxorpc_v1beta_query_query_proto
+	if queryFile == nil {
+		panic("utxorpc: missing v1beta query descriptor")
+	}
+	queryService := queryFile.Services().ByName("QueryService")
+	if queryService == nil {
+		panic("utxorpc: missing v1beta QueryService descriptor")
+	}
+	readStateMethod := queryService.Methods().ByName("ReadState")
+	if readStateMethod == nil {
+		panic("utxorpc: missing v1beta QueryService.ReadState descriptor")
+	}
 	readStateHandler := connect.NewUnaryHandler(
 		betaqueryconnect.QueryServiceReadStateProcedure,
 		func(
@@ -386,13 +398,12 @@ func betaVersionedQueryHandler(
 		) (*connect.Response[betaquery.ReadStateResponse], error) {
 			return nil, connect.NewError(
 				connect.CodeUnimplemented,
-				errors.New("utxorpc.v1beta.query.QueryService.ReadState is not implemented"),
+				errors.New(
+					"utxorpc.v1beta.query.QueryService.ReadState is not implemented",
+				),
 			)
 		},
-		connect.WithSchema(
-			betaquery.File_utxorpc_v1beta_query_query_proto.Services().
-				ByName("QueryService").Methods().ByName("ReadState"),
-		),
+		connect.WithSchema(readStateMethod),
 		connect.WithHandlerOptions(options),
 	)
 	// Build the rewrite handler once and reuse it across requests, matching
@@ -481,7 +492,8 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 		// instead of continuing to wait out the timer above.
 		u.config.Logger.Warn(
 			"utxorpc gRPC graceful shutdown cancelled by caller context; forcing close",
-			"error", ctx.Err(),
+			"error",
+			ctx.Err(),
 		)
 		return forceCloseUtxorpc(server, shutdownErr)
 	}

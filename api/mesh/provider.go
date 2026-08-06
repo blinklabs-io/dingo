@@ -44,14 +44,21 @@ type ProviderDependencies struct {
 func RegisterProvider(host *plugin.Host) error {
 	return plugin.Register(
 		host,
-		plugin.Descriptor{Capability: plugin.CapabilityAPIMesh, Name: "builtin", Description: "built-in Mesh-compatible Rosetta HTTP API"},
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityAPIMesh,
+			Name:        "builtin",
+			Description: "built-in Mesh-compatible Rosetta HTTP API",
+		},
 		func() ProviderConfig { return ProviderConfig{Port: 8080} },
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Server, plugin.Instance, error) {
 			server, err := NewServer(ServerConfig{
 				Logger: deps.Logger, LedgerState: deps.LedgerState,
 				Database: deps.Database, Chain: deps.Chain, Mempool: deps.Mempool,
-				ListenAddress: net.JoinHostPort(deps.Host, strconv.FormatUint(uint64(cfg.Port), 10)),
-				Network:       deps.Network, NetworkMagic: deps.NetworkMagic,
+				ListenAddress: net.JoinHostPort(
+					deps.Host,
+					strconv.FormatUint(uint64(cfg.Port), 10),
+				),
+				Network: deps.Network, NetworkMagic: deps.NetworkMagic,
 				GenesisHash: deps.GenesisHash, GenesisStartTimeSec: deps.GenesisStartTimeSec,
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 			})

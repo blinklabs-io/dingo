@@ -35,28 +35,41 @@ type testInput struct {
 	index uint32
 }
 
-func (i testInput) Id() lcommon.Blake2b256             { return i.txId }
-func (i testInput) Index() uint32                      { return i.index }
-func (i testInput) String() string                     { return fmt.Sprintf("%s#%d", i.txId, i.index) }
-func (i testInput) MarshalJSON() ([]byte, error)       { return []byte(`"` + i.String() + `"`), nil }
+func (i testInput) Id() lcommon.Blake2b256 { return i.txId }
+func (i testInput) Index() uint32          { return i.index }
+
+func (i testInput) String() string { return fmt.Sprintf("%s#%d", i.txId, i.index) }
+
+func (i testInput) MarshalJSON() ([]byte, error) { return []byte(`"` + i.String() + `"`), nil }
+
 func (i testInput) Utxorpc() (*utxorpc.TxInput, error) { return &utxorpc.TxInput{}, nil }
-func (i testInput) ToPlutusData() data.PlutusData      { return data.NewConstr(0) }
+
+func (i testInput) ToPlutusData() data.PlutusData { return data.NewConstr(0) }
 
 // testOutput implements lcommon.TransactionOutput for testing.
 type testOutput struct {
 	amount *big.Int
 }
 
-func (o testOutput) Address() lcommon.Address                                  { return lcommon.Address{} }
-func (o testOutput) Amount() *big.Int                                          { return o.amount }
+func (o testOutput) Address() lcommon.Address { return lcommon.Address{} }
+
+func (o testOutput) Amount() *big.Int { return o.amount }
+
 func (o testOutput) Assets() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput] { return nil }
-func (o testOutput) Datum() *lcommon.Datum                                     { return nil }
-func (o testOutput) DatumHash() *lcommon.Blake2b256                            { return nil }
-func (o testOutput) Cbor() []byte                                              { return nil }
-func (o testOutput) Utxorpc() (*utxorpc.TxOutput, error)                       { return &utxorpc.TxOutput{}, nil }
-func (o testOutput) ScriptRef() lcommon.Script                                 { return nil }
-func (o testOutput) ToPlutusData() data.PlutusData                             { return data.NewConstr(0) }
-func (o testOutput) String() string                                            { return "testOutput" }
+
+func (o testOutput) Datum() *lcommon.Datum { return nil }
+
+func (o testOutput) DatumHash() *lcommon.Blake2b256 { return nil }
+
+func (o testOutput) Cbor() []byte { return nil }
+
+func (o testOutput) Utxorpc() (*utxorpc.TxOutput, error) { return &utxorpc.TxOutput{}, nil }
+
+func (o testOutput) ScriptRef() lcommon.Script { return nil }
+
+func (o testOutput) ToPlutusData() data.PlutusData { return data.NewConstr(0) }
+
+func (o testOutput) String() string { return "testOutput" }
 
 func newTestInput(hashByte byte, index uint32) testInput {
 	var hash lcommon.Blake2b256

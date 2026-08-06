@@ -43,5 +43,9 @@ func TestWasBootstrapped(t *testing.T) {
 	require.NoError(t, setImmutableImportMarker(db, 12345))
 	got, err = WasBootstrapped(db)
 	require.NoError(t, err)
-	require.True(t, got, "database with the immutable-import marker is bootstrapped")
+	require.True(
+		t,
+		got,
+		"database with the immutable-import marker is bootstrapped",
+	)
 }

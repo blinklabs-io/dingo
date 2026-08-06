@@ -91,15 +91,23 @@ func TestCaptureEpochBoundaryUsesSnapPointStake(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(40_000_000), uint64(poolSnapshot.TotalStake),
-		"mark snapshot must hold SNAP-point stake, not post-SNAP boundary credits")
+	require.Equal(
+		t,
+		uint64(40_000_000),
+		uint64(poolSnapshot.TotalStake),
+		"mark snapshot must hold SNAP-point stake, not post-SNAP boundary credits",
+	)
 
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
 	require.True(t, rewardSnapshot.Authoritative)
-	require.Equal(t, uint64(40_000_000), uint64(rewardSnapshot.TotalActiveStake),
-		"reward basis must hold SNAP-point stake too")
+	require.Equal(
+		t,
+		uint64(40_000_000),
+		uint64(rewardSnapshot.TotalActiveStake),
+		"reward basis must hold SNAP-point stake too",
+	)
 
 	inputs, err := db.Metadata().GetRewardStakeInputs(1, nil)
 	require.NoError(t, err)
@@ -157,8 +165,12 @@ func TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(40_000_000), uint64(poolSnapshot.TotalStake),
-		"missing SNAP hook must reconstruct pre-credit stake, not read live aggregate")
+	require.Equal(
+		t,
+		uint64(40_000_000),
+		uint64(poolSnapshot.TotalStake),
+		"missing SNAP hook must reconstruct pre-credit stake, not read live aggregate",
+	)
 }
 
 // TestCaptureEpochBoundaryIgnoresStaleSnapPointStake proves the SNAP-point
@@ -222,8 +234,12 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(40_000_000), uint64(poolSnapshot.TotalStake),
-		"fallback must reconstruct the boundary rather than reuse a rolled-back SNAP read")
+	require.Equal(
+		t,
+		uint64(40_000_000),
+		uint64(poolSnapshot.TotalStake),
+		"fallback must reconstruct the boundary rather than reuse a rolled-back SNAP read",
+	)
 }
 
 // TestCalculateStakeDistributionDedupesCredentialAcrossPools proves the
@@ -253,27 +269,23 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 	}, 100)
 	seedPoolAndDelegations(t, db, poolB, nil, 100)
 
-	gormDB := snapshotGormDB(t, db)
+	raw := snapshotSQLDB(t, db)
 	// Reproduce a pre-unique-index database: drop the constraint, then add the
 	// duplicate credential row it would now reject.
-	require.NoError(t, gormDB.Exec(
-		"DROP INDEX IF EXISTS idx_reward_live_stake_cred",
-	).Error)
-	require.NoError(t, gormDB.Create(&models.RewardLiveStake{
-		CredentialTag:      0,
-		StakingKey:         stakingKey,
-		PoolKeyHash:        poolB,
-		UtxoStake:          types.Uint64(10),
-		TotalStake:         types.Uint64(10),
-		Registered:         true,
-		PoolDelegationSlot: 100,
-		UpdatedSlot:        100,
-	}).Error)
+	_, err := raw.Exec("DROP INDEX IF EXISTS idx_reward_live_stake_cred")
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO reward_live_stake
+ (credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
+  total_stake, registered, pool_delegation_slot, updated_slot, calculation_version)
+ VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, 0)`, 0, stakingKey, poolB, "10", "0", "10", 100, 100)
+	require.NoError(t, err)
 
-	var rows int64
-	require.NoError(t, gormDB.Model(&models.RewardLiveStake{}).
-		Where("staking_key = ?", stakingKey).Count(&rows).Error)
-	require.Equal(t, int64(2), rows, "fixture must hold the duplicate rows")
+	var rows int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM reward_live_stake WHERE staking_key = ?",
+		stakingKey,
+	).Scan(&rows))
+	require.Equal(t, 2, rows, "fixture must hold the duplicate rows")
 
 	calc := NewCalculator(db)
 	txn := db.Transaction(false)
@@ -289,8 +301,12 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 	require.Equal(t, uint64(10), dist.TotalStake,
 		"a duplicated credential must contribute its stake exactly once")
 	require.Len(t, dist.StakeInputs, 1)
-	require.Equal(t, uint64(1), dist.DelegatorCount[keyA]+dist.DelegatorCount[keyB],
-		"a duplicated credential must be counted as one delegator")
+	require.Equal(
+		t,
+		uint64(1),
+		dist.DelegatorCount[keyA]+dist.DelegatorCount[keyB],
+		"a duplicated credential must be counted as one delegator",
+	)
 	require.Equal(t, uint64(10), dist.PoolStakes[keyA]+dist.PoolStakes[keyB])
 	require.Len(t, dist.PoolStakes, 1,
 		"only the retained assignment may hold the credential's stake")
@@ -337,10 +353,13 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 			// Make the live aggregate disagree with the historical
 			// reconstruction, standing in for stake that moved after the
 			// boundary.
-			require.NoError(t, snapshotGormDB(t, db).
-				Model(&models.RewardLiveStake{}).
-				Where("staking_key = ?", stakingKey).
-				Update("total_stake", types.Uint64(75)).Error)
+			raw := snapshotSQLDB(t, db)
+			_, err := raw.Exec(
+				"UPDATE reward_live_stake SET total_stake = ? WHERE staking_key = ?",
+				"75",
+				stakingKey,
+			)
+			require.NoError(t, err)
 			// Tip past the snapshot slot selects the historical fallback.
 			require.NoError(t, db.SetTip(ochainsync.Tip{
 				Point: ocommon.Point{

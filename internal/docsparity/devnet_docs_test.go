@@ -80,7 +80,7 @@ var (
 func scriptFlags(script string) map[string]struct{} {
 	flags := map[string]struct{}{}
 	caseDepth := 0
-	for _, line := range strings.Split(script, "\n") {
+	for line := range strings.SplitSeq(script, "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case caseEndRe.MatchString(trimmed):

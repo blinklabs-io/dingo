@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -42,31 +43,16 @@ func RegisterProvider(host *hostplugin.Host) error {
 			Description: "SQLite relational database",
 		},
 		func() Config { return Config{} },
-		func(_ context.Context, cfg Config, deps metadata.ProviderDependencies) (*MetadataStoreSqlite, hostplugin.Instance, error) {
-			dataDir := deps.DataDir
-			if cfg.DataDir != "" {
-				dataDir = cfg.DataDir
-			}
-			maxConnections := deps.MaxConnections
-			if cfg.MaxConnections > 0 {
-				maxConnections = cfg.MaxConnections
-			}
-			if maxConnections <= 0 {
-				maxConnections = DefaultMaxConnections
-			}
-			store, err := NewWithOptions(
-				WithDataDir(dataDir),
-				WithMaxConnections(maxConnections),
-				WithStorageMode(deps.StorageMode),
-				WithLogger(deps.Logger),
-				WithPromRegistry(deps.PromRegistry),
-			)
+		func(_ context.Context, cfg Config, deps metadata.ProviderDependencies) (*sqlstore.Store, hostplugin.Instance, error) {
+			store, err := NewSQLStore(cfg, deps)
 			if err != nil {
 				return nil, nil, err
 			}
 			lifecycle := hostplugin.Lifecycle{
-				StartFunc: func(context.Context) error { return store.Start() },
-				StopFunc:  func(context.Context) error { return store.Stop() },
+				StartFunc: store.Start,
+				StopFunc: func(ctx context.Context) error {
+					return store.CloseContext(ctx)
+				},
 			}
 			return store, lifecycle, nil
 		},

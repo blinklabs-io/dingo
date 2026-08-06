@@ -99,7 +99,9 @@ type stubBlockfetchIterator struct {
 	cancelCalls int
 }
 
-func (i *stubBlockfetchIterator) Next(bool) (*chain.ChainIteratorResult, error) {
+func (i *stubBlockfetchIterator) Next(
+	bool,
+) (*chain.ChainIteratorResult, error) {
 	if i.nextCalls >= len(i.steps) {
 		return nil, chain.ErrIteratorChainTip
 	}
@@ -559,7 +561,11 @@ func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
 	start := ocommon.NewPoint(100, []byte{0x01})
 
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
-		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "should not trigger before threshold")
+		assert.False(
+			t,
+			o.blockfetchRecordNoBlocks(connId, start),
+			"should not trigger before threshold",
+		)
 	}
 }
 
@@ -578,7 +584,11 @@ func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		o.blockfetchRecordNoBlocks(connId, start)
 	}
-	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger on 5th consecutive request")
+	assert.True(
+		t,
+		o.blockfetchRecordNoBlocks(connId, start),
+		"should trigger on 5th consecutive request",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_ProgressResetsCounter verifies valid progress
@@ -600,9 +610,17 @@ func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 	o.blockfetchResetNoBlocks(connId)
 
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
-		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after progress")
+		assert.False(
+			t,
+			o.blockfetchRecordNoBlocks(connId, start),
+			"counter should reset after progress",
+		)
 	}
-	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should need another full sequence after progress")
+	assert.True(
+		t,
+		o.blockfetchRecordNoBlocks(connId, start),
+		"should need another full sequence after progress",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_IndependentPoints verifies changing start
@@ -621,8 +639,16 @@ func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, startA))
 	}
-	assert.False(t, o.blockfetchRecordNoBlocks(connId, startB), "different start point should not inherit count")
-	assert.False(t, o.blockfetchRecordNoBlocks(connId, startA), "interleaved start point should reset consecutive count")
+	assert.False(
+		t,
+		o.blockfetchRecordNoBlocks(connId, startB),
+		"different start point should not inherit count",
+	)
+	assert.False(
+		t,
+		o.blockfetchRecordNoBlocks(connId, startA),
+		"interleaved start point should reset consecutive count",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_IndependentConns verifies NoBlocks counts are
@@ -648,7 +674,11 @@ func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
 		o.blockfetchRecordNoBlocks(connA, start)
 	}
 	// Different connId at the same point must have its own independent counter
-	assert.False(t, o.blockfetchRecordNoBlocks(connB, start), "different connId should not inherit count")
+	assert.False(
+		t,
+		o.blockfetchRecordNoBlocks(connB, start),
+		"different connId should not inherit count",
+	)
 }
 
 // TestBlockfetchRecordNoBlocks_CleanupResetsCounter verifies connection-close
@@ -675,9 +705,17 @@ func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 
 	// Counter should be reset — needs another full sequence to trigger
 	for range blockfetchMaxConsecutiveNoBlocks - 1 {
-		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after cleanup")
+		assert.False(
+			t,
+			o.blockfetchRecordNoBlocks(connId, start),
+			"counter should reset after cleanup",
+		)
 	}
-	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger again after reset")
+	assert.True(
+		t,
+		o.blockfetchRecordNoBlocks(connId, start),
+		"should trigger again after reset",
+	)
 }
 
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {

@@ -65,7 +65,9 @@ func countBlockNonces(t *testing.T, db *database.Database) int {
 	return len(rows)
 }
 
-func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(t *testing.T) {
+func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
+	t *testing.T,
+) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -148,7 +150,11 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(t *testing.T) 
 		nil,
 	)
 	require.NoError(t, err)
-	require.Nil(t, byronNonce, "Byron blocks must not get Praos block_nonce rows")
+	require.Nil(
+		t,
+		byronNonce,
+		"Byron blocks must not get Praos block_nonce rows",
+	)
 
 	for _, block := range blocks {
 		got, err := db.GetBlockNonce(
@@ -494,7 +500,10 @@ func TestHealMithrilGapBlockNonces_MalformedRowDoesNotMaskAnchor(
 
 	anchorHash := bytes.Repeat([]byte{0x0a}, 32)
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
-	require.NoError(t, db.SetBlockNonce(anchorHash, 100, anchorNonce, true, nil))
+	require.NoError(
+		t,
+		db.SetBlockNonce(anchorHash, 100, anchorNonce, true, nil),
+	)
 	// Malformed row at a higher slot below the boundary.
 	require.NoError(t, db.SetBlockNonce(
 		bytes.Repeat([]byte{0x0b}, 32), 110, []byte{0x01, 0x02}, false, nil))
@@ -552,7 +561,10 @@ func TestHealMithrilGapBlockNonces_MalformedBoundaryRowDoesNotSkip(
 
 	anchorHash := bytes.Repeat([]byte{0x0a}, 32)
 	anchorNonce := bytes.Repeat([]byte{0xaa}, 32)
-	require.NoError(t, db.SetBlockNonce(anchorHash, 100, anchorNonce, true, nil))
+	require.NoError(
+		t,
+		db.SetBlockNonce(anchorHash, 100, anchorNonce, true, nil),
+	)
 	// Malformed nonce already stored AT the boundary slot (a block imported
 	// without folding its VRF). It must not be mistaken for a completion marker.
 	require.NoError(t, db.SetBlockNonce(
@@ -575,8 +587,12 @@ func TestHealMithrilGapBlockNonces_MalformedBoundaryRowDoesNotSkip(
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, want, got,
-		"malformed boundary nonce must be reconstructed, not treated as complete")
+	require.Equal(
+		t,
+		want,
+		got,
+		"malformed boundary nonce must be reconstructed, not treated as complete",
+	)
 	require.NotEqual(t, []byte{0x01, 0x02}, got,
 		"the malformed boundary nonce must have been overwritten")
 }
@@ -588,10 +604,20 @@ func TestHealMithrilGapBlockNonces_NoBoundaryNoOp(t *testing.T) {
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
 
-	ls := newGapHealTestLedgerState(t, db, 0, 300, bytes.Repeat([]byte{0x01}, 32))
+	ls := newGapHealTestLedgerState(
+		t,
+		db,
+		0,
+		300,
+		bytes.Repeat([]byte{0x01}, 32),
+	)
 	require.NoError(t, ls.healMithrilGapBlockNonces(t.Context()))
-	require.Equal(t, 0, countBlockNonces(t, db),
-		"heal must not write any block_nonce rows when not Mithril-bootstrapped")
+	require.Equal(
+		t,
+		0,
+		countBlockNonces(t, db),
+		"heal must not write any block_nonce rows when not Mithril-bootstrapped",
+	)
 }
 
 // TestHealMithrilGapBlockNonces_AlreadyHealedNoOp verifies idempotency: when a

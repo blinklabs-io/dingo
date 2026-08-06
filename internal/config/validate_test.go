@@ -534,7 +534,11 @@ func TestValidateDelegatorInactivity(t *testing.T) {
 		inactivity uint64
 		wantErr    string
 	}{
-		{name: "disabled ignores out-of-range value", enabled: false, inactivity: 10_001},
+		{
+			name:       "disabled ignores out-of-range value",
+			enabled:    false,
+			inactivity: 10_001,
+		},
 		{name: "enabled at minimum", enabled: true, inactivity: 1},
 		{name: "enabled within range", enabled: true, inactivity: 90},
 		{name: "enabled at maximum", enabled: true, inactivity: 10_000},
@@ -780,7 +784,11 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
-	assert.Contains(t, err.Error(), "invalid plugins.mempool.config.evictionWatermark")
+	assert.Contains(
+		t,
+		err.Error(),
+		"invalid plugins.mempool.config.evictionWatermark",
+	)
 	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
 }
 

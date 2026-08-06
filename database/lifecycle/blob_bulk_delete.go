@@ -40,7 +40,9 @@ func blockIndexID(key []byte) (id uint64, ok bool) {
 	if len(key) != len(types.BlockBlobIndexKeyPrefix)+8 {
 		return 0, false
 	}
-	return binary.BigEndian.Uint64(key[len(types.BlockBlobIndexKeyPrefix):]), true
+	return binary.BigEndian.Uint64(
+		key[len(types.BlockBlobIndexKeyPrefix):],
+	), true
 }
 
 // DeleteBlocksAfter removes every block whose internal, sequentially

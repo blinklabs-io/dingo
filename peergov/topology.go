@@ -41,7 +41,11 @@ func (p *PeerGovernor) LoadTopologyConfig(
 		normalized string
 	}
 
-	bootstrapResolved := make([]resolvedPeer, 0, len(topologyConfig.BootstrapPeers))
+	bootstrapResolved := make(
+		[]resolvedPeer,
+		0,
+		len(topologyConfig.BootstrapPeers),
+	)
 	for _, bootstrapPeer := range topologyConfig.BootstrapPeers {
 		tmpAddress := net.JoinHostPort(
 			bootstrapPeer.Address,
@@ -59,7 +63,11 @@ func (p *PeerGovernor) LoadTopologyConfig(
 		valency     uint
 		warmValency uint
 	}
-	localRootsResolved := make([]resolvedLocalRoot, 0, len(topologyConfig.LocalRoots))
+	localRootsResolved := make(
+		[]resolvedLocalRoot,
+		0,
+		len(topologyConfig.LocalRoots),
+	)
 	for _, localRoot := range topologyConfig.LocalRoots {
 		peers := make([]resolvedPeer, 0, len(localRoot.AccessPoints))
 		for _, ap := range localRoot.AccessPoints {
@@ -86,7 +94,11 @@ func (p *PeerGovernor) LoadTopologyConfig(
 		valency     uint
 		warmValency uint
 	}
-	publicRootsResolved := make([]resolvedPublicRoot, 0, len(topologyConfig.PublicRoots))
+	publicRootsResolved := make(
+		[]resolvedPublicRoot,
+		0,
+		len(topologyConfig.PublicRoots),
+	)
 	for _, publicRoot := range topologyConfig.PublicRoots {
 		peers := make([]resolvedPeer, 0, len(publicRoot.AccessPoints))
 		for _, ap := range publicRoot.AccessPoints {

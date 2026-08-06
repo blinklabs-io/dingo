@@ -28,7 +28,10 @@ import (
 // singleEraShape returns a shape with only the provided era, useful for
 // unit-testing Summary construction without having to reason about past eras.
 func singleEraShape(entry hardfork.ShapeEntry) hardfork.Shape {
-	return hardfork.Shape{SystemStart: testSysStart, Eras: []hardfork.ShapeEntry{entry}}
+	return hardfork.Shape{
+		SystemStart: testSysStart,
+		Eras:        []hardfork.ShapeEntry{entry},
+	}
 }
 
 func conwayShapeEntry() hardfork.ShapeEntry {
@@ -57,12 +60,22 @@ func TestBuildSummary_SingleEra_TransitionUnknown(t *testing.T) {
 	// SafeZoneSlots = 25_920 → safeEnd = 225_920. Snap to next epoch boundary.
 	// Epoch 500 spans slots [100_000, 532_000). 225_920 is inside epoch 500,
 	// so the end snaps to 532_000 (epoch 501).
-	s, err := hardfork.BuildSummary(shape, nil, current, tipSlot, hardfork.NewTransitionUnknown())
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		tipSlot,
+		hardfork.NewTransitionUnknown(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 
 	cur := s.Eras[0]
-	require.NotNil(t, cur.End, "TransitionUnknown with finite SafeZoneSlots produces bounded end")
+	require.NotNil(
+		t,
+		cur.End,
+		"TransitionUnknown with finite SafeZoneSlots produces bounded end",
+	)
 	assert.Equal(t, uint64(532_000), cur.End.Slot)
 	assert.Equal(t, uint64(501), cur.End.Epoch)
 }
@@ -77,13 +90,24 @@ func TestBuildSummary_SingleEra_TransitionKnown(t *testing.T) {
 		Params: shelleyParams,
 	}
 	tipSlot := uint64(200_000)
-	s, err := hardfork.BuildSummary(shape, nil, current, tipSlot, hardfork.NewTransitionKnown(501))
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		tipSlot,
+		hardfork.NewTransitionKnown(501),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 
 	cur := s.Eras[0]
 	require.NotNil(t, cur.End)
-	assert.Equal(t, uint64(532_000), cur.End.Slot, "TransitionKnown should pin the end at epoch 501's start")
+	assert.Equal(
+		t,
+		uint64(532_000),
+		cur.End.Slot,
+		"TransitionKnown should pin the end at epoch 501's start",
+	)
 	assert.Equal(t, uint64(501), cur.End.Epoch)
 }
 
@@ -97,7 +121,13 @@ func TestBuildSummary_SingleEra_TransitionImpossible(t *testing.T) {
 		Params: shelleyParams,
 	}
 	tipSlot := uint64(200_000)
-	s, err := hardfork.BuildSummary(shape, nil, current, tipSlot, hardfork.NewTransitionImpossible())
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		tipSlot,
+		hardfork.NewTransitionImpossible(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 
@@ -120,7 +150,13 @@ func TestBuildSummary_UnsafeIndefiniteSafeZone(t *testing.T) {
 		End:    nil,
 		Params: entry.Params,
 	}
-	s, err := hardfork.BuildSummary(shape, nil, current, 200_000, hardfork.NewTransitionUnknown())
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		200_000,
+		hardfork.NewTransitionUnknown(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 1)
 	assert.Nil(t, s.Eras[0].End, "zero SafeZoneSlots ⇒ unbounded end")
@@ -150,7 +186,13 @@ func TestBuildSummary_WithPastEra(t *testing.T) {
 		Params: shelleyParams,
 	}
 	// tipSlot = 150 (50 Shelley slots past the era start).
-	s, err := hardfork.BuildSummary(shape, past, current, 150, hardfork.NewTransitionUnknown())
+	s, err := hardfork.BuildSummary(
+		shape,
+		past,
+		current,
+		150,
+		hardfork.NewTransitionUnknown(),
+	)
 	require.NoError(t, err)
 	require.Len(t, s.Eras, 2)
 
@@ -159,7 +201,11 @@ func TestBuildSummary_WithPastEra(t *testing.T) {
 	assert.Equal(t, uint64(100), s.Eras[0].End.Slot)
 
 	assert.Equal(t, uint(1), s.Eras[1].EraID)
-	require.NotNil(t, s.Eras[1].End, "TransitionUnknown + finite SafeZoneSlots ⇒ bounded end")
+	require.NotNil(
+		t,
+		s.Eras[1].End,
+		"TransitionUnknown + finite SafeZoneSlots ⇒ bounded end",
+	)
 	// safe end = 150 + 25_920 = 26_070. Shelley epoch 1 = [100, 432_100).
 	// snap to next epoch boundary → 432_100, epoch 2.
 	assert.Equal(t, uint64(432_100), s.Eras[1].End.Slot)
@@ -188,7 +234,13 @@ func TestBuildSummary_RoundTripSlotTime(t *testing.T) {
 		Start:  hardfork.Bound{RelativeTime: 0, Slot: 100_000, Epoch: 500},
 		Params: shelleyParams,
 	}
-	s, err := hardfork.BuildSummary(shape, nil, current, 200_000, hardfork.NewTransitionKnown(501))
+	s, err := hardfork.BuildSummary(
+		shape,
+		nil,
+		current,
+		200_000,
+		hardfork.NewTransitionKnown(501),
+	)
 	require.NoError(t, err)
 
 	when, err := s.SlotToTime(150_000)

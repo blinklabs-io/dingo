@@ -140,7 +140,9 @@ func NewEventBus(
 	logger *slog.Logger,
 ) *EventBus {
 	e := &EventBus{
-		subscribers:         make(map[EventType]map[EventSubscriberId]Subscriber),
+		subscribers: make(
+			map[EventType]map[EventSubscriberId]Subscriber,
+		),
 		subscriberSnapshots: make(map[EventType][]subscriberEntry),
 		channelSubsById:     make(map[EventSubscriberId]*channelSubscriber),
 		Logger:              logger,
@@ -512,7 +514,11 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 			}
 			e.safeHandlerCall(handlerFunc, evt)
 		}
-	}(chSub.ch, handlerFunc, chSub.done)
+	}(
+		chSub.ch,
+		handlerFunc,
+		chSub.done,
+	)
 	return subId
 }
 
@@ -564,7 +570,10 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 // call actually removes the e.subscribers entry, this one still finds and
 // waits on the subscriber via channelSubsById, so the race cannot turn
 // this into a no-op.
-func (e *EventBus) UnsubscribeAndWait(eventType EventType, subId EventSubscriberId) {
+func (e *EventBus) UnsubscribeAndWait(
+	eventType EventType,
+	subId EventSubscriberId,
+) {
 	e.unsubscribe(eventType, subId, true)
 }
 
@@ -761,7 +770,9 @@ func (e *EventBus) PublishBlocking(eventType EventType, evt Event) error {
 	e.stopMu.RUnlock()
 
 	e.mu.RLock()
-	subList := append([]subscriberEntry(nil), e.subscriberSnapshots[eventType]...)
+	subList := append(
+		[]subscriberEntry(nil),
+		e.subscriberSnapshots[eventType]...)
 	e.mu.RUnlock()
 	if len(subList) == 0 {
 		if e.metrics != nil {

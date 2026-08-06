@@ -94,7 +94,13 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 
 	snapDir := filepath.Join(t.TempDir(), "snap")
 	manifest, err := lifecycle.Snapshot(
-		context.Background(), db, snapDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		db,
+		snapDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
@@ -107,7 +113,10 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, manifest.CommitTimestamp, restoredManifest.CommitTimestamp)
 
-	restoredDB, err := dbtest.NewDatabase(t, &database.Config{DataDir: restoredDir})
+	restoredDB, err := dbtest.NewDatabase(
+		t,
+		&database.Config{DataDir: restoredDir},
+	)
 	require.NoError(t, err)
 	defer restoredDB.Close()
 
@@ -115,7 +124,12 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	// byte-identically-addressable (same hash resolves) in the restored one.
 	for _, p := range points {
 		_, err := database.BlockByHash(restoredDB, p.Hash)
-		require.NoErrorf(t, err, "block at slot %d missing after restore", p.Slot)
+		require.NoErrorf(
+			t,
+			err,
+			"block at slot %d missing after restore",
+			p.Slot,
+		)
 	}
 	restoredTip, err := restoredDB.GetTip(nil)
 	require.NoError(t, err)
@@ -140,7 +154,14 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, points[targetIndex].Slot, target.Slot)
 
-	blocksRemoved, err := lifecycle.Truncate(context.Background(), db, target, 0, false, 0)
+	blocksRemoved, err := lifecycle.Truncate(
+		context.Background(),
+		db,
+		target,
+		0,
+		false,
+		0,
+	)
 	require.NoError(t, err)
 	// Blocks strictly after targetIndex, up to and including the last one
 	// (numBlocks-1): a difference between contiguous IDs, so it's exact
@@ -150,7 +171,13 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 	for i, p := range points {
 		_, err := database.BlockByHash(db, p.Hash)
 		if i <= targetIndex {
-			require.NoErrorf(t, err, "block at index %d (slot %d) should survive truncation", i, p.Slot)
+			require.NoErrorf(
+				t,
+				err,
+				"block at index %d (slot %d) should survive truncation",
+				i,
+				p.Slot,
+			)
 		} else {
 			require.Errorf(t, err, "block at index %d (slot %d) should have been truncated away", i, p.Slot)
 			require.ErrorIs(t, err, models.ErrBlockNotFound)
@@ -182,7 +209,14 @@ func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = lifecycle.Truncate(context.Background(), db, beforeBoundary, 0, false, 0)
+	_, err = lifecycle.Truncate(
+		context.Background(),
+		db,
+		beforeBoundary,
+		0,
+		false,
+		0,
+	)
 	require.Error(t, err)
 	// Not just any error: specifically the Mithril-boundary rejection,
 	// wrapped in ErrTruncateNotStarted (nothing on disk was touched) --

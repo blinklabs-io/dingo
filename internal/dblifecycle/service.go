@@ -54,7 +54,10 @@ type LiveNode interface {
 		description string,
 	) (lifecycle.Manifest, error)
 	Restore(ctx context.Context, snapshotDir string) (lifecycle.Manifest, error)
-	Truncate(ctx context.Context, target TruncateTarget) (blocksRemoved uint64, err error)
+	Truncate(
+		ctx context.Context,
+		target TruncateTarget,
+	) (blocksRemoved uint64, err error)
 }
 
 // Service performs database lifecycle operations against the data
@@ -355,7 +358,8 @@ func ResolveTarget(
 	if target.BlockNumber != nil && block.Number != *target.BlockNumber {
 		return models.Block{}, fmt.Errorf(
 			"target block number %d does not match the resolved block (number=%d)",
-			*target.BlockNumber, block.Number,
+			*target.BlockNumber,
+			block.Number,
 		)
 	}
 	return block, nil

@@ -17,7 +17,6 @@ package koiosparity
 import (
 	"context"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"math/big"
 	"path/filepath"
@@ -26,9 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 // newTestDingoDataDir creates an empty-but-valid Dingo metadata.sqlite (WAL
@@ -40,13 +37,8 @@ import (
 func newTestDingoDataDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata.sqlite")
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", path)), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.EpochSummary{}, &models.RewardAdaPots{}))
-	sqlDB, err := db.DB()
-	require.NoError(t, err)
-	require.NoError(t, sqlDB.Close())
+	gdb := openTestSQLDB(t, dir, false)
+	require.NoError(t, gdb.Close())
 	return dir
 }
 
@@ -54,7 +46,13 @@ func newTestDingoDataDir(t *testing.T) string {
 // CheckEpochStatus whose LastCheckedAt is newer than the epoch's FetchedAt —
 // i.e. "fresh" per GetEpochsNeedingCheck, so Check will not select it for
 // re-checking.
-func seedFreshStatus(t *testing.T, cache *Cache, network string, epoch uint64, status string) {
+func seedFreshStatus(
+	t *testing.T,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	status string,
+) {
 	t.Helper()
 	fetchedAt := time.Now().Add(-time.Hour).UTC()
 	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
@@ -87,14 +85,26 @@ func TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking(t *testing.T) {
 	seedFreshStatus(t, cache, "preview", 100, StatusFail)
 
 	result, err := Check(context.Background(), CheckConfig{
-		Network:   "preview",
-		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: newTestDingoDataDir(t)},
+		Network: "preview",
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
 		CachePath: cachePath,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
-	require.Equal(t, 0, result.EpochsChecked, "nothing should have needed rechecking")
-	require.Equal(t, []uint64{100}, result.FailEpochs,
-		"a persisted FAIL must surface even though no epoch was freshly checked")
+	require.Equal(
+		t,
+		0,
+		result.EpochsChecked,
+		"nothing should have needed rechecking",
+	)
+	require.Equal(
+		t,
+		[]uint64{100},
+		result.FailEpochs,
+		"a persisted FAIL must surface even though no epoch was freshly checked",
+	)
 	require.Empty(t, result.ErrorEpochs)
 }
 
@@ -109,14 +119,21 @@ func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
 	seedFreshStatus(t, cache, "preview", 200, StatusError)
 
 	result, err := Check(context.Background(), CheckConfig{
-		Network:   "preview",
-		DingoDB:   DingoDBConfig{Plugin: "sqlite", DataDir: newTestDingoDataDir(t)},
+		Network: "preview",
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
 		CachePath: cachePath,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.Equal(t, 0, result.EpochsChecked)
-	require.Equal(t, []uint64{200}, result.ErrorEpochs,
-		"a persisted ERROR must surface even though no epoch was freshly checked")
+	require.Equal(
+		t,
+		[]uint64{200},
+		result.ErrorEpochs,
+		"a persisted ERROR must surface even though no epoch was freshly checked",
+	)
 	require.Empty(t, result.FailEpochs)
 }
 
@@ -131,8 +148,20 @@ func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
-	seedFreshStatus(t, cache, "preview", 100, StatusFail) // outside requested scope below
-	seedFreshStatus(t, cache, "preview", 300, StatusFail) // inside requested scope below
+	seedFreshStatus(
+		t,
+		cache,
+		"preview",
+		100,
+		StatusFail,
+	) // outside requested scope below
+	seedFreshStatus(
+		t,
+		cache,
+		"preview",
+		300,
+		StatusFail,
+	) // inside requested scope below
 
 	dingoDir := newTestDingoDataDir(t)
 
@@ -144,8 +173,12 @@ func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
 		ThroughEpoch: 350,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
-	require.Equal(t, []uint64{300}, result.FailEpochs,
-		"only the persisted FAIL within [FromEpoch, ThroughEpoch] should surface")
+	require.Equal(
+		t,
+		[]uint64{300},
+		result.FailEpochs,
+		"only the persisted FAIL within [FromEpoch, ThroughEpoch] should surface",
+	)
 }
 
 // TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch documents the
@@ -164,8 +197,11 @@ func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
 	seedFreshStatus(t, cache, "preview", 100, StatusPass)
 
 	result, err := Check(context.Background(), CheckConfig{
-		Network:      "preview",
-		DingoDB:      DingoDBConfig{Plugin: "sqlite", DataDir: newTestDingoDataDir(t)},
+		Network: "preview",
+		DingoDB: DingoDBConfig{
+			Plugin:  "sqlite",
+			DataDir: newTestDingoDataDir(t),
+		},
 		CachePath:    cachePath,
 		All:          true,
 		FromEpoch:    999,
@@ -176,23 +212,14 @@ func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
 }
 
 // newTestDingoDB creates an empty, WAL-mode, schema-migrated Dingo
-// metadata.sqlite (matching newTestDingoDataDir) but returns a writable GORM
+// metadata.sqlite (matching newTestDingoDataDir) but returns a writable SQL
 // handle to it too, so a test can seed reward_pool_input/reward_pool_output/
 // epoch_summary rows directly before Check opens its own read-only
 // connection against the same file.
-func newTestDingoDB(t *testing.T) (dataDir string, gdb *gorm.DB) {
+func newTestDingoDB(t *testing.T) (dataDir string, gdb *testDB) {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata.sqlite")
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", path)), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(
-		&models.EpochSummary{},
-		&models.RewardAdaPots{},
-		&models.RewardPoolInput{},
-		&models.RewardPoolOutput{},
-	))
-	return dir, db
+	return dir, openTestSQLDB(t, dir, true)
 }
 
 // TestCheckAlignsRewardScheduleEpochsEndToEnd is an end-to-end boundary test
@@ -326,7 +353,11 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
 	require.NoError(t, err)
-	require.Empty(t, mismatches, "correct field-level epoch mapping must produce zero mismatches")
+	require.Empty(
+		t,
+		mismatches,
+		"correct field-level epoch mapping must produce zero mismatches",
+	)
 }
 
 // TestCheckDetectsMissingKoiosTotalsOnUpgradedCache is a regression test for
@@ -402,8 +433,12 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, result.EpochsChecked)
 	require.Empty(t, result.FailEpochs)
-	require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs,
-		"a missing Koios /totals reference row must surface as ERROR, not a silent PASS")
+	require.Equal(
+		t,
+		[]uint64{koiosEpoch},
+		result.ErrorEpochs,
+		"a missing Koios /totals reference row must surface as ERROR, not a silent PASS",
+	)
 
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
 	require.NoError(t, err)

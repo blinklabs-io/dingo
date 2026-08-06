@@ -64,7 +64,8 @@ func checkNoDataDirOverride(pluginKind string, cfg map[string]any) error {
 			"restore always writes under the given targetDataDir's own staging "+
 			"directory, and honoring a separate override would bypass its "+
 			"atomic-rename interruption safety",
-		pluginKind, override,
+		pluginKind,
+		override,
 	)
 }
 
@@ -84,15 +85,18 @@ var syncDir = fsyncdir.Sync
 // so restore's durability does not depend on trusting every plugin's
 // internals, present and future, to already cover it.
 func syncDirTree(root string) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		return syncDir(path)
-	})
+	return filepath.WalkDir(
+		root,
+		func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			return syncDir(path)
+		},
+	)
 }
 
 // RestoreStorageConfig carries the caller's configured provider-owned
@@ -223,7 +227,11 @@ func RestoreValidated(
 	validate func(Manifest) error,
 	storageConfig RestoreStorageConfig,
 ) (m Manifest, err error) {
-	manifest, snapshotDir, cleanup, err := resolveManifest(ctx, registry, snapshotDir)
+	manifest, snapshotDir, cleanup, err := resolveManifest(
+		ctx,
+		registry,
+		snapshotDir,
+	)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -396,7 +404,11 @@ func resolveManifest(
 ) (manifest Manifest, resolvedDir string, cleanup func(), err error) {
 	resolvedDir = snapshotDir
 	if _, ok := recognizedCloudScheme(registry, snapshotDir); ok {
-		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(ctx, registry, snapshotDir)
+		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(
+			ctx,
+			registry,
+			snapshotDir,
+		)
 		if downloadErr != nil {
 			return Manifest{}, "", nil, downloadErr
 		}

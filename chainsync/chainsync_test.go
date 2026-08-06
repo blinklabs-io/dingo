@@ -41,14 +41,19 @@ type testBlockHeader struct {
 	slot        uint64
 }
 
-func (h testBlockHeader) Hash() lcommon.Blake2b256          { return h.hash }
-func (h testBlockHeader) PrevHash() lcommon.Blake2b256      { return h.prevHash }
-func (h testBlockHeader) BlockNumber() uint64               { return h.blockNumber }
-func (h testBlockHeader) SlotNumber() uint64                { return h.slot }
-func (h testBlockHeader) IssuerVkey() lcommon.IssuerVkey    { return lcommon.IssuerVkey{} }
-func (h testBlockHeader) BlockBodySize() uint64             { return 0 }
-func (h testBlockHeader) Era() lcommon.Era                  { return babbage.EraBabbage }
-func (h testBlockHeader) Cbor() []byte                      { return nil }
+func (h testBlockHeader) Hash() lcommon.Blake2b256 { return h.hash }
+
+func (h testBlockHeader) PrevHash() lcommon.Blake2b256 { return h.prevHash }
+
+func (h testBlockHeader) BlockNumber() uint64 { return h.blockNumber }
+func (h testBlockHeader) SlotNumber() uint64  { return h.slot }
+
+func (h testBlockHeader) IssuerVkey() lcommon.IssuerVkey { return lcommon.IssuerVkey{} }
+func (h testBlockHeader) BlockBodySize() uint64          { return 0 }
+
+func (h testBlockHeader) Era() lcommon.Era { return babbage.EraBabbage }
+func (h testBlockHeader) Cbor() []byte     { return nil }
+
 func (h testBlockHeader) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 // newTestConnId creates a unique ConnectionId for testing by
@@ -331,7 +336,8 @@ func TestPromoteBestClient_NoHealthyClients(t *testing.T) {
 	s.RemoveClientConnId(connA)
 	active := s.GetClientConnId()
 	require.NotNil(
-		t, active,
+		t,
+		active,
 		"should promote stalled client as fallback when no healthy clients exist",
 	)
 	require.Equal(t, connB, *active,
@@ -1352,11 +1358,19 @@ func TestTryAddClientConnIdWithDirection_RecordsOutboundFlag(
 	// Verify outbound flag is recorded
 	outbound, exists := s.ClientStartedAsOutbound(connOutbound)
 	require.True(t, exists)
-	require.True(t, outbound, "outbound client should have StartedAsOutbound=true")
+	require.True(
+		t,
+		outbound,
+		"outbound client should have StartedAsOutbound=true",
+	)
 
 	inbound, exists := s.ClientStartedAsOutbound(connInbound)
 	require.True(t, exists)
-	require.False(t, inbound, "inbound client should have StartedAsOutbound=false")
+	require.False(
+		t,
+		inbound,
+		"inbound client should have StartedAsOutbound=false",
+	)
 
 	// Verify non-existent client returns false, false
 	_, exists = s.ClientStartedAsOutbound(newTestConnId(99))
@@ -1372,7 +1386,11 @@ func TestTryAddClientConnId_DefaultsOutboundFalse(t *testing.T) {
 
 	outbound, exists := s.ClientStartedAsOutbound(conn)
 	require.True(t, exists)
-	require.False(t, outbound, "TryAddClientConnId should default to StartedAsOutbound=false")
+	require.False(
+		t,
+		outbound,
+		"TryAddClientConnId should default to StartedAsOutbound=false",
+	)
 }
 
 func TestTryAddObservedClientConnId_DefaultsOutboundFalse(t *testing.T) {
@@ -1384,7 +1402,11 @@ func TestTryAddObservedClientConnId_DefaultsOutboundFalse(t *testing.T) {
 
 	outbound, exists := s.ClientStartedAsOutbound(conn)
 	require.True(t, exists)
-	require.False(t, outbound, "TryAddObservedClientConnId should default to StartedAsOutbound=false")
+	require.False(
+		t,
+		outbound,
+		"TryAddObservedClientConnId should default to StartedAsOutbound=false",
+	)
 }
 
 func TestTryAddObservedClientConnIdWithDirection_RecordsOutboundFlag(
@@ -1574,7 +1596,11 @@ func TestObservedHeaderLimitFollowsSelectionState(t *testing.T) {
 	}
 
 	_, _, ok := s.LookupObservedHeader(conn, firstHash)
-	require.False(t, ok, "the dynamic three-header limit should evict the oldest")
+	require.False(
+		t,
+		ok,
+		"the dynamic three-header limit should evict the oldest",
+	)
 
 	limit = 2
 	fifthHash := lcommon.NewBlake2b256([]byte("observed-header-5")).Bytes()
@@ -1624,7 +1650,11 @@ func TestBlockfetchLatencyMetricExposedPerConnection(t *testing.T) {
 			"connection_id": conn.String(),
 		},
 	)
-	require.True(t, ok, "expected a per-connection gauge series after recording")
+	require.True(
+		t,
+		ok,
+		"expected a per-connection gauge series after recording",
+	)
 	require.InDelta(t, 0.2, got, 1e-9)
 }
 
@@ -1646,7 +1676,11 @@ func TestBlockfetchLatencyMetricRemovedOnDisconnect(t *testing.T) {
 	_, ok := gaugeValueForLabels(
 		t, reg, blockfetchLatencyMetricName, labels,
 	)
-	require.True(t, ok, "precondition: gauge series should exist before removal")
+	require.True(
+		t,
+		ok,
+		"precondition: gauge series should exist before removal",
+	)
 
 	// Removing the connection must delete the per-connection series so
 	// cardinality stays bounded by live tracked connections.
@@ -1655,7 +1689,11 @@ func TestBlockfetchLatencyMetricRemovedOnDisconnect(t *testing.T) {
 	_, ok = gaugeValueForLabels(
 		t, reg, blockfetchLatencyMetricName, labels,
 	)
-	require.False(t, ok, "expected per-connection series to be removed on disconnect")
+	require.False(
+		t,
+		ok,
+		"expected per-connection series to be removed on disconnect",
+	)
 }
 
 func TestBlockfetchLatencyMetricDisconnectPreservesSamePeerConnection(

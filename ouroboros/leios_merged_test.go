@@ -65,7 +65,10 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2160}))
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2160}),
+	)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -229,7 +232,9 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 }
 
 func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
-	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
 	conn, err := gouroboros.New()
 	require.NoError(t, err)
 	require.True(t, cm.AddConnection(conn, false, "127.0.0.1:1234"))
@@ -248,7 +253,9 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 }
 
 func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
-	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
 	conn, err := gouroboros.New()
 	require.NoError(t, err)
 	require.True(t, cm.AddConnection(conn, false, "127.0.0.1:1234"))
@@ -267,6 +274,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	var headerTop []cbor.RawMessage
 	_, err = cbor.Decode(components[0], &headerTop)
 	require.NoError(t, err)
+	require.Len(t, headerTop, 2)
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
@@ -303,7 +311,14 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 		if !ok {
 			return errors.New("missing announcement")
 		}
-		return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, "test", true)
+		return o.recordLeiosAnnouncement(
+			raw,
+			ebHash,
+			ebSize,
+			header,
+			"test",
+			true,
+		)
 	}
 	require.NoError(t, record(headerRaw))
 	require.NoError(t, record(headerRaw))
@@ -316,7 +331,10 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 
 	// A different ranking block may not change the established size for the
 	// same endorser-block hash.
-	headerBody[len(headerBody)-1] = mustCbor(t, []any{ebHash.Bytes(), uint64(4321)})
+	headerBody[len(headerBody)-1] = mustCbor(
+		t,
+		[]any{ebHash.Bytes(), uint64(4321)},
+	)
 	headerTop[0], err = cbor.Encode(headerBody)
 	require.NoError(t, err)
 	headerRaw, err = cbor.Encode(headerTop)
@@ -326,7 +344,10 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	// A peer may announce at most two distinct ranking blocks for one
 	// slot/issuer election. The third distinct message is suppressed even when
 	// its endorser-block size is otherwise consistent.
-	headerBody[len(headerBody)-1] = mustCbor(t, []any{ebHash.Bytes(), uint64(1234)})
+	headerBody[len(headerBody)-1] = mustCbor(
+		t,
+		[]any{ebHash.Bytes(), uint64(1234)},
+	)
 	headerBody[0] = mustCbor(t, uint64(2))
 	headerTop[0], err = cbor.Encode(headerBody)
 	require.NoError(t, err)
@@ -346,14 +367,20 @@ func TestAcceptLeiosAnnouncementRejectsWithoutLedgerState(t *testing.T) {
 	o.leiosDeferredAnnouncements["pending"] = leiosDeferredAnnouncement{
 		raw: []byte("deferred"), source: "peer",
 	}
-	require.ErrorContains(t, o.acceptLeiosAnnouncement([]byte("not cbor"), "test"), "without ledger state")
+	require.ErrorContains(
+		t,
+		o.acceptLeiosAnnouncement([]byte("not cbor"), "test"),
+		"without ledger state",
+	)
 	require.Empty(t, o.leiosAnnouncements)
 	require.Empty(t, o.leiosEBLog.items)
 	_, stillDeferred := o.leiosDeferredAnnouncements["pending"]
 	require.True(t, stillDeferred)
 }
 
-var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")
+var errLeiosEndorserBlockNotCached = errors.New(
+	"leios endorser block not cached",
+)
 
 func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
 	point ocommon.Point,
@@ -415,8 +442,12 @@ func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
 	got, ok := o.EndorserBlockTxHashesByHash(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, []string{
-		hex.EncodeToString(block.TransactionReferences[0].TransactionHash.Bytes()),
-		hex.EncodeToString(block.TransactionReferences[1].TransactionHash.Bytes()),
+		hex.EncodeToString(
+			block.TransactionReferences[0].TransactionHash.Bytes(),
+		),
+		hex.EncodeToString(
+			block.TransactionReferences[1].TransactionHash.Bytes(),
+		),
 	}, got)
 }
 
@@ -524,7 +555,8 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	require.True(t, ok)
 
 	o.leiosMu.Lock()
-	oldData.insertedAt = time.Now().Add(-leiosEndorserBlockCacheTTL - time.Second)
+	oldData.insertedAt = time.Now().
+		Add(-leiosEndorserBlockCacheTTL - time.Second)
 	o.leiosMu.Unlock()
 
 	newPoint, newRaw := testLeiosEndorserBlockRaw(t, 2)
@@ -568,11 +600,16 @@ func buildDijkstraLeiosBlockRaw(
 	t.Helper()
 	require.Len(t, bodyElems, 4)
 	headerBody := babbage.BabbageBlockHeaderBody{
-		Slot:          slot,
-		PrevHash:      lcommon.NewBlake2b256(prevHash),
-		BlockBodyHash: lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
-		VrfKey:        make([]byte, 32),
-		VrfResult:     lcommon.VrfResult{Output: []byte{}, Proof: make([]byte, 80)},
+		Slot:     slot,
+		PrevHash: lcommon.NewBlake2b256(prevHash),
+		BlockBodyHash: lcommon.NewBlake2b256(
+			make([]byte, lcommon.Blake2b256Size),
+		),
+		VrfKey: make([]byte, 32),
+		VrfResult: lcommon.VrfResult{
+			Output: []byte{},
+			Proof:  make([]byte, 80),
+		},
 		OpCert: babbage.BabbageOpCert{
 			HotVkey:   make([]byte, 32),
 			Signature: make([]byte, 64),
@@ -609,7 +646,10 @@ func testDijkstraCertRBBodyElems(t *testing.T) []cbor.RawMessage {
 	return []cbor.RawMessage{
 		mustCbor(t, []uint{}),            // invalid_transactions
 		mustCbor(t, []cbor.RawMessage{}), // transactions (empty on a CertRB)
-		mustCbor(t, []any{[]byte{0x01}, make([]byte, lcommon.LeiosBlsSignatureSize)}), // leios_cert
+		mustCbor(
+			t,
+			[]any{[]byte{0x01}, make([]byte, lcommon.LeiosBlsSignatureSize)},
+		), // leios_cert
 		mustCbor(t, nil), // peras_certificate
 	}
 }
@@ -640,7 +680,11 @@ func testDijkstraTx(t *testing.T, seed byte) cbor.RawMessage {
 }
 
 func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
-	certRB := testDijkstraCertRBRaw(t, 100, make([]byte, lcommon.Blake2b256Size))
+	certRB := testDijkstraCertRBRaw(
+		t,
+		100,
+		make([]byte, lcommon.Blake2b256Size),
+	)
 	ebTxs := []cbor.RawMessage{testDijkstraTx(t, 1), testDijkstraTx(t, 2)}
 
 	merged, err := spliceEndorserTxsIntoDijkstraBlock(certRB, ebTxs)
@@ -755,7 +799,9 @@ func TestResolveCertifiedEndorserTxsGuards(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(t *testing.T) {
+func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(
+	t *testing.T,
+) {
 	certRB := testDijkstraCertRBRaw(t, 3, make([]byte, lcommon.Blake2b256Size))
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	got, ok, err := o.mergedLeiosRankingBlockCbor(certRB)
@@ -898,7 +944,10 @@ func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 	ebHash[0] = 0xcc
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		20*time.Millisecond,
+	)
 	defer cancel()
 	merged, ok := o.awaitMergedLeiosRankingBlock(ctx, certRB, ebHash)
 	require.False(t, ok)
@@ -954,7 +1003,11 @@ func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
 	// With no override and no ledger timing, the conservative default applies
 	// (not a short constant).
 	o = NewOuroboros(OuroborosConfig{EnableLeios: true})
-	require.Equal(t, defaultLeiosClosureWaitTimeout, o.leiosClosureWaitTimeout())
+	require.Equal(
+		t,
+		defaultLeiosClosureWaitTimeout,
+		o.leiosClosureWaitTimeout(),
+	)
 	require.GreaterOrEqual(t, defaultLeiosClosureWaitTimeout, 6*time.Second)
 }
 

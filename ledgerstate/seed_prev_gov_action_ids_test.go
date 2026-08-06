@@ -264,8 +264,18 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 				t, c.actionType, row.ActionType,
 				"unexpected action_type for %s", c.name,
 			)
-			require.NotNil(t, row.EnactedEpoch, "EnactedEpoch unset for %s", c.name)
-			require.NotNil(t, row.EnactedSlot, "EnactedSlot unset for %s", c.name)
+			require.NotNil(
+				t,
+				row.EnactedEpoch,
+				"EnactedEpoch unset for %s",
+				c.name,
+			)
+			require.NotNil(
+				t,
+				row.EnactedSlot,
+				"EnactedSlot unset for %s",
+				c.name,
+			)
 			assert.Equal(
 				t, uint64(0), row.AddedSlot,
 				"AddedSlot must be 0 to survive rollback for %s", c.name,

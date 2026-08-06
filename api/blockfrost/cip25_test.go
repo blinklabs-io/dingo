@@ -94,7 +94,11 @@ func TestParseCIP25Metadata(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			meta, standard, ok := parseCIP25Metadata(tc.json, policyID, assetName)
+			meta, standard, ok := parseCIP25Metadata(
+				tc.json,
+				policyID,
+				assetName,
+			)
 			assert.Equal(t, tc.wantOK, ok)
 			if !tc.wantOK {
 				return

@@ -488,7 +488,8 @@ func (p *PeerGovernor) isInboundEligibleForHot(peer *Peer) bool {
 	if tenure < p.config.InboundMinTenure {
 		return false
 	}
-	if p.config.InboundDuplexOnlyForHot && !peer.hasClientConnection() && !peer.InboundDuplex {
+	if p.config.InboundDuplexOnlyForHot && !peer.hasClientConnection() &&
+		!peer.InboundDuplex {
 		return false
 	}
 	// Penalize peers that are reconnect-flapping (repeated short-lived sessions).
@@ -500,10 +501,14 @@ func (p *PeerGovernor) isInboundEligibleForHot(peer *Peer) bool {
 		peer.ConnectionStability < minInboundConnectionStability {
 		return false
 	}
-	chainSyncUseful := peer.ChainSyncLastUpdate.After(now.Add(-inboundUsefulSignalFreshness)) &&
+	chainSyncUseful := peer.ChainSyncLastUpdate.After(
+		now.Add(-inboundUsefulSignalFreshness),
+	) &&
 		((peer.TipSlotDeltaInit && peer.TipSlotDelta <= 0) ||
 			(peer.HeaderArrivalRateInit && peer.HeaderArrivalRate > 0))
-	blockFetchUseful := peer.LastBlockFetchTime.After(now.Add(-inboundUsefulSignalFreshness)) &&
+	blockFetchUseful := peer.LastBlockFetchTime.After(
+		now.Add(-inboundUsefulSignalFreshness),
+	) &&
 		peer.BlockFetchSuccessInit &&
 		peer.BlockFetchSuccessRate >= minInboundBlockfetchSuccess
 	return chainSyncUseful || blockFetchUseful
@@ -530,8 +535,11 @@ func (p *PeerGovernor) inboundFlappingStateLocked(
 // isReusableInboundTopologyConnectionLocked reports whether this peer currently
 // has a client-capable inbound connection that can satisfy topology demand
 // without an extra outbound dial.
-func (p *PeerGovernor) isReusableInboundTopologyConnectionLocked(peer *Peer) bool {
-	if peer == nil || !p.isTopologyPeer(peer.Source) || !peer.hasClientConnection() {
+func (p *PeerGovernor) isReusableInboundTopologyConnectionLocked(
+	peer *Peer,
+) bool {
+	if peer == nil || !p.isTopologyPeer(peer.Source) ||
+		!peer.hasClientConnection() {
 		return false
 	}
 	if p.config.ConnManager != nil {

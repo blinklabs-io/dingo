@@ -136,7 +136,9 @@ type BlockfrostNode interface {
 	TransactionDelegations(hash []byte) ([]TransactionDelegationInfo, error)
 
 	// TransactionStakeAddresses returns stake address certificates in a transaction.
-	TransactionStakeAddresses(hash []byte) ([]TransactionStakeAddressInfo, error)
+	TransactionStakeAddresses(
+		hash []byte,
+	) ([]TransactionStakeAddressInfo, error)
 
 	// TransactionWithdrawals returns reward withdrawals in a transaction.
 	TransactionWithdrawals(hash []byte) ([]TransactionWithdrawalInfo, error)
@@ -154,7 +156,9 @@ type BlockfrostNode interface {
 	TransactionRedeemers(hash []byte) ([]TransactionRedeemerInfo, error)
 
 	// TransactionRequiredSigners returns required signing key hashes in a transaction.
-	TransactionRequiredSigners(hash []byte) ([]TransactionRequiredSignerInfo, error)
+	TransactionRequiredSigners(
+		hash []byte,
+	) ([]TransactionRequiredSignerInfo, error)
 
 	// Asset returns native asset information for a
 	// concatenated hex asset ID ({policy_id}{asset_name}).

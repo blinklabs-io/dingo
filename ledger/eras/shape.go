@@ -31,7 +31,10 @@ import (
 // Returns an error if the required genesis data is unavailable or malformed.
 // This is the pure, LedgerState-free version of the stability-window
 // computation used by the HFC Shape builder.
-func StabilityWindowForEra(cfg *cardano.CardanoNodeConfig, eraId uint) (uint64, error) {
+func StabilityWindowForEra(
+	cfg *cardano.CardanoNodeConfig,
+	eraId uint,
+) (uint64, error) {
 	if cfg == nil {
 		return 0, errors.New("eras: nil CardanoNodeConfig")
 	}
@@ -42,7 +45,10 @@ func StabilityWindowForEra(cfg *cardano.CardanoNodeConfig, eraId uint) (uint64, 
 		}
 		k := byronGenesis.ProtocolConsts.K
 		if k <= 0 {
-			return 0, fmt.Errorf("eras: invalid Byron security parameter k=%d", k)
+			return 0, fmt.Errorf(
+				"eras: invalid Byron security parameter k=%d",
+				k,
+			)
 		}
 		return uint64(k) * 2, nil // #nosec G115
 	}
@@ -75,7 +81,9 @@ func StabilityWindowForEra(cfg *cardano.CardanoNodeConfig, eraId uint) (uint64, 
 	numerator.Mul(numerator, big.NewInt(3))
 	numerator.Mul(numerator, activeSlotsCoeff.Denom())
 	denominator := new(big.Int).Set(activeSlotsCoeff.Num())
-	window, remainder := new(big.Int).QuoRem(numerator, denominator, new(big.Int))
+	window, remainder := new(
+		big.Int,
+	).QuoRem(numerator, denominator, new(big.Int))
 	if remainder.Sign() != 0 {
 		window.Add(window, big.NewInt(1))
 	}
@@ -97,7 +105,10 @@ func StabilityWindowForEra(cfg *cardano.CardanoNodeConfig, eraId uint) (uint64, 
 // BuildEraParams assembles a hardfork.EraParams value for the given era,
 // using the node configuration for the era-specific epoch length, slot length,
 // and safe-zone (stability-window) values.
-func BuildEraParams(cfg *cardano.CardanoNodeConfig, era EraDesc) (hardfork.EraParams, error) {
+func BuildEraParams(
+	cfg *cardano.CardanoNodeConfig,
+	era EraDesc,
+) (hardfork.EraParams, error) {
 	if cfg == nil {
 		return hardfork.EraParams{}, errors.New("eras: nil CardanoNodeConfig")
 	}
@@ -157,7 +168,9 @@ func BuildShapeForEras(
 	}
 	shelleyGenesis := cfg.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return hardfork.Shape{}, errors.New("eras: Shelley genesis unavailable (required for SystemStart)")
+		return hardfork.Shape{}, errors.New(
+			"eras: Shelley genesis unavailable (required for SystemStart)",
+		)
 	}
 
 	entries := make([]hardfork.ShapeEntry, 0, len(eraList))
@@ -189,7 +202,9 @@ func BuildShapeForEras(
 			entries[i].NextEraTrigger = hardfork.NewTriggerAtEpoch(epoch)
 			continue
 		}
-		entries[i].NextEraTrigger = hardfork.NewTriggerAtVersion(nextEra.MinMajorVersion)
+		entries[i].NextEraTrigger = hardfork.NewTriggerAtVersion(
+			nextEra.MinMajorVersion,
+		)
 	}
 
 	return hardfork.Shape{

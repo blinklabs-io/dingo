@@ -84,12 +84,17 @@ func validatePParamsData(eraIndex int, data []byte) error {
 	if eraIndex < 0 {
 		return fmt.Errorf("negative era index %d", eraIndex)
 	}
-	era := eras.GetEraById(uint(eraIndex)) //nolint:gosec // bounds checked above
+	era := eras.GetEraById(
+		uint(eraIndex),
+	) //nolint:gosec // bounds checked above
 	if era == nil {
 		return fmt.Errorf("unknown era %d", eraIndex)
 	}
 	if era.DecodePParamsFunc == nil {
-		return fmt.Errorf("%s era does not define protocol parameters", era.Name)
+		return fmt.Errorf(
+			"%s era does not define protocol parameters",
+			era.Name,
+		)
 	}
 	if _, err := era.DecodePParamsFunc(data); err != nil {
 		return fmt.Errorf("decoding %s protocol parameters: %w", era.Name, err)

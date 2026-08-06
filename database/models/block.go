@@ -23,11 +23,11 @@ import (
 var ErrBlockNotFound = errors.New("block not found")
 
 type Block struct {
-	Hash     []byte `gorm:"index:hash_slot;size:32"`
+	Hash     []byte
 	PrevHash []byte
 	Cbor     []byte
-	ID       uint64 `gorm:"primaryKey"`
-	Slot     uint64 `gorm:"index:hash_slot"`
+	ID       uint64
+	Slot     uint64
 	Number   uint64
 	Type     uint
 }
@@ -40,9 +40,4 @@ func (b Block) Decode() (ledger.Block, error) {
 		return DecodeConwayBlock(b.Cbor)
 	}
 	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
-}
-
-// TableName overrides default table name
-func (Block) TableName() string {
-	return "block"
 }

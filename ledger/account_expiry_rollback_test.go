@@ -72,7 +72,9 @@ func newExpiryRollbackTestLedger(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
-			Logger:                     slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			DelegatorInactivityEnabled: enabled,
 			DelegatorInactivity:        inactivity,
 		},
@@ -96,7 +98,7 @@ func newExpiryRollbackTestLedger(
 
 // seedRollbackCertificate records a certificate through the public database
 // ingestion boundary. This keeps the ledger test independent of a concrete
-// metadata plugin and its GORM schema.
+// metadata provider and its schema implementation.
 func seedRollbackCertificate(
 	t *testing.T,
 	db *database.Database,
@@ -181,7 +183,9 @@ func runRollbackRecompute(
 // expiration stamped to E2+W. Rolling back into E1 (slot 199) must drop the
 // orphaned E2 renewal and restore the surviving E1 renewal: ExpirationEpoch ==
 // E1 + DelegatorInactivity.
-func TestRecomputeAccountExpirationsAfterRollbackDropsOrphanedRenewal(t *testing.T) {
+func TestRecomputeAccountExpirationsAfterRollbackDropsOrphanedRenewal(
+	t *testing.T,
+) {
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 
@@ -249,7 +253,9 @@ func TestRecomputeAccountExpirationsAfterRollbackGateOff(t *testing.T) {
 // an unclamped recompute would produce 5+90=95. The activation floor (A=500,
 // account was stamped at activation) must clamp it back up to 500+90=590 — NOT 95,
 // NOT 0.
-func TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor(t *testing.T) {
+func TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor(
+	t *testing.T,
+) {
 	const (
 		inactivity      = uint64(90)
 		activationEpoch = uint64(500)
@@ -303,7 +309,9 @@ func TestRecomputeAccountExpirationsAfterRollbackClampsToActivationFloor(t *test
 // TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly verifies that a
 // credential whose only witness was rolled away (no surviving witness <=
 // rollbackSlot) has its expiration reset to 0.
-func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(t *testing.T) {
+func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(
+	t *testing.T,
+) {
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 
@@ -332,7 +340,9 @@ func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(t *testing.T) 
 // that every account stamped at activation is reconstructed when rollback
 // crosses before A. The account with no surviving witness resets to 0, while
 // the account with an epoch-A witness restores its earlier epoch-1 witness.
-func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(t *testing.T) {
+func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(
+	t *testing.T,
+) {
 	const (
 		inactivity      = uint64(90)
 		activationEpoch = uint64(2)
@@ -381,8 +391,12 @@ func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(t *testing
 
 	witnessedAcct, err := db.GetAccountByCredential(0, witnessed, true, nil)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1)+inactivity, witnessedAcct.ExpirationEpoch,
-		"epoch-2-witnessed account is recomputed from its surviving epoch-1 witness, not left at 0")
+	require.Equal(
+		t,
+		uint64(1)+inactivity,
+		witnessedAcct.ExpirationEpoch,
+		"epoch-2-witnessed account is recomputed from its surviving epoch-1 witness, not left at 0",
+	)
 }
 
 // TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness
@@ -421,8 +435,12 @@ func TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness(
 
 	acct, err = db.GetAccountByCredential(0, cred, true, nil)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1)+inactivity, acct.ExpirationEpoch,
-		"rollback before activation must restore the epoch-(A-1) witness expiration")
+	require.Equal(
+		t,
+		uint64(1)+inactivity,
+		acct.ExpirationEpoch,
+		"rollback before activation must restore the epoch-(A-1) witness expiration",
+	)
 }
 
 func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtActivation(
@@ -470,7 +488,9 @@ func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtAc
 	require.Equal(t, uint64(1)+inactivity, acct.ExpirationEpoch)
 }
 
-func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(t *testing.T) {
+func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(
+	t *testing.T,
+) {
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 	cred := renewTestCred(0x44)
@@ -484,7 +504,10 @@ func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(t *testing.T) 
 	acct, err := db.GetAccountByCredential(0, cred, true, nil)
 	require.NoError(t, err)
 	require.Zero(t, acct.ExpirationEpoch)
-	marker, err := db.GetSyncState(database.DelegatorInactivityActivatedSyncKey, nil)
+	marker, err := db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Empty(t, marker)
 }

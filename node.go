@@ -40,6 +40,7 @@ import (
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -83,6 +84,7 @@ type Node struct {
 	leiosPipelineManager             *leios.PipelineManager
 	bark                             *bark.Bark
 	historyExpiry                    *historyexpiry.Pruner
+	koiosParityObserver              *koiosparity.Observer
 	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	midnightIndexer                  *midnightindexer.Indexer
@@ -113,6 +115,14 @@ type Node struct {
 	chainsyncClientRemoveSubId     event.EventSubscriberId
 	connManagerRecycleSubId        event.EventSubscriberId
 	leiosVoteEmittedSubId          event.EventSubscriberId
+	// koiosParitySubId is tracked for the same reason: observer.
+	// HandleEpochTransitionEvent is bound to the *koiosparity.Observer
+	// instance startKoiosParityObserver creates, which a live database
+	// restore/truncate must tear down and rebuild (a stale observer would
+	// otherwise keep running against the pre-rebuild n.db) -- see
+	// node_lifecycle.go's quiesceForLiveLifecycleOp/
+	// reinitializeBackgroundManagers handling of it.
+	koiosParitySubId event.EventSubscriberId
 
 	// liveLifecycleMu serializes live database Restore/Truncate calls
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
@@ -428,7 +438,10 @@ func (n *Node) Run(ctx context.Context) error {
 		dbNeedsRecovery = true
 	}
 	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
-		return fmt.Errorf("check for interrupted database truncate: %w", pendingErr)
+		return fmt.Errorf(
+			"check for interrupted database truncate: %w",
+			pendingErr,
+		)
 	} else if pending != nil {
 		return fmt.Errorf(
 			"database truncate was interrupted after it started (target slot %d, target id %d); rerun the truncate operation before starting the node",
@@ -740,6 +753,14 @@ func (n *Node) Run(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
+	// Recovery changes both the ledger tip and blob contents. Complete it
+	// before starting background maintenance that reads or prunes either store.
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+
 	if n.config.historyExpiry.Enabled {
 		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
@@ -761,12 +782,6 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Run DB recovery if needed
-	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
-			return fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}
@@ -836,17 +851,17 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}
 
-	// Start ledger.
-	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to start ledger: %w", err)
-	}
-	started = append(started, func() { n.ledgerState.Close() })
-	// Register midnight indexer cleanup after LedgerState so it is torn down
-	// first (reverse order): midnight.Stop() → ledgerState.Close().
-	if n.midnightIndexer != nil {
-		started = append(started, func() { n.midnightIndexer.Stop() })
-	}
-	// Initialize and start snapshot manager for stake snapshot capture
+	// Initialize snapshot manager for stake snapshot capture and wire the
+	// authoritative epoch-boundary capture hooks before n.ledgerState.Start
+	// below, whose slot-clock/block-processing goroutines are what can
+	// first fire an epoch rollover: an epoch boundary reached before these
+	// hooks exist would fall back to the event-driven capture only, and — if
+	// the Koios parity observer is also enabled — race the observer's own
+	// event.EpochTransitionEvent subscription into validating an epoch whose
+	// reward rows the snapshot manager never got a chance to commit via
+	// these hooks. Configuring both before the observer is wired below (and
+	// both before Start) keeps the dependency ordering unambiguous: hooks
+	// configured → observer subscribed → ledger started.
 	n.snapshotMgr = snapshot.NewManager(
 		n.db,
 		n.eventBus,
@@ -879,6 +894,43 @@ func (n *Node) Run(ctx context.Context) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+
+	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
+	// (and, critically, subscribed to event.EpochTransitionEventType) before
+	// n.ledgerState.Start below, whose slot-clock/block-processing
+	// goroutines are what can first publish that event — see
+	// startKoiosParityObserver's doc comment (node_koiosparity.go). Wired
+	// after the snapshot-manager hooks immediately above, so an epoch
+	// boundary the observer reacts to always has its reward rows committed
+	// via those hooks first.
+	if n.config.koiosParity.Enabled {
+		if err := n.startKoiosParityObserver(); err != nil {
+			return fmt.Errorf("starting koios parity observer: %w", err)
+		}
+		started = append(started, func() {
+			stopCtx, cancel := context.WithTimeout(
+				context.Background(), n.configuredShutdownTimeout(),
+			)
+			defer cancel()
+			if err := n.koiosParityObserver.Stop(stopCtx); err != nil {
+				n.config.logger.Error(
+					"failed to stop koios parity observer during cleanup",
+					"error", err,
+				)
+			}
+		})
+	}
+
+	// Start ledger.
+	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
+		return fmt.Errorf("failed to start ledger: %w", err)
+	}
+	started = append(started, func() { n.ledgerState.Close() })
+	// Register midnight indexer cleanup after LedgerState so it is torn down
+	// first (reverse order): midnight.Stop() → ledgerState.Close().
+	if n.midnightIndexer != nil {
+		started = append(started, func() { n.midnightIndexer.Stop() })
+	}
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -1400,7 +1452,8 @@ func (n *Node) Run(ctx context.Context) error {
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
 				"bark database lifecycle service (Restore/Truncate) defaults to a loopback-only bind since no --bark-host was set; these RPCs are unauthenticated, so widen this only behind your own trusted network/auth controls",
-				"component", "bark",
+				"component",
+				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{
@@ -1691,16 +1744,20 @@ func (n *Node) backfillRewardLiveStake() error {
 		if err != nil {
 			return fmt.Errorf("check reward live stake backfill: %w", err)
 		}
-		staleSnapshots, err := n.db.Metadata().StaleConsensusStakeSnapshotsExist(
-			txn.Metadata(),
-		)
+		staleSnapshots, err := n.db.Metadata().
+			StaleConsensusStakeSnapshotsExist(
+				txn.Metadata(),
+			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
 		}
 		if needed {
 			tip, err := n.db.GetTip(txn)
 			if err != nil {
-				return fmt.Errorf("get tip for reward live stake backfill: %w", err)
+				return fmt.Errorf(
+					"get tip for reward live stake backfill: %w",
+					err,
+				)
 			}
 			n.config.logger.Info(
 				"rebuilding reward live stake aggregate",

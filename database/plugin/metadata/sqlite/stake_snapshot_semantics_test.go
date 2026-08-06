@@ -16,21 +16,135 @@ package sqlite
 
 import (
 	"bytes"
+	"database/sql"
+	"fmt"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"gorm.io/gorm"
+	"github.com/stretchr/testify/require"
 )
+
+type sqliteTestResult struct{ Error error }
+
+// sqliteTestDB is a deliberately tiny raw-SQL fixture facade. It keeps these
+// focused historical-stake tests readable while ensuring they exercise the
+// same database/sql schema as production.
+type sqliteTestDB struct{ db *sql.DB }
+
+func setupStakeSnapshotTestStore(
+	t *testing.T,
+) (*sqlstore.Store, *sqliteTestDB) {
+	t.Helper()
+	store, db, _, err := openSQLStore(
+		Config{DataDir: t.TempDir()},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	return store, &sqliteTestDB{db: db}
+}
+
+func (d *sqliteTestDB) Create(value any) sqliteTestResult {
+	var (
+		result sql.Result
+		err    error
+	)
+	switch v := value.(type) {
+	case *models.Account:
+		result, err = d.db.Exec(`INSERT INTO account
+            (staking_key, credential_tag, pool, drep, added_slot, created_slot, reward, active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, v.StakingKey, v.CredentialTag, v.Pool,
+			v.Drep, v.AddedSlot, v.CreatedSlot, fmt.Sprint(uint64(v.Reward)), v.Active)
+	case *models.Utxo:
+		result, err = d.db.Exec(`INSERT INTO utxo
+			(tx_id, output_idx, staking_key, credential_tag, amount, added_slot, deleted_slot)
+			VALUES (?, ?, ?, ?, ?, ?, 0)`, v.TxId, v.OutputIdx, v.StakingKey, v.CredentialTag,
+			fmt.Sprint(uint64(v.Amount)), v.AddedSlot)
+	case *models.AccountRewardDelta:
+		result, err = d.db.Exec(`INSERT INTO account_reward_delta
+            (staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot, withdrawal, post_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, v.StakingKey, v.CredentialTag, v.TxHash,
+			fmt.Sprint(uint64(v.Amount)), fmt.Sprint(uint64(v.PreviousReward)), v.AddedSlot,
+			v.Withdrawal, v.PostSnapshot)
+	case *models.Certificate:
+		result, err = d.db.Exec(`INSERT INTO certs
+            (transaction_id, certificate_id, slot, cert_index, cert_type)
+            VALUES (?, ?, ?, ?, ?)`, v.TransactionID, v.CertificateID, v.Slot, v.CertIndex, v.CertType)
+	case *models.StakeDelegation:
+		result, err = d.db.Exec(`INSERT INTO stake_delegation
+            (staking_key, credential_tag, pool_key_hash, certificate_id, added_slot)
+            VALUES (?, ?, ?, ?, ?)`, v.StakingKey, v.CredentialTag, v.PoolKeyHash,
+			v.CertificateID, v.AddedSlot)
+	case *models.VoteDelegation:
+		result, err = d.db.Exec(`INSERT INTO vote_delegation
+            (staking_key, credential_tag, drep, drep_type, certificate_id, added_slot)
+            VALUES (?, ?, ?, ?, ?, ?)`, v.StakingKey, v.CredentialTag, v.Drep,
+			v.DrepType, v.CertificateID, v.AddedSlot)
+	default:
+		err = fmt.Errorf("unsupported sqlite test model %T", value)
+	}
+	if err == nil && result != nil {
+		if id, idErr := result.LastInsertId(); idErr == nil {
+			switch v := value.(type) {
+			case *models.Certificate:
+				v.ID = uint(id)
+			case *models.StakeDelegation:
+				v.ID = uint(id)
+			case *models.VoteDelegation:
+				v.ID = uint(id)
+			}
+		}
+	}
+	return sqliteTestResult{Error: err}
+}
+
+type sqliteTestQuery struct {
+	db   *sqliteTestDB
+	args []any
+}
+
+func (d *sqliteTestDB) Model(
+	any,
+) *sqliteTestQuery {
+	return &sqliteTestQuery{db: d}
+}
+
+func (q *sqliteTestQuery) Where(_ string, args ...any) *sqliteTestQuery {
+	q.args = args
+	return q
+}
+
+func (q *sqliteTestQuery) Updates(values map[string]any) sqliteTestResult {
+	_, err := q.db.db.Exec(
+		"UPDATE account SET drep = ?, added_slot = ? WHERE credential_tag = ? AND staking_key = ?",
+		values["drep"],
+		values["added_slot"],
+		q.args[0],
+		q.args[1],
+	)
+	return sqliteTestResult{Error: err}
+}
+
+func createTestTransaction(db *sqliteTestDB, txID uint, slot uint64) error {
+	_, err := db.db.Exec(
+		`INSERT INTO "transaction" (id, hash, slot, block_index, valid)
+        VALUES (?, ?, ?, 0, 1)`,
+		txID,
+		[]byte(fmt.Sprintf("tx-%d", txID)),
+		slot,
+	)
+	return err
+}
 
 // seedStakeDelegationCert writes the certs + transaction rows the historical
 // stake CTE joins against, plus the typed certificate row itself.
 func seedStakeDelegationCert(
 	t *testing.T,
-	db *gorm.DB,
+	db *sqliteTestDB,
 	txID uint,
 	slot uint64,
 	stakeKey []byte,
@@ -62,7 +176,7 @@ func seedStakeDelegationCert(
 // bumped added_slot as registration/delegation evidence.
 func seedVoteDelegationCert(
 	t *testing.T,
-	db *gorm.DB,
+	db *sqliteTestDB,
 	txID uint,
 	slot uint64,
 	stakeKey []byte,
@@ -102,10 +216,8 @@ func seedVoteDelegationCert(
 // false and drop the whole credential — and all of its stake — out of
 // active_delegation.
 func TestGetStakeByPoolsAtSlotKeepsCredentialAfterVoteDelegation(t *testing.T) {
-	store := setupStakeSnapshotTestStore(t)
+	store, db := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
-
-	db := store.DB()
 	pool := bytes.Repeat([]byte{0xF1}, 28)
 	stakeKey := bytes.Repeat([]byte{0x31}, 28)
 	drep := bytes.Repeat([]byte{0x71}, 28)
@@ -129,7 +241,6 @@ func TestGetStakeByPoolsAtSlotKeepsCredentialAfterVoteDelegation(t *testing.T) {
 	seedStakeDelegationCert(t, db, 9001, 100, stakeKey, pool)
 	// DRep-only vote delegation at slot 150 bumps account.added_slot to 150.
 	seedVoteDelegationCert(t, db, 9002, 150, stakeKey, drep)
-
 	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
 		[][]byte{pool}, 200, 0, 0, nil,
 	)
@@ -149,10 +260,8 @@ func TestGetStakeByPoolsAtSlotKeepsCredentialAfterVoteDelegation(t *testing.T) {
 // because it reconstructs the boundary after live account state has already
 // advanced past it.
 func TestGetStakeByPoolsAtSlotKeepsCredentialMutatedAfterSlot(t *testing.T) {
-	store := setupStakeSnapshotTestStore(t)
+	store, db := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
-
-	db := store.DB()
 	pool := bytes.Repeat([]byte{0xF2}, 28)
 	stakeKey := bytes.Repeat([]byte{0x32}, 28)
 	drep := bytes.Repeat([]byte{0x72}, 28)
@@ -192,10 +301,8 @@ func TestGetStakeByPoolsAtSlotKeepsCredentialMutatedAfterSlot(t *testing.T) {
 // the intermediate goes negative and used to be scanned straight into a uint64,
 // turning a tiny stake into a near-2^64 one.
 func TestGetStakeByPoolsAtSlotFloorsNegativeHistoricalReward(t *testing.T) {
-	store := setupStakeSnapshotTestStore(t)
+	store, db := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
-
-	db := store.DB()
 	pool := bytes.Repeat([]byte{0xF3}, 28)
 	stakeKey := bytes.Repeat([]byte{0x33}, 28)
 
@@ -249,10 +356,8 @@ func TestGetStakeByPoolsAtSlotFloorsNegativeHistoricalReward(t *testing.T) {
 // withdrawals, proposal refunds), plus anything past the boundary. The plain
 // "stake at slot" query must be unchanged.
 func TestEpochBoundaryStakeRetainsBoundaryRewardUpdate(t *testing.T) {
-	store := setupStakeSnapshotTestStore(t)
+	store, db := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
-
-	db := store.DB()
 	pool := bytes.Repeat([]byte{0xF4}, 28)
 	stakeKey := bytes.Repeat([]byte{0x34}, 28)
 
@@ -304,8 +409,12 @@ func TestEpochBoundaryStakeRetainsBoundaryRewardUpdate(t *testing.T) {
 		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(150), stakes[string(pool)],
-		"the boundary query must retain the pre-SNAP reward update and drop the rest")
+	require.Equal(
+		t,
+		uint64(150),
+		stakes[string(pool)],
+		"the boundary query must retain the pre-SNAP reward update and drop the rest",
+	)
 	require.Equal(t, uint64(1), delegators[string(pool)])
 
 	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
@@ -324,10 +433,8 @@ func TestEpochBoundaryStakeRetainsBoundaryRewardUpdate(t *testing.T) {
 // update, and reconstruction must recover that balance rather than the cleared
 // one.
 func TestEpochBoundaryStakeHandlesBoundaryWithdrawal(t *testing.T) {
-	store := setupStakeSnapshotTestStore(t)
+	store, db := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
-
-	db := store.DB()
 	pool := bytes.Repeat([]byte{0xF5}, 28)
 	stakeKey := bytes.Repeat([]byte{0x35}, 28)
 
@@ -387,10 +494,8 @@ func TestEpochBoundaryStakeHandlesBoundaryWithdrawal(t *testing.T) {
 // ledger.TestBoundaryCreditVisibility_* pin that each rule reaches the right
 // method.
 func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
-	store := setupStakeSnapshotTestStore(t)
+	store, db := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
-
-	db := store.DB()
 	pool := bytes.Repeat([]byte{0xF6}, 28)
 	stakeKey := bytes.Repeat([]byte{0x36}, 28)
 

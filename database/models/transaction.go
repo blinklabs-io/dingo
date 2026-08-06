@@ -18,25 +18,24 @@ import "github.com/blinklabs-io/dingo/database/types"
 
 // Transaction represents a transaction record
 type Transaction struct {
-	// CollateralReturn uses a separate FK (CollateralReturnForTxID) to distinguish
-	// from regular Outputs which use TransactionID. This allows GORM to load each
-	// association correctly without ambiguity.
-	CollateralReturn *Utxo            `gorm:"foreignKey:CollateralReturnForTxID;references:ID;constraint:OnDelete:CASCADE"`
-	PlutusData       []PlutusData     `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
-	Certificates     []Certificate    `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
-	Outputs          []Utxo           `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
-	Hash             []byte           `gorm:"uniqueIndex;size:32"`
-	Collateral       []Utxo           `gorm:"foreignKey:CollateralByTxId;references:Hash"`
-	BlockHash        []byte           `gorm:"index;size:32"`
-	KeyWitnesses     []KeyWitness     `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
-	WitnessScripts   []WitnessScripts `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
-	Inputs           []Utxo           `gorm:"foreignKey:SpentAtTxId;references:Hash"`
-	Redeemers        []Redeemer       `gorm:"foreignKey:TransactionID;references:ID;constraint:OnDelete:CASCADE"`
-	ReferenceInputs  []Utxo           `gorm:"foreignKey:ReferencedByTxId;references:Hash"`
+	// CollateralReturn uses a separate FK (CollateralReturnForTxID) to
+	// distinguish it from regular Outputs, which use TransactionID.
+	CollateralReturn *Utxo
+	PlutusData       []PlutusData
+	Certificates     []Certificate
+	Outputs          []Utxo
+	Hash             []byte
+	Collateral       []Utxo
+	BlockHash        []byte
+	KeyWitnesses     []KeyWitness
+	WitnessScripts   []WitnessScripts
+	Inputs           []Utxo
+	Redeemers        []Redeemer
+	ReferenceInputs  []Utxo
 	Metadata         []byte
-	Slot             uint64 `gorm:"index"`
+	Slot             uint64
 	Type             int
-	ID               uint `gorm:"primaryKey"`
+	ID               uint
 	Fee              types.Uint64
 	// CollateralFee is the lovelace consumed into the fee pot by a
 	// phase-2-invalid transaction (collateral inputs minus collateral
@@ -46,8 +45,4 @@ type Transaction struct {
 	TTL           types.Uint64
 	BlockIndex    uint32
 	Valid         bool
-}
-
-func (Transaction) TableName() string {
-	return "transaction"
 }

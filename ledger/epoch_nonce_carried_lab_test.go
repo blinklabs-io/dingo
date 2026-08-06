@@ -59,10 +59,16 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 	importedNonce := bytes.Repeat([]byte{0xaa}, 32)
 	nonceAtPreCut := bytes.Repeat([]byte{0xbb}, 32) // frozen candidate
 	nonceAtPostCut := bytes.Repeat([]byte{0xcc}, 32)
-	carriedLab := bytes.Repeat([]byte{0xfa}, 32) // = last block of the PREVIOUS epoch
+	carriedLab := bytes.Repeat(
+		[]byte{0xfa},
+		32,
+	) // = last block of the PREVIOUS epoch
 
 	hashAtPreCut := bytes.Repeat([]byte{0x14}, 32)
-	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32) // last block of the CLOSING epoch
+	hashAtPostCut := bytes.Repeat(
+		[]byte{0x70},
+		32,
+	) // last block of the CLOSING epoch
 	prevHashAtPreCut := bytes.Repeat([]byte{0x09}, 32)
 
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
@@ -125,33 +131,59 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 	wantEta, err := lcommon.CalculateEpochNonce(nonceAtPreCut, carriedLab, nil)
 	require.NoError(t, err)
 	// Old (buggy) assembly: eta = candidate ⭒ last block of closing epoch.
-	oldEta, err := lcommon.CalculateEpochNonce(nonceAtPreCut, hashAtPostCut, nil)
+	oldEta, err := lcommon.CalculateEpochNonce(
+		nonceAtPreCut,
+		hashAtPostCut,
+		nil,
+	)
 	require.NoError(t, err)
 
-	require.Equal(t, hex.EncodeToString(nonceAtPreCut),
-		hex.EncodeToString(rCandidate), "candidate is the frozen pre-cutoff nonce")
-	require.Equal(t, hex.EncodeToString(wantEta.Bytes()),
+	require.Equal(
+		t,
+		hex.EncodeToString(nonceAtPreCut),
+		hex.EncodeToString(
+			rCandidate,
+		),
+		"candidate is the frozen pre-cutoff nonce",
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(wantEta.Bytes()),
 		hex.EncodeToString(rNonce),
-		"epoch nonce must mix the candidate with the CARRIED lab, not the closing epoch's last block")
-	require.NotEqual(t, hex.EncodeToString(oldEta.Bytes()),
+		"epoch nonce must mix the candidate with the CARRIED lab, not the closing epoch's last block",
+	)
+	require.NotEqual(
+		t,
+		hex.EncodeToString(oldEta.Bytes()),
 		hex.EncodeToString(rNonce),
-		"epoch nonce must NOT use the closing epoch's own last block (the #2734 bug)")
+		"epoch nonce must NOT use the closing epoch's own last block (the #2734 bug)",
+	)
 	// The carried lab stored for the NEXT boundary is the PARENT hash of the
 	// closing epoch's last block (prevHashToNonce(lastBlock.prevHash) ==
 	// hashAtPreCut, the post-cutoff block's PrevHash), NOT the last block's own
 	// hash — a one-block Praos lag (#2734 eta_1349 root cause).
-	require.Equal(t, hex.EncodeToString(hashAtPreCut),
+	require.Equal(
+		t,
+		hex.EncodeToString(hashAtPreCut),
 		hex.EncodeToString(rLab),
-		"stored lastEpochBlockNonce must be the closing epoch's last-block PrevHash, for the next boundary")
-	require.NotEqual(t, hex.EncodeToString(hashAtPostCut),
+		"stored lastEpochBlockNonce must be the closing epoch's last-block PrevHash, for the next boundary",
+	)
+	require.NotEqual(
+		t,
+		hex.EncodeToString(hashAtPostCut),
 		hex.EncodeToString(rLab),
-		"stored lastEpochBlockNonce must NOT be the closing epoch's last block's own hash")
+		"stored lastEpochBlockNonce must NOT be the closing epoch's last block's own hash",
+	)
 
 	// The eager header-verification path must agree with the rollover path.
 	require.Equal(t, hex.EncodeToString(rNonce), hex.EncodeToString(hvNonce),
 		"eager epoch nonce must match rollover")
-	require.Equal(t, hex.EncodeToString(rCandidate), hex.EncodeToString(hvCandidate),
-		"eager candidate must match rollover")
+	require.Equal(
+		t,
+		hex.EncodeToString(rCandidate),
+		hex.EncodeToString(hvCandidate),
+		"eager candidate must match rollover",
+	)
 	require.Equal(t, hex.EncodeToString(rLab), hex.EncodeToString(hvLab),
 		"eager lab must match rollover")
 }
@@ -207,21 +239,44 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 	}))
 
 	// Epoch/evolving/candidate are the genesis nonce for the initial epoch.
-	require.Equal(t, hex.EncodeToString(genesisHash), hex.EncodeToString(rNonce),
-		"initial epoch nonce is the genesis nonce")
-	require.Equal(t, hex.EncodeToString(genesisHash), hex.EncodeToString(rEvolving),
-		"initial evolving nonce is the genesis nonce")
-	require.Equal(t, hex.EncodeToString(genesisHash), hex.EncodeToString(rCandidate),
-		"initial candidate nonce is the genesis nonce")
+	require.Equal(
+		t,
+		hex.EncodeToString(genesisHash),
+		hex.EncodeToString(rNonce),
+		"initial epoch nonce is the genesis nonce",
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(genesisHash),
+		hex.EncodeToString(rEvolving),
+		"initial evolving nonce is the genesis nonce",
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(genesisHash),
+		hex.EncodeToString(rCandidate),
+		"initial candidate nonce is the genesis nonce",
+	)
 	// The key #2734 assertion: the carried lab is Neutral (nil), NOT the genesis
 	// nonce, so the first from-genesis boundary uses the identity.
-	require.Empty(t, rLab,
-		"initial carried lastEpochBlockNonce must be Neutral (nil), not the genesis nonce")
+	require.Empty(
+		t,
+		rLab,
+		"initial carried lastEpochBlockNonce must be Neutral (nil), not the genesis nonce",
+	)
 
 	// The eager header-verification path must agree with the rollover path.
 	require.Equal(t, hex.EncodeToString(rNonce), hex.EncodeToString(hvNonce))
-	require.Equal(t, hex.EncodeToString(rEvolving), hex.EncodeToString(hvEvolving))
-	require.Equal(t, hex.EncodeToString(rCandidate), hex.EncodeToString(hvCandidate))
+	require.Equal(
+		t,
+		hex.EncodeToString(rEvolving),
+		hex.EncodeToString(hvEvolving),
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(rCandidate),
+		hex.EncodeToString(hvCandidate),
+	)
 	require.Empty(t, hvLab,
 		"eager path initial carried lab must also be Neutral (nil)")
 }

@@ -29,15 +29,23 @@ import (
 // checkResultErr against exactly that kind of "zero fresh work, but persisted
 // failure" result, for both FAIL and ERROR statuses.
 func TestCheckResultErrOnPersistedOutcomeAlone(t *testing.T) {
-	failOnly := koiosparity.EffectiveCheckOutcome([]koiosparity.CheckEpochStatus{
-		{Epoch: 5, Status: koiosparity.StatusFail},
-	}, 0, 0)
+	failOnly := koiosparity.EffectiveCheckOutcome(
+		[]koiosparity.CheckEpochStatus{
+			{Epoch: 5, Status: koiosparity.StatusFail},
+		},
+		0,
+		0,
+	)
 	require.Zero(t, failOnly.EpochsChecked, "no epoch was freshly checked")
 	require.Error(t, checkResultErr(failOnly))
 
-	errorOnly := koiosparity.EffectiveCheckOutcome([]koiosparity.CheckEpochStatus{
-		{Epoch: 7, Status: koiosparity.StatusError},
-	}, 0, 0)
+	errorOnly := koiosparity.EffectiveCheckOutcome(
+		[]koiosparity.CheckEpochStatus{
+			{Epoch: 7, Status: koiosparity.StatusError},
+		},
+		0,
+		0,
+	)
 	require.Error(t, checkResultErr(errorOnly))
 
 	allPass := koiosparity.EffectiveCheckOutcome([]koiosparity.CheckEpochStatus{
@@ -70,8 +78,12 @@ func TestDsnFromMetadataConfigPostgresProviderOnly(t *testing.T) {
 // specified config layers explicit fields on top of the provider defaults
 // rather than falling back to "" once any field is set.
 func TestDsnFromMetadataConfigPostgresPartialOverride(t *testing.T) {
-	dsn := dsnFromMetadataConfig("postgres", map[string]any{"host": "db.example.com"})
-	require.Equal(t,
+	dsn := dsnFromMetadataConfig(
+		"postgres",
+		map[string]any{"host": "db.example.com"},
+	)
+	require.Equal(
+		t,
 		"host=db.example.com user=postgres password= dbname=postgres port=5432 sslmode=disable TimeZone=UTC",
 		dsn,
 	)
@@ -95,7 +107,8 @@ func TestDsnFromMetadataConfigMysqlProviderOnly(t *testing.T) {
 // TestDsnFromMetadataConfigPostgresPartialOverride for mysql.
 func TestDsnFromMetadataConfigMysqlPartialOverride(t *testing.T) {
 	dsn := dsnFromMetadataConfig("mysql", map[string]any{"database": "myapp"})
-	require.Equal(t,
+	require.Equal(
+		t,
 		"root@tcp(localhost:3306)/myapp?checkConnLiveness=false&parseTime=true&maxAllowedPacket=0&loc=UTC",
 		dsn,
 	)
@@ -105,12 +118,20 @@ func TestDsnFromMetadataConfigMysqlPartialOverride(t *testing.T) {
 // is still used verbatim ahead of any discrete-field default, for both
 // providers.
 func TestDsnFromMetadataConfigDsnKeyTakesPrecedence(t *testing.T) {
-	require.Equal(t, "custom-postgres-dsn", dsnFromMetadataConfig("postgres", map[string]any{
-		"dsn": "custom-postgres-dsn", "host": "ignored",
-	}))
-	require.Equal(t, "custom-mysql-dsn", dsnFromMetadataConfig("mysql", map[string]any{
-		"dsn": "custom-mysql-dsn", "host": "ignored",
-	}))
+	require.Equal(
+		t,
+		"custom-postgres-dsn",
+		dsnFromMetadataConfig("postgres", map[string]any{
+			"dsn": "custom-postgres-dsn", "host": "ignored",
+		}),
+	)
+	require.Equal(
+		t,
+		"custom-mysql-dsn",
+		dsnFromMetadataConfig("mysql", map[string]any{
+			"dsn": "custom-mysql-dsn", "host": "ignored",
+		}),
+	)
 }
 
 // TestDsnFromMetadataConfigUnsupportedPlugin confirms sqlite (and any other
@@ -118,5 +139,11 @@ func TestDsnFromMetadataConfigDsnKeyTakesPrecedence(t *testing.T) {
 // only ever consulted for postgres/mysql; sqlite never uses a DSN.
 func TestDsnFromMetadataConfigUnsupportedPlugin(t *testing.T) {
 	require.Empty(t, dsnFromMetadataConfig("sqlite", nil))
-	require.Empty(t, dsnFromMetadataConfig("sqlite", map[string]any{"host": "db.example.com"}))
+	require.Empty(
+		t,
+		dsnFromMetadataConfig(
+			"sqlite",
+			map[string]any{"host": "db.example.com"},
+		),
+	)
 }

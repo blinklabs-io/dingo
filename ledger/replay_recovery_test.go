@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
-	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -48,6 +47,25 @@ import (
 type replayRecoveryInput struct {
 	txId  []byte
 	index uint32
+}
+
+func seedReplayRecoveryTransaction(
+	t *testing.T,
+	db *database.Database,
+	hash []byte,
+	blockHash []byte,
+	slot uint64,
+) {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO "transaction" (
+    hash, block_hash, slot, type, valid, block_index
+) VALUES (?, ?, ?, 1, TRUE, 0)`,
+		hash, blockHash, slot,
+	)
+	require.NoError(t, err)
 }
 
 func (m *replayRecoveryInput) Id() lcommon.Blake2b256 {
@@ -162,29 +180,19 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	ls.currentTipBlockNonce = []byte("nonce-current")
 	ls.publishSnapshotsLocked()
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok)
-	require.NoError(
+	seedReplayRecoveryTransaction(
 		t,
-		store.DB().Create(&models.Transaction{
-			Hash:       testHashBytes("producer-tx-1"),
-			BlockHash:  producerOneBlock.Hash,
-			Slot:       producerOneBlock.Slot,
-			Type:       1,
-			Valid:      true,
-			BlockIndex: 0,
-		}).Error,
+		db,
+		testHashBytes("producer-tx-1"),
+		producerOneBlock.Hash,
+		producerOneBlock.Slot,
 	)
-	require.NoError(
+	seedReplayRecoveryTransaction(
 		t,
-		store.DB().Create(&models.Transaction{
-			Hash:       testHashBytes("producer-tx-2"),
-			BlockHash:  producerTwoBlock.Hash,
-			Slot:       producerTwoBlock.Slot,
-			Type:       1,
-			Valid:      true,
-			BlockIndex: 0,
-		}).Error,
+		db,
+		testHashBytes("producer-tx-2"),
+		producerTwoBlock.Hash,
+		producerTwoBlock.Slot,
 	)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(
@@ -332,19 +340,13 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	ls.pendingBlockfetchEvents = []BlockfetchEvent{{Point: boundaryTip.Point}}
 	ls.firstBlockReceived = true
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok)
 	producerTxHash := testHashBytes("mithril-recovery-producer-tx")
-	require.NoError(
+	seedReplayRecoveryTransaction(
 		t,
-		store.DB().Create(&models.Transaction{
-			Hash:       producerTxHash,
-			BlockHash:  producerBlock.Hash,
-			Slot:       producerBlock.Slot,
-			Type:       1,
-			Valid:      true,
-			BlockIndex: 0,
-		}).Error,
+		db,
+		producerTxHash,
+		producerBlock.Hash,
+		producerBlock.Slot,
 	)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(
@@ -465,18 +467,12 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	ls.reachedTip.Store(true)
 	ls.publishSnapshotsLocked()
 
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok)
-	require.NoError(
+	seedReplayRecoveryTransaction(
 		t,
-		store.DB().Create(&models.Transaction{
-			Hash:       testHashBytes("producer-tx-live"),
-			BlockHash:  producerBlock.Hash,
-			Slot:       producerBlock.Slot,
-			Type:       1,
-			Valid:      true,
-			BlockIndex: 0,
-		}).Error,
+		db,
+		testHashBytes("producer-tx-live"),
+		producerBlock.Hash,
+		producerBlock.Slot,
 	)
 
 	validationErr := &txValidationError{
@@ -1184,7 +1180,11 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 			}
 		}
 	}
-	require.True(t, found, "expected to find a two-hop tx dependency in immutable test data")
+	require.True(
+		t,
+		found,
+		"expected to find a two-hop tx dependency in immutable test data",
+	)
 	require.NoError(
 		t,
 		cm.PrimaryChain().AddRawBlocks(func() []chain.RawBlock {
@@ -1660,7 +1660,16 @@ func newReplayRecoveryAuditLedger(
 		{Point: ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash), BlockNumber: parentBlock.BlockNumber},
 		ledgerTip,
 	} {
-		require.NoError(t, db.SetBlockNonce(tip.Point.Hash, tip.Point.Slot, []byte("nonce"), false, nil))
+		require.NoError(
+			t,
+			db.SetBlockNonce(
+				tip.Point.Hash,
+				tip.Point.Slot,
+				[]byte("nonce"),
+				false,
+				nil,
+			),
+		)
 	}
 	require.NoError(t, db.SetTip(ledgerTip, nil))
 	ls.currentTip = ledgerTip
@@ -1702,14 +1711,20 @@ func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
 		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
 		TxHash:     testHashBytes("audit-held-failing-tx"),
 		Inputs: []lcommon.TransactionInput{
-			&replayRecoveryInput{txId: testHashBytes("missing-held-audit-producer")},
+			&replayRecoveryInput{
+				txId: testHashBytes("missing-held-audit-producer"),
+			},
 		},
 		Cause: errors.New("bad input"),
 	})
 	require.NoError(t, err)
 	require.True(t, recovered)
 	assert.Less(t, ls.chain.Tip().Point.Slot, ls.Tip().Point.Slot)
-	assert.Equal(t, ocommon.Point{Slot: 140, Hash: testHashBytes("audit-ledger-tip")}, ls.Tip().Point)
+	assert.Equal(
+		t,
+		ocommon.Point{Slot: 140, Hash: testHashBytes("audit-ledger-tip")},
+		ls.Tip().Point,
+	)
 	assert.Nil(t, ls.continuationAudit.Load())
 }
 

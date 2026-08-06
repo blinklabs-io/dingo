@@ -46,10 +46,18 @@ func (d *Database) RenewAccountExpirations(
 	txn *Txn,
 ) error {
 	if txn != nil {
-		return d.metadata.RenewAccountExpirations(refs, expirationEpoch, txn.Metadata())
+		return d.metadata.RenewAccountExpirations(
+			refs,
+			expirationEpoch,
+			txn.Metadata(),
+		)
 	}
 	return d.MetadataTxn(true).Do(func(t *Txn) error {
-		return d.metadata.RenewAccountExpirations(refs, expirationEpoch, t.Metadata())
+		return d.metadata.RenewAccountExpirations(
+			refs,
+			expirationEpoch,
+			t.Metadata(),
+		)
 	})
 }
 
@@ -100,12 +108,18 @@ func (d *Database) StampAllActiveAccountExpirations(
 	txn *Txn,
 ) (int64, error) {
 	if txn != nil {
-		return d.metadata.StampAllActiveAccountExpirations(expirationEpoch, txn.Metadata())
+		return d.metadata.StampAllActiveAccountExpirations(
+			expirationEpoch,
+			txn.Metadata(),
+		)
 	}
 	var rows int64
 	err := d.MetadataTxn(true).Do(func(t *Txn) error {
 		var doErr error
-		rows, doErr = d.metadata.StampAllActiveAccountExpirations(expirationEpoch, t.Metadata())
+		rows, doErr = d.metadata.StampAllActiveAccountExpirations(
+			expirationEpoch,
+			t.Metadata(),
+		)
 		return doErr
 	})
 	return rows, err

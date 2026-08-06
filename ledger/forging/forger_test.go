@@ -131,21 +131,27 @@ func newForgerTestBlock(slot, blockNumber uint64) *forgerTestBlock {
 }
 
 func (b *forgerTestBlock) Header() lcommon.BlockHeader { return b }
-func (b *forgerTestBlock) Type() int                   { return int(babbage.BlockTypeBabbage) }
+
+func (b *forgerTestBlock) Type() int { return int(babbage.BlockTypeBabbage) }
 func (b *forgerTestBlock) Transactions() []lcommon.Transaction {
 	return b.transactions
 }
 func (b *forgerTestBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
 	return nil, nil
 }
-func (b *forgerTestBlock) Hash() lcommon.Blake2b256          { return b.hash }
-func (b *forgerTestBlock) PrevHash() lcommon.Blake2b256      { return b.prevHash }
-func (b *forgerTestBlock) BlockNumber() uint64               { return b.blockNumber }
-func (b *forgerTestBlock) SlotNumber() uint64                { return b.slot }
-func (b *forgerTestBlock) IssuerVkey() lcommon.IssuerVkey    { return lcommon.IssuerVkey{} }
-func (b *forgerTestBlock) BlockBodySize() uint64             { return 0 }
-func (b *forgerTestBlock) Era() lcommon.Era                  { return babbage.EraBabbage }
-func (b *forgerTestBlock) Cbor() []byte                      { return b.cbor }
+func (b *forgerTestBlock) Hash() lcommon.Blake2b256 { return b.hash }
+
+func (b *forgerTestBlock) PrevHash() lcommon.Blake2b256 { return b.prevHash }
+
+func (b *forgerTestBlock) BlockNumber() uint64 { return b.blockNumber }
+func (b *forgerTestBlock) SlotNumber() uint64  { return b.slot }
+
+func (b *forgerTestBlock) IssuerVkey() lcommon.IssuerVkey { return lcommon.IssuerVkey{} }
+func (b *forgerTestBlock) BlockBodySize() uint64          { return 0 }
+
+func (b *forgerTestBlock) Era() lcommon.Era { return babbage.EraBabbage }
+func (b *forgerTestBlock) Cbor() []byte     { return b.cbor }
+
 func (b *forgerTestBlock) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b256{} }
 
 type forgerTestLeiosChecker struct {
@@ -165,7 +171,9 @@ func (r *forgerTestConfirmedTxRemover) RemoveTxsByHash(hashes []string) {
 
 func TestCheckAndForgeProductionRemovesConfirmedTransactions(t *testing.T) {
 	creds := setupTestCredentials(t)
-	tx, err := conway.NewConwayTransactionFromCbor(makeMinimalTxCbor(t, 0x42, 0))
+	tx, err := conway.NewConwayTransactionFromCbor(
+		makeMinimalTxCbor(t, 0x42, 0),
+	)
 	require.NoError(t, err)
 	block := newForgerTestBlock(10, 2)
 	block.transactions = []lcommon.Transaction{tx}
@@ -409,8 +417,16 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 	require.Equal(t, 1, builder.leiosCalls)
 	require.NotNil(t, builder.leiosData.Announcement)
 	require.Nil(t, builder.leiosData.Certificate)
-	assert.Equal(t, leiosCaster.hash, builder.leiosData.Announcement.Hash.Bytes())
-	assert.Equal(t, uint64(len(leiosCaster.cbor)), builder.leiosData.Announcement.Size)
+	assert.Equal(
+		t,
+		leiosCaster.hash,
+		builder.leiosData.Announcement.Hash.Bytes(),
+	)
+	assert.Equal(
+		t,
+		uint64(len(leiosCaster.cbor)),
+		builder.leiosData.Announcement.Size,
+	)
 }
 
 func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
@@ -430,10 +446,13 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			ebHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x33}, 32))
 			rbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
 			cert := &lcommon.LeiosEbCertificate{
-				SlotNo:              9,
-				EndorserBlockHash:   ebHash,
-				Signers:             []byte{0x80},
-				AggregatedSignature: make([]byte, lcommon.LeiosBlsSignatureSize),
+				SlotNo:            9,
+				EndorserBlockHash: ebHash,
+				Signers:           []byte{0x80},
+				AggregatedSignature: make(
+					[]byte,
+					lcommon.LeiosBlsSignatureSize,
+				),
 			}
 			leiosCerts := &forgerTestLeiosCerts{
 				txHashes:   []string{strings.Repeat("11", 32)},
@@ -454,8 +473,10 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			leiosCaster := &forgerTestLeiosCaster{}
 
 			forger, err := NewBlockForger(ForgerConfig{
-				Mode:             ModeProduction,
-				Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Mode: ModeProduction,
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
 				Credentials:      creds,
 				LeaderChecker:    forgerTestLeader{},
 				BlockBuilder:     builder,
@@ -485,7 +506,10 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
 
 			require.Equal(t, 1, builder.leiosCalls)
 			require.Same(t, cert, builder.leiosData.Certificate)
@@ -493,7 +517,11 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			if test.canAnnounce {
 				require.NotNil(t, builder.leiosData.Announcement)
 				require.NotEmpty(t, leiosCaster.hash)
-				require.Equal(t, [][]byte{{0x83, 0x04, 0x05, 0x06}}, leiosCaster.txBodies)
+				require.Equal(
+					t,
+					[][]byte{{0x83, 0x04, 0x05, 0x06}},
+					leiosCaster.txBodies,
+				)
 			} else {
 				require.Nil(t, builder.leiosData.Announcement)
 				require.Empty(t, leiosCaster.hash)

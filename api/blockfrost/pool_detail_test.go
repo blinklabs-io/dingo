@@ -46,10 +46,14 @@ func TestHandlePoolDetail(t *testing.T) {
 			MarginCost:     0.05,
 			FixedCost:      "340000000",
 			RewardAccount:  "stake1uxkptsa4lkr55jleztw43t37vgdn88l6ghclfwuxld2eykgpgvg3f",
-			Owners:         []string{"stake1u98nnlkvkk23vtvf9273uq7cph5ww6u2yq2389psuqet90sv4xv9v"},
-			Registration:   []string{"9f83e5484f543e05b52e99988272a31da373f3aab4c064c76db96643a355d9dc"},
-			Retirement:     []string{},
-			CalidusKey:     nil,
+			Owners: []string{
+				"stake1u98nnlkvkk23vtvf9273uq7cph5ww6u2yq2389psuqet90sv4xv9v",
+			},
+			Registration: []string{
+				"9f83e5484f543e05b52e99988272a31da373f3aab4c064c76db96643a355d9dc",
+			},
+			Retirement: []string{},
+			CalidusKey: nil,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -58,7 +62,10 @@ func TestHandlePoolDetail(t *testing.T) {
 		"/api/v0/pools/pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
 		nil,
 	)
-	req.SetPathValue("pool_id", "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec")
+	req.SetPathValue(
+		"pool_id",
+		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+	)
 	w := httptest.NewRecorder()
 	b.handlePoolDetail(w, req)
 
@@ -118,7 +125,13 @@ func TestHandlePoolDetailEmptyArraysNotNull(t *testing.T) {
 		v, ok := raw[field]
 		require.True(t, ok, "%s must be present", field)
 		arr, isArray := v.([]any)
-		require.True(t, isArray, "%s must encode as a JSON array, got %T", field, v)
+		require.True(
+			t,
+			isArray,
+			"%s must encode as a JSON array, got %T",
+			field,
+			v,
+		)
 		assert.Empty(t, arr)
 	}
 }
@@ -145,7 +158,10 @@ func TestHandlePoolDetailNotFound(t *testing.T) {
 		"/api/v0/pools/pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d",
 		nil,
 	)
-	req.SetPathValue("pool_id", "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d")
+	req.SetPathValue(
+		"pool_id",
+		"pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d",
+	)
 	w := httptest.NewRecorder()
 	b.handlePoolDetail(w, req)
 
@@ -159,7 +175,11 @@ func TestHandlePoolDetailDatabaseFailure(t *testing.T) {
 	b := newTestBlockfrost(&mockNode{
 		poolDetailErr: errors.New("database is closed"),
 	})
-	req := httptest.NewRequest(http.MethodGet, "/api/v0/pools/pool1whatever", nil)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/pools/pool1whatever",
+		nil,
+	)
 	req.SetPathValue("pool_id", "pool1whatever")
 	w := httptest.NewRecorder()
 	b.handlePoolDetail(w, req)

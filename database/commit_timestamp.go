@@ -46,10 +46,6 @@ func (b *Database) checkCommitTimestamp() error {
 			metadataErr,
 		)
 	}
-	// No timestamp in the database
-	if metadataTimestamp <= 0 {
-		return nil
-	}
 	// Get value from blob
 	blobTimestamp, blobErr := b.Blob().GetCommitTimestamp()
 	if blobErr != nil {
@@ -138,6 +134,9 @@ func (d *Database) checkNodeSettings() error {
 		}
 	}
 
+	if persisted == nil {
+		return errors.New("node settings unexpectedly missing")
+	}
 	var mismatches []string
 	if persisted.StorageMode != configured.StorageMode {
 		mismatches = append(mismatches, fmt.Sprintf(

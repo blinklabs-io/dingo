@@ -14,14 +14,13 @@
 
 // Package utxocond builds fixed-shape "(tx_id = ? AND output_idx = ?)" OR-list
 // conditions for the UTxO block-apply UPDATEs (consume, collateral, reference
-// inputs) shared by the sqlite, postgres, and mysql metadata plugins.
+// inputs) used by the shared metadata store.
 //
 // The block-apply path builds one such UPDATE per transaction, matching that
 // transaction's consumed/collateral/reference inputs. Building the WHERE clause
 // as a variable-length list of OR-ed placeholder pairs made the SQL text vary
-// with the input count, so GORM's prepared-statement cache (keyed on SQL text)
-// could not reuse statements and thrashed on parse/prepare under dense sync
-// (issue #2943).
+// with the input count, so prepared statements could not be reused and
+// thrashed on parse/prepare under dense sync (issue #2943).
 //
 // Chunks pads each chunk's term count up to the next power of two by repeating
 // the chunk's last ref. Because these UPDATEs match rows by an OR of composite

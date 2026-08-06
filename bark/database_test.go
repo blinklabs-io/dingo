@@ -131,18 +131,24 @@ func createAndAwaitSnapshot(
 	req *databasev1alpha1.CreateSnapshotRequest,
 ) *databasev1alpha1.CreateSnapshotResponse {
 	t.Helper()
-	createResp, err := h.CreateSnapshot(context.Background(), connect.NewRequest(req))
+	createResp, err := h.CreateSnapshot(
+		context.Background(),
+		connect.NewRequest(req),
+	)
 	require.NoError(t, err)
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetSnapshotStatus(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetSnapshotStatusRequest{
-				OperationId: createResp.Msg.GetOperationId(),
-			}),
-		)
-		require.NoError(t, err)
-		return statusResp.Msg.GetProgress()
-	})
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetSnapshotStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetSnapshotStatusRequest{
+					OperationId: createResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
@@ -164,23 +170,32 @@ func TestCreateSnapshotAndGetSnapshotStatus(t *testing.T) {
 
 	createResp, err := h.CreateSnapshot(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.CreateSnapshotRequest{Name: "test"}),
+		connect.NewRequest(
+			&databasev1alpha1.CreateSnapshotRequest{Name: "test"},
+		),
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, createResp.Msg.GetOperationId())
 	require.NotEmpty(t, createResp.Msg.GetSnapshotId())
 
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetSnapshotStatus(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetSnapshotStatusRequest{
-				OperationId: createResp.Msg.GetOperationId(),
-			}),
-		)
-		require.NoError(t, err)
-		require.Equal(t, createResp.Msg.GetSnapshotId(), statusResp.Msg.GetSnapshotId())
-		return statusResp.Msg.GetProgress()
-	})
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetSnapshotStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetSnapshotStatusRequest{
+					OperationId: createResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			require.Equal(
+				t,
+				createResp.Msg.GetSnapshotId(),
+				statusResp.Msg.GetSnapshotId(),
+			)
+			return statusResp.Msg.GetProgress()
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
@@ -236,7 +251,10 @@ func TestDeleteSnapshotRejectsConcurrentOperation(t *testing.T) {
 	snapshotDir := t.TempDir()
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	h.bark.config.SnapshotDir = snapshotDir
-	require.NoError(t, os.Mkdir(filepath.Join(snapshotDir, "some-snapshot"), 0o755))
+	require.NoError(
+		t,
+		os.Mkdir(filepath.Join(snapshotDir, "some-snapshot"), 0o755),
+	)
 
 	h.busy = true
 
@@ -314,7 +332,11 @@ func TestRestoreReleasesBusyWhenSourceResolutionFails(t *testing.T) {
 	h.mu.Lock()
 	busy := h.busy
 	h.mu.Unlock()
-	require.False(t, busy, "a failed source resolution must release the busy flag")
+	require.False(
+		t,
+		busy,
+		"a failed source resolution must release the busy flag",
+	)
 }
 
 // TestVerifySnapshotReleasesBusyWhenSourceResolutionFails is
@@ -335,7 +357,11 @@ func TestVerifySnapshotReleasesBusyWhenSourceResolutionFails(t *testing.T) {
 	h.mu.Lock()
 	busy := h.busy
 	h.mu.Unlock()
-	require.False(t, busy, "a failed source resolution must release the busy flag")
+	require.False(
+		t,
+		busy,
+		"a failed source resolution must release the busy flag",
+	)
 }
 
 // TestTruncateRejectsInvalidTarget verifies that Truncate rejects a nil
@@ -393,16 +419,19 @@ func TestTruncateAcceptsConsistentCombinedFields(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetTruncateStatus(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
-				OperationId: truncResp.Msg.GetOperationId(),
-			}),
-		)
-		require.NoError(t, err)
-		return statusResp.Msg.GetProgress()
-	})
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetTruncateStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
+					OperationId: truncResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
@@ -418,7 +447,9 @@ func TestTruncateAcceptsConsistentCombinedFields(t *testing.T) {
 // asynchronously once dblifecycle.ResolveTarget notices the mismatch,
 // rather than silently trusting whichever field is used for the actual
 // lookup.
-func TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation(t *testing.T) {
+func TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation(
+	t *testing.T,
+) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	var last models.Block
@@ -447,16 +478,19 @@ func TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation(t *testing.T
 	)
 	require.NoError(t, err)
 
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetTruncateStatus(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
-				OperationId: truncResp.Msg.GetOperationId(),
-			}),
-		)
-		require.NoError(t, err)
-		return statusResp.Msg.GetProgress()
-	})
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetTruncateStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
+					OperationId: truncResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_FAILED,
@@ -496,16 +530,19 @@ func TestTruncateAndGetTruncateStatus(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, truncResp.Msg.GetOperationId())
 
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetTruncateStatus(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
-				OperationId: truncResp.Msg.GetOperationId(),
-			}),
-		)
-		require.NoError(t, err)
-		return statusResp.Msg.GetProgress()
-	})
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetTruncateStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
+					OperationId: truncResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
@@ -568,10 +605,14 @@ func TestListSnapshotsReturnsCreatedSnapshotWithLabel(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{
-		Name:        "nightly",
-		Description: "pre-hardfork backup",
-	})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{
+			Name:        "nightly",
+			Description: "pre-hardfork backup",
+		},
+	)
 
 	listResp, err := h.ListSnapshots(
 		context.Background(),
@@ -646,13 +687,21 @@ func TestListSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	good := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{Name: "good"})
+	good := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{Name: "good"},
+	)
 
 	// A second snapshot directory whose manifest.json fails checksum
 	// validation -- present on disk, but unusable.
 	corruptDir := filepath.Join(h.bark.config.SnapshotDir, "corrupt-snapshot")
 	require.NoError(t, os.Mkdir(corruptDir, 0o755))
-	goodManifest := filepath.Join(h.bark.config.SnapshotDir, good.GetSnapshotId(), "manifest.json")
+	goodManifest := filepath.Join(
+		h.bark.config.SnapshotDir,
+		good.GetSnapshotId(),
+		"manifest.json",
+	)
 	data, err := os.ReadFile(goodManifest)
 	require.NoError(t, err)
 	corruptManifest := filepath.Join(corruptDir, "manifest.json")
@@ -665,25 +714,39 @@ func TestListSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, listResp.Msg.GetSnapshots(), 1)
-	require.Equal(t, good.GetSnapshotId(), listResp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Equal(
+		t,
+		good.GetSnapshotId(),
+		listResp.Msg.GetSnapshots()[0].GetSnapshotId(),
+	)
 }
 
 // TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers is
 // TestListSnapshotsSkipsCorruptedEntryButReturnsOthers's counterpart for
 // ListAvailableSnapshots, which scans the same local directory via its own
 // call to lifecycle.ListSnapshots.
-func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T) {
+func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(
+	t *testing.T,
+) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	good := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{Name: "good"})
+	good := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{Name: "good"},
+	)
 
 	corruptDir := filepath.Join(h.bark.config.SnapshotDir, "corrupt-snapshot")
 	require.NoError(t, os.Mkdir(corruptDir, 0o755))
-	goodManifest := filepath.Join(h.bark.config.SnapshotDir, good.GetSnapshotId(), "manifest.json")
+	goodManifest := filepath.Join(
+		h.bark.config.SnapshotDir,
+		good.GetSnapshotId(),
+		"manifest.json",
+	)
 	data, err := os.ReadFile(goodManifest)
 	require.NoError(t, err)
 	corruptManifest := filepath.Join(corruptDir, "manifest.json")
@@ -696,7 +759,11 @@ func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T)
 	)
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
-	require.Equal(t, good.GetSnapshotId(), resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Equal(
+		t,
+		good.GetSnapshotId(),
+		resp.Msg.GetSnapshots()[0].GetSnapshotId(),
+	)
 }
 
 // TestListAvailableSnapshotsMirrorsListSnapshots covers the no-cloud-
@@ -709,7 +776,11 @@ func TestListAvailableSnapshotsMirrorsListSnapshots(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
 	resp, err := h.ListAvailableSnapshots(
 		context.Background(),
@@ -717,7 +788,11 @@ func TestListAvailableSnapshotsMirrorsListSnapshots(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
-	require.Equal(t, created.GetSnapshotId(), resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Equal(
+		t,
+		created.GetSnapshotId(),
+		resp.Msg.GetSnapshots()[0].GetSnapshotId(),
+	)
 }
 
 // TestDeleteSnapshotRemovesItFromTheCatalog verifies that a deleted
@@ -729,7 +804,11 @@ func TestDeleteSnapshotRemovesItFromTheCatalog(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
 	deleteResp, err := h.DeleteSnapshot(
 		context.Background(),
@@ -769,7 +848,9 @@ func TestDeleteSnapshotRejectsPathTraversal(t *testing.T) {
 	for _, id := range []string{"../../etc", "..", ".", "a/b", ""} {
 		_, err := h.DeleteSnapshot(
 			context.Background(),
-			connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: id}),
+			connect.NewRequest(
+				&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: id},
+			),
 		)
 		require.Error(t, err, "snapshot_id %q must be rejected", id)
 		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
@@ -785,7 +866,11 @@ func TestVerifySnapshotSucceedsForValidSnapshot(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
 	verifyResp, err := h.VerifySnapshot(
 		context.Background(),
@@ -796,23 +881,28 @@ func TestVerifySnapshotSucceedsForValidSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, verifyResp.Msg.GetOperationId())
 
-	progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
-		statusResp, err := h.GetOperationHistory(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetOperationHistoryRequest{}),
-		)
-		require.NoError(t, err)
-		for _, rec := range statusResp.Msg.GetRecords() {
-			if rec.GetOperationId() == verifyResp.Msg.GetOperationId() {
-				return &databasev1alpha1.OperationProgress{
-					OperationId: rec.GetOperationId(),
-					Status:      rec.GetStatus(),
-					Message:     rec.GetMessage(),
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetOperationHistory(
+				context.Background(),
+				connect.NewRequest(
+					&databasev1alpha1.GetOperationHistoryRequest{},
+				),
+			)
+			require.NoError(t, err)
+			for _, rec := range statusResp.Msg.GetRecords() {
+				if rec.GetOperationId() == verifyResp.Msg.GetOperationId() {
+					return &databasev1alpha1.OperationProgress{
+						OperationId: rec.GetOperationId(),
+						Status:      rec.GetStatus(),
+						Message:     rec.GetMessage(),
+					}
 				}
 			}
-		}
-		return &databasev1alpha1.OperationProgress{}
-	})
+			return &databasev1alpha1.OperationProgress{}
+		},
+	)
 	require.Equal(
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
@@ -830,14 +920,29 @@ func TestVerifySnapshotFailsForCorruptedSnapshot(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
 	// Corrupt the blob backup so a real restore-based verify fails.
 	// Truncating to empty isn't enough: Badger's Load treats an empty
 	// stream as "nothing to load" and succeeds trivially. Garbage bytes
 	// fail Badger's internal length-prefix parsing instead.
-	blobPath := filepath.Join(h.bark.config.SnapshotDir, created.GetSnapshotId(), "blob.bak")
-	require.NoError(t, os.WriteFile(blobPath, []byte("not a valid badger backup stream"), 0o644))
+	blobPath := filepath.Join(
+		h.bark.config.SnapshotDir,
+		created.GetSnapshotId(),
+		"blob.bak",
+	)
+	require.NoError(
+		t,
+		os.WriteFile(
+			blobPath,
+			[]byte("not a valid badger backup stream"),
+			0o644,
+		),
+	)
 
 	verifyResp, err := h.VerifySnapshot(
 		context.Background(),
@@ -896,7 +1001,11 @@ func TestVerifySnapshotOfTamperedManifestReturnsDataLoss(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
 	manifestPath := filepath.Join(
 		h.bark.config.SnapshotDir, created.GetSnapshotId(), "manifest.json",
@@ -926,9 +1035,16 @@ func TestDeleteSnapshotRemovesLocalSnapshotWithCorruptedManifest(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
-	snapshotDir := filepath.Join(h.bark.config.SnapshotDir, created.GetSnapshotId())
+	snapshotDir := filepath.Join(
+		h.bark.config.SnapshotDir,
+		created.GetSnapshotId(),
+	)
 	tamperManifestChecksum(t, filepath.Join(snapshotDir, "manifest.json"))
 
 	deleteResp, err := h.DeleteSnapshot(
@@ -967,7 +1083,11 @@ func TestGetOperationHistoryReturnsPastOperations(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
 	histResp, err := h.GetOperationHistory(
 		context.Background(),
@@ -1004,7 +1124,9 @@ func TestOperationsArePrunedOnceOverCap(t *testing.T) {
 	const total = maxRetainedOperations + 50
 	var lastID string
 	for range total {
-		op, _ := h.registerOperation(databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT)
+		op, _ := h.registerOperation(
+			databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
+		)
 		op.complete(nil, 0)
 		lastID = op.id
 	}
@@ -1068,7 +1190,9 @@ func TestGetOperationHistoryPaginates(t *testing.T) {
 
 	page1, err := h.GetOperationHistory(
 		context.Background(),
-		connect.NewRequest(&databasev1alpha1.GetOperationHistoryRequest{PageSize: 2}),
+		connect.NewRequest(
+			&databasev1alpha1.GetOperationHistoryRequest{PageSize: 2},
+		),
 	)
 	require.NoError(t, err)
 	require.Len(t, page1.Msg.GetRecords(), 2)
@@ -1109,7 +1233,9 @@ func TestCancelOperationUnknownIDReturnsNotFound(t *testing.T) {
 // operation mid-flight.
 func TestCancelOperationCancelsContextAndMarksCancelled(t *testing.T) {
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
-	op, ctx, err := h.startOperation(databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT)
+	op, ctx, err := h.startOperation(
+		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
+	)
 	require.NoError(t, err)
 
 	cancelResp, err := h.CancelOperation(
@@ -1145,7 +1271,9 @@ func TestCancelOperationCancelsContextAndMarksCancelled(t *testing.T) {
 // accepted cancellation request instead of being mislabeled as failures.
 func TestCancelOperationMarksDriverCancellationErrorCancelled(t *testing.T) {
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
-	op, _, err := h.startOperation(databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT)
+	op, _, err := h.startOperation(
+		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
+	)
 	require.NoError(t, err)
 
 	_, err = h.CancelOperation(
@@ -1176,7 +1304,11 @@ func TestCancelOperationOnAlreadyCompletedOperationIsANoOp(t *testing.T) {
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(t, h, &databasev1alpha1.CreateSnapshotRequest{})
+	created := createAndAwaitSnapshot(
+		t,
+		h,
+		&databasev1alpha1.CreateSnapshotRequest{},
+	)
 
 	cancelResp, err := h.CancelOperation(
 		context.Background(),

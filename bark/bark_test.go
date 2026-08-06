@@ -135,15 +135,25 @@ func TestResumeDBPublishesNewDBAndUnpauses(t *testing.T) {
 // still live.
 func TestAddrClearsAfterStop(t *testing.T) {
 	db := newTestDB(t)
-	b, err := NewBark(BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)})
+	b, err := NewBark(
+		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+	)
 	require.NoError(t, err)
 	require.Empty(t, b.Addr(), "Addr must be empty before Start is ever called")
 
 	require.NoError(t, b.Start(context.Background()))
-	require.NotEmpty(t, b.Addr(), "Addr must be populated once Start has bound the listener")
+	require.NotEmpty(
+		t,
+		b.Addr(),
+		"Addr must be populated once Start has bound the listener",
+	)
 
 	require.NoError(t, b.Stop(context.Background()))
-	require.Empty(t, b.Addr(), "Addr must be cleared, not stale, once the server has stopped")
+	require.Empty(
+		t,
+		b.Addr(),
+		"Addr must be cleared, not stale, once the server has stopped",
+	)
 }
 
 // TestAddrClearsAfterStopTimesOut guards against a real bug: Stop
@@ -173,7 +183,9 @@ func TestAddrClearsAfterStopTimesOut(t *testing.T) {
 	const maxAttempts = 20
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		db := newTestDB(t)
-		b, err := NewBark(BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)})
+		b, err := NewBark(
+			BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+		)
 		require.NoError(t, err)
 		require.NoError(t, b.Start(context.Background()))
 		addr := b.Addr()
@@ -190,7 +202,10 @@ func TestAddrClearsAfterStopTimesOut(t *testing.T) {
 		_, err = conn.Write([]byte("GET / HTTP/1.1\r\n"))
 		require.NoError(t, err)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			20*time.Millisecond,
+		)
 		stopErr := b.Stop(ctx)
 		cancel()
 		_ = conn.Close()
@@ -225,7 +240,9 @@ func TestAddrClearsAfterStopTimesOut(t *testing.T) {
 // auto-shutdown goroutine, which must clear listenerAddr the same way.
 func TestAddrClearsWhenStartContextIsCancelled(t *testing.T) {
 	db := newTestDB(t)
-	b, err := NewBark(BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)})
+	b, err := NewBark(
+		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+	)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -277,7 +294,9 @@ func TestStopDoesNotDeadlockWithInFlightAcquire(t *testing.T) {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	server := &http.Server{Handler: mux} //nolint:gosec // test-only server, no real timeouts needed
+	server := &http.Server{
+		Handler: mux,
+	} //nolint:gosec // test-only server, no real timeouts needed
 
 	b.mu.Lock()
 	b.server = server
@@ -293,7 +312,9 @@ func TestStopDoesNotDeadlockWithInFlightAcquire(t *testing.T) {
 	reqDone := make(chan struct{})
 	go func() {
 		defer close(reqDone)
-		resp, getErr := http.Get("http://" + ln.Addr().String() + "/") //nolint:noctx,gosec // test-only request to a loopback test server
+		resp, getErr := http.Get(
+			"http://" + ln.Addr().String() + "/",
+		) //nolint:noctx,gosec // test-only request to a loopback test server
 		if getErr == nil {
 			_ = resp.Body.Close()
 		}
@@ -328,7 +349,11 @@ func TestStopDoesNotDeadlockWithInFlightAcquire(t *testing.T) {
 
 	select {
 	case err := <-acquireDone:
-		require.NoError(t, err, "Acquire should succeed for the in-flight request")
+		require.NoError(
+			t,
+			err,
+			"Acquire should succeed for the in-flight request",
+		)
 	case <-time.After(3 * time.Second):
 		t.Fatal(
 			"Acquire did not return -- deadlocked behind Stop's b.mu hold " +
@@ -343,6 +368,16 @@ func TestStopDoesNotDeadlockWithInFlightAcquire(t *testing.T) {
 		t.Fatal("Stop did not return after the in-flight request completed")
 	}
 
-	testutil.RequireReceive(t, reqDone, 2*time.Second, "client request should complete")
-	testutil.RequireReceive(t, serveDone, 2*time.Second, "Serve should return once Shutdown completes")
+	testutil.RequireReceive(
+		t,
+		reqDone,
+		2*time.Second,
+		"client request should complete",
+	)
+	testutil.RequireReceive(
+		t,
+		serveDone,
+		2*time.Second,
+		"Serve should return once Shutdown completes",
+	)
 }

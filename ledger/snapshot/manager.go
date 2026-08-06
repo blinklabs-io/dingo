@@ -254,7 +254,10 @@ func (m *Manager) Start(ctx context.Context) error {
 	// Reject an already-cancelled context so we don't mark the manager as
 	// running while the event loop would exit immediately.
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("snapshot manager: parent context already done: %w", err)
+		return fmt.Errorf(
+			"snapshot manager: parent context already done: %w",
+			err,
+		)
 	}
 
 	m.configurationLocked = true
@@ -410,22 +413,10 @@ func (m *Manager) handleEpochTransition(
 	// 1. Capture new Mark snapshot (current stake distribution)
 	//
 	// The pre-check runs inside a short read-only transaction rather than
-	// passing a nil txn directly. GORM's prepared-statement cache is
-	// shared across every *gorm.DB derived from the same connection pool,
-	// keyed only by SQL text: a query prepared outside any transaction
-	// requires a brand-new connection from the pool to run
-	// PrepareContext, while the identical query prepared inside a
-	// transaction reuses that transaction's own already-checked-out
-	// connection. When the read pool is saturated by other concurrent
-	// read transactions racing to prepare this same cold query, the
-	// nil-txn caller can never obtain the extra connection it needs,
-	// while every transactional caller blocks waiting on the shared
-	// cache entry only the nil-txn caller can complete -- an unbounded
-	// deadlock. Wrapping this call in its own read transaction gives it
-	// the same connection-reuse path as every other caller, closing that
-	// window, while still reading a fresh, uncommitted-write-independent
-	// view (WAL snapshot isolation applies the moment the transaction
-	// begins either way).
+	// passing a nil transaction directly. That keeps the metadata connection
+	// reserved for the complete read and avoids competing with other cold
+	// query preparations while the read pool is busy. The transaction still
+	// sees a fresh WAL snapshot when it begins.
 	preCheckTxn := m.db.Transaction(false)
 	exists, err := m.authoritativeMarkRewardSnapshotExists(
 		evt,
@@ -478,7 +469,8 @@ func (m *Manager) authoritativeMarkRewardSnapshotExists(
 	evt event.EpochTransitionEvent,
 	txn types.Txn,
 ) (bool, error) {
-	snapshot, err := m.db.Metadata().GetRewardSnapshot(evt.NewEpoch, "mark", txn)
+	snapshot, err := m.db.Metadata().
+		GetRewardSnapshot(evt.NewEpoch, "mark", txn)
 	if err != nil {
 		return false, err
 	}
@@ -592,9 +584,12 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	if distribution == nil {
 		m.logger.Debug(
 			"no snap-point stake distribution for boundary; reading at persist time",
-			"component", "snapshot",
-			"epoch", evt.NewEpoch,
-			"boundary_slot", evt.BoundarySlot,
+			"component",
+			"snapshot",
+			"epoch",
+			evt.NewEpoch,
+			"boundary_slot",
+			evt.BoundarySlot,
 		)
 		calculator := NewCalculator(m.db)
 		var err error
@@ -613,7 +608,9 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		if err != nil {
 			if m.metrics != nil {
 				m.metrics.captureFailureTotal.Inc()
-				m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+				m.metrics.captureDurationSeconds.Observe(
+					time.Since(start).Seconds(),
+				)
 			}
 			return fmt.Errorf("calculate stake distribution: %w", err)
 		}
@@ -636,7 +633,9 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	); err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+			m.metrics.captureDurationSeconds.Observe(
+				time.Since(start).Seconds(),
+			)
 		}
 		return fmt.Errorf("save mark snapshot: %w", err)
 	}
@@ -712,7 +711,9 @@ func (m *Manager) captureMarkSnapshot(
 	if err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+			m.metrics.captureDurationSeconds.Observe(
+				time.Since(start).Seconds(),
+			)
 		}
 		return fmt.Errorf("calculate stake distribution: %w", err)
 	}
@@ -739,7 +740,9 @@ func (m *Manager) captureMarkSnapshot(
 	if err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+			m.metrics.captureDurationSeconds.Observe(
+				time.Since(start).Seconds(),
+			)
 		}
 		return fmt.Errorf("save mark snapshot: %w", err)
 	}
@@ -751,7 +754,9 @@ func (m *Manager) captureMarkSnapshot(
 		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
 		m.metrics.captureSuccessTotal.Inc()
 		m.metrics.capturePoolsTotal.Set(float64(len(distribution.PoolStakes)))
-		m.metrics.captureTotalStakeLovelace.Set(float64(distribution.TotalStake))
+		m.metrics.captureTotalStakeLovelace.Set(
+			float64(distribution.TotalStake),
+		)
 		m.metrics.lastSuccessfulEpoch.Set(float64(evt.NewEpoch))
 	}
 
@@ -829,7 +834,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	if err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+			m.metrics.captureDurationSeconds.Observe(
+				time.Since(start).Seconds(),
+			)
 		}
 		return fmt.Errorf("calculate genesis distribution: %w", err)
 	}
@@ -877,7 +884,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 
 	if distribution.TotalPools == 0 {
 		if m.metrics != nil {
-			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+			m.metrics.captureDurationSeconds.Observe(
+				time.Since(start).Seconds(),
+			)
 		}
 		m.logger.Info(
 			"no genesis pools; leader election disabled"+
@@ -919,7 +928,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	); err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
-			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+			m.metrics.captureDurationSeconds.Observe(
+				time.Since(start).Seconds(),
+			)
 		}
 		return fmt.Errorf("save genesis snapshot: %w", err)
 	}
@@ -942,8 +953,10 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			if offset > 0 && m.expiryEpoch(seedEpoch) > 0 {
 				m.logger.Warn(
 					"skipping post-Mithril historical snapshot with delegator inactivity enabled",
-					"component", "snapshot",
-					"epoch", seedEpoch,
+					"component",
+					"snapshot",
+					"epoch",
+					seedEpoch,
 				)
 				continue
 			}
@@ -972,7 +985,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			); err != nil {
 				if m.metrics != nil {
 					m.metrics.captureFailureTotal.Inc()
-					m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+					m.metrics.captureDurationSeconds.Observe(
+						time.Since(start).Seconds(),
+					)
 				}
 				return fmt.Errorf(
 					"save bootstrap snapshot for epoch %d: %w",
@@ -1003,7 +1018,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
 		m.metrics.captureSuccessTotal.Add(float64(successCount))
 		m.metrics.capturePoolsTotal.Set(float64(distribution.TotalPools))
-		m.metrics.captureTotalStakeLovelace.Set(float64(distribution.TotalStake))
+		m.metrics.captureTotalStakeLovelace.Set(
+			float64(distribution.TotalStake),
+		)
 		m.metrics.lastSuccessfulEpoch.Set(float64(lastSuccessfulEpoch))
 	}
 	return nil

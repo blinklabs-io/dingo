@@ -49,7 +49,12 @@ import (
 // real preview-testnet blocks.
 func liveLifecycleTestDataDir() string {
 	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "database", "immutable", "testdata")
+	return filepath.Join(
+		filepath.Dir(thisFile),
+		"database",
+		"immutable",
+		"testdata",
+	)
 }
 
 // newLiveLifecycleTestNode hand-builds a partial but real *Node — real
@@ -162,8 +167,14 @@ func newLiveLifecycleTestNodeWithGenesis(
 		WithLogger(logger),
 		WithNetwork("preview"),
 		WithCardanoNodeConfig(cardanoNodeCfg),
-		WithPluginSelection(plugin.CapabilityStorageBlob, storageSelections.Blob),
-		WithPluginSelection(plugin.CapabilityStorageMetadata, storageSelections.Metadata),
+		WithPluginSelection(
+			plugin.CapabilityStorageBlob,
+			storageSelections.Blob,
+		),
+		WithPluginSelection(
+			plugin.CapabilityStorageMetadata,
+			storageSelections.Metadata,
+		),
 		WithDatabaseWorkerPoolConfig(workerPoolCfg),
 	)
 
@@ -182,7 +193,10 @@ func newLiveLifecycleTestNodeWithGenesis(
 	t.Cleanup(func() {
 		cancel()
 		if n.pluginHost != nil {
-			_ = n.pluginHost.StopCapability(context.Background(), plugin.CapabilityMempool)
+			_ = n.pluginHost.StopCapability(
+				context.Background(),
+				plugin.CapabilityMempool,
+			)
 		}
 		if n.connManager != nil {
 			_ = n.connManager.Stop(context.Background())
@@ -331,9 +345,12 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	targetIndex := numBlocks / 2
 	targetSlot := points[targetIndex].Slot
 
-	blocksRemoved, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot: &targetSlot,
-	})
+	blocksRemoved, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{
+			Slot: &targetSlot,
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(numBlocks-1-targetIndex), blocksRemoved)
 
@@ -373,7 +390,13 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	for i, p := range points {
 		_, err := database.BlockByHash(n.db, p.Hash)
 		if i <= targetIndex {
-			require.NoErrorf(t, err, "block %d (slot %d) should survive", i, p.Slot)
+			require.NoErrorf(
+				t,
+				err,
+				"block %d (slot %d) should survive",
+				i,
+				p.Slot,
+			)
 		} else {
 			require.Errorf(t, err, "block %d (slot %d) should be truncated away", i, p.Slot)
 		}
@@ -390,7 +413,9 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 // inactivity expiry must keep that gate enabled, with its exact
 // configured window, after a live truncate rebuilds its LedgerState --
 // not silently disabled until a full process restart.
-func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(t *testing.T) {
+func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
+	t *testing.T,
+) {
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -406,10 +431,17 @@ func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(t *testi
 	require.NoError(t, err)
 
 	enabled, window := n.ledgerState.DelegatorInactivityConfig()
-	require.True(t, enabled,
-		"DelegatorInactivityEnabled must survive live truncate reinitialization")
-	require.Equal(t, uint64(42), window,
-		"DelegatorInactivity window must survive live truncate reinitialization")
+	require.True(
+		t,
+		enabled,
+		"DelegatorInactivityEnabled must survive live truncate reinitialization",
+	)
+	require.Equal(
+		t,
+		uint64(42),
+		window,
+		"DelegatorInactivity window must survive live truncate reinitialization",
+	)
 }
 
 // TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig
@@ -438,10 +470,17 @@ func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivity
 	require.NoError(t, err)
 
 	enabled, window := n.snapshotMgr.DelegatorInactivityConfig()
-	require.True(t, enabled,
-		"snapshot manager's DelegatorInactivityEnabled must survive live truncate reinitialization")
-	require.Equal(t, uint64(42), window,
-		"snapshot manager's DelegatorInactivity window must survive live truncate reinitialization")
+	require.True(
+		t,
+		enabled,
+		"snapshot manager's DelegatorInactivityEnabled must survive live truncate reinitialization",
+	)
+	require.Equal(
+		t,
+		uint64(42),
+		window,
+		"snapshot manager's DelegatorInactivity window must survive live truncate reinitialization",
+	)
 }
 
 // TestLiveTruncateIsSerializedAgainstConcurrentCalls exercises
@@ -489,7 +528,9 @@ func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
 // lifecycle.Truncate's own pre-DeleteBlocksAfter checks are provably
 // read-only, lifecycle.ErrTruncateNotStarted now lets Node.Truncate resume
 // normally instead.
-func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(t *testing.T) {
+func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
+	t *testing.T,
+) {
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -541,7 +582,9 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(t *testing.T)
 // select is reached, forces exactly one clean, reproducible error out of
 // closeStorageForLiveLifecycleOp without needing to fake any component's
 // Stop method.
-func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(t *testing.T) {
+func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(
+	t *testing.T,
+) {
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -550,11 +593,17 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(t *te
 
 	n.deferredIndexMaintenanceDone = make(chan struct{})
 
-	shortCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	shortCtx, cancel := context.WithTimeout(
+		context.Background(),
+		20*time.Millisecond,
+	)
 	defer cancel()
 
 	targetSlot := points[len(points)/2].Slot
-	_, err := n.Truncate(shortCtx, dblifecycle.TruncateTarget{Slot: &targetSlot})
+	_, err := n.Truncate(
+		shortCtx,
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "close storage")
 
@@ -597,7 +646,9 @@ func TestLiveTruncateResumesAfterCloseStorageFailureInsteadOfStrandingNode(t *te
 // over: reopening storage while that worker might still be using it would
 // race the new database instance against the old one. Truncate must
 // instead cancel the node for a supervised restart.
-func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(t *testing.T) {
+func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
+	t *testing.T,
+) {
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, nil,
@@ -749,7 +800,12 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
 	for _, p := range points {
 		_, err := database.BlockByHash(n.db, p.Hash)
-		require.NoErrorf(t, err, "block at slot %d missing after restore", p.Slot)
+		require.NoErrorf(
+			t,
+			err,
+			"block at slot %d missing after restore",
+			p.Slot,
+		)
 	}
 }
 
@@ -842,7 +898,13 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap")
 	_, err = lifecycle.Snapshot(
-		context.Background(), otherDB, snapshotDir, lifecycle.TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		otherDB,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 	require.NoError(t, dbtest.CloseDatabase(otherDB))
@@ -929,7 +991,9 @@ func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedCon
 func newSwapTestNode(t *testing.T, dataDir string) *Node {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &Node{config: NewConfig(WithDatabasePath(dataDir), WithLogger(logger))}
+	return &Node{
+		config: NewConfig(WithDatabasePath(dataDir), WithLogger(logger)),
+	}
 }
 
 // writeMarkerFile creates dir (and any missing parents) and writes a
@@ -1051,7 +1115,9 @@ func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 // classified as errRestoreSwapUnrecoverable, the same as the existing
 // second-rename-then-rollback-failure case, not returned as an ordinary
 // "safe to resume" error.
-func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(t *testing.T) {
+func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
+	t *testing.T,
+) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits don't apply the same way on windows")
 	}
@@ -1070,9 +1136,13 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(t 
 	// directly inside base, which a read-only base refuses -- made
 	// read-only right as the injected sync failure is reported, so the
 	// first rename (which already succeeded by then) is unaffected.
-	withInjectedFirstSyncFailure(t, errors.New("injected sync failure"), func() {
-		require.NoError(t, os.Chmod(base, 0o500))
-	})
+	withInjectedFirstSyncFailure(
+		t,
+		errors.New("injected sync failure"),
+		func() {
+			require.NoError(t, os.Chmod(base, 0o500))
+		},
+	)
 
 	n := newSwapTestNode(t, dataDir)
 	_, err := n.swapInRestoredDataDir(stagingDir)
@@ -1087,7 +1157,9 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(t 
 // perfectly normal data directory -- left for the next Restore call's own
 // cleanup, not this one's, per reconcileInterruptedLiveRestoreSwap's doc
 // comment.
-func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(t *testing.T) {
+func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(
+	t *testing.T,
+) {
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	writeMarkerFile(t, dataDir, "original")
@@ -1168,7 +1240,9 @@ func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
 // permissions or filesystem error is always possible -- is surfaced as a
 // real error rather than silently leaving the node with no usable data
 // directory and no indication anything went wrong.
-func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(t *testing.T) {
+func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(
+	t *testing.T,
+) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits don't apply the same way on windows")
 	}
@@ -1196,7 +1270,9 @@ func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(t *testing
 // specifically tied to crossing epoch boundaries after a live truncate:
 // with the real genesis, a reproduction never actually exercises the
 // epoch-rollover/stake-snapshot code path at all.
-func smallEpochGenesisCfgForLifecycleTest(t *testing.T) *cardano.CardanoNodeConfig {
+func smallEpochGenesisCfgForLifecycleTest(
+	t *testing.T,
+) *cardano.CardanoNodeConfig {
 	t.Helper()
 	// Start from the real preview genesis (already has valid Byron/Shelley
 	// data, genesis UTxOs, hashes, etc.) and override just the one field
@@ -1215,18 +1291,10 @@ func smallEpochGenesisCfgForLifecycleTest(t *testing.T) *cardano.CardanoNodeConf
 // A tight back-to-back loop of AddBlock calls that crosses more than one
 // epoch boundary fires several epoch-transition EventBus events with no
 // synchronization between them, each spawning its own concurrent async
-// handler (reward precompute, the stake/reward snapshot manager, the
-// automatic database-lifecycle snapshot manager) against the shared
-// sqlite/GORM connection pool. Under -race plus a constrained GOMAXPROCS
-// (matching CI's runners), this can pile up enough concurrent first-time
-// statement preparations to hit a real, pre-existing GORM+SQLite
-// connection-pool contention issue (unrelated to database/lifecycle —
-// confirmed via `git diff` that none of the files on that call path belong
-// to this feature) that manifests as an effectively unbounded hang, since
-// nothing on that path is given a context deadline. Adding blocks one at a
-// time — which also more accurately simulates blocks actually arriving
-// live, one at a time, rather than as an instantaneous burst — keeps each
-// epoch transition's async work serialized instead of overlapping.
+// handler (reward precompute, stake/reward snapshots, and automatic database
+// lifecycle snapshots). Adding blocks one at a time both keeps this test
+// deterministic and more accurately simulates blocks arriving live instead
+// of as an instantaneous burst.
 func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 	t.Helper()
 	for _, b := range blocks {

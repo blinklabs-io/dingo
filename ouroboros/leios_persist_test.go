@@ -149,7 +149,9 @@ func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
 // LedgerState has been reassigned to a new database, mirroring
 // node_lifecycle.go's live restore/truncate reinit reassigning
 // n.ouroboros.LedgerState.
-func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(t *testing.T) {
+func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
+	t *testing.T,
+) {
 	o := newTestOuroborosWithLeiosDB(t)
 	oldDB := o.leiosDatabase()
 	require.NotNil(t, oldDB)
@@ -200,7 +202,9 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(t *tes
 // next enqueue start a second writer against a freshly reset pending map
 // while the old one is still reading and deleting from that same map
 // (now repointed) under the shared mutex.
-func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(t *testing.T) {
+func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
+	t *testing.T,
+) {
 	origTimeout := leiosPersistShutdownDrainTimeout
 	leiosPersistShutdownDrainTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = origTimeout })

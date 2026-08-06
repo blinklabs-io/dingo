@@ -156,7 +156,10 @@ func (d *BlobStoreS3) opContext() (context.Context, context.CancelFunc) {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-	return context.WithTimeout(context.Background(), timeout) //nolint:gosec // G118: cancel func is returned to caller
+	return context.WithTimeout(
+		context.Background(),
+		timeout,
+	) //nolint:gosec // G118: cancel func is returned to caller
 }
 
 // Close implements the BlobStore interface.
@@ -1088,7 +1091,9 @@ func (d *BlobStoreS3) listKeysToFile(
 			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
 			externalKey, err := hex.DecodeString(key)
 			if err != nil {
-				return nil, cleanup(fmt.Errorf("error decoding s3 key: %w", err))
+				return nil, cleanup(
+					fmt.Errorf("error decoding s3 key: %w", err),
+				)
 			}
 			if err := writeReverseKey(file, string(externalKey)); err != nil {
 				return nil, cleanup(err)

@@ -16,11 +16,13 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	metadataSqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -37,9 +39,12 @@ func newSyncBarrierTestDB(
 ) *Database {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	sqliteStore, err := metadataSqlite.New("", logger, nil)
+	sqliteStore, err := metadataSqlite.NewSQLStore(
+		metadataSqlite.Config{},
+		metadata.ProviderDependencies{Logger: logger},
+	)
 	require.NoError(t, err)
-	require.NoError(t, sqliteStore.Start())
+	require.NoError(t, sqliteStore.Start(context.Background()))
 	db := &Database{
 		blob:     store,
 		metadata: sqliteStore,

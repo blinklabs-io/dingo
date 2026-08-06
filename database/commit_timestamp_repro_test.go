@@ -37,7 +37,11 @@ func TestCheckCommitTimestamp_FreshBlobAndMetadata(t *testing.T) {
 	defer closeTestDatabase(db)
 
 	bts, bErr := db.Blob().GetCommitTimestamp()
-	require.NoError(t, bErr, "blob.GetCommitTimestamp on fresh blob must not error")
+	require.NoError(
+		t,
+		bErr,
+		"blob.GetCommitTimestamp on fresh blob must not error",
+	)
 	require.Equal(t, int64(0), bts, "fresh blob should report timestamp 0")
 }
 
@@ -70,7 +74,13 @@ func TestCheckCommitTimestamp_MetadataOnly(t *testing.T) {
 	}
 	require.Error(t, err)
 	var cte CommitTimestampError
-	require.ErrorAs(t, err, &cte, "expected recoverable CommitTimestampError, got: %v", err)
+	require.ErrorAs(
+		t,
+		err,
+		&cte,
+		"expected recoverable CommitTimestampError, got: %v",
+		err,
+	)
 	require.Equal(t, int64(123456789), cte.MetadataTimestamp)
 	require.Equal(t, int64(0), cte.BlobTimestamp)
 	require.False(
@@ -78,4 +88,43 @@ func TestCheckCommitTimestamp_MetadataOnly(t *testing.T) {
 		errors.Is(err, types.ErrBlobKeyNotFound),
 		"missing blob timestamp must not surface as raw ErrBlobKeyNotFound",
 	)
+}
+
+// TestCheckCommitTimestamp_BlobOnly verifies that startup detects a blob
+// timestamp with no corresponding metadata timestamp. This is the inverse of
+// TestCheckCommitTimestamp_MetadataOnly and must be handled by the same
+// recovery path.
+func TestCheckCommitTimestamp_BlobOnly(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	require.NoError(t, err)
+	dataDir := db.config.DataDir
+
+	blobTxn := db.Blob().NewTransaction(true)
+	require.NoError(t, db.Blob().SetCommitTimestamp(123456789, blobTxn))
+	require.NoError(t, blobTxn.Commit())
+	require.NoError(t, closeTestDatabase(db))
+
+	db2, err := newTestDatabase(t, &Config{
+		DataDir: dataDir,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	if db2 != nil {
+		defer closeTestDatabase(db2)
+	}
+	require.Error(t, err)
+	var cte CommitTimestampError
+	require.ErrorAs(
+		t,
+		err,
+		&cte,
+		"expected recoverable CommitTimestampError, got: %v",
+		err,
+	)
+	require.Equal(t, int64(0), cte.MetadataTimestamp)
+	require.Equal(t, int64(123456789), cte.BlobTimestamp)
 }

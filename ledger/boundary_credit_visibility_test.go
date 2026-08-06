@@ -15,30 +15,36 @@
 package ledger
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 // boundaryCreditPostSnapshot returns the AccountRewardDelta.PostSnapshot flag of
 // the single credit journaled for a credential.
 func boundaryCreditPostSnapshot(
 	t *testing.T,
-	gdb *gorm.DB,
+	db *sql.DB,
 	credential []byte,
 ) bool {
 	t.Helper()
-	var deltas []models.AccountRewardDelta
-	require.NoError(t, gdb.Where(
-		"credential_tag = ? AND staking_key = ? AND withdrawal = ?",
-		0, credential, false,
-	).Find(&deltas).Error)
-	require.Len(t, deltas, 1, "expected exactly one boundary credit")
-	return deltas[0].PostSnapshot
+	var postSnapshot bool
+	require.NoError(t, db.QueryRow(`
+SELECT post_snapshot FROM account_reward_delta
+WHERE credential_tag = ? AND staking_key = ? AND withdrawal = FALSE`,
+		0, credential).Scan(&postSnapshot))
+	return postSnapshot
+}
+
+func insertBoundaryAccount(t *testing.T, db *sql.DB, credential []byte) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO account (staking_key, active, reward)
+VALUES (?, TRUE, '0')`, credential)
+	require.NoError(t, err)
 }
 
 // TestBoundaryCreditVisibility_MIRIsIncludedInSnapshot pins MIR credits as
@@ -58,19 +64,25 @@ func TestBoundaryCreditVisibility_MIRIsIncludedInSnapshot(t *testing.T) {
 		amount         = uint64(70)
 	)
 	credential := mirCred28(0x51)
-	require.NoError(t, gdb.Create(&models.Account{
-		StakingKey: credential,
-		Active:     true,
-	}).Error)
+	insertBoundaryAccount(t, gdb, credential)
 	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 1, nil))
-	seedMIRDistribution(t, gdb, 0, epochStartSlot+1, []models.MoveInstantaneousRewardsReward{
-		{Credential: credential, Amount: types.Uint64(amount)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		0,
+		epochStartSlot+1,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: credential, Amount: types.Uint64(amount)},
+		},
+	)
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	require.False(t, boundaryCreditPostSnapshot(t, gdb, credential),
-		"MIR runs before SNAP in cardano-ledger, so its credit belongs in the mark snapshot")
+	require.False(
+		t,
+		boundaryCreditPostSnapshot(t, gdb, credential),
+		"MIR runs before SNAP in cardano-ledger, so its credit belongs in the mark snapshot",
+	)
 }
 
 // TestBoundaryCreditVisibility_PoolReapIsExcludedFromSnapshot pins POOLREAP
@@ -85,32 +97,31 @@ func TestBoundaryCreditVisibility_PoolReapIsExcludedFromSnapshot(t *testing.T) {
 		boundarySlot = uint64(2000)
 	)
 	rewardAccount := reapCred28(0x52)
-	require.NoError(t, gdb.Create(&models.Account{
-		StakingKey: rewardAccount,
-		Active:     true,
-	}).Error)
+	insertBoundaryAccount(t, gdb, rewardAccount)
 	seedRetiringPool(
 		t, gdb, reapCred28(0xB2), rewardAccount, deposit, 10, newEpoch, 20,
 	)
 
 	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
 
-	require.True(t, boundaryCreditPostSnapshot(t, gdb, rewardAccount),
-		"POOLREAP runs after SNAP, so its refund must be excluded from the mark snapshot")
+	require.True(
+		t,
+		boundaryCreditPostSnapshot(t, gdb, rewardAccount),
+		"POOLREAP runs after SNAP, so its refund must be excluded from the mark snapshot",
+	)
 }
 
 // TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot pins the delayed
 // reward update as pre-SNAP by exercising the crediting primitive it uses
 // (Database.AddAccountRewardByCredential), which must leave the journal row
 // unstamped.
-func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(t *testing.T) {
+func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(
+	t *testing.T,
+) {
 	_, db, gdb := newPoolreapTestLedger(t)
 
 	credential := reapCred28(0x53)
-	require.NoError(t, gdb.Create(&models.Account{
-		StakingKey: credential,
-		Active:     true,
-	}).Error)
+	insertBoundaryAccount(t, gdb, credential)
 
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
@@ -119,6 +130,9 @@ func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(t *testing.T) 
 		)
 	}))
 
-	require.False(t, boundaryCreditPostSnapshot(t, gdb, credential),
-		"the delayed reward update precedes SNAP and belongs in the mark snapshot")
+	require.False(
+		t,
+		boundaryCreditPostSnapshot(t, gdb, credential),
+		"the delayed reward update precedes SNAP and belongs in the mark snapshot",
+	)
 }

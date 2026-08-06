@@ -399,7 +399,11 @@ func (b *Bark) startServer(server *http.Server) error {
 // match this call's server, so a concurrent Stop/cancellation isn't
 // clobbered) so Addr() stops reporting a dead address for a listener
 // that's either already leaked or about to be if left unclosed here.
-func (b *Bark) handleServeExit(server *http.Server, ln net.Listener, serveErr error) {
+func (b *Bark) handleServeExit(
+	server *http.Server,
+	ln net.Listener,
+	serveErr error,
+) {
 	if serveErr == nil || errors.Is(serveErr, http.ErrServerClosed) {
 		return
 	}

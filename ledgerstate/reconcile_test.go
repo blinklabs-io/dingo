@@ -93,7 +93,10 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 	// The pool reconcile lists active pools via GetActivePoolKeyHashes, which
 	// reads the chain tip and the epoch at that slot — exactly as the real
 	// flow does after importTip. Seed both so the pool path is exercised.
-	require.NoError(t, db.SetEpoch(0, tipEpoch, nil, nil, nil, nil, 6, 1, 10000, nil))
+	require.NoError(
+		t,
+		db.SetEpoch(0, tipEpoch, nil, nil, nil, nil, 6, 1, 10000, nil),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{Slot: 4000, Hash: b32(0x01)},
 	}, nil))
@@ -127,17 +130,31 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 		staleTxId, 0, read.Metadata(),
 	)
 	require.NoError(t, err)
-	require.NotNil(t, staleUSpent, "stale UTxO should be tombstoned, not deleted")
+	require.NotNil(
+		t,
+		staleUSpent,
+		"stale UTxO should be tombstoned, not deleted",
+	)
 	require.EqualValues(
 		t, tipSlot, staleUSpent.DeletedSlot,
 		"stale UTxO should be tombstoned at the reconcile tip slot",
 	)
 
 	// Account: keep active, stale inactive.
-	keepA, err := rstore.GetAccountByCredential(0, keepStake, true, read.Metadata())
+	keepA, err := rstore.GetAccountByCredential(
+		0,
+		keepStake,
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.True(t, keepA.Active)
-	staleA, err := rstore.GetAccountByCredential(0, staleStake, true, read.Metadata())
+	staleA, err := rstore.GetAccountByCredential(
+		0,
+		staleStake,
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.False(t, staleA.Active, "stale account should be inactive")
 
@@ -145,15 +162,28 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 	keepD, err := rstore.GetDrepByCredential(0, keepDrep, true, read.Metadata())
 	require.NoError(t, err)
 	require.True(t, keepD.Active)
-	staleD, err := rstore.GetDrepByCredential(0, staleDrep, true, read.Metadata())
+	staleD, err := rstore.GetDrepByCredential(
+		0,
+		staleDrep,
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.False(t, staleD.Active, "stale DRep should be inactive")
 
 	// Pool: stale gets a retirement row; keep does not.
-	staleP, err := rstore.GetPool(lcommon.PoolKeyHash(stalePool), true, read.Metadata())
+	staleP, err := rstore.GetPool(
+		lcommon.PoolKeyHash(stalePool),
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.NotEmpty(t, staleP.Retirement, "stale pool should be retired")
-	keepP, err := rstore.GetPool(lcommon.PoolKeyHash(keepPool), true, read.Metadata())
+	keepP, err := rstore.GetPool(
+		lcommon.PoolKeyHash(keepPool),
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.Empty(t, keepP.Retirement, "kept pool should not be retired")
 }
@@ -195,7 +225,10 @@ func TestReconcileSkipsEntitiesWithIncompleteRecording(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	require.NoError(t, db.SetEpoch(0, tipEpoch, nil, nil, nil, nil, 6, 1, 10000, nil))
+	require.NoError(
+		t,
+		db.SetEpoch(0, tipEpoch, nil, nil, nil, nil, 6, 1, 10000, nil),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{Slot: 4000, Hash: b32(0x01)},
 	}, nil))
@@ -219,10 +252,20 @@ func TestReconcileSkipsEntitiesWithIncompleteRecording(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, u, "UTxO must stay live when the UTxO key set is empty")
 
-	keepA, err := store.GetAccountByCredential(0, liveStake, true, read.Metadata())
+	keepA, err := store.GetAccountByCredential(
+		0,
+		liveStake,
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.True(t, keepA.Active)
-	staleA, err := store.GetAccountByCredential(0, staleStake, true, read.Metadata())
+	staleA, err := store.GetAccountByCredential(
+		0,
+		staleStake,
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.False(t, staleA.Active,
 		"a non-empty account key set must still reconcile")
@@ -232,7 +275,11 @@ func TestReconcileSkipsEntitiesWithIncompleteRecording(t *testing.T) {
 	require.True(t, d.Active,
 		"DRep must stay active when the DRep key set is empty")
 
-	p, err := store.GetPool(lcommon.PoolKeyHash(livePool), true, read.Metadata())
+	p, err := store.GetPool(
+		lcommon.PoolKeyHash(livePool),
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.Empty(t, p.Retirement,
 		"pool must not be retired when pool recording is incomplete")
@@ -271,7 +318,10 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	require.NoError(t, db.SetEpoch(0, tipEpoch, nil, nil, nil, nil, 6, 1, 10000, nil))
+	require.NoError(
+		t,
+		db.SetEpoch(0, tipEpoch, nil, nil, nil, nil, 6, 1, 10000, nil),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{Slot: 4000, Hash: b32(0x01)},
 	}, nil))
@@ -292,7 +342,12 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, u, "completed empty UTxO set must tombstone stale UTxOs")
 
-	acct, err := store.GetAccountByCredential(0, liveStake, true, read.Metadata())
+	acct, err := store.GetAccountByCredential(
+		0,
+		liveStake,
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.False(t, acct.Active,
 		"completed empty account set must deactivate stale accounts")
@@ -302,7 +357,11 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 	require.False(t, drep.Active,
 		"completed empty DRep set must deactivate stale DReps")
 
-	pool, err := store.GetPool(lcommon.PoolKeyHash(livePool), true, read.Metadata())
+	pool, err := store.GetPool(
+		lcommon.PoolKeyHash(livePool),
+		true,
+		read.Metadata(),
+	)
 	require.NoError(t, err)
 	require.NotEmpty(t, pool.Retirement,
 		"completed empty pool set must retire stale pools")

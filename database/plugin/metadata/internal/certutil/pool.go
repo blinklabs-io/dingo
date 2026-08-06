@@ -73,10 +73,16 @@ func PoolRewardAccount(
 			raw[rewardAccountIndex],
 			&rewardAddrBytes,
 		); decErr != nil {
-			return 0, nil, fmt.Errorf("decode pool cert reward_account field: %w", decErr)
+			return 0, nil, fmt.Errorf(
+				"decode pool cert reward_account field: %w",
+				decErr,
+			)
 		}
 		if len(rewardAddrBytes) != 29 {
-			return 0, nil, fmt.Errorf("pool cert reward_account: got %d bytes, want 29", len(rewardAddrBytes))
+			return 0, nil, fmt.Errorf(
+				"pool cert reward_account: got %d bytes, want 29",
+				len(rewardAddrBytes),
+			)
 		}
 		// High nibble 0xE = key-hash reward address, 0xF = script-hash reward address.
 		// Any other value is invalid for a pool registration reward account.

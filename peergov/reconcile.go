@@ -232,7 +232,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					}
 					return 1
 				}
-				if len(selectedGroups) < p.bootstrapPromotionMinDiversityGroups() {
+				if len(
+					selectedGroups,
+				) < p.bootstrapPromotionMinDiversityGroups() {
 					_, aSeen := selectedGroups[a.diversityGroup]
 					_, bSeen := selectedGroups[b.diversityGroup]
 					aNew := a.diversityGroup != "" && !aSeen
@@ -360,12 +362,18 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				}
 				logArgs = append(
 					logArgs,
-					"tenure", tenure,
-					"min_tenure", p.config.InboundMinTenure,
-					"score_threshold", p.config.InboundHotScoreThreshold,
-					"full_duplex", peer.hasClientConnection() || peer.InboundDuplex,
-					"topology_slot", peer.InboundTopologyMatch,
-					"satisfies_topology_slot", satisfiesTopologySlot,
+					"tenure",
+					tenure,
+					"min_tenure",
+					p.config.InboundMinTenure,
+					"score_threshold",
+					p.config.InboundHotScoreThreshold,
+					"full_duplex",
+					peer.hasClientConnection() || peer.InboundDuplex,
+					"topology_slot",
+					peer.InboundTopologyMatch,
+					"satisfies_topology_slot",
+					satisfiesTopologySlot,
 				)
 			}
 			p.config.Logger.Info(logMsg, logArgs...)
@@ -386,7 +394,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Prune idle/unhelpful inbound warm peers and apply cooldown for
 	// flapping identities before generic state-limit pruning.
-	events = append(events, p.pruneInboundWarmPeersLocked(now, &knownRemoved)...)
+	events = append(
+		events,
+		p.pruneInboundWarmPeersLocked(now, &knownRemoved)...)
 
 	// Log valency status for topology groups
 	if debugEnabled {
@@ -634,7 +644,8 @@ func (p *PeerGovernor) enforceStateLimit(
 			p.inboundPruned++
 			if p.metrics != nil {
 				p.metrics.inboundPruned.Inc()
-				p.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded").Inc()
+				p.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded").
+					Inc()
 			}
 		}
 	}
@@ -672,10 +683,14 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 ) []pendingEvent {
 	var events []pendingEvent
 	for i, peer := range slices.Backward(p.peers) {
-		if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+		if peer == nil || peer.Source != PeerSourceInboundConn ||
+			peer.State != PeerStateWarm {
 			continue
 		}
-		shouldPrune, reason, reasonLabel, cooldownDuration, applyCooldown := p.inboundPruneDecisionLocked(peer, now)
+		shouldPrune, reason, reasonLabel, cooldownDuration, applyCooldown := p.inboundPruneDecisionLocked(
+			peer,
+			now,
+		)
 		if !shouldPrune {
 			continue
 		}
@@ -747,13 +762,18 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 ) {
 	reason = "inbound idle or unhelpful past prune threshold"
 	reasonLabel = "idle_unhelpful"
-	if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
+	if peer == nil || peer.Source != PeerSourceInboundConn ||
+		peer.State != PeerStateWarm {
 		return false, "", "", 0, false
 	}
 	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
 		cooldownDuration = max(
 			// Keep cooldown at least as long as the normal deny duration.
-			p.config.InboundCooldown*time.Duration(multiplier), p.config.DenyDuration)
+			p.config.InboundCooldown*time.Duration(
+				multiplier,
+			),
+			p.config.DenyDuration,
+		)
 		reason = "inbound flapping cooldown"
 		reasonLabel = "flapping_cooldown"
 		applyCooldown = true

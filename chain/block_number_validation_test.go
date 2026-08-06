@@ -33,13 +33,38 @@ func TestBlockNumberContiguous(t *testing.T) {
 		wantOK bool
 	}{
 		{"shelley parent+1 ok", shelley.EraIdShelley, parent + 1, true},
-		{"shelley same as parent rejected", shelley.EraIdShelley, parent, false},
-		{"shelley inflated rejected", shelley.EraIdShelley, parent + 1_000_000, false},
-		{"shelley below parent rejected", shelley.EraIdShelley, parent - 1, false},
+		{
+			"shelley same as parent rejected",
+			shelley.EraIdShelley,
+			parent,
+			false,
+		},
+		{
+			"shelley inflated rejected",
+			shelley.EraIdShelley,
+			parent + 1_000_000,
+			false,
+		},
+		{
+			"shelley below parent rejected",
+			shelley.EraIdShelley,
+			parent - 1,
+			false,
+		},
 		{"shelley zero rejected", shelley.EraIdShelley, 0, false},
-		{"byron parent+1 ok (normal block)", byron.EraIdByron, parent + 1, true},
+		{
+			"byron parent+1 ok (normal block)",
+			byron.EraIdByron,
+			parent + 1,
+			true,
+		},
 		{"byron same as parent ok (EBB)", byron.EraIdByron, parent, true},
-		{"byron inflated rejected", byron.EraIdByron, parent + 1_000_000, false},
+		{
+			"byron inflated rejected",
+			byron.EraIdByron,
+			parent + 1_000_000,
+			false,
+		},
 		{"byron below parent rejected", byron.EraIdByron, parent - 1, false},
 	}
 	for _, tt := range tests {
@@ -48,7 +73,11 @@ func TestBlockNumberContiguous(t *testing.T) {
 			if got != tt.wantOK {
 				t.Fatalf(
 					"blockNumberContiguous(era=%d, number=%d, parent=%d) = %v, want %v",
-					tt.eraId, tt.number, parent, got, tt.wantOK,
+					tt.eraId,
+					tt.number,
+					parent,
+					got,
+					tt.wantOK,
 				)
 			}
 		})

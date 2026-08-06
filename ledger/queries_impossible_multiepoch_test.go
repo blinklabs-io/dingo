@@ -40,7 +40,9 @@ import (
 // `hardfork.BuildSummary`, BuildSummary's Haskell-aligned semantics apply
 // the safe zone from `current.Start` (the *first* epoch of the era) — and
 // the resulting EraEnd lags many epochs behind the tip.
-func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(t *testing.T) {
+func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(
+	t *testing.T,
+) {
 	const (
 		slotLenMs = uint(1_000)
 		epochLen  = uint(432_000)
@@ -103,10 +105,15 @@ func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(t *testing.T
 	epoch, ok := eraEnd[2].(uint64)
 	require.True(t, ok, "EraEnd epoch should be uint64")
 
-	assert.Equal(t, thirdEpochEnd, slot,
+	assert.Equal(
+		t,
+		thirdEpochEnd,
+		slot,
 		"TransitionImpossible with a multi-epoch era must serve the CURRENT epoch's end "+
 			"(slot %d, end of epoch %d), not a safe-zone projection from the era's first epoch",
-		thirdEpochEnd, thirdEpochId)
+		thirdEpochEnd,
+		thirdEpochId,
+	)
 	assert.Equal(t, thirdEpochId+1, epoch,
 		"TransitionImpossible EraEnd epoch must be the current epoch + 1 (%d)",
 		thirdEpochId+1)

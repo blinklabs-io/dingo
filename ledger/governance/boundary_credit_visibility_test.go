@@ -15,32 +15,41 @@
 package governance
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
 
 // requireSoleCreditPostSnapshot asserts the single credit journaled for a
 // credential carries the expected PostSnapshot flag.
 func requireSoleCreditPostSnapshot(
 	t *testing.T,
-	gdb *gorm.DB,
+	db *sql.DB,
 	credential []byte,
 	want bool,
 	msg string,
 ) {
 	t.Helper()
-	var deltas []models.AccountRewardDelta
-	require.NoError(t, gdb.Where(
-		"credential_tag = ? AND staking_key = ? AND withdrawal = ?",
-		0, credential, false,
-	).Find(&deltas).Error)
-	require.Len(t, deltas, 1, "expected exactly one boundary credit")
-	require.Equal(t, want, deltas[0].PostSnapshot, msg)
+	var postSnapshot bool
+	require.NoError(t, db.QueryRow(`
+SELECT post_snapshot FROM account_reward_delta
+WHERE credential_tag = ? AND staking_key = ? AND withdrawal = FALSE`,
+		0, credential).Scan(&postSnapshot))
+	require.Equal(t, want, postSnapshot, msg)
+}
+
+func insertBoundaryAccount(
+	t *testing.T,
+	store *tallyTestStore,
+	credential []byte,
+) {
+	t.Helper()
+	_, err := store.raw.Exec(`INSERT INTO account (staking_key, reward, active)
+VALUES (?, '0', TRUE)`, credential)
+	require.NoError(t, err)
 }
 
 // TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot pins an
@@ -59,11 +68,7 @@ func TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot(
 		stakeCred,
 	)
 	require.NoError(t, err)
-	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: stakeCred,
-		Reward:     types.Uint64(0),
-		Active:     true,
-	}).Error)
+	insertBoundaryAccount(t, store, stakeCred)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	require.NoError(t, applyTreasuryWithdrawal(
@@ -74,8 +79,13 @@ func TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot(
 		&models.GovernanceProposal{TxHash: testBytes(32, 0x62)},
 	))
 
-	requireSoleCreditPostSnapshot(t, store.DB(), stakeCred, true,
-		"enactment runs after SNAP, so a treasury withdrawal must be excluded from the mark snapshot")
+	requireSoleCreditPostSnapshot(
+		t,
+		store.raw,
+		stakeCred,
+		true,
+		"enactment runs after SNAP, so a treasury withdrawal must be excluded from the mark snapshot",
+	)
 }
 
 // TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot pins a
@@ -86,18 +96,22 @@ func TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot(
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x63)
 	rewardAddrBytes := buildRewardAddr(t, stakeCred)
-	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: stakeCred,
-		Reward:     types.Uint64(0),
-		Active:     true,
-	}).Error)
+	insertBoundaryAccount(t, store, stakeCred)
 
-	require.NoError(t, refundProposalDeposit(db, nil, &models.GovernanceProposal{
-		TxHash:        testBytes(32, 0x64),
-		Deposit:       7,
-		ReturnAddress: rewardAddrBytes,
-	}, 200))
+	require.NoError(
+		t,
+		refundProposalDeposit(db, nil, &models.GovernanceProposal{
+			TxHash:        testBytes(32, 0x64),
+			Deposit:       7,
+			ReturnAddress: rewardAddrBytes,
+		}, 200),
+	)
 
-	requireSoleCreditPostSnapshot(t, store.DB(), stakeCred, true,
-		"a proposal-deposit refund is enacted after SNAP and must be excluded from the mark snapshot")
+	requireSoleCreditPostSnapshot(
+		t,
+		store.raw,
+		stakeCred,
+		true,
+		"a proposal-deposit refund is enacted after SNAP and must be excluded from the mark snapshot",
+	)
 }

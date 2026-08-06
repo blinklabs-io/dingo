@@ -35,10 +35,10 @@ func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
 	stakeCred := testBytes(28, 2)
 	abstainStakeCred := testBytes(28, 3)
 
-	require.NoError(t, store.DB().Create(&models.Drep{
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
-	}).Error)
+	}))
 	seedDRepStake(
 		t, store, stakeCred, drepCred, models.DrepTypeAddrKeyHash, 60, 1,
 	)

@@ -378,8 +378,11 @@ func TestInboundConnectionLimit_RejectsOverLimit(t *testing.T) {
 	cm.connectionsMutex.Lock()
 	for i := range maxInbound {
 		fakeId := ouroboros.ConnectionId{
-			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
-			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40000 + i},
+			LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{
+				IP:   net.ParseIP("10.0.0.1"),
+				Port: 40000 + i,
+			},
 		}
 		cm.connections[fakeId] = &connectionInfo{
 			conn:      nil,
@@ -540,8 +543,11 @@ func TestInboundConnectionLimit_OutboundNotCounted(t *testing.T) {
 	cm.connectionsMutex.Lock()
 	for i := range 10 {
 		fakeId := ouroboros.ConnectionId{
-			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
-			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 50000 + i},
+			LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{
+				IP:   net.ParseIP("10.0.0.1"),
+				Port: 50000 + i,
+			},
 		}
 		cm.connections[fakeId] = &connectionInfo{
 			conn:      nil,

@@ -102,51 +102,80 @@ func TestCreateOutboundConnection_DropsNeverConnectedGossipPeer(t *testing.T) {
 
 	go pg.createOutboundConnection(target, false)
 
-	require.Eventually(t, func() bool {
-		pg.mu.Lock()
-		defer pg.mu.Unlock()
-		_, denied := pg.denyList[deadDialAddress]
-		return !peersContainAddress(pg.peers, deadDialAddress) && denied
-	}, 5*time.Second, 10*time.Millisecond,
-		"never-connected gossip peer must be dropped and denied after a failed dial")
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			_, denied := pg.denyList[deadDialAddress]
+			return !peersContainAddress(pg.peers, deadDialAddress) && denied
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"never-connected gossip peer must be dropped and denied after a failed dial",
+	)
 }
 
 // A public-root peer that has never connected must likewise be dropped, even
 // though it is a topology-sourced peer.
-func TestCreateOutboundConnection_DropsNeverConnectedPublicRootPeer(t *testing.T) {
+func TestCreateOutboundConnection_DropsNeverConnectedPublicRootPeer(
+	t *testing.T,
+) {
 	pg := newReconnectGateTestGovernor(t, 0)
-	target := setupReconnectGateTest(pg, PeerSourceTopologyPublicRoot, false, true)
+	target := setupReconnectGateTest(
+		pg,
+		PeerSourceTopologyPublicRoot,
+		false,
+		true,
+	)
 
 	go pg.createOutboundConnection(target, false)
 
-	require.Eventually(t, func() bool {
-		pg.mu.Lock()
-		defer pg.mu.Unlock()
-		_, denied := pg.denyList[deadDialAddress]
-		return !peersContainAddress(pg.peers, deadDialAddress) && denied
-	}, 5*time.Second, 10*time.Millisecond,
-		"never-connected public-root peer must be dropped and denied after a failed dial")
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			_, denied := pg.denyList[deadDialAddress]
+			return !peersContainAddress(pg.peers, deadDialAddress) && denied
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"never-connected public-root peer must be dropped and denied after a failed dial",
+	)
 }
 
 // A local-root peer that has never connected is trusted and must keep retrying,
 // never dropped or denied, even while other upstreams exist.
-func TestCreateOutboundConnection_RetainsNeverConnectedLocalRootPeer(t *testing.T) {
+func TestCreateOutboundConnection_RetainsNeverConnectedLocalRootPeer(
+	t *testing.T,
+) {
 	pg := newReconnectGateTestGovernor(t, 0)
-	target := setupReconnectGateTest(pg, PeerSourceTopologyLocalRoot, false, true)
+	target := setupReconnectGateTest(
+		pg,
+		PeerSourceTopologyLocalRoot,
+		false,
+		true,
+	)
 
 	go pg.createOutboundConnection(target, false)
 
 	require.Eventually(t, func() bool {
 		pg.mu.Lock()
 		defer pg.mu.Unlock()
-		return peersContainAddress(pg.peers, deadDialAddress) && target.ReconnectCount > 0
+		return peersContainAddress(pg.peers, deadDialAddress) &&
+			target.ReconnectCount > 0
 	}, 5*time.Second, 10*time.Millisecond,
 		"never-connected local-root peer must keep retrying, not be dropped")
 
 	pg.mu.Lock()
 	_, denied := pg.denyList[deadDialAddress]
 	pg.mu.Unlock()
-	assert.False(t, denied, "local-root peer must never be denied by the never-connected gate")
+	assert.False(
+		t,
+		denied,
+		"local-root peer must never be denied by the never-connected gate",
+	)
 }
 
 // A discovered peer that connected at least once must keep retrying on a later
@@ -158,39 +187,61 @@ func TestCreateOutboundConnection_RetainsEverConnectedGossipPeer(t *testing.T) {
 
 	go pg.createOutboundConnection(target, false)
 
-	require.Eventually(t, func() bool {
-		pg.mu.Lock()
-		defer pg.mu.Unlock()
-		return peersContainAddress(pg.peers, deadDialAddress) && target.ReconnectCount > 0
-	}, 5*time.Second, 10*time.Millisecond,
-		"gossip peer that connected once must keep retrying on a later failure, not be dropped")
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			return peersContainAddress(pg.peers, deadDialAddress) &&
+				target.ReconnectCount > 0
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"gossip peer that connected once must keep retrying on a later failure, not be dropped",
+	)
 
 	pg.mu.Lock()
 	_, denied := pg.denyList[deadDialAddress]
 	pg.mu.Unlock()
-	assert.False(t, denied, "ever-connected gossip peer must not be denied by the never-connected gate")
+	assert.False(
+		t,
+		denied,
+		"ever-connected gossip peer must not be denied by the never-connected gate",
+	)
 }
 
 // When the node has no eligible upstream, a never-connected gossip peer is the
 // only lead back onto the network and must be kept and retried rather than
 // dropped, preserving the anti-stranding emergency redial path.
-func TestCreateOutboundConnection_RetainsNeverConnectedGossipPeerWhenNoUpstream(t *testing.T) {
+func TestCreateOutboundConnection_RetainsNeverConnectedGossipPeerWhenNoUpstream(
+	t *testing.T,
+) {
 	pg := newReconnectGateTestGovernor(t, 1000)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, false, false)
 
 	go pg.createOutboundConnection(target, false)
 
-	require.Eventually(t, func() bool {
-		pg.mu.Lock()
-		defer pg.mu.Unlock()
-		return peersContainAddress(pg.peers, deadDialAddress) && target.ReconnectCount > 0
-	}, 5*time.Second, 10*time.Millisecond,
-		"never-connected gossip peer must be retried when the node has no upstream left")
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			return peersContainAddress(pg.peers, deadDialAddress) &&
+				target.ReconnectCount > 0
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"never-connected gossip peer must be retried when the node has no upstream left",
+	)
 
 	pg.mu.Lock()
 	_, denied := pg.denyList[deadDialAddress]
 	pg.mu.Unlock()
-	assert.False(t, denied, "last-lead gossip peer must not be denied when no upstream remains")
+	assert.False(
+		t,
+		denied,
+		"last-lead gossip peer must not be denied when no upstream remains",
+	)
 }
 
 // A peer can gain a client-capable inbound connection while an outbound dial is
@@ -205,5 +256,9 @@ func TestNeverConnectedDropGate_RetainsCurrentClientConnection(t *testing.T) {
 	drop := pg.shouldDropNeverConnectedPeerAfterDialFailureLocked(target)
 	pg.mu.Unlock()
 
-	assert.False(t, drop, "current client-capable connection must suppress the never-connected drop")
+	assert.False(
+		t,
+		drop,
+		"current client-capable connection must suppress the never-connected drop",
+	)
 }

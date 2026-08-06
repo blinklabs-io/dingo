@@ -25,8 +25,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -335,14 +335,12 @@ func TestProtocolParamsForSlot_ConcurrentPostForkCallsDoNotRaceOnCostModels(
 	const goroutines = 16
 	var wg sync.WaitGroup
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got := ls.ProtocolParamsForSlot(75)
 			babbagePParams, ok := got.(*babbage.BabbageProtocolParameters)
 			require.True(t, ok)
 			require.NotEmpty(t, babbagePParams.CostModels)
-		}()
+		})
 	}
 	wg.Wait()
 }

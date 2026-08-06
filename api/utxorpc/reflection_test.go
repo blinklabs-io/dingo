@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
+
 	//nolint:staticcheck // SA1019: exercising the v1alpha reflection wire
 	// protocol requires its own request/response messages.
 	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"

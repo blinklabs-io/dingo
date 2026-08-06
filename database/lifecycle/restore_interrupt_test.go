@@ -101,6 +101,7 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 
+	require.NotEmpty(t, os.Args)
 	cmd := exec.Command( //nolint:gosec
 		os.Args[0],
 		"-test.run=^TestRestoreInterruptedByProcessKillLeavesTargetUntouched$",
@@ -143,7 +144,12 @@ func runRestoreInterruptHelper() {
 	host := plugin.NewHost()
 	_ = badger.RegisterProvider(host)
 	_ = sqlite.RegisterProvider(host)
-	_, _ = lifecycle.Restore(context.Background(), host, nil, snapshotDir, targetDir,
+	_, _ = lifecycle.Restore(
+		context.Background(),
+		host,
+		nil,
+		snapshotDir,
+		targetDir,
 		lifecycle.RestoreStorageConfig{},
 	)
 	// Only reached if the parent's kill lands after Restore already

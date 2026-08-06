@@ -126,9 +126,17 @@ func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
 
 	// Enabling tracking starts populating the hash frontier again; disabling
 	// clears it.
-	pt.recordObservedPoint(ocommon.Point{Slot: 30, Hash: []byte("h30")}, window, true)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 30, Hash: []byte("h30")},
+		window,
+		true,
+	)
 	assert.Len(t, pt.observedPoints, 1)
-	pt.recordObservedPoint(ocommon.Point{Slot: 40, Hash: []byte("h40")}, window, false)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 40, Hash: []byte("h40")},
+		window,
+		false,
+	)
 	assert.Empty(t, pt.observedPoints)
 }
 
@@ -157,7 +165,11 @@ func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	assert.Equal(t, []byte("h20"), pt.observedPoints[1].Hash)
 
 	// A subsequent point extends both frontiers consistently.
-	pt.recordObservedPoint(ocommon.Point{Slot: 40, Hash: []byte("h40")}, window, true)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 40, Hash: []byte("h40")},
+		window,
+		true,
+	)
 	require.Equal(t, []uint64{10, 20, 40}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h40"), pt.observedPoints[2].Hash)
@@ -262,17 +274,22 @@ func TestChainSelectedNoneEventOnBestPeerRemoval(t *testing.T) {
 	cs.RemovePeer(conn)
 	require.Nil(t, cs.GetBestPeer())
 
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		for _, e := range events {
-			if e.PreviousConnectionId == conn {
-				return true
+	require.Eventually(
+		t,
+		func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			for _, e := range events {
+				if e.PreviousConnectionId == conn {
+					return true
+				}
 			}
-		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond,
-		"expected ChainSelectedNoneEvent when the selected best peer is removed")
+			return false
+		},
+		2*time.Second,
+		10*time.Millisecond,
+		"expected ChainSelectedNoneEvent when the selected best peer is removed",
+	)
 }
 
 // ShouldApplyIngress is the real enforcement of the corroboration stall: an
@@ -425,7 +442,12 @@ func TestGenesisHonestFastSourceIsCorroborated(t *testing.T) {
 
 	best := cs.GetBestPeer()
 	require.NotNil(t, best)
-	assert.Equal(t, fast, *best, "corroborated dense fast source must be selected")
+	assert.Equal(
+		t,
+		fast,
+		*best,
+		"corroborated dense fast source must be selected",
+	)
 }
 
 // A dense but divergent fast source — one on a chain no other eligible peer
@@ -601,7 +623,10 @@ func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 	require.True(t, cs.updatePeerTipObserved(
 		liar,
 		ochainsync.Tip{
-			Point:       ocommon.Point{Slot: extremeSlot, Hash: []byte("liar-tip")},
+			Point: ocommon.Point{
+				Slot: extremeSlot,
+				Hash: []byte("liar-tip"),
+			},
 			BlockNumber: 100,
 		},
 		sharedObs,
@@ -615,8 +640,12 @@ func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 	})
 
 	// The liar's undelivered extreme advertised slot must not pin Genesis mode.
-	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
-		"a corroborated peer's undelivered advertised slot must not pin Genesis")
+	assert.Equal(
+		t,
+		SelectionModePraos,
+		cs.SelectionMode(),
+		"a corroborated peer's undelivered advertised slot must not pin Genesis",
+	)
 }
 
 // The Genesis exit horizon must be bounded so a single uncorroborated peer
@@ -646,8 +675,14 @@ func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 		Point:       ocommon.Point{Slot: 200, Hash: []byte("real-hdr")},
 		BlockNumber: 200,
 	}
-	require.True(t, cs.updatePeerTipObserved(honestA, honestAdv, honestObs, nil))
-	require.True(t, cs.updatePeerTipObserved(honestB, honestAdv, honestObs, nil))
+	require.True(
+		t,
+		cs.updatePeerTipObserved(honestA, honestAdv, honestObs, nil),
+	)
+	require.True(
+		t,
+		cs.updatePeerTipObserved(honestB, honestAdv, honestObs, nil),
+	)
 
 	// Uncorroborated liar: a plausible block number (200, within K of the honest
 	// peers) but an extreme advertised slot that nothing corroborates.
@@ -655,11 +690,17 @@ func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 	require.True(t, cs.updatePeerTipObserved(
 		liar,
 		ochainsync.Tip{
-			Point:       ocommon.Point{Slot: extremeSlot, Hash: []byte("liar-tip")},
+			Point: ocommon.Point{
+				Slot: extremeSlot,
+				Hash: []byte("liar-tip"),
+			},
 			BlockNumber: 200,
 		},
 		ochainsync.Tip{
-			Point:       ocommon.Point{Slot: extremeSlot, Hash: []byte("liar-hdr")},
+			Point: ocommon.Point{
+				Slot: extremeSlot,
+				Hash: []byte("liar-hdr"),
+			},
 			BlockNumber: 200,
 		},
 		nil,
@@ -831,8 +872,11 @@ func TestGenesisNegativeCorroborationFailsClosed(t *testing.T) {
 		genesisTip(110, "h110", 110),
 	)
 	cs.EvaluateAndSwitch()
-	assert.Nil(t, cs.GetBestPeer(),
-		"negative threshold must fail closed (gate active), not disable the gate")
+	assert.Nil(
+		t,
+		cs.GetBestPeer(),
+		"negative threshold must fail closed (gate active), not disable the gate",
+	)
 
 	// Adding one independent corroborator satisfies the clamped threshold of 1.
 	witness := corrConn(2)
@@ -896,7 +940,10 @@ func TestGenesisStatusObservability(t *testing.T) {
 	require.NotNil(t, status.BestSource)
 	assert.Equal(t, fast, *status.BestSource)
 
-	byConn := make(map[ouroboros.ConnectionId]GenesisPeerStatus, len(status.Peers))
+	byConn := make(
+		map[ouroboros.ConnectionId]GenesisPeerStatus,
+		len(status.Peers),
+	)
 	for _, ps := range status.Peers {
 		byConn[ps.ConnectionId] = ps
 	}
@@ -951,6 +998,9 @@ func TestGenesisModeExitEmitsEvent(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	if len(exits) == 0 {
+		t.Fatal("expected genesis mode exit event")
+	}
 	assert.Equal(t, uint64(75), exits[0].LocalSlot)
 	assert.Equal(t, uint64(100), exits[0].BestKnownSlot)
 	assert.Equal(t, uint64(30), exits[0].GenesisWindowSlots)

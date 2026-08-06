@@ -24,7 +24,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newSettingsTestDB(t *testing.T, dataDir, storageMode, network string) (*Database, error) {
+func newSettingsTestDB(
+	t *testing.T,
+	dataDir, storageMode, network string,
+) (*Database, error) {
 	t.Helper()
 	return newTestDatabase(t, &Config{
 		DataDir:     dataDir,
@@ -32,7 +35,6 @@ func newSettingsTestDB(t *testing.T, dataDir, storageMode, network string) (*Dat
 		Network:     network,
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
-
 }
 
 func TestNodeSettingsPersistence(t *testing.T) {
@@ -44,6 +46,7 @@ func TestNodeSettingsPersistence(t *testing.T) {
 
 	s, err := db.Metadata().GetNodeSettings()
 	require.NoError(t, err)
+	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "preview", s.Network)
 	require.NoError(t, closeTestDatabase(db))
@@ -112,6 +115,7 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 
 	s, err := db.Metadata().GetNodeSettings()
 	require.NoError(t, err)
+	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "", s.Network)
 	require.NoError(t, closeTestDatabase(db))
@@ -121,6 +125,7 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 
 	s, err = db.Metadata().GetNodeSettings()
 	require.NoError(t, err)
+	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "preview", s.Network)
 	require.NoError(t, closeTestDatabase(db))
@@ -171,6 +176,7 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 
 	s, err := db.Metadata().GetNodeSettings()
 	require.NoError(t, err)
+	require.NotNil(t, s)
 	require.Equal(t, "api", s.StorageMode)
 	require.Equal(t, "mainnet", s.Network)
 	require.NoError(t, closeTestDatabase(db))
@@ -204,6 +210,7 @@ func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
 
 	s, err := db.Metadata().GetNodeSettings()
 	require.NoError(t, err)
+	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)
 	require.Equal(t, "preview", s.Network)
 	require.NoError(t, closeTestDatabase(db))

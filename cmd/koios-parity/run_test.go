@@ -70,7 +70,10 @@ func withGlobalFlags(t *testing.T, network, cachePath string) {
 func TestRunCommandReportDirUnwritableReturnsError(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "blocker-file")
 	require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
-	reportDir := filepath.Join(blocker, "reports") // blocker is a file: MkdirAll must fail
+	reportDir := filepath.Join(
+		blocker,
+		"reports",
+	) // blocker is a file: MkdirAll must fail
 
 	withGlobalFlags(t, "preview", filepath.Join(t.TempDir(), "cache.db"))
 	cmd := newRunTestCmd(t)
@@ -89,8 +92,15 @@ func TestRunCommandReportDirUnwritableReturnsError(t *testing.T) {
 func TestRunCommandReportFileCreateFailureReturnsError(t *testing.T) {
 	reportDir := t.TempDir()
 	const network = "preview"
-	reportFileName := fmt.Sprintf("report-%s-%s.json", network, time.Now().Format("2006-01-02"))
-	require.NoError(t, os.Mkdir(filepath.Join(reportDir, reportFileName), 0o750))
+	reportFileName := fmt.Sprintf(
+		"report-%s-%s.json",
+		network,
+		time.Now().Format("2006-01-02"),
+	)
+	require.NoError(
+		t,
+		os.Mkdir(filepath.Join(reportDir, reportFileName), 0o750),
+	)
 
 	withGlobalFlags(t, network, filepath.Join(t.TempDir(), "cache.db"))
 	cmd := newRunTestCmd(t)
@@ -117,7 +127,11 @@ func TestRunCommandWritesReportAndReturnsNilOnCleanRun(t *testing.T) {
 	err := runCommand(cmd, nil)
 	require.NoError(t, err)
 
-	reportFileName := fmt.Sprintf("report-%s-%s.json", network, time.Now().Format("2006-01-02"))
+	reportFileName := fmt.Sprintf(
+		"report-%s-%s.json",
+		network,
+		time.Now().Format("2006-01-02"),
+	)
 	data, readErr := os.ReadFile(filepath.Join(reportDir, reportFileName))
 	require.NoError(t, readErr)
 	require.Contains(t, string(data), `"network": "preview"`)
@@ -145,8 +159,8 @@ func (f *fakeReportWriteCloser) Close() error { return f.closeErr }
 // create/build are injected specifically so this (and the two tests below)
 // can force each failure mode deterministically — reproducing a genuine
 // BuildJSONReport/WriteJSONReport/Close failure through a live runCommand +
-// cache round-trip is not practical, since AutoMigrate repairs any missing
-// cache table on the very next open.
+// cache round-trip is not practical, since the metadata migration repairs any
+// missing cache table on the very next open.
 func TestWriteParityReportBuildFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "report.json")
@@ -172,7 +186,8 @@ func TestWriteParityReportWriteFailure(t *testing.T) {
 
 	err := writeParityReport(
 		slog.New(slog.DiscardHandler),
-		dir, path,
+		dir,
+		path,
 		func(p string) (io.WriteCloser, error) { return fake, nil },
 		func() (*koiosparity.JSONReport, error) { return &koiosparity.JSONReport{Network: "preview"}, nil },
 	)
@@ -192,7 +207,8 @@ func TestWriteParityReportCloseFailureAfterSuccessfulWrite(t *testing.T) {
 
 	err := writeParityReport(
 		slog.New(slog.DiscardHandler),
-		dir, path,
+		dir,
+		path,
 		func(p string) (io.WriteCloser, error) { return fake, nil },
 		func() (*koiosparity.JSONReport, error) { return &koiosparity.JSONReport{Network: "preview"}, nil },
 	)
@@ -213,7 +229,8 @@ func TestWriteParityReportJoinsWriteAndCloseErrors(t *testing.T) {
 
 	err := writeParityReport(
 		slog.New(slog.DiscardHandler),
-		dir, path,
+		dir,
+		path,
 		func(p string) (io.WriteCloser, error) { return fake, nil },
 		func() (*koiosparity.JSONReport, error) { return &koiosparity.JSONReport{Network: "preview"}, nil },
 	)

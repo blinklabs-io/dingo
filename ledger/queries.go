@@ -21,6 +21,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -328,7 +329,10 @@ func (ls *LedgerState) currentEraEnd(
 	if ti.State == hardfork.TransitionImpossible {
 		endRel := new(big.Int).Set(startRel)
 		for _, ep := range era.epochs {
-			endRel.Add(endRel, epochPicoseconds(ep.SlotLength, ep.LengthInSlots))
+			endRel.Add(
+				endRel,
+				epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
+			)
 		}
 		lastEp := era.epochs[len(era.epochs)-1]
 		endSlot, err := checkedSlotAdd(
@@ -574,7 +578,8 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 					continue
 				}
 				markStake, setStake, goStake := mark[hash], set[hash], snapshotGo[hash]
-				if omitZeroPools && markStake == 0 && setStake == 0 && goStake == 0 {
+				if omitZeroPools && markStake == 0 && setStake == 0 &&
+					goStake == 0 {
 					continue
 				}
 				poolSnapshots[key] = &olocalstatequery.PoolStakeSnapshot{
@@ -725,7 +730,8 @@ func (ls *LedgerState) totalActiveStake(
 	if !exists {
 		return 1, nil
 	}
-	total, err := ls.db.Metadata().GetTotalActiveStake(epoch, snapshotTypeMark, txn)
+	total, err := ls.db.Metadata().
+		GetTotalActiveStake(epoch, snapshotTypeMark, txn)
 	if err != nil {
 		return 0, err
 	}
@@ -831,8 +837,29 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 	}
 	var treasury, reserves int64
 	if state != nil {
-		treasury = int64(state.Treasury) //nolint:gosec // pot values fit in int64
-		reserves = int64(state.Reserves) //nolint:gosec // pot values fit in int64
+		var parseErr error
+		treasury, parseErr = strconv.ParseInt(
+			strconv.FormatUint(uint64(state.Treasury), 10),
+			10,
+			64,
+		)
+		if parseErr != nil {
+			return nil, fmt.Errorf(
+				"network state treasury exceeds signed account-state range: %w",
+				parseErr,
+			)
+		}
+		reserves, parseErr = strconv.ParseInt(
+			strconv.FormatUint(uint64(state.Reserves), 10),
+			10,
+			64,
+		)
+		if parseErr != nil {
+			return nil, fmt.Errorf(
+				"network state reserves exceeds signed account-state range: %w",
+				parseErr,
+			)
+		}
 	}
 	return []any{
 		olocalstatequery.AccountState{
@@ -860,7 +887,11 @@ func (ls *LedgerState) drepDeposit() uint64 {
 func (ls *LedgerState) drepDelegators(
 	drep *models.Drep,
 ) ([]olocalstatequery.StakeCredential, error) {
-	refs, err := ls.db.GetDRepDelegators(drep.CredentialTag, drep.Credential, nil)
+	refs, err := ls.db.GetDRepDelegators(
+		drep.CredentialTag,
+		drep.Credential,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1152,9 +1183,13 @@ func (ls *LedgerState) governanceProposalState(
 		)
 	}
 	state := olocalstatequery.GovActionState{
-		Id:                id,
-		CommitteeVotes:    make(map[olocalstatequery.StakeCredential]lcommon.Vote),
-		DRepVotes:         make(map[olocalstatequery.StakeCredential]lcommon.Vote),
+		Id: id,
+		CommitteeVotes: make(
+			map[olocalstatequery.StakeCredential]lcommon.Vote,
+		),
+		DRepVotes: make(
+			map[olocalstatequery.StakeCredential]lcommon.Vote,
+		),
 		SPOVotes:          make(map[ledger.Blake2b224]lcommon.Vote),
 		ProposalProcedure: cbor.RawMessage(procedure),
 		ProposedIn:        proposal.ProposedEpoch,

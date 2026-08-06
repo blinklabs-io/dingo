@@ -32,6 +32,44 @@ dependency bundles, preserving `CARDANO_DATABASE_PATH` and `--data-dir` as a
 shortcut for both stores. Local providers can independently override that
 fallback through their typed `dataDir` configuration.
 
+### Shared metadata SQL store
+
+The shared `database/plugin/metadata/sqlstore` package is the composition
+boundary for relational metadata. It owns
+`database/sql` pools, store-owned transactions, savepoints, readiness, and
+business orchestration. A small dialect capability handles placeholder
+rebinding, identifier quoting, parameter limits, read-only isolation, bulk
+session tuning, and planner statistics. Generated query packages remain
+internal so generated row types cannot leak into ledger or API packages.
+
+The SQLite provider is a thin factory around the pure-Go driver. It configures
+one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
+locking, query tracing, and daily `VACUUM`. The tagged PostgreSQL/MySQL
+factories configure their direct drivers, pools, advisory migration locks, and
+repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
+business behavior is implemented once in `sqlstore` and dialect translation is
+limited to SQL mechanics.
+
+The public compatibility interface is decomposing into narrow
+`LifecycleStore`, `SettingsStore`, `TransactionStore`, and `SlotRangeStore`
+capabilities so components need not inherit the full historical metadata
+surface. Concrete SQL handles are not exposed; repository tests use internal
+fixtures when schema seeding or assertions require raw SQL.
+
+Startup reserves the write connection, acquires the backend migration lock,
+rejects unversioned metadata tables (users must delete the data directory,
+including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
+advertising readiness. The initial schema release is `v1alpha1` (integer
+migration version 1); subsequent schema work advances the ordered migration
+registry. It then checks the read pool. File-backed SQLite uses a
+cross-process lock file; isolated in-memory databases use a process lock. A
+failed or interrupted phase leaves readiness false and carries the migration
+version and phase in the returned error. Backfill data and its opaque cursor
+checkpoint commit atomically in one transaction. Shutdown serializes with
+startup and passes its lifecycle context through maintenance cancellation;
+bulk-load tuning is scoped to a dedicated write connection and restored before
+the connection is released.
+
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
 ## Table of Contents
@@ -177,8 +215,8 @@ graph LR
     db_blob["database/plugin/blob"]
     db_blob_impl["database/plugin/blob/{aws,badger,gcs}"]
     db_meta["database/plugin/metadata"]
-    db_meta_impl["database/plugin/metadata/{mysql,postgres,sqlite}"]
-    db_meta_util["database/plugin/metadata/{importutil,labelcodec}"]
+    db_meta_impl["database/plugin/metadata/{sqlite,sqlstore}"]
+    db_meta_util["database/plugin/metadata/{deferred,labelcodec}"]
     db_immutable["database/immutable"]
     cardano_cfg["config/cardano"]
     ev["event"]
@@ -518,8 +556,9 @@ dingo/
 │       │   └── gcs/     # Google Cloud Storage
 │       └── metadata/    # Metadata contract and providers
 │           ├── sqlite/  # SQLite (default)
-│           ├── postgres/# PostgreSQL (tag-gated)
-│           └── mysql/   # MySQL (tag-gated)
+│           ├── sqlstore/# Shared database/sql behavior and migrations
+│           ├── postgres/# PostgreSQL adapter (tag-gated)
+│           └── mysql/   # MySQL adapter (tag-gated)
 ├── plugin/              # Generic instance-owned provider host
 ├── internal/plugins/    # Explicit compiled-in provider composition
 ├── event/               # Event bus for decoupled communication
@@ -706,8 +745,10 @@ When `Node.Run()` is called, components are initialized in this order:
  3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
  5. LedgerState creation, followed by mempool provider resolution
- 6. Bark remote archive adapter and History Expiry worker (if configured)
- 7. Database recovery, if startup detects a recoverable timestamp conflict
+ 6. Bark remote archive adapter, then database recovery if startup detects a
+    recoverable timestamp conflict
+ 7. History Expiry worker (if configured), after recovery has settled the
+    ledger tip and blob contents
  8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
     backfill + EventBus subscription (if API storage mode).
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
@@ -905,18 +946,18 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     |   (blocks, UTxOs, txs)     |  (indexes, state)|
     -------------------------------------------------
     | Plugins:                    | Plugins:          |
-    |  - Badger (default)         |  - SQLite (default)|
-    |  - AWS S3 (tag-gated)       |  - PostgreSQL (tag-gated)|
-    |  - Google Cloud Storage (tag-gated)|  - MySQL (tag-gated)|
+    |  - Badger (default)         |  - SQLite|
+    |  - AWS S3 (tag-gated)       |            |
+    |  - Google Cloud Storage (tag-gated)|     |
     -------------------------------------------------
 ```
 
 Badger and SQLite are always compiled into Dingo. The non-default blob plugins
-(`s3` and `gcs`) and metadata plugins (`postgres` and `mysql`) are compiled
-only when the `dingo_extra_plugins` build tag is enabled; project builds, CI,
-and release binaries opt into that tag, while a plain `go build ./cmd/dingo`
-omits the cloud blob SDKs and SQL driver dependencies for non-default metadata
-stores.
+(`s3` and `gcs`) and PostgreSQL/MySQL metadata providers are compiled only when
+the `dingo_extra_plugins` build tag is enabled; project builds and CI still
+compile that boundary, while a plain `go build ./cmd/dingo` omits the cloud
+SDKs and non-default SQL drivers. Every compiled metadata provider passes the
+readiness gate after its dialect-specific migration completes.
 
 ### Cross-Store Commit Ordering
 
@@ -1506,6 +1547,8 @@ For the current respun prototype, the notify vote dialect is specifically the th
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
+Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest, and `ValidateTxConway` already returned early for them. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
+
 ### Checkpoint Enforcement
 
 When a network config supplies a `CheckpointsFile` (mainnet and preview ship one), `config/cardano` verifies its `CheckpointsFileHash` and loads it into a block-number to block-hash map, exposed via `CardanoNodeConfig.Checkpoints()`. `LedgerState` caches the map at construction, and `ledgerProcessBlock` (`ledger/state.go`) rejects any inbound block whose height matches a checkpoint but whose hash differs, in every validation mode, before header or transaction validation runs. This is an envelope-validity guard against following a chain that diverges from the known-good chain at a checkpointed height; honest chains always agree with the shipped checkpoints, so the rule never rejects a canonical block. Byron epoch boundary blocks share the preceding block's number and are skipped to avoid a false mismatch.
@@ -1544,7 +1587,15 @@ successor stays open only when the resolved safe zone is zero
 (`UnsafeIndefiniteSafeZone`), the same rule `BuildSummary` applies to the
 current era. Where that live bound is finite, a header past it fails with
 `hardfork.ErrPastHorizon` before `ensureEpochForSlot` can extend the forecasted
-epoch/nonce cache. Candidate fork blockfetch begins after fork resolution has
+epoch/nonce cache. That past-horizon failure is classified as a deferred
+condition (wrapped in `errHeaderVerificationDeferred`), not a peer fault: during
+catch-up the header chain legitimately runs ahead of the applied tip and crosses
+epoch boundaries, so the block is kept queued for in-order re-verification once
+the applied tip advances into range, and the peer that served it is not
+recycled. Recycling honest peers on these benign past-horizon rejections would
+starve the peer pool the block and Leios endorser-block fetch depend on and
+deadlock catch-up at each epoch boundary. Candidate fork blockfetch begins after
+fork resolution has
 rolled the applied chain back to its common ancestor, so permitted epoch-nonce
 forecasts and the epoch-specific Mark stake snapshot used for leader
 eligibility are read from that intersection state.
@@ -1573,9 +1624,21 @@ Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
 already materialized epoch directly from the immutable epoch cache before
 forecasting. The operational slot clock is the deliberate exception to
-wall-clock forecast refusal: a near-now `TimeToSlot` call extrapolates the
-current era while a stale node catches up, but arbitrary time queries and all
-header validation remain bounded. Blockfrost epoch/era end timestamps are
+wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
+extrapolate the current era while a stale node catches up, but arbitrary time
+queries and all header validation remain bounded. The accepted window is one
+slot length plus a fixed tolerance rather than a fixed 5s, because the clock
+resolves the *next* boundary -- up to one slot length ahead -- and a fixed
+window would reject that on any era with longer slots (Byron is 20s in real
+Cardano shapes). Both directions are needed
+because the clock's tick loop converts now to a slot and then that slot back to
+a time; with only the first, the clock could not resolve the next slot boundary
+and retried every 100ms for the whole catch-up instead of ticking.
+`SlotToEpoch` is deliberately not extrapolated -- a tick's `Epoch` and
+`IsEpochStart` drive subscriber epoch-boundary work, so a fabricated epoch would
+be worse than no tick. While the applied era history does not reach the current
+slot the clock emits no tick and reports entering and leaving that state once
+each, rather than an error per slot. Blockfrost epoch/era end timestamps are
 calculated as interval endpoints from cached epoch durations rather than
 treating the exclusive end as a forecastable header slot.
 When the next-epoch nonce becomes stable before that header horizon opens,
@@ -2852,8 +2915,8 @@ bootstrap boundary escapes it), wedging the node at the tip of the following
 epoch. For an empty closing epoch (no blocks of its own) the previous carried
 nonce is passed through unchanged.
 
-In API storage mode, the SQLite metadata plugin can defer selected query indexes
-during bulk load. Deferred indexes are classified as critical or lazy in
+In API storage mode, the shared SQL metadata providers can defer selected query
+indexes during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries
 and rollback predicates, while lazy indexes cover secondary query paths. The
 metadata plugin exposes `BuildCriticalDeferredIndexes` for the critical subset
@@ -2862,7 +2925,9 @@ critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the marker is
 cleared only after the full manifest has been rebuilt. Core-mode startup still
-repairs the full manifest synchronously before serving.
+repairs the full manifest synchronously before serving. On MySQL, InnoDB
+requires indexes supporting foreign-key child columns, so the dialect leaves
+those indexes in place while deferring the remaining manifest entries.
 
 ## External Interfaces
 
@@ -3008,16 +3073,21 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
 An operator tool that validates Dingo's closed-epoch reward inputs against Koios
-reference data on preview and preprod networks. It is not part of the node
-process; it is a standalone binary built from `cmd/koios-parity/`.
+reference data on preview and preprod networks. Its original, still-supported
+form is a standalone binary built from `cmd/koios-parity/` that polls a
+separately synced copy of Dingo's metadata database. Dingo #3098 added a
+second, in-process mode — an epoch-boundary observer the node itself can
+register from its own `Run()` composition — described in its own subsection
+below; both modes share the same `internal/koiosparity` comparison logic
+(`compare.go`/`check.go`) so a mismatch means the same thing either way.
 
 **Architecture:**
 
 ```
 internal/koiosparity/      # shared library
-  cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
+  cache.go                 # SQLite cache schema + CRUD (database/sql)
   koios_client.go          # Koios v1 REST client with pagination + retry
-  dingo_db.go              # read-only GORM access to Dingo's metadata database
+  dingo_db.go              # read-only database/sql access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
   check.go                 # parity check orchestration (pool-level comparison)
@@ -3286,6 +3356,169 @@ retried on the next tick instead of being cached as permanently skipped. A
 retrying it every tick would not change the outcome.
 
 **Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
+
+#### In-process epoch-boundary observer (dingo #3098)
+
+The standalone CLI above polls a metadata database that was populated by a
+*separate* Dingo process — real, but structurally a second, independently
+synced copy of the truth. Dingo #3098 adds a mode where the node validates
+its own committed reward state as it advances, with no export step and no
+second sync:
+
+- **`RewardParitySource`** (`internal/koiosparity/source.go`) is the
+  interface `check.go`'s comparison functions (`checkEpoch`/`CheckEpoch`)
+  consume instead of a concrete `*DingoDB`. `DingoDB` (the standalone CLI's
+  read-only `database/sql` connection to a separate database file) and
+  `DatabaseSource` (below) both implement it, so the comparison logic itself
+  is identical regardless of which one backs a given run.
+- **`DatabaseSource`** (same file) is the narrow, in-process adapter: it
+  wraps an already-open, live `*database.Database` and reads
+  `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
+  `reward_account_output` through the existing typed `MetadataStore`
+  accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
+  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`) inside a fresh read-only
+  transaction per call — the same tables `ledger/snapshot/rotation.go`
+  already populates at every epoch boundary, with no new table and no
+  metadata export. `GetRewardAccountOutputs` is exposed on the interface now
+  (unused by any comparison yet) so #3097's per-account exact-parity check
+  can be wired in later without revisiting this abstraction.
+  - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
+    `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
+    for only a rolling 4-epoch window in core storage mode (API mode retains
+    `reward_account_output` without bound instead); `reward_pool_input`/
+    `reward_pool_output` are not pruned by that path at all. `DatabaseSource`
+    does not race this in any special, same-transaction way — it just reads
+    whatever is currently committed. What actually satisfies "available
+    before cleanup" is that the observer (below) processes a newly closed
+    epoch promptly after its own event fires, many epochs before that
+    epoch's rows would age out of the window; a read made long after they
+    have aged out comes back as absent (`nil`/`*Present == false`), the same
+    signal already used for "not yet computed" — never an error, and never
+    to be confused with a same-transaction guarantee.
+- **`Observer`** (`internal/koiosparity/observer.go`) subscribes
+  `HandleEpochTransitionEvent` to `event.EpochTransitionEventType` on the
+  node's own `event.EventBus` — the same bus and event every other component
+  uses (`ledger/state.go` publishes it, after the epoch-boundary write
+  transaction has committed and the ledger lock (`ls.Unlock()`) has already
+  been released — see the "authoritative epoch-boundary snapshot capture"
+  ordering in `node.go`). The handler itself never does Koios/database I/O:
+  it only records the closed epoch (`event.EpochTransitionEvent
+  .PreviousEpoch`) into a pending set and wakes a background goroutine,
+  which does the actual fetch+check work. This keeps EventBus dispatch to
+  this subscriber fast regardless of how long a Koios round trip takes, and
+  guarantees network I/O only ever starts once the transaction that produced
+  the event has already committed — never while holding the ledger write
+  transaction or lock.
+  - **Backlog and checkpointing.** `Start` seeds the pending set from every
+    epoch the cache (`cache.db`) has not yet fetched/checked, up to
+    `Source.GetLatestEpoch() - 1` (a floor derived from Dingo's own current
+    epoch number, not an exact koios-epoch bound — good enough for a
+    one-time historical backfill on first attach, since anything it
+    undershoots by a small margin is still covered by the live event
+    subscription going forward). No separate checkpoint file exists: the
+    cache's own persisted `check_epoch_status`/`koios_epoch_info` rows are
+    the sole resumable state, matching the issue's "persist only the minimal
+    resumable checkpoint state actually needed."
+  - **Rapid transitions, replay, and rollback.** Pending epochs are a *set*,
+    not a single high-water-mark counter, so a burst of events collapses
+    duplicates (dingo's own block-based and slot-clock-based epoch.transition
+    emissions for the same boundary) into one entry, while distinct epochs
+    queued in the same tick are all still processed, in order, none skipped.
+    Critically, `CheckEpoch` is always invoked unconditionally for a
+    re-signaled epoch (bypassing `GetEpochsNeedingCheck`'s Koios-freshness
+    gate, which is about the *reference* side going stale, not the Dingo
+    side) — so a rollback that replays an epoch's boundary with corrected
+    committed state and re-emits its `event.EpochTransitionEvent` gets
+    re-validated against that corrected state rather than trusting a stale
+    prior `PASS`.
+  - **Strict mode** (`ObserverConfig.Strict`, the default via
+    `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to `n.cancel`
+    — exactly once, on the first Koios/tool error or exact parity mismatch,
+    and stops processing the rest of the current batch; this is what makes a
+    mismatch "stop the node" rather than "log and continue as ordinary
+    operation." Non-strict mode (available, not the default) records the
+    same failure in the cache and keeps validating subsequent epochs — an
+    explicit opt-in for advisory/observability-only use.
+  - **Fetch retry.** A single epoch's Koios fetch can fail transiently
+    because Koios's own backend has not finished closing that epoch out yet
+    (`fetchEpoch`'s `end_time==0` rejection) — expected mainly near live
+    chain tip. `fetchIfNeeded` retries this (and any other non-permanent
+    error) a bounded number of times with a fixed delay before giving up; a
+    permanent error (`ErrKoiosPermanent`) is never retried. The pool universe
+    (`GetAllHistoricalPoolIDs`/`GetPoolFirstActiveEpochs`, via
+    `resolvePoolUniverse`) is resolved at most once across that whole retry
+    loop and reused via `FetchEpochWithPools`, rather than re-run on every
+    attempt the way the simpler `FetchEpochWithClient` primitive does — a
+    bounded retry loop hammering both full Koios scans on every attempt would
+    burn meaningfully more of the daily rate-limit/quota budget than the
+    per-epoch fetch itself does.
+- **Composition** (`node.go`, `node_koiosparity.go`, `node_shutdown.go`,
+  `node_lifecycle.go`): `Node.Run()` configures `n.snapshotMgr` and installs
+  both epoch-boundary reward-snapshot hooks (`SetEpochBoundarySnapshotStakeHook`/
+  `SetEpochBoundarySnapshotHook`) first, then builds a `DatabaseSource` from
+  its own `n.db`, constructs the `Observer`, and subscribes it to
+  `n.eventBus` — all of this before `n.ledgerState.Start` (whose slot-clock/
+  block-processing goroutines are what can first publish
+  `event.EpochTransitionEvent`). This ordering — hooks configured → observer
+  subscribed → ledger started — matters: an epoch boundary reached before the
+  snapshot hooks exist would fall back to the event-driven capture only, and
+  the observer would validate an epoch whose reward rows the snapshot manager
+  never got a chance to commit via those hooks, a false parity failure that
+  can trip strict mode. `Run()`'s own `started` stack registers
+  `Observer.Stop` only for the startup-failure/panic rollback path (unwound
+  if a later step in `Run()` fails); the path every real shutdown actually
+  takes — `Node.Stop()`, SIGINT/SIGTERM, and `n.cancel()` (including the
+  observer's own strict-mode `FatalFunc`) — goes through
+  `node_shutdown.go`'s `shutdown()`, which stops the observer in phase 1,
+  same as `dbLifecycleMgr`/`offchainMetadataFetcher`, and unconditionally
+  before phase 3 closes `n.db`/`n.pluginHost` — the store `DatabaseSource`
+  reads from. `Observer.Stop` itself always blocks until its background
+  goroutine has actually exited (not just been signaled) before releasing
+  the Koios cache, so this ordering is race-free even under a slow in-flight
+  Koios/DB call. `Observer.Stop` is also idempotent — it signals its
+  background goroutine via a `context.CancelFunc` (safe to invoke more than
+  once) rather than closing an owned channel — because a startup failure that
+  occurs after the observer has started but before `Run()` finishes (e.g.
+  `n.ledgerState.Start` failing later in the same `Run()`) makes *both* the
+  `started`-stack cleanup path and, if the caller also calls `Node.Stop()` on
+  the same instance, `shutdown()`'s path invoke `Observer.Stop` on the same
+  `Observer`; without idempotency the second call would panic closing an
+  already-closed channel. All of this is gated entirely on
+  `KoiosParityConfig.Enabled`
+  (`dingo.yaml`'s `koiosParity:` section /
+  `DINGO_KOIOS_PARITY_*`/`--koios-parity-*`), default `false`. No Koios HTTP
+  client, node-lifecycle control, or EventBus subscription lives in
+  `ledger/`/`database/` — it is all constructed and wired from this
+  composition boundary, the same place every other cross-component adapter
+  in this repo (`internal/dblifecycle`, `internal/historyexpiry`,
+  `internal/offchainmetadata`) is. This is a one-off validation aid, not a
+  permanent Dingo subsystem — SQLite (or whichever metadata backend the node
+  itself runs) remains the only backend involved, since `DatabaseSource`
+  reads the live node's own store rather than opening a second connection.
+  - **Live database Restore/Truncate.** `node_lifecycle.go`'s
+    `quiesceForLiveLifecycleOp` stops the `Observer` (blocking until its
+    background goroutine has exited, same as `shutdown()`) and unsubscribes
+    its `event.EpochTransitionEventType` handler (`UnsubscribeAndWait`,
+    tracked via `n.koiosParitySubId`) before the in-flight `Restore`/
+    `Truncate` closes `n.db` out from under it — otherwise the observer would
+    keep running against a stale, soon-to-be-closed database, and its
+    subscription would leak on the never-recreated `n.eventBus`.
+    `reinitializeBackgroundManagers` rebuilds the snapshot-manager hooks,
+    then (if `KoiosParityConfig.Enabled`) calls the same
+    `startKoiosParityObserver` helper `Run()` uses to recreate the `Observer`
+    against the fresh `n.db` and resubscribe it, before restarting
+    `n.ledgerState` — mirroring `Run()`'s own hooks-then-observer-then-ledger
+    ordering above so a live rebuild cannot reintroduce the same race.
+- **Out of scope for #3098** (left for #3097/#3099, and explicitly not
+  blocked by this design): per-account exact parity (`RewardParitySource`
+  already exposes `GetRewardAccountOutputs` for this) and chunked/paginated/
+  resumable large-account Koios fetches. `Observer.fetchIfNeeded` avoids
+  repeating the pool-universe scan across its own bounded retry loop (see
+  above), but `FetchEpochWithClient`/`FetchEpochWithPools` still resolve or
+  reuse that universe only within a single `fetchIfNeeded` call, not across
+  distinct epochs or fetch runs — a deliberate simplicity trade-off for this
+  one-off validation use case, not a resumability guarantee; #3099 owns
+  making that path chunked/paginated/resumable across epochs.
 
 ### Bark (`bark/`)
 
@@ -3899,10 +4132,10 @@ rows (including `RewardAccountOutput`) above the rollback slot in every mode.
 
 ### Reward Metadata State
 
-The metadata plugins persist ADA pots, reward snapshot metadata, per-pool
-inputs, and a live per-credential stake aggregate. SQLite, MySQL, and
-PostgreSQL share reward-state query behavior through
-`database/plugin/metadata/internal/`.
+The shared metadata store persists ADA pots, reward snapshot metadata,
+per-pool inputs, and a live per-credential stake aggregate. Reward-state query
+behavior lives in `database/plugin/metadata/sqlstore` and is exercised through
+the SQLite contract suite.
 
 `RewardLiveStake` supplies the credential-level input bundle for reward
 snapshots; the leader-election Mark snapshot remains on its independent,
@@ -4283,8 +4516,8 @@ row/unique-key lock remains held until commit. This lets the fallback persist
 those rows without leaving a durable `reward_snapshot` row that falsely implies
 reward inputs exist. Because the marker or temporary guard is the first row both
 paths write, they acquire the `reward_snapshot` key/row lock in the same order,
-which keeps a concurrent authoritative-vs-fallback capture both race-free and
-deadlock-free on MySQL/Postgres; SQLite is already serial.
+which keeps a concurrent authoritative-vs-fallback capture race-free; SQLite
+serializes writers.
 `handleEpochTransition`'s pre-check that skips the fallback when an
 authoritative row exists is a best-effort optimization — the transactional
 marker/guard claim, not that read, is what closes the race.
@@ -4294,8 +4527,7 @@ consensus-critical epoch-boundary code (it changes the Mark `PoolStakeSnapshot`
 that leader election reads, and the exact SNAP-point placement affects
 Shelley-era replay once the reward-calculation consumer lands). It must be run
 through the DevNet harness (`internal/test/devnet/`) against cardano-node before
-merge; unit and conformance tests do not exercise the concurrent MySQL/Postgres
-capture paths.
+merge; unit and conformance tests do not exercise full multi-node timing.
 
 ### Epoch Boundary State Transitions
 

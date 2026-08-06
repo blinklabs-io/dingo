@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -24,8 +25,8 @@ import (
 	"path/filepath"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
-	"gorm.io/gorm"
 )
 
 // runVacuumInto executes "VACUUM INTO" against dstPath, indirected through
@@ -34,34 +35,25 @@ import (
 // behind first -- instead of racing a real VACUUM's completion against a
 // timed context cancellation (scheduler/storage-speed dependent even when
 // it happens to pass repeatedly).
-var runVacuumInto = func(ctx context.Context, db *gorm.DB, dstPath string) error {
-	return db.WithContext(ctx).Exec("VACUUM INTO ?", dstPath).Error
+var runVacuumInto = func(ctx context.Context, db *sql.DB, dstPath string) error {
+	_, err := db.ExecContext(ctx, "VACUUM INTO ?", dstPath)
+	return err
 }
 
 // BackupTo writes a standalone, defragmented copy of the store's current
 // contents to dstPath (which must not already exist) using SQLite's
 // `VACUUM INTO` statement. This takes only a brief read lock under WAL
 // mode and does not require stopping concurrent writers.
-func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) error {
-	if d.dataDir == "" {
+func backupSQLite(
+	ctx context.Context,
+	databasePath string,
+	dataDir string,
+	dstPath string,
+) error {
+	if dataDir == "" {
 		return errors.New(
 			"sqlite backup: in-memory database has nothing to back up",
 		)
-	}
-	// d.db is nil until Start() has run, and d.DB() returns it unchecked --
-	// calling BackupTo against a constructed-but-never-started (or already
-	// Close()'d) store would otherwise hand runVacuumInto a nil *gorm.DB
-	// and panic on the first method call against it, rather than the
-	// caller getting a clean error back. Mirrors the same open-state
-	// validation the Badger blob store's Backup does (see
-	// database/plugin/blob/badger/backup.go), using this store's own
-	// closed-flag pattern (see runVacuum above) since gorm.DB has no
-	// IsClosed method of its own.
-	d.timerMutex.Lock()
-	closed := d.closed
-	d.timerMutex.Unlock()
-	if d.db == nil || closed {
-		return errors.New("sqlite backup: store is not open")
 	}
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf(
@@ -107,7 +99,12 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	tmpPath := filepath.Join(tmpDir, filepath.Base(dstPath))
 
-	if err := runVacuumInto(ctx, d.DB(), tmpPath); err != nil {
+	backupDB, err := openSQLiteBackupDB(ctx, databasePath)
+	if err != nil {
+		return fmt.Errorf("sqlite backup: open source: %w", err)
+	}
+	defer backupDB.Close() //nolint:errcheck
+	if err := runVacuumInto(ctx, backupDB, tmpPath); err != nil {
 		return fmt.Errorf("sqlite backup: VACUUM INTO %q: %w", dstPath, err)
 	}
 	if err := os.Link(tmpPath, dstPath); err != nil {
@@ -124,17 +121,45 @@ func (d *MetadataStoreSqlite) BackupTo(ctx context.Context, dstPath string) erro
 	return fsyncdir.Sync(dstDir)
 }
 
+// openSQLiteBackupDB opens a short-lived connection for VACUUM INTO. The
+// provider's write pool is deliberately single-connection; borrowing it can
+// deadlock a live snapshot when another metadata operation still owns that
+// connection. A dedicated connection preserves SQLite's WAL snapshot
+// semantics without contending with the pool's connection accounting.
+func openSQLiteBackupDB(
+	ctx context.Context,
+	databasePath string,
+) (*sql.DB, error) {
+	dsn := sqliteFileURI(databasePath) +
+		"?_txlock=deferred" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=busy_timeout(30000)" +
+		"&_pragma=foreign_keys(1)"
+	db, err := sqlstore.OpenDB("sqlite", dsn, "sqlite")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
 // RestoreFrom replaces this store's on-disk database file with the backup
 // at srcPath (produced by BackupTo). It must be called before the store
 // has been started (Start), against a data directory that does not
 // already contain a metadata database file.
-func (d *MetadataStoreSqlite) RestoreFrom(ctx context.Context, srcPath string) error {
-	if d.dataDir == "" {
+func restoreSQLite(ctx context.Context, dataDir, srcPath string) error {
+	if dataDir == "" {
 		return errors.New(
 			"sqlite restore: cannot restore into an in-memory database",
 		)
 	}
-	dstPath := filepath.Join(d.dataDir, "metadata.sqlite")
+	dstPath := filepath.Join(dataDir, "metadata.sqlite")
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf(
 			"sqlite restore: destination %q already exists",
@@ -143,7 +168,7 @@ func (d *MetadataStoreSqlite) RestoreFrom(ctx context.Context, srcPath string) e
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("sqlite restore: stat %q: %w", dstPath, err)
 	}
-	if err := createDirDurable(d.dataDir); err != nil {
+	if err := createDirDurable(dataDir); err != nil {
 		return fmt.Errorf(
 			"sqlite restore: create data directory: %w",
 			err,
@@ -223,7 +248,11 @@ func copyFile(ctx context.Context, srcPath, dstPath string) error {
 // bytes.Reader in tests -- rather than a real filesystem copy racing a
 // concurrent cancellation's wall-clock timing, which a fast/cached copy
 // can simply outrun before the cancellation ever lands.
-func copyReaderToFile(ctx context.Context, src io.Reader, dstPath string) (retErr error) {
+func copyReaderToFile(
+	ctx context.Context,
+	src io.Reader,
+	dstPath string,
+) (retErr error) {
 	dst, err := os.OpenFile(
 		dstPath,
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL,

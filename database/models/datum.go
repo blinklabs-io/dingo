@@ -15,24 +15,16 @@
 package models
 
 type Datum struct {
-	Hash      []byte `gorm:"index;not null;unique;size:32"`
-	RawDatum  []byte `gorm:"not null"`
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"index;not null"`
-}
-
-func (Datum) TableName() string {
-	return "datum"
+	Hash      []byte
+	RawDatum  []byte
+	ID        uint
+	AddedSlot uint64
 }
 
 // PlutusData represents a Plutus data value in the witness set
 type PlutusData struct {
-	Transaction   *Transaction `gorm:"foreignKey:TransactionID"`
+	Transaction   *Transaction
 	Data          []byte
-	ID            uint `gorm:"primaryKey"`
-	TransactionID uint `gorm:"index"`
-}
-
-func (PlutusData) TableName() string {
-	return "plutus_data"
+	ID            uint
+	TransactionID uint
 }

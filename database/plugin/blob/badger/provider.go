@@ -91,16 +91,26 @@ func RegisterProvider(host *hostplugin.Host) error {
 				WithBlockCacheSize(blockCacheSize),
 				WithIndexCacheSize(indexCacheSize),
 				// #nosec G115 -- values are capped to the destination maximum.
-				WithValueLogFileSize(int64(min(cfg.ValueLogFileSize, uint64(math.MaxInt64)))),
+				WithValueLogFileSize(
+					int64(min(cfg.ValueLogFileSize, uint64(math.MaxInt64))),
+				),
 				// #nosec G115 -- values are capped to the destination maximum.
-				WithMemTableSize(int64(min(cfg.MemTableSize, uint64(math.MaxInt64)))),
+				WithMemTableSize(
+					int64(min(cfg.MemTableSize, uint64(math.MaxInt64))),
+				),
 				// #nosec G115 -- values are capped to the destination maximum.
-				WithValueThreshold(int64(min(cfg.ValueThreshold, uint64(math.MaxInt64)))),
-				WithCompactBlockMetadata(useCompactBlockMetadata(deps.RunMode, deps.StorageMode)),
+				WithValueThreshold(
+					int64(min(cfg.ValueThreshold, uint64(math.MaxInt64))),
+				),
+				WithCompactBlockMetadata(
+					useCompactBlockMetadata(deps.RunMode, deps.StorageMode),
+				),
 				WithGc(gcEnabled),
 				WithCompressionEnabled(compression),
 				// #nosec G115 -- value is capped to the destination maximum.
-				WithCompressionLevel(int(min(cfg.CompressionLevel, uint64(math.MaxInt)))),
+				WithCompressionLevel(
+					int(min(cfg.CompressionLevel, uint64(math.MaxInt))),
+				),
 				WithDeferOpen(),
 			)
 			if err != nil {
