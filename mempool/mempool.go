@@ -937,13 +937,22 @@ var errRevalidationJournalOverflow = errors.New(
 	"mempool: revalidation mutation journal overflow",
 )
 
-// errRevalidationCatchup reports repeated races against the live pool during
-// finalisation: each race consumes a round without extending the budget, so
-// enough consecutive ones exhaust it. Sustained mutation pressure does not
-// reach here, because the budget grows with the backlog; that path ends in
-// errRevalidationJournalOverflow instead.
+// errRevalidationCatchup means the catch-up loop ran out of rounds. It is a
+// defensive guard that no current path reaches, kept so that exhausting the
+// budget degrades into a retryable no-op with the live pool intact rather than
+// falling through to undefined behaviour.
+//
+// It is unreachable because recordMutationLocked bumps mutationSeq and appends
+// to the journal together whenever the journal is active and under cap. So the
+// one round-consuming path that does not itself enlarge the budget, the
+// finalise race at mutationSeq != liveSeq, implies a journal entry that makes
+// the next round observe pending > 0, which extends the budget past the current
+// round. The remaining case, a mutation that bumps the sequence without
+// appending because the journal is full, sets journalOverflow, and the loop
+// tests that before anything else and returns
+// errRevalidationJournalOverflow.
 var errRevalidationCatchup = errors.New(
-	"mempool: revalidation lost repeated races with the live pool",
+	"mempool: revalidation exhausted its catch-up budget",
 )
 
 // rebuildOverlay re-validates all pending TXs against a stable ledger snapshot
@@ -966,8 +975,8 @@ func (m *Mempool) rebuildOverlay() error {
 			continue
 		}
 		if errors.Is(err, errRevalidationCatchup) {
-			// The live pool is unchanged. Revalidation kept losing the
-			// finalisation race; a later chain update retries it.
+			// Defensive: no current path produces this. The live pool is
+			// unchanged either way, and a later chain update retries.
 			return nil
 		}
 		if err != nil {
@@ -1208,7 +1217,8 @@ func mutationWindow(
 // pending > 0 the result always exceeds round, by at least
 // maxRevalidationCatchupRounds. Termination therefore comes from sampling an
 // empty journal, from the journal cap, or from a replay error, not from this
-// number. The journal cap is the real bound on a sustained arrival rate.
+// number. The journal cap is the real bound on a sustained arrival rate, and
+// errRevalidationCatchup is consequently unreachable; see its declaration.
 func catchupBudget(round, pending, deltaCap int) int {
 	if deltaCap < 1 {
 		deltaCap = 1
