@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package utxorpc implements Dingo's UTxO RPC server, serving the
-// utxorpc.v1alpha.cardano gRPC API defined by the UTxO RPC spec.
+// utxorpc.v1alpha and utxorpc.v1beta gRPC APIs defined by the UTxO RPC spec.
 //
 // The Utxorpc type is a gRPC server that translates incoming requests
 // into queries against the ledger and mempool packages and streams

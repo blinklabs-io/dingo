@@ -74,7 +74,8 @@ func main() {
 		if len(signingKeys) > 0 {
 			keysByHash := make(map[string]*txpump.UTxOKey, len(signingKeys))
 			for _, signingKey := range signingKeys {
-				expectedHash := common.Blake2b256Hash(signingKey.Address).String()
+				expectedHash := common.Blake2b256Hash(signingKey.Address).
+					String()
 				keysByHash[expectedHash] = signingKey
 			}
 			for i, u := range utxos {

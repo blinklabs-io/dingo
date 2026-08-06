@@ -54,7 +54,10 @@ func TestCaptureEpochBoundarySnapshotMarksAuthoritative(t *testing.T) {
 	}
 
 	txn := db.Transaction(true)
-	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(context.Background(), txn, evt))
+	require.NoError(
+		t,
+		mgr.CaptureEpochBoundarySnapshot(context.Background(), txn, evt),
+	)
 	require.NoError(t, txn.Commit())
 
 	snap, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
@@ -121,7 +124,10 @@ func TestFallbackCaptureReplacesProvisionalFallback(t *testing.T) {
 		ProtocolVersion: 8,
 		SnapshotSlot:    431999,
 	}
-	require.NoError(t, mgr.captureMarkSnapshot(context.Background(), provisional))
+	require.NoError(
+		t,
+		mgr.captureMarkSnapshot(context.Background(), provisional),
+	)
 	first, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, first)

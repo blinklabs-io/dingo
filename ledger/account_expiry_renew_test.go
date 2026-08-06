@@ -44,7 +44,11 @@ func renewTestCredential(tag uint, b byte) lcommon.Credential {
 
 // renewTestRewardAddress builds a reward (stake) address for the credential hash
 // filled with b. header 0xE1 => key-hash reward address; 0xF1 => script-hash.
-func renewTestRewardAddress(t *testing.T, header byte, b byte) *lcommon.Address {
+func renewTestRewardAddress(
+	t *testing.T,
+	header byte,
+	b byte,
+) *lcommon.Address {
 	t.Helper()
 	addr, err := lcommon.NewAddressFromBytes(
 		append([]byte{header}, renewTestCred(b)...),
@@ -147,7 +151,9 @@ func TestWitnessedRewardCredentials(t *testing.T) {
 			build: func(t *testing.T, tx *mockledger.MockTransaction) {
 				tx.WithCertificates(&lcommon.VoteDelegationCertificate{
 					StakeCredential: stakeKey,
-					Drep:            lcommon.Drep{Type: lcommon.DrepTypeAbstain},
+					Drep: lcommon.Drep{
+						Type: lcommon.DrepTypeAbstain,
+					},
 				})
 			},
 			wantRefs: []models.StakeCredentialRef{
@@ -160,7 +166,9 @@ func TestWitnessedRewardCredentials(t *testing.T) {
 				tx.WithCertificates(&lcommon.StakeVoteDelegationCertificate{
 					StakeCredential: stakeKey,
 					PoolKeyHash:     poolHash,
-					Drep:            lcommon.Drep{Type: lcommon.DrepTypeAbstain},
+					Drep: lcommon.Drep{
+						Type: lcommon.DrepTypeAbstain,
+					},
 				})
 			},
 			wantRefs: []models.StakeCredentialRef{
@@ -192,10 +200,12 @@ func TestWitnessedRewardCredentials(t *testing.T) {
 		{
 			name: "stake registration+delegation certificate",
 			build: func(t *testing.T, tx *mockledger.MockTransaction) {
-				tx.WithCertificates(&lcommon.StakeRegistrationDelegationCertificate{
-					StakeCredential: stakeKey,
-					PoolKeyHash:     poolHash,
-				})
+				tx.WithCertificates(
+					&lcommon.StakeRegistrationDelegationCertificate{
+						StakeCredential: stakeKey,
+						PoolKeyHash:     poolHash,
+					},
+				)
 			},
 			wantRefs: []models.StakeCredentialRef{
 				models.NewStakeCredentialRef(0, renewTestCred(0x01)),
@@ -204,11 +214,15 @@ func TestWitnessedRewardCredentials(t *testing.T) {
 		{
 			name: "stake vote registration+delegation certificate",
 			build: func(t *testing.T, tx *mockledger.MockTransaction) {
-				tx.WithCertificates(&lcommon.StakeVoteRegistrationDelegationCertificate{
-					StakeCredential: stakeKey,
-					PoolKeyHash:     poolHash,
-					Drep:            lcommon.Drep{Type: lcommon.DrepTypeAbstain},
-				})
+				tx.WithCertificates(
+					&lcommon.StakeVoteRegistrationDelegationCertificate{
+						StakeCredential: stakeKey,
+						PoolKeyHash:     poolHash,
+						Drep: lcommon.Drep{
+							Type: lcommon.DrepTypeAbstain,
+						},
+					},
+				)
 			},
 			wantRefs: []models.StakeCredentialRef{
 				models.NewStakeCredentialRef(0, renewTestCred(0x01)),
@@ -217,10 +231,14 @@ func TestWitnessedRewardCredentials(t *testing.T) {
 		{
 			name: "vote registration+delegation certificate",
 			build: func(t *testing.T, tx *mockledger.MockTransaction) {
-				tx.WithCertificates(&lcommon.VoteRegistrationDelegationCertificate{
-					StakeCredential: stakeKey,
-					Drep:            lcommon.Drep{Type: lcommon.DrepTypeAbstain},
-				})
+				tx.WithCertificates(
+					&lcommon.VoteRegistrationDelegationCertificate{
+						StakeCredential: stakeKey,
+						Drep: lcommon.Drep{
+							Type: lcommon.DrepTypeAbstain,
+						},
+					},
+				)
 			},
 			wantRefs: []models.StakeCredentialRef{
 				models.NewStakeCredentialRef(0, renewTestCred(0x01)),
@@ -246,7 +264,9 @@ func TestWitnessedRewardCredentials(t *testing.T) {
 			name: "duplicate credentials are collapsed",
 			build: func(t *testing.T, tx *mockledger.MockTransaction) {
 				tx.WithCertificates(
-					&lcommon.StakeRegistrationCertificate{StakeCredential: stakeKey},
+					&lcommon.StakeRegistrationCertificate{
+						StakeCredential: stakeKey,
+					},
 					&lcommon.StakeDelegationCertificate{
 						StakeCredential: &stakeKey,
 						PoolKeyHash:     poolHash,
@@ -307,7 +327,9 @@ func newRenewTestLedger(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
-			Logger:                     slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			DelegatorInactivityEnabled: enabled,
 			DelegatorInactivity:        inactivity,
 		},

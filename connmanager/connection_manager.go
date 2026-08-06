@@ -520,6 +520,69 @@ func (c *ConnectionManager) stopListeners() {
 	}
 }
 
+// ResolvedListeners returns c's listener configs with Listener cleared and
+// ListenNetwork/ListenAddress set to the concrete address each one is
+// actually bound to. Must be called after a successful Start.
+//
+// This is what makes a caller-supplied net.Listener (e.g. a test harness
+// binding an OS-assigned loopback port up front, to hand a peer its exact
+// address with no discovery race) safe to carry across a live
+// Restore/Truncate's quiesce-then-reinit cycle: Stop closes every
+// listener it owns unconditionally, including one it didn't create, so
+// the original object can never be reused once closed. But the concrete
+// network+address it resolved to is stable and can be redialed to
+// produce a fresh listener -- the same thing that already happens
+// naturally for an address-configured (Listener == nil) entry, since
+// startListener only ever binds fresh when Listener is nil. Without this,
+// a caller-supplied listener stayed non-nil in the node's stored config
+// forever, so every reinit kept trying to reuse the exact same
+// now-permanently-closed object, and the accept loop launched on it
+// exited immediately on net.ErrClosed with the reinit still reporting
+// success -- silently leaving that listener deaf to new inbound
+// connections until the whole process restarted.
+func (c *ConnectionManager) ResolvedListeners() []ListenerConfig {
+	c.listenersMutex.Lock()
+	defer c.listenersMutex.Unlock()
+	resolved := make([]ListenerConfig, len(c.config.Listeners))
+	for i, cfg := range c.config.Listeners {
+		// Only rewrite an entry that came in with a caller-supplied
+		// Listener -- an already address-configured entry (Listener nil)
+		// already rebinds correctly on its own via ListenNetwork/
+		// ListenAddress and needs no help.
+		if cfg.Listener != nil && i < len(c.listeners) &&
+			c.listeners[i] != nil {
+			addr := c.listeners[i].Addr()
+			cfg.Listener = nil
+			cfg.ListenAddress = addr.String()
+			// Preserve a "unix" ListenNetwork instead of deriving it from
+			// addr.Network(): "unix" doubles as the cross-platform
+			// sentinel startListener uses to dispatch to
+			// createPipeListener on Windows for a caller-supplied
+			// named-pipe listener. That listener's underlying
+			// winio.PipeAddr.Network() reports "pipe", not "unix" -- so
+			// naively overwriting ListenNetwork here would corrupt the
+			// sentinel, and the next reinit's
+			// `runtime.GOOS == "windows" && l.ListenNetwork == "unix"`
+			// check would fail, falling through to a plain net.Listen
+			// with network "pipe", which is not a network Go's net
+			// package knows how to dial/listen and would fail the
+			// rebind. On real unix-domain sockets (any platform),
+			// addr.Network() already reports "unix", so preserving it
+			// here is a no-op.
+			if cfg.ListenNetwork != "unix" {
+				cfg.ListenNetwork = addr.Network()
+			}
+			// The rebind happens moments after this exact address's
+			// previous listener was closed; SO_REUSEADDR maximizes the
+			// chance that succeeds immediately rather than racing the
+			// OS's own socket-teardown bookkeeping.
+			cfg.ReuseAddress = true
+		}
+		resolved[i] = cfg
+	}
+	return resolved
+}
+
 func (c *ConnectionManager) AddConnection(
 	conn *ouroboros.Connection,
 	isInbound bool,

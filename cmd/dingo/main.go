@@ -206,6 +206,11 @@ func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
 			return config.RunModeSync
 		}
 		return config.RunModeMithril
+	case "database":
+		// `dingo database snapshot|restore|truncate` are offline
+		// maintenance commands against the local data directory; none of
+		// them start any listener.
+		return config.RunModeDatabase
 	default:
 		// No other non-informational top-level command exists today;
 		// fall back to full serving validation so a future command's
@@ -283,8 +288,16 @@ func main() {
 	// Initialize CPU profiling (starts immediately, stops on exit)
 	if cpuprofile != "" {
 		cpuprofile = filepath.Clean(cpuprofile)
-		fmt.Fprintf(os.Stderr, "Starting CPU profiling to %q\n", cpuprofile)         //nolint:gosec // stderr output, no XSS risk
-		f, err := os.OpenFile(cpuprofile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // user-specified profiling output path
+		fmt.Fprintf(
+			os.Stderr,
+			"Starting CPU profiling to %q\n",
+			cpuprofile,
+		) //nolint:gosec // stderr output, no XSS risk
+		f, err := os.OpenFile(
+			cpuprofile,
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+			0o600,
+		) //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
 			os.Exit(1)
@@ -404,8 +417,18 @@ Database Workers:
 		// is resolved only now that the merged configuration is final and
 		// valid — resolving it earlier could reject a YAML/env value a
 		// CLI flag has since repaired.
-		if _, err := config.LoadTopologyConfig(); err != nil {
-			return fmt.Errorf("loading topology: %w", err)
+		//
+		// `dingo database snapshot|restore|truncate` never opens a peer
+		// connection (see RunModeDatabase's doc comment) and its --network
+		// is only used to validate the local data directory's own recorded
+		// settings, not to look up bootstrap peers — resolving topology for
+		// it would spuriously fail for any network without a bundled
+		// static topology.json (e.g. devnet, or any custom network name),
+		// even though the command never uses it.
+		if effectiveRunMode(cmd, cfg) != config.RunModeDatabase {
+			if _, err := config.LoadTopologyConfig(); err != nil {
+				return fmt.Errorf("loading topology: %w", err)
+			}
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
@@ -419,6 +442,7 @@ Database Workers:
 	rootCmd.AddCommand(versionCommand())
 	rootCmd.AddCommand(mithrilCommand())
 	rootCmd.AddCommand(syncCommand())
+	rootCmd.AddCommand(databaseCommand())
 
 	// Execute cobra command
 	exitCode := 0
@@ -429,7 +453,11 @@ Database Workers:
 	// Finalize memory profiling before exit
 	if memprofile != "" {
 		memprofile = filepath.Clean(memprofile)
-		f, err := os.OpenFile(memprofile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // user-specified profiling output path
+		f, err := os.OpenFile(
+			memprofile,
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+			0o600,
+		) //nolint:gosec // user-specified profiling output path
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 		} else {

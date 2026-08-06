@@ -214,6 +214,14 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "bark on distinct bind address may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.1"
+				c.BarkHost = "127.0.0.2"
+				c.BarkPort = c.MetricsPort
+			},
+		},
+		{
 			// A wildcard bind address contends with every specific one.
 			name: "wildcard bind address collides with specific",
 			modify: func(c *Config) {
@@ -526,7 +534,11 @@ func TestValidateDelegatorInactivity(t *testing.T) {
 		inactivity uint64
 		wantErr    string
 	}{
-		{name: "disabled ignores out-of-range value", enabled: false, inactivity: 10_001},
+		{
+			name:       "disabled ignores out-of-range value",
+			enabled:    false,
+			inactivity: 10_001,
+		},
 		{name: "enabled at minimum", enabled: true, inactivity: 1},
 		{name: "enabled within range", enabled: true, inactivity: 90},
 		{name: "enabled at maximum", enabled: true, inactivity: 10_000},
@@ -555,6 +567,89 @@ func TestValidateDelegatorInactivity(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateDatabaseLifecycleSnapshotCloudDestination guards a config
+// that reaches Manager.Start with a malformed SnapshotCloudDestination:
+// without this check, the only place a bad URI ever surfaced was a
+// logged-and-swallowed failure inside handleEpochTransitionEvent, up to a
+// full epoch after the node had already started running with it.
+func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
+	tests := []struct {
+		name    string
+		dest    string
+		wantErr string
+	}{
+		{name: "empty is fine, no cloud mirroring configured", dest: ""},
+		{
+			name:    "well-formed s3 URI",
+			dest:    "s3://bucket/prefix",
+			wantErr: unsupportedCloudSchemeTestError("s3"),
+		},
+		{
+			name:    "well-formed gcs URI",
+			dest:    "gcs://bucket/prefix",
+			wantErr: unsupportedCloudSchemeTestError("gcs"),
+		},
+		{
+			name:    "typoed scheme",
+			dest:    "s33://bucket/prefix",
+			wantErr: "snapshotCloudDestination",
+		},
+		{
+			name:    "missing scheme separator",
+			dest:    "s3bucket/prefix",
+			wantErr: "snapshotCloudDestination",
+		},
+		{
+			name:    "scheme with no host",
+			dest:    "s3://",
+			wantErr: "snapshotCloudDestination",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotCloudDestination = tt.dest
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		prefix  string
+		wantErr bool
+	}{
+		{name: "empty", prefix: ""},
+		{name: "safe segment", prefix: "node-a"},
+		{name: "parent", prefix: "..", wantErr: true},
+		{name: "current directory", prefix: ".", wantErr: true},
+		{name: "forward slash", prefix: "nodes/a", wantErr: true},
+		{name: "backslash", prefix: `nodes\a`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotCloudDestinationPrefix = tt.prefix
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr {
+				require.ErrorContains(
+					t,
+					err,
+					"snapshotCloudDestinationPrefix",
+				)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
@@ -689,7 +784,11 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
-	assert.Contains(t, err.Error(), "invalid plugins.mempool.config.evictionWatermark")
+	assert.Contains(
+		t,
+		err.Error(),
+		"invalid plugins.mempool.config.evictionWatermark",
+	)
 	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
 }
 

@@ -179,7 +179,10 @@ type KoiosClient struct {
 func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
 	base, ok := koiosBaseURLs[network]
 	if !ok {
-		return nil, fmt.Errorf("unsupported network %q; supported: preview, preprod", network)
+		return nil, fmt.Errorf(
+			"unsupported network %q; supported: preview, preprod",
+			network,
+		)
 	}
 	return &KoiosClient{
 		baseURL: base,
@@ -258,7 +261,8 @@ func retryAfterDelay(resp *http.Response) time.Duration {
 	if ra == "" {
 		return koiosBurstCooldown
 	}
-	if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs > 0 {
+	if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil &&
+		secs > 0 {
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(ra); err == nil {
@@ -348,7 +352,9 @@ func (k *KoiosClient) get(
 		// http.Client.Do guarantees non-nil resp when err is nil, but nilaway
 		// can't see that invariant through the stdlib. Guard explicitly.
 		if resp == nil {
-			return nil, errors.New("koios: http.Do returned nil response without error")
+			return nil, errors.New(
+				"koios: http.Do returned nil response without error",
+			)
 		}
 
 		body, readErr := io.ReadAll(resp.Body)
@@ -373,7 +379,13 @@ func (k *KoiosClient) get(
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
-				return nil, fmt.Errorf("%w: koios daily tier quota exceeded on %s: %s (%s)", ErrKoiosPermanent, path, bodyStr, hint)
+				return nil, fmt.Errorf(
+					"%w: koios daily tier quota exceeded on %s: %s (%s)",
+					ErrKoiosPermanent,
+					path,
+					bodyStr,
+					hint,
+				)
 			}
 			// Burst 429: OpenAPI documents a ~60s sleep for the IP; honour
 			// Retry-After when the gateway sends it.
@@ -405,12 +417,22 @@ func (k *KoiosClient) get(
 		// will never succeed by retrying — mark it permanent so callers stop
 		// scheduling further doomed requests instead of treating it as an
 		// isolated, retryable blip.
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			return nil, fmt.Errorf("%w: koios GET %s: status %d body: %s",
-				ErrKoiosPermanent, path, resp.StatusCode, strings.TrimSpace(string(body)))
+		if resp.StatusCode != http.StatusOK &&
+			resp.StatusCode != http.StatusPartialContent {
+			return nil, fmt.Errorf(
+				"%w: koios GET %s: status %d body: %s",
+				ErrKoiosPermanent,
+				path,
+				resp.StatusCode,
+				strings.TrimSpace(string(body)),
+			)
 		}
 
-		return &koiosResponse{StatusCode: resp.StatusCode, Body: body, Header: resp.Header}, nil
+		return &koiosResponse{
+			StatusCode: resp.StatusCode,
+			Body:       body,
+			Header:     resp.Header,
+		}, nil
 	}
 	// Unreachable: every loop iteration either returns or continues; the range
 	// is bounded by koiosMaxRetries and the last iteration always returns via
@@ -425,7 +447,11 @@ func (k *KoiosClient) GetTipEpoch(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("koios /tip: status %d body: %s", resp.StatusCode, resp.Body)
+		return 0, fmt.Errorf(
+			"koios /tip: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
 	}
 	var tips []KoiosTipResp
 	if err := json.Unmarshal(resp.Body, &tips); err != nil {
@@ -438,14 +464,21 @@ func (k *KoiosClient) GetTipEpoch(ctx context.Context) (uint64, error) {
 }
 
 // GetEpochInfo fetches epoch info for a specific epoch.
-func (k *KoiosClient) GetEpochInfo(ctx context.Context, epoch uint64) (*KoiosEpochInfoResp, error) {
+func (k *KoiosClient) GetEpochInfo(
+	ctx context.Context,
+	epoch uint64,
+) (*KoiosEpochInfoResp, error) {
 	path := fmt.Sprintf("/epoch_info?_epoch_no=%d", epoch)
 	resp, err := k.get(ctx, path, -1, -1)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("koios /epoch_info: status %d body: %s", resp.StatusCode, resp.Body)
+		return nil, fmt.Errorf(
+			"koios /epoch_info: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
 	}
 	var items []KoiosEpochInfoResp
 	if err := json.Unmarshal(resp.Body, &items); err != nil {
@@ -459,14 +492,21 @@ func (k *KoiosClient) GetEpochInfo(ctx context.Context, epoch uint64) (*KoiosEpo
 
 // GetTotals fetches network-wide tokenomic totals (treasury, reserves,
 // rewards, fees, etc.) for a specific epoch.
-func (k *KoiosClient) GetTotals(ctx context.Context, epoch uint64) (*KoiosTotalsResp, error) {
+func (k *KoiosClient) GetTotals(
+	ctx context.Context,
+	epoch uint64,
+) (*KoiosTotalsResp, error) {
 	path := fmt.Sprintf("/totals?_epoch_no=%d", epoch)
 	resp, err := k.get(ctx, path, -1, -1)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("koios /totals: status %d body: %s", resp.StatusCode, resp.Body)
+		return nil, fmt.Errorf(
+			"koios /totals: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
 	}
 	var items []KoiosTotalsResp
 	if err := json.Unmarshal(resp.Body, &items); err != nil {
@@ -484,7 +524,9 @@ func (k *KoiosClient) GetTotals(ctx context.Context, epoch uint64) (*KoiosTotals
 // /pool_list is the correct endpoint: it returns all pools with their current
 // status and is pageable via Range headers. /pool_registrations does not exist
 // as a pageable GET endpoint on preview/preprod.
-func (k *KoiosClient) GetAllHistoricalPoolIDs(ctx context.Context) ([]string, error) {
+func (k *KoiosClient) GetAllHistoricalPoolIDs(
+	ctx context.Context,
+) ([]string, error) {
 	type listItem struct {
 		PoolIDBech32 string `json:"pool_id_bech32"`
 	}
@@ -496,8 +538,13 @@ func (k *KoiosClient) GetAllHistoricalPoolIDs(ctx context.Context) ([]string, er
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			return nil, fmt.Errorf("koios /pool_list: status %d body: %s", resp.StatusCode, resp.Body)
+		if resp.StatusCode != http.StatusOK &&
+			resp.StatusCode != http.StatusPartialContent {
+			return nil, fmt.Errorf(
+				"koios /pool_list: status %d body: %s",
+				resp.StatusCode,
+				resp.Body,
+			)
 		}
 		var page []listItem
 		if err := json.Unmarshal(resp.Body, &page); err != nil {
@@ -533,7 +580,9 @@ func (k *KoiosClient) GetAllHistoricalPoolIDs(ctx context.Context) ([]string, er
 // epoch in between. /pool_updates instead returns one row per historical
 // update (across ALL pools, paginated, no per-pool request needed), so the
 // minimum active_epoch_no per pool here is a safe, correct lower bound.
-func (k *KoiosClient) GetPoolFirstActiveEpochs(ctx context.Context) (map[string]uint64, error) {
+func (k *KoiosClient) GetPoolFirstActiveEpochs(
+	ctx context.Context,
+) (map[string]uint64, error) {
 	type updateItem struct {
 		PoolIDBech32  string  `json:"pool_id_bech32"`
 		ActiveEpochNo *uint64 `json:"active_epoch_no"`
@@ -541,12 +590,22 @@ func (k *KoiosClient) GetPoolFirstActiveEpochs(ctx context.Context) (map[string]
 	first := make(map[string]uint64)
 	for start := 0; ; start += koiosPageSize {
 		end := start + koiosPageSize - 1
-		resp, err := k.get(ctx, "/pool_updates?select=pool_id_bech32,active_epoch_no", start, end)
+		resp, err := k.get(
+			ctx,
+			"/pool_updates?select=pool_id_bech32,active_epoch_no",
+			start,
+			end,
+		)
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			return nil, fmt.Errorf("koios /pool_updates: status %d body: %s", resp.StatusCode, resp.Body)
+		if resp.StatusCode != http.StatusOK &&
+			resp.StatusCode != http.StatusPartialContent {
+			return nil, fmt.Errorf(
+				"koios /pool_updates: status %d body: %s",
+				resp.StatusCode,
+				resp.Body,
+			)
 		}
 		var page []updateItem
 		if err := json.Unmarshal(resp.Body, &page); err != nil {
@@ -560,7 +619,8 @@ func (k *KoiosClient) GetPoolFirstActiveEpochs(ctx context.Context) (map[string]
 			if item.ActiveEpochNo == nil {
 				continue
 			}
-			if cur, ok := first[item.PoolIDBech32]; !ok || *item.ActiveEpochNo < cur {
+			if cur, ok := first[item.PoolIDBech32]; !ok ||
+				*item.ActiveEpochNo < cur {
 				first[item.PoolIDBech32] = *item.ActiveEpochNo
 			}
 		}
@@ -591,14 +651,19 @@ func (k *KoiosClient) GetPoolEpochHistory(
 ) (*KoiosPoolHistoryItem, error) {
 	path := fmt.Sprintf(
 		"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=epoch_no,active_stake,active_stake_pct,block_cnt,delegator_cnt,margin,fixed_cost,saturation_pct,pool_fees,deleg_rewards,member_rewards,epoch_ros",
-		poolBech32, epoch,
+		poolBech32,
+		epoch,
 	)
 	resp, err := k.get(ctx, path, -1, -1)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("koios /pool_history: status %d body: %s", resp.StatusCode, resp.Body)
+		return nil, fmt.Errorf(
+			"koios /pool_history: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
 	}
 	var items []KoiosPoolHistoryItem
 	if err := json.Unmarshal(resp.Body, &items); err != nil {

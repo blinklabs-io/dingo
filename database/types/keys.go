@@ -65,7 +65,8 @@ func ParseBlockBlobKey(key []byte) (uint64, []byte, error) {
 	}
 	if string(key[:len(BlockBlobKeyPrefix)]) != BlockBlobKeyPrefix {
 		return 0, nil, fmt.Errorf(
-			"block blob key has wrong prefix: %q", key[:len(BlockBlobKeyPrefix)],
+			"block blob key has wrong prefix: %q",
+			key[:len(BlockBlobKeyPrefix)],
 		)
 	}
 	slot := binary.BigEndian.Uint64(

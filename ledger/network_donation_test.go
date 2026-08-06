@@ -40,7 +40,10 @@ func newDonationTestDB(t *testing.T) *database.Database {
 	return db
 }
 
-func networkState(t *testing.T, db *database.Database) (treasury, reserves, slot uint64) {
+func networkState(
+	t *testing.T,
+	db *database.Database,
+) (treasury, reserves, slot uint64) {
 	t.Helper()
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
@@ -68,7 +71,12 @@ func TestApplyEpochDonations(t *testing.T) {
 	}))
 
 	treasury, reserves, slot := networkState(t, db)
-	assert.Equal(t, uint64(1_300), treasury, "treasury += epoch-7 donations (100+200)")
+	assert.Equal(
+		t,
+		uint64(1_300),
+		treasury,
+		"treasury += epoch-7 donations (100+200)",
+	)
 	assert.Equal(t, uint64(5_000), reserves, "reserves untouched by donations")
 	assert.Equal(t, uint64(80), slot, "updated at the boundary slot")
 }
@@ -87,7 +95,12 @@ func TestApplyEpochDonations_NoDonations(t *testing.T) {
 	treasury, reserves, slot := networkState(t, db)
 	assert.Equal(t, uint64(1_000), treasury)
 	assert.Equal(t, uint64(5_000), reserves)
-	assert.Equal(t, uint64(50), slot, "no boundary row written when no donations")
+	assert.Equal(
+		t,
+		uint64(50),
+		slot,
+		"no boundary row written when no donations",
+	)
 }
 
 // TestEpochDonationWithdrawalRollback exercises the acceptance scenario: a
@@ -112,7 +125,12 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 		return ls.applyEpochDonations(txn, 7, 80)
 	}))
 	treasury, reserves, slot := networkState(t, db)
-	require.Equal(t, uint64(900), treasury, "1_000 - 400 withdrawal + 300 donation")
+	require.Equal(
+		t,
+		uint64(900),
+		treasury,
+		"1_000 - 400 withdrawal + 300 donation",
+	)
 	require.Equal(t, uint64(5_000), reserves)
 	require.Equal(t, uint64(80), slot)
 
@@ -122,7 +140,12 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 	require.NoError(t, db.DeleteNetworkDonationsAfterSlot(60, nil))
 
 	treasury, reserves, slot = networkState(t, db)
-	assert.Equal(t, uint64(1_000), treasury, "treasury restored to pre-boundary value")
+	assert.Equal(
+		t,
+		uint64(1_000),
+		treasury,
+		"treasury restored to pre-boundary value",
+	)
 	assert.Equal(t, uint64(5_000), reserves)
 	assert.Equal(t, uint64(50), slot)
 	sum, err := db.Metadata().SumNetworkDonationsForEpoch(7, nil)

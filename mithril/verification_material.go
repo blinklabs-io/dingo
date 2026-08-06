@@ -103,7 +103,8 @@ func certificateForSignedEntityKind(
 		return nil
 	}
 	if verification.LeafCertificate != nil {
-		if k, err := verification.LeafCertificate.SignedEntityType.Kind(); err == nil && k == kind {
+		if k, err := verification.LeafCertificate.SignedEntityType.Kind(); err == nil &&
+			k == kind {
 			return verification.LeafCertificate
 		}
 	}

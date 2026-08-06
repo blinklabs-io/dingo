@@ -170,9 +170,12 @@ func (n *Node) validateBlockProducerLedgerWithView(
 			n.config.network == "devnet" {
 			n.config.logger.Warn(
 				"devnet block producer VRF cross-check failed; node will continue",
-				"component", "node",
-				"pool_id", creds.GetPoolID().String(),
-				"error", err,
+				"component",
+				"node",
+				"pool_id",
+				creds.GetPoolID().String(),
+				"error",
+				err,
 			)
 			return nil
 		}
@@ -183,8 +186,10 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	case !registered:
 		n.config.logger.Warn(
 			"block producer pool not yet registered on chain; node will continue",
-			"component", "node",
-			"pool_id", poolID,
+			"component",
+			"node",
+			"pool_id",
+			poolID,
 		)
 	case vrfMatched:
 		n.config.logger.Info(
@@ -336,6 +341,7 @@ func (n *Node) initBlockForger(
 		LeaderChecker:                   election,
 		BlockBuilder:                    builder,
 		BlockBroadcaster:                broadcaster,
+		ConfirmedTxs:                    mempoolAdapter,
 		BlockForged:                     blockForged,
 		SlotClock:                       slotClock,
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
@@ -435,6 +441,10 @@ func (a *forgingMempoolAdapter) Transactions() []forging.MempoolTransaction {
 		}
 	}
 	return result
+}
+
+func (a *forgingMempoolAdapter) RemoveTxsByHash(hashes []string) {
+	a.source.RemoveTxsByHash(hashes)
 }
 
 // blockBroadcaster implements forging.BlockBroadcaster by proposing locally
@@ -652,7 +662,9 @@ func (a *epochInfoAdapter) ActiveSlotCoeffRat() *big.Rat {
 	return a.ledgerState.ActiveSlotCoeffRat()
 }
 
-func (a *epochInfoAdapter) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+func (a *epochInfoAdapter) ConsensusModeForEpoch(
+	epoch uint64,
+) consensus.ConsensusMode {
 	return a.ledgerState.ConsensusModeForEpoch(epoch)
 }
 
@@ -740,7 +752,9 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 	error,
 ) {
 	if a.chain == nil {
-		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, errors.New("chain unavailable")
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, errors.New(
+			"chain unavailable",
+		)
 	}
 	tip := a.chain.Tip()
 	if len(tip.Point.Hash) == 0 {

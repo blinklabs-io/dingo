@@ -33,7 +33,7 @@ import (
 // TestDeliverWaitsForCapacityThenDelivers is the core no-loss property: a
 // delivery into a full buffer parks until a slot frees, then lands.
 func TestDeliverWaitsForCapacityThenDelivers(t *testing.T) {
-	sub := newChannelSubscriber(1, nil)
+	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.Deliver(NewEvent("test", "first")))
 
 	done := make(chan error, 1)
@@ -63,7 +63,7 @@ func TestDeliverWaitsForCapacityThenDelivers(t *testing.T) {
 // Deliver holds mu.RLock while waiting, so Close has to signal waiters before
 // it takes mu.Lock.
 func TestDeliverUnblocksOnClose(t *testing.T) {
-	sub := newChannelSubscriber(1, nil)
+	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.Deliver(NewEvent("test", "fill")))
 
 	done := make(chan error, 1)
@@ -104,7 +104,7 @@ func TestDeliverUnblocksOnClose(t *testing.T) {
 // PublishBlocking uses, which must surface the closed error so PublishBlocking
 // can report ErrEventBusStopped.
 func TestDeliverBlockingUnblocksOnClose(t *testing.T) {
-	sub := newChannelSubscriber(1, nil)
+	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.DeliverBlocking(NewEvent("test", "fill")))
 
 	done := make(chan error, 1)
@@ -134,7 +134,7 @@ func TestCloseRaceWithBlockedDelivers(t *testing.T) {
 	const iters = 500
 	const senders = 8
 	for range iters {
-		sub := newChannelSubscriber(1, nil)
+		sub := newChannelSubscriber("test", 1, nil)
 		require.NoError(t, sub.Deliver(NewEvent("test", "fill")))
 
 		var wg sync.WaitGroup
@@ -176,7 +176,7 @@ func TestDeliverStallWarning(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	}))
-	sub := newChannelSubscriber(1, logger)
+	sub := newChannelSubscriber("test", 1, logger)
 	require.NoError(t, sub.Deliver(NewEvent("test.stalled", "fill")))
 
 	done := make(chan error, 1)
@@ -213,7 +213,7 @@ func TestDeliverDoesNotWarnWhenCapacityIsAvailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	}))
-	sub := newChannelSubscriber(4, logger)
+	sub := newChannelSubscriber("test", 4, logger)
 
 	for i := range 1000 {
 		require.NoError(t, sub.Deliver(NewEvent("test.quiet", i)))
@@ -225,12 +225,15 @@ func TestDeliverDoesNotWarnWhenCapacityIsAvailable(t *testing.T) {
 // TestDeliverAfterCloseReturnsClosed keeps the post-close contract explicit:
 // DeliverBlocking reports the closed subscriber, Deliver swallows it.
 func TestDeliverAfterCloseReturnsClosed(t *testing.T) {
-	sub := newChannelSubscriber(1, nil)
+	sub := newChannelSubscriber("test", 1, nil)
 	sub.Close()
 
 	require.True(
 		t,
-		errors.Is(sub.DeliverBlocking(NewEvent("test", "x")), errChannelSubscriberClosed),
+		errors.Is(
+			sub.DeliverBlocking(NewEvent("test", "x")),
+			errChannelSubscriberClosed,
+		),
 	)
 	require.NoError(t, sub.Deliver(NewEvent("test", "x")))
 }

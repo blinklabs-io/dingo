@@ -1070,7 +1070,8 @@ func VerifyCertificateChainWithMode(
 					cert.Hash,
 				)
 			}
-			if childCert.Epoch != cert.Epoch && childCert.Epoch != cert.Epoch+1 {
+			if childCert.Epoch != cert.Epoch &&
+				childCert.Epoch != cert.Epoch+1 {
 				return nil, fmt.Errorf(
 					"certificate chain missing epoch between child=%d and parent=%d",
 					childCert.Epoch,

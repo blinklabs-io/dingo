@@ -28,7 +28,9 @@ import (
 // dijkstraPoolCertTx builds a real *gdijkstra.DijkstraTransaction carrying a
 // single pool registration certificate with the given margin, for exercising
 // the CIP-23 pool-margin-floor certificate rule end to end.
-func dijkstraPoolCertTx(marginNum, marginDen int64) *gdijkstra.DijkstraTransaction {
+func dijkstraPoolCertTx(
+	marginNum, marginDen int64,
+) *gdijkstra.DijkstraTransaction {
 	cert := &lcommon.PoolRegistrationCertificate{
 		CertType: uint(lcommon.CertificateTypePoolRegistration),
 		Margin:   lcommon.GenesisRat{Rat: big.NewRat(marginNum, marginDen)},
@@ -72,7 +74,9 @@ func dijkstraTestProtocolParameters() *gdijkstra.DijkstraProtocolParameters {
 // runtime. Other Dijkstra UTxO validation rules may also error on this
 // deliberately minimal transaction; that's fine, since ValidateTxDijkstra
 // joins all rule errors and this test only asserts on the CIP-23 substring.
-func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(t *testing.T) {
+func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(
+	t *testing.T,
+) {
 	ls, _ := newRewardCalculationTestLedger(t)
 	ls.config.MinPoolMargin = 150 // 1.5%
 	lv := &LedgerView{ls: ls}
@@ -96,7 +100,12 @@ func TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView(
 		lv := &LedgerView{ls: ls}
 
 		tx := dijkstraPoolCertTx(150, 10_000) // exactly 1.5%
-		err := eras.ValidateTxDijkstra(tx, 0, lv, dijkstraTestProtocolParameters())
+		err := eras.ValidateTxDijkstra(
+			tx,
+			0,
+			lv,
+			dijkstraTestProtocolParameters(),
+		)
 		if err != nil {
 			require.NotContains(t, err.Error(), "below minimum pool margin")
 		}
@@ -108,7 +117,12 @@ func TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView(
 		lv := &LedgerView{ls: ls}
 
 		tx := dijkstraPoolCertTx(5, 100) // 5%
-		err := eras.ValidateTxDijkstra(tx, 0, lv, dijkstraTestProtocolParameters())
+		err := eras.ValidateTxDijkstra(
+			tx,
+			0,
+			lv,
+			dijkstraTestProtocolParameters(),
+		)
 		if err != nil {
 			require.NotContains(t, err.Error(), "below minimum pool margin")
 		}
@@ -122,7 +136,12 @@ func TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView(
 		// Even a zero margin cert must not trip the rule when the floor is
 		// disabled (config.MinPoolMargin == 0 -> MinPoolMargin() returns nil).
 		tx := dijkstraPoolCertTx(0, 1)
-		err := eras.ValidateTxDijkstra(tx, 0, lv, dijkstraTestProtocolParameters())
+		err := eras.ValidateTxDijkstra(
+			tx,
+			0,
+			lv,
+			dijkstraTestProtocolParameters(),
+		)
 		if err != nil {
 			require.NotContains(t, err.Error(), "below minimum pool margin")
 		}

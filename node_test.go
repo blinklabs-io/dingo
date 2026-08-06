@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	metadatasqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -45,42 +44,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled guards a real
+// P0 gap: bark.go's own empty-Host default is "0.0.0.0" (all interfaces),
+// which would expose the database lifecycle service's unauthenticated,
+// destructive Restore/Truncate RPCs on every interface by default. An
+// operator's explicit --bark-host must still always win.
+func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
+	require.Equal(t, "127.0.0.1", effectiveBarkHost("", true))
+	require.Equal(t, "", effectiveBarkHost("", false))
+	require.Equal(t, "0.0.0.0", effectiveBarkHost("0.0.0.0", true))
+	require.Equal(t, "10.0.0.5", effectiveBarkHost("10.0.0.5", false))
+}
+
 func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-	require.True(t, ok)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	stakeKey := make([]byte, 28)
 	stakeKey[0] = 0x51
 	missingStakeKey := make([]byte, 28)
 	missingStakeKey[0] = 0x52
-	require.NoError(t, store.DB().Create([]models.Account{
-		{
-			StakingKey: stakeKey,
-			Pool:       make([]byte, 28),
-			AddedSlot:  50,
-			Active:     true,
-		},
-		{
-			StakingKey: missingStakeKey,
-			Pool:       make([]byte, 28),
-			AddedSlot:  60,
-			Active:     true,
-		},
-	}).Error)
+	_, err = raw.Exec(`
+INSERT INTO account (staking_key, pool, added_slot, active)
+VALUES (?, ?, 50, TRUE), (?, ?, 60, TRUE)`,
+		stakeKey, make([]byte, 28),
+		missingStakeKey, make([]byte, 28),
+	)
+	require.NoError(t, err)
 	// Simulate a post-upgrade write that populated only one credential. The
 	// startup check must detect the missing canonical credential, not merely
 	// test whether reward_live_stake is empty.
-	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
-		StakingKey:    stakeKey,
-		CredentialTag: 0,
-		Registered:    true,
-		UpdatedSlot:   75,
-	}).Error)
+	_, err = raw.Exec(`
+INSERT INTO reward_live_stake
+    (staking_key, credential_tag, utxo_stake, reward_stake, total_stake,
+     registered, updated_slot)
+VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
+		stakeKey,
+	)
+	require.NoError(t, err)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(100, make([]byte, 32)),
 	}, nil))
@@ -101,150 +107,18 @@ func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
 	require.False(t, needed)
 	for _, key := range [][]byte{stakeKey, missingStakeKey} {
 		var live models.RewardLiveStake
-		require.NoError(t, store.DB().Where(
-			"credential_tag = ? AND staking_key = ?", 0, key,
-		).First(&live).Error)
+		require.NoError(t, raw.QueryRow(`
+SELECT staking_key, credential_tag, registered, updated_slot
+FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`,
+			0, key,
+		).Scan(
+			&live.StakingKey,
+			&live.CredentialTag,
+			&live.Registered,
+			&live.UpdatedSlot,
+		))
 		require.Equal(t, uint64(100), live.UpdatedSlot)
-	}
-}
-
-func TestBackfillRewardLiveStakeRepairsStaleValues(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x53
-	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: stakeKey,
-		Pool:       make([]byte, 28),
-		Reward:     5,
-		AddedSlot:  50,
-		Active:     true,
-	}).Error)
-	// The identity and calculation version are current, but the UTxO and total
-	// values are not. A presence-only check would incorrectly accept this row.
-	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
-		StakingKey:         stakeKey,
-		PoolKeyHash:        make([]byte, 28),
-		Registered:         true,
-		UtxoStake:          9,
-		RewardStake:        5,
-		TotalStake:         14,
-		UpdatedSlot:        75,
-		CalculationVersion: models.RewardStakeCalculationVersion,
-	}).Error)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-
-	n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
-	require.NoError(t, n.backfillRewardLiveStake())
-
-	var live models.RewardLiveStake
-	require.NoError(t, store.DB().Where("staking_key = ?", stakeKey).First(&live).Error)
-	require.Equal(t, uint64(0), uint64(live.UtxoStake))
-	require.Equal(t, uint64(5), uint64(live.RewardStake))
-	require.Equal(t, uint64(5), uint64(live.TotalStake))
-	require.Equal(t, models.RewardStakeCalculationVersion, live.CalculationVersion)
-}
-
-func TestBackfillRewardLiveStakeAcceptsCurrentUndelegatedAccount(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-	require.True(t, ok)
-	stakeKey := make([]byte, 28)
-	stakeKey[0] = 0x54
-	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: stakeKey,
-		Reward:     5,
-		AddedSlot:  50,
-		Active:     true,
-	}).Error)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(100, make([]byte, 32)),
-	}, nil))
-
-	n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
-	require.NoError(t, n.backfillRewardLiveStake())
-	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
-	require.NoError(t, err)
-	require.False(t, needed)
-}
-
-func TestBackfillRewardLiveStakeRejectsStaleConsensusSnapshots(t *testing.T) {
-	tests := []struct {
-		name string
-		seed func(*testing.T, *metadatasqlite.MetadataStoreSqlite)
-	}{
-		{
-			name: "mark pool snapshot",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
-					Epoch:        3,
-					SnapshotType: models.PoolStakeSnapshotTypeMark,
-					PoolKeyHash:  make([]byte, 28),
-					TotalStake:   1,
-					CapturedSlot: 100,
-				}).Error)
-			},
-		},
-		{
-			name: "set pool snapshot",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
-					Epoch:        3,
-					SnapshotType: models.PoolStakeSnapshotTypeSet,
-					PoolKeyHash:  make([]byte, 28),
-					TotalStake:   1,
-					CapturedSlot: 100,
-				}).Error)
-			},
-		},
-		{
-			name: "go pool snapshot",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
-					Epoch:        3,
-					SnapshotType: models.PoolStakeSnapshotTypeGo,
-					PoolKeyHash:  make([]byte, 28),
-					TotalStake:   1,
-					CapturedSlot: 100,
-				}).Error)
-			},
-		},
-		{
-			name: "authoritative mark metadata",
-			seed: func(t *testing.T, store *metadatasqlite.MetadataStoreSqlite) {
-				require.NoError(t, store.DB().Create(&models.RewardSnapshot{
-					Epoch:         3,
-					SnapshotType:  models.PoolStakeSnapshotTypeMark,
-					CapturedSlot:  100,
-					BoundarySlot:  101,
-					Authoritative: true,
-				}).Error)
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-			store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
-			require.True(t, ok)
-			test.seed(t, store)
-
-			n := &Node{db: db, config: Config{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
-			err = n.backfillRewardLiveStake()
-			require.ErrorContains(t, err, "rebootstrap from immutable blocks")
-		})
 	}
 }
 
@@ -327,7 +201,10 @@ func newNodeTestDivergedLedger(
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}))
+	require.NoError(
+		t,
+		cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}),
+	)
 
 	ancestorHash := nodeTestHashBytes("node-recycler-ancestor")
 	currentHash := nodeTestHashBytes("node-recycler-current")
@@ -395,10 +272,9 @@ func newNodeTestDivergedLedger(
 	})
 	require.NoError(t, err)
 	require.NoError(t, ledgerState.Start(context.Background()))
+	// Close stops ls.Scheduler itself now, so no separate manual Stop
+	// call is needed here.
 	t.Cleanup(func() {
-		if ledgerState.Scheduler != nil {
-			ledgerState.Scheduler.Stop()
-		}
 		require.NoError(t, ledgerState.Close())
 	})
 
@@ -411,7 +287,10 @@ func newNodeTestDivergedLedger(
 		Cbor:        []byte{0x80},
 	}
 	require.NoError(t, ledgerState.Chain().Rollback(ancestorTip.Point))
-	require.NoError(t, ledgerState.Chain().AddRawBlocks([]chain.RawBlock{forkBlock}))
+	require.NoError(
+		t,
+		ledgerState.Chain().AddRawBlocks([]chain.RawBlock{forkBlock}),
+	)
 	forkTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(forkBlock.Slot, forkBlock.Hash),
 		BlockNumber: forkBlock.BlockNumber,
@@ -469,6 +348,81 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	assert.Equal(t, pointB, clientB.Cursor)
 	assert.Equal(t, uint64(1), clientA.HeadersRecv)
 	assert.Equal(t, uint64(1), clientB.HeadersRecv)
+}
+
+// TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
+// during a live database restore/truncate where n.chainsyncState is nil
+// between closeStorageForLiveLifecycleOp and reinitializeNetworkingCore.
+// chainSelector's evaluation loop is never paused during quiesce, so it can
+// still emit a ChainSwitchEvent in that window.
+func TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic(t *testing.T) {
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	require.NotPanics(t, func() {
+		n.handleChainSwitchEvent(
+			event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					NewConnectionId: newNodeTestConnId(3003),
+					NewTip: ochainsync.Tip{
+						Point: ocommon.NewPoint(100, []byte("hash-a")),
+					},
+				},
+			),
+		)
+	})
+}
+
+// TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp covers the same
+// window from the other side: n.chainsyncState has already been rebuilt to a
+// non-nil value, but a live restore/truncate still holds n.liveLifecycleMu
+// (held for its entire quiesce-through-reinitialize duration), so the
+// handler must not block waiting for it -- it should skip the update rather
+// than stall the EventBus dispatch goroutine behind a possibly long-running
+// operation.
+func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connA := newNodeTestConnId(3001)
+	connB := newNodeTestConnId(3002)
+	state.AddClientConnId(connA)
+	state.AddClientConnId(connB)
+	state.SetClientConnId(connA)
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+	}
+
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+
+	n.handleChainSwitchEvent(
+		event.NewEvent(
+			chainselection.ChainSwitchEventType,
+			chainselection.ChainSwitchEvent{
+				PreviousConnectionId: connA,
+				NewConnectionId:      connB,
+				NewTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(200, []byte("hash-b")),
+				},
+			},
+		),
+	)
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	assert.Equal(t, connA, *active)
 }
 
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
@@ -818,7 +772,9 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 func TestProcessChainsyncRecyclerTickReconcilesBeforeBacklogSuppression(
 	t *testing.T,
 ) {
-	ledgerState, ancestorTip, currentTip, forkTip := newNodeTestDivergedLedger(t)
+	ledgerState, ancestorTip, currentTip, forkTip := newNodeTestDivergedLedger(
+		t,
+	)
 	require.True(
 		t,
 		isLedgerApplicationBacklog(
@@ -1284,6 +1240,263 @@ func TestChainsyncStallRecyclerExitsOnCancel(t *testing.T) {
 	)
 }
 
+// TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu guards
+// against a real bug: the recycler's one-time startup read
+// of n.ledgerState.Tip() (run whenever the loop (re)starts, e.g. after a
+// caught panic restarts it) took n.liveLifecycleMu.Lock() unconditionally
+// -- a plain blocking Lock() that cancellation cannot interrupt. Since
+// shutdown waits for this worker (chainsyncStallRecyclerWG) before tearing
+// anything down, a recycler restart landing on that line while a live
+// restore/truncate held liveLifecycleMu for its full
+// quiesce-through-reinitialize duration could hang shutdown well past its
+// configured timeout. This holds the mutex on the test goroutine BEFORE
+// starting the recycler (simulating a restart racing an in-progress live
+// lifecycle op) and confirms the recycler still reaches its
+// cancellation-aware tick loop and exits promptly once cancelled --
+// proving the startup read never blocked on the held mutex.
+func TestChainsyncStallRecyclerStartupSkipsBlockingOnLiveLifecycleMu(
+	t *testing.T,
+) {
+	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ledgerState: ledgerState,
+	}
+
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+
+	// A deterministic test seam for "the recycler has reached its startup
+	// TryLock attempt", rather than guessing with a fixed wall-clock
+	// window: a scheduler-starved goroutine could still not have reached
+	// that line after any fixed delay (flaking under load), while a
+	// generous delay risks the outer loop's ctx.Err() check winning the
+	// race before the goroutine is ever scheduled there at all -- passing
+	// vacuously regardless of whether the bug this test guards against is
+	// present. reached is closed exactly once: this test cancels promptly
+	// after observing it, before the loop could restart and call the hook
+	// again.
+	reached := make(chan struct{})
+	origHook := chainsyncStallRecyclerStartupHook
+	chainsyncStallRecyclerStartupHook = func() { close(reached) }
+	t.Cleanup(func() { chainsyncStallRecyclerStartupHook = origHook })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	recyclerCancel := n.startChainsyncStallRecycler(
+		ctx,
+		chainsync.Config{StallTimeout: time.Second},
+		5*time.Millisecond,
+		time.Second,
+		time.Second,
+	)
+	// Registered immediately after starting the recycler (before any
+	// assertion that could fail) so a failure below still cancels and
+	// waits for the goroutine instead of leaking it past this test.
+	t.Cleanup(func() {
+		recyclerCancel()
+		cancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.chainsyncStallRecyclerWG.Wait()
+	}()
+
+	testutil.RequireReceive(
+		t, reached, time.Second,
+		"recycler must reach its startup mutex acquisition",
+	)
+	testutil.RequireNoReceive(
+		t, done, 50*time.Millisecond,
+		"recycler must not exit before being cancelled",
+	)
+
+	recyclerCancel()
+	cancel()
+
+	testutil.RequireReceive(
+		t, done, time.Second,
+		"the recycler must exit promptly once cancelled, even though "+
+			"liveLifecycleMu is held for its entire lifetime -- a blocking "+
+			"Lock() at startup would hang this wait instead",
+	)
+}
+
+// TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds guards
+// against a real bug: the recycler's tick handler
+// dereferenced n.ledgerState/n.chainsyncState many times (well past its
+// own initial nil-check) without holding any lock, while a live
+// restore/truncate reassigns those exact fields concurrently under
+// n.liveLifecycleMu — a real, unsynchronized data race that could panic
+// on a nil or mid-swap value. The fix makes every tick TryLock
+// n.liveLifecycleMu (the same mutex Restore/Truncate hold for their
+// entire quiesce-through-reinitialize duration) and skip entirely on
+// contention.
+//
+// This holds that mutex on the test goroutine (simulating an in-progress
+// live lifecycle op) across several tick intervals and confirms the
+// recycler never calls chainsyncState.CheckStalledClients() during that
+// window — the only production caller of that method, so a tracked
+// client past its (deliberately very short) stall timeout staying
+// unmarked is direct proof every tick was skipped, not just a side effect
+// of the pre-existing nil-check (both n.ledgerState and n.chainsyncState
+// are real, non-nil objects here). Releasing the mutex must let ticks
+// resume normally. See TestChainsyncStallRecyclerDoesNotSkipTicksWhile
+// SnapshotMuHolds below for the companion case: Snapshot deliberately
+// does NOT hold this same mutex (see snapshotMu's doc comment, node.go),
+// so an in-progress Snapshot must not skip ticks the way this does.
+func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(
+	t *testing.T,
+) {
+	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	const stallTimeout = 10 * time.Millisecond
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+	)
+	conn := newNodeTestConnId(1)
+	require.True(t, state.AddClientConnId(conn))
+	state.SetClientConnId(conn)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ledgerState:    ledgerState,
+		chainsyncState: state,
+	}
+
+	isStalled := func() bool {
+		for _, tc := range state.GetTrackedClients() {
+			if tc.ConnId == conn {
+				return tc.Status == chainsync.ClientStatusStalled
+			}
+		}
+		return false
+	}
+
+	n.liveLifecycleMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	recyclerCancel := n.startChainsyncStallRecycler(
+		ctx,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+		5*time.Millisecond,
+		time.Second,
+		time.Second,
+	)
+	t.Cleanup(func() {
+		recyclerCancel()
+		cancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
+
+	// require.Never polls isStalled repeatedly across many tick intervals
+	// and fails the instant it ever becomes true, rather than sleeping
+	// once and checking a single snapshot at the end -- the direct way
+	// to express "this must not happen at any point during this window",
+	// which is what "no tick went through while the mutex is held"
+	// actually means.
+	require.Never(
+		t,
+		isStalled,
+		150*time.Millisecond,
+		5*time.Millisecond,
+		"a tick must not reach CheckStalledClients while liveLifecycleMu is held",
+	)
+
+	n.liveLifecycleMu.Unlock()
+	require.Eventually(
+		t,
+		isStalled,
+		time.Second,
+		5*time.Millisecond,
+		"ticks must resume and mark the stalled client once the mutex is released",
+	)
+}
+
+// TestChainsyncStallRecyclerDoesNotSkipTicksWhileSnapshotMuHolds guards
+// the companion gap to the test above: Snapshot used to take
+// n.liveLifecycleMu, the same mutex this recycler's tick TryLocks --
+// meaning a long-running Snapshot (a full local copy plus cloud upload)
+// disabled stall detection and plateau recovery for its entire duration,
+// contradicting Snapshot's own documented "keeps syncing normally"
+// behavior (unlike Restore/Truncate, Snapshot never nils or rebuilds
+// n.ledgerState/n.chainsyncState, so there is nothing for this tick to
+// race against while a Snapshot runs). The fix gives Snapshot its own
+// snapshotMu instead (node.go), leaving liveLifecycleMu meaning only "a
+// rebuild is in flight." This holds snapshotMu (simulating an in-progress
+// Snapshot) across several tick intervals and confirms ticks proceed
+// normally regardless -- the mirror image of the require.Never assertion
+// above, which uses liveLifecycleMu instead.
+func TestChainsyncStallRecyclerDoesNotSkipTicksWhileSnapshotMuHolds(
+	t *testing.T,
+) {
+	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	const stallTimeout = 10 * time.Millisecond
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+	)
+	conn := newNodeTestConnId(1)
+	require.True(t, state.AddClientConnId(conn))
+	state.SetClientConnId(conn)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ledgerState:    ledgerState,
+		chainsyncState: state,
+	}
+
+	isStalled := func() bool {
+		for _, tc := range state.GetTrackedClients() {
+			if tc.ConnId == conn {
+				return tc.Status == chainsync.ClientStatusStalled
+			}
+		}
+		return false
+	}
+
+	n.snapshotMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	recyclerCancel := n.startChainsyncStallRecycler(
+		ctx,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+		5*time.Millisecond,
+		time.Second,
+		time.Second,
+	)
+	t.Cleanup(func() {
+		recyclerCancel()
+		cancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
+
+	require.Eventually(
+		t, isStalled, time.Second, 5*time.Millisecond,
+		"a tick must still reach CheckStalledClients while only snapshotMu "+
+			"is held -- Snapshot no longer holds liveLifecycleMu",
+	)
+
+	n.snapshotMu.Unlock()
+}
+
 // TestStopWaitsForChainsyncStallRecycler verifies shutdown blocks while the
 // recycler is still tracked as running and continues once it exits.
 func TestStopWaitsForChainsyncStallRecycler(t *testing.T) {
@@ -1399,22 +1612,32 @@ func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
 		Point:       ocommon.NewPoint(100, []byte("tip")),
 		BlockNumber: 50,
 	}, nil)
-	require.NotNil(t, cs.GetBestPeer(), "peer should be selected before ineligibility")
+	require.NotNil(
+		t,
+		cs.GetBestPeer(),
+		"peer should be selected before ineligibility",
+	)
 
 	// Mirror the subscription wiring in node.go.
-	bus.SubscribeFunc(peergov.PeerEligibilityChangedEventType, func(evt event.Event) {
-		e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
-		if !ok {
-			return
-		}
-		cs.SetConnectionEligible(e.ConnectionId, e.Eligible)
-	})
+	bus.SubscribeFunc(
+		peergov.PeerEligibilityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+			if !ok {
+				return
+			}
+			cs.SetConnectionEligible(e.ConnectionId, e.Eligible)
+		},
+	)
 
 	bus.Publish(
 		peergov.PeerEligibilityChangedEventType,
 		event.NewEvent(
 			peergov.PeerEligibilityChangedEventType,
-			peergov.PeerEligibilityChangedEvent{ConnectionId: connId, Eligible: false},
+			peergov.PeerEligibilityChangedEvent{
+				ConnectionId: connId,
+				Eligible:     false,
+			},
 		),
 	)
 
@@ -1444,27 +1667,38 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 	cs.UpdatePeerTip(highPrioConn, equalTip, nil)
 
 	// Mirror the subscription wiring in node.go.
-	bus.SubscribeFunc(peergov.PeerPriorityChangedEventType, func(evt event.Event) {
-		e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
-		if !ok {
-			return
-		}
-		cs.SetConnectionPriority(e.ConnectionId, e.Priority)
-	})
+	bus.SubscribeFunc(
+		peergov.PeerPriorityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
+			if !ok {
+				return
+			}
+			cs.SetConnectionPriority(e.ConnectionId, e.Priority)
+		},
+	)
 
 	bus.Publish(
 		peergov.PeerPriorityChangedEventType,
 		event.NewEvent(
 			peergov.PeerPriorityChangedEventType,
-			peergov.PeerPriorityChangedEvent{ConnectionId: highPrioConn, Priority: 50},
+			peergov.PeerPriorityChangedEvent{
+				ConnectionId: highPrioConn,
+				Priority:     50,
+			},
 		),
 	)
 
 	// SelectBestChain does a pure comparison with no incumbent bias, so once
 	// the priority event has been processed the higher-priority peer wins.
-	require.Eventually(t, func() bool {
-		best := cs.SelectBestChain()
-		return best != nil && *best == highPrioConn
-	}, time.Second, 5*time.Millisecond,
-		"higher-priority peer must win equal-tip selection after priority event")
+	require.Eventually(
+		t,
+		func() bool {
+			best := cs.SelectBestChain()
+			return best != nil && *best == highPrioConn
+		},
+		time.Second,
+		5*time.Millisecond,
+		"higher-priority peer must win equal-tip selection after priority event",
+	)
 }

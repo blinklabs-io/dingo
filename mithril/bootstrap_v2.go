@@ -346,8 +346,10 @@ func bootstrapV2(
 		}
 		cfg.Logger.Warn(
 			"failed to download ancillary data; continuing without ledger state",
-			"component", "mithril",
-			"error", ancillaryErr,
+			"component",
+			"mithril",
+			"error",
+			ancillaryErr,
 		)
 	}
 	if cfg.VerifyCertificateChain && ancillaryTree == nil {
@@ -689,7 +691,9 @@ func downloadDigestsArchive(
 			"no digest JSON file found in digests archive",
 		)
 	}
-	data, err := os.ReadFile(jsonPath) //nolint:gosec // path is constructed from our own extraction directory
+	data, err := os.ReadFile(
+		jsonPath,
+	) //nolint:gosec // path is constructed from our own extraction directory
 	if err != nil {
 		return nil, fmt.Errorf("reading digest JSON: %w", err)
 	}
@@ -1020,9 +1024,11 @@ func fetchImmutableArchive(
 	dlLogger := cfg.Logger.With("immutable_file_number", num)
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
-			URL:                 location.ImmutableArchiveURI(num),
-			DestDir:             archiveDir,
-			Filename:            filepath.Base(immutableArchivePath(archiveDir, num)),
+			URL:     location.ImmutableArchiveURI(num),
+			DestDir: archiveDir,
+			Filename: filepath.Base(
+				immutableArchivePath(archiveDir, num),
+			),
 			Logger:              dlLogger,
 			HTTPClient:          cfg.httpClient,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
@@ -1148,7 +1154,9 @@ func removeImmutableTrio(root *os.Root, num uint64) {
 
 // sha256File returns the hex SHA-256 digest and size of a file.
 func sha256File(path string) (string, int64, error) {
-	f, err := os.Open(path) //nolint:gosec // callers construct the path from controlled directories
+	f, err := os.Open(
+		path,
+	) //nolint:gosec // callers construct the path from controlled directories
 	if err != nil {
 		return "", 0, err
 	}

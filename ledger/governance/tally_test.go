@@ -15,12 +15,13 @@
 package governance
 
 import (
+	"database/sql"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -34,10 +35,10 @@ func TestTallyDRepVotesIncludesAlwaysAbstain(t *testing.T) {
 	stakeCred := testBytes(28, 2)
 	abstainStakeCred := testBytes(28, 3)
 
-	require.NoError(t, store.DB().Create(&models.Drep{
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
-	}).Error)
+	}))
 	seedDRepStake(
 		t, store, stakeCred, drepCred, models.DrepTypeAddrKeyHash, 60,
 		1,
@@ -126,16 +127,16 @@ func TestTallyDRepVotesSeparatesSameHashByCredentialTag(t *testing.T) {
 	keyStakeCred := testBytes(28, 10)
 	scriptStakeCred := testBytes(28, 11)
 
-	require.NoError(t, store.DB().Create(&models.Drep{
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    drepCred,
 		Active:        true,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Drep{
+	}))
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
 		CredentialTag: 1,
 		Credential:    drepCred,
 		Active:        true,
-	}).Error)
+	}))
 	seedDRepStake(
 		t, store, keyStakeCred, drepCred, models.DrepTypeAddrKeyHash, 60,
 		12,
@@ -186,18 +187,18 @@ func TestTallyCCVotesRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 		{ColdCredHash: coldA, ExpiresEpoch: 20, AddedSlot: 1},
 		{ColdCredHash: coldB, ExpiresEpoch: 20, AddedSlot: 1},
 	}, nil))
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: coldA,
 		HotCredential:  hotA,
 		CertificateID:  1,
 		AddedSlot:      1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	})
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: unseatedCold,
 		HotCredential:  unseatedHot,
 		CertificateID:  2,
 		AddedSlot:      1,
-	}).Error)
+	})
 
 	tally := &ProposalTally{}
 	err := tallyCCVotes(
@@ -223,7 +224,9 @@ func TestTallyCCVotesRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 	assert.Equal(t, big.NewRat(1, 2), tally.CCYesRatio())
 }
 
-func TestLoadCommitteeVotingStateCountsSeatedMembersWithoutHotAuth(t *testing.T) {
+func TestLoadCommitteeVotingStateCountsSeatedMembersWithoutHotAuth(
+	t *testing.T,
+) {
 	db, store := newTallyTestDB(t)
 	coldA := testBytes(28, 21)
 	hotA := testBytes(28, 22)
@@ -235,18 +238,18 @@ func TestLoadCommitteeVotingStateCountsSeatedMembersWithoutHotAuth(t *testing.T)
 		{ColdCredHash: coldA, ExpiresEpoch: 20, AddedSlot: 1},
 		{ColdCredHash: coldB, ExpiresEpoch: 20, AddedSlot: 1},
 	}, nil))
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: coldA,
 		HotCredential:  hotA,
 		CertificateID:  1,
 		AddedSlot:      1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	})
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: unseatedCold,
 		HotCredential:  unseatedHot,
 		CertificateID:  2,
 		AddedSlot:      1,
-	}).Error)
+	})
 
 	state, err := LoadCommitteeVotingState(db, nil, 10)
 	require.NoError(t, err)
@@ -273,23 +276,23 @@ func TestLoadCommitteeVotingStateExcludesResignedMembers(t *testing.T) {
 		{ColdCredHash: activeCold, ExpiresEpoch: 20, AddedSlot: 1},
 		{ColdCredHash: resignedCold, ExpiresEpoch: 20, AddedSlot: 1},
 	}, nil))
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: activeCold,
 		HotCredential:  activeHot,
 		CertificateID:  1,
 		AddedSlot:      1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	})
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: resignedCold,
 		HotCredential:  resignedHot,
 		CertificateID:  2,
 		AddedSlot:      1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.ResignCommitteeCold{
+	})
+	seedTallyCommitteeResignation(t, store, models.ResignCommitteeCold{
 		ColdCredential: resignedCold,
 		CertificateID:  3,
 		AddedSlot:      2,
-	}).Error)
+	})
 
 	state, err := LoadCommitteeVotingState(db, nil, 10)
 	require.NoError(t, err)
@@ -313,23 +316,23 @@ func TestTallyCCVotesExcludesResignedFromDenominator(t *testing.T) {
 		{ColdCredHash: yesCold, ExpiresEpoch: 20, AddedSlot: 1},
 		{ColdCredHash: resignedCold, ExpiresEpoch: 20, AddedSlot: 1},
 	}, nil))
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: yesCold,
 		HotCredential:  yesHot,
 		CertificateID:  1,
 		AddedSlot:      1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	})
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: resignedCold,
 		HotCredential:  resignedHot,
 		CertificateID:  2,
 		AddedSlot:      1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.ResignCommitteeCold{
+	})
+	seedTallyCommitteeResignation(t, store, models.ResignCommitteeCold{
 		ColdCredential: resignedCold,
 		CertificateID:  3,
 		AddedSlot:      2,
-	}).Error)
+	})
 
 	tally := &ProposalTally{}
 	err := tallyCCVotes(
@@ -356,12 +359,12 @@ func TestTallyCCVotesExcludesExpiredCommitteeMembers(t *testing.T) {
 	require.NoError(t, store.SetCommitteeMembers([]*models.CommitteeMember{
 		{ColdCredHash: cold, ExpiresEpoch: 9, AddedSlot: 1},
 	}, nil))
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: cold,
 		HotCredential:  hot,
 		CertificateID:  1,
 		AddedSlot:      1,
-	}).Error)
+	})
 
 	tally := &ProposalTally{}
 	err := tallyCCVotes(
@@ -395,18 +398,18 @@ func TestTallyCCVotesNonVotingMembersAreNotCountedAsNo(t *testing.T) {
 		{ColdCredHash: voterCold, ExpiresEpoch: 20, AddedSlot: 1},
 		{ColdCredHash: silentCold, ExpiresEpoch: 20, AddedSlot: 1},
 	}, nil))
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: voterCold,
 		HotCredential:  voterHot,
 		CertificateID:  1,
 		AddedSlot:      1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.AuthCommitteeHot{
+	})
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: silentCold,
 		HotCredential:  silentHot,
 		CertificateID:  2,
 		AddedSlot:      1,
-	}).Error)
+	})
 
 	tally := &ProposalTally{}
 	err := tallyCCVotes(
@@ -424,30 +427,78 @@ func TestTallyCCVotesNonVotingMembersAreNotCountedAsNo(t *testing.T) {
 
 	assert.Equal(t, 2, tally.CCTotalCount)
 	assert.Equal(t, 1, tally.CCYesCount)
-	assert.Equal(t, 0, tally.CCNoCount, "silent member must not be counted as No")
+	assert.Equal(
+		t,
+		0,
+		tally.CCNoCount,
+		"silent member must not be counted as No",
+	)
 	assert.Equal(t, 0, tally.CCAbstainCount)
 	assert.Equal(t, big.NewRat(1, 2), tally.CCYesRatio())
 }
 
 func newTallyTestDB(
 	t *testing.T,
-) (*database.Database, *sqliteplugin.MetadataStoreSqlite) {
+) (*database.Database, *tallyTestStore) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
-	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
-	require.True(t, ok)
-	return db, store
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	return db, &tallyTestStore{
+		MetadataStore: db.Metadata(),
+		raw:           raw,
+	}
+}
+
+type tallyTestStore struct {
+	metadata.MetadataStore
+	raw *sql.DB
+}
+
+func seedTallyCommitteeAuth(
+	t *testing.T,
+	store *tallyTestStore,
+	auth models.AuthCommitteeHot,
+) {
+	t.Helper()
+	_, err := store.raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential, host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`,
+		auth.ColdCredential,
+		auth.HotCredential,
+		auth.CertificateID,
+		auth.AddedSlot,
+	)
+	require.NoError(t, err)
+}
+
+func seedTallyCommitteeResignation(
+	t *testing.T,
+	store *tallyTestStore,
+	resignation models.ResignCommitteeCold,
+) {
+	t.Helper()
+	_, err := store.raw.Exec(`
+INSERT INTO resign_committee_cold (
+    cold_credential, certificate_id, added_slot
+) VALUES (?, ?, ?)`,
+		resignation.ColdCredential,
+		resignation.CertificateID,
+		resignation.AddedSlot,
+	)
+	require.NoError(t, err)
 }
 
 func seedDRepStake(
 	t *testing.T,
-	store *sqliteplugin.MetadataStoreSqlite,
+	store *tallyTestStore,
 	stakeCred []byte,
 	drepCred []byte,
 	drepType uint64,
@@ -455,21 +506,21 @@ func seedDRepStake(
 	id byte,
 ) {
 	t.Helper()
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Drep:       drepCred,
 		DrepType:   drepType,
 		AddedSlot:  1,
 		Reward:     0,
 		Active:     true,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Utxo{
+	}))
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
 		TxId:       testBytes(32, id),
 		OutputIdx:  0,
 		StakingKey: stakeCred,
 		AddedSlot:  1,
 		Amount:     types.Uint64(amount),
-	}).Error)
+	}))
 }
 
 func testBytes(length int, seed byte) []byte {
@@ -487,23 +538,28 @@ func testBytes(length int, seed byte) []byte {
 // resolveSnapshotAutoVotes after seeding any Account delegation.
 func seedPoolWithStake(
 	t *testing.T,
-	store *sqliteplugin.MetadataStoreSqlite,
+	store *tallyTestStore,
 	poolKeyHash []byte,
 	rewardAccount []byte,
 	stake uint64,
 	epoch uint64,
 ) {
 	t.Helper()
-	require.NoError(t, store.DB().Create(&models.Pool{
+	pool := &models.Pool{
 		PoolKeyHash:   poolKeyHash,
 		RewardAccount: rewardAccount,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+	}
+	require.NoError(t, store.ImportPool(pool, &models.PoolRegistration{
+		PoolKeyHash:   poolKeyHash,
+		RewardAccount: rewardAccount,
+		AddedSlot:     0,
+	}, nil))
+	require.NoError(t, store.SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
 		Epoch:        epoch,
 		SnapshotType: "mark",
 		PoolKeyHash:  poolKeyHash,
 		TotalStake:   types.Uint64(stake),
-	}).Error)
+	}, nil))
 }
 
 // seedRewardAccountDelegation writes an Account row that pins the
@@ -512,19 +568,19 @@ func seedPoolWithStake(
 // to exercise the auto-vote paths.
 func seedRewardAccountDelegation(
 	t *testing.T,
-	store *sqliteplugin.MetadataStoreSqlite,
+	store *tallyTestStore,
 	stakeCred []byte,
 	drepCred []byte,
 	drepType uint64,
 ) {
 	t.Helper()
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: stakeCred,
 		Drep:       drepCred,
 		DrepType:   drepType,
 		AddedSlot:  1,
 		Active:     true,
-	}).Error)
+	}))
 }
 
 // resolveSnapshotAutoVotes drives the production snapshot-capture
@@ -545,16 +601,19 @@ func resolveSnapshotAutoVotes(
 	)
 	require.NoError(t, err)
 	require.NoError(t, db.ResolvePoolRewardAccountAutoVotes(snapshots, nil))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	for _, s := range snapshots {
-		require.NoError(t, db.Metadata().(*sqliteplugin.MetadataStoreSqlite).
-			DB().
-			Model(&models.PoolStakeSnapshot{}).
-			Where("id = ?", s.ID).
-			Updates(map[string]any{
-				"reward_account_auto_vote":          s.RewardAccountAutoVote,
-				"reward_account_auto_vote_resolved": s.RewardAccountAutoVoteResolved,
-			}).
-			Error)
+		_, err = raw.Exec(`
+UPDATE pool_stake_snapshot
+SET reward_account_auto_vote = ?,
+    reward_account_auto_vote_resolved = ?
+WHERE id = ?`,
+			s.RewardAccountAutoVote,
+			s.RewardAccountAutoVoteResolved,
+			s.ID,
+		)
+		require.NoError(t, err)
 	}
 }
 
@@ -631,38 +690,45 @@ func TestResolvePoolRewardAccountAutoVotesIsCredentialTagAware(t *testing.T) {
 	poolKeyHash := testBytes(28, 62)
 	rewardAccount := testBytes(28, 63)
 
-	require.NoError(t, store.DB().Create(&models.Pool{
+	pool := &models.Pool{
 		PoolKeyHash:                poolKeyHash,
 		RewardAccount:              rewardAccount,
 		RewardAccountCredentialTag: 1,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+	}
+	require.NoError(t, store.ImportPool(pool, &models.PoolRegistration{
+		PoolKeyHash:                poolKeyHash,
+		RewardAccount:              rewardAccount,
+		RewardAccountCredentialTag: 1,
+		AddedSlot:                  0,
+	}, nil))
+	require.NoError(t, store.SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
 		Epoch:        8,
 		SnapshotType: "mark",
 		PoolKeyHash:  poolKeyHash,
 		TotalStake:   types.Uint64(250),
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Account{
+	}, nil))
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		CredentialTag: 0,
 		StakingKey:    rewardAccount,
 		DrepType:      models.DrepTypeAlwaysNoConfidence,
 		AddedSlot:     1,
 		Active:        true,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.Account{
+	}))
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		CredentialTag: 1,
 		StakingKey:    rewardAccount,
 		DrepType:      models.DrepTypeAlwaysAbstain,
 		AddedSlot:     1,
 		Active:        true,
-	}).Error)
+	}))
 
 	resolveSnapshotAutoVotes(t, db, 8)
 
-	var snapshot models.PoolStakeSnapshot
-	require.NoError(t, store.DB().
-		Where("epoch = ? AND snapshot_type = ? AND pool_key_hash = ?", 8, "mark", poolKeyHash).
-		First(&snapshot).Error)
+	snapshot, err := store.GetPoolStakeSnapshot(
+		8, "mark", poolKeyHash, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
 	assert.True(t, snapshot.RewardAccountAutoVoteResolved)
 	assert.Equal(
 		t,
@@ -780,11 +846,11 @@ func TestTallySPOVotesNoRewardAccountDelegation(t *testing.T) {
 	)
 	// Only the first pool's reward account is registered. The Account
 	// row has no DRep delegation set (zero value DrepType + nil Drep).
-	require.NoError(t, store.DB().Create(&models.Account{
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: registeredRewardAcct,
 		AddedSlot:  1,
 		Active:     true,
-	}).Error)
+	}))
 	resolveSnapshotAutoVotes(t, db, 8)
 
 	tally := &ProposalTally{
@@ -821,26 +887,20 @@ func TestTallySPOVotesDeregisteredRewardAccountDoesNotAutoVote(t *testing.T) {
 	seedPoolWithStake(
 		t, store, noConfidencePool, noConfidenceAcct, 200, 12,
 	)
-	// Both reward accounts carry a predefined-DRep flag but are
-	// flagged inactive (deregistered). The follow-up Update is
-	// needed because models.Account has gorm:"default:true" on
-	// Active, which rewrites a literal-false insert back to true.
-	require.NoError(t, store.DB().Create(&models.Account{
+	// Both reward accounts carry a predefined-DRep flag but are inactive
+	// (deregistered).
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: abstainAcct,
 		DrepType:   models.DrepTypeAlwaysAbstain,
 		AddedSlot:  1,
-	}).Error)
-	require.NoError(t, store.DB().Model(&models.Account{}).
-		Where("staking_key = ?", abstainAcct).
-		Update("active", false).Error)
-	require.NoError(t, store.DB().Create(&models.Account{
+		Active:     false,
+	}))
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: noConfidenceAcct,
 		DrepType:   models.DrepTypeAlwaysNoConfidence,
 		AddedSlot:  1,
-	}).Error)
-	require.NoError(t, store.DB().Model(&models.Account{}).
-		Where("staking_key = ?", noConfidenceAcct).
-		Update("active", false).Error)
+		Active:     false,
+	}))
 	resolveSnapshotAutoVotes(t, db, 12)
 
 	tally := &ProposalTally{
@@ -854,8 +914,12 @@ func TestTallySPOVotesDeregisteredRewardAccountDoesNotAutoVote(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(300), tally.SPOTotalStake)
-	assert.Equal(t, uint64(0), tally.SPOYesStake,
-		"deregistered AlwaysNoConfidence delegation must not auto-Yes on NoConfidence action")
+	assert.Equal(
+		t,
+		uint64(0),
+		tally.SPOYesStake,
+		"deregistered AlwaysNoConfidence delegation must not auto-Yes on NoConfidence action",
+	)
 	assert.Equal(t, uint64(0), tally.SPONoStake)
 	assert.Equal(t, uint64(0), tally.SPOAbstainStake,
 		"deregistered AlwaysAbstain delegation must not auto-abstain")
@@ -933,18 +997,23 @@ func TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo(t *testing.T) {
 	// Abstain but Resolved=false. This mimics either a Mithril-imported
 	// set/go row that the import path declined to resolve, or a row
 	// from a pre-flag schema where the column happens to be non-zero.
-	require.NoError(t, store.DB().Create(&models.Pool{
+	pool := &models.Pool{
 		PoolKeyHash:   poolKeyHash,
 		RewardAccount: rewardAccount,
-	}).Error)
-	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+	}
+	require.NoError(t, store.ImportPool(pool, &models.PoolRegistration{
+		PoolKeyHash:   poolKeyHash,
+		RewardAccount: rewardAccount,
+		AddedSlot:     0,
+	}, nil))
+	require.NoError(t, store.SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
 		Epoch:                 15,
 		SnapshotType:          "mark",
 		PoolKeyHash:           poolKeyHash,
 		TotalStake:            types.Uint64(500),
 		RewardAccountAutoVote: models.PoolRewardAccountAutoVoteAbstain,
 		// RewardAccountAutoVoteResolved intentionally zero-value (false).
-	}).Error)
+	}, nil))
 
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -957,8 +1026,12 @@ func TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(500), tally.SPOTotalStake)
-	assert.Equal(t, uint64(0), tally.SPOAbstainStake,
-		"unresolved row must not bucket stake into Abstain even when the column says Abstain")
+	assert.Equal(
+		t,
+		uint64(0),
+		tally.SPOAbstainStake,
+		"unresolved row must not bucket stake into Abstain even when the column says Abstain",
+	)
 	assert.Equal(t, uint64(0), tally.SPOYesStake)
 	assert.Equal(t, uint64(0), tally.SPONoStake)
 }
@@ -991,20 +1064,24 @@ func TestTallySPOVotesSnapshotIsFrozenAgainstLiveStateChanges(t *testing.T) {
 	// a regular DRep AND rotate the pool's reward account to a brand
 	// new credential. Under live-state lookup this would zero out the
 	// abstain bucket; the snapshot-frozen tally must ignore both.
-	require.NoError(t, store.DB().Model(&models.Account{}).
-		Where("staking_key = ?", originalRewardAcct).
-		Updates(map[string]any{
-			"drep":      regularDRep,
-			"drep_type": models.DrepTypeAddrKeyHash,
-		}).Error)
-	require.NoError(t, store.DB().Model(&models.Pool{}).
-		Where("pool_key_hash = ?", poolKeyHash).
-		Update("reward_account", rotatedRewardAcct).Error)
+	_, err := store.raw.Exec(`
+UPDATE account SET drep = ?, drep_type = ? WHERE staking_key = ?`,
+		regularDRep,
+		models.DrepTypeAddrKeyHash,
+		originalRewardAcct,
+	)
+	require.NoError(t, err)
+	_, err = store.raw.Exec(
+		"UPDATE pool SET reward_account = ? WHERE pool_key_hash = ?",
+		rotatedRewardAcct,
+		poolKeyHash,
+	)
+	require.NoError(t, err)
 
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
-	err := tallySPOVotes(
+	err = tallySPOVotes(
 		&TallyContext{DB: db, StakeEpoch: 13},
 		nil,
 		tally,
@@ -1012,8 +1089,12 @@ func TestTallySPOVotesSnapshotIsFrozenAgainstLiveStateChanges(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(400), tally.SPOTotalStake)
-	assert.Equal(t, uint64(400), tally.SPOAbstainStake,
-		"snapshot-era AlwaysAbstain must survive a post-snapshot redelegation + reward-account rotation")
+	assert.Equal(
+		t,
+		uint64(400),
+		tally.SPOAbstainStake,
+		"snapshot-era AlwaysAbstain must survive a post-snapshot redelegation + reward-account rotation",
+	)
 	assert.Equal(t, uint64(0), tally.SPOYesStake)
 	assert.Equal(t, uint64(0), tally.SPONoStake)
 }

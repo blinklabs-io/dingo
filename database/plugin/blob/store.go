@@ -76,7 +76,11 @@ type BlobStore interface {
 	// DeleteBlock continues to fully remove a block for orphan rollbacks
 	// where there is no retained history entry.
 	TombstoneBlock(txn types.Txn, slot uint64, hash []byte) error
-	GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (types.SignedURL, types.BlockMetadata, error)
+	GetBlockURL(
+		ctx context.Context,
+		txn types.Txn,
+		point ocommon.Point,
+	) (types.SignedURL, types.BlockMetadata, error)
 	// UTxO operations
 	SetUtxo(txn types.Txn, txId []byte, outputIdx uint32, cbor []byte) error
 	GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([]byte, error)

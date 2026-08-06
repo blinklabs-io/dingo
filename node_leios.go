@@ -112,11 +112,13 @@ func leiosCommitteeParamsFromPParams(
 	}
 	// Return fresh copies so callers cannot mutate the shared defaults.
 	sigmaC := new(big.Rat).Set(defaultLeiosCommitteeStakeCoverage)
-	if cov := dijkstraPParams.CommitteeStakeCoverage; cov != nil && cov.Rat != nil {
+	if cov := dijkstraPParams.CommitteeStakeCoverage; cov != nil &&
+		cov.Rat != nil {
 		sigmaC = cov.Rat
 	}
 	tau := new(big.Rat).Set(defaultLeiosQuorumStakeThreshold)
-	if quorum := dijkstraPParams.QuorumStakeThreshold; quorum != nil && quorum.Rat != nil {
+	if quorum := dijkstraPParams.QuorumStakeThreshold; quorum != nil &&
+		quorum.Rat != nil {
 		tau = quorum.Rat
 	}
 	// Defaulting a single unset field against a configured counterpart could
@@ -125,7 +127,8 @@ func leiosCommitteeParamsFromPParams(
 	if tau.Cmp(sigmaC) >= 0 {
 		return nil, nil, fmt.Errorf(
 			"leios quorum stake threshold (%s) must be less than committee stake coverage (%s)",
-			tau.RatString(), sigmaC.RatString(),
+			tau.RatString(),
+			sigmaC.RatString(),
 		)
 	}
 	return sigmaC, tau, nil
@@ -174,13 +177,23 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	}
 	n.leiosVoteManager = mgr
 	n.ouroboros.LeiosVotes = mgr
-	n.eventBus.SubscribeFunc(leios.VoteEmittedEventType, func(evt event.Event) {
-		data, ok := evt.Data.(leios.VoteEmittedEvent)
-		if !ok {
-			return
-		}
-		n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
-	})
+	// Captured (not discarded) so quiesceForLiveLifecycleOp can unsubscribe
+	// this handler before a live database restore/truncate rebuilds
+	// leiosVoteManager and calls initLeiosVoteManager again -- the
+	// EventBus itself is retained across that cycle, so without this a
+	// stale subscription from every earlier cycle stays permanently
+	// active alongside the new one, and a single emitted vote gets
+	// enqueued (and diffused to peers) once per accumulated subscription.
+	n.leiosVoteEmittedSubId = n.eventBus.SubscribeFunc(
+		leios.VoteEmittedEventType,
+		func(evt event.Event) {
+			data, ok := evt.Data.(leios.VoteEmittedEvent)
+			if !ok {
+				return
+			}
+			n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
+		},
+	)
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",

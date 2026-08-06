@@ -159,6 +159,61 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 3
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		<-start
+		for i := range 100 {
+			ls.Lock()
+			if i%2 == 0 {
+				ls.currentEra = eras.BabbageEraDesc
+			} else {
+				ls.currentEra = eras.ConwayEraDesc
+			}
+			ls.Unlock()
+		}
+		close(done)
+	})
+
+	for range 8 {
+		wg.Go(func() {
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					_ = ls.SecurityParam()
+				}
+			}
+		})
+	}
+
+	close(start)
+	wg.Wait()
+}
+
 func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
 	const securityParam uint64 = 37
 	cfg := newTestShelleyGenesisCfg(t)
@@ -1087,7 +1142,9 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 	)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 	clock.nowFunc = func() time.Time {
-		return provider.systemStart.Add(time.Duration(currentSlot) * time.Second)
+		return provider.systemStart.Add(
+			time.Duration(currentSlot) * time.Second,
+		)
 	}
 
 	ls := &LedgerState{
@@ -1200,7 +1257,9 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 	)
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 	clock.nowFunc = func() time.Time {
-		return provider.systemStart.Add(time.Duration(currentSlot) * time.Second)
+		return provider.systemStart.Add(
+			time.Duration(currentSlot) * time.Second,
+		)
 	}
 
 	ls := &LedgerState{
@@ -1527,7 +1586,9 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 
 // TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations verifies that
 // shutdown remains panic-free while operations are still queued or running.
-func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(t *testing.T) {
+func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
+	t *testing.T,
+) {
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 2
 	config.TaskQueueSize = 20
@@ -3148,7 +3209,10 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 	tipBlock := blocks[len(blocks)-1]
-	require.NoError(t, db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil))
+	require.NoError(
+		t,
+		db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       makeTestPoint(tipBlock),
 		BlockNumber: tipBlock.Number,
@@ -3224,7 +3288,12 @@ func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 
 	for _, block := range blocks {
 		_, err := database.BlockByPoint(db, makeTestPoint(block))
-		assert.NoError(t, err, "block at slot %d should still exist", block.Slot)
+		assert.NoError(
+			t,
+			err,
+			"block at slot %d should still exist",
+			block.Slot,
+		)
 	}
 }
 
@@ -3279,7 +3348,11 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 }
 
 // newTestEpoch is a convenience builder for models.Epoch.
-func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.Epoch {
+func newTestEpoch(
+	id, startSlot uint64,
+	lengthInSlots uint,
+	eraId uint,
+) models.Epoch {
 	return models.Epoch{
 		EpochId:       id,
 		StartSlot:     startSlot,
@@ -3302,7 +3375,9 @@ func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.E
 //	safeZone = ceil(3*432/0.05) = 25_920
 //	epoch: startSlot=100_000, length=432_000, end=532_000
 //	tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.T) {
+func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(
+	t *testing.T,
+) {
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3314,8 +3389,13 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			epochStart,
+			epochLen,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
@@ -3334,7 +3414,9 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 
 // TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd verifies
 // that TransitionImpossible is set when safeEndSlot > epochEndSlot.
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.T) {
+func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(
+	t *testing.T,
+) {
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3345,8 +3427,13 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			epochStart,
+			epochLen,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
@@ -3364,7 +3451,9 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 
 // TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch verifies
 // that TransitionImpossible is NOT set when safeEndSlot < epochEndSlot.
-func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T) {
+func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(
+	t *testing.T,
+) {
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3374,8 +3463,13 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			epochStart,
+			epochLen,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
@@ -3397,8 +3491,13 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			100_000,
+			432_000,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			// tipSlot past the safe-zone boundary → would normally trigger Impossible
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
@@ -3422,8 +3521,13 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
+		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
+		currentEpoch: newTestEpoch(
+			500,
+			100_000,
+			432_000,
+			eras.ConwayEraDesc.Id,
+		),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
 		},
@@ -3643,7 +3747,11 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 
 	var eraTransitions []*EraTransitionResult
 	rolloverResult := &EpochRolloverResult{
-		NewCurrentEpoch:   models.Epoch{EpochId: 501, StartSlot: 532_000, LengthInSlots: 432_000},
+		NewCurrentEpoch: models.Epoch{
+			EpochId:       501,
+			StartSlot:     532_000,
+			LengthInSlots: 432_000,
+		},
 		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 501}},
@@ -3663,13 +3771,20 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 			ls.transitionInfo = hardfork.NewTransitionUnknown()
 		}
 	}
-	if len(eraTransitions) == 0 && rolloverResult != nil && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+	if len(eraTransitions) == 0 && rolloverResult != nil &&
+		rolloverResult.HardFork != nil {
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"plain epoch rollover must reset TransitionImpossible to TransitionUnknown")
+	assert.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"plain epoch rollover must reset TransitionImpossible to TransitionUnknown",
+	)
 }
 
 // TestApplyEraTransition_ClearsTransitionKnown verifies that
@@ -3823,12 +3938,18 @@ func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"era transition must clear transitionInfo even when rolloverResult.HardFork is set")
+	assert.Equal(
+		t,
+		hardfork.TransitionUnknown,
+		ls.transitionInfo.State,
+		"era transition must clear transitionInfo even when rolloverResult.HardFork is set",
+	)
 }
 
 // TestRolloverCommit_HardForkWithoutEraTransition verifies that
@@ -3862,12 +3983,18 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
-	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
-		"version bump at epoch boundary without era transition must set TransitionKnown")
+	assert.Equal(
+		t,
+		hardfork.TransitionKnown,
+		ls.transitionInfo.State,
+		"version bump at epoch boundary without era transition must set TransitionKnown",
+	)
 	assert.Equal(t, uint64(500), ls.transitionInfo.KnownEpoch)
 }
 
@@ -3898,7 +4025,9 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(rolloverResult.NewCurrentEpoch.EpochId)
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
 	}
 	ls.Unlock()
 
@@ -3994,6 +4123,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			block,
 			false,
 			false,
+			false,
 			nil,
 			envelopeParent{},
 			nil,
@@ -4051,6 +4181,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			block,
 			false,
 			false,
+			false,
 			nil,
 			envelopeParent{},
 			nil,
@@ -4061,6 +4192,65 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 		return err
 	})
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+}
+
+// TestStrictConsumedInputsEnabled pins the #3005 guard condition, including the
+// P1 transition-batch case: the first batch whose blocks cross the tip cutoff is
+// processed while reachedTip is still false (it is stored true only after that
+// batch commits), so the per-block reachesTip signal must enable the guard on
+// its own. Without it that transition batch could still recover an unapplied
+// producer from the blob store.
+func TestStrictConsumedInputsEnabled(t *testing.T) {
+	tests := []struct {
+		name           string
+		shouldValidate bool
+		reachedTip     bool
+		reachesTip     bool
+		want           bool
+	}{
+		{
+			name:           "unvalidated application is never strict",
+			shouldValidate: false,
+			reachedTip:     true,
+			reachesTip:     true,
+			want:           false,
+		},
+		{
+			name:           "validated at an established tip",
+			shouldValidate: true,
+			reachedTip:     true,
+			reachesTip:     false,
+			want:           true,
+		},
+		{
+			name:           "validated transition batch before reachedTip stored",
+			shouldValidate: true,
+			reachedTip:     false,
+			reachesTip:     true,
+			want:           true,
+		},
+		{
+			name:           "validated historical catch-up not yet at tip",
+			shouldValidate: true,
+			reachedTip:     false,
+			reachesTip:     false,
+			want:           false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := &LedgerState{}
+			ls.reachedTip.Store(tc.reachedTip)
+			require.Equal(
+				t,
+				tc.want,
+				ls.strictConsumedInputsEnabled(
+					tc.shouldValidate,
+					tc.reachesTip,
+				),
+			)
+		})
+	}
 }
 
 func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
@@ -4126,5 +4316,133 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 				assert.NotContains(t, logs, notWant)
 			}
 		})
+	}
+}
+
+// TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime covers Close()'s
+// rollback-goroutine wait: previously this only logged a Warn on timeout and
+// let Close() return nil regardless, which live restore/truncate's caller
+// (closeStorageForLiveLifecycleOp) took as a green light to proceed to
+// physically close/reopen the data directory even though a rollback
+// goroutine might still be running against it.
+func TestCloseReturnsErrorWhenRollbackGoroutinesDoNotDrainInTime(t *testing.T) {
+	origTimeout := CloseRollbackDrainTimeout
+	CloseRollbackDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseRollbackDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	// Simulate an in-flight rollback goroutine that outlives the timeout.
+	ls.rollbackWG.Add(1)
+	t.Cleanup(func() { ls.rollbackWG.Done() })
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rollback")
+}
+
+// TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime covers Close()'s
+// database-worker-pool wait, which had the same silent-timeout gap as the
+// rollback wait above.
+func TestCloseReturnsErrorWhenDBWorkerPoolDoesNotShutdownInTime(t *testing.T) {
+	origTimeout := CloseDBWorkerPoolShutdownTimeout
+	CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	pool := NewDatabaseWorkerPool(nil, DatabaseWorkerPoolConfig{
+		WorkerPoolSize: 1,
+		TaskQueueSize:  1,
+	})
+	release := make(chan struct{})
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			<-release
+			return nil
+		},
+	})
+	t.Cleanup(func() { close(release) })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		dbWorkerPool: pool,
+	}
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "database worker pool")
+}
+
+// TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime covers
+// the root cause of the "persistent chain index gap" liveness failure seen
+// under TestLiveTruncateUnderRealForgingAndNetworking (real forging +
+// networking, only reproducible under contention/slower hardware): Close
+// previously never waited for ledgerProcessBlocks (the goroutine Start
+// launches to apply incoming chainsync blocks) at all, since Start ran it
+// against ctx directly rather than a child context Close could cancel. A
+// block landing mid-write exactly as Close proceeded to shut down
+// dbWorkerPool left the persisted block-ID index permanently inconsistent
+// with the in-memory tip already advanced for it -- a corruption no retry
+// recovers from, unlike a transient timing issue.
+func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
+	t *testing.T,
+) {
+	origTimeout := CloseProcessBlocksDrainTimeout
+	CloseProcessBlocksDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseProcessBlocksDrainTimeout = origTimeout })
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.processBlocksCancel = func() {}
+	// Simulate an in-flight ledgerProcessBlocks goroutine that outlives the
+	// timeout -- e.g. mid-write on a block when Close is called.
+	ls.processBlocksWG.Add(1)
+	t.Cleanup(ls.processBlocksWG.Done)
+
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "block-processing pipeline")
+}
+
+// TestCloseWaitsForBlockProcessingPipelineToActuallyStop is the positive
+// counterpart: a real Start/Close cycle (ledgerProcessBlocks genuinely
+// running, not simulated) must not report a timeout, and Close must
+// actually block until the goroutine has exited -- proving
+// processBlocksCancel's child context, not ctx directly, is what Start
+// wires ledgerProcessBlocks to run against.
+func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+
+	processCtx, processCancel := context.WithCancel(t.Context())
+	ls.processBlocksCancel = processCancel
+	ls.processBlocksWG.Add(1)
+	stopped := make(chan struct{})
+	go func() {
+		defer ls.processBlocksWG.Done()
+		<-processCtx.Done()
+		close(stopped)
+	}()
+
+	err := ls.Close()
+	require.NoError(t, err)
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("Close returned without processCtx actually being cancelled")
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -44,6 +45,7 @@ const (
 	DefaultTransactionTTL         = 5 * time.Minute
 	DefaultCleanupInterval        = 1 * time.Minute
 	DefaultRevalidationDeltaCap   = 64
+	DefaultConsumerCacheSize      = 1024
 	defaultRevalidationJournalCap = 65_536
 )
 
@@ -123,7 +125,10 @@ type MempoolConfig struct {
 	EvictionWatermark    float64
 	RejectionWatermark   float64
 	RevalidationDeltaCap int
-	CurrentSlotFunc      func() uint64 // returns current slot for early TX rejection
+	// ConsumerCacheSize bounds the number of transaction bodies retained per
+	// transaction-submission consumer. Zero uses DefaultConsumerCacheSize.
+	ConsumerCacheSize int
+	CurrentSlotFunc   func() uint64 // returns current slot for early TX rejection
 }
 
 type Mempool struct {
@@ -153,10 +158,20 @@ type Mempool struct {
 	revalidationJournalCap int
 	stopped                bool
 	sync.RWMutex
-	doneOnce        sync.Once
-	mutationMutex   sync.Mutex
-	startOnce       sync.Once
-	stopOnce        sync.Once
+	doneOnce      sync.Once
+	mutationMutex sync.Mutex
+	startOnce     sync.Once
+	stopOnce      sync.Once
+	// stopTimeoutErr records the ctx.Err() from the first Stop call's context
+	// if it fired before workerWG drained. stopOnce.Do only executes its
+	// closure on the first Stop call, so a local variable set inside that
+	// closure would be invisible to any later, concurrent, or repeated Stop
+	// call -- this needs to be a field so every caller of Stop (regardless of
+	// which one actually ran the closure) can observe the real outcome
+	// instead of always getting nil, and so it reflects the context that
+	// actually timed out rather than whichever caller happens to check it.
+	stopTimeoutErr atomic.Pointer[error]
+
 	workerWG        sync.WaitGroup
 	consumersMutex  sync.Mutex
 	overlay         *utxoOverlay
@@ -659,7 +674,7 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	if consumer := m.consumers[connId]; consumer != nil {
 		return consumer
 	}
-	consumer := newConsumer(m)
+	consumer := newConsumer(m, m.config.ConsumerCacheSize)
 	m.consumers[connId] = consumer
 	return consumer
 }
@@ -716,6 +731,8 @@ func (m *Mempool) Stop(ctx context.Context) error {
 					"skipping teardown",
 				"error", ctx.Err(),
 			)
+			cancelErr := ctx.Err()
+			m.stopTimeoutErr.Store(&cancelErr)
 			return
 		}
 
@@ -742,6 +759,13 @@ func (m *Mempool) Stop(ctx context.Context) error {
 		m.metrics.txsInMempool.Set(0)
 		m.metrics.mempoolBytes.Set(0)
 	})
+
+	if timeoutErr := m.stopTimeoutErr.Load(); timeoutErr != nil {
+		return fmt.Errorf(
+			"mempool stop: %w before background workers drained",
+			*timeoutErr,
+		)
+	}
 
 	m.logger.Debug("mempool stopped")
 	return nil

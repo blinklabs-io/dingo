@@ -112,7 +112,12 @@ func (t *loadCaptureFailureTracker) err() error {
 	)
 }
 
-func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
+func Load(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	immutableDir string,
+) error {
 	return LoadWithDB(ctx, cfg, logger, immutableDir, nil)
 }
 
@@ -729,8 +734,10 @@ func copyBlocksDirect(
 	if chainTip.Point.Slot > immutableTip.Slot {
 		logger.Info(
 			"chain tip already beyond immutable DB tip; skipping immutable copy",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"immutable_tip_slot", immutableTip.Slot,
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"immutable_tip_slot",
+			immutableTip.Slot,
 		)
 		return 0, immutableTip.Slot, nil
 	}
@@ -972,8 +979,10 @@ func copyBlocksRawWithCallback(
 	if chainTip.Point.Slot > immutableTip.Slot {
 		logger.Info(
 			"chain tip already beyond immutable DB tip; skipping immutable copy",
-			"chain_tip_slot", chainTip.Point.Slot,
-			"immutable_tip_slot", immutableTip.Slot,
+			"chain_tip_slot",
+			chainTip.Point.Slot,
+			"immutable_tip_slot",
+			immutableTip.Slot,
 		)
 		if callback != nil && db != nil {
 			complete, err := immutableUtxoOffsetsComplete(
@@ -1253,7 +1262,9 @@ func backfillRawBlockCallbacks(
 	return blocksBackfilled, nil
 }
 
-func rawBlockFromImmutableBlock(block *immutable.Block) (chain.RawBlock, error) {
+func rawBlockFromImmutableBlock(
+	block *immutable.Block,
+) (chain.RawBlock, error) {
 	// Extract header CBOR from the block's outer array (first element for all
 	// eras), then decode just the header without decoding transaction bodies.
 	headerCbor, err := extractHeaderCbor(block.Cbor)
@@ -1597,6 +1608,9 @@ func cborArrayHeaderLen(data []byte) (int, error) {
 	case additional == 31:
 		return 1, nil
 	default:
-		return 0, fmt.Errorf("unsupported CBOR array additional info: %d", additional)
+		return 0, fmt.Errorf(
+			"unsupported CBOR array additional info: %d",
+			additional,
+		)
 	}
 }

@@ -97,7 +97,10 @@ func TestChainsyncByronEbbHeaderRoundTrip(t *testing.T) {
 
 func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
 	ebbCbor := byronEbbFixtureCbor(t)
-	expected, err := gledger.NewBlockFromCbor(gledger.BlockTypeByronEbb, ebbCbor)
+	expected, err := gledger.NewBlockFromCbor(
+		gledger.BlockTypeByronEbb,
+		ebbCbor,
+	)
 	require.NoError(t, err)
 
 	o := NewOuroboros(OuroborosConfig{})
@@ -250,7 +253,10 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2160}))
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2160}),
+	)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -444,8 +450,9 @@ func sendChainsyncTestConnError(errCh chan error, err error) {
 	}
 }
 
-// requireChainsyncClosedEvent verifies that the async send failure reached
-// connmanager's lifecycle path instead of being logged and dropped.
+// requireChainsyncClosedEvent verifies that the async send failure closed the
+// connection and reached connmanager's lifecycle path. The event error is nil
+// because channel closure, rather than an unsafe send, wakes the watcher.
 func requireChainsyncClosedEvent(
 	t *testing.T,
 	h chainsyncAsyncSendFailureHarness,
@@ -461,7 +468,7 @@ func requireChainsyncClosedEvent(
 	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
 	require.True(t, ok)
 	require.Equal(t, h.conn.Id(), closed.ConnectionId)
-	require.Error(t, closed.Error)
+	require.NoError(t, closed.Error)
 }
 
 // requestNextIntoAsyncAwait performs the initial rollback handshake and then
@@ -1007,10 +1014,13 @@ func TestChainsyncServerRequestNext_AsyncIteratorCancelDoesNotCloseConnection(
 	require.NoError(t, err)
 	clientState.NeedsInitialRollback = false
 
-	require.NoError(t, h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
-		ConnectionId: h.conn.Id(),
-		Server:       h.server,
-	}))
+	require.NoError(
+		t,
+		h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
+			ConnectionId: h.conn.Id(),
+			Server:       h.server,
+		}),
+	)
 
 	// Cancel the iterator to simulate normal connection/iterator cleanup.
 	clientState.ChainIter.Cancel()
@@ -1869,7 +1879,11 @@ func TestChainsyncClientRollForward_ParallelMultiPeerOrdering(t *testing.T) {
 			t,
 			ch,
 			time.Second,
-			fmt.Sprintf("missing expected ingress event %d (slot %d)", i, w.slot),
+			fmt.Sprintf(
+				"missing expected ingress event %d (slot %d)",
+				i,
+				w.slot,
+			),
 		)
 		data, ok := evt.Data.(ledger.ChainsyncEvent)
 		require.True(t, ok)
@@ -2005,7 +2019,9 @@ func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
 	require.False(t, o.isInboundChainsyncClient(connId))
 }
 
-func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(t *testing.T) {
+func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
+	t *testing.T,
+) {
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 

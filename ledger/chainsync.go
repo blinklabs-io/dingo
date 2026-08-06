@@ -316,7 +316,9 @@ func headerValidationPointKey(point ocommon.Point) string {
 }
 
 func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
-	return deferredHeaderValidationSyncStatePrefix + headerValidationPointKey(point)
+	return deferredHeaderValidationSyncStatePrefix + headerValidationPointKey(
+		point,
+	)
 }
 
 func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
@@ -334,7 +336,9 @@ func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
 	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
 }
 
-func (ls *LedgerState) consumeDeferredHeaderValidation(point ocommon.Point) bool {
+func (ls *LedgerState) consumeDeferredHeaderValidation(
+	point ocommon.Point,
+) bool {
 	ls.Lock()
 	defer ls.Unlock()
 	key := headerValidationPointKey(point)
@@ -391,7 +395,10 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 		txn,
 	)
 	if err != nil {
-		return false, fmt.Errorf("read deferred header validation marker: %w", err)
+		return false, fmt.Errorf(
+			"read deferred header validation marker: %w",
+			err,
+		)
 	}
 	return required || value == deferredHeaderValidationSyncStateValue, nil
 }
@@ -535,10 +542,14 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 				!sameConnectionId(*activeConnId, e.NewConnectionId) {
 				ls.config.Logger.Info(
 					"chain switch target unavailable, retrying with active best peer",
-					"component", "ledger",
-					"failed_connection_id", e.NewConnectionId.String(),
-					"active_connection_id", activeConnId.String(),
-					"error", err,
+					"component",
+					"ledger",
+					"failed_connection_id",
+					e.NewConnectionId.String(),
+					"active_connection_id",
+					activeConnId.String(),
+					"error",
+					err,
 				)
 				if retryConnId, retryErr := ls.handoffPipelineOnSwitchLocked(*activeConnId); retryErr == nil {
 					replayConnId = retryConnId
@@ -550,9 +561,12 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		if err != nil {
 			ls.config.Logger.Warn(
 				"failed to hand off chainsync pipeline on chain switch, resetting pipeline",
-				"component", "ledger",
-				"connection_id", e.NewConnectionId.String(),
-				"error", err,
+				"component",
+				"ledger",
+				"connection_id",
+				e.NewConnectionId.String(),
+				"error",
+				err,
 			)
 			// Clear orphaned headers and stale connection refs so the
 			// pipeline can accept headers from reconnected peers instead
@@ -574,11 +588,16 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	if requestFreshCursor {
 		ls.config.Logger.Info(
 			"chain switch selected peer is ahead without queued headers, requesting fresh chainsync cursor",
-			"component", "ledger",
-			"connection_id", effectiveConnId.String(),
-			"switch_connection_id", e.NewConnectionId.String(),
-			"local_tip_slot", ls.PrimaryChainTip().Point.Slot,
-			"peer_tip_slot", e.NewTip.Point.Slot,
+			"component",
+			"ledger",
+			"connection_id",
+			effectiveConnId.String(),
+			"switch_connection_id",
+			e.NewConnectionId.String(),
+			"local_tip_slot",
+			ls.PrimaryChainTip().Point.Slot,
+			"peer_tip_slot",
+			e.NewTip.Point.Slot,
 		)
 		ls.requestChainsyncResync(
 			effectiveConnId,
@@ -627,7 +646,8 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	}
 	if ls.config.GetActiveConnectionFunc != nil {
 		activeConnId := ls.config.GetActiveConnectionFunc()
-		if activeConnId == nil || sameConnectionId(*activeConnId, e.ConnectionId) {
+		if activeConnId == nil ||
+			sameConnectionId(*activeConnId, e.ConnectionId) {
 			ls.syncUpstreamTipSlot.Store(0)
 		}
 	}
@@ -671,9 +691,12 @@ func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
 	ls.selectedBlockfetchConnId = e.ConnectionId
 	ls.config.Logger.Debug(
 		"selected chainsync peer entered await reply, flushing queued headers to blockfetch",
-		"component", "ledger",
-		"connection_id", e.ConnectionId.String(),
-		"header_count", ls.chain.HeaderCount(),
+		"component",
+		"ledger",
+		"connection_id",
+		e.ConnectionId.String(),
+		"header_count",
+		ls.chain.HeaderCount(),
 	)
 	if err := ls.startQueuedBlockfetchLocked(e.ConnectionId); err != nil {
 		ls.config.Logger.Error(
@@ -729,9 +752,12 @@ func (ls *LedgerState) detectConnectionSwitch() (
 			if err != nil {
 				ls.config.Logger.Warn(
 					"failed to hand off chainsync pipeline after active connection change, resetting pipeline",
-					"component", "ledger",
-					"connection_id", activeConnId.String(),
-					"error", err,
+					"component",
+					"ledger",
+					"connection_id",
+					activeConnId.String(),
+					"error",
+					err,
 				)
 				ls.clearQueuedHeaders()
 				ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
@@ -1212,29 +1238,6 @@ func (ls *LedgerState) requestChainsyncResync(
 	)
 }
 
-func (ls *LedgerState) currentHeaderPipelineOwner() ouroboros.ConnectionId {
-	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	if ls.chainsyncBlockfetchReadyChan != nil {
-		if connIdKey(ls.headerPipelineConnId) != "" {
-			return ls.headerPipelineConnId
-		}
-		if connIdKey(ls.activeBlockfetchConnId) != "" {
-			return ls.activeBlockfetchConnId
-		}
-		return ouroboros.ConnectionId{}
-	}
-	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
-		return ls.headerPipelineConnId
-	}
-	// Once the shared header queue drains, there is no live pipeline owner.
-	// A stale selected blockfetch peer must not monopolize future headers while
-	// the pipeline is idle; whichever peer delivers the next usable header gets
-	// to seed the next batch.
-	ls.headerPipelineConnId = ouroboros.ConnectionId{}
-	return ouroboros.ConnectionId{}
-}
-
 func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
 	e ChainsyncEvent,
 ) bool {
@@ -1261,25 +1264,72 @@ func (ls *LedgerState) clearIdleSelectedOwner() {
 	}
 }
 
-func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+// claimHeaderPipelineOwnership atomically determines the current header
+// pipeline owner for e and, for every outcome that changes
+// headerPipelineConnId (and selectedBlockfetchConnId, for the
+// compatible-fork case), writes it under the same chainsyncBlockfetchMutex
+// hold as the read that decided it. Every other mutator of
+// headerPipelineConnId (discardBufferedPeerHeaders, clearQueuedHeaders,
+// handleEventBlockfetch's batch-done path, etc.) already holds this same
+// mutex around its own reads/writes; splitting "decide the owner" from
+// "write the decision" into two separate lock/unlock cycles (as this used
+// to do, via the now-inlined currentHeaderPipelineOwner) left a window
+// where one of those other mutators could run in between and have its
+// change silently overwritten by this function's own, now-stale decision.
+func (ls *LedgerState) claimHeaderPipelineOwnership(
+	e ChainsyncEvent,
+) (ownerConnId ouroboros.ConnectionId, shouldBuffer bool, acceptedDifferentConnection bool) {
 	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+
 	if ls.staleSelectedOwnerWouldBufferHeader(e) {
 		ls.logIdleSelectedOwnerRelease(e)
 		ls.clearIdleSelectedOwner()
 	}
-	ls.chainsyncBlockfetchMutex.Unlock()
-	ownerConnId := ls.currentHeaderPipelineOwner()
-	if ownerConnId == (ouroboros.ConnectionId{}) {
-		ls.headerPipelineConnId = e.ConnectionId
-		return false
+
+	var owner ouroboros.ConnectionId
+	switch {
+	case ls.chainsyncBlockfetchReadyChan != nil:
+		if connIdKey(ls.headerPipelineConnId) != "" {
+			owner = ls.headerPipelineConnId
+		} else if connIdKey(ls.activeBlockfetchConnId) != "" {
+			owner = ls.activeBlockfetchConnId
+		} else {
+			owner = ouroboros.ConnectionId{}
+		}
+	case ls.chain != nil && ls.chain.HeaderCount() > 0:
+		owner = ls.headerPipelineConnId
+	default:
+		// Once the shared header queue drains, there is no live pipeline
+		// owner. A stale selected blockfetch peer must not monopolize
+		// future headers while the pipeline is idle; whichever peer
+		// delivers the next usable header gets to seed the next batch.
+		ls.headerPipelineConnId = ouroboros.ConnectionId{}
+		owner = ouroboros.ConnectionId{}
 	}
-	if sameConnectionId(ownerConnId, e.ConnectionId) {
+
+	if owner == (ouroboros.ConnectionId{}) {
 		ls.headerPipelineConnId = e.ConnectionId
-		return false
+		return owner, false, false
+	}
+	if sameConnectionId(owner, e.ConnectionId) {
+		ls.headerPipelineConnId = e.ConnectionId
+		return owner, false, false
 	}
 	if ls.headerFitsCurrentPipeline(e) {
 		ls.headerPipelineConnId = e.ConnectionId
 		ls.selectedBlockfetchConnId = e.ConnectionId
+		return owner, false, true
+	}
+	ls.headerPipelineConnId = owner
+	return owner, true, false
+}
+
+func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+	ownerConnId, shouldBuffer, acceptedDifferentConnection := ls.claimHeaderPipelineOwnership(
+		e,
+	)
+	if acceptedDifferentConnection {
 		ls.config.Logger.Debug(
 			"accepting compatible header from different connection",
 			"component", "ledger",
@@ -1287,9 +1337,10 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 			"previous_owner_connection_id", ownerConnId.String(),
 			"slot", e.Point.Slot,
 		)
+	}
+	if !shouldBuffer {
 		return false
 	}
-	ls.headerPipelineConnId = ownerConnId
 	ls.bufferHeaderEvent(e)
 	ls.config.Logger.Debug(
 		"buffering header from non-owner connection",
@@ -1401,10 +1452,19 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	return nil
 }
 
+// discardBufferedPeerHeaders is called from handleEventChainsync's dispatch
+// goroutine, which holds only chainsyncMutex -- clearQueuedHeaders mutates
+// headerPipelineConnId, which every other mutator (handleChainSwitchEvent,
+// handleEventBlockfetch's batch-done path, etc.) guards with
+// chainsyncBlockfetchMutex. Taking it here too, self-contained, closes that
+// gap without widening handleEventBlockfetch's own critical section to
+// cover chainsyncMutex as well.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
 ) {
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
@@ -1561,10 +1621,14 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	if e.Point.Slot > localTip.Point.Slot {
 		ls.config.Logger.Warn(
 			"received rollback point ahead of local tip, triggering chainsync re-sync",
-			"component", "ledger",
-			"rollback_slot", e.Point.Slot,
-			"local_tip_slot", localTip.Point.Slot,
-			"connection_id", e.ConnectionId.String(),
+			"component",
+			"ledger",
+			"rollback_slot",
+			e.Point.Slot,
+			"local_tip_slot",
+			localTip.Point.Slot,
+			"connection_id",
+			e.ConnectionId.String(),
 		)
 		ls.resetChainsyncResyncState()
 		ls.setChainsyncState(SyncingChainsyncState)
@@ -1601,10 +1665,14 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			// chainsync cursor drift. Recover by forcing re-intersect.
 			ls.config.Logger.Warn(
 				"rollback point not found locally, triggering chainsync re-sync",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"connection_id", e.ConnectionId.String(),
+				"component",
+				"ledger",
+				"slot",
+				e.Point.Slot,
+				"hash",
+				hex.EncodeToString(e.Point.Hash),
+				"connection_id",
+				e.ConnectionId.String(),
 			)
 			// The per-connection loop detector cannot catch this: the
 			// reset below wipes rollbackHistory and the resync forces a
@@ -1713,12 +1781,18 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				reason = event.ChainsyncResyncReasonPeerTipBehindMithril
 				ls.config.Logger.Warn(
 					"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
-					"component", "ledger",
-					"slot", e.Point.Slot,
-					"hash", hex.EncodeToString(e.Point.Hash),
-					"peer_tip_slot", peerTipSlot,
-					"mithril_ledger_slot", mithrilLedgerSlot,
-					"connection_id", e.ConnectionId.String(),
+					"component",
+					"ledger",
+					"slot",
+					e.Point.Slot,
+					"hash",
+					hex.EncodeToString(e.Point.Hash),
+					"peer_tip_slot",
+					peerTipSlot,
+					"mithril_ledger_slot",
+					mithrilLedgerSlot,
+					"connection_id",
+					e.ConnectionId.String(),
 				)
 			} else {
 				ls.config.Logger.Error(
@@ -1825,8 +1899,12 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.headerMismatchCount = 0
 	ls.bufferedHeaderEvents = nil
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
-	ls.clearQueuedHeaders()
 	ls.chainsyncBlockfetchMutex.Lock()
+	// clearQueuedHeaders mutates headerPipelineConnId, which every other
+	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
+	// lock (rather than called before it, as this used to) to close that
+	// gap.
+	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
@@ -1985,8 +2063,13 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				continue
 			}
 			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
+				// clearQueuedHeaders (and the headerPipelineConnId write
+				// below) mutate a field every other mutator guards with
+				// chainsyncBlockfetchMutex -- take it here too, scoped
+				// tightly around just these writes.
+				ls.chainsyncBlockfetchMutex.Lock()
 				ls.clearQueuedHeaders()
-				ls.headerPipelineConnId = ouroboros.ConnectionId{}
+				ls.chainsyncBlockfetchMutex.Unlock()
 				return 0, err
 			}
 			added++
@@ -1994,7 +2077,9 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if added == 0 {
 			continue
 		}
+		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
+		ls.chainsyncBlockfetchMutex.Unlock()
 		ls.selectedBlockfetchConnId = connId
 		return ls.chain.HeaderCount(), nil
 	}
@@ -2091,10 +2176,14 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 						!sameConnectionId(*activeConnId, connId) {
 						ls.config.Logger.Info(
 							"local rollback recovery connection unavailable, retrying with active best peer",
-							"component", "ledger",
-							"failed_connection_id", connId.String(),
-							"active_connection_id", activeConnId.String(),
-							"error", err,
+							"component",
+							"ledger",
+							"failed_connection_id",
+							connId.String(),
+							"active_connection_id",
+							activeConnId.String(),
+							"error",
+							err,
 						)
 						if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId); retryErr == nil {
 							err = nil
@@ -2106,9 +2195,12 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 				if err != nil {
 					ls.config.Logger.Warn(
 						"failed to start blockfetch after local rollback recovery",
-						"component", "ledger",
-						"connection_id", connId.String(),
-						"error", err,
+						"component",
+						"ledger",
+						"connection_id",
+						connId.String(),
+						"error",
+						err,
 					)
 				}
 			}
@@ -2145,10 +2237,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			if errors.Is(err, errHeaderVerificationDeferred) {
 				ls.config.Logger.Debug(
 					"deferring chainsync header crypto verification until blockfetch",
-					"component", "ledger",
-					"slot", e.Point.Slot,
-					"hash", hex.EncodeToString(e.Point.Hash),
-					"error", err,
+					"component",
+					"ledger",
+					"slot",
+					e.Point.Slot,
+					"hash",
+					hex.EncodeToString(e.Point.Hash),
+					"error",
+					err,
 				)
 			} else {
 				if ls.config.EventBus != nil {
@@ -2258,7 +2354,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 			// Header doesn't fit current chain tip. Clear stale queued
 			// headers so subsequent headers are evaluated against the
 			// block tip rather than perpetuating the mismatch.
+			//
+			// clearQueuedHeaders mutates headerPipelineConnId, which
+			// every other mutator guards with chainsyncBlockfetchMutex
+			// -- take it here too, scoped tightly around just this call.
+			ls.chainsyncBlockfetchMutex.Lock()
 			ls.clearQueuedHeaders()
+			ls.chainsyncBlockfetchMutex.Unlock()
 			ls.headerMismatchCount++
 			ls.config.Logger.Debug(
 				"block header does not fit chain tip",
@@ -2296,9 +2398,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				ls.config.EventBus != nil {
 				ls.config.Logger.Info(
 					"persistent chain fork detected, triggering chainsync re-sync",
-					"component", "ledger",
-					"connection_id", e.ConnectionId.String(),
-					"consecutive_mismatches", ls.headerMismatchCount,
+					"component",
+					"ledger",
+					"connection_id",
+					e.ConnectionId.String(),
+					"consecutive_mismatches",
+					ls.headerMismatchCount,
 				)
 				ls.requestChainsyncResync(
 					e.ConnectionId,
@@ -2410,10 +2515,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				!sameConnectionId(*activeConnId, e.ConnectionId) {
 				ls.config.Logger.Info(
 					"blockfetch connections unavailable, retrying with active best peer",
-					"component", "ledger",
-					"failed_connection_id", initialConnId.String(),
-					"active_connection_id", activeConnId.String(),
-					"error", err,
+					"component",
+					"ledger",
+					"failed_connection_id",
+					initialConnId.String(),
+					"active_connection_id",
+					activeConnId.String(),
+					"error",
+					err,
 				)
 				ls.selectedBlockfetchConnId = *activeConnId
 				if retryErr := ls.startQueuedBlockfetchLocked(*activeConnId); retryErr == nil {
@@ -2632,12 +2741,18 @@ func (ls *LedgerState) tryResolveFork(
 			// treating this as an internal failure.
 			ls.config.Logger.Warn(
 				"fork ancestor is no longer on the local chain, triggering chainsync re-sync",
-				"component", "ledger",
-				"error", err,
-				"ancestor_slot", ancestorBlock.Slot,
-				"ancestor_hash", hex.EncodeToString(ancestorBlock.Hash),
-				"local_tip_slot", ls.chain.Tip().Point.Slot,
-				"connection_id", e.ConnectionId.String(),
+				"component",
+				"ledger",
+				"error",
+				err,
+				"ancestor_slot",
+				ancestorBlock.Slot,
+				"ancestor_hash",
+				hex.EncodeToString(ancestorBlock.Hash),
+				"local_tip_slot",
+				ls.chain.Tip().Point.Slot,
+				"connection_id",
+				e.ConnectionId.String(),
 			)
 			ls.headerMismatchCount = 0
 			ls.rollbackHistory = nil
@@ -2801,7 +2916,8 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
 			e.Point,
 		)
-		if !headerAlreadyVerified && !ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
+		if !headerAlreadyVerified &&
+			!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
 			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
 				return err
 			}
@@ -2828,10 +2944,14 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 				}
 				ls.config.Logger.Debug(
 					"deferring stateful block header verification until ledger apply",
-					"component", "ledger",
-					"slot", e.Point.Slot,
-					"hash", hex.EncodeToString(e.Point.Hash),
-					"error", verifyErr,
+					"component",
+					"ledger",
+					"slot",
+					e.Point.Slot,
+					"hash",
+					hex.EncodeToString(e.Point.Hash),
+					"error",
+					verifyErr,
 				)
 			} else {
 				return fmt.Errorf(
@@ -2990,13 +3110,20 @@ func (ls *LedgerState) noteBlockfetchRangeUnavailable(
 	}
 	ls.config.Logger.Warn(
 		"blockfetch could not obtain queued range, dropping queued headers and requesting chainsync re-sync",
-		"component", "ledger",
-		"connection_id", connId.String(),
-		"remaining_headers", ls.chain.HeaderCount(),
-		"range_start_slot", start.Slot,
-		"range_start_hash", hex.EncodeToString(start.Hash),
-		"range_failures", ls.blockfetchRangeFailure.count,
-		"reason", reason,
+		"component",
+		"ledger",
+		"connection_id",
+		connId.String(),
+		"remaining_headers",
+		ls.chain.HeaderCount(),
+		"range_start_slot",
+		start.Slot,
+		"range_start_hash",
+		hex.EncodeToString(start.Hash),
+		"range_failures",
+		ls.blockfetchRangeFailure.count,
+		"reason",
+		reason,
 	)
 	// Start a fresh count: the peer may re-offer the same header, and it
 	// must earn another full set of failures before the queue is dropped
@@ -3123,9 +3250,12 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 				if err != nil {
 					ls.config.Logger.Debug(
 						"shadow blockfetch dispatch failed, trying next candidate",
-						"component", "ledger",
-						"shadow_connection_id", shadowConn.String(),
-						"error", err,
+						"component",
+						"ledger",
+						"shadow_connection_id",
+						shadowConn.String(),
+						"error",
+						err,
 					)
 					continue
 				}
@@ -3262,8 +3392,10 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if ls.db.HasAnyGenesisCbor(0) {
 			ls.config.Logger.Warn(
 				"slot-0 CBOR exists but does not match synthetic genesis hash, creating genesis block",
-				"component", "ledger",
-				"expected_hash", hex.EncodeToString(genesisHash[:]),
+				"component",
+				"ledger",
+				"expected_hash",
+				hex.EncodeToString(genesisHash[:]),
 			)
 		}
 		// Genesis CBOR missing (e.g., after Mithril bootstrap which
@@ -3992,7 +4124,10 @@ func cloneProtocolParametersForEra(
 		return nil, nil
 	}
 	if era.DecodePParamsFunc == nil {
-		return nil, fmt.Errorf("era %d has no protocol parameter decoder", era.Id)
+		return nil, fmt.Errorf(
+			"era %d has no protocol parameter decoder",
+			era.Id,
+		)
 	}
 	data, err := cbor.Encode(pparams)
 	if err != nil {
@@ -4482,9 +4617,12 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 	if err := txn.SavePoint(savepoint); err != nil {
 		ls.config.Logger.Warn(
 			"snap-point stake savepoint unavailable; deferring stake read to snapshot persist",
-			"error", err,
-			"epoch", evt.NewEpoch,
-			"component", "ledger",
+			"error",
+			err,
+			"epoch",
+			evt.NewEpoch,
+			"component",
+			"ledger",
 		)
 		return nil
 	}
@@ -4504,9 +4642,12 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 		}
 		ls.config.Logger.Warn(
 			"snap-point stake read failed; deferring stake read to snapshot persist",
-			"error", err,
-			"epoch", evt.NewEpoch,
-			"component", "ledger",
+			"error",
+			err,
+			"epoch",
+			evt.NewEpoch,
+			"component",
+			"ledger",
 		)
 	}
 	return nil
@@ -4544,9 +4685,12 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 	if err := txn.SavePoint(savepoint); err != nil {
 		ls.config.Logger.Warn(
 			"epoch-boundary snapshot savepoint unavailable; deferring to fallback capture",
-			"error", err,
-			"epoch", newEpoch.EpochId,
-			"component", "ledger",
+			"error",
+			err,
+			"epoch",
+			newEpoch.EpochId,
+			"component",
+			"ledger",
 		)
 		return nil
 	}
@@ -4554,14 +4698,18 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
 			return fmt.Errorf(
 				"roll back epoch-boundary snapshot savepoint (capture error: %w): %w",
-				err, rbErr,
+				err,
+				rbErr,
 			)
 		}
 		ls.config.Logger.Warn(
 			"authoritative epoch-boundary snapshot capture failed; deferring to fallback capture",
-			"error", err,
-			"epoch", newEpoch.EpochId,
-			"component", "ledger",
+			"error",
+			err,
+			"epoch",
+			newEpoch.EpochId,
+			"component",
+			"ledger",
 		)
 	}
 	return nil
@@ -4798,9 +4946,12 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 			if retryErr := ls.startQueuedBlockfetchLocked(nextConnId); retryErr != nil {
 				ls.config.Logger.Error(
 					"failed to restart queued blockfetch after timeout retry failure",
-					"component", "ledger",
-					"connection_id", nextConnId.String(),
-					"error", retryErr,
+					"component",
+					"ledger",
+					"connection_id",
+					nextConnId.String(),
+					"error",
+					retryErr,
 				)
 				if ls.chain.HeaderCount() > 0 && ls.config.EventBus != nil {
 					ls.config.EventBus.Publish(
@@ -4891,10 +5042,14 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 			!sameConnectionId(retryConnId, e.ConnectionId) {
 			ls.config.Logger.Warn(
 				"blockfetch batch returned no blocks, retrying queued range on alternate connection",
-				"component", "ledger",
-				"previous_connection_id", e.ConnectionId.String(),
-				"retry_connection_id", retryConnId.String(),
-				"remaining_headers", remainingHeaders,
+				"component",
+				"ledger",
+				"previous_connection_id",
+				e.ConnectionId.String(),
+				"retry_connection_id",
+				retryConnId.String(),
+				"remaining_headers",
+				remainingHeaders,
 			)
 			if err := ls.startQueuedBlockfetchLocked(retryConnId); err != nil {
 				ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
@@ -4960,10 +5115,14 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 			!sameConnectionId(retryConnId, nextConnId) {
 			ls.config.Logger.Warn(
 				"blockfetch continuation failed, retrying on alternate connection",
-				"component", "ledger",
-				"failed_connection_id", nextConnId.String(),
-				"retry_connection_id", retryConnId.String(),
-				"error", err,
+				"component",
+				"ledger",
+				"failed_connection_id",
+				nextConnId.String(),
+				"retry_connection_id",
+				retryConnId.String(),
+				"error",
+				err,
 			)
 			if retryErr := ls.startQueuedBlockfetchLocked(retryConnId); retryErr == nil {
 				return nil

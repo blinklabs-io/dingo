@@ -21,17 +21,19 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 )
 
-// delegatorInactivityActivatedSyncKey is the durable sync_state marker key
-// guarding the one-time CIP-0163 activation stamp. Its value is the activation
-// epoch A (the epoch entered at the boundary activation ran on), stored as a
-// decimal string; a NON-EMPTY value means activation has already run. Once set,
-// activateDelegatorInactivityIfNeeded never re-stamps, even across restarts
-// (the marker is stored in the same metadata store as the account rows and
-// committed atomically with the stamp). The stored epoch is the activation
-// floor the rollback recompute clamps to (see
-// recomputeAccountExpirationsAfterRollback): activation stamps A + W without
-// leaving a witness, so witness history alone cannot reconstruct it.
-const delegatorInactivityActivatedSyncKey = "delegator_inactivity_activated"
+// database.DelegatorInactivityActivatedSyncKey is the durable sync_state
+// marker key guarding the one-time CIP-0163 activation stamp (defined in
+// the database package, not here, so both this write side and
+// database.RecomputeAccountExpirationsAfterTruncate's read/clear side
+// agree on the exact same key). Its value is the activation epoch A (the
+// epoch entered at the boundary activation ran on), stored as a decimal
+// string; a NON-EMPTY value means activation has already run. Once set,
+// activateDelegatorInactivityIfNeeded never re-stamps, even across
+// restarts (the marker is stored in the same metadata store as the
+// account rows and committed atomically with the stamp). The stored
+// epoch is the activation floor the rollback/truncate recompute clamps
+// to: activation stamps A + W without leaving a witness, so witness
+// history alone cannot reconstruct it.
 
 // activateDelegatorInactivityIfNeeded performs the one-time CIP-0163
 // activation stamp: on the first epoch boundary processed with the
@@ -63,7 +65,10 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 	if !ls.config.DelegatorInactivityEnabled {
 		return nil
 	}
-	done, err := ls.db.GetSyncState(delegatorInactivityActivatedSyncKey, txn)
+	done, err := ls.db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		txn,
+	)
 	if err != nil {
 		return err
 	}
@@ -78,7 +83,7 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 	// Record the activation epoch A (not a bare flag) so the rollback recompute
 	// can clamp orphaned accounts back up to the activation floor A + W.
 	if err := ls.db.SetSyncState(
-		delegatorInactivityActivatedSyncKey,
+		database.DelegatorInactivityActivatedSyncKey,
 		strconv.FormatUint(currentEpoch, 10),
 		txn,
 	); err != nil {
@@ -108,7 +113,10 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 func (ls *LedgerState) delegatorInactivityActivationEpoch(
 	txn *database.Txn,
 ) (epoch uint64, activated bool, err error) {
-	marker, err := ls.db.GetSyncState(delegatorInactivityActivatedSyncKey, txn)
+	marker, err := ls.db.GetSyncState(
+		database.DelegatorInactivityActivatedSyncKey,
+		txn,
+	)
 	if err != nil {
 		return 0, false, err
 	}
@@ -124,4 +132,15 @@ func (ls *LedgerState) delegatorInactivityActivationEpoch(
 		)
 	}
 	return epoch, true, nil
+}
+
+// DelegatorInactivityConfig reports the CIP-0163 delegator-inactivity gate
+// as this LedgerState was actually constructed with. Exported so callers
+// outside the ledger package (e.g. a regression test proving these values
+// survive a live restore/truncate's LedgerState reinitialization, the same
+// kind of construction-site drift MinPoolMargin/PledgeLeverageEnabled/
+// PledgeLeverage/FullPotRewardsEnabled were previously found missing from)
+// can verify it without reaching into the unexported config field.
+func (ls *LedgerState) DelegatorInactivityConfig() (enabled bool, window uint64) {
+	return ls.config.DelegatorInactivityEnabled, ls.config.DelegatorInactivity
 }

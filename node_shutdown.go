@@ -141,6 +141,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.dbLifecycleMgr != nil {
+		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	if n.bark != nil {
 		if stopErr := n.bark.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("bark shutdown: %w", stopErr))
@@ -182,6 +191,23 @@ func (n *Node) shutdown() error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("off-chain metadata fetcher shutdown: %w", stopErr),
+			)
+		}
+	}
+
+	// Stop the Koios parity observer before phase 3 tears down n.db/
+	// n.pluginHost: the observer's background goroutine reads Dingo's
+	// committed reward state through its RewardParitySource, which is backed
+	// by n.db, so it must fully stop (Observer.Stop blocks until its
+	// goroutine has actually exited, not just been signaled) before that
+	// store is closed. This is the only place the observer is stopped on the
+	// normal/signal-driven shutdown path — startKoiosParityObserver's Run()
+	// registration only covers the startup-failure/panic rollback path.
+	if n.koiosParityObserver != nil {
+		if stopErr := n.koiosParityObserver.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("koios parity observer shutdown: %w", stopErr),
 			)
 		}
 	}
@@ -242,8 +268,10 @@ func (n *Node) shutdown() error {
 		case <-ctx.Done():
 			n.config.logger.Warn(
 				"timed out waiting for deferred-index maintenance; continuing shutdown",
-				"timeout", shutdownTimeout,
-				"error", ctx.Err(),
+				"timeout",
+				shutdownTimeout,
+				"error",
+				ctx.Err(),
 			)
 			err = errors.Join(
 				err,
@@ -271,7 +299,10 @@ func (n *Node) shutdown() error {
 	}
 	if n.pluginHost != nil {
 		if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("plugin host shutdown: %w", stopErr))
+			err = errors.Join(
+				err,
+				fmt.Errorf("plugin host shutdown: %w", stopErr),
+			)
 		}
 	}
 

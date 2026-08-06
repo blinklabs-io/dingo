@@ -1101,7 +1101,10 @@ func TestHandlePoolsRetiring(t *testing.T) {
 	mock := &mockNode{
 		poolsRetiringTotal: 1,
 		poolsRetiring: []PoolRetiringInfo{
-			{PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec", Epoch: 1400},
+			{
+				PoolID: "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+				Epoch:  1400,
+			},
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -1156,7 +1159,10 @@ func TestHandlePoolMetadata(t *testing.T) {
 		"/api/v0/pools/pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec/metadata",
 		nil,
 	)
-	req.SetPathValue("pool_id", "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec")
+	req.SetPathValue(
+		"pool_id",
+		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+	)
 	w := httptest.NewRecorder()
 	b.handlePoolMetadata(w, req)
 
@@ -1184,7 +1190,10 @@ func TestHandlePoolMetadataNoAnchor(t *testing.T) {
 		"/api/v0/pools/pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec/metadata",
 		nil,
 	)
-	req.SetPathValue("pool_id", "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec")
+	req.SetPathValue(
+		"pool_id",
+		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+	)
 	w := httptest.NewRecorder()
 	b.handlePoolMetadata(w, req)
 
@@ -1199,19 +1208,29 @@ func TestOffchainFetchErrorClassification(t *testing.T) {
 
 	// Latest attempt failed with 404; the stale BodyHash from an
 	// earlier hash-mismatch attempt must not win.
-	err404 := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
-		LastError:      "unexpected HTTP status 404",
-		LastHTTPStatus: 404,
-		BodyHash:       stale,
-	})
+	err404 := offchainFetchError(
+		"Pool",
+		url,
+		expected,
+		&models.OffchainMetadata{
+			LastError:      "unexpected HTTP status 404",
+			LastHTTPStatus: 404,
+			BodyHash:       stale,
+		},
+	)
 	assert.Equal(t, "HTTP_RESPONSE_ERROR", err404.Code)
 	assert.Contains(t, err404.Message, `404 "Not Found"`)
 
-	mismatch := offchainFetchError("Pool", url, expected, &models.OffchainMetadata{
-		LastError:      models.OffchainFetchErrHashMismatch,
-		LastHTTPStatus: 200,
-		BodyHash:       stale,
-	})
+	mismatch := offchainFetchError(
+		"Pool",
+		url,
+		expected,
+		&models.OffchainMetadata{
+			LastError:      models.OffchainFetchErrHashMismatch,
+			LastHTTPStatus: 200,
+			BodyHash:       stale,
+		},
+	)
 	assert.Equal(t, "HASH_MISMATCH", mismatch.Code)
 	assert.Contains(t, mismatch.Message, hex.EncodeToString(stale))
 
@@ -1247,9 +1266,14 @@ func TestHandlePoolMetadataNotFound(t *testing.T) {
 		poolMetadataErr: fmt.Errorf("get pool: %w", models.ErrPoolNotFound),
 	})
 	req := httptest.NewRequest(
-		http.MethodGet, "/api/v0/pools/pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d/metadata", nil,
+		http.MethodGet,
+		"/api/v0/pools/pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d/metadata",
+		nil,
 	)
-	req.SetPathValue("pool_id", "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d")
+	req.SetPathValue(
+		"pool_id",
+		"pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8a7a2d",
+	)
 	w := httptest.NewRecorder()
 	b.handlePoolMetadata(w, req)
 
@@ -1257,18 +1281,28 @@ func TestHandlePoolMetadataNotFound(t *testing.T) {
 }
 
 func TestParsePoolID(t *testing.T) {
-	hash, err := parsePoolID("pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec")
+	hash, err := parsePoolID(
+		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+	)
 	require.NoError(t, err)
-	assert.Equal(t, "6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946", hex.EncodeToString(hash))
+	assert.Equal(
+		t,
+		"6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+		hex.EncodeToString(hash),
+	)
 
-	hash2, err := parsePoolID("6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946")
+	hash2, err := parsePoolID(
+		"6080b9c76b4b19c21d17b4091aa205417cb80a5449f638c27eec0946",
+	)
 	require.NoError(t, err)
 	assert.Equal(t, hash, hash2)
 
 	_, err = parsePoolID("pool1stonks")
 	require.Error(t, err)
 
-	_, err = parsePoolID("drep1ygqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7vlc9n")
+	_, err = parsePoolID(
+		"drep1ygqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7vlc9n",
+	)
 	require.Error(t, err)
 }
 
@@ -1381,14 +1415,20 @@ func TestHandleDRepsInvalidParams(t *testing.T) {
 		query   string
 		message string
 	}{
-		{"order=a", "querystring/order must be equal to one of the allowed values"},
+		{
+			"order=a",
+			"querystring/order must be equal to one of the allowed values",
+		},
 		{"page=x", "querystring/page must be integer"},
 		{"page=0", "querystring/page must be >= 1"},
 		{"page=99999999999999", "querystring/page must be <= 21474836"},
 		{"count=x", "querystring/count must be integer"},
 		{"count=999999999999999", "querystring/count must be <= 100"},
 		{"count=0", "querystring/count must be >= 1"},
-		{"order_by=bogus", "querystring/order_by must be equal to one of the allowed values"},
+		{
+			"order_by=bogus",
+			"querystring/order_by must be equal to one of the allowed values",
+		},
 		{"retired=x", "querystring/retired must be boolean"},
 		{"expired=x", "querystring/expired must be boolean"},
 	}
@@ -1428,7 +1468,14 @@ func TestNodeAdapterDRepsEpochForSlot(t *testing.T) {
 		{EpochId: 1, StartSlot: 100, LengthInSlots: 100},
 		{EpochId: 2, StartSlot: 200, LengthInSlots: 100},
 	} {
-		require.NoError(t, store.DB().Create(&epoch).Error)
+		_, err := store.Exec(`
+INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+VALUES (?, ?, ?)`,
+			epoch.EpochId,
+			epoch.StartSlot,
+			epoch.LengthInSlots,
+		)
+		require.NoError(t, err)
 	}
 
 	// LastActivityEpoch 0 makes the reported last-active epoch fall back
@@ -1438,7 +1485,17 @@ func TestNodeAdapterDRepsEpochForSlot(t *testing.T) {
 		{Credential: bytes.Repeat([]byte{0x02}, 28), AddedSlot: 200, Active: true},
 		{Credential: bytes.Repeat([]byte{0x03}, 28), AddedSlot: 250, Active: true},
 	} {
-		require.NoError(t, store.DB().Create(&drep).Error)
+		_, err := store.Exec(`
+INSERT INTO drep (
+    credential, credential_tag, added_slot, last_activity_epoch, active
+) VALUES (?, ?, ?, ?, ?)`,
+			drep.Credential,
+			drep.CredentialTag,
+			drep.AddedSlot,
+			drep.LastActivityEpoch,
+			drep.Active,
+		)
+		require.NoError(t, err)
 	}
 
 	items, total, err := adapter.DReps(DRepListParams{
@@ -1500,7 +1557,11 @@ func TestHandleDRepCIP129ScriptIdentifier(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.True(t, mock.drepCredential.HasScript)
 	assert.True(t, mock.drepCredential.CredentialTagKnown)
-	assert.Equal(t, make([]byte, drepCredentialHashLen), mock.drepCredential.Hash)
+	assert.Equal(
+		t,
+		make([]byte, drepCredentialHashLen),
+		mock.drepCredential.Hash,
+	)
 }
 
 // TestParseDRepIdentifierCIP129CredentialType verifies CIP-129 DRep IDs
@@ -1528,7 +1589,11 @@ func TestParseDRepIdentifierCIP129CredentialType(t *testing.T) {
 			credential, err := parseDRepIdentifier(tc.id)
 			require.NoError(t, err)
 			assert.Equal(t, tc.id, credential.ID)
-			assert.Equal(t, make([]byte, drepCredentialHashLen), credential.Hash)
+			assert.Equal(
+				t,
+				make([]byte, drepCredentialHashLen),
+				credential.Hash,
+			)
 			assert.Equal(t, tc.wantHasScript, credential.HasScript)
 			assert.True(t, credential.CredentialTagKnown)
 		})
@@ -1851,13 +1916,15 @@ func TestHandleTransaction(t *testing.T) {
 	invalidHereafter := "200"
 	mock := &mockNode{
 		transaction: TransactionInfo{
-			Hash:             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			Block:            "blockhash1",
-			Slot:             123,
-			BlockHeight:      45,
-			BlockTime:        1700000000,
-			Index:            2,
-			OutputAmount:     []AddressAmountInfo{{Unit: "lovelace", Quantity: "5000"}},
+			Hash:        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Block:       "blockhash1",
+			Slot:        123,
+			BlockHeight: 45,
+			BlockTime:   1700000000,
+			Index:       2,
+			OutputAmount: []AddressAmountInfo{
+				{Unit: "lovelace", Quantity: "5000"},
+			},
 			Fees:             "170000",
 			Deposit:          "0",
 			TreasuryDonation: "12345",
@@ -2199,7 +2266,11 @@ func TestHandleTransactionSubEndpointNotFound(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 			assert.Equal(t, "Not Found", resp.Error)
-			assert.Equal(t, "The requested transaction could not be found.", resp.Message)
+			assert.Equal(
+				t,
+				"The requested transaction could not be found.",
+				resp.Message,
+			)
 		})
 	}
 }
@@ -2273,15 +2344,19 @@ func TestHandleTransactionUTXOs(t *testing.T) {
 					Address:     "addr_test1input",
 					TxHash:      "prevtx",
 					OutputIndex: 1,
-					Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "10"}},
-					Reference:   &ref,
+					Amount: []AddressAmountInfo{
+						{Unit: "lovelace", Quantity: "10"},
+					},
+					Reference: &ref,
 				},
 			},
 			Outputs: []TransactionOutputInfo{
 				{
 					Address:     "addr_test1output",
 					OutputIndex: 0,
-					Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "5"}},
+					Amount: []AddressAmountInfo{
+						{Unit: "lovelace", Quantity: "5"},
+					},
 				},
 			},
 		},
@@ -2385,8 +2460,16 @@ func TestHandleTransactionRedeemers(t *testing.T) {
 	assert.Equal(t, datumHash, *resp[0].DatumHash)
 	assert.Equal(t, 0, resp[0].TxIndex)
 	assert.Equal(t, "spend", resp[0].Purpose)
-	assert.Equal(t, "f00dbeef00112233445566778899aabbccddeeff0011223344556677", resp[0].ScriptHash)
-	assert.Equal(t, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", resp[0].RedeemerDataHash)
+	assert.Equal(
+		t,
+		"f00dbeef00112233445566778899aabbccddeeff0011223344556677",
+		resp[0].ScriptHash,
+	)
+	assert.Equal(
+		t,
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		resp[0].RedeemerDataHash,
+	)
 	assert.Equal(t, "1700", resp[0].UnitMem)
 	assert.Equal(t, "200000", resp[0].UnitSteps)
 	assert.Equal(t, "172345", resp[0].Fee)
@@ -3207,12 +3290,16 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	// Spent history recorded against the payment credential (via a base
 	// address, so the synthetic enterprise form never matches) resolves
 	// with a zero lovelace balance.
-	require.NoError(t, store.DB().Create(&models.AddressTransaction{
-		PaymentKey:    paymentKey,
-		StakingKey:    bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
-		TransactionID: 1,
-		Slot:          10,
-	}).Error)
+	_, err = store.Exec(`
+INSERT INTO address_transaction (
+    payment_key, staking_key, transaction_id, slot
+) VALUES (?, ?, ?, ?)`,
+		paymentKey,
+		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		1,
+		10,
+	)
+	require.NoError(t, err)
 
 	info, err := adapter.Address(credID)
 	require.NoError(t, err)

@@ -11,12 +11,14 @@ func TestAsyncWorkerDropsQueuedEventAfterStop(t *testing.T) {
 
 	for attempt := range attempts {
 		eb := &EventBus{
-			subscribers:         make(map[EventType]map[EventSubscriberId]Subscriber),
+			subscribers: make(
+				map[EventType]map[EventSubscriberId]Subscriber,
+			),
 			subscriberSnapshots: make(map[EventType][]subscriberEntry),
 			asyncQueue:          make(chan asyncEvent, 1),
 			stopCh:              make(chan struct{}),
 		}
-		sub := newChannelSubscriber(1, nil)
+		sub := newChannelSubscriber(testEvtType, 1, nil)
 		eb.subscriberSnapshots[testEvtType] = []subscriberEntry{
 			{
 				id:         1,

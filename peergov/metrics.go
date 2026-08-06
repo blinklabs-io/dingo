@@ -226,14 +226,18 @@ func (p *PeerGovernor) initMetrics() {
 		},
 		[]string{"stage"},
 	)
-	p.metrics.inboundHotQuotaUsage = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "dingo_metrics_peerSelection_InboundHotQuotaUsage",
-		Help: "fraction of inbound hot quota currently occupied (>=0; may exceed 1 when over quota)",
-	})
-	p.metrics.inboundWarmOccupancy = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "dingo_metrics_peerSelection_InboundWarmTargetOccupancy",
-		Help: "fraction of inbound warm target currently occupied (>=0; may exceed 1 when over target)",
-	})
+	p.metrics.inboundHotQuotaUsage = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_metrics_peerSelection_InboundHotQuotaUsage",
+			Help: "fraction of inbound hot quota currently occupied (>=0; may exceed 1 when over quota)",
+		},
+	)
+	p.metrics.inboundWarmOccupancy = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_metrics_peerSelection_InboundWarmTargetOccupancy",
+			Help: "fraction of inbound warm target currently occupied (>=0; may exceed 1 when over target)",
+		},
+	)
 	p.metrics.peerPromotions = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_peer_promotion_total",
@@ -276,7 +280,8 @@ func peerStateLabel(state PeerState) string {
 // when a peer moves between cold/warm/hot. No-op when from == to or
 // metrics aren't initialized.
 func (p *PeerGovernor) recordPeerStateChange(from, to PeerState) {
-	if p.metrics == nil || p.metrics.peerPromotions == nil || p.metrics.peerDemotions == nil {
+	if p.metrics == nil || p.metrics.peerPromotions == nil ||
+		p.metrics.peerDemotions == nil {
 		return
 	}
 	if from == to {
@@ -457,12 +462,16 @@ func (p *PeerGovernor) updatePeerMetrics() {
 	p.metrics.inboundWarmHeld.Set(float64(census.Warm))
 	p.metrics.inboundHotHeld.Set(float64(census.Hot))
 	if p.config.InboundHotQuota > 0 {
-		p.metrics.inboundHotQuotaUsage.Set(float64(census.Hot) / float64(p.config.InboundHotQuota))
+		p.metrics.inboundHotQuotaUsage.Set(
+			float64(census.Hot) / float64(p.config.InboundHotQuota),
+		)
 	} else {
 		p.metrics.inboundHotQuotaUsage.Set(0)
 	}
 	if p.config.InboundWarmTarget > 0 {
-		p.metrics.inboundWarmOccupancy.Set(float64(census.Warm) / float64(p.config.InboundWarmTarget))
+		p.metrics.inboundWarmOccupancy.Set(
+			float64(census.Warm) / float64(p.config.InboundWarmTarget),
+		)
 	} else {
 		p.metrics.inboundWarmOccupancy.Set(0)
 	}

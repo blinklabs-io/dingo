@@ -84,7 +84,11 @@ func classifyFetchErr(err error) error {
 }
 
 // Fetch pulls Koios data into the cache, resuming from the last cached epoch.
-func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchResult, error) {
+func Fetch(
+	ctx context.Context,
+	cfg FetchConfig,
+	logger *slog.Logger,
+) (*FetchResult, error) {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 5
 	}
@@ -106,7 +110,9 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		return nil, fmt.Errorf("get tip epoch: %w", err)
 	}
 	if tipEpoch == 0 {
-		return nil, errors.New("koios tip epoch is 0: no closed epochs to fetch")
+		return nil, errors.New(
+			"koios tip epoch is 0: no closed epochs to fetch",
+		)
 	}
 	// We only compare closed epochs: tip - 1.
 	throughEpoch := tipEpoch - 1
@@ -123,7 +129,10 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			"network", cfg.Network,
 			"last_epoch", throughEpoch,
 		)
-		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
+		return &FetchResult{
+			FromEpoch:    fromEpoch,
+			ThroughEpoch: throughEpoch,
+		}, nil
 	}
 
 	// Collect every pool that has ever been registered on chain, including
@@ -166,7 +175,10 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			"network", cfg.Network,
 			"last_epoch", throughEpoch,
 		)
-		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
+		return &FetchResult{
+			FromEpoch:    fromEpoch,
+			ThroughEpoch: throughEpoch,
+		}, nil
 	}
 
 	logger.Info("koiosparity: fetching epochs from Koios",
@@ -212,15 +224,24 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 				elapsed := time.Since(start)
 				var eta time.Duration
 				if done > 0 {
-					eta = time.Duration(int64(elapsed) / done * int64(totalEpochs-int(done)))
+					eta = time.Duration(
+						int64(elapsed) / done * int64(totalEpochs-int(done)),
+					)
 				}
-				logger.Info("koiosparity: fetch progress",
-					"network", cfg.Network,
-					"epochs_done", done,
-					"epochs_total", totalEpochs,
-					"percent", fmt.Sprintf("%.1f", float64(done)/float64(totalEpochs)*100),
-					"elapsed", elapsed.Round(time.Second),
-					"eta", eta.Round(time.Second),
+				logger.Info(
+					"koiosparity: fetch progress",
+					"network",
+					cfg.Network,
+					"epochs_done",
+					done,
+					"epochs_total",
+					totalEpochs,
+					"percent",
+					fmt.Sprintf("%.1f", float64(done)/float64(totalEpochs)*100),
+					"elapsed",
+					elapsed.Round(time.Second),
+					"eta",
+					eta.Round(time.Second),
 				)
 			case <-progressDone:
 				return
@@ -320,6 +341,99 @@ loop:
 	return result, nil
 }
 
+// FetchEpochWithClient fetches and caches Koios reference data for exactly
+// one epoch using an already-open cache and Koios client, without reopening
+// the cache database or reconstructing a Koios client — the primitive Fetch's
+// per-epoch worker pool uses internally (fetchEpoch), exported so a
+// long-lived caller (the dingo #3098 in-process epoch observer, which fetches
+// one newly closed epoch at a time as epoch.transition events arrive rather
+// than batching a whole historical range) can reuse one cache handle and one
+// Koios client across many calls.
+//
+// Every request Koios needs beyond the target epoch's own history — the
+// full historical pool ID list and each pool's first-active epoch — is
+// re-resolved on every call. A caller that will fetch the same epoch more
+// than once in quick succession (e.g. a bounded retry loop riding out a
+// transient failure) should resolve these once with
+// GetAllHistoricalPoolIDs/GetPoolFirstActiveEpochs and call
+// FetchEpochWithPools instead, to avoid repeating both full Koios scans on
+// every attempt. Efficient reuse/pagination across many distinct epochs is
+// #3099's chunked/resumable fetch scope, not this function's.
+func FetchEpochWithClient(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	logger *slog.Logger,
+) (int, error) {
+	poolIDs, firstActiveEpochs, err := resolvePoolUniverse(ctx, koios)
+	if err != nil {
+		return 0, err
+	}
+	return fetchEpoch(
+		ctx,
+		koios,
+		cache,
+		network,
+		epoch,
+		poolIDs,
+		firstActiveEpochs,
+		logger,
+	)
+}
+
+// FetchEpochWithPools is FetchEpochWithClient with the pool universe
+// (poolIDs/firstActiveEpochs) already resolved by the caller — see
+// resolvePoolUniverse. Intended for a caller that fetches the same epoch
+// across multiple attempts (a retry loop) or fetches several epochs in one
+// batch: resolving the pool universe once, up front, and passing it to every
+// call avoids repeating /pool_list and /pool_updates's full scans on every
+// attempt/epoch, which matters for rate-limit budget on wide backfills or
+// long retry sequences near Koios's daily quota.
+func FetchEpochWithPools(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	poolIDs []string,
+	firstActiveEpochs map[string]uint64,
+	logger *slog.Logger,
+) (int, error) {
+	return fetchEpoch(
+		ctx,
+		koios,
+		cache,
+		network,
+		epoch,
+		poolIDs,
+		firstActiveEpochs,
+		logger,
+	)
+}
+
+// resolvePoolUniverse fetches the full historical pool ID list and each
+// pool's true first-active epoch — the two requests every fetchEpoch call
+// needs beyond the target epoch's own history. Factored out so callers that
+// fetch more than one epoch (or retry the same epoch) can resolve it once
+// and reuse it via FetchEpochWithPools, instead of paying for both full
+// Koios scans again on every call the way FetchEpochWithClient does.
+func resolvePoolUniverse(
+	ctx context.Context,
+	koios *KoiosClient,
+) (poolIDs []string, firstActiveEpochs map[string]uint64, err error) {
+	poolIDs, err = koios.GetAllHistoricalPoolIDs(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get historical pool IDs: %w", err)
+	}
+	firstActiveEpochs, err = koios.GetPoolFirstActiveEpochs(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get pool first-active epochs: %w", err)
+	}
+	return poolIDs, firstActiveEpochs, nil
+}
+
 // fetchEpoch fetches and caches one epoch's worth of Koios data.
 //
 // Pool rows are written before epoch info so the resume cursor
@@ -383,16 +497,20 @@ func fetchEpoch(
 		}, nil, nil); err != nil {
 			return 0, fmt.Errorf("commit pre-staking marker: %w", err)
 		}
-		logger.Info("koiosparity: epoch predates staking, marking permanently unfetchable",
-			"network", network,
-			"epoch", epoch,
+		logger.Info(
+			"koiosparity: epoch predates staking, marking permanently unfetchable",
+			"network",
+			network,
+			"epoch",
+			epoch,
 		)
 		return 0, nil
 	}
 	if info.ActiveStake == nil {
 		return 0, fmt.Errorf(
 			"epoch %d: koios returned null active_stake unexpectedly (only epochs <= %d predate a valid stake snapshot)",
-			epoch, preStakingThroughEpoch,
+			epoch,
+			preStakingThroughEpoch,
 		)
 	}
 	activeStake := *info.ActiveStake
@@ -400,7 +518,10 @@ func fetchEpoch(
 	// end_time 0 means the epoch is not yet fully closed in Koios. Reject now
 	// rather than after pool rows have been written to the cache.
 	if info.EndTime == 0 {
-		return 0, fmt.Errorf("epoch %d: koios returned end_time=0 — epoch may not be fully closed yet", epoch)
+		return 0, fmt.Errorf(
+			"epoch %d: koios returned end_time=0 — epoch may not be fully closed yet",
+			epoch,
+		)
 	}
 	epochEndTime := unixTime(info.EndTime)
 

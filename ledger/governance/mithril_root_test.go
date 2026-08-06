@@ -29,7 +29,7 @@ import (
 // snapshot must be accepted by validateParentChain when the per-
 // purpose root has been seeded as a synthetic enacted row.
 func TestMithrilSeededRootUnblocksChainedProposal(t *testing.T) {
-	db, store := newTallyTestDB(t)
+	db, _ := newTallyTestDB(t)
 
 	rootHash := testBytes(32, 0xA1)
 	parentIdx := uint32(0)
@@ -38,7 +38,7 @@ func TestMithrilSeededRootUnblocksChainedProposal(t *testing.T) {
 	// ledgerstate.seedPrevGovActionIds writes.
 	enactedEpoch := uint64(500)
 	enactedSlot := uint64(123_456)
-	require.NoError(t, store.DB().Create(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
 		TxHash:        rootHash,
 		ActionIndex:   parentIdx,
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
@@ -51,7 +51,7 @@ func TestMithrilSeededRootUnblocksChainedProposal(t *testing.T) {
 		AnchorURL:     "",
 		AnchorHash:    make([]byte, 32),
 		AddedSlot:     0,
-	}).Error)
+	}, nil))
 
 	root, err := db.GetLastEnactedGovernanceProposal(
 		[]uint8{uint8(lcommon.GovActionTypeHardForkInitiation)},
@@ -85,7 +85,9 @@ func TestMithrilSeededRootUnblocksChainedProposal(t *testing.T) {
 // proves that when committee NoConfidence is the seeded root,
 // a subsequent UpdateCommittee whose parent matches the root is
 // accepted (purposeCommittee groups both action types).
-func TestValidateParentChain_NoConfidenceRootAllowsCommitteeUpdate(t *testing.T) {
+func TestValidateParentChain_NoConfidenceRootAllowsCommitteeUpdate(
+	t *testing.T,
+) {
 	rootHash := testBytes(32, 0xC1)
 	parentIdx := uint32(2)
 

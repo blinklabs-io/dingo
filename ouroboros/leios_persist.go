@@ -15,7 +15,9 @@
 package ouroboros
 
 import (
+	"errors"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -38,7 +40,20 @@ const leiosPersistMaxPending = 4096
 // timeout the wait is abandoned (a warning is logged, the writer goroutine is
 // left to exit on its own once the store unblocks). The stop channel is always
 // closed regardless, so the writer does exit; only the wait is bounded.
-const leiosPersistShutdownDrainTimeout = 5 * time.Second
+// Package-level var (not const) so tests can shrink it instead of running a
+// real multi-second timeout.
+var leiosPersistShutdownDrainTimeout = 5 * time.Second
+
+// ErrLeiosPersistDrainUnconfirmed is returned by
+// PauseLeiosPersistWriterForLiveLifecycleOp when its bounded wait gave up
+// before confirming the writer goroutine actually exited. Unlike a normal
+// permanent StopLeiosPersistWriter timeout (best-effort, the process is
+// exiting anyway), a live restore/truncate's caller must not treat this as
+// safe to proceed: the old writer may still be running drainLeiosPersist
+// against the about-to-close database and the shared pending map.
+var ErrLeiosPersistDrainUnconfirmed = errors.New(
+	"leios persist writer drain not confirmed before timeout",
+)
 
 // leiosPersistJob is one endorser block queued for best-effort blob-store
 // persistence. txsRaw is nil for a manifest-only job (incomplete EB).
@@ -190,10 +205,14 @@ func (o *Ouroboros) StopLeiosPersistWriter() {
 // stopLeiosPersistWriter closes the stop channel and waits for the writer to
 // drain and exit, giving up after drainTimeout so a stuck blob store cannot
 // hang graceful shutdown. Split out from StopLeiosPersistWriter so tests can
-// exercise the bounded wait without the production timeout.
-func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) {
+// exercise the bounded wait without the production timeout. Returns whether
+// the writer's exit was actually confirmed (false on timeout) so a caller
+// that cannot tolerate an unconfirmed exit -- see
+// PauseLeiosPersistWriterForLiveLifecycleOp -- can react instead of assuming
+// a timeout means the writer is gone.
+func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 	if !o.leiosPersistStarted.Load() {
-		return
+		return true
 	}
 	// Always close the stop channel so the writer observes the stop and exits,
 	// even if we stop waiting for it below.
@@ -202,14 +221,71 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) {
 	defer timer.Stop()
 	select {
 	case <-o.leiosPersistDone:
+		return true
 	case <-timer.C:
 		// The drain is stuck (likely a slow/unavailable blob store). Abandon the
 		// wait: historical-serving persistence is best-effort and the writer
 		// goroutine will still exit once the store unblocks.
 		o.config.Logger.Warn(
 			"timed out waiting for leios EB persistence writer to drain; abandoning remaining historical-serving writes",
-			"component", "network",
-			"timeout", drainTimeout,
+			"component",
+			"network",
+			"timeout",
+			drainTimeout,
 		)
+		return false
 	}
+}
+
+// PauseLeiosPersistWriterForLiveLifecycleOp stops the persistence writer
+// (draining whatever is already queued against the current, about-to-close
+// database) and resets its start-once guard, so a later enqueueLeiosPersist
+// call -- once LedgerState has been reassigned to the reinitialized
+// database after a live Restore/Truncate -- lazily relaunches a fresh
+// writer against the new database, the same way the very first call ever
+// does.
+//
+// Without this, the writer (once started) ran for the whole Ouroboros
+// object's lifetime, since that object is retained (not rebuilt) across a
+// live Restore/Truncate. A job already queued before quiesce began could
+// still be mid-drain when closeStorageForLiveLifecycleOp closed the
+// database out from under it, or -- worse -- could still be sitting
+// untouched in the pending map when LedgerState was reassigned, so the
+// eventual drain would silently write pre-operation data into the freshly
+// restored/truncated store.
+//
+// Must be called late in the quiesce sequence, after inbound network
+// traffic has actually stopped (connManager.Stop): enqueueLeiosPersist
+// doesn't take leiosPersistMu before touching leiosPersistOnce, so a
+// concurrent enqueue from still-live Leios fetch traffic could otherwise
+// race this reset. This is not merely a documented call-order convention:
+// node_lifecycle.go's quiesceForLiveLifecycleOp escalates a connManager.Stop
+// failure to errStorageDrainUnconfirmed (the same as this method's own
+// unconfirmed-drain error below), specifically because connManager.Stop
+// returning an error means it could not confirm every connection/listener
+// goroutine actually exited -- i.e. this method's precondition may not
+// hold. That escalation makes the caller take the full-supervised-restart
+// path (n.cancel()) instead of ever reaching reinitializeAndResume, so a
+// straggling connection's Leios fetch can no longer race this reset in
+// practice, not just "shouldn't" by convention.
+//
+// Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
+// the drain wait timed out: the old writer goroutine may still be running
+// drainLeiosPersist against the old database and the shared pending map,
+// so resetting leiosPersistOnce here would let the very next enqueue start
+// a second writer against a freshly reset map and channels while the old
+// one is still reading and deleting from that same map (now repointed)
+// under leiosPersistMu — silently stealing jobs meant for the new database
+// and, worse, writing them into the old one via the stale captured db
+// reference. The caller must not proceed to close storage or attempt
+// reinitializeAndResume in that case; it must escalate to a supervised
+// restart instead, the same as errStorageDrainUnconfirmed.
+func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
+	if !o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout) {
+		return ErrLeiosPersistDrainUnconfirmed
+	}
+	o.leiosPersistOnce = sync.Once{}
+	o.leiosPersistStopOnce = sync.Once{}
+	o.leiosPersistStarted.Store(false)
+	return nil
 }

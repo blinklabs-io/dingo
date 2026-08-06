@@ -73,6 +73,7 @@ func (c *ConnectionManager) CreateOutboundConn(
 			)
 		}
 	}
+	tmpConn = withSocketDeadlines(tmpConn)
 	// Build connection options
 	connOpts := make(
 		[]ouroboros.ConnectionOptionFunc,

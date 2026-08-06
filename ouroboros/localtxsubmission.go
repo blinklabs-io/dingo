@@ -27,7 +27,9 @@ import (
 func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
 	return []olocaltxsubmission.LocalTxSubmissionOptionFunc{
 		olocaltxsubmission.WithSubmitTxFunc(
-			o.instrumentLocaltxsubmissionSubmitTx(o.localtxsubmissionServerSubmitTx),
+			o.instrumentLocaltxsubmissionSubmitTx(
+				o.localtxsubmissionServerSubmitTx,
+			),
 		),
 	}
 }
@@ -62,7 +64,9 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			"role", "server",
 			"connection_id", ctx.ConnectionId.String(),
 		)
-		return errors.New("local-tx-submission: unexpected transaction content type")
+		return errors.New(
+			"local-tx-submission: unexpected transaction content type",
+		)
 	}
 	// Add transaction to mempool
 	err := o.Mempool.AddTransaction(

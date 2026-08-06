@@ -88,7 +88,12 @@ func TestEpochBoundaryConsensus(t *testing.T) {
 	for _, p := range h.Producers() {
 		tip, terr := h.GetChainTip(p)
 		require.NoError(t, terr, "failed to get %s tip after boundary", p.Name)
-		t.Logf("post-boundary: %s slot=%d block=%d", p.Name, tip.SlotNumber, tip.BlockNumber)
+		t.Logf(
+			"post-boundary: %s slot=%d block=%d",
+			p.Name,
+			tip.SlotNumber,
+			tip.BlockNumber,
+		)
 		require.Greater(t, tip.SlotNumber, cfg.EpochLength,
 			"%s did not advance past first epoch boundary "+
 				"(stuck before slot %d) - likely VRF verification "+

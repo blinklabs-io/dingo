@@ -1175,7 +1175,9 @@ func ParseActivePoolDistribution(
 	if len(data) == 0 {
 		return nil, nil
 	}
-	mapData, totalActiveStake, hasTotal, err := activePoolDistributionMapData(data)
+	mapData, totalActiveStake, hasTotal, err := activePoolDistributionMapData(
+		data,
+	)
 	if err != nil {
 		return nil, err
 	}

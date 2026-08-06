@@ -16,6 +16,7 @@ package plugin
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -30,13 +31,19 @@ type Selection struct {
 
 // EnvironmentPrefix returns the generic environment prefix for capability.
 func EnvironmentPrefix(capability Capability) string {
-	return "DINGO_PLUGINS_" + strings.ToUpper(strings.ReplaceAll(string(capability), ".", "_")) + "_"
+	return "DINGO_PLUGINS_" + strings.ToUpper(
+		strings.ReplaceAll(string(capability), ".", "_"),
+	) + "_"
 }
 
 // ApplyEnvironment overlays generic plugin environment entries on a YAML
 // selection. CLI provider selectors are intentionally applied by composition
 // after this function, giving selector CLI > environment > YAML precedence.
-func ApplyEnvironment(capability Capability, selection *Selection, environ []string) error {
+func ApplyEnvironment(
+	capability Capability,
+	selection *Selection,
+	environ []string,
+) error {
 	if !capability.Valid() {
 		return fmt.Errorf("unknown plugin capability %q", capability)
 	}
@@ -56,23 +63,24 @@ func ApplyEnvironment(capability Capability, selection *Selection, environ []str
 		case strings.HasPrefix(path, "CONFIG_"):
 			fieldPath := strings.TrimPrefix(path, "CONFIG_")
 			if fieldPath == "" {
-				return fmt.Errorf("empty plugin config environment path: %s", name)
+				return fmt.Errorf(
+					"empty plugin config environment path: %s",
+					name,
+				)
 			}
 			if selection.Config == nil {
 				selection.Config = make(map[string]any)
 			}
 			components := strings.Split(fieldPath, "_")
-			for _, component := range components {
-				if component == "" {
-					// Repeated or leading/trailing underscores (e.g.
-					// DATA__DIR or DATA_DIR_) would otherwise silently
-					// collapse to a valid field name and override the
-					// wrong setting. Fail startup on the typo instead.
-					return fmt.Errorf(
-						"malformed plugin config environment path %s: empty path component",
-						name,
-					)
-				}
+			if slices.Contains(components, "") {
+				// Repeated or leading/trailing underscores (e.g.
+				// DATA__DIR or DATA_DIR_) would otherwise silently
+				// collapse to a valid field name and override the
+				// wrong setting. Fail startup on the typo instead.
+				return fmt.Errorf(
+					"malformed plugin config environment path %s: empty path component",
+					name,
+				)
 			}
 			var scalar any
 			if err := yaml.Unmarshal([]byte(value), &scalar); err != nil {

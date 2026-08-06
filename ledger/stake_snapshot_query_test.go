@@ -61,13 +61,20 @@ const (
 // blockQueryFromHex decodes a captured LSQ MsgQuery payload and returns the
 // inner *BlockQuery, exactly the value dingo's LSQ server hands to
 // LedgerState.Query.
-func blockQueryFromHex(t *testing.T, payloadHex string) *olocalstatequery.BlockQuery {
+func blockQueryFromHex(
+	t *testing.T,
+	payloadHex string,
+) *olocalstatequery.BlockQuery {
 	t.Helper()
 	msg, err := olocalstatequery.NewMsgFromCbor(
 		olocalstatequery.MessageTypeQuery,
 		mustHex(t, payloadHex),
 	)
-	require.NoError(t, err, "captured stake-snapshot query must decode (issue #2917)")
+	require.NoError(
+		t,
+		err,
+		"captured stake-snapshot query must decode (issue #2917)",
+	)
 	msgQuery, ok := msg.(*olocalstatequery.MsgQuery)
 	require.True(t, ok)
 	blockQuery, ok := msgQuery.Query.Query.(*olocalstatequery.BlockQuery)
@@ -112,7 +119,12 @@ func serialisedInner(t *testing.T, ls *LedgerState, payloadHex string) []byte {
 	require.Len(t, outer, 1)
 	tag, ok := outer[0].(cbor.Tag)
 	require.True(t, ok, "GetCBOR result must be a CBOR tag")
-	require.Equal(t, uint64(cbor.CborTagCbor), tag.Number, "expected tag 24 (CBOR-in-CBOR)")
+	require.Equal(
+		t,
+		uint64(cbor.CborTagCbor),
+		tag.Number,
+		"expected tag 24 (CBOR-in-CBOR)",
+	)
 	inner, ok := tag.Content.([]byte)
 	require.True(t, ok, "tag-24 content must be a byte string")
 	return inner
@@ -126,7 +138,9 @@ func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
 	meta := db.Metadata()
 	// Only pool1 has a current-epoch (mark) snapshot; set/go are empty.
 	require.NoError(t, meta.SavePoolStakeSnapshots(
-		[]*models.PoolStakeSnapshot{markSnapshot(t, 2, ssPool1Hex, oneTrillion)},
+		[]*models.PoolStakeSnapshot{
+			markSnapshot(t, 2, ssPool1Hex, oneTrillion),
+		},
 		nil,
 	))
 	// Only the mark total exists (2e12, both pools). The set/go epochs have
@@ -134,7 +148,9 @@ func TestQueryStakeSnapshotSpecificPool(t *testing.T) {
 	// minimum 1 -- matching cardano-node -- giving totals [2e12, 1, 1].
 	require.NoError(t, meta.SaveEpochSummary(epochSummary(2, twoTrillion), nil))
 	ls := &LedgerState{db: db}
-	ls.consensus.Store(&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}})
+	ls.consensus.Store(
+		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
+	)
 
 	inner := serialisedInner(t, ls, ssQueryOnePoolHex)
 	require.Equal(t,
@@ -167,7 +183,9 @@ func TestQueryStakeSnapshotAllPools(t *testing.T) {
 	require.NoError(t, meta.SaveEpochSummary(epochSummary(2, twoTrillion), nil))
 	require.NoError(t, meta.SaveEpochSummary(epochSummary(1, twoTrillion), nil))
 	ls := &LedgerState{db: db}
-	ls.consensus.Store(&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}})
+	ls.consensus.Store(
+		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
+	)
 
 	inner := serialisedInner(t, ls, ssQueryAllPoolsHex)
 	require.Equal(t,
@@ -187,12 +205,16 @@ func TestQueryStakeSnapshotEarlyEpochsNonZeroTotals(t *testing.T) {
 	db := newTestDB(t)
 	meta := db.Metadata()
 	require.NoError(t, meta.SavePoolStakeSnapshots(
-		[]*models.PoolStakeSnapshot{markSnapshot(t, 0, ssPool1Hex, oneTrillion)},
+		[]*models.PoolStakeSnapshot{
+			markSnapshot(t, 0, ssPool1Hex, oneTrillion),
+		},
 		nil,
 	))
 	require.NoError(t, meta.SaveEpochSummary(epochSummary(0, oneTrillion), nil))
 	ls := &LedgerState{db: db}
-	ls.consensus.Store(&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 0}})
+	ls.consensus.Store(
+		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 0}},
+	)
 
 	inner := serialisedInner(t, ls, ssQueryOnePoolHex)
 	// [ {728e…: [mark 1e12, set 0, go 0]}, markTotal 1e12, setTotal 1, goTotal 1 ]
@@ -201,8 +223,18 @@ func TestQueryStakeSnapshotEarlyEpochsNonZeroTotals(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, decoded, 4)
 	require.EqualValues(t, oneTrillion, decoded[1], "markTotal")
-	require.EqualValues(t, 1, decoded[2], "setTotal must be NonZero (1) at epoch 0")
-	require.EqualValues(t, 1, decoded[3], "goTotal must be NonZero (1) at epoch 0")
+	require.EqualValues(
+		t,
+		1,
+		decoded[2],
+		"setTotal must be NonZero (1) at epoch 0",
+	)
+	require.EqualValues(
+		t,
+		1,
+		decoded[3],
+		"goTotal must be NonZero (1) at epoch 0",
+	)
 	// The per-pool set/go stakes remain plain zero (not clamped).
 	pools, ok := decoded[0].(map[any]any)
 	require.True(t, ok)
@@ -234,7 +266,9 @@ func TestQueryStakeSnapshotAllPoolsIncludesRetiredPool(t *testing.T) {
 	require.NoError(t, meta.SaveEpochSummary(epochSummary(2, twoTrillion), nil))
 	require.NoError(t, meta.SaveEpochSummary(epochSummary(1, oneTrillion), nil))
 	ls := &LedgerState{db: db}
-	ls.consensus.Store(&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}})
+	ls.consensus.Store(
+		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
+	)
 
 	inner := serialisedInner(t, ls, ssQueryAllPoolsHex)
 	var result olocalstatequery.StakeSnapshotsResult
@@ -247,8 +281,18 @@ func TestQueryStakeSnapshotAllPoolsIncludesRetiredPool(t *testing.T) {
 	require.Contains(t, result.PoolSnapshots, pool1)
 	retired, ok := result.PoolSnapshots[pool2]
 	require.True(t, ok, "retired pool with only set/go stake must be reported")
-	assert.EqualValues(t, 0, retired.StakeMark, "retired pool has no mark stake")
-	assert.EqualValues(t, oneTrillion, retired.StakeSet, "retired pool keeps its set stake")
+	assert.EqualValues(
+		t,
+		0,
+		retired.StakeMark,
+		"retired pool has no mark stake",
+	)
+	assert.EqualValues(
+		t,
+		oneTrillion,
+		retired.StakeSet,
+		"retired pool keeps its set stake",
+	)
 	assert.EqualValues(t, 0, retired.StakeGo)
 }
 
@@ -277,8 +321,12 @@ func TestQueryStakeSnapshotNonexistentPoolPV10(t *testing.T) {
 	var result olocalstatequery.StakeSnapshotsResult
 	_, err := cbor.Decode(inner, &result)
 	require.NoError(t, err)
-	require.Len(t, result.PoolSnapshots, 1,
-		"below PV11 an explicitly requested pool is returned even with zero stake")
+	require.Len(
+		t,
+		result.PoolSnapshots,
+		1,
+		"below PV11 an explicitly requested pool is returned even with zero stake",
+	)
 	snap, ok := result.PoolSnapshots[ledger.NewBlake2b224(mustHex(t, ssPool1Hex))]
 	require.True(t, ok)
 	assert.EqualValues(t, 0, snap.StakeMark)
@@ -313,7 +361,12 @@ func TestQueryStakeSnapshotAllPoolsPV11OmitsZeroStake(t *testing.T) {
 	require.NoError(t, meta.SavePoolStakeSnapshots(
 		[]*models.PoolStakeSnapshot{
 			markSnapshot(t, 2, ssPool1Hex, oneTrillion), // has stake
-			markSnapshot(t, 2, ssPool2Hex, 0),           // explicit zero-stake row
+			markSnapshot(
+				t,
+				2,
+				ssPool2Hex,
+				0,
+			), // explicit zero-stake row
 		},
 		nil,
 	))
@@ -328,6 +381,12 @@ func TestQueryStakeSnapshotAllPoolsPV11OmitsZeroStake(t *testing.T) {
 	require.Len(t, result.PoolSnapshots, 1)
 	assert.Contains(t, result.PoolSnapshots,
 		ledger.NewBlake2b224(mustHex(t, ssPool1Hex)), "pool with stake is kept")
-	assert.NotContains(t, result.PoolSnapshots,
-		ledger.NewBlake2b224(mustHex(t, ssPool2Hex)), "all-zero pool is omitted")
+	assert.NotContains(
+		t,
+		result.PoolSnapshots,
+		ledger.NewBlake2b224(
+			mustHex(t, ssPool2Hex),
+		),
+		"all-zero pool is omitted",
+	)
 }

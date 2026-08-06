@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -172,7 +173,9 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 	return m.activeSlotCoeff
 }
 
-func (m *mockEpochProvider) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+func (m *mockEpochProvider) ConsensusModeForEpoch(
+	epoch uint64,
+) consensus.ConsensusMode {
 	return consensus.ConsensusModeTPraos
 }
 
@@ -315,6 +318,195 @@ func TestElectionStartStop(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestElectionStopPreventsStaleMonitorFromStoppingALaterStart guards a
+// real bug: the ctx-cancellation monitor goroutine Start launches used to
+// be untracked by e.wg, so a completed Stop() call could return while
+// that goroutine was still alive, watching the now-superseded ctx/stopCh
+// from that Start generation. A later Start() on the same *Election (a
+// supported, idempotent-per-Stop pattern per TestElectionStartStop above)
+// builds a fresh ctx/stopCh but does nothing about a stale monitor left
+// over from the previous generation -- if that stale monitor's own parent
+// context were ever cancelled afterward, it would call e.Stop() on the
+// new, currently-running generation it has no business touching.
+func TestElectionStopPreventsStaleMonitorFromStoppingALaterStart(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 10000
+	stakeProvider.poolStakes[string(poolId[:])] = 1000
+
+	epochProvider := newMockEpochProvider()
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	parentA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	require.NoError(t, election.Start(parentA))
+	require.NoError(t, election.Stop())
+
+	parentB := t.Context()
+	require.NoError(t, election.Start(parentB))
+
+	// Cancelling the FIRST generation's now-unrelated parent must never
+	// affect the second, currently-running generation -- if Stop above
+	// left generation 1's monitor goroutine alive, this would eventually
+	// call e.Stop() on generation 2.
+	cancelA()
+
+	require.Never(t, func() bool {
+		election.mu.RLock()
+		defer election.mu.RUnlock()
+		return !election.running
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	require.NoError(t, election.Stop())
+}
+
+// TestElectionStopDoesNotDeadlockOnMonitorSelectRace guards the sharper,
+// more severe consequence of the same gap: once the monitor goroutine is
+// tracked in e.wg (so Stop actually waits for it), a select that picks its
+// <-ctx.Done() case instead of <-stopCh purely by luck -- both channels
+// can be simultaneously ready by the time the goroutine is actually
+// scheduled, since Stop closes stopCh and cancels ctx back to back with
+// no yield point in between, and Go's select has no case-priority when
+// more than one is ready -- would call e.Stop() a second, concurrent
+// time. That second call's own e.wg.Wait() would then deadlock forever
+// waiting for this very goroutine to finish, which it never will: it is
+// itself blocked inside that same e.Stop() call. Repeats many Start/Stop
+// cycles (each call is independent, so a fresh *Election every time)
+// specifically to land in that narrow race window rather than relying on
+// a single attempt to happen to hit it.
+func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 10000
+	stakeProvider.poolStakes[string(poolId[:])] = 1000
+	epochProvider := newMockEpochProvider()
+
+	for i := range 200 {
+		eventBus := event.NewEventBus(nil, nil)
+		election := NewElection(
+			poolId,
+			electionTestVRFSeed,
+			stakeProvider,
+			epochProvider,
+			eventBus,
+			slog.Default(),
+		)
+		require.NoError(t, election.Start(context.Background()))
+
+		stopDone := make(chan struct{})
+		go func() {
+			defer close(stopDone)
+			_ = election.Stop()
+		}()
+
+		select {
+		case <-stopDone:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Stop() deadlocked on iteration %d", i)
+		}
+		eventBus.Stop()
+	}
+}
+
+// blockingStakeProvider wraps mockStakeProvider's GetPoolStake so a test can
+// deterministically pin a schedule computation in flight: the first call
+// signals started (closing it) and then blocks until release is closed,
+// rather than racing a real computation's completion against a timed Stop
+// call.
+type blockingStakeProvider struct {
+	*mockStakeProvider
+	started   chan struct{}
+	startOnce sync.Once
+	release   chan struct{}
+}
+
+func (b *blockingStakeProvider) GetPoolStake(
+	epoch uint64,
+	poolKeyHash []byte,
+) (uint64, error) {
+	b.startOnce.Do(func() { close(b.started) })
+	<-b.release
+	return b.mockStakeProvider.GetPoolStake(epoch, poolKeyHash)
+}
+
+// TestElectionStopWaitsForInFlightScheduleComputation guards a real bug:
+// Stop used to signal its background goroutines to exit (closing stopCh/
+// computeCh, cancelling ctx, unsubscribing) and return immediately,
+// without waiting for a schedule computation already in flight to
+// actually finish. Schedule computation reads stakeProvider/epochProvider,
+// which node.go's initBlockForger binds to whatever ledgerState exists at
+// construction time -- so on the live database restore/truncate path
+// (node_lifecycle.go), a computation still running when Stop returns could
+// keep reading from that ledgerState after the caller closes it moments
+// later. Start's own initial-epoch compute request pins the computation in
+// flight via blockingStakeProvider, so this needs no timing assumptions
+// about a real computation's speed.
+func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	inner := newMockStakeProvider()
+	inner.totalStake = 10000
+	inner.poolStakes[string(poolId[:])] = 1000
+	blocking := &blockingStakeProvider{
+		mockStakeProvider: inner,
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+
+	epochProvider := newMockEpochProvider()
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		blocking,
+		epochProvider,
+		eventBus,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	require.NoError(t, election.Start(context.Background()))
+
+	// Start's own initial schedule-compute request reaches GetPoolStake
+	// almost immediately.
+	select {
+	case <-blocking.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("schedule computation never started")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- election.Stop() }()
+
+	select {
+	case <-stopDone:
+		t.Fatal(
+			"Stop returned before the in-flight schedule computation finished",
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case err := <-stopDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight computation finished")
+	}
+}
+
 func TestElectionScheduleEarlyEpochs(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
@@ -446,7 +638,13 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 	copy(poolId[:], []byte("testpool1234567890123"))
 
 	store := newMockScheduleStore()
-	persisted := NewSchedule(10, poolId, 1_000_000, 1_000_000, makeElectionNonce(0x44))
+	persisted := NewSchedule(
+		10,
+		poolId,
+		1_000_000,
+		1_000_000,
+		makeElectionNonce(0x44),
+	)
 	persisted.AddLeaderSlot(999)
 	require.NoError(t, store.SaveSchedule(persisted))
 
@@ -765,7 +963,9 @@ func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
 // known range), the producer declines rather than running with an
 // incorrect epoch index. The compute path is not engaged because we
 // don't know which epoch's schedule to request.
-func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(t *testing.T) {
+func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(
+	t *testing.T,
+) {
 	poolId := lcommon.PoolKeyHash{}
 	epochProvider := newMockEpochProvider()
 	epochProvider.epochForSlot = func(uint64) (uint64, error) {
@@ -1067,7 +1267,10 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
 			bytes.Equal(expectedNonce, schedule.EpochNonce) &&
-			assert.ObjectsAreEqual(expectedSlots, schedule.LeaderSlotsSnapshot())
+			assert.ObjectsAreEqual(
+				expectedSlots,
+				schedule.LeaderSlotsSnapshot(),
+			)
 	}, time.Second, 20*time.Millisecond,
 		"rollback should not invalidate a precomputed next-epoch schedule")
 }

@@ -746,9 +746,15 @@ func TestVerifyCertificateChainWithModeReturnsDetails(t *testing.T) {
 			},
 			ProtocolMessage: ProtocolMessage{
 				MessageParts: map[string]string{
-					"current_epoch":                   "269",
-					"next_aggregate_verification_key": hex.EncodeToString(g2.Marshal()),
-					"next_protocol_parameters":        ProtocolParameters{K: 1, M: 2, PhiF: 0.5}.ComputeHash(),
+					"current_epoch": "269",
+					"next_aggregate_verification_key": hex.EncodeToString(
+						g2.Marshal(),
+					),
+					"next_protocol_parameters": ProtocolParameters{
+						K:    1,
+						M:    2,
+						PhiF: 0.5,
+					}.ComputeHash(),
 				},
 			},
 		},
@@ -813,7 +819,9 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 				Digest:          "digest123",
 				Network:         "preprod",
 				CertificateHash: "cert_leaf",
-				Locations:       []string{"https://example.com/snapshot.tar.zst"},
+				Locations: []string{
+					"https://example.com/snapshot.tar.zst",
+				},
 				Beacon: Beacon{
 					Epoch:               270,
 					ImmutableFileNumber: 5320,
@@ -859,7 +867,11 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 				MessageParts: map[string]string{
 					"current_epoch":                   "269",
 					"next_aggregate_verification_key": g2Hex,
-					"next_protocol_parameters":        ProtocolParameters{K: 1, M: 2, PhiF: 0.5}.ComputeHash(),
+					"next_protocol_parameters": ProtocolParameters{
+						K:    1,
+						M:    2,
+						PhiF: 0.5,
+					}.ComputeHash(),
 				},
 			},
 		},

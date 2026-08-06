@@ -119,7 +119,10 @@ func TestImportBoundaries(t *testing.T) {
 			errorMessages = append(errorMessages, err.Error())
 		}
 		slices.Sort(errorMessages)
-		t.Fatalf("check import boundaries:\n%s", strings.Join(errorMessages, "\n"))
+		t.Fatalf(
+			"check import boundaries:\n%s",
+			strings.Join(errorMessages, "\n"),
+		)
 	}
 
 	if len(violations) > 0 {

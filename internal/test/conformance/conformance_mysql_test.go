@@ -33,7 +33,8 @@ import (
 // state_manager_mysql.go), so it specifically requires MYSQL_ROOT_PASSWORD
 // or a full MYSQL_DSN override.
 func isMysqlConformanceConfigured() bool {
-	return os.Getenv("MYSQL_ROOT_PASSWORD") != "" || os.Getenv("MYSQL_DSN") != ""
+	return os.Getenv("MYSQL_ROOT_PASSWORD") != "" ||
+		os.Getenv("MYSQL_DSN") != ""
 }
 
 // skipIfMysqlConformanceNotConfigured skips the test unless a MySQL root

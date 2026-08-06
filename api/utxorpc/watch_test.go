@@ -190,7 +190,10 @@ func TestWatchTxBuildRollbackMessages_StopsAtRollbackPoint(t *testing.T) {
 	require.Len(t, history, 2)
 	require.True(
 		t,
-		pointsEqual(history[len(history)-1].point, ocommon.NewPoint(101, []byte{0x02})),
+		pointsEqual(
+			history[len(history)-1].point,
+			ocommon.NewPoint(101, []byte{0x02}),
+		),
 	)
 }
 

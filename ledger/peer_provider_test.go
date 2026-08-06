@@ -152,7 +152,11 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 	// The in-memory DB has no pool registrations, so it returns empty.
 	result, err = adapter.GetPoolRelays()
 	require.NoError(t, err)
-	require.Empty(t, result, "expected empty relays after TTL expiry since DB has no data")
+	require.Empty(
+		t,
+		result,
+		"expected empty relays after TTL expiry since DB has no data",
+	)
 }
 
 func TestPoolRelayProviderInvalidateCache(t *testing.T) {
@@ -254,7 +258,12 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	// Get a second copy from the cache
 	result2, err := adapter.GetPoolRelays()
 	require.NoError(t, err)
-	require.Len(t, result2, 2, "cached slice length should not be affected by append")
+	require.Len(
+		t,
+		result2,
+		2,
+		"cached slice length should not be affected by append",
+	)
 
 	// Verify the cached data is unaffected by mutations
 	require.Equal(
@@ -500,4 +509,25 @@ func TestCopyPoolRelaysFull(t *testing.T) {
 	// Mutate the copy and verify original is unaffected
 	(*result[0].IPv4)[0] = 0xFF
 	require.Equal(t, byte(10), (*original[0].IPv4)[0])
+}
+
+// TestPoolRelayProviderCloseUnsubscribes pins that Close removes the
+// cache-invalidation handler NewPoolRelayProvider registers. Without this, a
+// live database restore/truncate -- which constructs a fresh
+// PoolRelayProvider on every cycle (node_lifecycle.go) but previously had no
+// way to unsubscribe the old one -- leaks one more permanently-active
+// EventBus subscription per cycle.
+func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
+	db := newTestDB(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	adapter := newTestAdapter(t, db, bus, defaultRelayCacheTTL)
+	require.True(t, bus.HasSubscribers(PoolStateRestoredEventType))
+
+	adapter.Close()
+	require.False(t, bus.HasSubscribers(PoolStateRestoredEventType))
+
+	// Safe to call more than once.
+	require.NotPanics(t, adapter.Close)
 }

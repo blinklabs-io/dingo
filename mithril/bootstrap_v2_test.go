@@ -80,7 +80,10 @@ func mithrilJSONHexKey(t *testing.T, key []byte) string {
 	return hex.EncodeToString(encoded)
 }
 
-func validImmutableFiles(t *testing.T, slot uint64) (map[string][]byte, []byte) {
+func validImmutableFiles(
+	t *testing.T,
+	slot uint64,
+) (map[string][]byte, []byte) {
 	t.Helper()
 	makeBlock := func(
 		blockNumber, blockSlot uint64, prevHash common.Blake2b256,
@@ -409,9 +412,12 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 
 	// Artifact detail and list entry
 	artifact := &CardanoDatabaseSnapshot{
-		MerkleRoot:              merkleRoot,
-		Network:                 "preprod",
-		Beacon:                  Beacon{Epoch: 294, ImmutableFileNumber: opts.immutableFileNumber},
+		MerkleRoot: merkleRoot,
+		Network:    "preprod",
+		Beacon: Beacon{
+			Epoch:               294,
+			ImmutableFileNumber: opts.immutableFileNumber,
+		},
 		TotalDbSizeUncompressed: 4096,
 		Digests: CardanoDatabaseDigests{
 			SizeUncompressed: int64(len(digestJSON)),
@@ -586,7 +592,11 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				writeJSON(w, cert)
 			case p == "/artifact/mithril-stake-distributions":
 				writeJSON(w, []MithrilStakeDistributionListItem{
-					{Hash: "msd123", CertificateHash: fixture.leafHash, Epoch: 294},
+					{
+						Hash:            "msd123",
+						CertificateHash: fixture.leafHash,
+						Epoch:           294,
+					},
 				})
 			case p == "/artifact/mithril-stake-distribution/msd123":
 				writeJSON(w, MithrilStakeDistribution{
@@ -603,7 +613,11 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				})
 			case p == "/artifact/cardano-stake-distributions":
 				writeJSON(w, []CardanoStakeDistributionListItem{
-					{Hash: "csd123", CertificateHash: fixture.leafHash, Epoch: 294},
+					{
+						Hash:            "csd123",
+						CertificateHash: fixture.leafHash,
+						Epoch:           294,
+					},
 				})
 			case p == "/artifact/cardano-stake-distribution/csd123":
 				writeJSON(w, CardanoStakeDistribution{
@@ -782,33 +796,36 @@ func TestBootstrapV2CertLeafMerkleRootMismatch(t *testing.T) {
 
 func TestBootstrapV2ImmutableDigestMismatch(t *testing.T) {
 	for _, tamperImmutable := range []uint64{0, 1} {
-		t.Run(fmt.Sprintf("immutable_%05d", tamperImmutable), func(t *testing.T) {
-			fixture := newV2Fixture(t, v2FixtureOptions{
-				immutableFileNumber: 2,
-				tamperImmutable:     &tamperImmutable,
-			})
-			downloadDir := t.TempDir()
-			_, err := Bootstrap(
-				context.Background(),
-				fixture.bootstrapConfig(downloadDir),
-			)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "digest")
+		t.Run(
+			fmt.Sprintf("immutable_%05d", tamperImmutable),
+			func(t *testing.T) {
+				fixture := newV2Fixture(t, v2FixtureOptions{
+					immutableFileNumber: 2,
+					tamperImmutable:     &tamperImmutable,
+				})
+				downloadDir := t.TempDir()
+				_, err := Bootstrap(
+					context.Background(),
+					fixture.bootstrapConfig(downloadDir),
+				)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "digest")
 
-			// The corrupted trio must not be left behind for resume reuse
-			immutableDir := filepath.Join(
-				downloadDir,
-				"immutable-"+fixture.artifact.Hash,
-				"immutable",
-			)
-			_, statErr := os.Stat(
-				filepath.Join(
-					immutableDir,
-					fmt.Sprintf("%05d.chunk", tamperImmutable),
-				),
-			)
-			assert.True(t, os.IsNotExist(statErr))
-		})
+				// The corrupted trio must not be left behind for resume reuse
+				immutableDir := filepath.Join(
+					downloadDir,
+					"immutable-"+fixture.artifact.Hash,
+					"immutable",
+				)
+				_, statErr := os.Stat(
+					filepath.Join(
+						immutableDir,
+						fmt.Sprintf("%05d.chunk", tamperImmutable),
+					),
+				)
+				assert.True(t, os.IsNotExist(statErr))
+			},
+		)
 	}
 }
 

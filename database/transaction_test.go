@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	metadataSqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -151,7 +152,11 @@ func (m *mockBlobStore) SetUtxo(types.Txn, []byte, uint32, []byte) error {
 	return nil
 }
 
-func (m *mockBlobStore) GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([]byte, error) {
+func (m *mockBlobStore) GetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
 	if m.utxoData != nil {
 		if data, ok := m.utxoData[fmt.Sprintf("%x:%d", txId, outputIdx)]; ok {
 			return data, nil
@@ -160,7 +165,11 @@ func (m *mockBlobStore) GetUtxo(txn types.Txn, txId []byte, outputIdx uint32) ([
 	return nil, types.ErrBlobKeyNotFound
 }
 
-func (m *mockBlobStore) DeleteUtxo(txn types.Txn, txId []byte, outputIdx uint32) error {
+func (m *mockBlobStore) DeleteUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) error {
 	mockTxn, ok := txn.(*mockBlobTxn)
 	if !ok {
 		return types.ErrTxnWrongType
@@ -200,6 +209,67 @@ func (m *mockBlobTxn) Commit() error {
 func (m *mockBlobTxn) Rollback() error {
 	m.rollbackCount++
 	return nil
+}
+
+// TestMithrilTrustBoundarySlotStrictPropagatesReadError guards against
+// a real bug: database/lifecycle.Truncate's safety check
+// against the Mithril trust boundary used MithrilTrustBoundarySlot, which
+// silently treats a failed sync-state read the same as "no boundary
+// recorded" (returns 0) — bypassing the safety check entirely on a
+// transient storage error instead of refusing the truncate. The strict
+// variant must instead propagate the read error so a caller enforcing a
+// safety check can fail closed.
+func TestMithrilTrustBoundarySlotStrictPropagatesReadError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(t, closeTestDatabase(db))
+
+	_, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.Error(t, err)
+}
+
+// TestMithrilTrustBoundarySlotSwallowsReadError confirms
+// MithrilTrustBoundarySlot's existing fail-open contract is unchanged for
+// its other caller (the consumed-UTxO recovery heuristic in this same
+// file): a failed read still returns 0, not an error.
+func TestMithrilTrustBoundarySlotSwallowsReadError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(t, closeTestDatabase(db))
+
+	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
+}
+
+// TestMithrilTrustBoundarySlotStrictPropagatesParseError guards against a
+// corrupted persisted boundary being silently treated as "no Mithril
+// snapshot was ever imported": database/lifecycle.Truncate relies on
+// MithrilTrustBoundarySlotStrict to fail closed, so a malformed stored
+// value (not just a read error) must also come back as an error rather
+// than (0, nil), or a truncate could proceed past a boundary that is
+// actually corrupt/unreadable.
+func TestMithrilTrustBoundarySlotStrictPropagatesParseError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(
+		t,
+		db.SetSyncState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
+	)
+
+	slot, err := db.MithrilTrustBoundarySlotStrict(nil)
+	require.Error(t, err)
+	require.Zero(t, slot)
+}
+
+// TestMithrilTrustBoundarySlotSwallowsParseError confirms
+// MithrilTrustBoundarySlot's existing fail-open contract is unchanged for a
+// malformed persisted boundary: it must still return 0 with no error, only
+// via its logged fail-open path now that the strict variant propagates the
+// parse error.
+func TestMithrilTrustBoundarySlotSwallowsParseError(t *testing.T) {
+	db := openTestDB(t)
+	require.NoError(
+		t,
+		db.SetSyncState(mithrilLedgerSlotSyncKey, "not-a-slot", nil),
+	)
+
+	require.Zero(t, db.MithrilTrustBoundarySlot(nil))
 }
 
 func TestDeleteTxBlobsUsesCallerBlobTxn(t *testing.T) {
@@ -281,7 +351,9 @@ func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
 
 // TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata injects a transaction blob deletion failure.
 // It verifies the failure is logged while rollback metadata cleanup still succeeds.
-func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
+func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(
+	t *testing.T,
+) {
 	var logs bytes.Buffer
 	logger := slog.New(
 		slog.NewJSONHandler(
@@ -290,9 +362,16 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testin
 		),
 	)
 	txHash := bytes.Repeat([]byte{0x11}, 32)
-	sqliteStore, err := metadataSqlite.New("", logger, nil)
+	dataDir := t.TempDir()
+	sqliteStore, err := metadataSqlite.NewSQLStore(
+		metadataSqlite.Config{DataDir: dataDir},
+		metadata.ProviderDependencies{Logger: logger},
+	)
 	require.NoError(t, err)
-	require.NoError(t, sqliteStore.Start())
+	require.NoError(t, sqliteStore.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, sqliteStore.Close())
+	})
 	store := &mockBlobStore{
 		deleteTxErrs: map[string]error{
 			string(txHash): errors.New("delete tx blob failed"),
@@ -302,23 +381,27 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testin
 		blob:     store,
 		metadata: sqliteStore,
 		logger:   logger,
-		config:   &Config{Logger: logger},
+		config:   &Config{DataDir: dataDir, Logger: logger},
 	}
 	defer func() {
 		require.NoError(t, db.Close())
 	}()
-	require.NoError(t, sqliteStore.DB().Create(&models.Transaction{
-		Hash:  txHash,
-		Slot:  200,
-		Valid: true,
-	}).Error)
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err = raw.Exec(
+		`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, ?, ?)`,
+		txHash,
+		200,
+		true,
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, db.TransactionsDeleteRolledback(100, nil))
 
 	var count int64
-	require.NoError(t, sqliteStore.DB().Model(&models.Transaction{}).
-		Where("hash = ?", txHash).
-		Count(&count).Error)
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+		txHash,
+	).Scan(&count))
 	require.Zero(t, count)
 	require.Contains(t, logs.String(), "\"level\":\"WARN\"")
 	require.Contains(t, logs.String(), "failed to delete TX blob data")
@@ -337,36 +420,51 @@ func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
 		),
 	)
 	txID := bytes.Repeat([]byte{0x22}, 32)
-	sqliteStore, err := metadataSqlite.New("", logger, nil)
+	dataDir := t.TempDir()
+	sqliteStore, err := metadataSqlite.NewSQLStore(
+		metadataSqlite.Config{DataDir: dataDir},
+		metadata.ProviderDependencies{Logger: logger},
+	)
 	require.NoError(t, err)
-	require.NoError(t, sqliteStore.Start())
+	require.NoError(t, sqliteStore.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, sqliteStore.Close())
+	})
 	store := &mockBlobStore{
 		deleteUtxoErrs: map[string]error{
-			fmt.Sprintf("%x:%d", txID, 0): errors.New("delete utxo blob failed"),
+			fmt.Sprintf("%x:%d", txID, 0): errors.New(
+				"delete utxo blob failed",
+			),
 		},
 	}
 	db := &Database{
 		blob:     store,
 		metadata: sqliteStore,
 		logger:   logger,
-		config:   &Config{Logger: logger},
+		config:   &Config{DataDir: dataDir, Logger: logger},
 	}
 	defer func() {
 		require.NoError(t, db.Close())
 	}()
-	require.NoError(t, sqliteStore.DB().Create(&models.Utxo{
-		TxId:      txID,
-		OutputIdx: 0,
-		AddedSlot: 200,
-		Amount:    1,
-	}).Error)
+	raw := rawSQLiteMetadataFixture(t, db)
+	_, err = raw.Exec(`
+INSERT INTO utxo (tx_id, output_idx, added_slot, amount)
+VALUES (?, ?, ?, ?)`,
+		txID,
+		0,
+		200,
+		"1",
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, db.UtxosDeleteRolledback(100, nil))
 
 	var count int64
-	require.NoError(t, sqliteStore.DB().Model(&models.Utxo{}).
-		Where("tx_id = ? AND output_idx = ?", txID, 0).
-		Count(&count).Error)
+	require.NoError(t, raw.QueryRow(`
+SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+		txID,
+		0,
+	).Scan(&count))
 	require.Zero(t, count)
 	require.Contains(t, logs.String(), "\"level\":\"WARN\"")
 	require.Contains(t, logs.String(), "failed to delete UTxO blob data")
@@ -374,7 +472,9 @@ func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
 	require.Contains(t, logs.String(), "\"total\":1")
 }
 
-func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T) {
+func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(
+	t *testing.T,
+) {
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	defer func() {
@@ -400,18 +500,89 @@ func TestRecoverConsumedUtxoLegacyRawCborWithoutProducerBlockFails(t *testing.T)
 	txn := db.Transaction(true)
 	defer txn.Release()
 
-	_, err = db.recoverConsumedUtxo(dbtestutil.NewMockInput(txId, 0), txn)
+	_, err = db.recoverConsumedUtxo(
+		dbtestutil.NewMockInput(txId, 0),
+		txn,
+		false,
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
+}
+
+// TestRecoveredProducerOnPrimaryChain verifies the membership check that gates
+// blob-recovery of consumed inputs (issue #3005 Mode B cross-fork splice). A
+// producer block that is present in the append-only blob store but is not the
+// block indexed on the applied primary chain at its height (an abandoned fork)
+// must be reported off-chain, so recoverConsumedUtxo refuses to resurrect it
+// for a validated block past the Mithril boundary.
+func TestRecoveredProducerOnPrimaryChain(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{
+		DataDir:              t.TempDir(),
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StrictUtxoValidation: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const height = uint64(100)
+	canonHash := bytes.Repeat([]byte{0x11}, 32)
+	forkHash := bytes.Repeat([]byte{0x22}, 32)
+	prevHash := bytes.Repeat([]byte{0x01}, 32)
+
+	create := func(slot uint64, hash []byte) {
+		t.Helper()
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(itxn *Txn) error {
+			return db.BlockCreate(models.Block{
+				ID:       height,
+				Slot:     slot,
+				Hash:     hash,
+				PrevHash: prevHash,
+				Number:   height,
+				Cbor:     []byte{0x80},
+			}, itxn)
+		}))
+		txn.Release()
+	}
+
+	// The producer's block ID is supplied by the caller (every recovery path
+	// has already loaded the producer), so the check is by ID and hash.
+	check := func(producerID uint64, hash []byte) bool {
+		t.Helper()
+		txn := db.Transaction(true)
+		defer txn.Release()
+		onChain, cErr := db.recoveredProducerOnPrimaryChain(
+			txn, producerID, hash,
+		)
+		require.NoError(t, cErr)
+		return onChain
+	}
+
+	// The block currently indexed at this height is on the primary chain.
+	create(1000, canonHash)
+	require.True(t, check(height, canonHash),
+		"canonical producer must be reported on-chain")
+
+	// Index the same height to a different block: the earlier block remains
+	// retrievable by point (append-only blob) but is no longer the canonical
+	// block at its height, i.e. an abandoned fork.
+	create(2000, forkHash)
+	require.False(t, check(height, canonHash),
+		"abandoned-fork producer (not indexed at its height) must be off-chain")
+	require.True(t, check(height, forkHash),
+		"the newly indexed block is now the canonical producer")
+
+	// A producer at a height the chain never indexed is off-chain.
+	require.False(t, check(height+1, canonHash),
+		"producer at an unindexed height must be reported off-chain")
 }
 
 // TestSetTransactionRecoveryPopulatesProducerFK verifies that when
 // ensureTransactionConsumedUtxos has to recover a missing UTxO row for
 // a consumed input, the recovered row carries the producer transaction
 // FK. Without this FK, SetUtxosNotDeletedAfterSlot would reanimate the
-// row during a rollback but joins on utxo.transaction_id and GORM
-// Preload("Outputs") through the producer Transaction would silently
-// drop it.
+// row during a rollback, but joins on utxo.transaction_id would silently drop
+// it from producer-transaction output lookups.
 func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
@@ -599,6 +770,174 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 	}
 }
 
+// TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation covers
+// issue #3005: in the steady-state, at-tip, validated block-application path,
+// a consumed input whose produced utxo row is absent from the metadata store
+// (the producer transaction row may still be present) must NOT be recovered
+// from the append-only blob store and persisted, even when that recovery would
+// succeed. The blob retains blocks from abandoned forks,
+// so recovering the producer would import a UTxO the applied chain never
+// produced and bake an input-conservation violation into the persisted chain.
+// With StrictAppliedInputConservation the ingest errors instead, so the block's
+// transaction aborts and the node stalls for resync rather than wedging past K.
+//
+// The fixture stages the producers so that recovery from the blob WOULD
+// otherwise succeed (blob offsets present, metadata Transaction rows present,
+// only the Utxo rows deleted), isolating the new refusal from the pre-existing
+// unrecoverable-input behavior in the sibling test below.
+func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
+	t *testing.T,
+) {
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+
+	// newRecoverableDB stages the fixture in a recovery-ready state: producer
+	// blocks and their metadata Transaction rows exist, the consumer block's
+	// offsets exist, and the producers' Utxo rows are deleted so the consumer's
+	// consumed inputs are absent from the metadata store but reconstructable
+	// from the blob.
+	newRecoverableDB := func(t *testing.T) *Database {
+		t.Helper()
+		db, err := newTestDatabase(t, &Config{
+			DataDir: t.TempDir(),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+			StrictUtxoValidation: true,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		for _, p := range candidate.producers {
+			storeBlockOffsetsOnly(t, db, p.block)
+			metaTxn := db.MetadataTxn(true)
+			producer := p
+			require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+				return db.Metadata().SetGapBlockTransaction(
+					producer.tx,
+					producer.point,
+					0,
+					txn.Metadata(),
+				)
+			}))
+			metaTxn.Release()
+		}
+		storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+
+		refs := make([]models.UtxoId, 0, len(candidate.consumerTx.Consumed()))
+		for _, input := range candidate.consumerTx.Consumed() {
+			refs = append(refs, models.UtxoId{
+				Hash: input.Id().Bytes(),
+				Idx:  input.Index(),
+			})
+		}
+		metaTxn := db.MetadataTxn(true)
+		require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().DeleteUtxos(refs, txn.Metadata())
+		}))
+		metaTxn.Release()
+		return db
+	}
+
+	setConsumer := func(t *testing.T, db *Database, opts BatchedTxIngestOpts) error {
+		t.Helper()
+		return db.SetTransactionWithOpts(
+			candidate.consumerTx,
+			candidate.consumerPoint,
+			0,
+			0,
+			nil,
+			nil,
+			mustBlockOffsets(t, candidate.consumerBlock),
+			nil,
+			opts,
+		)
+	}
+
+	t.Run("flag off recovers from blob", func(t *testing.T) {
+		db := newRecoverableDB(t)
+		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{}))
+	})
+
+	t.Run("flag on refuses recovery past boundary", func(t *testing.T) {
+		db := newRecoverableDB(t)
+		// No mithril_ledger_slot recorded (0): every slot is past the boundary.
+		err := setConsumer(t, db, BatchedTxIngestOpts{
+			StrictAppliedInputConservation: true,
+		})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrUtxoNotFound)
+		// The block's transaction must not have persisted the recovered row.
+		for _, input := range candidate.consumerTx.Consumed() {
+			utxo, err := db.Metadata().GetUtxoIncludingSpent(
+				input.Id().Bytes(),
+				input.Index(),
+				nil,
+			)
+			require.NoError(t, err)
+			require.Nil(
+				t,
+				utxo,
+				"input %s must not be recovered/persisted under the gate",
+				input.String(),
+			)
+		}
+	})
+
+	t.Run("flag on tolerated at or below boundary", func(t *testing.T) {
+		db := newRecoverableDB(t)
+		require.NoError(t, db.SetSyncState(
+			mithrilLedgerSlotSyncKey,
+			fmt.Sprintf("%d", candidate.consumerPoint.Slot),
+			nil,
+		))
+		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{
+			StrictAppliedInputConservation: true,
+		}))
+	})
+
+	t.Run("flag on inert without StrictUtxoValidation", func(t *testing.T) {
+		db, err := newTestDatabase(t, &Config{
+			DataDir: t.TempDir(),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+			StrictUtxoValidation: false,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		for _, p := range candidate.producers {
+			storeBlockOffsetsOnly(t, db, p.block)
+			metaTxn := db.MetadataTxn(true)
+			producer := p
+			require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+				return db.Metadata().SetGapBlockTransaction(
+					producer.tx,
+					producer.point,
+					0,
+					txn.Metadata(),
+				)
+			}))
+			metaTxn.Release()
+		}
+		storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+		refs := make([]models.UtxoId, 0, len(candidate.consumerTx.Consumed()))
+		for _, input := range candidate.consumerTx.Consumed() {
+			refs = append(refs, models.UtxoId{
+				Hash: input.Id().Bytes(),
+				Idx:  input.Index(),
+			})
+		}
+		metaTxn := db.MetadataTxn(true)
+		require.NoError(t, metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().DeleteUtxos(refs, txn.Metadata())
+		}))
+		metaTxn.Release()
+		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{
+			StrictAppliedInputConservation: true,
+		}))
+	})
+}
+
 // TestEnsureTransactionConsumedUtxosStrictValidation covers issue #396:
 // when a consumed UTxO cannot be recovered from either the metadata store
 // or the blob store, StrictUtxoValidation controls whether that is a hard
@@ -611,8 +950,10 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 	newTestDB := func(t *testing.T, strict bool) *Database {
 		t.Helper()
 		db, err := newTestDatabase(t, &Config{
-			DataDir:              t.TempDir(),
-			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			DataDir: t.TempDir(),
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			StrictUtxoValidation: strict,
 		})
 
@@ -653,16 +994,125 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 		require.ErrorIs(t, err, ErrUtxoNotFound)
 	})
 
-	t.Run("enabled skips at or below the recorded boundary", func(t *testing.T) {
-		db := newTestDB(t, true)
-		require.NoError(
-			t,
-			db.SetSyncState(
-				mithrilLedgerSlotSyncKey,
-				fmt.Sprintf("%d", candidate.consumerPoint.Slot),
-				nil,
-			),
-		)
-		require.NoError(t, setTransaction(t, db))
+	t.Run(
+		"enabled skips at or below the recorded boundary",
+		func(t *testing.T) {
+			db := newTestDB(t, true)
+			require.NoError(
+				t,
+				db.SetSyncState(
+					mithrilLedgerSlotSyncKey,
+					fmt.Sprintf("%d", candidate.consumerPoint.Slot),
+					nil,
+				),
+			)
+			require.NoError(t, setTransaction(t, db))
+		},
+	)
+}
+
+// TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer is the end-to-end guard
+// for the Mode B cross-fork splice (issue #3005): it drives recoverConsumedUtxo
+// itself, with a real offset-format blob entry, rather than only the membership
+// helper. The append-only blob store keeps abandoned-fork blocks, so an
+// offset-format UTxO can still resolve to a producer the applied chain
+// abandoned; recovering it for a validated block past the Mithril boundary would
+// splice in a UTxO the chain never produced.
+//
+// The three cases pin that the gate is what decides: a canonical producer gets
+// past it, an abandoned one is refused with ErrUtxoNotFound, and with the gate
+// off the same abandoned producer gets past it again. "Past the gate" is
+// observed as the later, unrelated output-decode failure, so the test needs no
+// fabricated ledger CBOR.
+func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{
+		DataDir:              t.TempDir(),
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StrictUtxoValidation: true,
 	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const (
+		producerID   = uint64(500)
+		producerSlot = uint64(1_000)
+	)
+	txId := randomHash(t)
+	producerHash := randomHash(t)
+	// Block CBOR whose bytes at [1,4) stand in for the output payload. The
+	// content only has to be sliceable; the refusal happens before any decode.
+	blockCbor := []byte{0x80, 0xa1, 0xb2, 0xc3, 0xd4}
+	payloadOffset, payloadLength := uint32(1), uint32(3)
+
+	createBlock := func(hash []byte, slot uint64) {
+		t.Helper()
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(itxn *Txn) error {
+			return db.BlockCreate(models.Block{
+				ID:       producerID,
+				Slot:     slot,
+				Hash:     hash,
+				PrevHash: randomHash(t),
+				Number:   producerID,
+				Cbor:     blockCbor,
+				Type:     1,
+			}, itxn)
+		}))
+		txn.Release()
+	}
+
+	// The producer block, canonical at its height, plus an offset-format blob
+	// entry for the consumed input pointing into it.
+	createBlock(producerHash, producerSlot)
+	var producerHashArr [32]byte
+	copy(producerHashArr[:], producerHash)
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(itxn *Txn) error {
+		return db.Blob().SetUtxo(
+			itxn.Blob(), txId, 0,
+			EncodeUtxoOffset(&CborOffset{
+				BlockSlot:  producerSlot,
+				BlockHash:  producerHashArr,
+				ByteOffset: payloadOffset,
+				ByteLength: payloadLength,
+			}),
+		)
+	}))
+
+	recover := func(enforcePrimaryChain bool) error {
+		t.Helper()
+		txn := db.Transaction(true)
+		defer txn.Release()
+		_, rErr := db.recoverConsumedUtxo(
+			dbtestutil.NewMockInput(txId, 0), txn, enforcePrimaryChain,
+		)
+		return rErr
+	}
+
+	// Canonical producer: the gate allows it through, and recovery proceeds to
+	// the output decode.
+	err = recover(true)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrUtxoNotFound,
+		"a canonical producer must not be refused by the primary-chain gate")
+	require.ErrorContains(t, err, "decode transaction output",
+		"recovery should reach the decode step for a canonical producer")
+
+	// Index a different block at the producer's height: the producer is still
+	// in the blob and still resolvable by the offset, but is now an abandoned
+	// fork.
+	createBlock(randomHash(t), producerSlot+1)
+
+	err = recover(true)
+	require.ErrorIs(t, err, ErrUtxoNotFound,
+		"an abandoned-fork producer must be refused past the trust boundary")
+	require.ErrorContains(t, err, "not on the applied primary chain")
+
+	// With the gate off (below the boundary, or the Mithril gap-closure path)
+	// the same producer is recovered as before.
+	err = recover(false)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrUtxoNotFound,
+		"the gate must be the only thing refusing this producer")
+	require.ErrorContains(t, err, "decode transaction output")
 }

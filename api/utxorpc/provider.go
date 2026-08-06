@@ -39,7 +39,11 @@ type ProviderDependencies struct {
 func RegisterProvider(host *plugin.Host) error {
 	return plugin.Register(
 		host,
-		plugin.Descriptor{Capability: plugin.CapabilityAPIUtxorpc, Name: "builtin", Description: "built-in UTxO RPC Connect server"},
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityAPIUtxorpc,
+			Name:        "builtin",
+			Description: "built-in UTxO RPC Connect server",
+		},
 		func() ProviderConfig { return ProviderConfig{Port: 9090} },
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Utxorpc, plugin.Instance, error) {
 			server := NewUtxorpc(UtxorpcConfig{

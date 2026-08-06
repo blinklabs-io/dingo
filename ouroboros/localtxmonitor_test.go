@@ -36,9 +36,12 @@ func TestLocaltxmonitorServerGetMempoolReportsConfiguredCapacity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o, _ := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
-				cfg.MempoolCapacity = tt.capacity
-			})
+			o, _ := newTxSubmissionTestOuroboros(
+				t,
+				func(cfg *mempool.MempoolConfig) {
+					cfg.MempoolCapacity = tt.capacity
+				},
+			)
 			o.LedgerState = newTestLedgerState(t)
 
 			_, capacity, _, err := o.localtxmonitorServerGetMempool(
@@ -46,12 +49,18 @@ func TestLocaltxmonitorServerGetMempoolReportsConfiguredCapacity(t *testing.T) {
 			)
 
 			require.NoError(t, err)
-			assert.Equal(t, uint32(tt.capacity), capacity) // #nosec G115 -- test values fit
+			assert.Equal(
+				t,
+				uint32(tt.capacity),
+				capacity,
+			) // #nosec G115 -- test values fit
 		})
 	}
 }
 
-func TestLocaltxmonitorServerGetMempoolRejectsUnrepresentableCapacity(t *testing.T) {
+func TestLocaltxmonitorServerGetMempoolRejectsUnrepresentableCapacity(
+	t *testing.T,
+) {
 	o, _ := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
 		cfg.MempoolCapacity = int64(math.MaxUint32) + 1
 	})

@@ -103,7 +103,9 @@ func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOpti
 func (o *Ouroboros) txsubmissionClientConnOpts() []txsubmission.TxSubmissionOptionFunc {
 	return []txsubmission.TxSubmissionOptionFunc{
 		txsubmission.WithRequestTxIdsFunc(
-			o.instrumentTxsubmissionRequestTxIds(o.txsubmissionClientRequestTxIds),
+			o.instrumentTxsubmissionRequestTxIds(
+				o.txsubmissionClientRequestTxIds,
+			),
 		),
 		txsubmission.WithRequestTxsFunc(
 			o.instrumentTxsubmissionRequestTxs(o.txsubmissionClientRequestTxs),
@@ -324,11 +326,16 @@ func (o *Ouroboros) txsubmissionServerInit(
 						headroom.MaxAdmissionHeadroomBytes() {
 						o.config.Logger.Warn(
 							"peer offered transaction larger than mempool admission capacity",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"tx_size", txIds[0].Size,
+							"component",
+							"network",
+							"protocol",
+							"tx-submission",
+							"role",
+							"server",
+							"connection_id",
+							ctx.ConnectionId.String(),
+							"tx_size",
+							txIds[0].Size,
 							"max_admission_bytes",
 							headroom.MaxAdmissionHeadroomBytes(),
 						)
@@ -429,14 +436,20 @@ func (o *Ouroboros) txsubmissionServerInit(
 					) {
 						o.config.Logger.Warn(
 							"dropping peer transaction after repeated mempool admission contention",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"tx_hash", tx.Hash(),
+							"component",
+							"network",
+							"protocol",
+							"tx-submission",
+							"role",
+							"server",
+							"connection_id",
+							ctx.ConnectionId.String(),
+							"tx_hash",
+							tx.Hash(),
 							"retry_streak",
 							txsubmissionMaxAdmissionRetryStreak,
-							"error", err,
+							"error",
+							err,
 						)
 						continue
 					}

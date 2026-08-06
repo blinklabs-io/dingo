@@ -15,15 +15,20 @@
 package indexer
 
 import (
+	"context"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -31,6 +36,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	fxcbor "github.com/fxamacker/cbor/v2"
+	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -73,22 +79,42 @@ func pad32(prefix string) string {
 	return prefix + hex.EncodeToString(make([]byte, need/2))
 }
 
-// setupTestStore creates an in-memory SQLite store and runs auto-migration.
-func setupTestStore(t *testing.T) *sqlite.MetadataStoreSqlite {
+type testStore struct {
+	*sqlstore.Store
+	raw *sql.DB
+}
+
+// setupTestStore creates a file-backed SQLite store so tests can use the
+// shared production implementation while retaining a raw SQL assertion
+// fixture. Schema ownership remains entirely with the migration runner.
+func setupTestStore(t *testing.T) *testStore {
 	t.Helper()
-	store, err := sqlite.New("", slog.New(slog.NewTextHandler(os.Stderr, nil)), nil)
+	dataDir := t.TempDir()
+	store, err := sqlite.NewSQLStore(
+		sqlite.Config{DataDir: dataDir},
+		metadata.ProviderDependencies{
+			Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		},
+	)
 	require.NoError(t, err)
-	require.NoError(t, store.Start())
-	require.NoError(t, store.DB().AutoMigrate(models.MigrateModels...))
+	require.NoError(t, store.Start(context.Background()))
+	raw, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(dataDir, "metadata.sqlite")+
+			"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+	)
+	require.NoError(t, err)
+	require.NoError(t, raw.Ping())
 	t.Cleanup(func() {
-		store.Close() //nolint:errcheck
+		require.NoError(t, raw.Close())
+		require.NoError(t, store.Close())
 	})
-	return store
+	return &testStore{Store: store, raw: raw}
 }
 
 // setupIndexer creates a test Indexer backed by the given store.
 // It uses testAuthPolicyID to enforce policy-scoped auth-token matching.
-func setupIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
+func setupIndexer(t *testing.T, store *testStore) *Indexer {
 	t.Helper()
 	idx, err := New(Config{
 		Metadata:                store,
@@ -103,6 +129,158 @@ func setupIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
 	return idx
 }
 
+func allAssetCreates(
+	t *testing.T,
+	store *testStore,
+) []models.MidnightAssetCreate {
+	t.Helper()
+	ret, err := store.FindMidnightAssetCreatesFrom(0, 0, 0, nil)
+	require.NoError(t, err)
+	return ret
+}
+
+func allAssetSpends(
+	t *testing.T,
+	store *testStore,
+) []models.MidnightAssetSpend {
+	t.Helper()
+	ret, err := store.FindMidnightAssetSpendsFrom(0, 0, 0, nil)
+	require.NoError(t, err)
+	return ret
+}
+
+func allRegistrations(
+	t *testing.T,
+	store *testStore,
+) []models.MidnightRegistration {
+	t.Helper()
+	ret, err := store.FindMidnightRegistrationsFrom(0, 0, 0, nil)
+	require.NoError(t, err)
+	return ret
+}
+
+func allDeregistrations(
+	t *testing.T,
+	store *testStore,
+) []models.MidnightDeregistration {
+	t.Helper()
+	ret, err := store.FindMidnightDeregistrationsFrom(0, 0, 0, nil)
+	require.NoError(t, err)
+	return ret
+}
+
+func governanceDatums(
+	t *testing.T,
+	store *testStore,
+	datumType string,
+) []models.MidnightGovernanceDatum {
+	t.Helper()
+	query := `
+SELECT id, datum_type, tx_hash, output_index, datum, block_number
+FROM midnight_governance_datums`
+	args := []any{}
+	if datumType != "" {
+		query += " WHERE datum_type = ?"
+		args = append(args, datumType)
+	}
+	query += " ORDER BY id"
+	rows, err := store.raw.Query(query, args...)
+	require.NoError(t, err)
+	defer rows.Close()
+	ret := []models.MidnightGovernanceDatum{}
+	for rows.Next() {
+		var item models.MidnightGovernanceDatum
+		require.NoError(t, rows.Scan(
+			&item.ID,
+			&item.DatumType,
+			&item.TxHash,
+			&item.OutputIndex,
+			&item.Datum,
+			&item.BlockNumber,
+		))
+		ret = append(ret, item)
+	}
+	require.NoError(t, rows.Err())
+	return ret
+}
+
+func ariadneParams(
+	t *testing.T,
+	store *testStore,
+) []models.MidnightAriadneParams {
+	t.Helper()
+	rows, err := store.raw.Query(`
+SELECT id, epoch, datum
+FROM midnight_ariadne_params
+ORDER BY epoch`)
+	require.NoError(t, err)
+	defer rows.Close()
+	ret := []models.MidnightAriadneParams{}
+	for rows.Next() {
+		var item models.MidnightAriadneParams
+		require.NoError(t, rows.Scan(&item.ID, &item.Epoch, &item.Datum))
+		ret = append(ret, item)
+	}
+	require.NoError(t, rows.Err())
+	return ret
+}
+
+func epochCandidateSnapshots(
+	t *testing.T,
+	store *testStore,
+) []models.MidnightEpochCandidates {
+	t.Helper()
+	rows, err := store.raw.Query(`
+SELECT id, epoch, block_number, candidates_cbor
+FROM midnight_epoch_candidates
+ORDER BY epoch`)
+	require.NoError(t, err)
+	defer rows.Close()
+	ret := []models.MidnightEpochCandidates{}
+	for rows.Next() {
+		var item models.MidnightEpochCandidates
+		require.NoError(t, rows.Scan(
+			&item.ID,
+			&item.Epoch,
+			&item.BlockNumber,
+			&item.CandidatesCbor,
+		))
+		ret = append(ret, item)
+	}
+	require.NoError(t, rows.Err())
+	return ret
+}
+
+func committeeCandidateRegistrations(
+	t *testing.T,
+	store *testStore,
+) []models.MidnightCommitteeCandidateRegistration {
+	t.Helper()
+	rows, err := store.raw.Query(`
+SELECT id, tx_hash, output_index, block_number, slot_number, tx_index,
+       tx_inputs_cbor
+FROM midnight_committee_candidate_registrations
+ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	ret := []models.MidnightCommitteeCandidateRegistration{}
+	for rows.Next() {
+		var item models.MidnightCommitteeCandidateRegistration
+		require.NoError(t, rows.Scan(
+			&item.ID,
+			&item.TxHash,
+			&item.OutputIndex,
+			&item.BlockNumber,
+			&item.SlotNumber,
+			&item.TxIndex,
+			&item.TxInputsCbor,
+		))
+		ret = append(ret, item)
+	}
+	require.NoError(t, rows.Err())
+	return ret
+}
+
 // testBlock creates a minimal models.Block for use in tests.
 func testBlock(number uint64, slot uint64, hashByte byte) models.Block {
 	hash := make([]byte, 32)
@@ -115,7 +293,11 @@ func testBlock(number uint64, slot uint64, hashByte byte) models.Block {
 }
 
 // buildCNightOutput builds a mock output containing a cNIGHT token.
-func buildCNightOutput(t *testing.T, policyHex, assetNameHex string, amount uint64) lcommon.TransactionOutput {
+func buildCNightOutput(
+	t *testing.T,
+	policyHex, assetNameHex string,
+	amount uint64,
+) lcommon.TransactionOutput {
 	t.Helper()
 	policyBytes, err := hex.DecodeString(policyHex)
 	require.NoError(t, err)
@@ -136,7 +318,11 @@ func buildCNightOutput(t *testing.T, policyHex, assetNameHex string, amount uint
 
 // buildAuthOutput builds a mock output at the mapping validator address
 // with an inline datum and auth token.
-func buildAuthOutput(t *testing.T, policyHex, authAssetNameHex string, datumCbor []byte) lcommon.TransactionOutput {
+func buildAuthOutput(
+	t *testing.T,
+	policyHex, authAssetNameHex string,
+	datumCbor []byte,
+) lcommon.TransactionOutput {
 	t.Helper()
 	policyBytes, err := hex.DecodeString(policyHex)
 	require.NoError(t, err)
@@ -157,7 +343,11 @@ func buildAuthOutput(t *testing.T, policyHex, authAssetNameHex string, datumCbor
 }
 
 // buildInput builds a mock transaction input from a hex tx hash.
-func buildInput(t *testing.T, txHashHex string, index uint32) lcommon.TransactionInput {
+func buildInput(
+	t *testing.T,
+	txHashHex string,
+	index uint32,
+) lcommon.TransactionInput {
 	t.Helper()
 	txBytes, err := hex.DecodeString(txHashHex)
 	require.NoError(t, err)
@@ -167,7 +357,12 @@ func buildInput(t *testing.T, txHashHex string, index uint32) lcommon.Transactio
 }
 
 // buildTx assembles a mock transaction with the given ID, inputs, and outputs.
-func buildTx(t *testing.T, txHashHex string, inputs []lcommon.TransactionInput, outputs []lcommon.TransactionOutput) lcommon.Transaction {
+func buildTx(
+	t *testing.T,
+	txHashHex string,
+	inputs []lcommon.TransactionInput,
+	outputs []lcommon.TransactionOutput,
+) lcommon.Transaction {
 	t.Helper()
 	txBytes, err := hex.DecodeString(txHashHex)
 	require.NoError(t, err)
@@ -216,13 +411,20 @@ func TestCNightCreate_HappyPath(t *testing.T) {
 	txHash := pad32("aabbccdd")
 	cnightOut := buildCNightOutput(t, testPolicyID, testAssetNameHex, 500)
 	dummyIn := buildInput(t, pad32("1122334455667788"), 0)
-	tx := buildTx(t, txHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{cnightOut})
+	tx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{cnightOut},
+	)
 
 	block := testBlock(1, 100, 0xAA)
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{tx}, 1_000_000))
+	require.NoError(
+		t,
+		idx.processBlock(block, []lcommon.Transaction{tx}, 1_000_000),
+	)
 
-	var creates []models.MidnightAssetCreate
-	require.NoError(t, store.DB().Find(&creates).Error)
+	creates := allAssetCreates(t, store)
 	require.Len(t, creates, 1)
 	assert.Equal(t, uint64(500), creates[0].Quantity)
 	assert.Equal(t, uint64(1), creates[0].BlockNumber)
@@ -245,17 +447,40 @@ func TestCNightSpend_HappyPath(t *testing.T) {
 	createTxHash := pad32("cccc0000")
 	cnightOut := buildCNightOutput(t, testPolicyID, testAssetNameHex, 250)
 	dummyIn := buildInput(t, pad32("dddd0000"), 0)
-	createTx := buildTx(t, createTxHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{cnightOut})
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{createTx}, 1_000))
+	createTx := buildTx(
+		t,
+		createTxHash,
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{cnightOut},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0x01),
+			[]lcommon.Transaction{createTx},
+			1_000,
+		),
+	)
 
 	// Block 2: spend the cNIGHT UTxO.
 	spendTxHash := pad32("eeee0000")
 	spendIn := buildInput(t, createTxHash, 0)
-	spendTx := buildTx(t, spendTxHash, []lcommon.TransactionInput{spendIn}, []lcommon.TransactionOutput{anyOutput(t)})
-	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x02), []lcommon.Transaction{spendTx}, 2_000))
+	spendTx := buildTx(
+		t,
+		spendTxHash,
+		[]lcommon.TransactionInput{spendIn},
+		[]lcommon.TransactionOutput{anyOutput(t)},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(2, 200, 0x02),
+			[]lcommon.Transaction{spendTx},
+			2_000,
+		),
+	)
 
-	var spends []models.MidnightAssetSpend
-	require.NoError(t, store.DB().Find(&spends).Error)
+	spends := allAssetSpends(t, store)
 	require.Len(t, spends, 1)
 	assert.Equal(t, uint64(250), spends[0].Quantity)
 	assert.Equal(t, uint64(2), spends[0].BlockNumber)
@@ -276,15 +501,31 @@ func TestRegistration_HappyPath(t *testing.T) {
 
 	datumCbor := simpleDatumCbor(t)
 	// Use the expected auth policy (testAuthPolicyID).
-	regOut := buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)
+	regOut := buildAuthOutput(
+		t,
+		testAuthPolicyID,
+		testAuthAssetNameHex,
+		datumCbor,
+	)
 	dummyIn := buildInput(t, pad32("aaaa1111"), 0)
 	regTxHash := pad32("bbbb1111")
-	regTx := buildTx(t, regTxHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{regOut})
+	regTx := buildTx(
+		t,
+		regTxHash,
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{regOut},
+	)
 
-	require.NoError(t, idx.processBlock(testBlock(5, 500, 0x05), []lcommon.Transaction{regTx}, 5_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(5, 500, 0x05),
+			[]lcommon.Transaction{regTx},
+			5_000,
+		),
+	)
 
-	var regs []models.MidnightRegistration
-	require.NoError(t, store.DB().Find(&regs).Error)
+	regs := allRegistrations(t, store)
 	require.Len(t, regs, 1)
 	assert.Equal(t, uint64(5), regs[0].BlockNumber)
 	assert.NotEmpty(t, regs[0].FullDatum)
@@ -305,17 +546,32 @@ func TestRegistration_WrongPolicy(t *testing.T) {
 	// Mint the auth asset name under a different (wrong) policy.
 	wrongPolicy := "aaaabbbbccccddddeeeeffffaaaabbbbccccddddeeeeffffaaaabbbb"
 	datumCbor := simpleDatumCbor(t)
-	spoofedOut := buildAuthOutput(t, wrongPolicy, testAuthAssetNameHex, datumCbor)
+	spoofedOut := buildAuthOutput(
+		t,
+		wrongPolicy,
+		testAuthAssetNameHex,
+		datumCbor,
+	)
 	dummyIn := buildInput(t, pad32("aa000001"), 0)
 	spoofedTx := buildTx(t, pad32("bb000001"),
 		[]lcommon.TransactionInput{dummyIn},
 		[]lcommon.TransactionOutput{spoofedOut})
 
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{spoofedTx}, 1_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0x01),
+			[]lcommon.Transaction{spoofedTx},
+			1_000,
+		),
+	)
 
-	var regs []models.MidnightRegistration
-	require.NoError(t, store.DB().Find(&regs).Error)
-	assert.Empty(t, regs, "spoofed auth token under wrong policy must not be indexed")
+	regs := allRegistrations(t, store)
+	assert.Empty(
+		t,
+		regs,
+		"spoofed auth token under wrong policy must not be indexed",
+	)
 }
 
 // TestDeregistration_HappyPath verifies that spending a tracked registration
@@ -332,17 +588,40 @@ func TestDeregistration_HappyPath(t *testing.T) {
 	regTxHash := pad32("ee000001")
 	regOut := buildAuthOutput(t, authPolicy, testAuthAssetNameHex, datumCbor)
 	dummyIn := buildInput(t, pad32("ff000001"), 0)
-	regTx := buildTx(t, regTxHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{regOut})
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x10), []lcommon.Transaction{regTx}, 1_000))
+	regTx := buildTx(
+		t,
+		regTxHash,
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{regOut},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0x10),
+			[]lcommon.Transaction{regTx},
+			1_000,
+		),
+	)
 
 	// Block 2: deregister (spend the registration UTxO).
 	deregTxHash := pad32("ee000002")
 	deregIn := buildInput(t, regTxHash, 0)
-	deregTx := buildTx(t, deregTxHash, []lcommon.TransactionInput{deregIn}, []lcommon.TransactionOutput{anyOutput(t)})
-	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x20), []lcommon.Transaction{deregTx}, 2_000))
+	deregTx := buildTx(
+		t,
+		deregTxHash,
+		[]lcommon.TransactionInput{deregIn},
+		[]lcommon.TransactionOutput{anyOutput(t)},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(2, 200, 0x20),
+			[]lcommon.Transaction{deregTx},
+			2_000,
+		),
+	)
 
-	var deregs []models.MidnightDeregistration
-	require.NoError(t, store.DB().Find(&deregs).Error)
+	deregs := allDeregistrations(t, store)
 	require.Len(t, deregs, 1)
 	assert.Equal(t, uint64(2), deregs[0].BlockNumber)
 	assert.NotEmpty(t, deregs[0].FullDatum)
@@ -388,24 +667,33 @@ func TestMixedBlock_RelevantAndNonRelevant(t *testing.T) {
 
 	// Relevant tx: real cNIGHT output.
 	cnightTxHash := pad32("c1900001")
-	cnightTx := buildTx(t, cnightTxHash,
+	cnightTx := buildTx(
+		t,
+		cnightTxHash,
 		[]lcommon.TransactionInput{buildInput(t, pad32("c1900000"), 0)},
-		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 77)})
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 77),
+		},
+	)
 
 	block := testBlock(10, 1000, 0xFF)
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{plainTx, wrongTx, cnightTx}, 10_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			block,
+			[]lcommon.Transaction{plainTx, wrongTx, cnightTx},
+			10_000,
+		),
+	)
 
-	var creates []models.MidnightAssetCreate
-	require.NoError(t, store.DB().Find(&creates).Error)
+	creates := allAssetCreates(t, store)
 	require.Len(t, creates, 1, "only the real cNIGHT output must be indexed")
 	assert.Equal(t, uint64(77), creates[0].Quantity)
 
-	var spends []models.MidnightAssetSpend
-	require.NoError(t, store.DB().Find(&spends).Error)
+	spends := allAssetSpends(t, store)
 	assert.Empty(t, spends)
 
-	var regs []models.MidnightRegistration
-	require.NoError(t, store.DB().Find(&regs).Error)
+	regs := allRegistrations(t, store)
 	assert.Empty(t, regs)
 }
 
@@ -419,12 +707,19 @@ func TestCNightCreate_Rollback(t *testing.T) {
 	txHash := pad32("dd000001")
 	cnightOut := buildCNightOutput(t, testPolicyID, testAssetNameHex, 300)
 	dummyIn := buildInput(t, pad32("dd000000"), 0)
-	tx := buildTx(t, txHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{cnightOut})
+	tx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{cnightOut},
+	)
 	block1 := testBlock(7, 700, 0x07)
-	require.NoError(t, idx.processBlock(block1, []lcommon.Transaction{tx}, 7_000))
+	require.NoError(
+		t,
+		idx.processBlock(block1, []lcommon.Transaction{tx}, 7_000),
+	)
 
-	var creates []models.MidnightAssetCreate
-	require.NoError(t, store.DB().Find(&creates).Error)
+	creates := allAssetCreates(t, store)
 	require.Len(t, creates, 1)
 
 	idx.mu.RLock()
@@ -434,7 +729,7 @@ func TestCNightCreate_Rollback(t *testing.T) {
 
 	idx.rollbackBlock(block1)
 
-	require.NoError(t, store.DB().Find(&creates).Error)
+	creates = allAssetCreates(t, store)
 	assert.Empty(t, creates, "create row must be deleted on rollback")
 
 	idx.mu.RLock()
@@ -469,20 +764,23 @@ func TestCNightSpend_Rollback(t *testing.T) {
 			[]lcommon.TransactionOutput{anyOutput(t)})},
 		2_000))
 
-	var spends []models.MidnightAssetSpend
-	require.NoError(t, store.DB().Find(&spends).Error)
+	spends := allAssetSpends(t, store)
 	require.Len(t, spends, 1)
 
 	// Rollback block 2.
 	idx.rollbackBlock(block2)
 
-	require.NoError(t, store.DB().Find(&spends).Error)
+	spends = allAssetSpends(t, store)
 	assert.Empty(t, spends, "spend row must be deleted on rollback")
 
 	idx.mu.RLock()
 	utxo, restored := idx.cNightUTxOs[utxoKey{TxHash: createTxHash, Index: 0}]
 	idx.mu.RUnlock()
-	assert.True(t, restored, "UTxO must be restored to memory after spend rollback")
+	assert.True(
+		t,
+		restored,
+		"UTxO must be restored to memory after spend rollback",
+	)
 	assert.Equal(t, uint64(150), utxo.Quantity)
 }
 
@@ -495,7 +793,12 @@ func TestRegistration_Rollback(t *testing.T) {
 
 	datumCbor := simpleDatumCbor(t)
 	regTxHash := pad32("ff100001")
-	regOut := buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)
+	regOut := buildAuthOutput(
+		t,
+		testAuthPolicyID,
+		testAuthAssetNameHex,
+		datumCbor,
+	)
 	block1 := testBlock(3, 300, 0x03)
 	require.NoError(t, idx.processBlock(block1,
 		[]lcommon.Transaction{buildTx(t, regTxHash,
@@ -503,19 +806,22 @@ func TestRegistration_Rollback(t *testing.T) {
 			[]lcommon.TransactionOutput{regOut})},
 		3_000))
 
-	var regs []models.MidnightRegistration
-	require.NoError(t, store.DB().Find(&regs).Error)
+	regs := allRegistrations(t, store)
 	require.Len(t, regs, 1)
 
 	idx.rollbackBlock(block1)
 
-	require.NoError(t, store.DB().Find(&regs).Error)
+	regs = allRegistrations(t, store)
 	assert.Empty(t, regs, "registration row must be deleted on rollback")
 
 	idx.mu.RLock()
 	_, inMem := idx.regUTxOs[utxoKey{TxHash: regTxHash, Index: 0}]
 	idx.mu.RUnlock()
-	assert.False(t, inMem, "registration UTxO must be removed from memory on rollback")
+	assert.False(
+		t,
+		inMem,
+		"registration UTxO must be removed from memory on rollback",
+	)
 }
 
 // TestDeregistration_Rollback verifies that rolling back a block containing
@@ -531,9 +837,19 @@ func TestDeregistration_Rollback(t *testing.T) {
 	regTxHash := pad32("cc100001")
 	block1 := testBlock(1, 100, 0x01)
 	require.NoError(t, idx.processBlock(block1,
-		[]lcommon.Transaction{buildTx(t, regTxHash,
+		[]lcommon.Transaction{buildTx(
+			t,
+			regTxHash,
 			[]lcommon.TransactionInput{buildInput(t, pad32("cc100000"), 0)},
-			[]lcommon.TransactionOutput{buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)})},
+			[]lcommon.TransactionOutput{
+				buildAuthOutput(
+					t,
+					testAuthPolicyID,
+					testAuthAssetNameHex,
+					datumCbor,
+				),
+			},
+		)},
 		1_000))
 
 	// Block 2: deregister.
@@ -545,20 +861,23 @@ func TestDeregistration_Rollback(t *testing.T) {
 			[]lcommon.TransactionOutput{anyOutput(t)})},
 		2_000))
 
-	var deregs []models.MidnightDeregistration
-	require.NoError(t, store.DB().Find(&deregs).Error)
+	deregs := allDeregistrations(t, store)
 	require.Len(t, deregs, 1)
 
 	// Rollback block 2.
 	idx.rollbackBlock(block2)
 
-	require.NoError(t, store.DB().Find(&deregs).Error)
+	deregs = allDeregistrations(t, store)
 	assert.Empty(t, deregs, "deregistration row must be deleted on rollback")
 
 	idx.mu.RLock()
 	reg, restored := idx.regUTxOs[utxoKey{TxHash: regTxHash, Index: 0}]
 	idx.mu.RUnlock()
-	assert.True(t, restored, "registration UTxO must be restored to memory after dereg rollback")
+	assert.True(
+		t,
+		restored,
+		"registration UTxO must be restored to memory after dereg rollback",
+	)
 	assert.NotEmpty(t, reg.FullDatum)
 }
 
@@ -576,9 +895,14 @@ func TestRollback_NoRecordedEvents(t *testing.T) {
 	keepTxHash := pad32("a1000001")
 	block1 := testBlock(1, 100, 0x01)
 	require.NoError(t, idx.processBlock(block1,
-		[]lcommon.Transaction{buildTx(t, keepTxHash,
+		[]lcommon.Transaction{buildTx(
+			t,
+			keepTxHash,
 			[]lcommon.TransactionInput{buildInput(t, pad32("a1000000"), 0)},
-			[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 500)})},
+			[]lcommon.TransactionOutput{
+				buildCNightOutput(t, testPolicyID, testAssetNameHex, 500),
+			},
+		)},
 		1_000))
 
 	// Block 2: only a non-relevant plain transfer, so nothing is recorded.
@@ -586,11 +910,13 @@ func TestRollback_NoRecordedEvents(t *testing.T) {
 		[]lcommon.TransactionInput{buildInput(t, pad32("b2000000"), 0)},
 		[]lcommon.TransactionOutput{anyOutput(t)})
 	block2 := testBlock(2, 200, 0x02)
-	require.NoError(t, idx.processBlock(block2, []lcommon.Transaction{plainTx}, 2_000))
+	require.NoError(
+		t,
+		idx.processBlock(block2, []lcommon.Transaction{plainTx}, 2_000),
+	)
 
 	// Precondition: block 2 wrote no rows; only block 1's create exists.
-	var creates []models.MidnightAssetCreate
-	require.NoError(t, store.DB().Find(&creates).Error)
+	creates := allAssetCreates(t, store)
 	require.Len(t, creates, 1, "only block 1 should have recorded a create")
 
 	idx.mu.RLock()
@@ -601,16 +927,23 @@ func TestRollback_NoRecordedEvents(t *testing.T) {
 	idx.rollbackBlock(block2)
 
 	// Block 1's create row must be untouched by the rollback of an empty block.
-	require.NoError(t, store.DB().Find(&creates).Error)
-	assert.Len(t, creates, 1,
-		"rolling back a block with no recorded events must not delete other blocks' rows")
+	creates = allAssetCreates(t, store)
+	assert.Len(
+		t,
+		creates,
+		1,
+		"rolling back a block with no recorded events must not delete other blocks' rows",
+	)
 
 	idx.mu.RLock()
 	_, kept := idx.cNightUTxOs[utxoKey{TxHash: keepTxHash, Index: 0}]
 	utxoCountAfter := len(idx.cNightUTxOs)
 	idx.mu.RUnlock()
-	assert.True(t, kept,
-		"block 1's tracked UTxO must remain after rolling back an unrelated empty block")
+	assert.True(
+		t,
+		kept,
+		"block 1's tracked UTxO must remain after rolling back an unrelated empty block",
+	)
 	assert.Equal(t, utxoCountBefore, utxoCountAfter,
 		"tracked UTxO set must be unchanged by a no-op rollback")
 }
@@ -653,15 +986,18 @@ func TestLoadTrackedUTxOs_RestoredOnStartup(t *testing.T) {
 	// Simulate a cNIGHT create written in a previous run.
 	txHashBytes, err := hex.DecodeString(pad32("abcd0001"))
 	require.NoError(t, err)
-	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
-		Address:     []byte{0x01},
-		Quantity:    100,
-		TxHash:      txHashBytes,
-		OutputIndex: 0,
-		BlockNumber: 1,
-		BlockHash:   make([]byte, 32),
-		TxIndex:     0,
-	}))
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    100,
+			TxHash:      txHashBytes,
+			OutputIndex: 0,
+			BlockNumber: 1,
+			BlockHash:   make([]byte, 32),
+			TxIndex:     0,
+		}),
+	)
 
 	// A fresh indexer must load the create from DB.
 	idx, err := New(Config{
@@ -678,17 +1014,27 @@ func TestLoadTrackedUTxOs_RestoredOnStartup(t *testing.T) {
 	idx.mu.RLock()
 	_, ok := idx.cNightUTxOs[utxoKey{TxHash: txHashHex, Index: 0}]
 	idx.mu.RUnlock()
-	assert.True(t, ok, "create loaded from DB must appear in the in-memory tracked set")
+	assert.True(
+		t,
+		ok,
+		"create loaded from DB must appear in the in-memory tracked set",
+	)
 
 	// Spend it and confirm the spend row is written.
 	spendIn := buildInput(t, txHashHex, 0)
 	spendTx := buildTx(t, pad32("5e0d0001"),
 		[]lcommon.TransactionInput{spendIn},
 		[]lcommon.TransactionOutput{anyOutput(t)})
-	require.NoError(t, idx.processBlock(testBlock(2, 200, 0xBB), []lcommon.Transaction{spendTx}, 2_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(2, 200, 0xBB),
+			[]lcommon.Transaction{spendTx},
+			2_000,
+		),
+	)
 
-	var spends []models.MidnightAssetSpend
-	require.NoError(t, store.DB().Find(&spends).Error)
+	spends := allAssetSpends(t, store)
 	require.Len(t, spends, 1)
 	assert.Equal(t, uint64(100), spends[0].Quantity)
 }
@@ -700,7 +1046,11 @@ func TestLoadTrackedUTxOs_RestoredOnStartup(t *testing.T) {
 // buildGovOutput builds a plain ADA output at the given address carrying an
 // inline datum. It is used for candidate-address tests where no policy token is
 // required.
-func buildGovOutput(t *testing.T, addr string, datumCbor []byte) lcommon.TransactionOutput {
+func buildGovOutput(
+	t *testing.T,
+	addr string,
+	datumCbor []byte,
+) lcommon.TransactionOutput {
 	t.Helper()
 	out, err := mockledger.NewTransactionOutputBuilder().
 		WithAddress(addr).
@@ -712,7 +1062,11 @@ func buildGovOutput(t *testing.T, addr string, datumCbor []byte) lcommon.Transac
 }
 
 // buildPolicyOutput builds an output that carries a token under policyHex at addr.
-func buildPolicyOutput(t *testing.T, addr, policyHex string, datumCbor []byte) lcommon.TransactionOutput {
+func buildPolicyOutput(
+	t *testing.T,
+	addr, policyHex string,
+	datumCbor []byte,
+) lcommon.TransactionOutput {
 	t.Helper()
 	policyBytes, err := hex.DecodeString(policyHex)
 	require.NoError(t, err)
@@ -728,11 +1082,13 @@ func buildPolicyOutput(t *testing.T, addr, policyHex string, datumCbor []byte) l
 
 // setupGovIndexer creates an Indexer wired for governance / Ariadne / candidate
 // scanning, backed by the given SQLite store.
-func setupGovIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
+func setupGovIndexer(t *testing.T, store *testStore) *Indexer {
 	t.Helper()
 	idx, err := New(Config{
-		Metadata:                    store,
-		Logger:                      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Metadata: store,
+		Logger: slog.New(
+			slog.NewTextHandler(os.Stderr, nil),
+		),
 		TechnicalCommitteeAddress:   testMappingAddr,
 		TechnicalCommitteePolicyID:  testGovPolicyID,
 		CouncilAddress:              testCouncilAddr,
@@ -747,7 +1103,11 @@ func setupGovIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
 	return idx
 }
 
-func candidateTestKey(t *testing.T, txHash string, outputIndex uint32) candidateKey {
+func candidateTestKey(
+	t *testing.T,
+	txHash string,
+	outputIndex uint32,
+) candidateKey {
 	t.Helper()
 	txHashBytes, err := hex.DecodeString(txHash)
 	require.NoError(t, err)
@@ -770,14 +1130,29 @@ func TestGovernanceTechnicalCommitteeDatum(t *testing.T) {
 	// Must carry the TC policy token for the governance scan to trigger.
 	govOut := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum)
 	dummyIn := buildInput(t, pad32("f0000001"), 0)
-	tx := buildTx(t, pad32("f0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{govOut})
+	tx := buildTx(
+		t,
+		pad32("f0000002"),
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{govOut},
+	)
 
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{tx}, 1_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0x01),
+			[]lcommon.Transaction{tx},
+			1_000,
+		),
+	)
 
-	var rows []models.MidnightGovernanceDatum
-	require.NoError(t, store.DB().Find(&rows).Error)
+	rows := governanceDatums(t, store, "")
 	require.Len(t, rows, 1)
-	assert.Equal(t, models.MidnightGovernanceDatumTypeTechnicalCommittee, rows[0].DatumType)
+	assert.Equal(
+		t,
+		models.MidnightGovernanceDatumTypeTechnicalCommittee,
+		rows[0].DatumType,
+	)
 	assert.Equal(t, uint64(1), rows[0].BlockNumber)
 	assert.Equal(t, datum, rows[0].Datum)
 }
@@ -794,12 +1169,27 @@ func TestGovernanceCouncilDatum(t *testing.T) {
 	// Must carry the Council policy token for the governance scan to trigger.
 	govOut := buildPolicyOutput(t, testCouncilAddr, testCouncilPolicyID, datum)
 	dummyIn := buildInput(t, pad32("c0000001"), 0)
-	tx := buildTx(t, pad32("c0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{govOut})
+	tx := buildTx(
+		t,
+		pad32("c0000002"),
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{govOut},
+	)
 
-	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x02), []lcommon.Transaction{tx}, 2_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(2, 200, 0x02),
+			[]lcommon.Transaction{tx},
+			2_000,
+		),
+	)
 
-	var rows []models.MidnightGovernanceDatum
-	require.NoError(t, store.DB().Where("datum_type = ?", models.MidnightGovernanceDatumTypeCouncil).Find(&rows).Error)
+	rows := governanceDatums(
+		t,
+		store,
+		models.MidnightGovernanceDatumTypeCouncil,
+	)
 	require.Len(t, rows, 1)
 	assert.Equal(t, datum, rows[0].Datum)
 }
@@ -820,13 +1210,29 @@ func TestGovernanceTwoOutputsProduceTwoRows(t *testing.T) {
 	out1 := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum1)
 	out2 := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum2)
 	dummyIn := buildInput(t, pad32("d0000001"), 0)
-	tx := buildTx(t, pad32("d0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{out1, out2})
+	tx := buildTx(
+		t,
+		pad32("d0000002"),
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{out1, out2},
+	)
 
-	require.NoError(t, idx.processBlock(testBlock(3, 300, 0x03), []lcommon.Transaction{tx}, 3_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(3, 300, 0x03),
+			[]lcommon.Transaction{tx},
+			3_000,
+		),
+	)
 
-	var rows []models.MidnightGovernanceDatum
-	require.NoError(t, store.DB().Find(&rows).Error)
-	require.Len(t, rows, 2, "each governance output must produce its own DB row")
+	rows := governanceDatums(t, store, "")
+	require.Len(
+		t,
+		rows,
+		2,
+		"each governance output must produce its own DB row",
+	)
 }
 
 // TestGovernanceDatumReplayIdempotent verifies that replaying the same block
@@ -840,16 +1246,30 @@ func TestGovernanceDatumReplayIdempotent(t *testing.T) {
 	govOut := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum)
 	dummyIn := buildInput(t, pad32("e0000001"), 0)
 	txHash := pad32("e0000002")
-	tx := buildTx(t, txHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{govOut})
+	tx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{govOut},
+	)
 	block := testBlock(9, 900, 0x09)
 
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{tx}, 9_000))
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{tx}, 9_000))
+	require.NoError(
+		t,
+		idx.processBlock(block, []lcommon.Transaction{tx}, 9_000),
+	)
+	require.NoError(
+		t,
+		idx.processBlock(block, []lcommon.Transaction{tx}, 9_000),
+	)
 
-	var rows []models.MidnightGovernanceDatum
-	require.NoError(t, store.DB().Find(&rows).Error)
+	rows := governanceDatums(t, store, "")
 	require.Len(t, rows, 1)
-	assert.Equal(t, models.MidnightGovernanceDatumTypeTechnicalCommittee, rows[0].DatumType)
+	assert.Equal(
+		t,
+		models.MidnightGovernanceDatumTypeTechnicalCommittee,
+		rows[0].DatumType,
+	)
 	assert.Equal(t, uint32(0), rows[0].OutputIndex)
 	expectedTxHash, err := hex.DecodeString(txHash)
 	require.NoError(t, err)
@@ -873,34 +1293,79 @@ func TestAriadneParamsDeduplicated(t *testing.T) {
 
 	// Block 1: first Ariadne output with datumA.
 	out1 := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumA)
-	tx1 := buildTx(t, pad32("a0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{out1})
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x11), []lcommon.Transaction{tx1}, 1_000))
+	tx1 := buildTx(
+		t,
+		pad32("a0000002"),
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{out1},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0x11),
+			[]lcommon.Transaction{tx1},
+			1_000,
+		),
+	)
 
-	var params []models.MidnightAriadneParams
-	require.NoError(t, store.DB().Find(&params).Error)
+	params := ariadneParams(t, store)
 	require.Len(t, params, 1, "first Ariadne datum must be stored")
 	assert.Equal(t, datumA, params[0].Datum)
 
 	// Block 2: same datumA again — in-memory dedup must prevent a second write.
 	dummyIn2 := buildInput(t, pad32("a0000003"), 0)
 	out2 := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumA)
-	tx2 := buildTx(t, pad32("a0000004"), []lcommon.TransactionInput{dummyIn2}, []lcommon.TransactionOutput{out2})
-	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x22), []lcommon.Transaction{tx2}, 2_000))
+	tx2 := buildTx(
+		t,
+		pad32("a0000004"),
+		[]lcommon.TransactionInput{dummyIn2},
+		[]lcommon.TransactionOutput{out2},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(2, 200, 0x22),
+			[]lcommon.Transaction{tx2},
+			2_000,
+		),
+	)
 
-	require.NoError(t, store.DB().Find(&params).Error)
-	require.Len(t, params, 1, "duplicate Ariadne datum must not produce a second row")
+	params = ariadneParams(t, store)
+	require.Len(
+		t,
+		params,
+		1,
+		"duplicate Ariadne datum must not produce a second row",
+	)
 
 	// Block 3: new datumB — changed datum must reach the store (upserts the epoch row).
 	dummyIn3 := buildInput(t, pad32("a0000005"), 0)
 	out3 := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumB)
-	tx3 := buildTx(t, pad32("a0000006"), []lcommon.TransactionInput{dummyIn3}, []lcommon.TransactionOutput{out3})
-	require.NoError(t, idx.processBlock(testBlock(3, 300, 0x33), []lcommon.Transaction{tx3}, 3_000))
+	tx3 := buildTx(
+		t,
+		pad32("a0000006"),
+		[]lcommon.TransactionInput{dummyIn3},
+		[]lcommon.TransactionOutput{out3},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(3, 300, 0x33),
+			[]lcommon.Transaction{tx3},
+			3_000,
+		),
+	)
 
 	// processBlock resolves epochs via SlotToEpoch (slot/100 in tests), so each
 	// block uses its correct epoch key. Block 1 → epoch 1 (datumA), block 2 →
 	// epoch 2 (dup, no write), block 3 → epoch 3 (datumB). Two distinct rows.
-	require.NoError(t, store.DB().Order("epoch asc").Find(&params).Error)
-	require.Len(t, params, 2, "each distinct epoch with a new datum produces its own row")
+	params = ariadneParams(t, store)
+	require.Len(
+		t,
+		params,
+		2,
+		"each distinct epoch with a new datum produces its own row",
+	)
 	assert.Equal(t, datumA, params[0].Datum, "epoch 1 row must hold datumA")
 	assert.Equal(t, datumB, params[1].Datum, "epoch 3 row must hold datumB")
 
@@ -925,7 +1390,9 @@ func TestBackfillUsesResolvedEpochForAriadne(t *testing.T) {
 		t,
 		pad32("ba000001"),
 		[]lcommon.TransactionInput{buildInput(t, pad32("ba000000"), 0)},
-		[]lcommon.TransactionOutput{buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datum)},
+		[]lcommon.TransactionOutput{
+			buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datum),
+		},
 	)
 	block := testBlock(7, 250, 0xB7)
 	idx.config.BlockIterator = func(startSlot, endSlot uint64, fn func(models.Block) error) error {
@@ -946,7 +1413,11 @@ func TestBackfillUsesResolvedEpochForAriadne(t *testing.T) {
 
 	epochZero, err := store.GetMidnightAriadneParamsByEpoch(0, nil)
 	require.NoError(t, err)
-	assert.Nil(t, epochZero, "backfill must not write Ariadne params under epoch 0")
+	assert.Nil(
+		t,
+		epochZero,
+		"backfill must not write Ariadne params under epoch 0",
+	)
 }
 
 // TestProcessBlockEpochResolutionErrorSkipsEpochKeyedWrites verifies that a
@@ -965,19 +1436,23 @@ func TestProcessBlockEpochResolutionErrorSkipsEpochKeyedWrites(t *testing.T) {
 		t,
 		pad32("be000001"),
 		[]lcommon.TransactionInput{buildInput(t, pad32("be000000"), 0)},
-		[]lcommon.TransactionOutput{buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datum)},
+		[]lcommon.TransactionOutput{
+			buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datum),
+		},
 	)
 
-	err := idx.processBlock(testBlock(8, 250, 0xB8), []lcommon.Transaction{tx}, 2_500)
+	err := idx.processBlock(
+		testBlock(8, 250, 0xB8),
+		[]lcommon.Transaction{tx},
+		2_500,
+	)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "epoch resolution required")
 
-	var ariadneRows []models.MidnightAriadneParams
-	require.NoError(t, store.DB().Find(&ariadneRows).Error)
+	ariadneRows := ariadneParams(t, store)
 	assert.Empty(t, ariadneRows)
 
-	var candidateRows []models.MidnightEpochCandidates
-	require.NoError(t, store.DB().Find(&candidateRows).Error)
+	candidateRows := epochCandidateSnapshots(t, store)
 	assert.Empty(t, candidateRows)
 }
 
@@ -995,13 +1470,33 @@ func TestAriadneRollbackRestoresPriorEpochState(t *testing.T) {
 	require.NoError(t, err)
 
 	outA := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumA)
-	txA := buildTx(t, pad32("ab000001"), []lcommon.TransactionInput{buildInput(t, pad32("ab000000"), 0)}, []lcommon.TransactionOutput{outA})
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0xA1), []lcommon.Transaction{txA}, 1_000))
+	txA := buildTx(
+		t,
+		pad32("ab000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("ab000000"), 0)},
+		[]lcommon.TransactionOutput{outA},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0xA1),
+			[]lcommon.Transaction{txA},
+			1_000,
+		),
+	)
 
 	outB := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumB)
-	txB := buildTx(t, pad32("ab000002"), []lcommon.TransactionInput{buildInput(t, pad32("ab000003"), 0)}, []lcommon.TransactionOutput{outB})
+	txB := buildTx(
+		t,
+		pad32("ab000002"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("ab000003"), 0)},
+		[]lcommon.TransactionOutput{outB},
+	)
 	block2 := testBlock(2, 150, 0xA2)
-	require.NoError(t, idx.processBlock(block2, []lcommon.Transaction{txB}, 1_500))
+	require.NoError(
+		t,
+		idx.processBlock(block2, []lcommon.Transaction{txB}, 1_500),
+	)
 
 	params, err := store.GetMidnightAriadneParamsByEpoch(1, nil)
 	require.NoError(t, err)
@@ -1014,22 +1509,39 @@ func TestAriadneRollbackRestoresPriorEpochState(t *testing.T) {
 	params, err = store.GetMidnightAriadneParamsByEpoch(1, nil)
 	require.NoError(t, err)
 	require.NotNil(t, params)
-	assert.Equal(t, datumA, params.Datum, "rollback must restore the overwritten epoch row")
+	assert.Equal(
+		t,
+		datumA,
+		params.Datum,
+		"rollback must restore the overwritten epoch row",
+	)
 	restarted.mu.RLock()
 	assert.Equal(t, datumA, restarted.lastAriadneDatum)
 	restarted.mu.RUnlock()
 
 	outC := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumC)
-	txC := buildTx(t, pad32("ab000004"), []lcommon.TransactionInput{buildInput(t, pad32("ab000005"), 0)}, []lcommon.TransactionOutput{outC})
+	txC := buildTx(
+		t,
+		pad32("ab000004"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("ab000005"), 0)},
+		[]lcommon.TransactionOutput{outC},
+	)
 	block3 := testBlock(3, 200, 0xA3)
-	require.NoError(t, restarted.processBlock(block3, []lcommon.Transaction{txC}, 2_000))
+	require.NoError(
+		t,
+		restarted.processBlock(block3, []lcommon.Transaction{txC}, 2_000),
+	)
 
 	restartedAgain := setupGovIndexer(t, store)
 	restartedAgain.rollbackAriadne(block3.Number)
 
 	params, err = store.GetMidnightAriadneParamsByEpoch(2, nil)
 	require.NoError(t, err)
-	assert.Nil(t, params, "rollback must delete an epoch row created by the rolled-back block")
+	assert.Nil(
+		t,
+		params,
+		"rollback must delete an epoch row created by the rolled-back block",
+	)
 	restartedAgain.mu.RLock()
 	assert.Equal(t, datumA, restartedAgain.lastAriadneDatum)
 	restartedAgain.mu.RUnlock()
@@ -1052,21 +1564,60 @@ func TestCandidateAddRemove(t *testing.T) {
 	dummyIn2 := buildInput(t, pad32("ca000009"), 0)
 	out1 := buildGovOutput(t, testMappingAddr, datum)
 	out2 := buildGovOutput(t, testMappingAddr, datum)
-	tx1 := buildTx(t, txHash1, []lcommon.TransactionInput{dummyIn1}, []lcommon.TransactionOutput{out1})
-	tx2 := buildTx(t, txHash2, []lcommon.TransactionInput{dummyIn2}, []lcommon.TransactionOutput{out2})
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0xCA), []lcommon.Transaction{tx1, tx2}, 1_000))
+	tx1 := buildTx(
+		t,
+		txHash1,
+		[]lcommon.TransactionInput{dummyIn1},
+		[]lcommon.TransactionOutput{out1},
+	)
+	tx2 := buildTx(
+		t,
+		txHash2,
+		[]lcommon.TransactionInput{dummyIn2},
+		[]lcommon.TransactionOutput{out2},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0xCA),
+			[]lcommon.Transaction{tx1, tx2},
+			1_000,
+		),
+	)
 
 	idx.mu.RLock()
-	require.Len(t, idx.candidates, 2, "two candidate UTxOs must be tracked after block 1")
+	require.Len(
+		t,
+		idx.candidates,
+		2,
+		"two candidate UTxOs must be tracked after block 1",
+	)
 	idx.mu.RUnlock()
 
 	// Block 2: spend candidate 1.
 	spendIn := buildInput(t, txHash1, 0)
-	spendTx := buildTx(t, pad32("ca000003"), []lcommon.TransactionInput{spendIn}, []lcommon.TransactionOutput{anyOutput(t)})
-	require.NoError(t, idx.processBlock(testBlock(2, 150, 0xCB), []lcommon.Transaction{spendTx}, 2_000))
+	spendTx := buildTx(
+		t,
+		pad32("ca000003"),
+		[]lcommon.TransactionInput{spendIn},
+		[]lcommon.TransactionOutput{anyOutput(t)},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(2, 150, 0xCB),
+			[]lcommon.Transaction{spendTx},
+			2_000,
+		),
+	)
 
 	idx.mu.RLock()
-	require.Len(t, idx.candidates, 1, "spent candidate must be removed from the in-memory set")
+	require.Len(
+		t,
+		idx.candidates,
+		1,
+		"spent candidate must be removed from the in-memory set",
+	)
 	idx.mu.RUnlock()
 
 	// Epoch transition: snapshot must contain the one remaining candidate.
@@ -1074,9 +1625,13 @@ func TestCandidateAddRemove(t *testing.T) {
 	idx.advanceEpochLocked(2, 2, nil)
 	idx.mu.Unlock()
 
-	var snapshots []models.MidnightEpochCandidates
-	require.NoError(t, store.DB().Find(&snapshots).Error)
-	require.Len(t, snapshots, 1, "epoch transition must write a candidate snapshot")
+	snapshots := epochCandidateSnapshots(t, store)
+	require.Len(
+		t,
+		snapshots,
+		1,
+		"epoch transition must write a candidate snapshot",
+	)
 	assert.Equal(t, uint64(1), snapshots[0].Epoch)
 
 	var entries []CandidateEntry
@@ -1115,20 +1670,31 @@ func TestCandidateRegistrationProvenance_PersistedAndDecodable(t *testing.T) {
 		[]lcommon.TransactionOutput{anyOutput(t)},
 	)
 	block := testBlock(7, 777, 0xF7)
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{otherTx, createTx}, 1_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			block,
+			[]lcommon.Transaction{otherTx, createTx},
+			1_000,
+		),
+	)
 
 	txHashBytes, err := hex.DecodeString(txHash)
 	require.NoError(t, err)
 
-	var rows []models.MidnightCommitteeCandidateRegistration
-	require.NoError(t, store.DB().Find(&rows).Error)
+	rows := committeeCandidateRegistrations(t, store)
 	require.Len(t, rows, 1)
 	row := rows[0]
 	assert.Equal(t, txHashBytes, row.TxHash)
 	assert.Equal(t, uint32(0), row.OutputIndex)
 	assert.Equal(t, block.Number, row.BlockNumber)
 	assert.Equal(t, block.Slot, row.SlotNumber)
-	assert.Equal(t, uint32(1), row.TxIndex, "candidate tx is the second tx in the block")
+	assert.Equal(
+		t,
+		uint32(1),
+		row.TxIndex,
+		"candidate tx is the second tx in the block",
+	)
 
 	refs, err := DecodeCandidateInputsCbor(row.TxInputsCbor)
 	require.NoError(t, err)
@@ -1167,7 +1733,9 @@ func decodableBlockCbor(t *testing.T) ([]byte, uint) {
 // that rolling back a decodable block deletes the committee-candidate
 // registration rows it wrote, so a re-applied block at the same height
 // doesn't see stale provenance.
-func TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess(t *testing.T) {
+func TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess(
+	t *testing.T,
+) {
 	t.Parallel()
 	store := setupTestStore(t)
 	idx := setupGovIndexer(t, store)
@@ -1189,17 +1757,22 @@ func TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess(t *testi
 	block := testBlock(1, 100, 0xC7)
 	block.Cbor = cborData
 	block.Type = blockType
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
+	require.NoError(
+		t,
+		idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000),
+	)
 
-	var before []models.MidnightCommitteeCandidateRegistration
-	require.NoError(t, store.DB().Find(&before).Error)
+	before := committeeCandidateRegistrations(t, store)
 	require.Len(t, before, 1, "registration row must exist before rollback")
 
 	idx.rollbackBlock(block)
 
-	var after []models.MidnightCommitteeCandidateRegistration
-	require.NoError(t, store.DB().Find(&after).Error)
-	assert.Empty(t, after, "registration row must be deleted after a decode-success rollback")
+	after := committeeCandidateRegistrations(t, store)
+	assert.Empty(
+		t,
+		after,
+		"registration row must be deleted after a decode-success rollback",
+	)
 }
 
 // TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure guards
@@ -1208,7 +1781,9 @@ func TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess(t *testi
 // in-memory set, so their registration provenance rows must be RETAINED.
 // Deleting them would let a later epoch snapshot emit those candidates with
 // missing tx_inputs/slot_number/tx_index/block_number.
-func TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure(t *testing.T) {
+func TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure(
+	t *testing.T,
+) {
 	t.Parallel()
 	store := setupTestStore(t)
 	idx := setupGovIndexer(t, store)
@@ -1223,13 +1798,20 @@ func TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure(t *testi
 	)
 	// testBlock carries no CBOR, so block.Decode() fails inside rollbackBlock.
 	block := testBlock(1, 100, 0xC8)
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
+	require.NoError(
+		t,
+		idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000),
+	)
 
 	key := candidateTestKey(t, txHash, 0)
 	idx.mu.RLock()
 	_, trackedBefore := idx.candidates[key]
 	idx.mu.RUnlock()
-	require.True(t, trackedBefore, "candidate must be in memory before rollback")
+	require.True(
+		t,
+		trackedBefore,
+		"candidate must be in memory before rollback",
+	)
 
 	idx.rollbackBlock(block)
 
@@ -1237,12 +1819,20 @@ func TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure(t *testi
 	idx.mu.RLock()
 	_, trackedAfter := idx.candidates[key]
 	idx.mu.RUnlock()
-	assert.True(t, trackedAfter, "decode failure leaves the created candidate in memory")
+	assert.True(
+		t,
+		trackedAfter,
+		"decode failure leaves the created candidate in memory",
+	)
 
 	// ...so its provenance row must remain too, keeping the two consistent.
-	var after []models.MidnightCommitteeCandidateRegistration
-	require.NoError(t, store.DB().Find(&after).Error)
-	require.Len(t, after, 1, "registration row must be retained when the candidate can't be removed from memory")
+	after := committeeCandidateRegistrations(t, store)
+	require.Len(
+		t,
+		after,
+		1,
+		"registration row must be retained when the candidate can't be removed from memory",
+	)
 }
 
 // TestCandidateRollbackRestoresSpentAndRemovesCreated verifies candidate
@@ -1263,7 +1853,14 @@ func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
 		[]lcommon.TransactionInput{buildInput(t, pad32("ca100000"), 0)},
 		[]lcommon.TransactionOutput{createOut1},
 	)
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0xC1), []lcommon.Transaction{createTx1}, 1_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0xC1),
+			[]lcommon.Transaction{createTx1},
+			1_000,
+		),
+	)
 
 	txHash2 := pad32("ca100002")
 	spendAndCreateTx := buildTx(
@@ -1273,7 +1870,14 @@ func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
 		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
 	)
 	block2 := testBlock(2, 200, 0xC2)
-	require.NoError(t, idx.processBlock(block2, []lcommon.Transaction{spendAndCreateTx}, 2_000))
+	require.NoError(
+		t,
+		idx.processBlock(
+			block2,
+			[]lcommon.Transaction{spendAndCreateTx},
+			2_000,
+		),
+	)
 
 	key1 := candidateTestKey(t, txHash1, 0)
 	key2 := candidateTestKey(t, txHash2, 0)
@@ -1282,8 +1886,16 @@ func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
 	_, hasKey1AfterApply := idx.candidates[key1]
 	_, hasKey2AfterApply := idx.candidates[key2]
 	idx.mu.RUnlock()
-	assert.False(t, hasKey1AfterApply, "spent candidate must be absent after applying block 2")
-	assert.True(t, hasKey2AfterApply, "new candidate must be present after applying block 2")
+	assert.False(
+		t,
+		hasKey1AfterApply,
+		"spent candidate must be absent after applying block 2",
+	)
+	assert.True(
+		t,
+		hasKey2AfterApply,
+		"new candidate must be present after applying block 2",
+	)
 
 	idx.rollbackCandidateSpends(block2.Number)
 	idx.rollbackCandidateCreates([]lcommon.Transaction{spendAndCreateTx})
@@ -1294,10 +1906,22 @@ func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
 	_, hasRemovalLog := idx.candidateRemovals[block2.Number]
 	idx.mu.RUnlock()
 
-	assert.True(t, hasKey1AfterRollback, "spent candidate must be restored after rollback")
+	assert.True(
+		t,
+		hasKey1AfterRollback,
+		"spent candidate must be restored after rollback",
+	)
 	assert.Equal(t, datum, restoredDatum)
-	assert.False(t, hasKey2AfterRollback, "candidate created by rolled-back block must be removed")
-	assert.False(t, hasRemovalLog, "rollback removal log must be cleared after use")
+	assert.False(
+		t,
+		hasKey2AfterRollback,
+		"candidate created by rolled-back block must be removed",
+	)
+	assert.False(
+		t,
+		hasRemovalLog,
+		"rollback removal log must be cleared after use",
+	)
 }
 
 // TestCandidateRollbackDeletesPersistedSnapshots verifies that candidate
@@ -1316,24 +1940,34 @@ func TestCandidateRollbackDeletesPersistedSnapshots(t *testing.T) {
 		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
 	)
 	block := testBlock(1, 100, 0xD1)
-	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
+	require.NoError(
+		t,
+		idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000),
+	)
 
 	boundaryBlock := testBlock(2, 200, 0xD2)
 	require.NoError(t, idx.processBlock(boundaryBlock, nil, 2_000))
 
-	var snapshots []models.MidnightEpochCandidates
-	require.NoError(t, store.DB().Find(&snapshots).Error)
+	snapshots := epochCandidateSnapshots(t, store)
 	require.Len(t, snapshots, 1, "snapshot must exist before rollback")
 	assert.Equal(t, uint64(1), snapshots[0].Epoch)
 	assert.Equal(t, boundaryBlock.Number, snapshots[0].BlockNumber)
 
 	idx.rollbackCandidateSnapshots(boundaryBlock)
 
-	require.NoError(t, store.DB().Find(&snapshots).Error)
-	assert.Empty(t, snapshots, "rollback must delete stale persisted candidate snapshots")
+	snapshots = epochCandidateSnapshots(t, store)
+	assert.Empty(
+		t,
+		snapshots,
+		"rollback must delete stale persisted candidate snapshots",
+	)
 
 	idx.mu.RLock()
-	assert.False(t, idx.hasSnapshotEpoch, "snapshot marker must allow future snapshot rewrite")
+	assert.False(
+		t,
+		idx.hasSnapshotEpoch,
+		"snapshot marker must allow future snapshot rewrite",
+	)
 	idx.mu.RUnlock()
 }
 
@@ -1347,17 +1981,27 @@ func TestCandidateRollbackDecodeFailureDeletesSnapshots(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	block := testBlock(3, 300, 0xD3)
-	require.NoError(t, store.UpsertMidnightEpochCandidates(nil, &models.MidnightEpochCandidates{
-		Epoch:          2,
-		BlockNumber:    block.Number,
-		CandidatesCbor: []byte{0x80},
-	}))
+	require.NoError(
+		t,
+		store.UpsertMidnightEpochCandidates(
+			nil,
+			&models.MidnightEpochCandidates{
+				Epoch:          2,
+				BlockNumber:    block.Number,
+				CandidatesCbor: []byte{0x80},
+			},
+		),
+	)
 
 	idx.rollbackBlock(block)
 
-	var snapshots []models.MidnightEpochCandidates
-	require.NoError(t, store.DB().Find(&snapshots).Error)
-	require.Len(t, snapshots, 0, "snapshot for rolled-back block must be deleted even on decode failure")
+	snapshots := epochCandidateSnapshots(t, store)
+	require.Len(
+		t,
+		snapshots,
+		0,
+		"snapshot for rolled-back block must be deleted even on decode failure",
+	)
 }
 
 // TestCandidateEmptySnapshot verifies that an epoch transition with no
@@ -1368,13 +2012,21 @@ func TestCandidateEmptySnapshot(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(0, 0, nil) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
+	idx.advanceEpochLocked(
+		0,
+		0,
+		nil,
+	) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
 	idx.advanceEpochLocked(1, 1, nil) // advance to epoch 1, snapshots epoch 0
 	idx.mu.Unlock()
 
-	var snapshots []models.MidnightEpochCandidates
-	require.NoError(t, store.DB().Find(&snapshots).Error)
-	require.Len(t, snapshots, 1, "epoch boundary must write a snapshot even with no candidates")
+	snapshots := epochCandidateSnapshots(t, store)
+	require.Len(
+		t,
+		snapshots,
+		1,
+		"epoch boundary must write a snapshot even with no candidates",
+	)
 	assert.Equal(t, uint64(0), snapshots[0].Epoch)
 }
 
@@ -1386,21 +2038,33 @@ func TestEpochTransitionIdempotent(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(3, 0, nil)  // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
+	idx.advanceEpochLocked(
+		3,
+		0,
+		nil,
+	) // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
 	idx.advanceEpochLocked(4, 42, nil) // advance to epoch 4, snapshots epoch 3
-	idx.advanceEpochLocked(4, 42, nil) // no-op: same epoch, guard prevents a second snapshot
+	idx.advanceEpochLocked(
+		4,
+		42,
+		nil,
+	) // no-op: same epoch, guard prevents a second snapshot
 	idx.mu.Unlock()
 
-	var snapshots []models.MidnightEpochCandidates
-	require.NoError(t, store.DB().Find(&snapshots).Error)
-	require.Len(t, snapshots, 1, "advancing to the same epoch twice must not write a second snapshot row")
+	snapshots := epochCandidateSnapshots(t, store)
+	require.Len(
+		t,
+		snapshots,
+		1,
+		"advancing to the same epoch twice must not write a second snapshot row",
+	)
 }
 
 // failingAfterNCreatesStore wraps a real store and fails the (n+1)th call to
 // CreateMidnightAssetCreate, so a test can force processBlock to fail
 // partway through a block that would otherwise write more than one row.
 type failingAfterNCreatesStore struct {
-	*sqlite.MetadataStoreSqlite
+	*testStore
 	remaining int
 }
 
@@ -1412,7 +2076,7 @@ func (s *failingAfterNCreatesStore) CreateMidnightAssetCreate(
 		return errors.New("injected failure")
 	}
 	s.remaining--
-	return s.MetadataStoreSqlite.CreateMidnightAssetCreate(txn, row)
+	return s.testStore.CreateMidnightAssetCreate(txn, row)
 }
 
 // TestProcessBlock_PartialFailureRollsBackWholeBlock verifies that when one
@@ -1429,7 +2093,7 @@ func (s *failingAfterNCreatesStore) CreateMidnightAssetCreate(
 func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	wrapped := &failingAfterNCreatesStore{MetadataStoreSqlite: store, remaining: 1}
+	wrapped := &failingAfterNCreatesStore{testStore: store, remaining: 1}
 	idx, err := New(Config{
 		Metadata:        wrapped,
 		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
@@ -1438,19 +2102,32 @@ func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	tx1 := buildTx(t, pad32("aa000001"),
+	tx1 := buildTx(
+		t,
+		pad32("aa000001"),
 		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
-		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 100)})
-	tx2 := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 100),
+		},
+	)
+	tx2 := buildTx(
+		t,
+		pad32("bb000001"),
 		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
-		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 200)})
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 200),
+		},
+	)
 
 	block := testBlock(1, 100, 0xAA)
 	err = idx.processBlock(block, []lcommon.Transaction{tx1, tx2}, 1_000_000)
-	require.Error(t, err, "the second tx's create must fail and abort the whole block")
+	require.Error(
+		t,
+		err,
+		"the second tx's create must fail and abort the whole block",
+	)
 
-	var rows []models.MidnightAssetCreate
-	require.NoError(t, store.DB().Find(&rows).Error)
+	rows := allAssetCreates(t, store)
 	require.Empty(
 		t,
 		rows,
@@ -1476,7 +2153,7 @@ func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
 func TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
-	wrapped := &failingAfterNCreatesStore{MetadataStoreSqlite: store, remaining: 2}
+	wrapped := &failingAfterNCreatesStore{testStore: store, remaining: 2}
 	idx, err := New(Config{
 		Metadata:        wrapped,
 		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
@@ -1486,23 +2163,49 @@ func TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact(t *testing.T) {
 	require.NoError(t, err)
 
 	// Block 1 succeeds outright and leaves a durably tracked UTxO.
-	seedTx := buildTx(t, pad32("11000001"),
+	seedTx := buildTx(
+		t,
+		pad32("11000001"),
 		[]lcommon.TransactionInput{buildInput(t, pad32("11000000"), 0)},
-		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 50)})
-	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x11), []lcommon.Transaction{seedTx}, 1_000))
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 50),
+		},
+	)
+	require.NoError(
+		t,
+		idx.processBlock(
+			testBlock(1, 100, 0x11),
+			[]lcommon.Transaction{seedTx},
+			1_000,
+		),
+	)
 
 	idx.mu.RLock()
 	require.Len(t, idx.cNightUTxOs, 1, "block 1's create must be tracked")
 	idx.mu.RUnlock()
 
 	// Block 2's first tx succeeds, its second fails, aborting the block.
-	tx1 := buildTx(t, pad32("aa000001"),
+	tx1 := buildTx(
+		t,
+		pad32("aa000001"),
 		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
-		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 100)})
-	tx2 := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 100),
+		},
+	)
+	tx2 := buildTx(
+		t,
+		pad32("bb000001"),
 		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
-		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 200)})
-	err = idx.processBlock(testBlock(2, 200, 0x22), []lcommon.Transaction{tx1, tx2}, 2_000)
+		[]lcommon.TransactionOutput{
+			buildCNightOutput(t, testPolicyID, testAssetNameHex, 200),
+		},
+	)
+	err = idx.processBlock(
+		testBlock(2, 200, 0x22),
+		[]lcommon.Transaction{tx1, tx2},
+		2_000,
+	)
 	require.Error(t, err, "block 2's second tx must fail and abort the block")
 
 	idx.mu.RLock()

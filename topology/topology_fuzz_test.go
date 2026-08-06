@@ -28,14 +28,18 @@ func FuzzNewTopologyConfigFromReader(f *testing.F) {
 	for _, tc := range topologyTests {
 		f.Add(tc.jsonData)
 	}
-	f.Add(`{"localRoots":[],"publicRoots":[],"bootstrapPeers":[],"useLedgerAfterSlot":0}`)
+	f.Add(
+		`{"localRoots":[],"publicRoots":[],"bootstrapPeers":[],"useLedgerAfterSlot":0}`,
+	)
 
 	f.Fuzz(func(t *testing.T, input string) {
 		if len(input) > 1024*1024 {
 			t.Skip("topology corpus input is too large for fast fuzzing")
 		}
 
-		cfg, err := topology.NewTopologyConfigFromReader(strings.NewReader(input))
+		cfg, err := topology.NewTopologyConfigFromReader(
+			strings.NewReader(input),
+		)
 		if err != nil {
 			return
 		}
@@ -48,7 +52,9 @@ func FuzzNewTopologyConfigFromReader(f *testing.F) {
 			t.Fatalf("json.Marshal(parsed topology): %v", err)
 		}
 
-		roundTrip, err := topology.NewTopologyConfigFromReader(bytes.NewReader(encoded))
+		roundTrip, err := topology.NewTopologyConfigFromReader(
+			bytes.NewReader(encoded),
+		)
 		if err != nil {
 			t.Fatalf("NewTopologyConfigFromReader(marshaled topology): %v", err)
 		}

@@ -117,7 +117,9 @@ func openTestDB(t *testing.T) *Database {
 //
 // Addresses reviewer feedback that the prior version probed only one or an
 // unrelated key, which could not detect a partial regression.
-func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(t *testing.T) {
+func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
+	t *testing.T,
+) {
 	db := openTestDB(t)
 
 	candidate := findBatchedCrossBlockSpendCandidate(t)
@@ -154,9 +156,12 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(t *testing.T) 
 		)
 		require.NoError(t, err, "GetUtxo %x#%d", ref.TxId[:8], ref.OutputIdx)
 		require.Equalf(
-			t, want, got,
+			t,
+			want,
+			got,
 			"produced UTxO %x#%d was overwritten — skip did not elide its write",
-			ref.TxId[:8], ref.OutputIdx,
+			ref.TxId[:8],
+			ref.OutputIdx,
 		)
 	}
 }
@@ -218,7 +223,9 @@ func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 	got, err := readTxn.DB().Blob().GetTx(readTxn.Blob(), txHash)
 	require.NoError(t, err)
 	require.NotEqual(
-		t, sentinel, got,
+		t,
+		sentinel,
+		got,
 		"TX sentinel must be overwritten — TX offset writes are not part of the skip",
 	)
 	require.True(
@@ -318,7 +325,11 @@ func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 		txn,
 		BatchedTxIngestOpts{SkipProducedUtxoOffsetWrites: true},
 	)
-	require.Error(t, err, "missing offset must still error even with skip enabled")
+	require.Error(
+		t,
+		err,
+		"missing offset must still error even with skip enabled",
+	)
 	require.Contains(t, err.Error(), "missing UTxO offset")
 }
 
@@ -381,9 +392,16 @@ func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
 
 	// Verify the counter shows skipped inputs
 	consumed := candidate.consumerTx.Consumed()
-	require.Greater(t, len(consumed), 0, "consumer tx must have at least one input")
+	require.Greater(
+		t,
+		len(consumed),
+		0,
+		"consumer tx must have at least one input",
+	)
 	require.Equal(
-		t, uint64(len(consumed)), stats.SkippedInputRecovery,
+		t,
+		uint64(len(consumed)),
+		stats.SkippedInputRecovery,
 		"SkippedInputRecovery must count all consumed inputs when skip is enabled",
 	)
 }

@@ -435,25 +435,12 @@ func (o *Ouroboros) reportBlockfetchServerAsyncError(
 		"end_slot", end.Slot,
 		"error", err,
 	)
-	if !sendBlockfetchConnError(conn.ErrorChan(), err) {
+	if closeErr := conn.Close(); closeErr != nil {
 		o.config.Logger.Debug(
-			"blockfetch: failed to forward async server error to connection error channel",
+			"blockfetch: failed to close connection after async server error",
 			"connection_id", connectionID,
+			"error", closeErr,
 		)
-	}
-}
-
-func sendBlockfetchConnError(errCh chan error, err error) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	select {
-	case errCh <- err:
-		return true
-	default:
-		return false
 	}
 }
 
@@ -627,7 +614,8 @@ func (o *Ouroboros) blockfetchClientBlock(
 			)
 		}
 	}
-	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+	if o.EventBus != nil &&
+		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
 		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(
@@ -654,7 +642,8 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, ctx.ConnectionId)
 	o.blockFetchMutex.Unlock()
-	if o.EventBus != nil && o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
+	if o.EventBus != nil &&
+		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
 		o.EventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(

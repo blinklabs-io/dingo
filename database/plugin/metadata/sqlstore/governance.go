@@ -1,0 +1,672 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//nolint:rowserrcheck,sqlclosecheck // Cursors are explicitly closed and close errors are propagated before dependent queries.
+package sqlstore
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+)
+
+const governanceProposalColumns = `
+id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
+parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
+ratified_epoch, ratified_slot, policy_hash, anchor_url, anchor_hash, deposit,
+return_address, gov_action_cbor, expired_epoch, expired_slot, added_slot,
+deleted_slot`
+
+const governanceProposalOrderSQL = `
+proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC`
+
+const ratifiedGovernanceProposalOrderSQL = `
+ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC,
+tx_hash ASC, action_index ASC`
+
+func (s *Store) GetGovernanceProposal(
+	txHash []byte,
+	actionIndex uint32,
+	txn types.Txn,
+) (*models.GovernanceProposal, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	proposal, err := scanGovernanceProposal(db.QueryRowContext(
+		context.Background(),
+		"SELECT "+governanceProposalColumns+`
+ FROM governance_proposal
+ WHERE tx_hash = ? AND action_index = ? AND deleted_slot IS NULL
+ LIMIT 1`,
+		txHash,
+		actionIndex,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return proposal, err
+}
+
+func (s *Store) GetActiveGovernanceProposals(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"expires_epoch >= ? AND enacted_epoch IS NULL "+
+			"AND expired_epoch IS NULL AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		epoch,
+	)
+}
+
+func (s *Store) GetExpiringGovernanceProposals(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"expires_epoch < ? AND enacted_epoch IS NULL "+
+			"AND expired_epoch IS NULL AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		epoch,
+	)
+}
+
+func (s *Store) GetExpiredGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"expired_epoch = ? AND expired_slot = ? "+
+			"AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		epoch,
+		slot,
+	)
+}
+
+func (s *Store) GetRatifiedGovernanceProposals(
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"ratified_epoch IS NOT NULL AND enacted_epoch IS NULL "+
+			"AND deleted_slot IS NULL",
+		ratifiedGovernanceProposalOrderSQL,
+	)
+}
+
+func (s *Store) GetEnactedGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"ratified_epoch IS NOT NULL AND enacted_epoch = ? "+
+			"AND enacted_slot = ? AND deleted_slot IS NULL",
+		ratifiedGovernanceProposalOrderSQL,
+		epoch,
+		slot,
+	)
+}
+
+func (s *Store) GetChildGovernanceProposals(
+	parentTxHash []byte,
+	parentActionIndex uint32,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"parent_tx_hash = ? AND parent_action_idx = ? "+
+			"AND enacted_epoch IS NULL AND expired_epoch IS NULL "+
+			"AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		parentTxHash,
+		parentActionIndex,
+	)
+}
+
+func (s *Store) GetLastEnactedGovernanceProposal(
+	actionTypes []uint8,
+	txn types.Txn,
+) (*models.GovernanceProposal, error) {
+	if len(actionTypes) == 0 {
+		return nil, nil
+	}
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	args := make([]any, len(actionTypes))
+	for i, actionType := range actionTypes {
+		args[i] = actionType
+	}
+	proposal, err := scanGovernanceProposal(db.QueryRowContext(
+		context.Background(),
+		"SELECT "+governanceProposalColumns+`
+ FROM governance_proposal
+ WHERE action_type IN (`+bindPlaceholders(len(args))+`)
+   AND enacted_epoch IS NOT NULL AND deleted_slot IS NULL
+ ORDER BY enacted_epoch DESC, enacted_slot DESC, id DESC
+ LIMIT 1`,
+		args...,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return proposal, err
+}
+
+func (s *Store) SetGovernanceProposal(
+	proposal *models.GovernanceProposal,
+	txn types.Txn,
+) error {
+	if proposal == nil {
+		return errors.New("set governance proposal: nil proposal")
+	}
+	return s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			var id uint
+			err := db.QueryRowContext(context.Background(), `
+INSERT INTO governance_proposal (
+    tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
+    parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
+    ratified_epoch, ratified_slot, policy_hash, anchor_url, anchor_hash,
+    deposit, return_address, gov_action_cbor, expired_epoch, expired_slot,
+    added_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (tx_hash, action_index) DO UPDATE SET
+    action_type = excluded.action_type,
+    proposed_epoch = excluded.proposed_epoch,
+    expires_epoch = excluded.expires_epoch,
+    parent_tx_hash = excluded.parent_tx_hash,
+    parent_action_idx = excluded.parent_action_idx,
+    policy_hash = excluded.policy_hash,
+    anchor_url = excluded.anchor_url,
+    anchor_hash = excluded.anchor_hash,
+    deposit = excluded.deposit,
+    return_address = excluded.return_address,
+    gov_action_cbor = CASE
+        WHEN excluded.gov_action_cbor IS NOT NULL
+         AND length(excluded.gov_action_cbor) > 0
+        THEN excluded.gov_action_cbor
+        ELSE governance_proposal.gov_action_cbor
+    END,
+    enacted_epoch = COALESCE(excluded.enacted_epoch,
+                             governance_proposal.enacted_epoch),
+    enacted_slot = COALESCE(excluded.enacted_slot,
+                            governance_proposal.enacted_slot),
+    ratified_epoch = COALESCE(excluded.ratified_epoch,
+                              governance_proposal.ratified_epoch),
+    ratified_slot = COALESCE(excluded.ratified_slot,
+                             governance_proposal.ratified_slot),
+    expired_epoch = COALESCE(excluded.expired_epoch,
+                             governance_proposal.expired_epoch),
+    expired_slot = COALESCE(excluded.expired_slot,
+                            governance_proposal.expired_slot),
+    deleted_slot = COALESCE(excluded.deleted_slot,
+                            governance_proposal.deleted_slot)
+RETURNING id`,
+				proposal.TxHash,
+				proposal.ActionIndex,
+				proposal.ActionType,
+				proposal.ProposedEpoch,
+				proposal.ExpiresEpoch,
+				proposal.ParentTxHash,
+				proposal.ParentActionIdx,
+				proposal.EnactedEpoch,
+				proposal.EnactedSlot,
+				proposal.RatifiedEpoch,
+				proposal.RatifiedSlot,
+				proposal.PolicyHash,
+				proposal.AnchorURL,
+				proposal.AnchorHash,
+				decimalUint64(types.Uint64(proposal.Deposit)),
+				proposal.ReturnAddress,
+				proposal.GovActionCbor,
+				proposal.ExpiredEpoch,
+				proposal.ExpiredSlot,
+				proposal.AddedSlot,
+				proposal.DeletedSlot,
+			).Scan(&id)
+			if err == nil {
+				proposal.ID = id
+			}
+			return err
+		},
+	)
+}
+
+func (s *Store) GetGovernanceVotes(
+	proposalID uint,
+	txn types.Txn,
+) ([]*models.GovernanceVote, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(context.Background(), `
+SELECT id, proposal_id, voter_type, voter_credential_tag, voter_credential,
+       vote, anchor_url, anchor_hash, added_slot, vote_updated_slot,
+       deleted_slot
+FROM governance_vote
+WHERE proposal_id = ? AND deleted_slot IS NULL`,
+		proposalID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.GovernanceVote{}
+	for rows.Next() {
+		vote, err := scanGovernanceVote(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, vote)
+	}
+	return ret, rows.Err()
+}
+
+func (s *Store) SetGovernanceVote(
+	vote *models.GovernanceVote,
+	txn types.Txn,
+) error {
+	if vote == nil {
+		return errors.New("set governance vote: nil vote")
+	}
+	return s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			var id uint
+			err := db.QueryRowContext(context.Background(), `
+INSERT INTO governance_vote (
+    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
+    anchor_url, anchor_hash, added_slot, vote_updated_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (
+    proposal_id, voter_type, voter_credential_tag, voter_credential
+) DO UPDATE SET
+    vote = excluded.vote,
+    anchor_url = excluded.anchor_url,
+    anchor_hash = excluded.anchor_hash,
+    vote_updated_slot = excluded.vote_updated_slot,
+    deleted_slot = excluded.deleted_slot
+RETURNING id`,
+				vote.ProposalID,
+				vote.VoterType,
+				vote.VoterCredentialTag,
+				vote.VoterCredential,
+				vote.Vote,
+				vote.AnchorURL,
+				vote.AnchorHash,
+				vote.AddedSlot,
+				vote.VoteUpdatedSlot,
+				vote.DeletedSlot,
+			).Scan(&id)
+			if err == nil {
+				vote.ID = id
+			}
+			return err
+		},
+	)
+}
+
+func (s *Store) DeleteGovernanceProposalsAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			queries := []string{
+				"DELETE FROM governance_proposal WHERE added_slot > ?",
+				`UPDATE governance_proposal SET deleted_slot = NULL
+				 WHERE deleted_slot > ?`,
+				`UPDATE governance_proposal
+				 SET ratified_epoch = NULL, ratified_slot = NULL
+				 WHERE ratified_slot > ?`,
+				`UPDATE governance_proposal
+				 SET enacted_epoch = NULL, enacted_slot = NULL
+				 WHERE enacted_slot > ?`,
+				`UPDATE governance_proposal
+				 SET expired_epoch = NULL, expired_slot = NULL
+				 WHERE expired_slot > ?`,
+			}
+			for _, query := range queries {
+				if _, err := db.ExecContext(
+					context.Background(),
+					query,
+					slot,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+}
+
+func (s *Store) DeleteGovernanceVotesAfterSlot(
+	slot uint64,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			if _, err := db.ExecContext(context.Background(), `
+DELETE FROM governance_vote
+WHERE added_slot > ? OR vote_updated_slot > ?`,
+				slot,
+				slot,
+			); err != nil {
+				return err
+			}
+			_, err := db.ExecContext(context.Background(), `
+UPDATE governance_vote SET deleted_slot = NULL
+WHERE deleted_slot > ?`,
+				slot,
+			)
+			return err
+		},
+	)
+}
+
+func (s *Store) queryGovernanceProposals(
+	txn types.Txn,
+	predicate string,
+	order string,
+	args ...any,
+) ([]*models.GovernanceProposal, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		context.Background(),
+		"SELECT "+governanceProposalColumns+
+			" FROM governance_proposal WHERE "+predicate+" ORDER BY "+order,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.GovernanceProposal{}
+	for rows.Next() {
+		proposal, err := scanGovernanceProposal(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, proposal)
+	}
+	return ret, rows.Err()
+}
+
+func scanGovernanceProposal(
+	row rowScanner,
+) (*models.GovernanceProposal, error) {
+	var proposal models.GovernanceProposal
+	var deposit sql.NullString
+	err := row.Scan(
+		&proposal.ID,
+		&proposal.TxHash,
+		&proposal.ActionIndex,
+		&proposal.ActionType,
+		&proposal.ProposedEpoch,
+		&proposal.ExpiresEpoch,
+		&proposal.ParentTxHash,
+		&proposal.ParentActionIdx,
+		&proposal.EnactedEpoch,
+		&proposal.EnactedSlot,
+		&proposal.RatifiedEpoch,
+		&proposal.RatifiedSlot,
+		&proposal.PolicyHash,
+		&proposal.AnchorURL,
+		&proposal.AnchorHash,
+		&deposit,
+		&proposal.ReturnAddress,
+		&proposal.GovActionCbor,
+		&proposal.ExpiredEpoch,
+		&proposal.ExpiredSlot,
+		&proposal.AddedSlot,
+		&proposal.DeletedSlot,
+	)
+	if err != nil {
+		return nil, err
+	}
+	proposal.Deposit, err = parseNullUint64(
+		"governance proposal deposit",
+		deposit,
+	)
+	return &proposal, err
+}
+
+func scanGovernanceVote(row rowScanner) (*models.GovernanceVote, error) {
+	var vote models.GovernanceVote
+	err := row.Scan(
+		&vote.ID,
+		&vote.ProposalID,
+		&vote.VoterType,
+		&vote.VoterCredentialTag,
+		&vote.VoterCredential,
+		&vote.Vote,
+		&vote.AnchorURL,
+		&vote.AnchorHash,
+		&vote.AddedSlot,
+		&vote.VoteUpdatedSlot,
+		&vote.DeletedSlot,
+	)
+	return &vote, err
+}
+
+func (s *Store) GetCommitteeMember(
+	coldKey []byte,
+	txn types.Txn,
+) (*models.AuthCommitteeHot, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	var member models.AuthCommitteeHot
+	err = db.QueryRowContext(context.Background(), `
+SELECT cold_credential, host_credential, id, certificate_id, added_slot
+FROM auth_committee_hot
+WHERE cold_credential = ?
+ORDER BY added_slot DESC, certificate_id DESC
+LIMIT 1`,
+		coldKey,
+	).Scan(
+		&member.ColdCredential,
+		&member.HotCredential,
+		&member.ID,
+		&member.CertificateID,
+		&member.AddedSlot,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return &member, err
+}
+
+func (s *Store) GetActiveCommitteeMembers(
+	txn types.Txn,
+) ([]*models.AuthCommitteeHot, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(context.Background(), `
+SELECT auth.cold_credential, auth.host_credential, auth.id,
+       auth.certificate_id, auth.added_slot
+FROM (
+    SELECT cold_credential, host_credential, id, certificate_id, added_slot,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM auth_committee_hot
+) auth
+WHERE auth.rn = 1
+  AND NOT EXISTS (
+      SELECT 1 FROM resign_committee_cold resign
+      WHERE resign.cold_credential = auth.cold_credential
+        AND (
+            resign.added_slot > auth.added_slot
+            OR (resign.added_slot = auth.added_slot
+                AND resign.certificate_id > auth.certificate_id)
+        )
+  )`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.AuthCommitteeHot{}
+	for rows.Next() {
+		var member models.AuthCommitteeHot
+		if err := rows.Scan(
+			&member.ColdCredential,
+			&member.HotCredential,
+			&member.ID,
+			&member.CertificateID,
+			&member.AddedSlot,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, &member)
+	}
+	return ret, rows.Err()
+}
+
+func (s *Store) IsCommitteeMemberResigned(
+	coldKey []byte,
+	txn types.Txn,
+) (bool, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	var resigned bool
+	err = db.QueryRowContext(context.Background(), `
+WITH latest_auth AS (
+    SELECT added_slot, certificate_id
+    FROM auth_committee_hot
+    WHERE cold_credential = ?
+    ORDER BY added_slot DESC, certificate_id DESC
+    LIMIT 1
+),
+latest_resign AS (
+    SELECT added_slot, certificate_id
+    FROM resign_committee_cold
+    WHERE cold_credential = ?
+    ORDER BY added_slot DESC, certificate_id DESC
+    LIMIT 1
+)
+SELECT EXISTS (
+    SELECT 1 FROM latest_auth auth
+    JOIN latest_resign resign
+      ON resign.added_slot > auth.added_slot
+      OR (resign.added_slot = auth.added_slot
+          AND resign.certificate_id > auth.certificate_id)
+)`,
+		coldKey,
+		coldKey,
+	).Scan(&resigned)
+	return resigned, err
+}
+
+func (s *Store) GetResignedCommitteeMembers(
+	coldKeys [][]byte,
+	txn types.Txn,
+) (map[string]bool, error) {
+	ret := make(map[string]bool)
+	if len(coldKeys) == 0 {
+		return ret, nil
+	}
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(coldKeys); start += 400 {
+		end := min(start+400, len(coldKeys))
+		args := make([]any, 0, end-start)
+		for _, key := range coldKeys[start:end] {
+			args = append(args, key)
+		}
+		rows, err := db.QueryContext(context.Background(), `
+WITH latest_auth AS (
+    SELECT cold_credential, added_slot, certificate_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM auth_committee_hot
+    WHERE cold_credential IN (`+bindPlaceholders(len(args))+`)
+),
+latest_resign AS (
+    SELECT cold_credential, added_slot, certificate_id,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM resign_committee_cold
+    WHERE cold_credential IN (`+bindPlaceholders(len(args))+`)
+)
+SELECT resign.cold_credential
+FROM latest_resign resign
+JOIN latest_auth auth
+  ON auth.cold_credential = resign.cold_credential
+ AND auth.rn = 1 AND resign.rn = 1
+WHERE resign.added_slot > auth.added_slot
+   OR (resign.added_slot = auth.added_slot
+       AND resign.certificate_id > auth.certificate_id)`,
+			append(args, args...)...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var key []byte
+			if err := rows.Scan(&key); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret[string(key)] = true
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
+}
+
+func (s *Store) GetCommitteeActiveCount(
+	txn types.Txn,
+) (int, error) {
+	members, err := s.GetActiveCommitteeMembers(txn)
+	return len(members), err
+}

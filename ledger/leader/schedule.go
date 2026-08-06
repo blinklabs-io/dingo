@@ -352,7 +352,11 @@ func vrfInputForMode(
 	}
 	switch mode {
 	case consensus.ConsensusModeTPraos:
-		return vrf.MkSeedTPraos(int64(slot), epochNonce, vrf.SeedL()) //nolint:gosec
+		return vrf.MkSeedTPraos(
+			int64(slot),
+			epochNonce,
+			vrf.SeedL(),
+		) //nolint:gosec
 	case consensus.ConsensusModeCPraos:
 		return vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
 	default:

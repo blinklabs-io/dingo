@@ -10,14 +10,16 @@ require (
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.0
 	github.com/Microsoft/go-winio v0.6.2
+	github.com/XSAM/otelsql v0.42.0
 	github.com/aws/aws-sdk-go-v2 v1.43.2
 	github.com/aws/aws-sdk-go-v2/config v1.32.31
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.32
+	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.34
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.2
 	github.com/aws/smithy-go v1.27.5
 	github.com/blinklabs-io/bark v0.1.0
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.191.2
+	github.com/blinklabs-io/gouroboros v0.191.3
 	github.com/blinklabs-io/ouroboros-mock v0.15.0
 	github.com/blinklabs-io/plutigo v0.2.0
 	github.com/blockfrost/blockfrost-go v0.5.0
@@ -26,12 +28,13 @@ require (
 	github.com/dgraph-io/badger/v4 v4.9.4
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/getsops/sops/v3 v3.13.3
-	github.com/glebarez/sqlite v1.11.0
+	github.com/glebarez/go-sqlite v1.21.2
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/google/uuid v1.6.0
 	github.com/ipfs/go-cid v0.6.2
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/klauspost/compress v1.18.6
-	github.com/orandin/slog-gorm v1.4.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/spf13/cobra v1.10.2
@@ -53,10 +56,6 @@ require (
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
-	gorm.io/driver/mysql v1.6.0
-	gorm.io/driver/postgres v1.6.0
-	gorm.io/gorm v1.31.2
-	gorm.io/plugin/opentelemetry v0.1.16
 )
 
 // XXX: uncomment when testing local changes to gouroboros
@@ -86,16 +85,12 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys v1.5.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2 // indirect
-	github.com/ClickHouse/ch-go v0.61.5 // indirect
-	github.com/ClickHouse/clickhouse-go/v2 v2.30.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.34.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.58.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.58.0 // indirect
 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
-	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.33 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.34 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.33 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.33 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.34 // indirect
@@ -131,9 +126,6 @@ require (
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e // indirect
-	github.com/glebarez/go-sqlite v1.21.2 // indirect
-	github.com/go-faster/city v1.0.1 // indirect
-	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -145,7 +137,6 @@ require (
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.19 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/goware/prefixer v0.0.0-20160118172347-395022866408 // indirect
@@ -158,18 +149,14 @@ require (
 	github.com/hashicorp/go-secure-stdlib/parseutil v0.2.0 // indirect
 	github.com/hashicorp/go-secure-stdlib/strutil v0.1.2 // indirect
 	github.com/hashicorp/go-sockaddr v1.0.7 // indirect
-	github.com/hashicorp/go-version v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
 	github.com/hashicorp/vault/api v1.23.0 // indirect
 	github.com/huaweicloud/huaweicloud-sdk-go-v3 v0.1.207 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.9.2 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jinzhu/copier v0.4.0 // indirect
-	github.com/jinzhu/inflection v1.0.0 // indirect
-	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/json-iterator/go v1.1.13-0.20220915233716-71ac16282d12 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
@@ -189,8 +176,6 @@ require (
 	github.com/multiformats/go-multihash v0.2.3 // indirect
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/paulmach/orb v0.11.1 // indirect
-	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
@@ -200,8 +185,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
-	github.com/segmentio/asm v1.2.0 // indirect
-	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.8.1 // indirect
@@ -228,7 +211,6 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260720171339-e059f2f05d78 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260724162435-b2f20204f0df // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
-	gorm.io/driver/clickhouse v0.7.0 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
 	modernc.org/libc v1.22.5 // indirect
 	modernc.org/mathutil v1.5.0 // indirect

@@ -374,7 +374,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			cardano.EmbeddedConfigFS,
 		)
 		if err != nil {
-			return SyncResult{}, fmt.Errorf("loading cardano node config: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"loading cardano node config: %w",
+				err,
+			)
 		}
 	}
 
@@ -764,7 +767,13 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		ledgerStateSlot = slot
 		ledgerStateHash = hash
 		if len(hash) > 0 {
-			cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true, CurrentSlot: slot})
+			cfg.emit(
+				SyncProgress{
+					Phase:       PhaseLedgerImport,
+					Active:      true,
+					CurrentSlot: slot,
+				},
+			)
 		}
 		return nil
 	})
@@ -945,12 +954,18 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		if validateErr != nil {
 			logger.Warn(
 				"stored volatile gap blocks failed continuity check, refetching from relay",
-				"component", "mithril",
-				"immutable_tip_slot", immutableTipSlot,
-				"resume_gap_end_slot", resumeGapEnd,
-				"ledger_state_slot", ledgerStateSlot,
-				"ledger_state_hash", hex.EncodeToString(ledgerStateHash),
-				"error", validateErr,
+				"component",
+				"mithril",
+				"immutable_tip_slot",
+				immutableTipSlot,
+				"resume_gap_end_slot",
+				resumeGapEnd,
+				"ledger_state_slot",
+				ledgerStateSlot,
+				"ledger_state_hash",
+				hex.EncodeToString(ledgerStateHash),
+				"error",
+				validateErr,
 			)
 			// Drop the rejected blob blocks so neither the upcoming
 			// BlocksRecent query nor any slot-ordered iterator can
@@ -1029,9 +1044,18 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
 		)
 		if fetchErr != nil {
-			return SyncResult{}, fmt.Errorf("fetching volatile blocks: %w", fetchErr)
+			return SyncResult{}, fmt.Errorf(
+				"fetching volatile blocks: %w",
+				fetchErr,
+			)
 		}
-		cfg.emit(SyncProgress{Phase: PhaseGapBlocks, Active: true, Count: len(gapBlocks)})
+		cfg.emit(
+			SyncProgress{
+				Phase:  PhaseGapBlocks,
+				Active: true,
+				Count:  len(gapBlocks),
+			},
+		)
 		// Store gap blocks to the blob store, then index
 		// their metadata. These two steps are not atomic:
 		// if processGapBlocks fails, re-running the sync
@@ -1040,11 +1064,17 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		// writes, so re-processing is safe.
 		for _, block := range gapBlocks {
 			if err := db.BlockCreate(block, nil); err != nil {
-				return SyncResult{}, fmt.Errorf("storing volatile block: %w", err)
+				return SyncResult{}, fmt.Errorf(
+					"storing volatile block: %w",
+					err,
+				)
 			}
 		}
 		if err := processGapBlocks(ctx, db, logger, gapBlocks); err != nil {
-			return SyncResult{}, fmt.Errorf("processing gap block transactions: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"processing gap block transactions: %w",
+				err,
+			)
 		}
 		logger.Info(
 			"volatile blocks stored",
@@ -1072,7 +1102,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			"component", "mithril",
 		)
 		if err := node.RunPlannerStats(db, logger); err != nil {
-			return SyncResult{}, fmt.Errorf("running planner statistics before backfill: %w", err)
+			return SyncResult{}, fmt.Errorf(
+				"running planner statistics before backfill: %w",
+				err,
+			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
 		bf.SetEndSlot(ledgerStateSlot)
@@ -1112,12 +1145,20 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, err
 	}
 	indexRebuildElapsed := time.Since(indexRebuildStart)
-	cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: true, Description: indexRebuildElapsed.String()})
+	cfg.emit(
+		SyncProgress{
+			Phase:       PhaseIndexRebuild,
+			Active:      true,
+			Description: indexRebuildElapsed.String(),
+		},
+	)
 	cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
 	logger.Info(
 		"critical deferred metadata indexes rebuilt; lazy indexes deferred to maintenance",
-		"component", "mithril",
-		"duration", indexRebuildElapsed,
+		"component",
+		"mithril",
+		"duration",
+		indexRebuildElapsed,
 	)
 
 	if err := updateMithrilReadyState(
@@ -1159,7 +1200,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		"lazy_index_rebuild_mode", "maintenance",
 	)
 
-	return SyncResult{Snapshot: result.Snapshot, LedgerSlot: ledgerStateSlot}, nil
+	return SyncResult{
+		Snapshot:   result.Snapshot,
+		LedgerSlot: ledgerStateSlot,
+	}, nil
 }
 
 // NeedsSync reports whether the database at cfg.DataDir requires a (re)sync —

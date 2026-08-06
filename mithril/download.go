@@ -297,16 +297,25 @@ func isTransientDownloadError(err error) bool {
 // defaultTransientRetryMaxDelay with ±25% jitter.
 func transientRetryDelay(attempt int) time.Duration {
 	shift := min(attempt, 6) // 2^6 * 500ms = 32s, capped at 30s
-	d := min(defaultTransientRetryBaseDelay*(1<<shift), defaultTransientRetryMaxDelay)
+	d := min(
+		defaultTransientRetryBaseDelay*(1<<shift),
+		defaultTransientRetryMaxDelay,
+	)
 	if quarter := d / 4; quarter > 0 {
 		// Jitter in [-quarter, +quarter]
-		d += time.Duration(rand.Int63n(int64(quarter)*2+1)) - quarter //nolint:gosec
+		d += time.Duration(
+			rand.Int63n(int64(quarter)*2+1), //nolint:gosec
+		) - quarter
 	}
 	return d
 }
 
 func downloadIdleTimeoutCause(timeout time.Duration) error {
-	return fmt.Errorf("%w after %s without data", errDownloadIdleTimeout, timeout)
+	return fmt.Errorf(
+		"%w after %s without data",
+		errDownloadIdleTimeout,
+		timeout,
+	)
 }
 
 func downloadDestinationPath(cfg DownloadConfig) string {
@@ -370,14 +379,16 @@ func newPooledDownloadTransport(maxConns int) *http.Transport {
 	// connections preserves keep-alive without sharing stream fate.
 	transport.ForceAttemptHTTP2 = false
 	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	if transport.TLSClientConfig != nil {
-		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
-	} else {
-		transport.TLSClientConfig = &tls.Config{
+	tlsConfig := transport.TLSClientConfig
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
+	} else if cloned := tlsConfig.Clone(); cloned != nil {
+		tlsConfig = cloned
 	}
-	transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	tlsConfig.NextProtos = []string{"http/1.1"}
+	transport.TLSClientConfig = tlsConfig
 	return transport
 }
 
@@ -629,7 +640,10 @@ func downloadSnapshotOnce(
 		headerTimer.Stop()
 	}
 	if err != nil {
-		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+		if cause := context.Cause(downloadCtx); errors.Is(
+			cause,
+			errDownloadIdleTimeout,
+		) {
 			return "", fmt.Errorf("downloading snapshot: %w", cause)
 		}
 		return "", fmt.Errorf("downloading snapshot: %w", err)
@@ -726,7 +740,10 @@ func downloadSnapshotOnce(
 			}
 			if err != nil {
 				file.Close()
-				if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+				if cause := context.Cause(downloadCtx); errors.Is(
+					cause,
+					errDownloadIdleTimeout,
+				) {
 					return "", fmt.Errorf("restarting download: %w", cause)
 				}
 				return "", fmt.Errorf(
@@ -874,7 +891,10 @@ func downloadSnapshotOnce(
 		body.Stop()
 		file.Close()
 		file = nil
-		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+		if cause := context.Cause(downloadCtx); errors.Is(
+			cause,
+			errDownloadIdleTimeout,
+		) {
 			return "", fmt.Errorf("writing snapshot data: %w", cause)
 		}
 		return "", fmt.Errorf("writing snapshot data: %w", err)

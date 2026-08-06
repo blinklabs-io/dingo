@@ -79,9 +79,18 @@ func TestBlockValidatorPassesAllowsAdoption(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, validator.calls, "validator must be called once")
-	assert.Equal(t, 1, broadcaster.calls, "block must be adopted after passing validation")
+	assert.Equal(
+		t,
+		1,
+		broadcaster.calls,
+		"block must be adopted after passing validation",
+	)
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
-	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeCouldNot))
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
 }
 
 // TestBlockValidatorFailureDropsBlock verifies that a failing validator
@@ -99,10 +108,23 @@ func TestBlockValidatorFailureDropsBlock(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "self-validation failed")
 	assert.Equal(t, 1, validator.calls, "validator must be called once")
-	assert.Equal(t, 0, broadcaster.calls, "block must NOT be adopted after failed validation")
+	assert.Equal(
+		t,
+		0,
+		broadcaster.calls,
+		"block must NOT be adopted after failed validation",
+	)
 	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
-	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeCouldNot))
-	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeValidationFailed))
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeValidationFailed),
+	)
 }
 
 // TestNilBlockValidatorSkipsValidation confirms that the default nil validator
@@ -131,7 +153,12 @@ func TestNilBlockValidatorSkipsValidation(t *testing.T) {
 
 	err = forger.checkAndForgeProduction(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, broadcaster.calls, "block must be adopted when validator is nil")
+	assert.Equal(
+		t,
+		1,
+		broadcaster.calls,
+		"block must be adopted when validator is nil",
+	)
 }
 
 // TestBlockValidatorCalledBeforeBroadcaster verifies ordering: the validator
@@ -173,8 +200,12 @@ func TestBlockValidatorCalledBeforeBroadcaster(t *testing.T) {
 
 	_ = forger.checkAndForgeProduction(context.Background())
 
-	require.Equal(t, []string{"validate"}, callOrder,
-		"validator must run before broadcaster; broadcaster must not run on failure")
+	require.Equal(
+		t,
+		[]string{"validate"},
+		callOrder,
+		"validator must run before broadcaster; broadcaster must not run on failure",
+	)
 }
 
 // trackingBroadcaster wraps a broadcaster and calls a hook on AddBlock.
@@ -193,6 +224,9 @@ type trackingBlockValidator struct {
 	onValidate func() error
 }
 
-func (v *trackingBlockValidator) ValidateForgedBlock(ledger.Block, []byte) error {
+func (v *trackingBlockValidator) ValidateForgedBlock(
+	ledger.Block,
+	[]byte,
+) error {
 	return v.onValidate()
 }

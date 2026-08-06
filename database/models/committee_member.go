@@ -22,26 +22,16 @@ import "github.com/blinklabs-io/dingo/database/types"
 // membership changes from on-chain certificates. This table captures
 // the committee composition at the time of the snapshot.
 type CommitteeMember struct {
-	ID           uint    `gorm:"primarykey"`
-	ColdCredHash []byte  `gorm:"uniqueIndex;size:28;not null"` // 28-byte credential hash
-	ExpiresEpoch uint64  `gorm:"not null"`
-	AddedSlot    uint64  `gorm:"index;not null"` // Slot when imported/registered
-	DeletedSlot  *uint64 `gorm:"index"`          // For rollback support
-}
-
-// TableName returns the table name for CommitteeMember.
-func (CommitteeMember) TableName() string {
-	return "committee_member"
+	ID           uint
+	ColdCredHash []byte // 28-byte credential hash
+	ExpiresEpoch uint64
+	AddedSlot    uint64  // Slot when imported/registered
+	DeletedSlot  *uint64 // For rollback support
 }
 
 // CommitteeQuorum records the quorum threshold enacted with a committee.
 type CommitteeQuorum struct {
 	Quorum    *types.Rat
-	ID        uint   `gorm:"primarykey"`
-	AddedSlot uint64 `gorm:"uniqueIndex;not null"`
-}
-
-// TableName returns the table name for CommitteeQuorum.
-func (CommitteeQuorum) TableName() string {
-	return "committee_quorum"
+	ID        uint
+	AddedSlot uint64
 }

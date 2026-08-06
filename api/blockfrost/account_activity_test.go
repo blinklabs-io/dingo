@@ -55,11 +55,13 @@ func TestHandleAccountUTXOs(t *testing.T) {
 				Block: "block1",
 			},
 			{
-				Address:             "addr_test2",
-				TxHash:              "tx2",
-				TxIndex:             1,
-				OutputIndex:         1,
-				Amount:              []AddressAmountInfo{{Unit: "lovelace", Quantity: "2000000"}},
+				Address:     "addr_test2",
+				TxHash:      "tx2",
+				TxIndex:     1,
+				OutputIndex: 1,
+				Amount: []AddressAmountInfo{
+					{Unit: "lovelace", Quantity: "2000000"},
+				},
 				Block:               "block2",
 				DataHash:            &dataHash,
 				InlineDatum:         &inlineDatum,
@@ -116,8 +118,10 @@ func TestHandleAccountUTXOsNullableFieldsNull(t *testing.T) {
 				TxHash:      "tx1",
 				TxIndex:     0,
 				OutputIndex: 0,
-				Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "1000000"}},
-				Block:       "block1",
+				Amount: []AddressAmountInfo{
+					{Unit: "lovelace", Quantity: "1000000"},
+				},
+				Block: "block1",
 			},
 		},
 	}
@@ -331,7 +335,8 @@ func TestHandleAccountTransactions(t *testing.T) {
 	b := newTestBlockfrost(mock)
 
 	req := newAccountActivityRequest(
-		t, "/api/v0/accounts/stake_test1/transactions?count=1&page=1&order=desc",
+		t,
+		"/api/v0/accounts/stake_test1/transactions?count=1&page=1&order=desc",
 	)
 	w := httptest.NewRecorder()
 	b.handleAccountTransactions(w, req)

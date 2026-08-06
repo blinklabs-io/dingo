@@ -578,7 +578,11 @@ func (d *BlobStoreBadger) NewIterator(
 			)
 			if errors.Is(err, badger.ErrDBClosed) {
 				iter = &errorIterator{
-					err: fmt.Errorf("%w: %w", types.ErrBlobStoreUnavailable, err),
+					err: fmt.Errorf(
+						"%w: %w",
+						types.ErrBlobStoreUnavailable,
+						err,
+					),
 				}
 				return
 			}

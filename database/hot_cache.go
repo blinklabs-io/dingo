@@ -141,10 +141,14 @@ func (c *HotCache) logWriterAborted(op string) {
 	}
 	c.logger.Warn(
 		"hot cache dropped a best-effort update after exhausting its CAS retry budget",
-		"cache", c.cacheName,
-		"op", op,
-		"max_attempts", c.maxCASAttempts,
-		"writers_aborted_total", c.writersAborted.Load(),
+		"cache",
+		c.cacheName,
+		"op",
+		op,
+		"max_attempts",
+		c.maxCASAttempts,
+		"writers_aborted_total",
+		c.writersAborted.Load(),
 	)
 }
 
@@ -232,7 +236,9 @@ func (c *HotCache) backoff(attempt int) time.Duration {
 	window := uint64(1) << shift
 	sequence := c.casSequence.Add(0x9e3779b97f4a7c15)
 	// #nosec G115 -- value is 1..window (window <= 64), far below int64 range.
-	jitter := time.Duration(1+(sequence^(sequence>>30))%window) * time.Microsecond
+	jitter := time.Duration(
+		1+(sequence^(sequence>>30))%window,
+	) * time.Microsecond
 	jitter = min(jitter, maxCASBackoff)
 	time.Sleep(jitter)
 	return jitter

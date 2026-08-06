@@ -550,7 +550,10 @@ func ImportLedgerState(
 	// started. Bail out here if the import was cancelled during the preceding
 	// phases rather than beginning the rebuild on an interrupted sync.
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("cancelled before rebuilding reward live stake: %w", err)
+		return fmt.Errorf(
+			"cancelled before rebuilding reward live stake: %w",
+			err,
+		)
 	}
 	if err := cfg.Database.RebuildRewardLiveStake(slot, nil); err != nil {
 		return fmt.Errorf("rebuilding reward live stake: %w", err)
@@ -2112,7 +2115,9 @@ func resolveEraParams(
 	}
 	epochSpan := endBound.Epoch - startBound.Epoch
 	slotSpan := endBound.Slot - startBound.Slot
-	epochLength = uint(slotSpan / epochSpan) // #nosec G115 -- epoch length fits in uint
+	epochLength = uint(
+		slotSpan / epochSpan,
+	) // #nosec G115 -- epoch length fits in uint
 	cfg.Logger.Warn(
 		"slot length unavailable from era bounds fallback; "+
 			"slot-to-wall-clock-time mapping may be inaccurate",
@@ -2341,18 +2346,25 @@ func importGovState(
 		if len(ratifiedIds) > 0 {
 			cfg.Logger.Info(
 				"marking ratified governance proposals from snapshot DRep pulsing state",
-				"component", "ledgerstate",
-				"count", len(ratifiedIds),
-				"ratified_epoch", cfg.State.Epoch,
+				"component",
+				"ledgerstate",
+				"count",
+				len(ratifiedIds),
+				"ratified_epoch",
+				cfg.State.Epoch,
 			)
 		}
 		if ratifiedHFI != nil {
 			cfg.Logger.Info(
 				"marking active HFI as ratified at snapshot epoch (close 1-epoch lag)",
-				"component", "ledgerstate",
-				"tx_hash", hex.EncodeToString(ratifiedHFI.TxHash),
-				"action_index", ratifiedHFI.ActionIndex,
-				"ratified_epoch", cfg.State.Epoch,
+				"component",
+				"ledgerstate",
+				"tx_hash",
+				hex.EncodeToString(ratifiedHFI.TxHash),
+				"action_index",
+				ratifiedHFI.ActionIndex,
+				"ratified_epoch",
+				cfg.State.Epoch,
 			)
 		}
 		if err := func() error {
