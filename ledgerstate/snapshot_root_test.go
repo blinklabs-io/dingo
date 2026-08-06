@@ -594,21 +594,6 @@ func TestOpenSnapshotAtOrBeforeRefusesDirectoryState(t *testing.T) {
 	}
 }
 
-// addSlotDir adds a second UTxO-HD slot directory to a tree built by
-// writeUTxOHDSnapshot.
-func addSlotDir(t *testing.T, dir, slot, state string) {
-	t.Helper()
-	slotDir := filepath.Join(dir, "ledger", slot)
-	if err := os.MkdirAll(slotDir, 0o750); err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(slotDir, "state"), []byte(state), 0o640,
-	); err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-}
-
 // TestOpenSnapshotAtOrBeforeRefusesADemotedNewestSlot covers the selection a
 // planted entry can force when there is a valid older slot to fall back to.
 //
