@@ -139,3 +139,80 @@ func TestWriteDBInfoSidecarRecreatedOnSteadyStateStart(t *testing.T) {
 	)
 	require.Equal(t, "sqlite", info.MetadataPlugin)
 }
+
+// sidecarTrapPath returns a path that behaves like an unusable data
+// directory for dbinfo.Read/Write specifically: a plain file, not a
+// directory, so any attempt to read or create a file "inside" it fails with
+// ENOTDIR. Config.DataDir is independent of the metadata/blob stores'
+// actual directories (newTestDatabaseAt resolves those separately), so this
+// lets a test break only the sidecar path without touching the real store.
+func sidecarTrapPath(t *testing.T) string {
+	t.Helper()
+	trap := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(trap, []byte("x"), 0o600))
+	return trap
+}
+
+// TestNewDatabaseFailsWhenSidecarCannotBeEstablished pins Finding 3's fix:
+// for a brand-new database, the sidecar is the only thing that will later
+// stop a mistyped provider from silently creating a second, empty database
+// beside the real one (there is no metadata_plugin gate row yet for
+// settingsresolve to compare against -- this open is what creates it), so
+// failing to establish it here must fail the open instead of warning and
+// continuing.
+func TestNewDatabaseFailsWhenSidecarCannotBeEstablished(t *testing.T) {
+	metaDir := t.TempDir()
+	blobDir := t.TempDir()
+
+	_, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
+		DataDir:        sidecarTrapPath(t),
+		StorageMode:    "core",
+		Network:        "preprod",
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dbinfo sidecar")
+}
+
+// TestExistingDatabaseSidecarFailureIsNonFatal pins the other half of
+// Finding 3: an already-established database (one with a prior
+// writeGateValues call, so a metadata_plugin gate row already exists)
+// backfilling a lost or never-written sidecar on a later gate write must
+// still warn and continue, not fail the open -- node_settings_gate's own
+// metadata_plugin gate is already the real enforcement for it by then.
+func TestExistingDatabaseSidecarFailureIsNonFatal(t *testing.T) {
+	metaDir := t.TempDir()
+	blobDir := t.TempDir()
+	realDataDir := t.TempDir()
+
+	db, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
+		DataDir:        realDataDir,
+		StorageMode:    "api",
+		Network:        "preprod",
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	require.NoError(t, closeTestDatabase(db))
+
+	// Reopen the same stores with a gate that still needs a genuine write
+	// (storage_mode's permitted api -> core move) so this reaches
+	// writeGateValues again, but point Config.DataDir at a sidecar trap
+	// this time. legacy is already non-nil from the open above, so this is
+	// not a new database.
+	reopened, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
+		DataDir:        sidecarTrapPath(t),
+		StorageMode:    "core",
+		Network:        "preprod",
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(
+		t,
+		err,
+		"a sidecar failure while backfilling an already-established "+
+			"database must not fail the open",
+	)
+	require.NoError(t, closeTestDatabase(reopened))
+}

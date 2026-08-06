@@ -34,3 +34,8 @@ ON CONFLICT (name) DO UPDATE SET
     value = excluded.value,
     recorded_epoch = excluded.recorded_epoch,
     recorded_slot = excluded.recorded_slot;
+
+-- name: InsertNodeSettingsGateIfAbsent :execrows
+INSERT INTO node_settings_gate (name, value, recorded_epoch, recorded_slot)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (name) DO NOTHING;

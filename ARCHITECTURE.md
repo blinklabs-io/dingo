@@ -4166,6 +4166,19 @@ reason, makes `settingsresolve.Apply` a silent no-op — a corrupt or in-use
 database is `database.New`'s problem to report properly, and failing here
 would only mask its better error behind a worse one.
 
+A sidecar write failure is fatal only for the one call `writeGateValues`
+makes for a brand-new database (no prior `node_settings_gate` row of any
+kind, detected via the same `legacy == nil` check `writeGateValues` already
+does for its own legacy-row seeding): a database that new has no
+`metadata_plugin` gate row yet for this pre-open check to compare against
+until that same call creates it, so the sidecar is the only thing that will
+catch a mistyped provider the next time this directory is opened, and losing
+it here fails the database open rather than starting silently unprotected.
+Every other call — backfilling a sidecar an operator deleted from an
+already-established database — keeps the original warn-and-continue
+behavior, since `node_settings_gate`'s own gate row is already the real
+enforcement for it by then.
+
 On every path that returns without an error — including the no-op ones
 above, where `cfg` is left completely unchanged — `Apply` finishes by
 calling `config.PublishConfig(cfg)`, mirroring what `LoadConfig` and
@@ -4394,6 +4407,18 @@ Both phases share one `evaluateAndPersistGates` helper
 fail-on-mismatch/write/verify-write body; `CheckNodeSettings` and
 `EnforceNodeSettings` differ only in which `nodesettings.Values` map they
 pass in.
+
+That body also guards against two openers racing the same gate's
+first-ever write: it reserves each gate name absent from what it just read
+as persisted via `SettingsStore.InsertNodeSettingsGateIfAbsent` (a
+conditional insert, distinct from the plain upsert used for every other
+write) before persisting anything, and a caller that loses re-reads what
+is now actually persisted and evaluates its own configuration against that
+instead of assuming its own write landed. This only matters when the
+metadata plugin is shared across processes by design (postgres, mysql);
+sqlite is opened per-process, and the default blob plugin's exclusive
+per-directory lock already rules out two full database opens racing at
+once regardless of metadata plugin.
 
 ## Stake Snapshots
 

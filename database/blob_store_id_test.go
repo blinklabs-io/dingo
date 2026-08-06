@@ -17,6 +17,8 @@ package database
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -193,11 +195,29 @@ func TestBlobStoreIDSyncsAfterMint(t *testing.T) {
 	)
 }
 
+// TestPhase1RejectsBlobStoreIDReadFailure ensures a genuine read failure --
+// distinct from types.ErrBlobKeyNotFound, the ordinary first-use case that
+// mints an id -- fails closed instead of silently omitting the identity gate.
+func TestPhase1RejectsBlobStoreIDReadFailure(t *testing.T) {
+	readErr := errors.New("simulated corrupted blob store read")
+	store := &mockBlobStore{getErr: readErr}
+	db := &Database{
+		blob: store,
+		config: &Config{
+			StorageMode: "core",
+			Network:     "preprod",
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	_, err := db.phase1GateValues()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "get blob store id")
+}
+
 // TestBlobStoreIDSyncFailurePropagates confirms a failed sync surfaces as an
-// error from blobStoreID rather than being swallowed, so phase1GateValues's
-// existing "log and skip the gate" handling -- not a false success --
-// applies to this failure. blobStoreID must never claim an id is durable
-// when Sync could not confirm it.
+// error from blobStoreID rather than being swallowed. blobStoreID must never
+// claim an id is durable when Sync could not confirm it.
 func TestBlobStoreIDSyncFailurePropagates(t *testing.T) {
 	syncErr := errors.New("simulated sync failure")
 	store := &mockBlobStore{syncErr: syncErr}

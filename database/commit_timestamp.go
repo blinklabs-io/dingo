@@ -105,8 +105,9 @@ func (e NodeSettingsError) Error() string {
 // phase1GateValues returns the gates a bare database open can supply.
 // Genesis hashes and the ledger feature gates are absent here and are
 // supplied later by EnforceNodeSettings, once the node has parsed its
-// cardano config.
-func (d *Database) phase1GateValues() nodesettings.Values {
+// cardano config. Blob-store identity is required: an inability to read or
+// durably create it must fail closed rather than omit the pairing gate.
+func (d *Database) phase1GateValues() (nodesettings.Values, error) {
 	values := nodesettings.Values{
 		"storage_mode": d.config.StorageMode,
 		"network":      d.config.Network,
@@ -151,22 +152,15 @@ func (d *Database) phase1GateValues() nodesettings.Values {
 		values["start_era"] = nodesettings.NoStartEra
 	}
 	// blob_store_id is read (and minted, on first use) from the blob store
-	// itself rather than from config, so it has its own failure mode: a
-	// read-only or not-yet-writable blob store cannot complete the mint's
-	// write. That must not fail the open -- some phase 1 callers pair a
-	// partial Config with a store that is legitimately not ready for this
-	// -- so the gate is skipped rather than compared whenever it cannot be
-	// established, the same "fill in what this path can, skip what it
-	// can't" rule the rest of this function follows.
-	if id, err := d.blobStoreID(); err == nil && id != "" {
+	// itself rather than from config. A genuine read, write, commit, or sync
+	// failure must fail closed: omitting this value would let startup proceed
+	// without validating the metadata/blob pairing.
+	if id, err := d.blobStoreID(); err != nil {
+		return nil, fmt.Errorf("get blob store id: %w", err)
+	} else if id != "" {
 		values["blob_store_id"] = id
-	} else if err != nil {
-		d.logger.Debug(
-			"blob store id unavailable; skipping its gate",
-			"error", err,
-		)
 	}
-	return values
+	return values, nil
 }
 
 // persistedGateValues merges the legacy node_settings row with the
@@ -241,7 +235,15 @@ func (d *Database) persistedGateValues() (nodesettings.Values, error) {
 // ever touches network -- so this mirror can never contradict
 // node_settings_gate, which remains the only thing persistedGateValues
 // treats as authoritative for storage_mode.
-func (d *Database) writeGateValues(writes nodesettings.Values) error {
+//
+// requireSidecar says that the metadata-plugin gate was not present before
+// this enforcement pass. In that case the sidecar is still needed to protect
+// the next pre-open provider selection, including for databases created before
+// node_settings_gate existed.
+func (d *Database) writeGateValues(
+	writes nodesettings.Values,
+	requireSidecar bool,
+) error {
 	if len(writes) == 0 {
 		return nil
 	}
@@ -271,7 +273,16 @@ func (d *Database) writeGateValues(writes nodesettings.Values) error {
 	if err := d.Metadata().SetNodeSettingsGates(writes, epoch, slot); err != nil {
 		return fmt.Errorf("failed to persist node settings gates: %w", err)
 	}
-	d.writeDBInfoSidecar()
+	if requireSidecar {
+		if err := d.writeDBInfoSidecarErr(); err != nil {
+			return fmt.Errorf(
+				"failed to establish dbinfo sidecar for unprotected database: %w",
+				err,
+			)
+		}
+	} else {
+		d.writeDBInfoSidecar()
+	}
 	return nil
 }
 
@@ -281,10 +292,10 @@ func (d *Database) writeGateValues(writes nodesettings.Values) error {
 // database and one outside it. internal/settingsresolve's pre-open check
 // reads this file to identify the correct plugin to open before it has
 // opened anything -- without a real writer, that check would be dead code
-// on every real run. This is a best-effort convenience, never a hard
-// requirement: metadata_plugin in node_settings_gate remains the real
-// enforcement, so a failure here is logged and never fails the database
-// open.
+// on every real run. This is a best-effort convenience once the
+// metadata_plugin gate is already latched in node_settings_gate. During the
+// first enforcement pass that can establish that gate, writeGateValues uses
+// writeDBInfoSidecarErr and fails closed if the sidecar cannot be established.
 //
 // Two guards apply:
 //
@@ -301,27 +312,33 @@ func (d *Database) writeGateValues(writes nodesettings.Values) error {
 //     the exact signal it exists to carry. Absent means a first start or an
 //     operator who deleted it, and both cases want it written.
 func (d *Database) writeDBInfoSidecar() {
+	if err := d.writeDBInfoSidecarErr(); err != nil {
+		d.logger.Warn("failed to write dbinfo sidecar", "error", err)
+	}
+}
+
+// writeDBInfoSidecarErr is writeDBInfoSidecar's error-returning body. See
+// that function's doc comment for the two guards and the fatal/non-fatal
+// split between callers.
+func (d *Database) writeDBInfoSidecarErr() error {
 	if d.config.MetadataPlugin == "" {
-		return
+		return nil
 	}
 	existing, err := dbinfo.Read(d.config.DataDir)
 	if err != nil {
-		d.logger.Warn(
-			"failed to read dbinfo sidecar; leaving it untouched",
-			"error", err,
-		)
-		return
+		return fmt.Errorf("read dbinfo sidecar: %w", err)
 	}
 	if existing.MetadataPlugin != "" {
 		// Already present: never overwrite (see doc comment above).
-		return
+		return nil
 	}
 	if err := dbinfo.Write(d.config.DataDir, dbinfo.Info{
 		FormatVersion:  dbinfo.CurrentFormatVersion,
 		MetadataPlugin: d.config.MetadataPlugin,
 	}); err != nil {
-		d.logger.Warn("failed to write dbinfo sidecar", "error", err)
+		return fmt.Errorf("write dbinfo sidecar: %w", err)
 	}
+	return nil
 }
 
 // currentEpochSlot returns the tip's epoch and slot, for stamping gate
@@ -339,6 +356,17 @@ func (d *Database) currentEpochSlot() (epoch uint64, slot uint64) {
 		return 0, slot
 	}
 	return ep.EpochId, slot
+}
+
+// mismatchStrings renders each Mismatch via its own String(), for the two
+// NodeSettingsError sites in evaluateAndPersistGates below (the ordinary
+// path and the re-evaluation after losing a first-write race).
+func mismatchStrings(mismatches []nodesettings.Mismatch) []string {
+	out := make([]string, 0, len(mismatches))
+	for _, mismatch := range mismatches {
+		out = append(out, mismatch.String())
+	}
+	return out
 }
 
 // evaluateAndPersistGates is the shared body of CheckNodeSettings (phase 1)
@@ -363,11 +391,7 @@ func (d *Database) evaluateAndPersistGates(
 	}
 	result := nodesettings.Evaluate(persisted, configured, explicit)
 	if len(result.Mismatches) > 0 {
-		mismatches := make([]string, 0, len(result.Mismatches))
-		for _, mismatch := range result.Mismatches {
-			mismatches = append(mismatches, mismatch.String())
-		}
-		return NodeSettingsError{Mismatches: mismatches}
+		return NodeSettingsError{Mismatches: mismatchStrings(result.Mismatches)}
 	}
 	if len(result.Writes) == 0 {
 		// No gate needs writing, but the dbinfo sidecar is a separate,
@@ -380,7 +404,74 @@ func (d *Database) evaluateAndPersistGates(
 		d.writeDBInfoSidecar()
 		return nil
 	}
-	if err := d.writeGateValues(result.Writes); err != nil {
+	requireSidecar := d.config.MetadataPlugin != ""
+	if requireSidecar {
+		_, hasMetadataPluginGate := persisted["metadata_plugin"]
+		requireSidecar = !hasMetadataPluginGate
+	}
+	// A gate written here for the first time ever (absent from persisted)
+	// can race against a concurrent opener doing the same first-ever
+	// write: two openers both see nothing persisted, both Evaluate against
+	// their own configured values with no mismatch (there is nothing yet
+	// to disagree with), and an unconditional upsert would let whichever
+	// one commits last silently overwrite the other's value with no
+	// record a collision even happened. This is reachable in practice only
+	// when the metadata plugin is shared across processes by design
+	// (postgres, mysql, both dingo_extra_plugins-gated): sqlite is opened
+	// per-process, and the default blob plugin, badger, takes an exclusive
+	// process lock that already rules out two full opens of the same
+	// database at once regardless of metadata plugin. Reserve each
+	// first-ever name with a conditional insert before the plain upsert
+	// below, so a losing opener discovers the winner's value instead of
+	// blindly overwriting it.
+	firstFill := make(nodesettings.Values, len(result.Writes))
+	for name, value := range result.Writes {
+		if _, has := persisted[name]; !has {
+			firstFill[name] = value
+		}
+	}
+	if len(firstFill) > 0 {
+		epoch, slot := d.currentEpochSlot()
+		lostRace := false
+		for name, value := range firstFill {
+			inserted, err := d.Metadata().InsertNodeSettingsGateIfAbsent(
+				name, value, epoch, slot,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to reserve node settings gate %q: %w",
+					name,
+					err,
+				)
+			}
+			if !inserted {
+				lostRace = true
+			}
+		}
+		if lostRace {
+			// Another opener's first write to at least one of these names
+			// landed before ours. Re-evaluate configured against what is
+			// now actually persisted -- exactly what a genuinely
+			// sequential second start would do -- rather than trusting the
+			// persisted map read at the top of this function, which is now
+			// stale for at least the reserved names.
+			persisted, err = d.persistedGateValues()
+			if err != nil {
+				return err
+			}
+			result = nodesettings.Evaluate(persisted, configured, explicit)
+			if len(result.Mismatches) > 0 {
+				return NodeSettingsError{
+					Mismatches: mismatchStrings(result.Mismatches),
+				}
+			}
+			if len(result.Writes) == 0 {
+				d.writeDBInfoSidecar()
+				return nil
+			}
+		}
+	}
+	if err := d.writeGateValues(result.Writes, requireSidecar); err != nil {
 		return err
 	}
 	// Verify every write actually landed rather than trusting the store
@@ -422,5 +513,9 @@ func (d *Database) evaluateAndPersistGates(
 // never runs phase 1 on its own -- see node.go's dbNeedsRecovery handling,
 // which calls this explicitly once RecoverCommitTimestampConflict succeeds.
 func (d *Database) CheckNodeSettings() error {
-	return d.evaluateAndPersistGates(d.phase1GateValues())
+	configured, err := d.phase1GateValues()
+	if err != nil {
+		return err
+	}
+	return d.evaluateAndPersistGates(configured)
 }

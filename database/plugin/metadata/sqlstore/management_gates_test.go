@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -60,4 +61,84 @@ func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
 	gates, err := store.GetNodeSettingsGates()
 	require.NoError(t, err)
 	require.Empty(t, gates)
+}
+
+// TestInsertNodeSettingsGateIfAbsentFirstCallWins pins the ordinary case:
+// the first call for a name inserts and reports it, unlike
+// SetNodeSettingsGates's unconditional upsert.
+func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
+	store := newManagementTestStore(t)
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "1", 0, 0,
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "1", gates["network_magic"])
+}
+
+// TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite is
+// InsertNodeSettingsGateIfAbsent's whole point: a second call for a name
+// that already has a row must report that it did not insert and must never
+// touch the existing value -- the opposite of SetNodeSettingsGates's
+// upsert, which always overwrites regardless of what is already there.
+func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
+	store := newManagementTestStore(t)
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "1", 0, 0,
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	inserted, err = store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "2", 10, 100,
+	)
+	require.NoError(t, err)
+	require.False(t, inserted)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"1",
+		gates["network_magic"],
+		"a losing call must never overwrite the winner's value",
+	)
+}
+
+// TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins runs many
+// concurrent conditional inserts for the same name against a real
+// connection pool and asserts exactly one reports having inserted -- the
+// property commit_timestamp.go's evaluateAndPersistGates depends on to
+// detect a concurrent first-ever opener instead of racing an unconditional
+// upsert.
+func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
+	t *testing.T,
+) {
+	store := newManagementTestStore(t)
+	const attempts = 8
+	results := make([]bool, attempts)
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for i := range attempts {
+		go func(i int) {
+			defer wg.Done()
+			inserted, err := store.InsertNodeSettingsGateIfAbsent(
+				"storage_mode", "core", 0, 0,
+			)
+			require.NoError(t, err)
+			results[i] = inserted
+		}(i)
+	}
+	wg.Wait()
+
+	winners := 0
+	for _, inserted := range results {
+		if inserted {
+			winners++
+		}
+	}
+	require.Equal(t, 1, winners, "exactly one concurrent insert must win")
 }

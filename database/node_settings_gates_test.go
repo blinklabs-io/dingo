@@ -16,6 +16,8 @@ package database
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -374,4 +376,72 @@ func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
 		checkErr,
 	)
 	require.Contains(t, settingsErr.Error(), "blob plugin")
+}
+
+// TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch pins Finding 2's fix: a
+// gate written for the first time ever can race against a second opener
+// doing the same first-ever write. Two *Database instances race to open
+// against the SAME metadata directory concurrently -- each with its own
+// separate blob store directory, so badger's exclusive per-directory lock
+// (which rules this race out for a real shared node) never enters into it,
+// isolating the metadata-side race this fix targets -- with different
+// NetworkMagic. Before the fix, node_settings_gate's plain upsert let
+// whichever opener wrote last silently overwrite the other with no record
+// a collision happened. After it, exactly one opener may win the first-ever
+// write; the other must observe the winner's value and fail loudly on its
+// own now-conflicting configuration, never silently adopt or overwrite it.
+func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
+	for i := range 5 {
+		t.Run(fmt.Sprintf("iteration_%d", i), func(t *testing.T) {
+			metaDir := t.TempDir()
+			blobDirA := t.TempDir()
+			blobDirB := t.TempDir()
+
+			var wg sync.WaitGroup
+			var dbA, dbB *Database
+			var errA, errB error
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				dbA, errA = newTestDatabaseAt(t, metaDir, blobDirA, &Config{
+					DataDir:      metaDir,
+					StorageMode:  "core",
+					Network:      "preprod",
+					NetworkMagic: 1,
+				})
+			}()
+			go func() {
+				defer wg.Done()
+				dbB, errB = newTestDatabaseAt(t, metaDir, blobDirB, &Config{
+					DataDir:      metaDir,
+					StorageMode:  "core",
+					Network:      "preprod",
+					NetworkMagic: 2,
+				})
+			}()
+			wg.Wait()
+
+			// Exactly one opener must win: the other's differing
+			// NetworkMagic must be rejected as a mismatch against whatever
+			// the winner actually persisted, never silently accepted or
+			// silently overwritten.
+			require.True(
+				t,
+				(errA == nil) != (errB == nil),
+				"exactly one concurrent first-open must succeed: errA=%v errB=%v",
+				errA,
+				errB,
+			)
+			var settingsErr NodeSettingsError
+			if errA != nil {
+				require.True(t, errors.As(errA, &settingsErr))
+				require.Contains(t, settingsErr.Error(), "network magic")
+				require.NoError(t, closeTestDatabase(dbB))
+			} else {
+				require.True(t, errors.As(errB, &settingsErr))
+				require.Contains(t, settingsErr.Error(), "network magic")
+				require.NoError(t, closeTestDatabase(dbA))
+			}
+		})
+	}
 }

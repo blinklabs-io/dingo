@@ -156,6 +156,7 @@ type Querier interface {
 	InsertMidnightCommitteeCandidateRegistration(ctx context.Context, arg InsertMidnightCommitteeCandidateRegistrationParams) (int64, error)
 	InsertMidnightGovernanceDatum(ctx context.Context, arg InsertMidnightGovernanceDatumParams) (int64, error)
 	InsertNodeSettings(ctx context.Context, arg InsertNodeSettingsParams) (int64, error)
+	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
 	InsertOffchainMetadataPointer(ctx context.Context, arg InsertOffchainMetadataPointerParams) (int64, error)
 	InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error)
 	ReleaseFallbackRewardSnapshotGuard(ctx context.Context, id int64) (int64, error)

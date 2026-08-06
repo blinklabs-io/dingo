@@ -42,6 +42,13 @@ type managementQueries interface {
 		int64,
 		int64,
 	) error
+	insertNodeSettingsGateIfAbsent(
+		context.Context,
+		string,
+		string,
+		int64,
+		int64,
+	) (int64, error)
 }
 
 func newManagementQueries(
@@ -147,6 +154,24 @@ func (q sqliteManagementQueries) upsertNodeSettingsGate(
 	)
 }
 
+func (q sqliteManagementQueries) insertNodeSettingsGateIfAbsent(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) (int64, error) {
+	return q.queries.InsertNodeSettingsGateIfAbsent(
+		ctx,
+		sqlitequery.InsertNodeSettingsGateIfAbsentParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
 type postgresManagementQueries struct {
 	queries *postgresquery.Queries
 }
@@ -231,6 +256,24 @@ func (q postgresManagementQueries) upsertNodeSettingsGate(
 	)
 }
 
+func (q postgresManagementQueries) insertNodeSettingsGateIfAbsent(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) (int64, error) {
+	return q.queries.InsertNodeSettingsGateIfAbsent(
+		ctx,
+		postgresquery.InsertNodeSettingsGateIfAbsentParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
 type mysqlManagementQueries struct {
 	queries *mysqlquery.Queries
 }
@@ -307,6 +350,24 @@ func (q mysqlManagementQueries) upsertNodeSettingsGate(
 	return q.queries.UpsertNodeSettingsGate(
 		ctx,
 		mysqlquery.UpsertNodeSettingsGateParams{
+			Name:          name,
+			Value:         value,
+			RecordedEpoch: recordedEpoch,
+			RecordedSlot:  recordedSlot,
+		},
+	)
+}
+
+func (q mysqlManagementQueries) insertNodeSettingsGateIfAbsent(
+	ctx context.Context,
+	name string,
+	value string,
+	recordedEpoch int64,
+	recordedSlot int64,
+) (int64, error) {
+	return q.queries.InsertNodeSettingsGateIfAbsent(
+		ctx,
+		mysqlquery.InsertNodeSettingsGateIfAbsentParams{
 			Name:          name,
 			Value:         value,
 			RecordedEpoch: recordedEpoch,

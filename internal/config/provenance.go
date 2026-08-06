@@ -118,6 +118,27 @@ func (c *Config) recordProvenance(field string, source Source) {
 	c.provenance[field] = source
 }
 
+// gatedFieldPathSet indexes gatedFieldPaths for the per-flag lookup ApplyFlags
+// does over every registered flag, not just the gated ones.
+var gatedFieldPathSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(gatedFieldPaths))
+	for _, path := range gatedFieldPaths {
+		set[path] = struct{}{}
+	}
+	return set
+}()
+
+// isGatedField reports whether path is one of the field paths provenance is
+// documented to track. Callers that iterate something broader than
+// gatedFieldPaths -- ApplyFlags walks every flagSpec -- must consult this
+// before recording, or the map fills with fields nothing ever reads and stops
+// matching its own contract. recordProvenance itself stays unguarded so
+// SetProvenanceForTest can set any path a test needs.
+func isGatedField(path string) bool {
+	_, ok := gatedFieldPathSet[path]
+	return ok
+}
+
 // SetProvenanceForTest directly sets a gated field's recorded provenance,
 // bypassing CLI/env/YAML detection entirely.
 //

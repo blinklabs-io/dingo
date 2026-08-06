@@ -709,7 +709,10 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
-		if flags.Changed(spec.name) {
+		// Only gated fields, per provenance's documented contract: this loop
+		// walks every registered flag, and recording the rest would fill the
+		// map with entries nothing reads.
+		if flags.Changed(spec.name) && isGatedField(spec.field) {
 			cfg.recordProvenance(spec.field, SourceFlag)
 		}
 	}

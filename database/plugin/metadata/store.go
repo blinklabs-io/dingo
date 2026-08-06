@@ -79,6 +79,24 @@ type SettingsStore interface {
 		recordedEpoch uint64,
 		recordedSlot uint64,
 	) error
+
+	// InsertNodeSettingsGateIfAbsent persists a single gate only if no row
+	// for name exists yet, returning whether this call created it. This is
+	// SetNodeSettingsGates's conditional counterpart, used for a gate's
+	// first-ever write specifically: two concurrent openers can both reach
+	// SettingsStore with no gates persisted yet -- reachable in practice
+	// only with a metadata plugin shared across processes by design
+	// (postgres, mysql) -- and an unconditional upsert would let whichever
+	// one commits last silently overwrite the other's value with no
+	// record that a collision happened. A caller that gets inserted=false
+	// lost the race and must re-read what is now actually persisted rather
+	// than assume its own write took effect.
+	InsertNodeSettingsGateIfAbsent(
+		name string,
+		value string,
+		recordedEpoch uint64,
+		recordedSlot uint64,
+	) (inserted bool, err error)
 }
 
 // TransactionStore creates backend-owned read and write snapshots.

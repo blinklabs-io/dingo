@@ -112,6 +112,32 @@ func (q *Queries) InsertNodeSettings(ctx context.Context, arg InsertNodeSettings
 	return result.RowsAffected()
 }
 
+const insertNodeSettingsGateIfAbsent = `-- name: InsertNodeSettingsGateIfAbsent :execrows
+INSERT INTO node_settings_gate (name, value, recorded_epoch, recorded_slot)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (name) DO NOTHING
+`
+
+type InsertNodeSettingsGateIfAbsentParams struct {
+	Name          string
+	Value         string
+	RecordedEpoch int64
+	RecordedSlot  int64
+}
+
+func (q *Queries) InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertNodeSettingsGateIfAbsent,
+		arg.Name,
+		arg.Value,
+		arg.RecordedEpoch,
+		arg.RecordedSlot,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setCommitTimestamp = `-- name: SetCommitTimestamp :exec
 INSERT INTO commit_timestamp (id, timestamp)
 VALUES (1, $1)

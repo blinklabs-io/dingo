@@ -184,6 +184,43 @@ func (s *Store) SetNodeSettingsGates(
 	return nil
 }
 
+// InsertNodeSettingsGateIfAbsent persists a single gate only if no row for
+// name exists yet, reporting whether this call is what created it. Unlike
+// SetNodeSettingsGates's unconditional upsert, this lets a caller detect a
+// concurrent opener's first-ever write to the same gate (see
+// commit_timestamp.go's evaluateAndPersistGates) instead of silently
+// overwriting it -- the loser learns it lost and can re-evaluate against
+// what is now actually persisted rather than assuming its own write landed.
+func (s *Store) InsertNodeSettingsGateIfAbsent(
+	name string,
+	value string,
+	recordedEpoch uint64,
+	recordedSlot uint64,
+) (bool, error) {
+	if err := s.ensureReady(); err != nil {
+		return false, err
+	}
+	queries, err := newManagementQueries(s.dialect.Name(), s.writeDB)
+	if err != nil {
+		return false, err
+	}
+	rows, err := queries.insertNodeSettingsGateIfAbsent(
+		context.Background(),
+		name,
+		value,
+		int64(recordedEpoch),
+		int64(recordedSlot),
+	)
+	if err != nil {
+		return false, fmt.Errorf(
+			"insert node settings gate %q if absent: %w",
+			name,
+			err,
+		)
+	}
+	return rows > 0, nil
+}
+
 func (s *Store) ensureReady() error {
 	if !s.ready.Load() {
 		return errors.New("sqlstore: store is not ready")
