@@ -182,6 +182,20 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// block, and dropping the partial would send the next re-offer back to
 		// a from-scratch fetch.
 		data.partialTxs = existing.partialTxs
+		// Carrying the partial must not also restart the block's cache
+		// lifetime. This store rebuilds the entry with a fresh insertedAt, and
+		// the relay re-offers each endorser block on every connection, so a
+		// steady trickle of offers would keep refreshing an incomplete entry
+		// just before expiry and it would never be pruned -- now holding
+		// transaction bodies rather than just a manifest. Keeping the original
+		// timestamp while the block is still incomplete bounds a never-
+		// completing block to one TTL, after which pruning evicts it and a
+		// later offer starts over from the manifest. A store that completes
+		// the transaction set does take the fresh timestamp: it has become a
+		// servable entry and earns the same lifetime as any other.
+		if len(data.partialTxs) > 0 && !data.completeTxCache() {
+			data.insertedAt = existing.insertedAt
+		}
 	}
 	if data.completeTxCache() {
 		// The transaction set is whole; the resume state is now dead weight.

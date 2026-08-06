@@ -18,6 +18,7 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -221,4 +222,66 @@ func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
 	})
 	_, ok := o.lookupLeiosEndorserBlock([]byte{0xde, 0xad})
 	require.False(t, ok)
+}
+
+// An endorser block that never completes must not stay resident forever. The
+// relay offers each block on every connection and every one of those offers
+// re-stores the manifest, rebuilding the cache entry with a fresh insertedAt.
+// Carrying the retained partial across that store must not also restart the
+// block's ten-minute lifetime: the entry now holds transaction bodies rather
+// than just a manifest, and a steady trickle of re-offers would otherwise keep
+// refreshing it just before expiry, so it would never be pruned.
+func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
+	const txCount = 100
+	const diffused = 40
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 19, txCount)
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+
+	requester := &diffusingBlockTxsRequester{available: diffused}
+	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	require.Error(t, err)
+
+	// Age the entry to just short of its TTL, the window in which a re-offer
+	// would otherwise reset the clock before pruning can evict it.
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	aged := time.Now().Add(-leiosEndorserBlockCacheTTL + 2*time.Second)
+	o.leiosMu.Lock()
+	data.insertedAt = aged
+	o.leiosMu.Unlock()
+
+	for range 3 {
+		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	}
+	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Equal(
+		t,
+		diffused,
+		data.partialTxCount(),
+		"redundant manifest store dropped the retained partial tail",
+	)
+	require.WithinDuration(
+		t,
+		aged,
+		data.insertedAt,
+		time.Second,
+		"re-offer restarted the cache lifetime of an incomplete endorser block",
+	)
+
+	// Completing the block does refresh it: it is now a servable entry with
+	// the same lifetime any freshly fetched endorser block gets.
+	full := make([]cbor.RawMessage, txCount)
+	for i := range full {
+		enc, err := cbor.Encode(i)
+		require.NoError(t, err)
+		full[i] = cbor.RawMessage(enc)
+	}
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full))
+	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.True(t, data.completeTxCache())
+	require.Zero(t, data.partialTxCount())
+	require.WithinDuration(t, time.Now(), data.insertedAt, time.Minute)
 }
