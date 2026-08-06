@@ -18,16 +18,32 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"strings"
 )
 
 // migrationSQL contains immutable, versioned migration resources.
 //
-//go:embed v1/*/*.sql
+//go:embed v*/*/*.sql
 var migrationSQL embed.FS
 
-const initialSchemaRelease = "v1alpha1"
+const (
+	initialSchemaRelease = "v1alpha1"
+	opCertIndexRelease   = "v2alpha1"
+)
+
+// schemaVersions names every migration in ascending version order. A version
+// with no post-backfill work simply ships no contract.sql; only the initial
+// version needs one on record.
+var schemaVersions = []struct {
+	Version int
+	Name    string
+	Dir     string
+}{
+	{Version: 1, Name: initialSchemaRelease, Dir: "v1"},
+	{Version: 2, Name: opCertIndexRelease, Dir: "v2"},
+}
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
 func SQLiteRegistry() ([]Migration, error) {
@@ -47,27 +63,53 @@ func MySQLRegistry() ([]Migration, error) {
 }
 
 func registryForDialect(dialect string) ([]Migration, error) {
-	expand, err := loadSQL("v1/sqlite/expand.sql")
-	if err != nil {
-		return nil, err
+	loaded := make([]SQL, 0, len(schemaVersions))
+	// Every CREATE TABLE lives in the initial version, and MySQL's translation
+	// reads them to learn which columns are blobs. A later version indexing an
+	// existing blob column carries no CREATE TABLE of its own, so it is
+	// translated against the schema as a whole rather than against its own
+	// statements -- otherwise MySQL would be handed a BLOB key with no prefix
+	// length, which it rejects.
+	var wholeSchema []string
+	for _, version := range schemaVersions {
+		expand, err := loadSQL(version.Dir + "/sqlite/expand.sql")
+		if err != nil {
+			return nil, err
+		}
+		contract, err := loadOptionalSQL(version.Dir + "/sqlite/contract.sql")
+		if err != nil {
+			return nil, err
+		}
+		loaded = append(loaded, SQL{Expand: expand, Contract: contract})
+		wholeSchema = append(wholeSchema, expand...)
+		wholeSchema = append(wholeSchema, contract...)
 	}
-	contract, err := loadSQL("v1/sqlite/contract.sql")
-	if err != nil {
-		return nil, err
+
+	ret := make([]Migration, 0, len(schemaVersions))
+	for index, version := range schemaVersions {
+		sqlForDialect := loaded[index]
+		if dialect != "sqlite" {
+			sqlForDialect.Expand = translateSchemaSQLInSchema(
+				loaded[index].Expand,
+				dialect,
+				wholeSchema,
+			)
+			sqlForDialect.Contract = translateSchemaSQLInSchema(
+				loaded[index].Contract,
+				dialect,
+				wholeSchema,
+			)
+		}
+		ret = append(ret, Migration{
+			Version:          version.Version,
+			Name:             version.Name,
+			BackfillRevision: "none",
+			SQL: map[string]SQL{
+				dialect: sqlForDialect,
+			},
+		})
 	}
-	sqlForDialect := SQL{Expand: expand, Contract: contract}
-	if dialect != "sqlite" {
-		sqlForDialect.Expand = translateSchemaSQL(expand, dialect)
-		sqlForDialect.Contract = translateSchemaSQL(contract, dialect)
-	}
-	return []Migration{{
-		Version:          1,
-		Name:             initialSchemaRelease,
-		BackfillRevision: "none",
-		SQL: map[string]SQL{
-			dialect: sqlForDialect,
-		},
-	}}, nil
+	return ret, nil
 }
 
 var (
@@ -95,12 +137,20 @@ var (
 	)
 )
 
-func translateSchemaSQL(statements []string, dialect string) []string {
+// translateSchemaSQLInSchema translates statements for a dialect, deriving
+// MySQL's column typing from schemaStatements rather than from the statements
+// being translated. The two differ for any migration that alters a table it
+// did not create; see registryForDialect.
+func translateSchemaSQLInSchema(
+	statements []string,
+	dialect string,
+	schemaStatements []string,
+) []string {
 	translated := make([]string, len(statements))
 	mysqlBlobColumns := make(map[string]map[string]struct{})
 	mysqlForeignKeyColumns := make(map[string]map[string]struct{})
 	if dialect == "mysql" {
-		for _, statement := range statements {
+		for _, statement := range schemaStatements {
 			if !strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				continue
 			}
@@ -242,6 +292,22 @@ func translateMySQLIndexColumns(
 		columns[index] = trimmed + "(255)"
 	}
 	return match[1] + "(" + strings.Join(columns, ",") + ")"
+}
+
+// loadOptionalSQL loads a migration resource that a version need not ship,
+// returning no statements when the file is absent. Only a missing file is
+// tolerated: an unreadable or unparseable one is still an error.
+//
+// Existence is tested with fs.Stat rather than Open so the probe does not open
+// a handle the caller then has to remember to close.
+func loadOptionalSQL(path string) ([]string, error) {
+	if _, err := fs.Stat(migrationSQL, path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read embedded migration %s: %w", path, err)
+	}
+	return loadSQL(path)
 }
 
 func loadSQL(path string) ([]string, error) {

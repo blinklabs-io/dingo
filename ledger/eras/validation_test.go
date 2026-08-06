@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"fmt"
 	"iter"
 	"math"
 	"math/big"
@@ -968,13 +969,20 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 }
 
 func TestBuildIndexedUtxoValidationRulesPanicsForStaleSkipIndex(t *testing.T) {
+	// The message is derived from the constant rather than spelled out, so an
+	// upstream reordering that shifts the index does not also require editing
+	// this expectation.
+	staleIndex := alonzoUtxoValidatePlutusScriptsRuleIndex - 1
 	require.PanicsWithValue(
 		t,
-		"test.UtxoValidatePlutusScripts hardcoded rule index 26 no longer resolves to the expected function",
+		fmt.Sprintf(
+			"test.UtxoValidatePlutusScripts hardcoded rule index %d no longer resolves to the expected function",
+			staleIndex,
+		),
 		func() {
 			buildIndexedUtxoValidationRules(
 				alonzo.UtxoValidationRules,
-				alonzoUtxoValidatePlutusScriptsRuleIndex-1,
+				staleIndex,
 				alonzo.UtxoValidatePlutusScripts,
 				"test.UtxoValidatePlutusScripts",
 			)

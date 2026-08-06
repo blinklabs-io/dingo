@@ -1680,6 +1680,29 @@ dependency across two points in the pipeline:
 - Candidate nonce: frozen at the stability window cutoff
 - Epoch nonce: derived from candidate nonce and previous epoch's last block hash
 
+The `epoch` row's evolving and candidate values are the pair the epoch opened
+with; nothing rewrites them as blocks land, so they are checkpoints rather than
+current state. A reader that needs the pair part-way through an epoch — the
+`GetChainDepState` local-state query, at its acquired tip — calls
+`computeCandidateNonceAsOf`, which folds the same blocks the boundary
+computation would but stops early. `computeCandidateNonce` is that function
+stopped at the epoch's end, so the freeze rule and both the stored-nonce and
+CBOR-decode lookup paths are shared and cannot drift between the query and
+consensus. The candidate's freeze cutoff comes from the full epoch length in
+both cases: where the epoch ends is what fixes it, not how far a given call
+folds.
+
+Stopping early takes two bounds, because the blob store these lookups address
+is not bounded by the chain's tip — a rollback leaves the abandoned blocks in
+place until they are overwritten, and a stored fork holds blocks the chain never
+adopted. The evolving nonce therefore takes the last block before the fold's
+end rather than before the epoch's end, and the candidate takes the last block
+before `min(freeze cutoff, fold end)`: past the cutoff the candidate has frozen
+and the cutoff binds, but before it the candidate still tracks the evolving
+nonce and only the fold's end keeps a stored block above the tip out of it.
+Folding to the epoch's end collapses both bounds to what the boundary
+computation has always used.
+
 The previous epoch's last-block hash is resolved through the active chain index
 (`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
 retain synthetic endorser/genesis blobs and fork blobs that are useful for other
@@ -1726,6 +1749,60 @@ totals. For protocol version 11 and later, requested pools whose mark, set,
 and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
+
+`GetChainDepState` and `GetPoolDistr2` back `cardano-cli query
+leadership-schedule`, which reads the epoch nonce from the first and the stake
+distribution from the second.
+
+`GetChainDepState` serialises the consensus chain-dependent state, and which
+record it writes depends on the era at the acquired tip: Shelley through Alonzo
+take the TPraos layout (`encodeVersion 1` wrapping a nested `PrtclState`),
+Babbage onwards the Praos one (`encodeVersion 0` wrapping a flat eight-field
+record whose extra nonces TPraos does not carry). The version tag selects the
+shape rather than merely labelling it, so a node serving the wrong one during a
+sync through the TPraos eras hands the client a payload it cannot read as
+promised. Which era is which is not restated for the wire: the layout is chosen
+from `consensusModeForEraID`, the same mapping `ConsensusModeForEpoch` uses to
+decide how leader eligibility is checked, so the protocol the reply names and
+the protocol the node elects under cannot disagree. Byron, which ran PBFT and
+has no state of this shape, maps to CPraos there and so takes the modern layout,
+along with any era not explicitly listed.
+
+`GetPoolDistr2` reports each pool's share of the active stake from the mark
+snapshot at `praos.StakeSnapshotEpoch` — the snapshot leader election itself
+reads — rather than from live stake, so a schedule computed from it agrees with
+what the node will accept. Which epoch that is comes from the tip read inside
+the query's own transaction, not from the in-memory consensus snapshot: the
+snapshot is published after the write that advances the chain, so the two can
+sit on opposite sides of an epoch boundary, and stake rows read for the wrong
+epoch still yield a well-formed distribution summing to one. Like
+`GetChainDepState`'s tip-and-epoch pairing, the fix is to take both from the
+same transaction. Each pool's VRF key hash is resolved through
+`registeredPoolVrfKeyHash`, the same function header validation uses, so the
+key the reply names is the key a block must carry to be accepted. A query
+carrying a pool filter reads only the snapshot rows for the pools it names,
+through `GetPoolStakeSnapshotsForPools`; the unfiltered form — the one
+`leadership-schedule` sends — takes the whole-epoch read instead. Neither is a
+query per pool: the filtered read is chunked over the backend's parameter
+limit, as is the `GetPools` VRF-key lookup that follows it, so what the
+caller's filter length decides is how many rows come back, not how many round
+trips the node makes. A requested pool with no row in the
+snapshot is omitted rather than reported at zero stake, matching the node's
+restriction of the distribution to the requested keys.
+
+Both leaves degrade rather than abort on inconsistent data, and that is a
+protocol constraint rather than a preference. The LocalStateQuery server
+propagates a handler error as a protocol error, so returning one does not fail
+a single query — the node drops the client's connection and `cardano-cli`
+reports only a closed bearer, which is the failure mode #2997 was filed for.
+`GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
+has no registration to supply a VRF key hash (the unfiltered form covers every
+pool on the chain, so aborting would take `leadership-schedule` down for every
+operator over one bad row), and `GetChainDepState` logs and skips an op-cert
+counter whose issuer key is not a pool key hash. Omitting a pool leaves the
+reported fractions summing to slightly under one, since its stake stays in
+`TotalActiveStake`; a caller checking its own leadership is unaffected, because
+its own fraction is its stake over that same unchanged total.
 
 ## Chain Management
 
