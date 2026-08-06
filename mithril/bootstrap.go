@@ -573,9 +573,14 @@ func Bootstrap(
 				}
 				return
 			}
-			dir, archPath, ancErr := downloadAncillary(
+			tree, archPath, ancErr := downloadAncillary(
 				ancCtx, cfg, snapshot, downloadDir,
 			)
+			// Recorded whether or not the tree turned out usable, so a
+			// downloaded archive still gets cleaned up.
+			if archPath != "" {
+				ancillaryArchivePath = archPath
+			}
 			if ancErr != nil {
 				cfg.Logger.Warn(
 					"failed to download ancillary "+
@@ -586,24 +591,8 @@ func Bootstrap(
 				)
 				return
 			}
-			// Recorded before the vetting below, so a tree that turns
-			// out to hold no ledger state still gets its archive
-			// cleaned up.
-			ancillaryArchivePath = archPath
-			// Freshly extracted by this process, but vetted all the
-			// same: the handle is what the import reads through, and
-			// opening it here is what binds the tree that was written
-			// to the tree that gets loaded.
-			tree := ledgerDir(dir)
-			if tree == nil {
-				cfg.Logger.Warn(
-					"extracted ancillary data holds no "+
-						"ledger state, continuing without it",
-					"component", "mithril",
-					"path", dir,
-				)
-				return
-			}
+			// The handle the tree was vetted through, carried across
+			// rather than reopened from its name here.
 			ancillaryTree = tree
 		})
 	}
@@ -705,15 +694,23 @@ func Bootstrap(
 }
 
 // downloadAncillary downloads and extracts the ancillary archive
-// which contains the ledger state in UTxO-HD format.
+// which contains the ledger state in UTxO-HD format. It returns the extracted
+// tree as the handle it was vetted through.
+//
+// v1 has no ancillary manifest, so nothing here is signature-bound the way the
+// v2 path is. The handle is still what is returned rather than the directory's
+// name: a function that vets a tree, drops the handle and hands back a name
+// invites the caller to reopen it and believe the check applies to what they
+// reopened — which is exactly how the v2 path went wrong once. The caller
+// closes the result.
 func downloadAncillary(
 	ctx context.Context,
 	cfg BootstrapConfig,
 	snapshot *SnapshotListItem,
 	downloadDir string,
-) (dir string, archivePath string, err error) {
+) (tree *vettedDir, archivePath string, err error) {
 	if len(snapshot.AncillaryLocations) == 0 {
-		return "", "", errors.New(
+		return nil, "", errors.New(
 			"snapshot has no ancillary locations",
 		)
 	}
@@ -758,7 +755,7 @@ func downloadAncillary(
 		)
 	}
 	if err != nil {
-		return "", "", fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"downloading ancillary archive "+
 				"(all %d locations failed): %w",
 			len(snapshot.AncillaryLocations),
@@ -776,19 +773,29 @@ func downloadAncillary(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
 		WithReplaceDestination(),
 	); extractErr != nil {
-		return "", "", fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
+		)
+	}
+
+	extracted := ledgerDir(ancillaryDir)
+	if extracted == nil {
+		// The archive path goes back even so, since it was downloaded and
+		// still wants cleaning up.
+		return nil, ancillaryPath, fmt.Errorf(
+			"extracted ancillary data at %s holds no ledger state",
+			ancillaryDir,
 		)
 	}
 
 	cfg.Logger.Info(
 		"ancillary data extracted",
 		"component", "mithril",
-		"path", ancillaryDir,
+		"path", extracted.Path(),
 	)
 
-	return ancillaryDir, ancillaryPath, nil
+	return extracted, ancillaryPath, nil
 }
 
 // Cleanup removes the temporary files created during bootstrap.

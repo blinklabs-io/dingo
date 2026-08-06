@@ -571,3 +571,25 @@ func TestOpenSnapshotAtOrBeforeUsesDBLedgerWhenLedgerAbsent(t *testing.T) {
 		t.Fatalf("expected the db/ledger state, got %q", string(got))
 	}
 }
+
+// TestOpenSnapshotAtOrBeforeRefusesDirectoryState pins that an entry of the
+// wrong kind is refused where it is found, rather than opening cleanly and
+// failing later somewhere that cannot say why.
+func TestOpenSnapshotAtOrBeforeRefusesDirectoryState(t *testing.T) {
+	dir := t.TempDir()
+	// ledger/100/state as a directory: opens fine, reads as nothing useful.
+	if err := os.MkdirAll(
+		filepath.Join(dir, "ledger", "100", "state"), 0o750,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err == nil {
+		files.Close()
+		t.Fatal("a directory named state must be refused")
+	}
+	if !errors.Is(err, ErrUnsafeSnapshotPath) {
+		t.Fatalf("expected ErrUnsafeSnapshotPath, got %v", err)
+	}
+}

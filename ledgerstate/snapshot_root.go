@@ -150,9 +150,14 @@ func openVerifiedDirPath(root *os.Root, rel string) (*os.Root, error) {
 	return current, nil
 }
 
-// openVerifiedFile opens a file directly beneath dir on the same terms as
-// openVerifiedChild: the open handle must describe the entry the name denotes,
-// which a symlink or a substitution does not. The caller closes the result.
+// openVerifiedFile opens a regular file directly beneath dir on the same terms
+// as openVerifiedChild: the open handle must describe the entry the name
+// denotes, which a symlink or a substitution does not. The caller closes the
+// result.
+//
+// Anything that is not a regular file is refused rather than handed back. A
+// directory opens perfectly well, and a caller that went on to read it would
+// get an error from somewhere further away, about something else.
 func openVerifiedFile(dir *os.Root, name string) (*os.File, error) {
 	f, err := dir.Open(name)
 	if err != nil {
@@ -173,6 +178,12 @@ func openVerifiedFile(dir *os.Root, name string) (*os.File, error) {
 		return nil, fmt.Errorf(
 			"%w: %s is a symlink or was substituted",
 			ErrUnsafeSnapshotPath, name,
+		)
+	}
+	if !named.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf(
+			"%w: %s is not a regular file", ErrUnsafeSnapshotPath, name,
 		)
 	}
 	return f, nil

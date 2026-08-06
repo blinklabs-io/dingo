@@ -2903,6 +2903,18 @@ handle — vetting it twice would be two resolutions of one name, so the tree
 whose ImmutableDB was accepted could differ from the tree whose ledger state is
 imported.
 
+One limit is worth stating rather than leaving to be discovered. The handles
+bind *directories*, and on the immutable side the individual chunk files are
+still opened by name through that handle as the load reaches them — long after
+`checkImmutableTrio` verified their digests against the certified map. A writer
+inside the extraction directory can therefore still replace a chunk file
+between its digest check and its read. Closing that would mean holding a
+descriptor for every file in the snapshot from verification until load, which
+for a mainnet ImmutableDB is thousands of them, or re-hashing at read time. The
+ledger state is not in this position — there are two files, so discovery opens
+and carries them — which is why the ancillary side is bound to its signature and
+the immutable side is bound only to its directory.
+
 Inside the ancillary tree the same rule applies one level down, to files.
 `ledgerstate.OpenSnapshotAtOrBefore` *opens* the ledger state and its UTxO-HD
 table as it selects them and hands back the open files, because a returned name

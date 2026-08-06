@@ -271,6 +271,11 @@ func bootstrapV2(
 			tree, archPath, ancErr := downloadAncillaryV2(
 				ancCtx, cfg, artifact, downloadDir,
 			)
+			// Recorded whether or not the tree turned out usable, so a
+			// downloaded archive still gets cleaned up.
+			if archPath != "" {
+				ancillaryArchivePath = archPath
+			}
 			if ancErr != nil {
 				ancillaryErr = ancErr
 				return
@@ -278,7 +283,6 @@ func bootstrapV2(
 			// The handle the manifest was checked through, carried straight
 			// across. Reopening the directory by name here would hand the
 			// import a tree nothing verified, under a flag saying otherwise.
-			ancillaryArchivePath = archPath
 			ancillaryTree = tree
 		})
 	}
@@ -1266,7 +1270,9 @@ func downloadAncillaryV2(
 		// a no-op for them — so an ancillary archive carrying no ledger state
 		// has to be caught on its own.
 		os.RemoveAll(ancillaryDir)
-		return nil, "", fmt.Errorf(
+		// The archive path goes back even so, since it was downloaded and
+		// still wants cleaning up.
+		return nil, ancillaryPath, fmt.Errorf(
 			"extracted ancillary data at %s holds no ledger state",
 			ancillaryDir,
 		)

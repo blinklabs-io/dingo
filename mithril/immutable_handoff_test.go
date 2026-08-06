@@ -17,6 +17,8 @@ package mithril
 import (
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -415,4 +417,50 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 		// being unreachable.
 		assert.ErrorContains(t, run(t, false), "parsing ledger state")
 	})
+}
+
+// TestDownloadAncillaryReportsArchiveWhenTreeUnusable pins that a downloaded
+// ancillary archive is still reported for cleanup when the tree it extracted to
+// turns out to hold no ledger state.
+//
+// The tree and the archive fail together but are cleaned up separately: the
+// caller records the archive path from the same return that carries the error,
+// and losing it would leave the download behind in an operator-supplied
+// directory, where no temp-dir removal sweeps it up.
+func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
+	// An ancillary archive whose payload has no ledger state at all.
+	archive := writeTestArchive(t, map[string]string{
+		"immutable/00000.chunk": "not ledger state",
+	})
+	downloadDir := t.TempDir()
+	served := filepath.Join(downloadDir, "served.tar.zst")
+	data, err := os.ReadFile(archive)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(served, data, 0o640))
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, served)
+		},
+	))
+	defer srv.Close()
+
+	tree, archPath, err := downloadAncillary(
+		t.Context(),
+		BootstrapConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		&SnapshotListItem{
+			SnapshotBase: SnapshotBase{
+				Digest:             "abc123",
+				Network:            "preprod",
+				AncillaryLocations: []string{srv.URL},
+			},
+		},
+		downloadDir,
+	)
+	require.Error(t, err)
+	assert.Nil(t, tree, "an unusable tree must not be returned")
+	assert.NotEmpty(t, archPath,
+		"the downloaded archive must still be reported so it gets cleaned up")
 }

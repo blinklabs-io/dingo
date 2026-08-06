@@ -44,6 +44,13 @@ var ErrLedgerDirNotFound = errors.New("ledger directory not found")
 //   - UTxO-HD: ledger/<slot>/state
 //
 // Returns the path to the state file.
+//
+// For trees the caller controls. It resolves pathnames and follows symlinks, so
+// what it returns describes the tree only for as long as nobody else can write
+// to it — and the name is resolved again by whoever opens it. Use
+// OpenSnapshotAtOrBefore for a tree that was vetted, or that lives anywhere a
+// concurrent writer might reach; it discovers through a directory handle and
+// hands back the files already open. Mithril bootstrap uses that one.
 func FindLedgerStateFile(extractedDir string) (string, error) {
 	return FindLedgerStateFileAtOrBefore(extractedDir, ^uint64(0))
 }
