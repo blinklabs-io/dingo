@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -1440,6 +1441,19 @@ func importSnapShots(
 				len(activeSnapshots),
 			),
 		})
+
+		if err := synthesizeRetiredScheduledPools(
+			ctx,
+			cfg,
+			activePoolDistr,
+			epoch,
+			slot,
+		); err != nil {
+			return fmt.Errorf(
+				"synthesizing retired scheduled pools: %w",
+				err,
+			)
+		}
 	}
 
 	return nil
@@ -1590,6 +1604,141 @@ func persistImportedActivePoolDistribution(
 	if err := txn.Commit(); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
 	}
+	return nil
+}
+
+// synthesizeRetiredScheduledPools registers, as retired tombstones, any pool
+// that appears in the imported active pool distribution but is absent from the
+// live pool table. Such a pool retired at (or before) the snapshot's epoch
+// boundary and so is gone from cardano-node's live psStakePoolParams, yet it
+// remains in the operative pool distribution the leader schedule for this epoch
+// was fixed against roughly two epochs earlier, so it continues to lead and
+// produce valid blocks through the end of the epoch. A genesis-synced node
+// keeps the pool resolvable through its on-chain retirement tombstone; a
+// Mithril-imported node, which imports only currently-registered pools,
+// otherwise cannot resolve the producer's registered VRF key and rejects the
+// first post-snapshot block forever (verifyRegisteredVrfKey ->
+// GetPool(includeInactive=true) -> "pool not found").
+//
+// The synthesized pool and registration carry only the pool key hash and the
+// VRF key hash from the pool distribution -- the fields GetPool /
+// verifyRegisteredVrfKey read to bind a block's header VRF key to the pool's
+// registered key. Pledge, cost, margin, reward account and stake are left at
+// their zero values: a paired retirement tombstone keeps the pool out of the
+// active-pool, stake-snapshot and reward paths, so no fabricated economic value
+// can leak into leader-eligibility or reward math. The registration's added
+// slot is the snapshot's ledger-state slot, matching the other imported
+// registrations, and the retirement is recorded at the snapshot epoch so
+// live-pool queries continue to exclude it.
+func synthesizeRetiredScheduledPools(
+	ctx context.Context,
+	cfg ImportConfig,
+	activePoolDistr []ParsedActivePoolStake,
+	epoch uint64,
+	slot uint64,
+) error {
+	if len(activePoolDistr) == 0 {
+		return nil
+	}
+
+	keyHashes := make([]lcommon.PoolKeyHash, 0, len(activePoolDistr))
+	for i := range activePoolDistr {
+		if len(activePoolDistr[i].PoolKeyHash) != 28 {
+			continue
+		}
+		var pkh lcommon.PoolKeyHash
+		copy(pkh[:], activePoolDistr[i].PoolKeyHash)
+		keyHashes = append(keyHashes, pkh)
+	}
+	if len(keyHashes) == 0 {
+		return nil
+	}
+
+	store := cfg.Database.Metadata()
+	txn := cfg.Database.MetadataTxn(true)
+	defer txn.Release()
+	metaTxn := txn.Metadata()
+
+	existing, err := store.GetPools(keyHashes, metaTxn)
+	if err != nil {
+		return fmt.Errorf("loading existing pools: %w", err)
+	}
+	present := make(map[string]struct{}, len(existing))
+	for i := range existing {
+		present[string(existing[i].PoolKeyHash)] = struct{}{}
+	}
+
+	retiredKeyHashes := make([][]byte, 0)
+	for i := range activePoolDistr {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"retired scheduled pool import cancelled: %w", ctx.Err(),
+			)
+		default:
+		}
+		pool := activePoolDistr[i]
+		if len(pool.PoolKeyHash) != 28 || len(pool.VrfKeyHash) != 32 {
+			continue
+		}
+		if _, ok := present[string(pool.PoolKeyHash)]; ok {
+			continue
+		}
+		// Deduplicate: the active pool distribution is keyed by pool, so a
+		// repeat would only arise from malformed input, but a second
+		// ImportPool + RetirePools for the same key would be redundant.
+		present[string(pool.PoolKeyHash)] = struct{}{}
+
+		model := &models.Pool{
+			PoolKeyHash: slices.Clone(pool.PoolKeyHash),
+			VrfKeyHash:  slices.Clone(pool.VrfKeyHash),
+		}
+		reg := &models.PoolRegistration{
+			PoolKeyHash: slices.Clone(pool.PoolKeyHash),
+			VrfKeyHash:  slices.Clone(pool.VrfKeyHash),
+			AddedSlot:   slot,
+		}
+		if err := store.ImportPool(model, reg, metaTxn); err != nil {
+			return fmt.Errorf(
+				"importing retired scheduled pool %x: %w",
+				pool.PoolKeyHash,
+				err,
+			)
+		}
+		retiredKeyHashes = append(
+			retiredKeyHashes,
+			slices.Clone(pool.PoolKeyHash),
+		)
+	}
+
+	if len(retiredKeyHashes) == 0 {
+		return nil
+	}
+
+	// Tombstone the synthesized pools so they resolve via
+	// GetPool(includeInactive=true) but are excluded from every active-pool,
+	// stake and reward query. RetirePools matches against the pool rows just
+	// inserted in this same transaction.
+	if err := store.RetirePools(
+		metaTxn,
+		retiredKeyHashes,
+		epoch,
+		slot,
+	); err != nil {
+		return fmt.Errorf("retiring scheduled pools: %w", err)
+	}
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	cfg.Logger.Info(
+		"synthesized retired-but-scheduled pools from active pool distribution",
+		"component", "ledgerstate",
+		"count", len(retiredKeyHashes),
+		"epoch", epoch,
+		"slot", slot,
+	)
 	return nil
 }
 
