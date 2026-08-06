@@ -51,6 +51,16 @@ type Config struct {
 	// from a non-genesis chainsync intersect point without a Mithril
 	// snapshot import, where pre-intersect UTxOs are legitimately absent.
 	StrictUtxoValidation bool
+	// NetworkMagic is the protocol magic. It is the real network
+	// discriminator: a custom or devnet database may have an empty Network
+	// while still needing identity enforcement.
+	NetworkMagic uint32
+	// StartEra is the experimental start era ("dijkstra" or empty).
+	StartEra string
+	// BlobPlugin and MetadataPlugin name the storage providers that
+	// produced this database.
+	BlobPlugin     string
+	MetadataPlugin string
 }
 
 // Stores contains the provider-owned storage services injected into a

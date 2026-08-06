@@ -22,3 +22,15 @@ ON CONFLICT (id) DO NOTHING;
 UPDATE node_settings
 SET network = $1
 WHERE id = 1 AND storage_mode = $2 AND network = '';
+
+-- name: GetNodeSettingsGates :many
+SELECT name, value
+FROM node_settings_gate;
+
+-- name: UpsertNodeSettingsGate :exec
+INSERT INTO node_settings_gate (name, value, recorded_epoch, recorded_slot)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (name) DO UPDATE SET
+    value = excluded.value,
+    recorded_epoch = excluded.recorded_epoch,
+    recorded_slot = excluded.recorded_slot;

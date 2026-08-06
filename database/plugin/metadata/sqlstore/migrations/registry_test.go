@@ -27,10 +27,13 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 1)
+	require.Len(t, registry, 2)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 302)
+	require.Equal(t, 2, registry[1].Version)
+	require.Equal(t, "v2alpha1", registry[1].Name)
+	require.Len(t, registry[1].SQL["sqlite"].Expand, 1)
 }
 
 func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {

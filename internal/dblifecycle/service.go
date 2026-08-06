@@ -30,10 +30,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -114,10 +116,14 @@ func (s *Service) openDatabase(
 	runtime, err := internalplugins.OpenDatabase(
 		ctx,
 		&database.Config{
-			DataDir:     s.cfg.DatabasePath,
-			Logger:      s.logger,
-			StorageMode: s.cfg.StorageMode,
-			Network:     s.cfg.Network,
+			DataDir:        s.cfg.DatabasePath,
+			Logger:         s.logger,
+			StorageMode:    s.cfg.StorageMode,
+			Network:        s.cfg.Network,
+			NetworkMagic:   s.cfg.NetworkMagic,
+			StartEra:       string(s.cfg.StartEra),
+			BlobPlugin:     s.cfg.Plugins.Storage.Blob.Provider,
+			MetadataPlugin: s.cfg.Plugins.Storage.Metadata.Provider,
 		},
 		internalplugins.StorageSelections{
 			Blob:     s.cfg.Plugins.Storage.Blob,
@@ -226,6 +232,7 @@ func (s *Service) Restore(
 				s.cfg.Plugins.Storage.Metadata.Provider,
 				storageMode,
 				s.cfg.Network,
+				intendedGateValues(s.cfg),
 			); err != nil {
 				return fmt.Errorf(
 					"snapshot is not compatible with the configured database: %w",
@@ -243,6 +250,70 @@ func (s *Service) Restore(
 		return lifecycle.Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// intendedGateValues builds the subset of database/nodesettings.Gates that
+// s.cfg is able to supply, for Manifest.CheckGateMatch to compare a restore
+// candidate's manifest against: network_magic, start_era, and the
+// ledger-semantics gates. These are the consensus-relevant values a
+// mismatch on which the existing storage-mode/network/plugin checks in
+// CheckCompatibility do not catch on their own — e.g. a snapshot taken
+// with CIP-0163 full-pot rewards enabled, restored onto a node configured
+// without it, would otherwise silently diverge rewards from that point
+// forward.
+//
+// It cannot supply the era genesis hashes: those are derived from a
+// parsed cardano config that only a running node holds (see node.go's
+// nodeSettingsGateValues), not from internal/config.Config alone. That
+// omission is not a gap to work around here — CheckGateMatch only compares
+// gates present in both maps, so a snapshot's genesis-hash gates simply go
+// unchecked by this offline path, the same "caller has no way to supply
+// this gate" tolerance that lets an older snapshot restore under a newer
+// dingo.
+func intendedGateValues(cfg *config.Config) nodesettings.Values {
+	values := make(nodesettings.Values, 7)
+	// A zero NetworkMagic means "not known yet" (the same convention
+	// database/commit_timestamp.go's phase1GateValues and
+	// internal/settingsresolve use), not a meaningful configured value of
+	// zero, so it is omitted rather than compared.
+	if cfg.NetworkMagic != 0 {
+		values["network_magic"] = strconv.FormatUint(
+			uint64(cfg.NetworkMagic), 10,
+		)
+	}
+	// cfg is always a fully-resolved *config.Config, never one of
+	// database.Config's partial callers (see phase1GateValues's guard in
+	// database/commit_timestamp.go), so an empty StartEra is unambiguously
+	// "no start era" rather than "unknown" -- record the same
+	// nodesettings.NoStartEra sentinel that writer and internal/
+	// settingsresolve use, rather than omitting the key, so a restore
+	// candidate that recorded no start era is actually compared against a
+	// target that also has none, instead of the comparison being skipped
+	// entirely.
+	startEra := string(cfg.StartEra)
+	if startEra == "" {
+		startEra = nodesettings.NoStartEra
+	}
+	values["start_era"] = startEra
+	values["history_expiry_active"] = nodesettings.EncodeLatchBool(
+		cfg.HistoryExpiry.Enabled, "",
+	)
+	values["pledge_leverage"] = nodesettings.EncodeLatchBool(
+		cfg.PledgeLeverageEnabled,
+		strconv.FormatUint(uint64(cfg.PledgeLeverage), 10),
+	)
+	values["full_pot_rewards"] = nodesettings.EncodeLatchBool(
+		cfg.FullPotRewardsEnabled, "",
+	)
+	values["delegator_inactivity"] = nodesettings.EncodeLatchBool(
+		cfg.DelegatorInactivityEnabled,
+		strconv.FormatUint(cfg.DelegatorInactivity, 10),
+	)
+	values["min_pool_margin"] = nodesettings.EncodeLatchBool(
+		cfg.MinPoolMargin != 0,
+		strconv.FormatUint(uint64(cfg.MinPoolMargin), 10),
+	)
+	return values
 }
 
 // TruncateTarget identifies a truncate target by at least one of Slot,

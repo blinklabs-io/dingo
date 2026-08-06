@@ -21,6 +21,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
@@ -398,7 +400,13 @@ func (n *Node) Run(ctx context.Context) error {
 		PromRegistry:         n.config.promRegistry,
 		StorageMode:          string(n.config.storageMode),
 		Network:              n.config.network,
+		NetworkMagic:         n.config.networkMagic,
+		StartEra:             string(n.config.startEra),
 		StrictUtxoValidation: n.config.strictUtxoValidation,
+		BlobPlugin: n.config.pluginSelections[plugin.CapabilityStorageBlob].
+			Provider,
+		MetadataPlugin: n.config.pluginSelections[plugin.CapabilityStorageMetadata].
+			Provider,
 		CacheConfig: database.CborCacheConfig{
 			BlockLRUEntries: n.config.cacheBlockLRUEntries,
 			HotUtxoEntries:  n.config.cacheHotUtxoEntries,
@@ -436,6 +444,18 @@ func (n *Node) Run(ctx context.Context) error {
 			err,
 		)
 		dbNeedsRecovery = true
+	}
+	if dbNeedsRecovery {
+		// A database awaiting recovery has a known-inconsistent commit
+		// state. Enforcing phase 2 gates against it here could report a
+		// spurious gate error that masks the recovery path that is about
+		// to repair it, so enforcement is deferred until
+		// RecoverCommitTimestampConflict has run, below.
+		n.config.logger.Info(
+			"node settings gate enforcement deferred until database recovery completes",
+		)
+	} else if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
+		return fmt.Errorf("node settings: %w", err)
 	}
 	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
 		return fmt.Errorf(
@@ -758,6 +778,16 @@ func (n *Node) Run(ctx context.Context) error {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		// The deferred phase 2 pass from above: the database is
+		// consistent now, so a gate mismatch can no longer be confused
+		// with the repair that just ran. This still lands before history
+		// expiry, the Midnight indexer, and every network listener below,
+		// so it completes before anything can apply a block or act on a
+		// ledger feature flag phase 2 would have rejected.
+		n.config.logger.Info("running deferred node settings gate enforcement")
+		if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
+			return fmt.Errorf("node settings: %w", err)
 		}
 	}
 
@@ -1730,6 +1760,65 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wait for shutdown signal
 	<-n.ctx.Done()
 	return nil
+}
+
+// taintValue encodes a taint bit for EnforceNodeSettings. A taint records
+// that the database was produced under relaxed conditions; tightening later
+// cannot clear it.
+func taintValue(relaxed bool) string {
+	if relaxed {
+		return nodesettings.LatchOn
+	}
+	return nodesettings.LatchOff
+}
+
+// nodeSettingsGateValues assembles the phase 2 gate values -- the era
+// genesis hashes and the ledger-semantics gates -- from n.config, for
+// EnforceNodeSettings. It is called from two sites in Run: once for the
+// normal startup path, and once for the deferred pass that runs
+// immediately after RecoverCommitTimestampConflict when recovery was
+// needed. Factored out so both sites build the same map from a single
+// definition rather than two copies that could drift.
+func (n *Node) nodeSettingsGateValues() nodesettings.Values {
+	gateValues := nodesettings.Values{
+		// The two validation taints live here, not in phase 1. Only full
+		// node startup knows these settings; a bool has no "unknown"
+		// sentinel, and the partial database.Config callers would
+		// otherwise compute a relaxed taint of "on" from a zero value and
+		// fail against every normally-created database.
+		"historical_validation_relaxed": taintValue(
+			!n.config.validateHistorical,
+		),
+		"strict_utxo_validation_relaxed": taintValue(
+			!n.config.strictUtxoValidation,
+		),
+		"history_expiry_active": nodesettings.EncodeLatchBool(
+			n.config.historyExpiry.Enabled, "",
+		),
+		"pledge_leverage": nodesettings.EncodeLatchBool(
+			n.config.pledgeLeverageEnabled,
+			strconv.FormatUint(uint64(n.config.pledgeLeverage), 10),
+		),
+		"full_pot_rewards": nodesettings.EncodeLatchBool(
+			n.config.fullPotRewardsEnabled, "",
+		),
+		"delegator_inactivity": nodesettings.EncodeLatchBool(
+			n.config.delegatorInactivityEnabled,
+			strconv.FormatUint(n.config.delegatorInactivity, 10),
+		),
+		"min_pool_margin": nodesettings.EncodeLatchBool(
+			n.config.minPoolMargin != 0,
+			strconv.FormatUint(uint64(n.config.minPoolMargin), 10),
+		),
+	}
+	if nodeCfg := n.config.CardanoNodeConfig(); nodeCfg != nil {
+		gateValues["byron_genesis_hash"] = nodeCfg.ByronGenesisHash
+		gateValues["shelley_genesis_hash"] = nodeCfg.ShelleyGenesisHash
+		gateValues["alonzo_genesis_hash"] = nodeCfg.AlonzoGenesisHash
+		gateValues["conway_genesis_hash"] = nodeCfg.ConwayGenesisHash
+		gateValues["dijkstra_genesis_hash"] = nodeCfg.DijkstraGenesisHash
+	}
+	return gateValues
 }
 
 // backfillRewardLiveStake repairs databases created before the live reward

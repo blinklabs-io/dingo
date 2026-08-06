@@ -698,6 +698,9 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
+		if flags.Changed(spec.name) {
+			cfg.recordProvenance(spec.field, SourceFlag)
+		}
 	}
 	if cfg.Network != previousNetwork {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)

@@ -120,6 +120,7 @@ type Querier interface {
 	GetMidnightEpochCandidatesByEpoch(ctx context.Context, epoch int64) (MidnightEpochCandidate, error)
 	GetMidnightRegistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightRegistration, error)
 	GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, error)
+	GetNodeSettingsGates(ctx context.Context) ([]GetNodeSettingsGatesRow, error)
 	GetOffchainMetadata(ctx context.Context, arg GetOffchainMetadataParams) (OffchainMetadatum, error)
 	GetOffchainMetadataFetchCandidates(ctx context.Context, arg GetOffchainMetadataFetchCandidatesParams) ([]OffchainMetadatum, error)
 	GetPParamUpdates(ctx context.Context, arg GetPParamUpdatesParams) ([]PparamUpdate, error)
@@ -192,6 +193,7 @@ type Querier interface {
 	UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error)
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
+	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error
 }
 
 var _ Querier = (*Queries)(nil)

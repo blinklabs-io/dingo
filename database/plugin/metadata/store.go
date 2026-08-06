@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -60,6 +61,24 @@ type SettingsStore interface {
 	// currently unset so callers like checkNodeSettings can perform
 	// a one-time network backfill.
 	SetNodeSettings(*types.NodeSettings) error
+
+	// GetNodeSettingsGates returns the persisted node settings gate
+	// values, keyed by gate name. These are the values enforced on every
+	// startup by database/nodesettings.Evaluate; an empty result means no
+	// gates have been recorded yet, which is normal before the first
+	// successful start.
+	GetNodeSettingsGates() (nodesettings.Values, error)
+
+	// SetNodeSettingsGates persists gates, one row per gate, so that a
+	// later call overwrites an earlier value for the same name. The
+	// recorded epoch and slot are stamped on every row written by this
+	// call and are zero when the write happens before the first block
+	// has been processed. A nil or empty gates is a no-op.
+	SetNodeSettingsGates(
+		gates nodesettings.Values,
+		recordedEpoch uint64,
+		recordedSlot uint64,
+	) error
 }
 
 // TransactionStore creates backend-owned read and write snapshots.

@@ -28,15 +28,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 )
 
 // ManifestFormatVersion is the current on-disk schema version of Manifest.
 // Bump it when making a breaking change to the JSON shape so old restore
 // tooling can reject a manifest it doesn't understand instead of silently
-// misreading it.
+// misreading it. Adding the Gates field did NOT bump this — see Gates'
+// doc comment for why.
 const ManifestFormatVersion = 1
 
 // ManifestFileName is the name of the manifest file inside a snapshot
@@ -102,6 +106,31 @@ type Manifest struct {
 	BlobPlugin     string `json:"blobPlugin"`
 	MetadataPlugin string `json:"metadataPlugin"`
 
+	// Gates mirrors the source database's persisted node settings gates
+	// (database/nodesettings.Gates) at backup time — network_magic,
+	// start_era, the era genesis hashes, the ledger-semantics gates, and
+	// so on — so CheckGateMatch can refuse restoring a snapshot whose
+	// consensus-relevant configuration disagrees with what the caller
+	// intends to run it with (e.g. a snapshot taken with CIP-0163
+	// full-pot rewards enabled, restored onto a node configured without
+	// it, would otherwise silently diverge rewards from that point
+	// forward).
+	//
+	// This field is additive and optional (omitempty) and does NOT bump
+	// ManifestFormatVersion, deliberately: ParseManifest decodes with a
+	// plain json.Unmarshal, not DisallowUnknownFields, so an older dingo
+	// reading a manifest that carries Gates simply ignores the field and
+	// behaves exactly as it did before this feature existed — it loses
+	// only the extra gate check, not the ability to restore at all. The
+	// format version exists to reject a manifest a build genuinely
+	// cannot understand; a purely advisory field doesn't meet that bar.
+	// Bumping it would instead make every older dingo refuse to restore
+	// any snapshot taken by a newer one, an interoperability regression
+	// for no safety gain. Do not "fix" this by bumping the version if a
+	// future gate is added to this map — the same reasoning still
+	// applies as long as the addition stays additive.
+	Gates nodesettings.Values `json:"gates,omitempty"`
+
 	// DingoVersion records the dingo build that produced the backup, so
 	// a restore across incompatible dingo versions is at least detectable rather
 	// than failing schema migration in a confusing way partway through.
@@ -151,9 +180,49 @@ func (m Manifest) CheckPluginMatch(blobPlugin, metadataPlugin string) error {
 	return nil
 }
 
+// CheckGateMatch returns an error if any gate present in both m.Gates and
+// configured disagrees. A gate present in only one of the two maps is not
+// an error: that is what lets an older snapshot (missing a gate a newer
+// dingo would record) restore under that newer dingo, and a newer
+// snapshot restore when the caller has no way to supply every gate it
+// recorded (e.g. no cardano config loaded, so no genesis hashes).
+//
+// blob_store_id is never compared, even when present in both maps: the
+// restored blob store IS the snapshot's, so its identity always differs
+// from whatever the caller had, and comparing it would fail every
+// restore. metadata_plugin and blob_plugin are excluded too, since
+// CheckPluginMatch already reports those — comparing them again here
+// would just report the same mismatch twice.
+func (m Manifest) CheckGateMatch(configured nodesettings.Values) error {
+	var mismatches []string
+	for name, want := range configured {
+		switch name {
+		case "blob_store_id", "metadata_plugin", "blob_plugin":
+			continue
+		}
+		got, ok := m.Gates[name]
+		if !ok || got == want {
+			continue
+		}
+		mismatches = append(mismatches, fmt.Sprintf(
+			"%s: manifest %q, target %q", name, got, want,
+		))
+	}
+	if len(mismatches) == 0 {
+		return nil
+	}
+	// Map iteration order is random; sort so the error message is
+	// deterministic across calls.
+	sort.Strings(mismatches)
+	return fmt.Errorf(
+		"manifest gates do not match target configuration: %s",
+		strings.Join(mismatches, "; "),
+	)
+}
+
 // CheckCompatibility returns an error if the manifest's recorded plugins,
-// storage mode, or network are incompatible with the target values given.
-// Offline restore call sites should call this (directly, or via
+// storage mode, network, or gates are incompatible with the target values
+// given. Offline restore call sites should call this (directly, or via
 // RestoreValidated) before targetDataDir is touched in any way: unlike the
 // live-node restore path, which always opens the restored copy through
 // database.New using the node's own real configured plugins (so
@@ -164,6 +233,7 @@ func (m Manifest) CheckPluginMatch(blobPlugin, metadataPlugin string) error {
 // actually intends to run the restored store with.
 func (m Manifest) CheckCompatibility(
 	blobPlugin, metadataPlugin, storageMode, network string,
+	gates nodesettings.Values,
 ) error {
 	if err := m.CheckPluginMatch(blobPlugin, metadataPlugin); err != nil {
 		return err
@@ -181,6 +251,9 @@ func (m Manifest) CheckCompatibility(
 			m.Network,
 			network,
 		)
+	}
+	if err := m.CheckGateMatch(gates); err != nil {
+		return err
 	}
 	return nil
 }

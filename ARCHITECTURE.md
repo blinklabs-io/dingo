@@ -3946,7 +3946,90 @@ tier, the plugin-form name takes precedence when both forms are set.
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
-`ApplyFlags` and may still replace an invalid or unset value. Once every
+`ApplyFlags` and may still replace an invalid or unset value. Between
+`LoadConfig` and `ApplyFlags`, `cmd/dingo` calls `Config.RecordSourceProvenance`,
+which records, for a small set of gated fields, whether the current value
+came from the YAML file or an environment variable; `ApplyFlags` then
+records a flag override on top of that for any field the operator actually
+passed. `RecordSourceProvenance` runs as its own step rather than inside
+`LoadConfig` because an `internal/config` test `reflect.DeepEqual`s the whole
+`*Config` that `LoadConfig` returns against a hand-built struct literal, and
+a literal cannot populate an unexported field.
+
+Immediately after `ApplyFlags`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
+(`internal/settingsresolve`), which lets a data directory's already-persisted
+node settings supply the effective value for any override-eligible gate
+(`database/nodesettings.Gates`) the operator left at its built-in default —
+the mechanism behind `dingo -n preprod`, a stop, and then a bare `dingo`
+resuming preprod instead of failing to sync from scratch, while
+`dingo -n preview` against that same database is still a fatal error naming
+the conflict, because an operator-supplied value (tracked via the same
+provenance this section describes) is never silently discarded. `Gate.OverrideEligible`
+requires a gate's persisted value to be self-sufficient, needing no companion
+configuration that is not itself persisted; `full_pot_rewards` is the one
+ledger `LatchBool` gate that is deliberately *not* eligible, because its
+companion, `UnsafeFullPotRewardsOnStandardNetworks`, is neither gated nor
+persisted — resuming the latch alone from a database would enable full-pot
+rewards without the flag that makes them usable on a standard network, and
+the resulting startup failure would name a flag the operator never passed
+without ever mentioning that the value came from the database. `Apply` is
+also a no-op — returning `nil` without touching the directory — when
+`DatabasePath` exists but is empty, the same as when it does not exist at
+all: an empty directory (a freshly mounted container/k8s volume, or a
+`dingo database restore` target) has nothing persisted to resume from, and
+without this check `readPersistedGateValues` would resolve a metadata
+provider and run its migration registry as a side effect of merely
+starting it, creating a database in a directory `lifecycle.RestoreValidated`'s
+`requireEmptyOrAbsent` check needs to still find empty. This has to
+run before `ApplyDefaults`, `Validate`, and topology loading, all of which
+derive from `Network`, and it works at all only because `DatabasePath`
+defaults to `.dingo` and is not itself network-derived. `settingsresolve`
+is its own package, not part of `internal/config`, specifically so that
+`internal/config` — imported by roughly half the tree — does not have to
+depend on the plugin host and storage plugins that opening a metadata store
+requires. It opens only the metadata store (`plugin.Resolve[metadata.MetadataStore]`
+directly, never `internal/plugins.ResolveStorage`, which also resolves the
+blob store) at `DatabasePath`, reads the legacy `node_settings` row and
+`node_settings_gate`, and closes the store and stops its plugin host on
+every path, including every error path, before returning — leaving either
+open would block the real `database.New` that follows moments later. Before
+opening anything, it reads the `dbinfo` sidecar (`database/dbinfo`, a small
+JSON file named `dingo.dbinfo` recording only the metadata plugin that
+created the database) and refuses to proceed if it names a different
+plugin than the one configured: resolving a metadata store runs its
+migration registry as a side effect of merely starting it, so opening the
+wrong provider first would silently create a fresh, empty database beside
+the real one instead of ever reaching `node_settings_gate`'s own
+`metadata_plugin` gate, which would otherwise have caught the mismatch. The
+sidecar itself is written by `database/commit_timestamp.go`'s
+`writeGateValues`, alongside the write that records the `metadata_plugin`
+gate, guarded so it is never written with an empty plugin name (the partial
+`Config`s `mithril/sync.go` and `database/lifecycle/restore.go` reopen with)
+and never overwrites a sidecar that is already present. A database
+directory that does not exist, or one this process cannot open for any
+reason, makes `settingsresolve.Apply` a silent no-op — a corrupt or in-use
+database is `database.New`'s problem to report properly, and failing here
+would only mask its better error behind a worse one.
+
+On every path that returns without an error — including the no-op ones
+above, where `cfg` is left completely unchanged — `Apply` finishes by
+calling `config.PublishConfig(cfg)`, mirroring what `LoadConfig` and
+`ApplyFlags` already do for the same process-wide snapshot. This is not
+optional bookkeeping: `config.LoadTopologyConfig` (and any other consumer
+of `config.GetConfig`) reads that snapshot, not the `*Config` pointer
+`cmd/dingo`'s `PersistentPreRunE` is threading through by hand, so an
+override `Apply` made directly on `cfg` — resuming `Network` from a
+persisted gate, for instance — would otherwise be visible to every
+consumer holding that pointer while topology resolution alone kept seeing
+the pre-override value. A shipped version of this exact gap let a bare
+resume mutate `cfg.Network` to the persisted network while topology
+resolved against the previous default, so the node dialed the *other*
+network's relays while handshaking with the *resumed* network's magic —
+every handshake failed on a network-magic mismatch, and the node could
+not sync with anything despite `cfg.Network` itself being correct.
+`PublishConfig` closes that gap by keeping the snapshot and the pointer in
+lockstep on every `Apply` return, not just the ones that changed
+something. Once every
 source is merged, `Config.ApplyDefaults()` fills in unset values whose
 defaults are derived from other settings (an empty `runMode` selects `serve`;
 `plugins.mempool.config.capacity` defaults by run mode — Leios raises it — and the watermarks,
@@ -4008,6 +4091,95 @@ Key configuration areas:
   size, response cap, and private-address policy
 - Block producer credentials (VRF key, KES key, operational certificate)
 - External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
+
+### Node Settings Gate Enforcement
+
+Beyond `settingsresolve.Apply`'s pre-open resolution above, node startup
+enforces `database/nodesettings.Gates()` in two phases, split by what each
+stage can know rather than by gate importance.
+
+Phase 1 runs inside `database.New` (`database/commit_timestamp.go`'s
+`checkNodeSettings`) and validates every gate a bare database open can
+supply — `storage_mode`, `network`, `network_magic`, `start_era`, the plugin
+selections, and `blob_store_id` — persisting first-start values via
+`writeGateValues`. It deliberately excludes every bool-derived gate
+(`history_expiry_active`, `historical_validation_relaxed`,
+`strict_utxo_validation_relaxed`, `pledge_leverage`, `full_pot_rewards`,
+`delegator_inactivity`, `min_pool_margin`): `database.Config` has two callers
+that construct a partial config with only `DataDir`, `Logger`,
+`StorageMode`, and `Network` set (`mithril/sync.go`,
+`database/lifecycle/restore.go`), and a bool's zero value cannot be told
+apart from "the operator turned it off." Computing
+`historical_validation_relaxed` from a zero `validateHistorical` would
+fabricate a relaxed ("on") taint against every normally-created database;
+computing `history_expiry_active` from a zero `Enabled` would fabricate the
+forbidden "off" latch direction against a database that legitimately ran
+with expiry on. Either would make phase 1 reject `dingo mithril sync` and
+every restore against an otherwise-healthy database.
+
+`start_era` has the same ambiguity as the two partial-caller fields above,
+but in reverse: its empty string means both "explicitly no start era" (the
+ordinary case for a full node startup) and "this caller's Config never
+populated the field" (the same partial callers). Phase 1 tells the two
+apart via `MetadataPlugin`, which only a full caller ever sets: when it is
+non-empty, an empty `StartEra` is recorded as the canonical sentinel
+`nodesettings.NoStartEra` rather than left as `""`, so the ordinary case of
+running with no start era override is actually persisted, and a later
+`--start-era dijkstra` against that database is rejected as a change to a
+frozen value instead of silently accepted as that gate's first-ever fill.
+Before this, `start_era`'s `FrozenFillOnce` class treated the empty
+configured value the same way it treats a genuinely unknown one, so a
+database that ran with no start era override recorded nothing at all for
+the gate. `internal/settingsresolve`'s `start_era` binding and
+`internal/dblifecycle`'s `intendedGateValues` emit the same sentinel, since
+neither of those callers has the partial-config ambiguity phase 1 does — both
+work from a fully-resolved `*config.Config` — so all three writers and the
+manifest gate comparison agree on one encoding for "no start era" rather
+than three independent string literals that could drift apart.
+
+Phase 2 is `(*Database).EnforceNodeSettings`
+(`database/enforce_node_settings.go`), called from `Node.Run` (`node.go`)
+with a `nodesettings.Values` built by `(n *Node) nodeSettingsGateValues()`
+(`node.go`) — one assembly function shared by both of phase 2's call sites
+below, so they cannot drift into passing different values for the same
+gates. It supplies the five era genesis hashes — each passed as an empty
+string when the loaded cardano config leaves it unset, so the gate's
+`FrozenFillOnce` class treats an older database's missing era hash as
+fillable rather than a mismatch, since era hashes are added over time and an
+older database legitimately lacks the newer ones — plus the ledger-semantics
+gates phase 1 excludes. Every value phase 2 supplies is treated as explicit,
+the same way phase 1 treats its own gates: `node.go` assembles them from the
+fully-resolved node configuration, not a partial one, so there is no
+"not yet known" case to leave override room for.
+
+Phase 2 runs at one of two points, chosen by whether the database needed
+recovery. On the normal path, it runs immediately after `database.New`'s
+error handling completes and before the pending-truncate check — after the
+cardano config has been parsed but strictly before the ledger can apply its
+first block, since the era genesis hashes it validates come only from
+`Config.CardanoNodeConfig()`. When `dbNeedsRecovery` is set instead, that
+first call site only logs that enforcement is deferred and does not call
+`EnforceNodeSettings`: a database awaiting commit-timestamp recovery has a
+known-inconsistent commit state, and evaluating gates against it could
+report a mismatch that has nothing to do with the operator's configuration
+and would mask the recovery path that is about to repair that same
+inconsistency. The deferred call runs later in the same `Run`, immediately
+after `n.ledgerState.RecoverCommitTimestampConflict()` succeeds and before
+`n.config.historyExpiry.Enabled` starts the pruner, the Midnight indexer is
+created, or any network listener starts — so it still lands before
+anything can apply a block or act on a ledger feature flag phase 2 would
+have rejected. Deferring rather than skipping matters because the ledger
+feature flags phase 2 gates (pledge leverage, full-pot rewards, delegator
+inactivity, and the two validation taints) are wired into the ledger from
+`n.config` independently of gate enforcement: skipping enforcement outright
+on a recovery-needed startup would let a forbidden transition — disabling
+an already-enabled `full_pot_rewards`, for instance — silently take effect
+in the ledger for that entire run, and would later record a legitimate
+transition's activation stamped with whatever epoch and slot a subsequent
+startup happened to reach, not the epoch it actually took effect in. A
+mismatch found by the deferred call fails startup the same way the normal
+path's does, by returning an error out of `Run`, which unwinds through the
+same `started` cleanup stack every other startup failure does.
 
 ## Stake Snapshots
 

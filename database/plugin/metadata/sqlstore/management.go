@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//nolint:gosec // SQL INTEGER mappings preserve the existing unsigned domain API.
 package sqlstore
 
 import (
@@ -20,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -124,6 +126,60 @@ func (s *Store) SetNodeSettings(settings *types.NodeSettings) error {
 		settings.StorageMode,
 	); err != nil {
 		return fmt.Errorf("set node settings: network backfill: %w", err)
+	}
+	return nil
+}
+
+// GetNodeSettingsGates returns the persisted node settings gate values,
+// keyed by gate name. An empty result means no gates have been recorded yet.
+func (s *Store) GetNodeSettingsGates() (nodesettings.Values, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
+	queries, err := newManagementQueries(s.dialect.Name(), s.readDB)
+	if err != nil {
+		return nil, err
+	}
+	gates, err := queries.getNodeSettingsGates(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("get node settings gates: %w", err)
+	}
+	return nodesettings.Values(gates), nil
+}
+
+// SetNodeSettingsGates persists gates, upserting one row per entry so a
+// later call can overwrite an earlier one. recordedEpoch and recordedSlot
+// are stamped on every row in this call; callers pass zero for both when
+// the write happens before the first block. A nil or empty gates is a no-op.
+func (s *Store) SetNodeSettingsGates(
+	gates nodesettings.Values,
+	recordedEpoch uint64,
+	recordedSlot uint64,
+) error {
+	if len(gates) == 0 {
+		return nil
+	}
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
+	queries, err := newManagementQueries(s.dialect.Name(), s.writeDB)
+	if err != nil {
+		return err
+	}
+	for name, value := range gates {
+		if err := queries.upsertNodeSettingsGate(
+			context.Background(),
+			name,
+			value,
+			int64(recordedEpoch),
+			int64(recordedSlot),
+		); err != nil {
+			return fmt.Errorf(
+				"set node settings gates: upsert %q: %w",
+				name,
+				err,
+			)
+		}
 	}
 	return nil
 }

@@ -24,10 +24,13 @@ import (
 
 // migrationSQL contains immutable, versioned migration resources.
 //
-//go:embed v1/*/*.sql
+//go:embed v1/*/*.sql v2/*/*.sql
 var migrationSQL embed.FS
 
-const initialSchemaRelease = "v1alpha1"
+const (
+	initialSchemaRelease    = "v1alpha1"
+	nodeSettingsGateRelease = "v2alpha1"
+)
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
 func SQLiteRegistry() ([]Migration, error) {
@@ -47,27 +50,61 @@ func MySQLRegistry() ([]Migration, error) {
 }
 
 func registryForDialect(dialect string) ([]Migration, error) {
-	expand, err := loadSQL("v1/sqlite/expand.sql")
+	v1, err := migrationForDialect(
+		dialect,
+		1,
+		initialSchemaRelease,
+		"v1/sqlite/expand.sql",
+		"v1/sqlite/contract.sql",
+	)
 	if err != nil {
 		return nil, err
 	}
-	contract, err := loadSQL("v1/sqlite/contract.sql")
+	v2, err := migrationForDialect(
+		dialect,
+		2,
+		nodeSettingsGateRelease,
+		"v2/sqlite/expand.sql",
+		"v2/sqlite/contract.sql",
+	)
 	if err != nil {
 		return nil, err
+	}
+	return []Migration{v1, v2}, nil
+}
+
+// migrationForDialect loads one version's checked-in SQLite SQL and, for
+// non-SQLite dialects, translates it through translateSchemaSQL. sqlite is
+// the authoritative dialect: postgres and mysql are derived from it so the
+// three providers cannot drift at the schema boundary.
+func migrationForDialect(
+	dialect string,
+	version int,
+	name string,
+	expandPath string,
+	contractPath string,
+) (Migration, error) {
+	expand, err := loadSQL(expandPath)
+	if err != nil {
+		return Migration{}, err
+	}
+	contract, err := loadSQL(contractPath)
+	if err != nil {
+		return Migration{}, err
 	}
 	sqlForDialect := SQL{Expand: expand, Contract: contract}
 	if dialect != "sqlite" {
 		sqlForDialect.Expand = translateSchemaSQL(expand, dialect)
 		sqlForDialect.Contract = translateSchemaSQL(contract, dialect)
 	}
-	return []Migration{{
-		Version:          1,
-		Name:             initialSchemaRelease,
+	return Migration{
+		Version:          version,
+		Name:             name,
 		BackfillRevision: "none",
 		SQL: map[string]SQL{
 			dialect: sqlForDialect,
 		},
-	}}, nil
+	}, nil
 }
 
 var (

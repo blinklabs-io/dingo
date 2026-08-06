@@ -1235,7 +1235,13 @@ func (n *Node) databaseConfig() *database.Config {
 		PromRegistry:         n.config.promRegistry,
 		StorageMode:          string(n.config.storageMode),
 		Network:              n.config.network,
+		NetworkMagic:         n.config.networkMagic,
+		StartEra:             string(n.config.startEra),
 		StrictUtxoValidation: n.config.strictUtxoValidation,
+		BlobPlugin: n.config.pluginSelections[plugin.CapabilityStorageBlob].
+			Provider,
+		MetadataPlugin: n.config.pluginSelections[plugin.CapabilityStorageMetadata].
+			Provider,
 		CacheConfig: database.CborCacheConfig{
 			BlockLRUEntries: n.config.cacheBlockLRUEntries,
 			HotUtxoEntries:  n.config.cacheHotUtxoEntries,

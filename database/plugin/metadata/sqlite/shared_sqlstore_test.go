@@ -67,7 +67,7 @@ func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
 	require.NoError(t, readDB.QueryRow(
 		"SELECT COUNT(*) FROM schema_migrations WHERE phase = 'complete'",
 	).Scan(&migrationCount))
-	require.Equal(t, 1, migrationCount)
+	require.Equal(t, 2, migrationCount)
 
 	size, err := store.DiskSize()
 	require.NoError(t, err)

@@ -22,3 +22,15 @@ ON DUPLICATE KEY UPDATE id = VALUES(id);
 UPDATE node_settings
 SET network = ?
 WHERE id = 1 AND storage_mode = ? AND network = '';
+
+-- name: GetNodeSettingsGates :many
+SELECT name, value
+FROM node_settings_gate;
+
+-- name: UpsertNodeSettingsGate :exec
+INSERT INTO node_settings_gate (name, value, recorded_epoch, recorded_slot)
+VALUES (?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+    value = VALUES(value),
+    recorded_epoch = VALUES(recorded_epoch),
+    recorded_slot = VALUES(recorded_slot);
