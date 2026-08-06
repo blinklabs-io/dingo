@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const midnightCheckpointPhase = "midnight"
@@ -58,6 +59,9 @@ type Config struct {
 	Metadata  metadata.MetadataStore
 	SlotTimer SlotTimer
 	Logger    *slog.Logger
+	// PromRegistry registers the indexer's block/event counters. Nil is
+	// safe -- the counters just never expose themselves to a registry.
+	PromRegistry prometheus.Registerer
 	// Midnight chain parameters
 	CNightPolicyID          string
 	CNightAssetName         string
@@ -172,8 +176,9 @@ func DecodeCandidateInputsCbor(data []byte) ([]CandidateInputRef, error) {
 // Indexer scans blocks for Midnight-relevant transactions and writes rows
 // to the midnight_* tables.
 type Indexer struct {
-	config Config
-	mu     sync.RWMutex
+	config  Config
+	mu      sync.RWMutex
+	metrics *indexerMetrics
 	// In-memory tracked UTxO sets; keyed by (tx_hash_hex, output_index).
 	cNightUTxOs map[utxoKey]cNightUTxO
 	regUTxOs    map[utxoKey]registrationUTxO
@@ -226,6 +231,7 @@ type Indexer struct {
 func New(cfg Config) (*Indexer, error) {
 	idx := &Indexer{
 		config:            cfg,
+		metrics:           newIndexerMetrics(cfg.PromRegistry),
 		cNightUTxOs:       make(map[utxoKey]cNightUTxO),
 		regUTxOs:          make(map[utxoKey]registrationUTxO),
 		candidates:        make(map[candidateKey][]byte),
@@ -1147,8 +1153,13 @@ func (idx *Indexer) processBlock(
 		idx.mu.RUnlock()
 	}
 
+	// counts tallies this block's written events by type, applied to the
+	// eventsTotal metric only after txn.Commit succeeds below -- a block
+	// that fails and rolls back must not have already-incremented counts
+	// for rows that never actually persisted.
+	counts := make(map[string]int, 4)
 	for i, tx := range txs {
-		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch, txn, journal); err != nil { //nolint:gosec
+		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch, txn, journal, counts); err != nil { //nolint:gosec
 			return err
 		}
 	}
@@ -1207,6 +1218,7 @@ func (idx *Indexer) processBlock(
 		)
 	}
 	committed = true
+	idx.metrics.recordBlockEvents(counts)
 	return nil
 }
 
@@ -1224,6 +1236,7 @@ func (idx *Indexer) processTx(
 	govEpoch uint64,
 	txn types.Txn,
 	journal *blockMutationJournal,
+	counts map[string]int,
 ) error {
 	txHashBytes := tx.Id().Bytes()
 
@@ -1260,6 +1273,7 @@ func (idx *Indexer) processTx(
 					hex.EncodeToString(txHashBytes), inpHashHex, inpIdx, err,
 				)
 			}
+			counts["spend"]++
 			idx.mu.Lock()
 			journal.cNightUTxOs.record(idx.cNightUTxOs, key)
 			delete(idx.cNightUTxOs, key)
@@ -1283,6 +1297,7 @@ func (idx *Indexer) processTx(
 					hex.EncodeToString(txHashBytes), inpHashHex, inpIdx, err,
 				)
 			}
+			counts["deregistration"]++
 			idx.mu.Lock()
 			journal.regUTxOs.record(idx.regUTxOs, key)
 			delete(idx.regUTxOs, key)
@@ -1339,6 +1354,7 @@ func (idx *Indexer) processTx(
 			txn,
 			journal,
 			txInputsCborOnce,
+			counts,
 		); err != nil {
 			return err
 		}
@@ -1361,6 +1377,7 @@ func (idx *Indexer) processOutput(
 	txn types.Txn,
 	journal *blockMutationJournal,
 	txInputsCborOnce func() ([]byte, error),
+	counts map[string]int,
 ) error {
 	txHashHex := hex.EncodeToString(txHashBytes)
 	key := utxoKey{TxHash: txHashHex, Index: outIdx}
@@ -1388,6 +1405,7 @@ func (idx *Indexer) processOutput(
 						txHashHex, outIdx, err,
 					)
 				}
+				counts["create"]++
 				idx.mu.Lock()
 				journal.cNightUTxOs.record(idx.cNightUTxOs, key)
 				idx.cNightUTxOs[key] = cNightUTxO{
@@ -1424,6 +1442,7 @@ func (idx *Indexer) processOutput(
 							txHashHex, outIdx, err,
 						)
 					}
+					counts["registration"]++
 					idx.mu.Lock()
 					journal.regUTxOs.record(idx.regUTxOs, key)
 					idx.regUTxOs[key] = registrationUTxO{FullDatum: datumCbor}
