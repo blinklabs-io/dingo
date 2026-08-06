@@ -167,11 +167,12 @@ func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
 	)
 }
 
-// Health and reflection share this server's interceptor chain but must never
-// show up in the MidnightState request/latency metrics -- otherwise routine
-// health-check polling would pollute a metric meant to reflect real
-// MidnightState API usage. Call a health Check first (must not be recorded),
-// then a real MidnightState RPC (must be the only thing recorded).
+// The health service's unary Check method shares this server's interceptor
+// chain but must never show up in the MidnightState request/latency metrics
+// -- otherwise routine health-check polling would pollute a metric meant to
+// reflect real MidnightState API usage. Call Check first (must not be
+// recorded), then a real MidnightState RPC (must be the only thing
+// recorded).
 func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
@@ -190,10 +191,12 @@ func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(t *testing
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
+	var found bool
 	for _, mf := range families {
 		if mf.GetName() != "dingo_midnight_grpc_requests_total" {
 			continue
 		}
+		found = true
 		require.Len(
 			t,
 			mf.GetMetric(),
@@ -206,6 +209,11 @@ func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(t *testing
 			}
 		}
 	}
+	require.True(
+		t,
+		found,
+		"expected dingo_midnight_grpc_requests_total to exist after a real MidnightState RPC",
+	)
 }
 
 // The health service must report SERVING for both the overall server and the

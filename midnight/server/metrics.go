@@ -27,11 +27,14 @@ import (
 )
 
 // midnightStateMethodPrefix matches info.FullMethod for MidnightState's own
-// RPCs. Start's grpc.UnaryInterceptor wraps the whole *grpc.Server, and the
-// health and reflection services registered alongside MidnightState (see
-// Start) share this same interceptor chain, so without this filter a health
-// probe or reflection call would show up in these metrics as if it were
-// MidnightState API traffic.
+// RPCs. Start's grpc.UnaryInterceptor wraps every *unary* call on the
+// *grpc.Server, and the health service registered alongside MidnightState
+// (see Start) has one unary method, Check, that reaches this same
+// interceptor chain -- so without this filter a health probe would show up
+// in these metrics as if it were MidnightState API traffic. Reflection's
+// ServerReflectionInfo is bidirectional-streaming, not unary, so it never
+// reaches grpc.UnaryInterceptor at all regardless of this filter; only
+// health's Check needed excluding here.
 var midnightStateMethodPrefix = "/" + midnight.MidnightState_ServiceDesc.ServiceName + "/"
 
 // serverMetrics holds the Prometheus instruments for the MidnightState gRPC
@@ -63,9 +66,9 @@ func newServerMetrics(reg prometheus.Registerer) *serverMetrics {
 }
 
 // unaryInterceptor records request count and latency for every unary
-// MidnightState RPC (the service has no streaming methods). Health and
-// reflection calls share this interceptor chain but are passed straight to
-// handler, unrecorded -- see midnightStateMethodPrefix.
+// MidnightState RPC (the service has no streaming methods). The health
+// service's unary Check method shares this interceptor chain but is passed
+// straight to handler, unrecorded -- see midnightStateMethodPrefix.
 func (m *serverMetrics) unaryInterceptor(
 	ctx context.Context,
 	req any,
