@@ -732,7 +732,16 @@ func downloadAncillary(
 	// Reporting the path with every error below is what lets Cleanup remove it
 	// — otherwise a failed ancillary download leaves a file behind in an
 	// operator-supplied download directory, which no temp-dir removal sweeps.
-	ancillaryDest := filepath.Join(downloadDir, ancillaryFilename)
+	//
+	// Asked of the downloader rather than assembled here. The filename carries
+	// the network name, which comes from the aggregator, and the downloader
+	// reduces it to its last element before writing. Joining it raw would name
+	// a different file for a network like "../../etc" — one outside the
+	// download directory, which Cleanup would then remove.
+	ancillaryDest := downloadDestinationPath(DownloadConfig{
+		DestDir:  downloadDir,
+		Filename: ancillaryFilename,
+	})
 
 	var ancillaryPath string
 	for i, loc := range snapshot.AncillaryLocations {

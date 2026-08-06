@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
@@ -486,9 +487,18 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 	}
 
 	t.Run("every download location fails", func(t *testing.T) {
+		// Truncated mid-body rather than refused outright: a refusal writes
+		// nothing, and the point of this case is the partial file a resumable
+		// download leaves behind.
 		srv := httptest.NewServer(http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "nope", http.StatusInternalServerError)
+				w.Header().Set("Content-Length", "4096")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(make([]byte, 512))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				panic(http.ErrAbortHandler)
 			},
 		))
 		defer srv.Close()
@@ -499,15 +509,21 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 			BootstrapConfig{
 				Logger:                      discard,
 				DownloadMaxTransientRetries: -1,
+				DownloadMaxIdleRetries:      1,
 			},
 			snapshot(srv.URL),
 			downloadDir,
 		)
 		require.Error(t, err)
 		assert.Nil(t, tree)
-		assert.NotEmpty(t, archPath,
+		require.NotEmpty(t, archPath)
+		// The assertion that matters: the reported path is the partial file
+		// that is actually on disk, not merely some non-empty string.
+		fi, statErr := os.Stat(archPath)
+		require.NoError(t, statErr,
 			"a partial download is left on disk and must stay reachable "+
 				"to cleanup")
+		assert.NotZero(t, fi.Size(), "the partial file should hold bytes")
 	})
 
 	t.Run("extraction fails after a complete download", func(t *testing.T) {
@@ -534,4 +550,47 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 		assert.NoError(t, statErr,
 			"the reported path must be the archive that is actually there")
 	})
+}
+
+// TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir covers the
+// archive path reported on failure being reduced the same way the downloader
+// reduces it.
+//
+// The filename carries the network name, which the aggregator supplies, and
+// DownloadSnapshot writes to its last element. A path assembled from the raw
+// name would name a different file for a network like "../../etc" — one outside
+// the download directory, and Cleanup calls os.RemoveAll on whatever it is
+// given. So the reported path has to stay inside, whatever the aggregator says.
+func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "nope", http.StatusInternalServerError)
+		},
+	))
+	defer srv.Close()
+
+	downloadDir := t.TempDir()
+	_, archPath, err := downloadAncillary(
+		t.Context(),
+		BootstrapConfig{
+			Logger:                      slog.New(slog.NewTextHandler(io.Discard, nil)),
+			DownloadMaxTransientRetries: -1,
+		},
+		&SnapshotListItem{
+			SnapshotBase: SnapshotBase{
+				Digest:             "abc123",
+				Network:            filepath.Join("..", "..", "etc"),
+				AncillaryLocations: []string{srv.URL},
+			},
+		},
+		downloadDir,
+	)
+	require.Error(t, err)
+	require.NotEmpty(t, archPath)
+
+	rel, relErr := filepath.Rel(downloadDir, archPath)
+	require.NoError(t, relErr)
+	assert.False(t, strings.HasPrefix(rel, ".."),
+		"a network name with a separator must not move the reported "+
+			"archive out of the download directory: got %s", archPath)
 }

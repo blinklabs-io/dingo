@@ -1242,12 +1242,18 @@ func downloadAncillaryV2(
 		// The destination path, not the (empty) return of a failed download:
 		// DownloadSnapshot resumes, so a failed attempt leaves a partial file
 		// there for Cleanup to remove.
-		return nil, filepath.Join(
-				downloadDir, ancillaryFilename,
-			), fmt.Errorf(
-				"downloading ancillary archive: %w",
-				err,
-			)
+		//
+		// Asked of the downloader rather than assembled here, so the two
+		// cannot name different files — see downloadAncillary for what that
+		// costs when the aggregator picks the network name.
+		dest := downloadDestinationPath(DownloadConfig{
+			DestDir:  downloadDir,
+			Filename: ancillaryFilename,
+		})
+		return nil, dest, fmt.Errorf(
+			"downloading ancillary archive: %w",
+			err,
+		)
 	}
 
 	ancillaryDir := filepath.Join(
