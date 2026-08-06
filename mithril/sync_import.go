@@ -233,6 +233,17 @@ func importLedgerState(
 			snapshot, stateDir = files, tree.name
 			break
 		}
+		// Only a tree with no usable ledger state moves on to the next. One
+		// holding something unusable — a symlink, a substitution, a state that
+		// exists but will not open — fails the import, because falling through
+		// would let a planted ancillary tree choose the extraction directory
+		// as the source instead. The ancillary tree is the one covered by a
+		// signature, so that swap is worth something to an attacker.
+		if !errors.Is(findErr, ledgerstate.ErrNoUsableLedgerState) {
+			return 0, nil, fmt.Errorf(
+				"inspecting ledger state in %s: %w", tree.name, findErr,
+			)
+		}
 		logger.Debug(
 			"ledger state not found in directory",
 			"component", "mithril",

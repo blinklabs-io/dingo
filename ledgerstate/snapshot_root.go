@@ -49,8 +49,25 @@ import (
 )
 
 // ErrUnsafeSnapshotPath reports an entry in a snapshot tree that is a symlink,
-// or that was replaced between being opened and being checked.
+// that is not the kind of thing it should be, or that was replaced between
+// being opened and being checked.
 var ErrUnsafeSnapshotPath = errors.New("unsafe snapshot path")
+
+// errAbsent reports a name that nothing occupies.
+//
+// It exists so that choosing between candidates can never be influenced by
+// planted content. An entry that is present but unusable has to be
+// distinguishable from one that was never there, or making a candidate
+// unusable becomes a way of selecting the next one.
+var errAbsent = errors.New("no such entry")
+
+// ErrNoUsableLedgerState reports a tree that holds no ledger state a caller can
+// use: no ledger directory at all, or none at or below the slot asked for.
+//
+// It is the only outcome a caller searching several trees may treat as "look
+// somewhere else". Everything else means the tree holds something unusable, and
+// moving on from that would let planted content pick which tree gets imported.
+var ErrNoUsableLedgerState = errors.New("no usable ledger state")
 
 // openVerifiedChild opens a directory directly beneath parent and confirms the
 // handle refers to the entry that name refers to.
@@ -61,7 +78,33 @@ var ErrUnsafeSnapshotPath = errors.New("unsafe snapshot path")
 // the comparison leaves the two disagreeing, which is what this rejects; a
 // symlink present beforehand is caught by the same comparison, because lstat
 // describes the link and the open describes its target.
+// It reports errAbsent when nothing occupies name, so a caller choosing between
+// candidate layouts can tell "this one is not here" from "this one is here and
+// unusable" — the second must never be skipped over.
 func openVerifiedChild(parent *os.Root, name string) (*os.Root, error) {
+	// Absence is settled on the entry, not on the outcome of opening it.
+	// Opening fails the same way for an absent name, a dangling symlink, and a
+	// symlink to a non-directory, and only the first is benign.
+	info, err := parent.Lstat(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", errAbsent, name)
+		}
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf(
+			"%w: %s is a symlink", ErrUnsafeSnapshotPath, name,
+		)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf(
+			"%w: %s is not a directory", ErrUnsafeSnapshotPath, name,
+		)
+	}
+	// Anything from here on is a refusal, including a name that has since
+	// vanished: it existed a moment ago, so its disappearance is a change under
+	// us rather than the benign absence handled above.
 	child, err := parent.OpenRoot(name)
 	if err != nil {
 		return nil, err
@@ -176,16 +219,28 @@ func (s *SnapshotFiles) Close() {
 // and a writer between them can make the answers describe different
 // directories — the second would still be verified, just not the one the choice
 // was made about. The caller closes the result.
+//
+// Only an absent candidate moves on to the next. One that exists but is a
+// symlink, is not a directory, or cannot be opened fails the lookup, because
+// falling through would let a planted `ledger` entry choose the `db/ledger`
+// layout — the same trick as making the newest slot directory unusable, applied
+// to which layout gets read.
 func openLedgerDirIn(root *os.Root) (*os.Root, string, error) {
 	for _, rel := range []string{"ledger", "db/ledger"} {
 		dir, err := openVerifiedDirPath(root, rel)
-		if err != nil {
+		if err == nil {
+			return dir, rel, nil
+		}
+		if errors.Is(err, errAbsent) {
 			continue
 		}
-		return dir, rel, nil
+		return nil, "", fmt.Errorf(
+			"inspecting ledger directory %s: %w", rel, err,
+		)
 	}
 	return nil, "", fmt.Errorf(
-		"%w under %s (checked ledger/ and db/ledger/)",
+		"%w: %w under %s (checked ledger/ and db/ledger/)",
+		ErrNoUsableLedgerState,
 		ErrLedgerDirNotFound,
 		root.Name(),
 	)
@@ -285,7 +340,8 @@ func OpenSnapshotAtOrBefore(
 	}
 
 	return nil, fmt.Errorf(
-		"no ledger state files at or before slot %d found under %s",
+		"%w: no ledger state files at or before slot %d found under %s",
+		ErrNoUsableLedgerState,
 		maxSlot,
 		root.Name(),
 	)

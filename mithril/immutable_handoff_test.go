@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -260,6 +261,94 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 		false, ^uint64(0), nil,
 	)
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "no ledger state",
+	assert.ErrorIs(t, err, ledgerstate.ErrUnsafeSnapshotPath,
 		"a symlinked state file must be refused, not followed")
+	// Refused as unsafe rather than reported as absent: the difference
+	// matters, because "absent" is what lets the search move on to another
+	// tree and import from there instead.
+	assert.NotErrorIs(t, err, ledgerstate.ErrNoUsableLedgerState)
+}
+
+// TestImportLedgerStateRefusesUnsafeAncillaryTree covers tree selection with
+// both trees usable.
+//
+// The ancillary tree is preferred over the extraction directory, and it is the
+// one the signed manifest covers. Moving on from an ancillary tree that exists
+// but holds something unusable would let a planted entry pick the source: an
+// attacker who cannot forge a signed ancillary state can make the real one
+// unopenable and have the unsigned extraction directory imported instead.
+//
+// A tree with genuinely no ledger state still falls through — that is the
+// v1 layout, where the state lives in the main archive's db/ledger.
+func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// The extraction directory holds a readable state throughout, so a
+	// fall-through would visibly succeed rather than merely fail differently.
+	newExtract := func(t *testing.T) (string, *os.Root) {
+		t.Helper()
+		dir := t.TempDir()
+		slotDir := filepath.Join(dir, "db", "ledger", "100")
+		require.NoError(t, os.MkdirAll(slotDir, 0o750))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(slotDir, "state"), []byte{0x81, 0x00}, 0o640,
+		))
+		root, err := openVerifiedDir(dir)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = root.Close() })
+		return dir, root
+	}
+
+	t.Run("planted ancillary tree is refused", func(t *testing.T) {
+		anc := t.TempDir()
+		slotDir := filepath.Join(anc, "ledger", "100")
+		require.NoError(t, os.MkdirAll(slotDir, 0o750))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(slotDir, "real"), []byte{0x81, 0x00}, 0o640,
+		))
+		requireSymlinkSupport(t, "real", filepath.Join(slotDir, "state"))
+		ancRoot, err := openVerifiedDir(anc)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ancRoot.Close() })
+
+		extractDir, extractRoot := newExtract(t)
+		_, _, err = importLedgerState(
+			t.Context(), nil, discard, nil,
+			&BootstrapResult{
+				AncillaryDir:  anc,
+				AncillaryRoot: ancRoot,
+				ExtractDir:    extractDir,
+				ExtractRoot:   extractRoot,
+			},
+			false, ^uint64(0), nil,
+		)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ledgerstate.ErrUnsafeSnapshotPath,
+			"an unusable ancillary tree must fail the import, not hand "+
+				"source selection to whoever planted it")
+	})
+
+	t.Run("stateless ancillary tree falls through", func(t *testing.T) {
+		anc := t.TempDir()
+		extractDir, extractRoot := newExtract(t)
+		ancRoot, err := openVerifiedDir(anc)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ancRoot.Close() })
+
+		_, _, err = importLedgerState(
+			t.Context(), nil, discard, nil,
+			&BootstrapResult{
+				AncillaryDir:  anc,
+				AncillaryRoot: ancRoot,
+				ExtractDir:    extractDir,
+				ExtractRoot:   extractRoot,
+			},
+			false, ^uint64(0), nil,
+		)
+		// Reaches the parser on the extraction directory's state, which is
+		// what makes the refusal above about planted content rather than
+		// about the fallback being unreachable.
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "parsing ledger state")
+	})
 }

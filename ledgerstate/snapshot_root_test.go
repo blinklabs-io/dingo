@@ -473,3 +473,101 @@ func TestOpenSnapshotAtOrBeforeRefusesMalformedNewestTable(t *testing.T) {
 		)
 	}
 }
+
+// writeDBLedgerSnapshot lays out db/ledger/<slot>/state, the alternate layout
+// tried when a top-level ledger/ is absent.
+func writeDBLedgerSnapshot(t *testing.T, dir, slot, state string) {
+	t.Helper()
+	slotDir := filepath.Join(dir, "db", "ledger", slot)
+	if err := os.MkdirAll(slotDir, 0o750); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(slotDir, "state"), []byte(state), 0o640,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
+// TestOpenSnapshotAtOrBeforeRefusesUnsafePreferredLayout covers layout
+// selection with both layouts present.
+//
+// ledger/ is preferred over db/ledger/. Moving on from a ledger/ that exists
+// but is unusable would let a planted entry choose the layout: an attacker who
+// cannot write a convincing ledger/ can make the real one unopenable and have
+// their db/ledger/ read instead. Only an absent ledger/ moves on.
+func TestOpenSnapshotAtOrBeforeRefusesUnsafePreferredLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		plant   func(t *testing.T, dir string)
+		wantErr error
+	}{
+		{
+			name: "symlinked ledger",
+			plant: func(t *testing.T, dir string) {
+				requireSymlink(t, "db/ledger", filepath.Join(dir, "ledger"))
+			},
+			wantErr: ErrUnsafeSnapshotPath,
+		},
+		{
+			name: "ledger is a regular file",
+			plant: func(t *testing.T, dir string) {
+				if err := os.WriteFile(
+					filepath.Join(dir, "ledger"), []byte("x"), 0o640,
+				); err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+			},
+			wantErr: ErrUnsafeSnapshotPath,
+		},
+		{
+			name: "dangling ledger symlink",
+			plant: func(t *testing.T, dir string) {
+				requireSymlink(t, "missing", filepath.Join(dir, "ledger"))
+			},
+			wantErr: ErrUnsafeSnapshotPath,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeDBLedgerSnapshot(t, dir, "100", "fallback")
+			tc.plant(t, dir)
+
+			files, err := OpenSnapshotAtOrBefore(
+				openTree(t, dir), ^uint64(0),
+			)
+			if err == nil {
+				files.Close()
+				t.Fatal(
+					"an unusable ledger/ must fail the lookup, not hand " +
+						"layout selection to whoever planted it",
+				)
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestOpenSnapshotAtOrBeforeUsesDBLedgerWhenLedgerAbsent is the control: the
+// fallback layout is still reached when ledger/ genuinely is not there, which
+// is what makes the refusals above about planted content rather than about the
+// fallback being unreachable.
+func TestOpenSnapshotAtOrBeforeUsesDBLedgerWhenLedgerAbsent(t *testing.T) {
+	dir := t.TempDir()
+	writeDBLedgerSnapshot(t, dir, "100", "fallback")
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer files.Close()
+	got, err := io.ReadAll(files.State)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if string(got) != "fallback" {
+		t.Fatalf("expected the db/ledger state, got %q", string(got))
+	}
+}

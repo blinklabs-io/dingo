@@ -2920,7 +2920,16 @@ and the next one down tried, while a symlink or a substitution fails the
 snapshot outright. Absence is settled by lstat, which describes the entry
 rather than what it points at: opening a dangling symlink fails exactly as
 opening an absent file does, so deciding by the open would read planted content
-as an unfinished extraction. Falling back there would hand the choice of ledger state to whoever
+as an unfinished extraction.
+
+The same rule governs every choice between candidates, not just slot
+directories — which layout (`ledger/` before `db/ledger/`) and which tree (the
+ancillary one before the extraction directory) are picked the same way. Only a
+candidate that is genuinely absent moves on to the next; one that exists and is
+unusable fails the lookup. Otherwise making a candidate unopenable is a way of
+selecting the one after it, and the ancillary tree is the one a signature
+covers, so steering the search onto the unsigned extraction directory would be
+worth something. Falling back there would hand the choice of ledger state to whoever
 planted it, since making the newest unusable would be enough to select an older
 one. A symlinked UTxO table fails for the same reason rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
