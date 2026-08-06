@@ -588,10 +588,11 @@ type LedgerState struct {
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
-	// nowFunc overrides the wall clock used by the operational slot/time
-	// fallbacks. Nil outside tests, which inject a fixed clock so those
-	// fallbacks are deterministic.
-	nowFunc func() time.Time
+	// timeConverter owns slot/wall-clock time conversion (SlotToTime,
+	// TimeToSlot, SlotToEpoch, EpochInfo) and the operational near-now
+	// fallbacks used while the applied ledger is behind the wall clock. Built
+	// lazily via timeConv(); see slot.go.
+	timeConverter *SlotTimeConverter
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
@@ -842,6 +843,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	ls.timeConverter = ls.newTimeConverter()
 	ls.publishSnapshotsLocked()
 	// Cache configured chain checkpoints (keyed by block height) so the
 	// hot block-processing path does an O(1) lookup. Nil when the network
@@ -1717,7 +1719,7 @@ func (ls *LedgerState) initScheduler() error {
 	slotClockConfig := SlotClockConfig{
 		Logger: ls.config.Logger,
 	}
-	provider := newLedgerStateSlotProvider(ls)
+	provider := newSlotTimeConverterProvider(ls.timeConv())
 	ls.slotClock = NewSlotClock(provider, slotClockConfig)
 	ls.slotTickChan = ls.slotClock.Subscribe()
 
