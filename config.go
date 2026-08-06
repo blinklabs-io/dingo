@@ -499,10 +499,15 @@ func (n *Node) configValidate() error {
 		n.config.cfg.NetworkMagic,
 	); ok {
 		return fmt.Errorf(
-			"network %q must not use the Musashi prototype network magic (%d): "+
-				"the Musashi prototype disables consensus and ledger validation "+
-				"and must not be reachable from a standard network configuration",
+			"network identity conflict: network %q with networkMagic %d "+
+				"identifies both the %q network and the Musashi prototype "+
+				"network (name %q, magic %d); the Musashi prototype disables "+
+				"consensus and ledger validation and must not be reachable "+
+				"from a standard network configuration",
+			n.config.cfg.Network,
+			n.config.cfg.NetworkMagic,
 			network,
+			ouroboros.NetworkCardanoMusashi.Name,
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}

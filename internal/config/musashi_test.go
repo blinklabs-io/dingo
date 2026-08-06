@@ -162,19 +162,29 @@ func TestValidateRejectsMusashiIdentityConflict(t *testing.T) {
 			name:         "preview with prototype magic",
 			network:      "preview",
 			networkMagic: 164,
-			wantErr:      `network "preview" must not use the Musashi prototype network magic`,
+			// The message names both configured fields, so the operator can
+			// see which of the two they need to change.
+			wantErr: `network identity conflict: network "preview" with ` +
+				`networkMagic 164 identifies both the "preview" network and ` +
+				`the Musashi prototype network`,
 		},
 		{
 			name:         "preprod with prototype magic",
 			network:      "preprod",
 			networkMagic: 164,
-			wantErr:      `network "preprod" must not use the Musashi prototype network magic`,
+			wantErr: `network identity conflict: network "preprod" with ` +
+				`networkMagic 164 identifies both the "preprod" network and ` +
+				`the Musashi prototype network`,
 		},
 		{
+			// The reverse direction must not blame "preview", which the
+			// operator never configured: it reports musashi/2 as supplied.
 			name:         "prototype name with preview magic",
 			network:      "musashi",
 			networkMagic: 2,
-			wantErr:      `network "preview" must not use the Musashi prototype network magic`,
+			wantErr: `network identity conflict: network "musashi" with ` +
+				`networkMagic 2 identifies both the "preview" network and ` +
+				`the Musashi prototype network`,
 		},
 	}
 	for _, tt := range tests {

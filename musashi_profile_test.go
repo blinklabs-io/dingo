@@ -41,7 +41,7 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 				WithNetwork("preview"),
 				WithNetworkMagic(164),
 			},
-			wantErr: `network "preview" must not use the Musashi prototype network magic`,
+			wantErr: `network identity conflict: network "preview" with networkMagic 164`,
 		},
 		{
 			name: "preprod cannot borrow the prototype magic",
@@ -49,7 +49,7 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 				WithNetwork("preprod"),
 				WithNetworkMagic(164),
 			},
-			wantErr: `network "preprod" must not use the Musashi prototype network magic`,
+			wantErr: `network identity conflict: network "preprod" with networkMagic 164`,
 		},
 		{
 			name: "mainnet cannot borrow the prototype magic",
@@ -57,7 +57,7 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 				WithNetwork("mainnet"),
 				WithNetworkMagic(164),
 			},
-			wantErr: `network "mainnet" must not use the Musashi prototype network magic`,
+			wantErr: `network identity conflict: network "mainnet" with networkMagic 164`,
 		},
 		{
 			// The handshake uses the magic, so this configuration actually
@@ -67,7 +67,7 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 				WithNetwork("musashi"),
 				WithNetworkMagic(2),
 			},
-			wantErr: `network "preview" must not use the Musashi prototype network magic`,
+			wantErr: `network identity conflict: network "musashi" with networkMagic 2`,
 		},
 		{
 			name: "prototype name cannot borrow preprod's magic",
@@ -75,7 +75,7 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 				WithNetwork("musashi"),
 				WithNetworkMagic(1),
 			},
-			wantErr: `network "preprod" must not use the Musashi prototype network magic`,
+			wantErr: `network identity conflict: network "musashi" with networkMagic 1`,
 		},
 		{
 			name: "musashi by name is still accepted",
