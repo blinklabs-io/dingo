@@ -85,6 +85,18 @@ type BarkConfig struct {
 	DestinationRegistry *lifecycle.DestinationRegistry
 	TlsCertFilePath     string
 	TlsKeyFilePath      string
+	// TlsClientCAFilePath is a PEM CA bundle used to verify client
+	// certificates (mTLS) on this listener. Required whenever Lifecycle is
+	// set: the DatabaseService's destructive RPCs (CreateSnapshot,
+	// DeleteSnapshot, VerifySnapshot, Restore, Truncate, CancelOperation)
+	// refuse any request whose connection didn't present a certificate
+	// verified against this CA — see newOperatorAuthInterceptor in auth.go.
+	// Read-only RPCs (status/catalog/Archive) never require one. Requires
+	// TlsCertFilePath/TlsKeyFilePath to also be set, since mTLS has no
+	// meaning without the server's own TLS listener underneath it. Start
+	// (not NewBark) fails closed if Lifecycle is set without this — see
+	// Start's doc comment for why the check lives there.
+	TlsClientCAFilePath string
 	Host                string
 	Port                uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
@@ -215,6 +227,33 @@ func (b *Bark) Start(ctx context.Context) error {
 		return errors.New("server already started")
 	}
 
+	// Fail closed here, at the point the DatabaseService's destructive RPCs
+	// actually become network-reachable, rather than in NewBark: a
+	// *databaseServiceHandler built via newDatabaseServiceHandler and
+	// exercised through direct in-process Go calls (as most of this
+	// package's own handler-level tests do) never goes through Start's
+	// mux/interceptor wiring at all, so requiring TLS/a client CA in the
+	// constructor would reject a composition path that was never actually
+	// exposed over the network in the first place.
+	if b.config.Lifecycle != nil && b.config.TlsClientCAFilePath == "" {
+		b.mu.Unlock()
+		return errors.New(
+			"bark: TlsClientCAFilePath is required to start with lifecycle set — " +
+				"the DatabaseService's destructive RPCs (CreateSnapshot/" +
+				"DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation) " +
+				"must not be mounted without a way to authenticate callers",
+		)
+	}
+	if b.config.Lifecycle != nil &&
+		(b.config.TlsCertFilePath == "" || b.config.TlsKeyFilePath == "") {
+		b.mu.Unlock()
+		return errors.New(
+			"bark: TlsCertFilePath and TlsKeyFilePath are required to start " +
+				"with lifecycle set — mTLS client-certificate verification has " +
+				"no meaning without the server's own TLS listener",
+		)
+	}
+
 	mux := http.NewServeMux()
 	compress1KB := connect.WithCompressMinBytes(1024)
 
@@ -230,6 +269,11 @@ func (b *Bark) Start(ctx context.Context) error {
 		databasePath, databaseHandler := databaseconnect.NewDatabaseServiceHandler(
 			newDatabaseServiceHandler(b),
 			compress1KB,
+			connect.WithInterceptors(newOperatorAuthInterceptor(
+				b.config.Logger,
+				destructiveDatabaseProcedures,
+				readOnlyDatabaseProcedures,
+			)),
 		)
 		mux.Handle(databasePath, databaseHandler)
 		serviceNames = append(serviceNames, databaseconnect.DatabaseServiceName)
@@ -248,12 +292,12 @@ func (b *Bark) Start(ctx context.Context) error {
 		),
 	)
 
-	handler := httpcors.Handler(
+	handler := peerCertContextMiddleware(httpcors.Handler(
 		mux,
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 		},
-	)
+	))
 	listenAddr := barkListenAddr(b.config.Host, b.config.Port)
 	var server *http.Server
 	if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
@@ -340,6 +384,11 @@ func (b *Bark) startServer(server *http.Server) error {
 		)
 	}
 	useTLS := b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != ""
+	if b.config.TlsClientCAFilePath != "" && !useTLS {
+		return errors.New(
+			"failed to start bark gRPC server: TlsClientCAFilePath requires tls cert and key to also be set",
+		)
+	}
 	serverType := "non-TLS"
 	if useTLS {
 		serverType = "TLS"
@@ -367,6 +416,30 @@ func (b *Bark) startServer(server *http.Server) error {
 		// b.listenerAddr/b.server reporting a listener that is open but
 		// nobody is Accept-ing on.
 		server.TLSConfig.Certificates = []tls.Certificate{cert}
+
+		if b.config.TlsClientCAFilePath != "" {
+			pool, caErr := tlsutil.LoadClientCAPool(
+				b.config.TlsClientCAFilePath,
+			)
+			if caErr != nil {
+				return fmt.Errorf(
+					"failed to load client CA for bark gRPC %s server: %w",
+					serverType, caErr,
+				)
+			}
+			server.TLSConfig.ClientCAs = pool
+			// VerifyClientCertIfGiven, not RequireAndVerifyClientCert: this
+			// listener also serves read-only RPCs (status/catalog/Archive)
+			// that must keep working for a caller with no client cert at
+			// all. Only the destructive DatabaseService procedures actually
+			// require one — enforced per-request by
+			// newOperatorAuthInterceptor (auth.go), not at the handshake.
+			// Go's TLS stack still fully chain-verifies any cert that IS
+			// presented against ClientCAs during the handshake itself, so a
+			// cert signed by an untrusted CA never reaches the request
+			// layer regardless of which RPC it's calling.
+			server.TLSConfig.ClientAuth = tls.VerifyClientCertIfGiven
+		}
 	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {

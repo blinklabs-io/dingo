@@ -311,6 +311,37 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
+	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
+	// whenever bark is enabled with a snapshot directory configured —
+	// exactly node.go's Run() gating for lifecycleEnabled. Those RPCs must
+	// never be reachable without a way to authenticate callers, regardless
+	// of bind address (BarkHost/effectiveBarkHost is a network control, not
+	// an identity one), so a client CA is required upfront here rather than
+	// left to fail deep inside bark.Bark.Start at startup.
+	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
+		c.BarkClientCAFilePath == "" {
+		errs = append(errs, errors.New(
+			"barkClientCaFilePath is required when bark is enabled "+
+				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
+				"destructive DatabaseService RPCs must not be mounted "+
+				"without a way to authenticate callers",
+		))
+	}
+	// mTLS client verification also needs the server's own TLS pair --
+	// without it, bark.Bark.Start's own equivalent check (independent of
+	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
+	// deep inside node startup instead of here. Checked independently of
+	// the barkPort/snapshotDir gate above so a barkClientCaFilePath set by
+	// mistake without barkPort/snapshotDir still gets flagged.
+	if serving && c.BarkClientCAFilePath != "" &&
+		(c.TlsCertFilePath == "" || c.TlsKeyFilePath == "") {
+		errs = append(errs, errors.New(
+			"barkClientCaFilePath requires tlsCertFilePath and tlsKeyFilePath "+
+				"to also be set for mTLS client verification",
+		))
+	}
+
 	// Mempool
 	mempoolCapacity, evictionWatermark, rejectionWatermark := c.MempoolSettings()
 	if mempoolCapacity < 0 {

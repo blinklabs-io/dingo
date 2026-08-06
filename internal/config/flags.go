@@ -262,6 +262,12 @@ var flagSpecs = []flagSpec{
 		"",
 		"Bark RPC listen address (defaults to loopback-only when the database lifecycle service is enabled, all interfaces otherwise)",
 	),
+	stringFlag(
+		"BarkClientCAFilePath",
+		"bark-client-ca-file-path",
+		"",
+		"path to a PEM CA bundle; client certs verified against it authenticate Bark's destructive DatabaseService RPCs (required whenever the database lifecycle service is enabled)",
+	),
 
 	// History expiry
 	boolFlag(

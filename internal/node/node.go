@@ -354,6 +354,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
 			dingo.WithBarkPort(cfg.BarkPort),
 			dingo.WithBarkHost(cfg.BarkHost),
+			dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
 			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 				Enabled:   cfg.HistoryExpiry.Enabled,
 				Frequency: cfg.HistoryExpiry.Frequency,
