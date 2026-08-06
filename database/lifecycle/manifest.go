@@ -39,8 +39,8 @@ import (
 // ManifestFormatVersion is the current on-disk schema version of Manifest.
 // Bump it when making a breaking change to the JSON shape so old restore
 // tooling can reject a manifest it doesn't understand instead of silently
-// misreading it. Adding the Gates field did NOT bump this — see Gates'
-// doc comment for why.
+// misreading it. Adding the Gates field did not bump this -- see Gates'
+// doc comment for why that is acceptable today.
 const ManifestFormatVersion = 1
 
 // ManifestFileName is the name of the manifest file inside a snapshot
@@ -116,19 +116,16 @@ type Manifest struct {
 	// it, would otherwise silently diverge rewards from that point
 	// forward).
 	//
-	// This field is additive and optional (omitempty) and does NOT bump
-	// ManifestFormatVersion, deliberately: ParseManifest decodes with a
-	// plain json.Unmarshal, not DisallowUnknownFields, so an older dingo
-	// reading a manifest that carries Gates simply ignores the field and
-	// behaves exactly as it did before this feature existed — it loses
-	// only the extra gate check, not the ability to restore at all. The
-	// format version exists to reject a manifest a build genuinely
-	// cannot understand; a purely advisory field doesn't meet that bar.
-	// Bumping it would instead make every older dingo refuse to restore
-	// any snapshot taken by a newer one, an interoperability regression
-	// for no safety gain. Do not "fix" this by bumping the version if a
-	// future gate is added to this map — the same reasoning still
-	// applies as long as the addition stays additive.
+	// This field is optional (omitempty), and its addition did not bump
+	// ManifestFormatVersion, but it is not actually backward compatible:
+	// checksum() covers the whole struct, so a build that predates Gates
+	// ignores the unknown "gates" key on unmarshal (ParseManifest decodes
+	// with a plain json.Unmarshal, not DisallowUnknownFields) and then
+	// recomputes the checksum without a field it never saw, getting a
+	// different digest and rejecting an otherwise-valid manifest as
+	// ErrManifestCorrupted. That is acceptable only because this manifest
+	// format is unreleased: no build that predates Gates is deployed
+	// anywhere to hit it.
 	Gates nodesettings.Values `json:"gates,omitempty"`
 
 	// DingoVersion records the dingo build that produced the backup, so
