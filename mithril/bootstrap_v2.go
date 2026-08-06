@@ -268,27 +268,17 @@ func bootstrapV2(
 					return
 				}
 			}
-			dir, archPath, ancErr := downloadAncillaryV2(
+			tree, archPath, ancErr := downloadAncillaryV2(
 				ancCtx, cfg, artifact, downloadDir,
 			)
 			if ancErr != nil {
 				ancillaryErr = ancErr
 				return
 			}
-			// Recorded before the vetting below, so a tree that turns out
-			// to hold no ledger state still gets its archive cleaned up.
+			// The handle the manifest was checked through, carried straight
+			// across. Reopening the directory by name here would hand the
+			// import a tree nothing verified, under a flag saying otherwise.
 			ancillaryArchivePath = archPath
-			// Vetted even though this process just extracted it: the handle
-			// is what the manifest check and the import read through, and it
-			// is opening it here that binds the two to one tree.
-			tree := ledgerDir(dir)
-			if tree == nil {
-				ancillaryErr = fmt.Errorf(
-					"extracted ancillary data at %s holds no ledger state",
-					dir,
-				)
-				return
-			}
 			ancillaryTree = tree
 		})
 	}
@@ -387,9 +377,11 @@ func bootstrapV2(
 		ExtractRoot:   extractTree,
 		AncillaryDir:  ancillaryTree.Path(),
 		AncillaryRoot: ancillaryTree.Root(),
-		// Both paths that accept an ancillary tree run it through
-		// verifyAncillaryExtraction first, which checks the signed manifest
-		// when the bootstrap is a verified one and is a no-op otherwise.
+		// Both paths that accept an ancillary tree verify it through the very
+		// handle carried here — the cache-reuse path opens it once and keeps
+		// it, and downloadAncillaryV2 returns the handle it checked. So the
+		// flag is a claim about the directory this handle refers to, which is
+		// the only thing that makes it worth anything.
 		AncillaryVerified:    ancillaryTree != nil && cfg.VerifyCertificateChain,
 		AncillaryArchivePath: ancillaryArchivePath,
 	}
@@ -1177,14 +1169,23 @@ func sha256File(path string) (string, int64, error) {
 // (ledger state plus the next in-progress immutable trio) and, when
 // certificate verification is enabled, verifies the signed ancillary
 // manifest. A verified bootstrap fails closed when this data is unavailable.
+// downloadAncillaryV2 downloads, extracts and verifies the v2 ancillary archive
+// and returns the extracted tree as the handle its manifest was checked
+// through.
+//
+// Returning the handle rather than the directory's name is what lets the caller
+// claim the tree is verified. A name would have to be reopened, and the tree
+// behind it need not be the one the ancillary key signed by the time it is —
+// the check and the claim would then be about different directories. The caller
+// closes the result.
 func downloadAncillaryV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) (string, string, error) {
+) (*vettedDir, string, error) {
 	if len(artifact.Ancillary.Locations) == 0 {
-		return "", "", errors.New(
+		return nil, "", errors.New(
 			"no ancillary locations in Cardano database snapshot",
 		)
 	}
@@ -1234,7 +1235,7 @@ func downloadAncillaryV2(
 		err = errors.New("no usable ancillary locations")
 	}
 	if err != nil {
-		return "", "", fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"downloading ancillary archive: %w",
 			err,
 		)
@@ -1250,33 +1251,43 @@ func downloadAncillaryV2(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
 		WithReplaceDestination(),
 	); extractErr != nil {
-		return "", "", fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
 		)
 	}
 
-	// Verified through a handle on what was just extracted. The caller vets
-	// the directory again to obtain the handle it will import through; that
-	// second vetting is not redundant, because this one's handle does not
-	// outlive the function and a name alone would carry nothing across.
+	// Vetted and then verified through one handle, which is the same handle
+	// returned. Anything else leaves the manifest check describing a tree the
+	// caller does not go on to read.
 	extracted := ledgerDir(ancillaryDir)
-	verifyErr := verifyAncillaryExtraction(cfg, extracted)
-	extracted.Close()
-	if verifyErr != nil {
+	if extracted == nil {
+		// Unverified bootstraps reach here too — verifyAncillaryExtraction is
+		// a no-op for them — so an ancillary archive carrying no ledger state
+		// has to be caught on its own.
+		os.RemoveAll(ancillaryDir)
+		return nil, "", fmt.Errorf(
+			"extracted ancillary data at %s holds no ledger state",
+			ancillaryDir,
+		)
+	}
+	if verifyErr := verifyAncillaryExtraction(
+		cfg, extracted,
+	); verifyErr != nil {
 		// Remove the unverified extraction so it cannot be
 		// picked up by the resume path on a later run.
+		extracted.Close()
 		os.RemoveAll(ancillaryDir)
-		return "", "", verifyErr
+		return nil, "", verifyErr
 	}
 
 	cfg.Logger.Info(
 		"ancillary data extracted",
 		"component", "mithril",
-		"path", ancillaryDir,
+		"path", extracted.Path(),
 	)
 
-	return ancillaryDir, ancillaryPath, nil
+	return extracted, ancillaryPath, nil
 }
 
 // verifyAncillaryExtraction checks a verified bootstrap's ancillary tree

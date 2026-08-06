@@ -1170,3 +1170,66 @@ func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
 	assert.Empty(t, entries,
 		"nothing may be created through a symlinked extraction directory")
 }
+
+// TestBootstrapV2CarriesTheVerifiedAncillaryHandle pins that the handle a
+// verified result carries is the one the manifest was checked through.
+//
+// The manifest check happens inside downloadAncillaryV2. If that returned the
+// directory's name and the caller reopened it, a tree swapped in between would
+// be carried as AncillaryVerified while nothing had verified it — the flag
+// would be a claim about a directory the check never saw.
+func TestBootstrapV2CarriesTheVerifiedAncillaryHandle(t *testing.T) {
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	downloadDir := t.TempDir()
+
+	result, err := Bootstrap(
+		context.Background(), fixture.bootstrapConfig(downloadDir),
+	)
+	require.NoError(t, err)
+	t.Cleanup(result.CloseHandles)
+	require.True(t, result.AncillaryVerified,
+		"a verified bootstrap must report its ancillary tree as verified")
+	require.NotNil(t, result.AncillaryRoot)
+
+	verified, err := ledgerstate.OpenSnapshotAtOrBefore(
+		result.AncillaryRoot, ^uint64(0),
+	)
+	require.NoError(t, err)
+	want, err := io.ReadAll(verified.State)
+	verified.Close()
+	require.NoError(t, err)
+
+	// A writer takes the ancillary directory's name after the bootstrap
+	// returned, in the window before the import reads it.
+	theirs := filepath.Join(downloadDir, "theirs", "ledger", "100")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(theirs, "state"), []byte("theirs"), 0o640,
+	))
+	requireDirectorySwap(
+		t, result.AncillaryDir, filepath.Join(downloadDir, "moved-aside"),
+	)
+	requireDirectorySwap(
+		t, filepath.Join(downloadDir, "theirs"), result.AncillaryDir,
+	)
+
+	// The premise: the name denotes the writer's tree now.
+	byName, err := os.ReadFile(
+		filepath.Join(result.AncillaryDir, "ledger", "100", "state"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("theirs"), byName,
+		"the substitution must be observable through the name, or this "+
+			"test proves nothing")
+
+	// The carried handle still refers to the tree the manifest covered.
+	after, err := ledgerstate.OpenSnapshotAtOrBefore(
+		result.AncillaryRoot, ^uint64(0),
+	)
+	require.NoError(t, err)
+	defer after.Close()
+	got, err := io.ReadAll(after.State)
+	require.NoError(t, err)
+	assert.Equal(t, want, got,
+		"AncillaryVerified must describe the tree the handle refers to")
+}

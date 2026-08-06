@@ -2937,9 +2937,9 @@ not covered by that signature, so falling through would let whoever emptied the
 first tree choose the second. Where nothing was verified there is no downgrade
 to make and the fallback stays — v1 keeps its ledger state in the main archive,
 so looking there is how that layout works at all, and it is also what covers an
-ancillary tree holding only states newer than the certified tip. Falling back there would hand the choice of ledger state to whoever
-planted it, since making the newest unusable would be enough to select an older
-one. A symlinked UTxO table fails for the same reason rather than being reported
+ancillary tree holding only states newer than the certified tip.
+
+A symlinked UTxO table fails on the same rule rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
 snapshot's table is somebody else's".
 
