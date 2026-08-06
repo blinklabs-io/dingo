@@ -69,6 +69,47 @@ func NewPoolCredentials() *PoolCredentials {
 
 // LoadFromFiles loads all pool credentials from the specified file paths.
 // Uses Bursa to parse cardano-cli format key files.
+func (pc *PoolCredentials) LoadFromFiles(
+	vrfSKeyPath string,
+	kesSKeyPath string,
+	opCertPath string,
+) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	if err := pc.loadVRFAndOpCertLocked(vrfSKeyPath, opCertPath); err != nil {
+		return err
+	}
+
+	// Load KES signing key
+	kesKey, err := bursa.LoadKeyFromFile(kesSKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to load KES signing key: %w", err)
+	}
+	if len(kesKey.SKey) != kes.CardanoKesSecretKeySize {
+		return fmt.Errorf(
+			"invalid KES key size: expected %d, got %d",
+			kes.CardanoKesSecretKeySize,
+			len(kesKey.SKey),
+		)
+	}
+	pc.kesSKey = &kes.SecretKey{
+		Depth:  kes.CardanoKesDepth,
+		Period: 0, // Will be updated during block production
+		Data:   kesKey.SKey,
+	}
+	pc.kesVKey = kesKey.VKey
+
+	// Validate that OpCert KES vkey matches the loaded KES key
+	if !bytes.Equal(pc.kesVKey, pc.opCert.KESVKey) {
+		return errors.New(
+			"KES verification key mismatch: loaded key does not match OpCert KES vkey",
+		)
+	}
+
+	return nil
+}
+
 // loadVRFAndOpCertLocked loads the VRF signing key and the operational
 // certificate and derives the pool ID. Both credential loaders need exactly
 // this; only the KES handling differs between them, so keeping one copy means a
@@ -108,47 +149,6 @@ func (pc *PoolCredentials) loadVRFAndOpCertLocked(
 
 	// Derive pool ID from cold verification key (Blake2b-224 hash)
 	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash(pc.opCert.ColdVKey))
-	return nil
-}
-
-func (pc *PoolCredentials) LoadFromFiles(
-	vrfSKeyPath string,
-	kesSKeyPath string,
-	opCertPath string,
-) error {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	if err := pc.loadVRFAndOpCertLocked(vrfSKeyPath, opCertPath); err != nil {
-		return err
-	}
-
-	// Load KES signing key
-	kesKey, err := bursa.LoadKeyFromFile(kesSKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to load KES signing key: %w", err)
-	}
-	if len(kesKey.SKey) != kes.CardanoKesSecretKeySize {
-		return fmt.Errorf(
-			"invalid KES key size: expected %d, got %d",
-			kes.CardanoKesSecretKeySize,
-			len(kesKey.SKey),
-		)
-	}
-	pc.kesSKey = &kes.SecretKey{
-		Depth:  kes.CardanoKesDepth,
-		Period: 0, // Will be updated during block production
-		Data:   kesKey.SKey,
-	}
-	pc.kesVKey = kesKey.VKey
-
-	// Validate that OpCert KES vkey matches the loaded KES key
-	if !bytes.Equal(pc.kesVKey, pc.opCert.KESVKey) {
-		return errors.New(
-			"KES verification key mismatch: loaded key does not match OpCert KES vkey",
-		)
-	}
-
 	return nil
 }
 
