@@ -418,3 +418,58 @@ func TestOpenSnapshotAtOrBeforeRefusesRatherThanFallingBack(t *testing.T) {
 		t.Fatalf("expected ErrUnsafeSnapshotPath, got %v", err)
 	}
 }
+
+// TestOpenSnapshotAtOrBeforeRefusesDanglingNewestState covers the case that
+// makes "skip when the state is missing" dangerous.
+//
+// Opening a dangling symlink fails with ErrNotExist, exactly as opening an
+// absent file does. Deciding the slot is not a candidate on that basis would
+// let an attacker choose the imported ledger state by pointing the newest one
+// at nothing — the fallback does the rest. Whether the entry exists is settled
+// by lstat, which describes the link rather than its missing target.
+func TestOpenSnapshotAtOrBeforeRefusesDanglingNewestState(t *testing.T) {
+	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
+	newer := filepath.Join(dir, "ledger", "200")
+	if err := os.MkdirAll(newer, 0o750); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	requireSymlink(t, "missing", filepath.Join(newer, "state"))
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err == nil {
+		files.Close()
+		t.Fatal(
+			"a dangling newest state must fail the snapshot, not read as " +
+				"absent and fall back to an older slot",
+		)
+	}
+	if errors.Is(err, errNoStateEntry) {
+		t.Fatal("a dangling symlink is planted content, not an absent state")
+	}
+}
+
+// TestOpenSnapshotAtOrBeforeRefusesMalformedNewestTable is the same argument
+// one file over: a UTxO-HD slot whose tables directory holds no tvar is
+// malformed, and skipping it would again let the newest slot be made unusable
+// on purpose.
+func TestOpenSnapshotAtOrBeforeRefusesMalformedNewestTable(t *testing.T) {
+	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
+	newer := filepath.Join(dir, "ledger", "200")
+	if err := os.MkdirAll(filepath.Join(newer, "tables"), 0o750); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(newer, "state"), []byte("newer"), 0o640,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err == nil {
+		files.Close()
+		t.Fatal(
+			"a newest slot with an empty tables directory must fail the " +
+				"snapshot, not fall back to an older slot",
+		)
+	}
+}

@@ -249,17 +249,23 @@ func OpenSnapshotAtOrBefore(
 
 	// Prefer UTxO-HD format (newer), newest slot first.
 	//
-	// A slot directory holding no state is not a candidate and the next one
-	// down is tried; anything else — a symlink, a substitution, an unreadable
-	// state — fails the snapshot rather than quietly selecting an older one.
-	// Falling through on those would let planted content decide which ledger
-	// state gets imported, by making the newest one unusable.
+	// A slot directory that never had a state is not a candidate and the next
+	// one down is tried; anything else — a symlink, a substitution, a state or
+	// table that exists but cannot be read — fails the snapshot rather than
+	// quietly selecting an older one. Falling through on those would let
+	// planted content decide which ledger state gets imported, by making the
+	// newest one unusable.
+	//
+	// Only errNoStateEntry means "never had one". Skipping on ErrNotExist
+	// instead would read a dangling symlink as an absent state, since opening
+	// one fails exactly the same way — and a dangling symlink is planted
+	// content, which is the thing that must not get to choose.
 	for _, slotDir := range sortNumericDesc(utxoHDDirs) {
 		files, err := openUTxOHDSnapshot(ledgerRoot, ledgerRel, slotDir)
 		if err == nil {
 			return files, nil
 		}
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, errNoStateEntry) {
 			continue
 		}
 		return nil, err
@@ -285,9 +291,22 @@ func OpenSnapshotAtOrBefore(
 	)
 }
 
+// errNoStateEntry reports a slot directory with no state entry at all — an
+// extraction that was interrupted before writing one, which is ordinary and
+// means the slot is simply not a candidate.
+//
+// It is deliberately not ErrNotExist. Opening a dangling symlink fails with
+// ErrNotExist too, and the two must not be confused: one is a slot that never
+// had a state, the other is one whose state somebody replaced with a link to
+// nothing.
+var errNoStateEntry = errors.New("slot directory holds no ledger state")
+
 // openUTxOHDSnapshot opens ledger/<slot>/state and the UTxO table beside it,
 // both through a handle on the slot directory, so the state and the table are
 // taken from one directory rather than from a name resolved twice.
+//
+// It returns errNoStateEntry when the slot holds no state entry, and any other
+// error means the caller must refuse rather than try an older slot.
 func openUTxOHDSnapshot(
 	ledgerRoot *os.Root,
 	ledgerRel string,
@@ -300,6 +319,22 @@ func openUTxOHDSnapshot(
 		)
 	}
 	defer slotRoot.Close()
+
+	// Whether a state entry exists is settled by lstat, which describes the
+	// entry rather than whatever it points at. Deciding this by trying to open
+	// it would make a dangling symlink indistinguishable from an absent state,
+	// and an attacker could then pick the imported state by pointing the newest
+	// one at nothing.
+	//
+	// Past this point the entry exists, so every failure is a refusal.
+	if _, err := slotRoot.Lstat("state"); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, errNoStateEntry
+		}
+		return nil, fmt.Errorf(
+			"inspecting ledger state %s/state: %w", slotDir, err,
+		)
+	}
 
 	state, err := openVerifiedFile(slotRoot, "state")
 	if err != nil {

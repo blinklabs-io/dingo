@@ -2915,9 +2915,12 @@ Each candidate is settled by *opening* it rather than by inspecting it and
 opening it afterwards: asking whether `ledger` is a directory and later opening
 `ledger` are two questions, and a writer between them can make the answers
 describe different directories — the second still verified, just not the one the
-choice was made about. So a slot directory holding no state is skipped and the
-next one down tried, while a symlink or a substitution fails the snapshot
-outright. Falling back there would hand the choice of ledger state to whoever
+choice was made about. So a slot directory that never had a state is skipped
+and the next one down tried, while a symlink or a substitution fails the
+snapshot outright. Absence is settled by lstat, which describes the entry
+rather than what it points at: opening a dangling symlink fails exactly as
+opening an absent file does, so deciding by the open would read planted content
+as an unfinished extraction. Falling back there would hand the choice of ledger state to whoever
 planted it, since making the newest unusable would be enough to select an older
 one. A symlinked UTxO table fails for the same reason rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
