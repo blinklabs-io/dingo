@@ -169,7 +169,10 @@ func New(cfg Config) (*Server, error) {
 			"midnight grpc: both tls cert and key must be specified",
 		)
 	}
-	return &Server{config: cfg, metrics: newServerMetrics(cfg.PromRegistry)}, nil
+	return &Server{
+		config:  cfg,
+		metrics: newServerMetrics(cfg.PromRegistry),
+	}, nil
 }
 
 // Start binds the listener and serves the gRPC server in a background
@@ -180,7 +183,9 @@ func New(cfg Config) (*Server, error) {
 func (s *Server) Start(ctx context.Context) error {
 	useTLS := s.config.TLSCertFilePath != "" && s.config.TLSKeyFilePath != ""
 
-	opts := []grpc.ServerOption{grpc.UnaryInterceptor(s.metrics.unaryInterceptor)}
+	opts := []grpc.ServerOption{
+		grpc.UnaryInterceptor(s.metrics.unaryInterceptor),
+	}
 	serverType := "non-TLS"
 	if useTLS {
 		serverType = "TLS"

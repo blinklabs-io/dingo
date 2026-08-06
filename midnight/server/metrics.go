@@ -82,6 +82,7 @@ func (m *serverMetrics) unaryInterceptor(
 	start := time.Now()
 	resp, err := handler(ctx, req)
 	m.requestsTotal.WithLabelValues(method).Inc()
-	m.requestDuration.WithLabelValues(method).Observe(time.Since(start).Seconds())
+	m.requestDuration.WithLabelValues(method).
+		Observe(time.Since(start).Seconds())
 	return resp, err
 }

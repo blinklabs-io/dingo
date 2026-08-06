@@ -173,7 +173,9 @@ func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
 // reflect real MidnightState API usage. Call Check first (must not be
 // recorded), then a real MidnightState RPC (must be the only thing
 // recorded).
-func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(t *testing.T) {
+func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(
+	t *testing.T,
+) {
 	reg := prometheus.NewRegistry()
 	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
 

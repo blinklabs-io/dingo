@@ -88,7 +88,9 @@ func TestUnaryInterceptor_RecordsFailedRequestsToo(t *testing.T) {
 // (no panic) when constructed with a nil Prometheus registry.
 func TestNewServerMetrics_NilRegistryIsSafe(t *testing.T) {
 	m := newServerMetrics(nil)
-	info := &grpc.UnaryServerInfo{FullMethod: "/midnight_state.MidnightState/GetEpochNonce"}
+	info := &grpc.UnaryServerInfo{
+		FullMethod: "/midnight_state.MidnightState/GetEpochNonce",
+	}
 	handler := func(ctx context.Context, req any) (any, error) {
 		return nil, nil
 	}
