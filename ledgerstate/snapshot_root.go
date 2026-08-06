@@ -38,12 +38,14 @@ package ledgerstate
 // names are; they are converted where they reach an os.Root method.
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -257,6 +259,16 @@ func openLedgerDirIn(root *os.Root) (*os.Root, string, error) {
 	)
 }
 
+// slotCandidate is one entry in a ledger directory that names a slot, together
+// with what kind of thing it is — a UTxO-HD slot directory or a legacy state
+// file. Both layouts go into one ordered list so that selection is by slot
+// rather than by layout.
+type slotCandidate struct {
+	name string
+	slot uint64
+	dir  bool
+}
+
 // OpenSnapshotAtOrBefore is FindLedgerStateFileAtOrBefore for an untrusted
 // tree: it searches through an open handle on the extracted snapshot directory
 // and returns the selected files already open, together with the UTxO-HD table
@@ -282,9 +294,14 @@ func OpenSnapshotAtOrBefore(
 		return nil, fmt.Errorf("reading ledger directory: %w", err)
 	}
 
-	var utxoHDDirs []string
-	var legacyFiles []string
-
+	// Every entry naming a slot becomes a candidate or a refusal. None is
+	// dropped, because dropping one is indistinguishable from it never having
+	// been there — and that is exactly the difference a planted entry trades
+	// on. A name that parses as a slot is already a legitimate state name:
+	// stripLedgerSuffix only removes the two state suffixes, so `.checksum`,
+	// `.lock` and `.tmp` companions fail the parse rather than needing to be
+	// excluded by name here.
+	candidates := make([]slotCandidate, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
 		slot, parseErr := strconv.ParseUint(
@@ -295,26 +312,58 @@ func OpenSnapshotAtOrBefore(
 		if parseErr != nil || slot > maxSlot {
 			continue
 		}
-		if e.IsDir() {
+		switch {
+		case e.IsDir():
 			// UTxO-HD format: directory named by slot number. Whether it
 			// actually holds a state is settled by opening it below, not by a
 			// check here that the open would then have to repeat.
+			candidates = append(
+				candidates, slotCandidate{name: name, slot: slot, dir: true},
+			)
+		case e.Type().IsRegular():
+			// Legacy format: the state is the file itself.
+			candidates = append(
+				candidates, slotCandidate{name: name, slot: slot},
+			)
+		default:
+			// Present, named like a slot, and neither of the two things a slot
+			// is ever written as. ReadDir reports a symlink as a symlink
+			// rather than as whatever it points at, so this is where one
+			// lands — and extraction never writes one, which makes it evidence
+			// somebody else did.
 			//
-			// ReadDir reports a symlink as its own type rather than as the
-			// directory it points at, so one never reaches this branch.
-			utxoHDDirs = append(utxoHDDirs, name)
-			continue
-		}
-		// Legacy format: .lstate files or numeric slot filenames
-		if strings.HasSuffix(name, ".lstate") ||
-			strings.HasSuffix(name, "_snapshot") ||
-			isLedgerStateFile(name) {
-			legacyFiles = append(legacyFiles, name)
+			// Refused rather than ignored. Ignoring it reads as "there is no
+			// slot 200", so a real slot 200 replaced by a link would hand the
+			// import to slot 100 and report nothing wrong.
+			return nil, fmt.Errorf(
+				"%w: %s is neither a slot directory nor a state file",
+				ErrUnsafeSnapshotPath, path.Join(ledgerRel, name),
+			)
 		}
 	}
 
-	// Prefer UTxO-HD format (newer), newest slot first.
+	// Newest slot first across both layouts, UTxO-HD winning a tie on the same
+	// slot number.
 	//
+	// Preferring UTxO-HD is a tie-break between layouts, not a licence to
+	// import an older state than the tree holds. Draining the directories
+	// first and only then looking at the files would let a numeric *file* at a
+	// newer slot be pre-empted by a directory at an older one — the same
+	// demotion the refusal above prevents, arrived at without planting
+	// anything the enumeration would reject.
+	slices.SortFunc(candidates, func(a, b slotCandidate) int {
+		if a.slot != b.slot {
+			return cmp.Compare(b.slot, a.slot)
+		}
+		if a.dir != b.dir {
+			if a.dir {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.name, b.name)
+	})
+
 	// A slot directory that never had a state is not a candidate and the next
 	// one down is tried; anything else — a symlink, a substitution, a state or
 	// table that exists but cannot be read — fails the snapshot rather than
@@ -326,8 +375,20 @@ func OpenSnapshotAtOrBefore(
 	// instead would read a dangling symlink as an absent state, since opening
 	// one fails exactly the same way — and a dangling symlink is planted
 	// content, which is the thing that must not get to choose.
-	for _, slotDir := range sortNumericDesc(utxoHDDirs) {
-		files, err := openUTxOHDSnapshot(ledgerRoot, ledgerRel, slotDir)
+	for _, candidate := range candidates {
+		if !candidate.dir {
+			state, err := openVerifiedFile(ledgerRoot, candidate.name)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"opening ledger state %s: %w", candidate.name, err,
+				)
+			}
+			return &SnapshotFiles{
+				State:     state,
+				StatePath: path.Join(ledgerRel, candidate.name),
+			}, nil
+		}
+		files, err := openUTxOHDSnapshot(ledgerRoot, ledgerRel, candidate.name)
 		if err == nil {
 			return files, nil
 		}
@@ -335,19 +396,6 @@ func OpenSnapshotAtOrBefore(
 			continue
 		}
 		return nil, err
-	}
-
-	if legacyFiles = sortNumericSuffixDesc(legacyFiles); len(legacyFiles) > 0 {
-		state, err := openVerifiedFile(ledgerRoot, legacyFiles[0])
-		if err != nil {
-			return nil, fmt.Errorf(
-				"opening ledger state %s: %w", legacyFiles[0], err,
-			)
-		}
-		return &SnapshotFiles{
-			State:     state,
-			StatePath: path.Join(ledgerRel, legacyFiles[0]),
-		}, nil
 	}
 
 	return nil, fmt.Errorf(

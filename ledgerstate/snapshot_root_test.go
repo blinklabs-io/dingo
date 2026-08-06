@@ -593,3 +593,150 @@ func TestOpenSnapshotAtOrBeforeRefusesDirectoryState(t *testing.T) {
 		t.Fatalf("expected ErrUnsafeSnapshotPath, got %v", err)
 	}
 }
+
+// addSlotDir adds a second UTxO-HD slot directory to a tree built by
+// writeUTxOHDSnapshot.
+func addSlotDir(t *testing.T, dir, slot, state string) {
+	t.Helper()
+	slotDir := filepath.Join(dir, "ledger", slot)
+	if err := os.MkdirAll(slotDir, 0o750); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(slotDir, "state"), []byte(state), 0o640,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+}
+
+// TestOpenSnapshotAtOrBeforeRefusesADemotedNewestSlot covers the selection a
+// planted entry can force when there is a valid older slot to fall back to.
+//
+// The refusals elsewhere in this file all use a tree whose only slot is the
+// planted one, so ignoring the plant produces an error either way and the test
+// passes whether or not the entry was inspected. With a valid older slot
+// present, skipping the newest is *silent*: the import succeeds, from a state
+// the planter chose by making the real newest one unusable. That is the whole
+// thing the fail-closed rule exists to prevent, and it was the one arrangement
+// not being tested.
+//
+// The mechanism is the enumeration, not the selection loop. A numeric entry
+// that is not a directory never reached the UTxO-HD candidates, and the loop
+// over those ran to completion — succeeding on the older slot — before
+// anything else was consulted.
+//
+// A numeric entry that is a plain *file* is deliberately not here: that is the
+// legacy state layout, so slot 200 is selectable rather than demoted, and
+// TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats covers it. Refusing
+// it would buy nothing anyway — a writer who can put a file at ledger/200 can
+// put a directory at ledger/200/state instead.
+func TestOpenSnapshotAtOrBeforeRefusesADemotedNewestSlot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, ledger string)
+	}{
+		{
+			// The newest slot directory replaced by a link. ReadDir reports it
+			// as a symlink rather than as the directory it points at.
+			name: "newest slot is a symlink",
+			plant: func(t *testing.T, ledger string) {
+				requireSymlink(t, "elsewhere", filepath.Join(ledger, "200"))
+			},
+		},
+		{
+			name: "newest slot is a dangling symlink",
+			plant: func(t *testing.T, ledger string) {
+				requireSymlink(t, "missing", filepath.Join(ledger, "200"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A valid older slot, so a skipped newest one is not merely a
+			// different error — it is a successful import of the wrong state.
+			dir := writeUTxOHDSnapshot(t, "100", "older", "older-tables")
+			ledger := filepath.Join(dir, "ledger")
+			if err := os.MkdirAll(
+				filepath.Join(dir, "elsewhere"), 0o750,
+			); err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+			tc.plant(t, ledger)
+
+			files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+			if err == nil {
+				got, _ := io.ReadAll(files.State)
+				files.Close()
+				t.Fatalf(
+					"a demoted newest slot must fail the snapshot, not "+
+						"select an older one; imported %q from %s",
+					string(got), files.StatePath,
+				)
+			}
+			if !errors.Is(err, ErrUnsafeSnapshotPath) {
+				t.Fatalf("expected ErrUnsafeSnapshotPath, got %v", err)
+			}
+		})
+	}
+}
+
+// TestOpenSnapshotAtOrBeforeStillSkipsAStatelessNewestSlot is the control that
+// keeps the refusals above about planted content.
+//
+// A slot directory that never had a state is ordinary — an extraction
+// interrupted before writing one — and must still fall through to the next slot
+// down. Only that case is skippable; the entry being present but the wrong kind
+// of thing is not.
+func TestOpenSnapshotAtOrBeforeStillSkipsAStatelessNewestSlot(t *testing.T) {
+	dir := writeUTxOHDSnapshot(t, "100", "older", "older-tables")
+	if err := os.MkdirAll(
+		filepath.Join(dir, "ledger", "200"), 0o750,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer files.Close()
+	got, err := io.ReadAll(files.State)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if string(got) != "older" {
+		t.Fatalf("expected the older slot's state, got %q", string(got))
+	}
+}
+
+// TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats covers a legacy state
+// file newer than every UTxO-HD slot directory.
+//
+// Preferring the UTxO-HD format is a tie-break between layouts, not a licence
+// to import an older state than the tree holds. Treating it as the latter is
+// what let a planted numeric file demote a real slot directory: the file landed
+// among the legacy candidates, which are only consulted once the directories
+// have all been tried and one of them has already won.
+func TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats(t *testing.T) {
+	dir := writeUTxOHDSnapshot(t, "100", "older", "older-tables")
+	if err := os.WriteFile(
+		filepath.Join(dir, "ledger", "200"), []byte("newer"), 0o640,
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer files.Close()
+	got, err := io.ReadAll(files.State)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if string(got) != "newer" {
+		t.Fatalf(
+			"expected the newer legacy state, got %q from %s",
+			string(got), files.StatePath,
+		)
+	}
+}

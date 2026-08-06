@@ -2949,6 +2949,21 @@ rather than what it points at: opening a dangling symlink fails exactly as
 opening an absent file does, so deciding by the open would read planted content
 as an unfinished extraction.
 
+That rule binds the enumeration as much as the selection, and the enumeration
+is the easier of the two to leave a hole in. `ReadDir` reports a symlink as a
+symlink rather than as whatever it points at, so a slot entry that is neither a
+directory nor a regular file never resembles a candidate at all — and an entry
+quietly left out of the candidate list is indistinguishable from one that was
+never there. So every entry naming a slot becomes a candidate or a refusal:
+directories are UTxO-HD candidates, regular files are legacy ones, and anything
+else fails the snapshot.
+
+Selection is then by slot across both layouts, with UTxO-HD winning a tie on the
+same slot number. Preferring UTxO-HD is a tie-break between layouts, not a
+licence to import an older state than the tree holds — draining the directories
+first and consulting the files only afterwards would let a legacy state at a
+newer slot be pre-empted by a directory at an older one.
+
 The same rule governs every choice between candidates, not just slot
 directories — which layout (`ledger/` before `db/ledger/`) and which tree (the
 ancillary one before the extraction directory) are picked the same way. Only a
