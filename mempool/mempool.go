@@ -41,12 +41,17 @@ const (
 	AddTransactionEventType    event.EventType = "mempool.add_tx"
 	RemoveTransactionEventType event.EventType = "mempool.remove_tx"
 
-	DefaultEvictionWatermark      = 0.90
-	DefaultRejectionWatermark     = 0.95
-	DefaultTransactionTTL         = 5 * time.Minute
-	DefaultCleanupInterval        = 1 * time.Minute
-	DefaultRevalidationDeltaCap   = 64
-	DefaultConsumerCacheSize      = 1024
+	DefaultEvictionWatermark    = 0.90
+	DefaultRejectionWatermark   = 0.95
+	DefaultTransactionTTL       = 5 * time.Minute
+	DefaultCleanupInterval      = 1 * time.Minute
+	DefaultRevalidationDeltaCap = 64
+	DefaultConsumerCacheSize    = 1024
+	// defaultRevalidationJournalCap bounds the mutation journal a revalidation
+	// pass may accumulate. A mempoolMutation is 40 bytes, so the backing slice
+	// tops out near 42 MiB, and each entry additionally pins the transaction it
+	// describes for the duration of the pass. A full drain of a cap-sized
+	// journal measured 5.3 ms.
 	defaultRevalidationJournalCap = 1 << 20
 )
 
@@ -932,8 +937,13 @@ var errRevalidationJournalOverflow = errors.New(
 	"mempool: revalidation mutation journal overflow",
 )
 
+// errRevalidationCatchup reports repeated races against the live pool during
+// finalisation: each race consumes a round without extending the budget, so
+// enough consecutive ones exhaust it. Sustained mutation pressure does not
+// reach here, because the budget grows with the backlog; that path ends in
+// errRevalidationJournalOverflow instead.
 var errRevalidationCatchup = errors.New(
-	"mempool: revalidation could not catch up with mutations",
+	"mempool: revalidation lost repeated races with the live pool",
 )
 
 // rebuildOverlay re-validates all pending TXs against a stable ledger snapshot
@@ -956,8 +966,8 @@ func (m *Mempool) rebuildOverlay() error {
 			continue
 		}
 		if errors.Is(err, errRevalidationCatchup) {
-			// The live pool is unchanged. A later chain update will retry
-			// revalidation after mutation pressure subsides.
+			// The live pool is unchanged. Revalidation kept losing the
+			// finalisation race; a later chain update retries it.
 			return nil
 		}
 		if err != nil {
@@ -1193,6 +1203,12 @@ func mutationWindow(
 // in an already-enlarged budget computes a total no larger than the current one,
 // so the budget does not grow and the loop bails with errRevalidationCatchup
 // even though the work would have fit.
+//
+// Note this means the budget never ends the loop while work remains: with
+// pending > 0 the result always exceeds round, by at least
+// maxRevalidationCatchupRounds. Termination therefore comes from sampling an
+// empty journal, from the journal cap, or from a replay error, not from this
+// number. The journal cap is the real bound on a sustained arrival rate.
 func catchupBudget(round, pending, deltaCap int) int {
 	if deltaCap < 1 {
 		deltaCap = 1

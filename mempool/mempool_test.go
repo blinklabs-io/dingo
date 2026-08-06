@@ -3991,6 +3991,55 @@ func TestCatchupBudgetAccountsForRoundsAlreadySpent(t *testing.T) {
 	assert.Equal(t, maxRevalidationCatchupRounds, catchupBudget(0, 0, deltaCap))
 }
 
+// TestCatchupBudgetAlwaysExceedsCurrentRound pins the property the catch-up
+// loop actually depends on, as opposed to the arithmetic pinned above: while
+// any work is pending, the recomputed budget is strictly greater than the round
+// the loop has reached, so `round < catchupRounds` can never end the loop. The
+// terminators are an empty journal, the journal cap, or a replay error. If this
+// ever fails, the loop gained a new exit that the surrounding comments and the
+// ARCHITECTURE.md note do not describe.
+func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
+	for _, deltaCap := range []int{1, 8, 64, 4096} {
+		for _, round := range []int{0, 1, 17, 1_000, 100_000} {
+			for _, pending := range []int{1, 2, 63, 64, 65, 1 << 20} {
+				got := catchupBudget(round, pending, deltaCap)
+				assert.Greater(t, got, round,
+					"deltaCap=%d round=%d pending=%d: a pending backlog must leave headroom",
+					deltaCap, round, pending,
+				)
+			}
+		}
+	}
+
+	// With nothing pending the budget stops growing, which is what lets the
+	// loop finish once it samples an empty journal.
+	assert.Equal(
+		t,
+		1_000+maxRevalidationCatchupRounds,
+		catchupBudget(1_000, 0, 64),
+	)
+}
+
+// TestMutationWindowReturnsEmptyNotNil covers mutationWindow's documented
+// never-nil contract. No production path reaches it today, because the caller
+// takes the finalize branch when pending is zero, so without this the contract
+// would be uncovered if that ever changes.
+func TestMutationWindowReturnsEmptyNotNil(t *testing.T) {
+	journal := []mempoolMutation{{seq: 1}, {seq: 2}}
+
+	// Caught up: sequence at or beyond the newest entry.
+	window, pending := mutationWindow(journal, 2, 64)
+	assert.NotNil(t, window)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+
+	// Empty journal.
+	window, pending = mutationWindow([]mempoolMutation{}, 0, 64)
+	assert.NotNil(t, window)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+}
+
 // mutationWindow must bound what it clones. Cloning the whole remaining suffix
 // each round, under mutationMutex, made a large journal quadratic in scans and
 // allocations and blocked admissions and removals.
