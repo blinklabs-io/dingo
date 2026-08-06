@@ -1123,9 +1123,11 @@ func chunkDirUnder(base, rel string) *vettedDir {
 // v1 derives `immutable-<digest>` and `ancillary-<digest>` inside the download
 // directory, and `Cleanup` calls os.RemoveAll on both. The digest is the
 // aggregator's string. Joining it raw does not stay inside: a digest beginning
-// with a separator makes the "immutable-" prefix its own path element, which
-// the following ".." then pops — "/../.." reduces to the download directory's
-// grandparent, and that is what gets extracted into and then removed.
+// with a separator makes the "immutable-" prefix its own path element, and the
+// ".." that follows pops it, so the first ".." buys nothing and every one after
+// it climbs a level. The depth is the digest's to choose — "/../.." reaches the
+// download directory's parent, "/../../.." its grandparent — and whatever it
+// reaches is what gets extracted into and then removed.
 //
 // v2 is closed by a different check: it refuses an artifact whose hash is not
 // the one it computes, and a computed hash is hex. v1 has no computed hash to
@@ -1134,8 +1136,16 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 	archiveData := createChunkArchive(t)
 
 	for _, digest := range []string{
-		"/../../pwned",
+		// One level up from the download directory, then two, then a named
+		// entry beside it. Nesting the download directory two deep below the
+		// test root is what keeps the deepest of these observable — an escape
+		// that climbed past the root would land in the system temp directory,
+		// where this test could assert nothing about it.
 		"/../..",
+		"/../../..",
+		"/../../pwned",
+		// Neither of these escapes; both are still refused, because a digest
+		// that is not one path element is not a digest.
 		"a/b",
 		"..",
 	} {
@@ -1166,10 +1176,12 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 				server.URL + "/download/snapshot.tar.zst",
 			}
 
-			// The download directory sits inside a root, so an escape has
-			// somewhere observable to land.
+			// Two levels of nesting below the root, so both the parent and
+			// the grandparent of the download directory are somewhere this
+			// test can look afterwards.
 			root := t.TempDir()
-			downloadDir := filepath.Join(root, "downloads")
+			nested := filepath.Join(root, "nested")
+			downloadDir := filepath.Join(nested, "downloads")
 			require.NoError(t, os.MkdirAll(downloadDir, 0o750))
 
 			_, err := Bootstrap(context.Background(), BootstrapConfig{
@@ -1181,13 +1193,21 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 			require.Error(t, err)
 			assert.ErrorIs(t, err, ErrUnsafeSnapshotDigest)
 
-			// Refused before anything is derived from it, so the download
-			// directory holds nothing and nothing appeared beside it.
-			entries, readErr := os.ReadDir(root)
-			require.NoError(t, readErr)
-			require.Len(t, entries, 1,
-				"nothing may be created outside the download directory")
-			assert.Equal(t, "downloads", entries[0].Name())
+			// Refused before anything is derived from it, so every level the
+			// digest could have named is untouched — including the two above
+			// the download directory, which is where extraction would have
+			// gone and where Cleanup would then have pointed os.RemoveAll.
+			for dir, want := range map[string]string{
+				root:   "nested",
+				nested: "downloads",
+			} {
+				entries, readErr := os.ReadDir(dir)
+				require.NoError(t, readErr)
+				require.Len(t, entries, 1,
+					"nothing may be created above the download directory, "+
+						"but %s gained an entry", dir)
+				assert.Equal(t, want, entries[0].Name())
+			}
 			inside, readErr := os.ReadDir(downloadDir)
 			require.NoError(t, readErr)
 			assert.Empty(t, inside,

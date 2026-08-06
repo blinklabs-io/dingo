@@ -2869,15 +2869,17 @@ line.
 "Derived inside the download directory" is a property the digest has to be
 constrained to give, not one the join provides. The digest is the aggregator's
 string, and joining it raw does not stay inside: a leading separator makes the
-`immutable-` prefix its own path element, and a following `..` pops it, so
-`/../..` names the download directory's *grandparent* — which is then extracted
-into and, on `Cleanup`, removed with `os.RemoveAll`. v2 is closed by a check it
-already had, refusing an artifact whose hash is not the one it recomputes, and a
-computed hash is hex. v1 has nothing to recompute, so `validateSnapshotDigest`
-states the constraint directly and refuses anything that is not a single path
-element, before the first join. Refused rather than reduced: reducing it would
-give two different snapshots the same cache key, and a stale extraction would
-then be reused for the wrong artifact.
+`immutable-` prefix its own path element, and the `..` that follows pops it, so
+the first `..` buys nothing and every one after it climbs a level. How far is
+the digest's to choose — `/../..` names the download directory's *parent*,
+`/../../..` its grandparent, and so on up — and whatever it names is then
+extracted into and, on `Cleanup`, removed with `os.RemoveAll`. v2 is closed by
+a check it already had, refusing an artifact whose hash is not the one it
+recomputes, and a computed hash is hex. v1 has nothing to recompute, so
+`validateSnapshotDigest` states the constraint directly and refuses anything
+that is not a single path element, before the first join. Refused rather than
+reduced: reducing it would give two different snapshots the same cache key, and
+a stale extraction would then be reused for the wrong artifact.
 
 Reading through the handle is half of it. A name refers to whatever occupies it
 at the moment it is resolved, so a lookup that ends by handing back a pathname
