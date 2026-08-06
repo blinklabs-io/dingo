@@ -1771,7 +1771,13 @@ along with any era not explicitly listed.
 `GetPoolDistr2` reports each pool's share of the active stake from the mark
 snapshot at `praos.StakeSnapshotEpoch` — the snapshot leader election itself
 reads — rather than from live stake, so a schedule computed from it agrees with
-what the node will accept. Each pool's VRF key hash is resolved through
+what the node will accept. Which epoch that is comes from the tip read inside
+the query's own transaction, not from the in-memory consensus snapshot: the
+snapshot is published after the write that advances the chain, so the two can
+sit on opposite sides of an epoch boundary, and stake rows read for the wrong
+epoch still yield a well-formed distribution summing to one. Like
+`GetChainDepState`'s tip-and-epoch pairing, the fix is to take both from the
+same transaction. Each pool's VRF key hash is resolved through
 `registeredPoolVrfKeyHash`, the same function header validation uses, so the
 key the reply names is the key a block must carry to be accepted. A query
 carrying a pool filter reads only the snapshot rows for the pools it names,

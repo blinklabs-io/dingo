@@ -50,15 +50,41 @@ var ErrPoolDistrUnregisteredPool = errors.New(
 func (ls *LedgerState) queryShelleyPoolDistr2(
 	q *olocalstatequery.ShelleyPoolDistr2Query,
 ) (any, error) {
-	epoch := ls.loadConsensusSnapshot().currentEpoch.EpochId
-	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
-
-	// The per-pool stakes and their total have to come from one view: read
-	// separately, an epoch boundary landing in between would produce
-	// fractions that do not sum to one.
+	// The per-pool stakes, their total, and the epoch naming the snapshot they
+	// come from all have to come from one view: read separately, an epoch
+	// boundary landing in between would produce fractions that do not sum to
+	// one, or a distribution belonging to an epoch other than the one this
+	// query resolved.
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
+
+	// The epoch comes from the tip inside this transaction rather than from
+	// the in-memory consensus snapshot. The snapshot is the cheaper source,
+	// but it is published after the database write that advances the chain, so
+	// reading it before opening the transaction lets the two sit on opposite
+	// sides of an epoch boundary. What that costs is invisible downstream: the
+	// stake rows for the wrong epoch still produce a well-formed distribution
+	// summing to one, so cardano-cli computes a leadership schedule that is
+	// wrong rather than absent. This is the same pairing
+	// queryShelleyDebugChainDepState resolves by taking its tip and epoch from
+	// the one transaction.
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return nil, err
+	}
+	// A chain that has applied no blocks has no epoch record covering its tip.
+	// Epoch zero is the right answer there, and is what the snapshot's zero
+	// value gave before.
+	var epoch uint64
+	current, err := ls.db.GetEpochBySlot(tip.Point.Slot, txn)
+	if err != nil {
+		return nil, err
+	}
+	if current != nil {
+		epoch = current.EpochId
+	}
+	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 
 	requested, all := q.PoolFilter()
 
@@ -68,10 +94,7 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 	// for the same reason -- the unfiltered path, which is the one
 	// cardano-cli's leadership schedule takes, still gets the single bulk read
 	// rather than one query per pool.
-	var (
-		stakeByPool map[string]uint64
-		err         error
-	)
+	var stakeByPool map[string]uint64
 	if all {
 		stakeByPool, err = ls.markStakeByPool(snapshotEpoch, true, metaTxn)
 	} else {

@@ -23,6 +23,8 @@ import (
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -475,4 +477,106 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 
 	assert.Equal(t, acceptedVrfHash.Bytes(), entry.VrfHash[:],
 		"the reply must name the VRF key of a header the validator accepts")
+}
+
+// TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot pins
+// where the snapshot epoch is read from.
+//
+// The in-memory consensus snapshot is the cheaper source, but it is published
+// after the database write that advances the chain, so it and a transaction
+// opened separately can sit on opposite sides of an epoch boundary. Deriving
+// the epoch from the snapshot and then reading the stake rows from the
+// transaction pairs an epoch number with a distribution belonging to a
+// different one -- and the result is a plausible distribution rather than an
+// absent one, so nothing downstream can tell.
+//
+// This is the same pairing GetChainDepState resolves by reading its tip and
+// epoch from the one transaction, and it is resolved the same way here.
+//
+// The fixture makes the two sources disagree outright rather than trying to
+// land a real boundary mid-query: the epoch row covering the tip says 5 while
+// the in-memory snapshot says 9. Each names a different mark snapshot, and only
+// one of them is consistent with the state the query acquired.
+func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	const (
+		epochStart  uint64 = 5000
+		epochLength uint64 = 1000
+		tipSlot     uint64 = 5500
+		// What the transaction sees. Leader election reads the preceding
+		// epoch's mark snapshot, so this resolves to epoch 4.
+		txnEpoch      uint64 = 5
+		txnSnapshot   uint64 = 4
+		staleEpoch    uint64 = 9
+		staleSnapshot uint64 = 8
+	)
+
+	vrfKey := make([]byte, 32)
+	for i := range vrfKey {
+		vrfKey[i] = 0xCC
+	}
+	poolKey := make([]byte, 28)
+	for i := range poolKey {
+		poolKey[i] = 0x33
+	}
+
+	// The same pool holds different stake in the two snapshots, so the reply
+	// names which one was read without needing a second pool to tell them
+	// apart.
+	pkh := seedPoolDistr2Fixture(
+		t, db, poolKey, vrfKey, 3_000_000, txnSnapshot,
+	)
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        staleSnapshot,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(7_000_000),
+			CapturedSlot: 1,
+		},
+		nil,
+	))
+
+	require.NoError(t, db.Metadata().SetEpoch(
+		epochStart,        // slot
+		txnEpoch,          // epoch
+		nil,               // nonce
+		nil,               // evolvingNonce
+		nil,               // candidateNonce
+		nil,               // lastEpochBlockNonce
+		0,                 // era
+		1,                 // slotLength
+		uint(epochLength), // lengthInSlots
+		nil,               // txn
+	))
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, make([]byte, 32)),
+		},
+		nil,
+	))
+
+	ls := &LedgerState{db: db}
+	// The snapshot the query must NOT read the epoch from.
+	ls.currentEpoch = models.Epoch{EpochId: staleEpoch}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.Query(poolDistr2Query())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	distr, ok := arr[0].(olocalstatequery.PoolDistr2Result)
+	require.True(t, ok)
+
+	entry, ok := distr.Pools[lcommon.PoolId(pkh)]
+	require.True(t, ok, "pool missing from the distribution")
+	assert.Equal(t, uint64(3_000_000), entry.TotalPoolStake,
+		"the distribution must come from the epoch the acquired transaction "+
+			"is in, not the one the in-memory snapshot had reached")
+	assert.Equal(t, uint64(3_000_000), distr.TotalActiveStake,
+		"the total has to be summed over that same snapshot, or the "+
+			"fractions are shares of a denominator from another epoch")
 }
