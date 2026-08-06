@@ -17,6 +17,8 @@ package kesagent
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"sync"
@@ -56,8 +58,7 @@ func newTestKES(t *testing.T, start uint64) ([]byte, *kes.SecretKey, *forging.Op
 
 // evolveClone returns a clone of master evolved forward to the given internal
 // period.
-func evolveClone(t *testing.T, master *kes.SecretKey, internal uint64) *kes.SecretKey {
-	t.Helper()
+func evolveClone(master *kes.SecretKey, internal uint64) (*kes.SecretKey, error) {
 	cur := &kes.SecretKey{
 		Depth:  master.Depth,
 		Period: master.Period,
@@ -66,11 +67,11 @@ func evolveClone(t *testing.T, master *kes.SecretKey, internal uint64) *kes.Secr
 	for cur.Period < internal {
 		next, err := kes.Update(cur)
 		if err != nil {
-			t.Fatalf("evolve to %d: %v", internal, err)
+			return nil, fmt.Errorf("evolve to %d: %w", internal, err)
 		}
 		cur = next
 	}
-	return cur
+	return cur, nil
 }
 
 // --- fake agent ---------------------------------------------------------
@@ -141,7 +142,10 @@ func TestServeKeyModeSignsAndVerifies(t *testing.T) {
 	const pushPeriod = uint64(12)
 
 	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
-		evolved := evolveClone(t, master, pushPeriod-start)
+		evolved, err := evolveClone(master, pushPeriod-start)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       "key_push",
 			Period:     pushPeriod,
@@ -192,7 +196,10 @@ func TestServeKeyModePicksUpRePush(t *testing.T) {
 			if p == 4 {
 				<-releaseSecond
 			}
-			evolved := evolveClone(t, master, p-start)
+			evolved, err := evolveClone(master, p-start)
+			if err != nil {
+				return
+			}
 			if err := writeFrame(conn, KeyPush{
 				Type:       KeyPushType,
 				Period:     p,
@@ -244,7 +251,10 @@ func TestSignModeForwardsAndVerifies(t *testing.T) {
 				return
 			}
 			rel := req.Period - start
-			sk := evolveClone(t, master, rel)
+			sk, err := evolveClone(master, rel)
+			if err != nil {
+				return
+			}
 			sig, err := kes.Sign(sk, rel, req.Message)
 			resp := SignResponse{Type: "sign_response", Period: req.Period}
 			if err != nil {
@@ -279,6 +289,55 @@ func TestSignModeForwardsAndVerifies(t *testing.T) {
 	}
 }
 
+func TestSignModeRejectsInvalidSignature(t *testing.T) {
+	const start = uint64(0)
+	_, _, opcert := newTestKES(t, start)
+	agent := startFakeAgent(t, ModeSign, func(_ int, conn net.Conn) {
+		var req SignRequest
+		if err := readFrame(conn, &req); err != nil {
+			return
+		}
+		_ = writeFrame(conn, SignResponse{
+			Type:      SignResponseType,
+			Period:    req.Period,
+			Signature: bytes.Repeat([]byte{0x01}, 448),
+		})
+	})
+
+	client, err := New(Config{
+		SocketPath: agent.socket(),
+		Mode:       ModeSign,
+		OpCert:     opcert,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Start(t.Context())
+
+	_, err = client.KESSign(1, []byte("message"))
+	if !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("expected invalid signature error, got %v", err)
+	}
+}
+
+func TestSignModeRejectsClosedClient(t *testing.T) {
+	_, _, opcert := newTestKES(t, 0)
+	client, err := New(Config{
+		SocketPath: "/unused",
+		Mode:       ModeSign,
+		OpCert:     opcert,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	client.Close()
+
+	_, err = client.KESSign(0, []byte("message"))
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("expected ErrClosed, got %v", err)
+	}
+}
+
 func TestServeKeyModeReconnectsAfterDrop(t *testing.T) {
 	const start = uint64(0)
 	vkey, master, opcert := newTestKES(t, start)
@@ -290,7 +349,10 @@ func TestServeKeyModeReconnectsAfterDrop(t *testing.T) {
 		if index >= 1 {
 			period = 5
 		}
-		evolved := evolveClone(t, master, period-start)
+		evolved, err := evolveClone(master, period-start)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       "key_push",
 			Period:     period,
@@ -321,8 +383,9 @@ func TestServeKeyModeReconnectsAfterDrop(t *testing.T) {
 	// After the dropped first connection, the client reconnects and receives
 	// the period-5 key.
 	waitFor(t, 3*time.Second, func() bool { return client.CurrentPeriod() == 5 })
-	if atomic.LoadInt32(&agent.conns) < 2 {
-		t.Fatalf("expected at least 2 connections, got %d", agent.conns)
+	connections := atomic.LoadInt32(&agent.conns)
+	if connections < 2 {
+		t.Fatalf("expected at least 2 connections, got %d", connections)
 	}
 }
 
@@ -341,7 +404,10 @@ func TestSignModeReconnectsAfterDrop(t *testing.T) {
 			return
 		}
 		rel := req.Period - start
-		sk := evolveClone(t, master, rel)
+		sk, err := evolveClone(master, rel)
+		if err != nil {
+			return
+		}
 		sig, _ := kes.Sign(sk, rel, req.Message)
 		_ = writeFrame(conn, SignResponse{
 			Type:      "sign_response",
@@ -395,7 +461,10 @@ func TestServeKeyRejectsMismatchedKESVKey(t *testing.T) {
 	// HasKey() == false cannot show: that assertion also holds before the push
 	// arrives at all.
 	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
-		bad := evolveClone(t, otherMaster, 3)
+		bad, err := evolveClone(otherMaster, 3)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       KeyPushType,
 			Period:     3,
@@ -403,7 +472,10 @@ func TestServeKeyRejectsMismatchedKESVKey(t *testing.T) {
 			KESSignKey: bad.Data,
 			KESVKey:    otherVKey,
 		})
-		good := evolveClone(t, master, 1)
+		good, err := evolveClone(master, 1)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       KeyPushType,
 			Period:     1,
@@ -454,7 +526,10 @@ func TestServeKeyRejectsPushWithoutKESVKey(t *testing.T) {
 		// The legitimate key, but with no verification key declared. Using the
 		// real key is deliberate: it isolates the vkey comparison, since a
 		// foreign key would be caught by the derivation check regardless.
-		bad := evolveClone(t, master, 3)
+		bad, err := evolveClone(master, 3)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       KeyPushType,
 			Period:     3,
@@ -462,7 +537,10 @@ func TestServeKeyRejectsPushWithoutKESVKey(t *testing.T) {
 			KESSignKey: bad.Data,
 			// No KESVKey at all.
 		})
-		good := evolveClone(t, master, 1)
+		good, err := evolveClone(master, 1)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       KeyPushType,
 			Period:     1,
@@ -508,7 +586,10 @@ func TestServeKeyRejectsKeyNotDerivingOpCertVKey(t *testing.T) {
 	_, otherMaster, _ := newTestKES(t, start)
 
 	agent := startFakeAgent(t, ModeServeKey, func(_ int, conn net.Conn) {
-		impostor := evolveClone(t, otherMaster, 3)
+		impostor, err := evolveClone(otherMaster, 3)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:   KeyPushType,
 			Period: 3,
@@ -517,7 +598,10 @@ func TestServeKeyRejectsKeyNotDerivingOpCertVKey(t *testing.T) {
 			KESSignKey: impostor.Data,
 			KESVKey:    vkey,
 		})
-		good := evolveClone(t, master, 1)
+		good, err := evolveClone(master, 1)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       KeyPushType,
 			Period:     1,
@@ -569,7 +653,10 @@ func TestServeKeyRejectsMalformedKeyWithoutPanic(t *testing.T) {
 			KESSignKey: []byte{0x01, 0x02, 0x03},
 			KESVKey:    vkey,
 		})
-		good := evolveClone(t, master, 1)
+		good, err := evolveClone(master, 1)
+		if err != nil {
+			return
+		}
 		_ = writeFrame(conn, KeyPush{
 			Type:       KeyPushType,
 			Period:     1,

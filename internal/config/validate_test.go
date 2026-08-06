@@ -341,6 +341,11 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name:    "invalid KES agent mode",
+			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
+			wantErr: "invalid shelleyKesAgentMode",
+		},
+		{
 			name: "no network and no magic",
 			modify: func(c *Config) {
 				c.Network = ""

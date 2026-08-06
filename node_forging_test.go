@@ -103,13 +103,21 @@ func TestKESAgentModeSelection(t *testing.T) {
 	if !n.kesAgentEnabled() {
 		t.Fatal("expected KES agent enabled when socket is set")
 	}
-	if got := n.kesAgentMode(); got != "serve-key" {
+	got, err := n.kesAgentMode()
+	if err != nil {
+		t.Fatalf("default mode: %v", err)
+	}
+	if got != "serve-key" {
 		t.Fatalf("expected default mode serve-key, got %q", got)
 	}
 
 	// Explicit sign mode is honored.
 	n.config.shelleyKESAgentMode = "sign"
-	if got := n.kesAgentMode(); got != "sign" {
+	got, err = n.kesAgentMode()
+	if err != nil {
+		t.Fatalf("explicit mode: %v", err)
+	}
+	if got != "sign" {
 		t.Fatalf("expected mode sign, got %q", got)
 	}
 }

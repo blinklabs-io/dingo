@@ -42,6 +42,11 @@ var (
 	ErrPastPeriod = errors.New("kesagent: requested KES period is in the past")
 	// ErrNotStarted is returned by sign-mode KESSign before Start.
 	ErrNotStarted = errors.New("kesagent: client not started")
+	// ErrClosed is returned when KESSign is called after Close.
+	ErrClosed = errors.New("kesagent: client is closed")
+	// ErrInvalidSignature is returned when the agent's signature fails KES
+	// verification.
+	ErrInvalidSignature = errors.New("kesagent: agent returned an invalid signature")
 )
 
 const (
@@ -433,7 +438,12 @@ func (c *Client) runSign(ctx context.Context) {
 				backoff = c.cfg.MinReconnect
 			}
 			sig, err := roundTripSign(
-				conn, req.period, req.msg, c.cfg.SignTimeout,
+				conn,
+				c.kesVKey,
+				c.start,
+				req.period,
+				req.msg,
+				c.cfg.SignTimeout,
 			)
 			if err != nil {
 				// Transport error: drop the connection so the next request
@@ -451,6 +461,8 @@ func (c *Client) runSign(ctx context.Context) {
 // roundTripSign performs one sign request/response over conn.
 func roundTripSign(
 	conn net.Conn,
+	kesVKey []byte,
+	opCertStart uint64,
 	period uint64,
 	msg []byte,
 	timeout time.Duration,
@@ -487,7 +499,7 @@ func roundTripSign(
 	// mislabelled frame, a reply for a different period, or an empty
 	// signature would otherwise be reported as a successful signature and
 	// only surface as an invalid block.
-	if resp.Type != "" && resp.Type != SignResponseType {
+	if resp.Type != SignResponseType {
 		return nil, fmt.Errorf(
 			"kesagent: unexpected response type %q (want %q)",
 			resp.Type, SignResponseType,
@@ -501,6 +513,13 @@ func roundTripSign(
 	}
 	if len(resp.Signature) == 0 {
 		return nil, errors.New("kesagent: agent returned an empty signature")
+	}
+	relativePeriod, err := relativeKESPeriod(opCertStart, period)
+	if err != nil {
+		return nil, err
+	}
+	if !kes.VerifySignedKES(kesVKey, relativePeriod, msg, resp.Signature) {
+		return nil, ErrInvalidSignature
 	}
 	return resp.Signature, nil
 }
@@ -518,7 +537,11 @@ func (c *Client) KESSign(period uint64, message []byte) ([]byte, error) {
 func (c *Client) signRemote(period uint64, message []byte) ([]byte, error) {
 	c.mu.Lock()
 	started := c.started
+	closed := c.closed
 	c.mu.Unlock()
+	if closed {
+		return nil, ErrClosed
+	}
 	if !started {
 		return nil, ErrNotStarted
 	}
@@ -570,13 +593,18 @@ func (c *Client) UpdateKESPeriod(period uint64) error {
 // relativePeriod converts an absolute KES period to the period relative to the
 // operational certificate's start period.
 func (c *Client) relativePeriod(period uint64) (uint64, error) {
-	if period < c.start {
+	return relativeKESPeriod(c.start, period)
+}
+
+func relativeKESPeriod(start, period uint64) (uint64, error) {
+	if period < start {
 		return 0, fmt.Errorf(
 			"kesagent: absolute period %d is before opcert start %d",
-			period, c.start,
+			period,
+			start,
 		)
 	}
-	return period - c.start, nil
+	return period - start, nil
 }
 
 // evolveLocked evolves the local key forward to the given relative period.

@@ -407,6 +407,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			))
 		}
 	}
+	if c.ShelleyKESAgentMode != "" &&
+		c.ShelleyKESAgentMode != "serve-key" &&
+		c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"invalid shelleyKesAgentMode %q: must be \"serve-key\" or \"sign\"",
+			c.ShelleyKESAgentMode,
+		))
+	}
 
 	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].
 	if c.MinPoolMargin > 10_000 {

@@ -310,13 +310,20 @@ func (n *Node) initBlockForger(
 	// Source the KES signing key from an external agent when configured;
 	// otherwise the forger and builder default to the file-based credentials.
 	var kesSigner forging.KESSigner
+	var agentClient *kesagent.Client
+	keepAgentClient := false
 	if n.kesAgentEnabled() {
 		client, err := n.newKESAgentSigner(ctx, creds)
 		if err != nil {
 			return err
 		}
-		n.kesAgentClient = client
+		agentClient = client
 		kesSigner = client
+		defer func() {
+			if !keepAgentClient {
+				agentClient.Close()
+			}
+		}()
 	}
 	// Create mempool adapter for the forging package.
 	mempoolAdapter := &forgingMempoolAdapter{source: n.mempool}
@@ -464,6 +471,10 @@ func (n *Node) initBlockForger(
 	// fully created and running.
 	n.leaderElection = election
 	n.blockForger = forger
+	if agentClient != nil {
+		n.kesAgentClient = agentClient
+		keepAgentClient = true
+	}
 	n.config.logger.Info(
 		"block forger started in production mode with leader election",
 		"pool_id", poolID.String(),

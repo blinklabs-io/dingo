@@ -1236,6 +1236,9 @@ func (c *Config) ApplyDefaults() {
 	if c.RunMode == "" {
 		c.RunMode = RunModeServe
 	}
+	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
+		c.ShelleyKESAgentMode = "serve-key"
+	}
 	if c.Plugins.Mempool.Config == nil {
 		c.Plugins.Mempool.Config = make(map[string]any)
 	}
