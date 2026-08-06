@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/assert"
@@ -2845,20 +2846,24 @@ func TestCheckPoolMarginFloor(t *testing.T) {
 	})
 }
 
-// TestConwayTxInfoCachePropagatesProtocolMajor guards the wiring that carries
-// the active major protocol version into the PlutusV1/V2 script context.
-// gouroboros renders txInfoMint differently from PV10 (Plomin) on: V1/V2 gain a
-// zero-lovelace ada entry, matching cardano-ledger's transMintValue. That
-// rendering is selected by TxInfo.ProtocolMajor, whose zero value means
-// "pre-Plomin". dingo builds the Conway script context itself rather than going
-// through gouroboros' conway.UtxoValidatePlutusScripts, so leaving the field
-// unset silently evaluates every PV10+ V1/V2 script against a pre-Plomin
-// context, changing both the ex-units charged and the script result.
-func TestConwayTxInfoCachePropagatesProtocolMajor(t *testing.T) {
+// TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion pins the
+// invariant that replaced the one this test used to assert.
+//
+// It previously required PV9 and PV10 to render txInfoMint differently, because
+// gouroboros gated the zero-lovelace ada entry on PV10. That gate was the bug:
+// cardano-ledger's transMintValue takes no protocol version, so pre-Plomin
+// scripts that inspect txInfoMint were costed against a mint field one entry
+// short and diverged from the node that produced the block. gouroboros v0.192.0
+// removed the gate, so the rendering is now identical in every era, and this
+// test fails if the gate returns.
+func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(t *testing.T) {
 	input := newTestInput(0x01, 0)
 	tx := &mockConwayFeeTx{
 		mockFeeTx: mockFeeTx{
-			fee:       big.NewInt(0),
+			// Non-zero so the fee field cannot be mistaken for the mint field:
+			// both render as a single-entry map keyed by the empty policy, and
+			// a zero fee would make them identical.
+			fee:       big.NewInt(311_505),
 			witnesses: &mockWitnessSet{},
 		},
 		inputs: []lcommon.TransactionInput{input},
@@ -2867,97 +2872,61 @@ func TestConwayTxInfoCachePropagatesProtocolMajor(t *testing.T) {
 	ls.addUtxo(input, newTestOutput(1_000_000))
 	resolved := []lcommon.Utxo{{Id: input, Output: newTestOutput(1_000_000)}}
 
-	// The mint rendering differs even for a tx that mints nothing, so no mint
-	// fixture is needed to observe the two renderings. Driving this through a
-	// parameter set rather than a bare major mirrors production: the cache reads
-	// the version out of the pparams the caller is already holding, so a call
-	// site cannot supply a version that drifts from the active one.
-	build := func(t *testing.T, major uint) (script.TxInfoV1, script.TxInfoV2) {
-		t.Helper()
-		pp := &conway.ConwayProtocolParameters{}
-		pp.ProtocolVersion.Major = major
-		cache := newConwayTxInfoCache(ls, tx, resolved, pp)
-		v1, err := cache.v1()
-		require.NoError(t, err)
-		v2, err := cache.v2()
-		require.NoError(t, err)
-		require.Equal(t, major, v1.ProtocolMajor)
-		require.Equal(t, major, v2.ProtocolMajor)
-		return v1, v2
-	}
-
-	preV1, preV2 := build(t, lcommon.ProtocolVersionConway)
-	postV1, postV2 := build(t, lcommon.ProtocolVersionPlomin)
-
-	assert.NotEqual(
-		t,
-		preV1.ToPlutusData(),
-		postV1.ToPlutusData(),
-		"PV10 must render a different V1 txInfoMint than PV9",
-	)
-	assert.NotEqual(
-		t,
-		preV2.ToPlutusData(),
-		postV2.ToPlutusData(),
-		"PV10 must render a different V2 txInfoMint than PV9",
-	)
-}
-
-// TestConwayTxInfoCacheReadsMajorFromPparams pins the cache to the version in
-// the parameter set it was given. Combined with the cache taking
-// *conway.ConwayProtocolParameters, this is what keeps the two production call
-// sites honest: neither can pass a standalone version at all, so the only way to
-// reach a wrong major is to change what the pparams themselves say.
-func TestConwayTxInfoCacheReadsMajorFromPparams(t *testing.T) {
-	input := newTestInput(0x01, 0)
-	tx := &mockConwayFeeTx{
-		mockFeeTx: mockFeeTx{
-			fee:       big.NewInt(0),
-			witnesses: &mockWitnessSet{},
-		},
-		inputs: []lcommon.TransactionInput{input},
-	}
-	ls := newMockLedgerState()
-	ls.addUtxo(input, newTestOutput(1_000_000))
-
-	plutusCtx, err := newConwayPlutusValidationContext(tx, ls)
-	require.NoError(t, err)
-	pp := &conway.ConwayProtocolParameters{}
-	pp.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
-
-	cache := newConwayTxInfoCache(
-		ls,
-		tx,
-		plutusCtx.scriptInputs.resolvedAllInputs,
-		pp,
-	)
+	// A tx that mints nothing still carries the ada entry, so no mint fixture
+	// is needed to observe the rendering.
+	cache := newConwayTxInfoCache(ls, tx, resolved)
 	v1, err := cache.v1()
 	require.NoError(t, err)
 	v2, err := cache.v2()
 	require.NoError(t, err)
 
-	assert.Equal(t, lcommon.ProtocolVersionPlomin, v1.ProtocolMajor)
-	assert.Equal(t, lcommon.ProtocolVersionPlomin, v2.ProtocolMajor)
+	// txInfo field order differs by version: V1 is
+	// [inputs, outputs, fee, mint, ...] while V2 inserts reference inputs
+	// ahead of outputs, so its mint sits one later.
+	mintOf := func(d data.PlutusData, idx int) data.PlutusData {
+		constr, ok := d.(*data.Constr)
+		require.True(t, ok)
+		require.Greater(t, len(constr.Fields), idx)
+		return constr.Fields[idx]
+	}
+	for _, tc := range []struct {
+		name string
+		mint data.PlutusData
+	}{
+		{"v1", mintOf(v1.ToPlutusData(), 3)},
+		{"v2", mintOf(v2.ToPlutusData(), 4)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ok := tc.mint.(*data.Map)
+			require.True(t, ok, "txInfoMint must be a map")
+			require.Len(t, m.Pairs, 1,
+				"an empty mint must still carry the zero-lovelace ada entry")
+			policy, ok := m.Pairs[0][0].(*data.ByteString)
+			require.True(t, ok)
+			assert.Empty(t, policy.Inner, "ada policy id is the empty bytestring")
 
-	// A later version in the same parameter set must follow through, so the
-	// cache cannot be reading a constant.
-	pp.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
-	later := newConwayTxInfoCache(
-		ls,
-		tx,
-		plutusCtx.scriptInputs.resolvedAllInputs,
-		pp,
-	)
-	laterV1, err := later.v1()
-	require.NoError(t, err)
-
-	assert.Equal(t, lcommon.ProtocolVersionVanRossem, laterV1.ProtocolMajor)
+			// Assert the amount too. Without it the fee field, which is also a
+			// single-entry map keyed by the empty policy, satisfies the checks
+			// above and the test would not notice a wrong field index.
+			inner, ok := m.Pairs[0][1].(*data.Map)
+			require.True(t, ok, "ada entry must map asset name to amount")
+			require.Len(t, inner.Pairs, 1)
+			name, ok := inner.Pairs[0][0].(*data.ByteString)
+			require.True(t, ok)
+			assert.Empty(t, name.Inner, "ada asset name is the empty bytestring")
+			amount, ok := inner.Pairs[0][1].(*data.Integer)
+			require.True(t, ok)
+			assert.Zero(t, amount.Inner.Int64(),
+				"the prepended ada entry mints zero")
+		})
+	}
 }
 
 // TestConwayPlutusRejectsNilPparams covers the typed-nil pointer case: a nil
 // *conway.ConwayProtocolParameters satisfies the protocol-parameters type
-// assertion, and the Conway plutus path now dereferences pparams to read the
-// protocol major, so an unguarded nil would panic instead of erroring.
+// assertion, and the Conway plutus path dereferences pparams for cost models
+// and the protocol version, so an unguarded nil would panic instead of
+// erroring.
 func TestConwayPlutusRejectsNilPparams(t *testing.T) {
 	tx := &mockConwayFeeTx{
 		mockFeeTx: mockFeeTx{
