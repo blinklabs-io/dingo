@@ -175,6 +175,35 @@ func TestNewDatabaseFailsWhenSidecarCannotBeEstablished(t *testing.T) {
 	require.Contains(t, err.Error(), "dbinfo sidecar")
 }
 
+func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
+	metaDir := t.TempDir()
+	blobDir := t.TempDir()
+	trapDataDir := sidecarTrapPath(t)
+
+	_, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
+		DataDir:        trapDataDir,
+		StorageMode:    "core",
+		Network:        "preprod",
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.Error(t, err)
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabaseAt(t, metaDir, blobDir, &Config{
+		DataDir:        dataDir,
+		StorageMode:    "core",
+		Network:        "preprod",
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+
+	gates, err := db.Metadata().GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "sqlite", gates["metadata_plugin"])
+}
+
 // TestExistingDatabaseSidecarFailureIsNonFatal pins the other half of
 // Finding 3: an already-established database (one with a prior
 // writeGateValues call, so a metadata_plugin gate row already exists)

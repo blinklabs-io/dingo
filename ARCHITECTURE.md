@@ -4166,11 +4166,9 @@ reason, makes `settingsresolve.Apply` a silent no-op — a corrupt or in-use
 database is `database.New`'s problem to report properly, and failing here
 would only mask its better error behind a worse one.
 
-A sidecar write failure is fatal only for the one call `writeGateValues`
-makes for a brand-new database (no prior `node_settings_gate` row of any
-kind, detected via the same `legacy == nil` check `writeGateValues` already
-does for its own legacy-row seeding): a database that new has no
-`metadata_plugin` gate row yet for this pre-open check to compare against
+A sidecar write failure is fatal while the `metadata_plugin` gate is not
+yet persisted: a database in that state has no `metadata_plugin` gate row
+yet for this pre-open check to compare against
 until that same call creates it, so the sidecar is the only thing that will
 catch a mistyped provider the next time this directory is opened, and losing
 it here fails the database open rather than starting silently unprotected.

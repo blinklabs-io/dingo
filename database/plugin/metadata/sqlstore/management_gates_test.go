@@ -120,6 +120,7 @@ func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 	store := newManagementTestStore(t)
 	const attempts = 8
 	results := make([]bool, attempts)
+	errorsByAttempt := make([]error, attempts)
 	var wg sync.WaitGroup
 	wg.Add(attempts)
 	for i := range attempts {
@@ -128,11 +129,14 @@ func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 			inserted, err := store.InsertNodeSettingsGateIfAbsent(
 				"storage_mode", "core", 0, 0,
 			)
-			require.NoError(t, err)
+			errorsByAttempt[i] = err
 			results[i] = inserted
 		}(i)
 	}
 	wg.Wait()
+	for i, err := range errorsByAttempt {
+		require.NoError(t, err, "attempt %d", i)
+	}
 
 	winners := 0
 	for _, inserted := range results {
@@ -141,4 +145,42 @@ func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 		}
 	}
 	require.Equal(t, 1, winners, "exactly one concurrent insert must win")
+}
+
+func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
+	store := newManagementTestStore(t)
+	sets := []nodesettings.Values{
+		{"network_magic": "1", "start_era": "byron"},
+		{"network_magic": "2", "start_era": "shelley"},
+	}
+	inserted := make([]bool, len(sets))
+	errorsByAttempt := make([]error, len(sets))
+	var wg sync.WaitGroup
+	wg.Add(len(sets))
+	for i := range sets {
+		go func(i int) {
+			defer wg.Done()
+			inserted[i], errorsByAttempt[i] =
+				store.InsertNodeSettingsGatesIfAbsent(sets[i], 0, 0)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errorsByAttempt {
+		require.NoError(t, err, "attempt %d", i)
+	}
+	winners := 0
+	for _, value := range inserted {
+		if value {
+			winners++
+		}
+	}
+	require.Equal(t, 1, winners)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	winningSet := sets[0]
+	if !inserted[0] {
+		winningSet = sets[1]
+	}
+	require.Equal(t, winningSet, gates)
 }

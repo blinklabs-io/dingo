@@ -398,12 +398,11 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 			blobDirB := t.TempDir()
 
 			var wg sync.WaitGroup
-			var dbA, dbB *Database
 			var errA, errB error
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				dbA, errA = newTestDatabaseAt(t, metaDir, blobDirA, &Config{
+				_, errA = newTestDatabaseAt(t, metaDir, blobDirA, &Config{
 					DataDir:      metaDir,
 					StorageMode:  "core",
 					Network:      "preprod",
@@ -412,7 +411,7 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 			}()
 			go func() {
 				defer wg.Done()
-				dbB, errB = newTestDatabaseAt(t, metaDir, blobDirB, &Config{
+				_, errB = newTestDatabaseAt(t, metaDir, blobDirB, &Config{
 					DataDir:      metaDir,
 					StorageMode:  "core",
 					Network:      "preprod",
@@ -436,11 +435,9 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 			if errA != nil {
 				require.True(t, errors.As(errA, &settingsErr))
 				require.Contains(t, settingsErr.Error(), "network magic")
-				require.NoError(t, closeTestDatabase(dbB))
 			} else {
 				require.True(t, errors.As(errB, &settingsErr))
 				require.Contains(t, settingsErr.Error(), "network magic")
-				require.NoError(t, closeTestDatabase(dbA))
 			}
 		})
 	}

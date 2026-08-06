@@ -97,6 +97,15 @@ type SettingsStore interface {
 		recordedEpoch uint64,
 		recordedSlot uint64,
 	) (inserted bool, err error)
+
+	// InsertNodeSettingsGatesIfAbsent persists the complete first-fill set in
+	// one metadata transaction. It returns false when another initializer
+	// already claimed any member of the set; no partial set is committed.
+	InsertNodeSettingsGatesIfAbsent(
+		gates nodesettings.Values,
+		recordedEpoch uint64,
+		recordedSlot uint64,
+	) (inserted bool, err error)
 }
 
 // TransactionStore creates backend-owned read and write snapshots.

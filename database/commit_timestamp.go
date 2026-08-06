@@ -235,15 +235,7 @@ func (d *Database) persistedGateValues() (nodesettings.Values, error) {
 // ever touches network -- so this mirror can never contradict
 // node_settings_gate, which remains the only thing persistedGateValues
 // treats as authoritative for storage_mode.
-//
-// requireSidecar says that the metadata-plugin gate was not present before
-// this enforcement pass. In that case the sidecar is still needed to protect
-// the next pre-open provider selection, including for databases created before
-// node_settings_gate existed.
-func (d *Database) writeGateValues(
-	writes nodesettings.Values,
-	requireSidecar bool,
-) error {
+func (d *Database) writeGateValues(writes nodesettings.Values) error {
 	if len(writes) == 0 {
 		return nil
 	}
@@ -273,16 +265,7 @@ func (d *Database) writeGateValues(
 	if err := d.Metadata().SetNodeSettingsGates(writes, epoch, slot); err != nil {
 		return fmt.Errorf("failed to persist node settings gates: %w", err)
 	}
-	if requireSidecar {
-		if err := d.writeDBInfoSidecarErr(); err != nil {
-			return fmt.Errorf(
-				"failed to establish dbinfo sidecar for unprotected database: %w",
-				err,
-			)
-		}
-	} else {
-		d.writeDBInfoSidecar()
-	}
+	d.writeDBInfoSidecar()
 	return nil
 }
 
@@ -385,6 +368,22 @@ func (d *Database) evaluateAndPersistGates(
 	if err != nil {
 		return err
 	}
+	// Establish the sidecar before recording the metadata_plugin gate. If
+	// this is the first post-feature start (including a pre-feature database
+	// whose legacy row already exists), a failure must leave no persisted
+	// metadata_plugin gate that could make a retry treat the database as
+	// protected. Once the gate is present, the sidecar is only a best-effort
+	// repair and the gate itself provides the in-database enforcement.
+	if d.config.MetadataPlugin != "" {
+		if _, hasMetadataPluginGate := persisted["metadata_plugin"]; !hasMetadataPluginGate {
+			if err := d.writeDBInfoSidecarErr(); err != nil {
+				return fmt.Errorf(
+					"failed to establish dbinfo sidecar for unprotected database: %w",
+					err,
+				)
+			}
+		}
+	}
 	explicit := make(map[string]bool, len(configured))
 	for name := range configured {
 		explicit[name] = true
@@ -404,11 +403,6 @@ func (d *Database) evaluateAndPersistGates(
 		d.writeDBInfoSidecar()
 		return nil
 	}
-	requireSidecar := d.config.MetadataPlugin != ""
-	if requireSidecar {
-		_, hasMetadataPluginGate := persisted["metadata_plugin"]
-		requireSidecar = !hasMetadataPluginGate
-	}
 	// A gate written here for the first time ever (absent from persisted)
 	// can race against a concurrent opener doing the same first-ever
 	// write: two openers both see nothing persisted, both Evaluate against
@@ -420,10 +414,9 @@ func (d *Database) evaluateAndPersistGates(
 	// (postgres, mysql, both dingo_extra_plugins-gated): sqlite is opened
 	// per-process, and the default blob plugin, badger, takes an exclusive
 	// process lock that already rules out two full opens of the same
-	// database at once regardless of metadata plugin. Reserve each
-	// first-ever name with a conditional insert before the plain upsert
-	// below, so a losing opener discovers the winner's value instead of
-	// blindly overwriting it.
+	// database at once regardless of metadata plugin. Reserve the complete
+	// first-fill set in one transaction, so a losing opener discovers the
+	// winner's values instead of leaving a mixed configuration behind.
 	firstFill := make(nodesettings.Values, len(result.Writes))
 	for name, value := range result.Writes {
 		if _, has := persisted[name]; !has {
@@ -432,23 +425,16 @@ func (d *Database) evaluateAndPersistGates(
 	}
 	if len(firstFill) > 0 {
 		epoch, slot := d.currentEpochSlot()
-		lostRace := false
-		for name, value := range firstFill {
-			inserted, err := d.Metadata().InsertNodeSettingsGateIfAbsent(
-				name, value, epoch, slot,
+		inserted, err := d.Metadata().InsertNodeSettingsGatesIfAbsent(
+			firstFill, epoch, slot,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to reserve node settings gates: %w",
+				err,
 			)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to reserve node settings gate %q: %w",
-					name,
-					err,
-				)
-			}
-			if !inserted {
-				lostRace = true
-			}
 		}
-		if lostRace {
+		if !inserted {
 			// Another opener's first write to at least one of these names
 			// landed before ours. Re-evaluate configured against what is
 			// now actually persisted -- exactly what a genuinely
@@ -471,7 +457,7 @@ func (d *Database) evaluateAndPersistGates(
 			}
 		}
 	}
-	if err := d.writeGateValues(result.Writes, requireSidecar); err != nil {
+	if err := d.writeGateValues(result.Writes); err != nil {
 		return err
 	}
 	// Verify every write actually landed rather than trusting the store

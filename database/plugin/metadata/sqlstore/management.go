@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -219,6 +220,68 @@ func (s *Store) InsertNodeSettingsGateIfAbsent(
 		)
 	}
 	return rows > 0, nil
+}
+
+var errNodeSettingsGateInitializationLost = errors.New(
+	"node settings gate initialization lost race",
+)
+
+// InsertNodeSettingsGatesIfAbsent inserts a complete first-fill set in one
+// transaction. A concurrent initializer may win the conditional insert for
+// one or more names; in that case the transaction is rolled back so this
+// method never leaves a partially initialized gate set behind.
+func (s *Store) InsertNodeSettingsGatesIfAbsent(
+	gates nodesettings.Values,
+	recordedEpoch uint64,
+	recordedSlot uint64,
+) (bool, error) {
+	if len(gates) == 0 {
+		return false, nil
+	}
+	names := make([]string, 0, len(gates))
+	for name := range gates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	inserted := 0
+	err := s.withWriteTransaction(
+		context.Background(),
+		nil,
+		func(db queryer) error {
+			queries, err := newManagementQueries(s.dialect.Name(), db)
+			if err != nil {
+				return err
+			}
+			for _, name := range names {
+				rows, err := queries.insertNodeSettingsGateIfAbsent(
+					context.Background(),
+					name,
+					gates[name],
+					int64(recordedEpoch),
+					int64(recordedSlot),
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"insert node settings gate %q if absent: %w",
+						name,
+						err,
+					)
+				}
+				inserted += int(rows)
+			}
+			if inserted != len(names) {
+				return errNodeSettingsGateInitializationLost
+			}
+			return nil
+		},
+	)
+	if errors.Is(err, errNodeSettingsGateInitializationLost) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) ensureReady() error {
