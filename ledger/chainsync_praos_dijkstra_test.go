@@ -108,8 +108,10 @@ func TestCompareIncomingHeaderToLocalTip_Dijkstra(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	ls := &LedgerState{
-		db:     db,
-		config: LedgerStateConfig{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil))},
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
 	}
 
 	const blockNumber = 50
@@ -170,12 +172,19 @@ func TestCompareIncomingHeaderToLocalTip_Dijkstra(t *testing.T) {
 			}
 			event := ChainsyncEvent{
 				BlockHeader: incomingHeader,
-				Point:       ocommon.Point{Slot: tc.incomingSlot, Hash: []byte("incoming-hash")},
+				Point: ocommon.Point{
+					Slot: tc.incomingSlot,
+					Hash: []byte("incoming-hash"),
+				},
 			}
 
 			result := ls.compareIncomingHeaderToLocalTip(event, localTip)
-			require.Equal(t, tc.expectedBeats, result,
-				"Dijkstra local tip must participate in the VRF tiebreaker through the real storage/decode path")
+			require.Equal(
+				t,
+				tc.expectedBeats,
+				result,
+				"Dijkstra local tip must participate in the VRF tiebreaker through the real storage/decode path",
+			)
 		})
 	}
 }

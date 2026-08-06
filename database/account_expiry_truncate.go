@@ -115,9 +115,16 @@ func RecomputeAccountExpirationsAfterTruncate(
 	}
 	rollbackEpoch, err := EpochBySlot(d, rollbackSlot, txn)
 	if err != nil {
-		return fmt.Errorf("map rollback slot %d to epoch: %w", rollbackSlot, err)
+		return fmt.Errorf(
+			"map rollback slot %d to epoch: %w",
+			rollbackSlot,
+			err,
+		)
 	}
-	activationEpoch, activated, err := DelegatorInactivityActivationEpoch(d, txn)
+	activationEpoch, activated, err := DelegatorInactivityActivationEpoch(
+		d,
+		txn,
+	)
 	if err != nil {
 		return fmt.Errorf("read delegator-inactivity activation epoch: %w", err)
 	}
@@ -139,7 +146,10 @@ func RecomputeAccountExpirationsAfterTruncate(
 		}
 		affectedRefs = mergeStakeCredentialRefs(affectedRefs, resetRefs)
 		if err := d.DeleteSyncState(DelegatorInactivityActivatedSyncKey, txn); err != nil {
-			return fmt.Errorf("clear delegator-inactivity activation marker: %w", err)
+			return fmt.Errorf(
+				"clear delegator-inactivity activation marker: %w",
+				err,
+			)
 		}
 		activated = false
 	}

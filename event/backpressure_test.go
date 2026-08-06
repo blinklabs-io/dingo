@@ -230,7 +230,10 @@ func TestDeliverAfterCloseReturnsClosed(t *testing.T) {
 
 	require.True(
 		t,
-		errors.Is(sub.DeliverBlocking(NewEvent("test", "x")), errChannelSubscriberClosed),
+		errors.Is(
+			sub.DeliverBlocking(NewEvent("test", "x")),
+			errChannelSubscriberClosed,
+		),
 	)
 	require.NoError(t, sub.Deliver(NewEvent("test", "x")))
 }

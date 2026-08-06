@@ -329,7 +329,10 @@ func (ls *LedgerState) currentEraEnd(
 	if ti.State == hardfork.TransitionImpossible {
 		endRel := new(big.Int).Set(startRel)
 		for _, ep := range era.epochs {
-			endRel.Add(endRel, epochPicoseconds(ep.SlotLength, ep.LengthInSlots))
+			endRel.Add(
+				endRel,
+				epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
+			)
 		}
 		lastEp := era.epochs[len(era.epochs)-1]
 		endSlot, err := checkedSlotAdd(
@@ -460,6 +463,10 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		return ls.queryShelleyFilteredVoteDelegatees(q.Credentials.Items())
 	case *olocalstatequery.ShelleyGetProposalsQuery:
 		return ls.queryShelleyGetProposals(q.ActionIds.Items())
+	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
+		return ls.queryShelleyDebugChainDepState()
+	case *olocalstatequery.ShelleyPoolDistr2Query:
+		return ls.queryShelleyPoolDistr2(q)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -469,7 +476,6 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
-		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
@@ -575,7 +581,8 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 					continue
 				}
 				markStake, setStake, goStake := mark[hash], set[hash], snapshotGo[hash]
-				if omitZeroPools && markStake == 0 && setStake == 0 && goStake == 0 {
+				if omitZeroPools && markStake == 0 && setStake == 0 &&
+					goStake == 0 {
 					continue
 				}
 				poolSnapshots[key] = &olocalstatequery.PoolStakeSnapshot{
@@ -708,6 +715,44 @@ func (ls *LedgerState) poolSnapshotStake(
 	return uint64(snapshot.TotalStake), nil
 }
 
+// markStakeForPools reads the mark snapshot for just the pools named, keyed by
+// pool key hash the way markStakeByPool keys the whole snapshot.
+//
+// A pool with no row in the snapshot is left out rather than reported with zero
+// stake. The two are different answers: the distribution describes the pools
+// the snapshot holds, so a caller naming one it does not hold has to see it
+// missing rather than be handed a fraction of zero for a pool the node will
+// never elect.
+//
+// The rows come back in one bounded read rather than a query per pool. Both
+// costs are worth avoiding here: reading the whole snapshot to discard most of
+// it does work the request did not ask for, while a per-pool loop lets the
+// caller's filter length decide how many round trips the node makes.
+func (ls *LedgerState) markStakeForPools(
+	epoch uint64,
+	poolIds []ledger.PoolId,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	hashes := make([][]byte, 0, len(poolIds))
+	for _, poolId := range poolIds {
+		hashes = append(hashes, lcommon.PoolKeyHash(poolId).Bytes())
+	}
+	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsForPools(
+		epoch,
+		snapshotTypeMark,
+		hashes,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	byPool := make(map[string]uint64, len(snapshots))
+	for _, snapshot := range snapshots {
+		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
+	}
+	return byPool, nil
+}
+
 // totalActiveStake returns the total mark-snapshot stake at the given epoch,
 // clamped to a minimum of 1.
 //
@@ -726,7 +771,8 @@ func (ls *LedgerState) totalActiveStake(
 	if !exists {
 		return 1, nil
 	}
-	total, err := ls.db.Metadata().GetTotalActiveStake(epoch, snapshotTypeMark, txn)
+	total, err := ls.db.Metadata().
+		GetTotalActiveStake(epoch, snapshotTypeMark, txn)
 	if err != nil {
 		return 0, err
 	}
@@ -833,13 +879,27 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 	var treasury, reserves int64
 	if state != nil {
 		var parseErr error
-		treasury, parseErr = strconv.ParseInt(strconv.FormatUint(uint64(state.Treasury), 10), 10, 64)
+		treasury, parseErr = strconv.ParseInt(
+			strconv.FormatUint(uint64(state.Treasury), 10),
+			10,
+			64,
+		)
 		if parseErr != nil {
-			return nil, fmt.Errorf("network state treasury exceeds signed account-state range: %w", parseErr)
+			return nil, fmt.Errorf(
+				"network state treasury exceeds signed account-state range: %w",
+				parseErr,
+			)
 		}
-		reserves, parseErr = strconv.ParseInt(strconv.FormatUint(uint64(state.Reserves), 10), 10, 64)
+		reserves, parseErr = strconv.ParseInt(
+			strconv.FormatUint(uint64(state.Reserves), 10),
+			10,
+			64,
+		)
 		if parseErr != nil {
-			return nil, fmt.Errorf("network state reserves exceeds signed account-state range: %w", parseErr)
+			return nil, fmt.Errorf(
+				"network state reserves exceeds signed account-state range: %w",
+				parseErr,
+			)
 		}
 	}
 	return []any{
@@ -868,7 +928,11 @@ func (ls *LedgerState) drepDeposit() uint64 {
 func (ls *LedgerState) drepDelegators(
 	drep *models.Drep,
 ) ([]olocalstatequery.StakeCredential, error) {
-	refs, err := ls.db.GetDRepDelegators(drep.CredentialTag, drep.Credential, nil)
+	refs, err := ls.db.GetDRepDelegators(
+		drep.CredentialTag,
+		drep.Credential,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1160,9 +1224,13 @@ func (ls *LedgerState) governanceProposalState(
 		)
 	}
 	state := olocalstatequery.GovActionState{
-		Id:                id,
-		CommitteeVotes:    make(map[olocalstatequery.StakeCredential]lcommon.Vote),
-		DRepVotes:         make(map[olocalstatequery.StakeCredential]lcommon.Vote),
+		Id: id,
+		CommitteeVotes: make(
+			map[olocalstatequery.StakeCredential]lcommon.Vote,
+		),
+		DRepVotes: make(
+			map[olocalstatequery.StakeCredential]lcommon.Vote,
+		),
 		SPOVotes:          make(map[ledger.Blake2b224]lcommon.Vote),
 		ProposalProcedure: cbor.RawMessage(procedure),
 		ProposedIn:        proposal.ProposedEpoch,

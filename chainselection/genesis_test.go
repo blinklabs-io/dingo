@@ -28,8 +28,16 @@ import (
 
 func TestGenesisWindowSlotsForParams(t *testing.T) {
 	assert.Equal(t, uint64(129600), GenesisWindowSlotsForParams(2160, 0.05))
-	assert.Equal(t, defaultGenesisWindowSlots, GenesisWindowSlotsForParams(0, 0.05))
-	assert.Equal(t, defaultGenesisWindowSlots, GenesisWindowSlotsForParams(2160, 0))
+	assert.Equal(
+		t,
+		defaultGenesisWindowSlots,
+		GenesisWindowSlotsForParams(0, 0.05),
+	)
+	assert.Equal(
+		t,
+		defaultGenesisWindowSlots,
+		GenesisWindowSlotsForParams(2160, 0),
+	)
 	assert.Equal(
 		t,
 		defaultGenesisWindowSlots,
@@ -158,8 +166,16 @@ func TestChainSelectorGenesisPrefersObservedDensity(t *testing.T) {
 	sparseTip := cs.GetPeerTip(sparseConn)
 	require.NotNil(t, denseTip)
 	require.NotNil(t, sparseTip)
-	assert.Equal(t, uint64(3), denseTip.observedDensity(cs.GenesisWindowSlots()))
-	assert.Equal(t, uint64(1), sparseTip.observedDensity(cs.GenesisWindowSlots()))
+	assert.Equal(
+		t,
+		uint64(3),
+		denseTip.observedDensity(cs.GenesisWindowSlots()),
+	)
+	assert.Equal(
+		t,
+		uint64(1),
+		sparseTip.observedDensity(cs.GenesisWindowSlots()),
+	)
 }
 
 func TestChainSelectorGenesisTransitionsBackToPraos(t *testing.T) {

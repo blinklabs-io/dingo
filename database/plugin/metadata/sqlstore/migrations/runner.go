@@ -102,7 +102,8 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 	target := r.Registry[len(r.Registry)-1].Version
 	current := 0
 	for _, migrationState := range states {
-		if migrationState.phase == PhaseComplete && migrationState.version > current {
+		if migrationState.phase == PhaseComplete &&
+			migrationState.version > current {
 			current = migrationState.version
 		}
 	}
@@ -401,7 +402,10 @@ func (r *Runner) ensureStateTable(
 	return nil
 }
 
-func (r *Runner) stateTableExists(ctx context.Context, conn *sql.Conn) (bool, error) {
+func (r *Runner) stateTableExists(
+	ctx context.Context,
+	conn *sql.Conn,
+) (bool, error) {
 	var query string
 	switch r.Dialect {
 	case "sqlite":
@@ -601,7 +605,8 @@ func execDDL(
 ) error {
 	for index, statement := range statements {
 		if _, err := conn.ExecContext(ctx, statement); err != nil {
-			if dialect == "mysql" && isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
+			if dialect == "mysql" &&
+				isMySQLDDLAlreadyAppliedOnConn(ctx, conn, statement, err) {
 				continue
 			}
 			return fmt.Errorf("statement %d: %w", index+1, err)

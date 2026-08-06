@@ -667,7 +667,10 @@ func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
 	eb := event.NewEventBus(nil, nil)
 	eb.Close()
 
-	err := eb.PublishBlocking(testEvtType, event.NewEvent(testEvtType, "closed"))
+	err := eb.PublishBlocking(
+		testEvtType,
+		event.NewEvent(testEvtType, "closed"),
+	)
 	require.ErrorIs(t, err, event.ErrEventBusStopped)
 }
 

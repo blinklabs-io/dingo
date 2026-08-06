@@ -29,7 +29,9 @@ import (
 	"time"
 )
 
-var nodeLogName = regexp.MustCompile(`^p([0-9]+)(?:[._-].*)?\.log(?:\.[0-9]+)?$`)
+var nodeLogName = regexp.MustCompile(
+	`^p([0-9]+)(?:[._-].*)?\.log(?:\.[0-9]+)?$`,
+)
 
 // fileState tracks the read position within a single log file so that
 // successive checks only process new lines.
@@ -138,23 +140,32 @@ func (a *Analyzer) check() {
 }
 
 func (a *Analyzer) reportObservability(snap MetricsSnapshot) {
-	Always(len(a.ingestion.nodeReadable) > 0, "node-log-observability", map[string]interface{}{
-		"node_files":          len(a.ingestion.nodeFiles),
-		"readable_node_files": len(a.ingestion.nodeReadable),
-		"node_log_bytes":      a.ingestion.nodeBytes,
-		"node_events":         a.ingestion.nodeEvents,
-		"open_failures":       a.ingestion.openFailures,
-		"forged_blocks":       snap.TotalBlocksForged,
-		"txpump_readable":     a.ingestion.txpumpReadable,
-		"txpump_events":       a.ingestion.txpumpEvents,
-		"mempool_events":      snap.MempoolTxCount,
-	})
+	Always(
+		len(a.ingestion.nodeReadable) > 0,
+		"node-log-observability",
+		map[string]interface{}{
+			"node_files":          len(a.ingestion.nodeFiles),
+			"readable_node_files": len(a.ingestion.nodeReadable),
+			"node_log_bytes":      a.ingestion.nodeBytes,
+			"node_events":         a.ingestion.nodeEvents,
+			"open_failures":       a.ingestion.openFailures,
+			"forged_blocks":       snap.TotalBlocksForged,
+			"txpump_readable":     a.ingestion.txpumpReadable,
+			"txpump_events":       a.ingestion.txpumpEvents,
+			"mempool_events":      snap.MempoolTxCount,
+		},
+	)
 	if a.ingestion.nodeEvents == 0 && !a.observabilityWarned {
-		a.logger.Warn("no node log events ingested; workload assertions are pending",
-			"node_files", len(a.ingestion.nodeFiles),
-			"readable_node_files", len(a.ingestion.nodeReadable),
-			"node_log_bytes", a.ingestion.nodeBytes,
-			"open_failures", a.ingestion.openFailures,
+		a.logger.Warn(
+			"no node log events ingested; workload assertions are pending",
+			"node_files",
+			len(a.ingestion.nodeFiles),
+			"readable_node_files",
+			len(a.ingestion.nodeReadable),
+			"node_log_bytes",
+			a.ingestion.nodeBytes,
+			"open_failures",
+			a.ingestion.openFailures,
 		)
 		a.observabilityWarned = true
 	}
@@ -180,27 +191,39 @@ func (a *Analyzer) readNewLines() {
 	a.ingestion.txpumpReadable = false
 	type logFile struct{ path, role, nodeID string }
 	var logFiles []logFile
-	_ = filepath.WalkDir(a.cfg.LogDir, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if _, warned := a.walkWarnings[path]; !warned {
-				a.logger.Warn("cannot inspect log path", "path", path, "err", walkErr)
-				a.walkWarnings[path] = struct{}{}
+	_ = filepath.WalkDir(
+		a.cfg.LogDir,
+		func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				if _, warned := a.walkWarnings[path]; !warned {
+					a.logger.Warn(
+						"cannot inspect log path",
+						"path",
+						path,
+						"err",
+						walkErr,
+					)
+					a.walkWarnings[path] = struct{}{}
+				}
+				return nil
 			}
+			if entry.IsDir() {
+				return nil
+			}
+			role, nodeID, ok := logRole(path)
+			if !ok {
+				return nil
+			}
+			if role == "node" {
+				currentNodeFiles[path] = struct{}{}
+			}
+			logFiles = append(
+				logFiles,
+				logFile{path: path, role: role, nodeID: nodeID},
+			)
 			return nil
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		role, nodeID, ok := logRole(path)
-		if !ok {
-			return nil
-		}
-		if role == "node" {
-			currentNodeFiles[path] = struct{}{}
-		}
-		logFiles = append(logFiles, logFile{path: path, role: role, nodeID: nodeID})
-		return nil
-	})
+		},
+	)
 	// Prefer active files over rotations so a renamed active file is not used
 	// as the canonical state when both paths refer to the same inode.
 	sort.Slice(logFiles, func(i, j int) bool {
@@ -255,7 +278,8 @@ func (a *Analyzer) readFile(path, role, nodeID string) bool {
 		state = &fileState{path: path, nodeID: nodeID}
 	}
 	if identity != "" {
-		if existing := a.filesByIdentity[identity]; existing != nil && existing != state {
+		if existing := a.filesByIdentity[identity]; existing != nil &&
+			existing != state {
 			// A rotated file is the same inode under a new path. It has already
 			// been consumed during this pass under the active path.
 			return true
@@ -371,7 +395,8 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 		"regression_count": len(snap.SlotRegressions),
 	})
 
-	if snap.TotalBlocksForged >= a.cfg.MinBlocksSample && len(snap.ChainTipByNode) >= 2 {
+	if snap.TotalBlocksForged >= a.cfg.MinBlocksSample &&
+		len(snap.ChainTipByNode) >= 2 {
 		if minTip, maxTip, ok := chainTipRange(snap.ChainTipByNode); ok {
 			lag := maxTip - minTip
 			a.logger.Info("sync-lag",
@@ -415,14 +440,22 @@ func (a *Analyzer) reportLivenessAssertions(snap *MetricsSnapshot) {
 	// Liveness 2: Chain growth — total forged block count is increasing.
 	// "Sometimes" is the right predicate: we just want to see growth at some
 	// point.
-	Sometimes(snap.TotalBlocksForged > 0, "chain-growth", map[string]interface{}{
-		"total_blocks_forged": snap.TotalBlocksForged,
-	})
+	Sometimes(
+		snap.TotalBlocksForged > 0,
+		"chain-growth",
+		map[string]interface{}{
+			"total_blocks_forged": snap.TotalBlocksForged,
+		},
+	)
 
 	// Liveness 3: Mempool activity — at least one transaction has been added.
-	Sometimes(snap.MempoolTxCount > 0, "mempool-activity", map[string]interface{}{
-		"mempool_tx_count": snap.MempoolTxCount,
-	})
+	Sometimes(
+		snap.MempoolTxCount > 0,
+		"mempool-activity",
+		map[string]interface{}{
+			"mempool_tx_count": snap.MempoolTxCount,
+		},
+	)
 
 	// Liveness 4: Epoch boundary crossed — once MinBlocksSample blocks have
 	// been seen we expect at least one epoch transition (epoch > 0).

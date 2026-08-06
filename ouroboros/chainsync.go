@@ -620,9 +620,12 @@ func (o *Ouroboros) reportChainsyncServerAsyncError(
 	if closeErr := conn.Close(); closeErr != nil {
 		o.config.Logger.Debug(
 			"chainsync server: failed to close connection after async send error",
-			"connection_id", connectionID,
-			"operation", operation,
-			"error", closeErr,
+			"connection_id",
+			connectionID,
+			"operation",
+			operation,
+			"error",
+			closeErr,
 		)
 	}
 }

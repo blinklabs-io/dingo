@@ -2528,23 +2528,35 @@ func (ls *LedgerState) processChainIteratorRollback(
 		case err == nil:
 			ls.config.Logger.Debug(
 				"stale chain iterator rollback superseded, ledger tip still valid, restarting ledger pipeline",
-				"component", "ledger",
-				"rollback_slot", point.Slot,
-				"rollback_hash", hex.EncodeToString(point.Hash),
-				"chain_tip_slot", chainTip.Point.Slot,
-				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+				"component",
+				"ledger",
+				"rollback_slot",
+				point.Slot,
+				"rollback_hash",
+				hex.EncodeToString(point.Hash),
+				"chain_tip_slot",
+				chainTip.Point.Slot,
+				"chain_tip_hash",
+				hex.EncodeToString(chainTip.Point.Hash),
 			)
 			return errRestartLedgerPipeline
 		case errors.Is(err, models.ErrBlockNotFound):
 			ls.config.Logger.Debug(
 				"stale chain iterator rollback, ledger tip was on abandoned fork, rolling back and restarting ledger pipeline",
-				"component", "ledger",
-				"rollback_slot", point.Slot,
-				"rollback_hash", hex.EncodeToString(point.Hash),
-				"chain_tip_slot", chainTip.Point.Slot,
-				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-				"ledger_tip_slot", currentTip.Point.Slot,
-				"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+				"component",
+				"ledger",
+				"rollback_slot",
+				point.Slot,
+				"rollback_hash",
+				hex.EncodeToString(point.Hash),
+				"chain_tip_slot",
+				chainTip.Point.Slot,
+				"chain_tip_hash",
+				hex.EncodeToString(chainTip.Point.Hash),
+				"ledger_tip_slot",
+				currentTip.Point.Slot,
+				"ledger_tip_hash",
+				hex.EncodeToString(currentTip.Point.Hash),
 			)
 			if err := ls.rollback(point); err != nil {
 				return err
@@ -3183,11 +3195,16 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 				consecutiveNoProgress%100 == 0 {
 				ls.config.Logger.Warn(
 					"ledger pipeline making no progress across repeated restarts, backing off",
-					"component", "ledger",
-					"consecutive_no_progress", consecutiveNoProgress,
-					"backoff", backoff,
-					"tip_slot", tipSlot,
-					"error", err,
+					"component",
+					"ledger",
+					"consecutive_no_progress",
+					consecutiveNoProgress,
+					"backoff",
+					backoff,
+					"tip_slot",
+					tipSlot,
+					"error",
+					err,
 				)
 			}
 			timer := time.NewTimer(backoff)
@@ -5946,11 +5963,16 @@ func (ls *LedgerState) enforceDurableTipFloor() error {
 	}
 	ls.config.Logger.Warn(
 		"ledger tip leads durable applied state, repairing tip down to applied floor",
-		"component", "ledger",
-		"ledger_tip_slot", currentTip.Point.Slot,
-		"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-		"applied_floor_slot", floor.Slot,
-		"applied_floor_hash", hex.EncodeToString(floor.Hash),
+		"component",
+		"ledger",
+		"ledger_tip_slot",
+		currentTip.Point.Slot,
+		"ledger_tip_hash",
+		hex.EncodeToString(currentTip.Point.Hash),
+		"applied_floor_slot",
+		floor.Slot,
+		"applied_floor_hash",
+		hex.EncodeToString(floor.Hash),
 	)
 	return ls.rollback(floor)
 }

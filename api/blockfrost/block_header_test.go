@@ -33,8 +33,12 @@ import (
 // vrfKey and hotVkey are arbitrary 32-byte values used to exercise the header
 // field extraction. The exact bytes don't matter, only that they round-trip.
 var (
-	testVRFKey  = mustHex("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
-	testHotVkey = mustHex("ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
+	testVRFKey = mustHex(
+		"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+	)
+	testHotVkey = mustHex(
+		"ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+	)
 )
 
 func mustHex(s string) []byte {

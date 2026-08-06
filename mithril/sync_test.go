@@ -13,8 +13,14 @@ import (
 
 func testStoragePlugins() StoragePlugins {
 	return StoragePlugins{
-		Blob:     plugin.Selection{Provider: "badger", Config: map[string]any{}},
-		Metadata: plugin.Selection{Provider: "sqlite", Config: map[string]any{}},
+		Blob: plugin.Selection{
+			Provider: "badger",
+			Config:   map[string]any{},
+		},
+		Metadata: plugin.Selection{
+			Provider: "sqlite",
+			Config:   map[string]any{},
+		},
 	}
 }
 

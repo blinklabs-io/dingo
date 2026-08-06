@@ -30,15 +30,28 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Len(t, registry, 1)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
-	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 302)
+	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
+	require.Contains(t, registry[0].SQL["sqlite"].Expand, "CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`)")
+}
+
+func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
+	t.Parallel()
+	registry, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.NoError(t, validateRegistry(registry, "mysql"))
+	require.Len(t, registry, 1)
+	require.Contains(t, registry[0].SQL["mysql"].Expand, "CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)")
 }
 
 func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {
 	expand, err := loadSQL("v1/sqlite/expand.sql")
 	require.NoError(t, err)
-	translated := translateSchemaSQL(expand, "mysql")
+	translated := translateSchemaSQLInSchema(expand, "mysql", expand)
 	for _, statement := range translated {
-		if strings.Contains(statement, "idx_account_inactivity_activation_staking_key") {
+		if strings.Contains(
+			statement,
+			"idx_account_inactivity_activation_staking_key",
+		) {
 			require.Contains(t, statement, "`staking_key`(255)")
 		}
 		if strings.Contains(statement, "idx_transaction_block_hash") {
@@ -54,7 +67,7 @@ func TestPostgresSchemaTranslationUsesCompatibleIntegerTypes(t *testing.T) {
 	t.Parallel()
 	expand, err := loadSQL("v1/sqlite/expand.sql")
 	require.NoError(t, err)
-	translated := translateSchemaSQL(expand, "postgres")
+	translated := translateSchemaSQLInSchema(expand, "postgres", expand)
 	joined := strings.Join(translated, "\n")
 	require.Contains(t, joined, "BIGSERIAL PRIMARY KEY")
 	// SQLite INTEGER foreign-key columns must be widened alongside the
@@ -80,7 +93,9 @@ func TestSplitSQL(t *testing.T) {
 
 func TestSplitSQLPreservesCommentTokenBoundaries(t *testing.T) {
 	t.Parallel()
-	statements, err := splitSQL("CREATE/*inline*/TABLE thing (id INTEGER); SELECT/*x*/1;")
+	statements, err := splitSQL(
+		"CREATE/*inline*/TABLE thing (id INTEGER); SELECT/*x*/1;",
+	)
 	require.NoError(t, err)
 	require.Equal(t, []string{
 		"CREATE TABLE thing (id INTEGER)",

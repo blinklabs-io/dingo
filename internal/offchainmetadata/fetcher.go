@@ -206,11 +206,19 @@ func (f *Fetcher) runOnce(ctx context.Context) {
 	}
 	created, err := f.store.EnsureOffchainMetadataPointers(ctx, now, nil)
 	if err != nil {
-		f.logger.Warn("off-chain metadata pointer discovery failed", "error", err)
+		f.logger.Warn(
+			"off-chain metadata pointer discovery failed",
+			"error",
+			err,
+		)
 		return
 	}
 	if created > 0 {
-		f.logger.Debug("off-chain metadata pointers discovered", "count", created)
+		f.logger.Debug(
+			"off-chain metadata pointers discovered",
+			"count",
+			created,
+		)
 	}
 	if ctx.Err() != nil {
 		return
@@ -276,14 +284,21 @@ func (f *Fetcher) fetchOne(
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, f.timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, fetchURL, nil)
+	req, err := http.NewRequestWithContext(
+		reqCtx,
+		http.MethodGet,
+		fetchURL,
+		nil,
+	)
 	if err != nil {
 		f.markFailure(doc, 0, err)
 		return nil
 	}
 	req.Header.Set("User-Agent", f.userAgent)
 	req.Header.Set("Accept", "application/json, text/plain;q=0.8, */*;q=0.1")
-	resp, err := f.client.Do(req) //nolint:gosec // URL is ledger-provided but validated and fetched through the enforced client policy.
+	resp, err := f.client.Do(
+		req,
+	) //nolint:gosec // URL is ledger-provided but validated and fetched through the enforced client policy.
 	if err != nil {
 		if ctx.Err() != nil {
 			doc.FetchAttempts = originalAttempts
@@ -293,11 +308,16 @@ func (f *Fetcher) fetchOne(
 		return nil
 	}
 	if resp == nil {
-		f.markFailure(doc, 0, errors.New("metadata fetch returned nil response"))
+		f.markFailure(
+			doc,
+			0,
+			errors.New("metadata fetch returned nil response"),
+		)
 		return nil
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	if resp.StatusCode < http.StatusOK ||
+		resp.StatusCode >= http.StatusMultipleChoices {
 		f.markFailure(
 			doc,
 			uint(resp.StatusCode),

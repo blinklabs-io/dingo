@@ -163,4 +163,10 @@ func (c *recordingConn) SetReadDeadline(t time.Time) error {
 	c.readDeadlineCalls++
 	return nil
 }
-func (c *recordingConn) SetWriteDeadline(t time.Time) error { c.writeDeadline = t; return nil }
+
+func (c *recordingConn) SetWriteDeadline(
+	t time.Time,
+) error {
+	c.writeDeadline = t
+	return nil
+}

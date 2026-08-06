@@ -82,7 +82,10 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 	}
 	// Read after the goroutine finished, so no concurrent buffer access.
 	if logged := buf.String(); !strings.Contains(logged, "metrics") {
-		t.Fatalf("expected a log mentioning the metrics listener, got: %q", logged)
+		t.Fatalf(
+			"expected a log mentioning the metrics listener, got: %q",
+			logged,
+		)
 	}
 }
 
@@ -128,7 +131,10 @@ func TestShutdownNodeResourcesAggregatesErrors(t *testing.T) {
 	if !errors.Is(err, nodeErr) {
 		t.Fatalf("expected node stop error to be joined: %v", err)
 	}
-	if !strings.Contains(err.Error(), "metrics server shutdown: metrics failed") {
+	if !strings.Contains(
+		err.Error(),
+		"metrics server shutdown: metrics failed",
+	) {
 		t.Fatalf("expected metrics shutdown context in error: %v", err)
 	}
 	if !strings.Contains(err.Error(), "node stop: node failed") {

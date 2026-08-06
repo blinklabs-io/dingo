@@ -171,7 +171,8 @@ func (p *PeerGovernor) gossipChurn() {
 		if !p.lastEligibleUpstreamSkipLogged {
 			p.config.Logger.Info(
 				"gossip churn: skipping demotion of last eligible upstream peer",
-				"address", skippedUpstreamAddress,
+				"address",
+				skippedUpstreamAddress,
 			)
 			p.lastEligibleUpstreamSkipLogged = true
 		}

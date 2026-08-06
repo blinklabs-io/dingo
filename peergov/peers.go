@@ -666,7 +666,10 @@ func (p *PeerGovernor) resolveInboundIdentity(
 		}
 		if peer.Address == remoteAddr ||
 			peer.NormalizedAddress == normalizedRemoteAddr {
-			return i, topologyGroupIDForPeer(peer, p.isTopologyPeer(peer.Source))
+			return i, topologyGroupIDForPeer(
+				peer,
+				p.isTopologyPeer(peer.Source),
+			)
 		}
 	}
 	// Rule 2: unambiguous topology-host match.

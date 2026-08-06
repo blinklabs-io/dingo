@@ -112,7 +112,8 @@ func LoadDevNetConfig() (*DevNetConfig, error) {
 	if len(docs) < 4 {
 		return nil, fmt.Errorf(
 			"LoadDevNetConfig: expected at least 4 YAML documents in %s, got %d",
-			path, len(docs),
+			path,
+			len(docs),
 		)
 	}
 

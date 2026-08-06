@@ -35,7 +35,10 @@ import (
 func TestOrderEntriesManifestLastSortsManifestToEnd(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{ManifestFileName, BlobBackupFileName, MetadataBackupFileName} {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644))
+		require.NoError(
+			t,
+			os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644),
+		)
 	}
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -108,15 +111,23 @@ func TestJoinCloudURIPreservesQueryAndFragment(t *testing.T) {
 func TestParseCloudDestinationCleansNoncanonicalPath(t *testing.T) {
 	var gotPath string
 	registry := NewDestinationRegistry()
-	registry.Register("cleantest", func(uri *url.URL) (CloudDestination, error) {
-		gotPath = uri.Path
-		return &fakeInternalCloudDestination{}, nil
-	})
+	registry.Register(
+		"cleantest",
+		func(uri *url.URL) (CloudDestination, error) {
+			gotPath = uri.Path
+			return &fakeInternalCloudDestination{}, nil
+		},
+	)
 
-	_, err := ParseCloudDestination(registry, "cleantest://bucket/prefix//sub/../other")
+	_, err := ParseCloudDestination(
+		registry,
+		"cleantest://bucket/prefix//sub/../other",
+	)
 	require.NoError(t, err)
 	require.Equal(
-		t, "/prefix/other", gotPath,
+		t,
+		"/prefix/other",
+		gotPath,
 		"factory must see an already-cleaned path, not the raw noncanonical one",
 	)
 }
@@ -129,8 +140,19 @@ func TestParseCloudDestinationCleansNoncanonicalPath(t *testing.T) {
 // _test package, already covers that).
 type fakeInternalCloudDestination struct{}
 
-func (*fakeInternalCloudDestination) UploadDir(context.Context, string) error   { return nil }
-func (*fakeInternalCloudDestination) DownloadDir(context.Context, string) error { return nil }
+func (*fakeInternalCloudDestination) UploadDir(
+	context.Context,
+	string,
+) error {
+	return nil
+}
+
+func (*fakeInternalCloudDestination) DownloadDir(
+	context.Context,
+	string,
+) error {
+	return nil
+}
 
 // TestDestinationRegistryRegisterNilReceiverIsNoOp guards against a real
 // panic: DestinationRegistry's doc comment promises "every method here is

@@ -112,11 +112,13 @@ func leiosCommitteeParamsFromPParams(
 	}
 	// Return fresh copies so callers cannot mutate the shared defaults.
 	sigmaC := new(big.Rat).Set(defaultLeiosCommitteeStakeCoverage)
-	if cov := dijkstraPParams.CommitteeStakeCoverage; cov != nil && cov.Rat != nil {
+	if cov := dijkstraPParams.CommitteeStakeCoverage; cov != nil &&
+		cov.Rat != nil {
 		sigmaC = cov.Rat
 	}
 	tau := new(big.Rat).Set(defaultLeiosQuorumStakeThreshold)
-	if quorum := dijkstraPParams.QuorumStakeThreshold; quorum != nil && quorum.Rat != nil {
+	if quorum := dijkstraPParams.QuorumStakeThreshold; quorum != nil &&
+		quorum.Rat != nil {
 		tau = quorum.Rat
 	}
 	// Defaulting a single unset field against a configured counterpart could
@@ -125,7 +127,8 @@ func leiosCommitteeParamsFromPParams(
 	if tau.Cmp(sigmaC) >= 0 {
 		return nil, nil, fmt.Errorf(
 			"leios quorum stake threshold (%s) must be less than committee stake coverage (%s)",
-			tau.RatString(), sigmaC.RatString(),
+			tau.RatString(),
+			sigmaC.RatString(),
 		)
 	}
 	return sigmaC, tau, nil

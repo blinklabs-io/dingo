@@ -59,15 +59,19 @@ type envelopeTestBlock struct {
 }
 
 func (b *envelopeTestBlock) Header() lcommon.BlockHeader { return b.header }
-func (b *envelopeTestBlock) Hash() lcommon.Blake2b256    { return b.header.Hash() }
+
+func (b *envelopeTestBlock) Hash() lcommon.Blake2b256 { return b.header.Hash() }
 func (b *envelopeTestBlock) PrevHash() lcommon.Blake2b256 {
 	return b.header.PrevHash()
 }
+
 func (b *envelopeTestBlock) BlockNumber() uint64 { return b.header.BlockNumber() }
-func (b *envelopeTestBlock) SlotNumber() uint64  { return b.header.SlotNumber() }
+
+func (b *envelopeTestBlock) SlotNumber() uint64 { return b.header.SlotNumber() }
 func (b *envelopeTestBlock) IssuerVkey() lcommon.IssuerVkey {
 	return b.header.IssuerVkey()
 }
+
 func (b *envelopeTestBlock) BlockBodySize() uint64 { return b.header.BlockBodySize() }
 func (b *envelopeTestBlock) Era() lcommon.Era      { return b.header.Era() }
 func (b *envelopeTestBlock) Cbor() []byte          { return b.cbor }

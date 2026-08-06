@@ -30,7 +30,8 @@ import (
 // database/plugin/metadata/postgres's isPostgresConfigured so both suites
 // skip/run under the same conditions in CI and locally.
 func isPostgresConformanceConfigured() bool {
-	return os.Getenv("POSTGRES_PASSWORD") != "" || os.Getenv("POSTGRES_DSN") != ""
+	return os.Getenv("POSTGRES_PASSWORD") != "" ||
+		os.Getenv("POSTGRES_DSN") != ""
 }
 
 // skipIfPostgresConformanceNotConfigured skips the test unless postgres

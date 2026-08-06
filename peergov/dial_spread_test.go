@@ -115,7 +115,10 @@ func TestResolveDialAddress_SingleIPHostname(t *testing.T) {
 		assert.Equal(
 			t,
 			"198.51.100.7:3001",
-			pg.resolveDialAddress(context.Background(), "relay.example.com:3001"),
+			pg.resolveDialAddress(
+				context.Background(),
+				"relay.example.com:3001",
+			),
 		)
 	}
 }
@@ -153,7 +156,10 @@ func TestResolveDialAddress_MultiIPRotates(t *testing.T) {
 	pg := newDialSpreadGovernor()
 	seen := make(map[string]struct{})
 	for range 200 {
-		got := pg.resolveDialAddress(context.Background(), "leios-node.play.dev.cardano.org:3001")
+		got := pg.resolveDialAddress(
+			context.Background(),
+			"leios-node.play.dev.cardano.org:3001",
+		)
 		_, ok := valid[got]
 		require.Truef(
 			t,
@@ -276,8 +282,16 @@ func TestResolveDialAddress_V4OnlyHostFiltersV6(t *testing.T) {
 
 	pg := newDialSpreadGovernor()
 	for range 100 {
-		got := pg.resolveDialAddress(context.Background(), "relay.example.com:3001")
-		assert.Truef(t, dialTargetIsV4(t, got), "expected IPv4 target, got %q", got)
+		got := pg.resolveDialAddress(
+			context.Background(),
+			"relay.example.com:3001",
+		)
+		assert.Truef(
+			t,
+			dialTargetIsV4(t, got),
+			"expected IPv4 target, got %q",
+			got,
+		)
 	}
 }
 
@@ -289,8 +303,16 @@ func TestResolveDialAddress_V6OnlyHostFiltersV4(t *testing.T) {
 
 	pg := newDialSpreadGovernor()
 	for range 100 {
-		got := pg.resolveDialAddress(context.Background(), "relay.example.com:3001")
-		assert.Falsef(t, dialTargetIsV4(t, got), "expected IPv6 target, got %q", got)
+		got := pg.resolveDialAddress(
+			context.Background(),
+			"relay.example.com:3001",
+		)
+		assert.Falsef(
+			t,
+			dialTargetIsV4(t, got),
+			"expected IPv6 target, got %q",
+			got,
+		)
 	}
 }
 
@@ -304,15 +326,26 @@ func TestResolveDialAddress_DualStackKeepsBoth(t *testing.T) {
 	pg := newDialSpreadGovernor()
 	sawV4, sawV6 := false, false
 	for range 300 {
-		got := pg.resolveDialAddress(context.Background(), "relay.example.com:3001")
+		got := pg.resolveDialAddress(
+			context.Background(),
+			"relay.example.com:3001",
+		)
 		if dialTargetIsV4(t, got) {
 			sawV4 = true
 		} else {
 			sawV6 = true
 		}
 	}
-	assert.True(t, sawV4, "expected at least one IPv4 target on dual-stack host")
-	assert.True(t, sawV6, "expected at least one IPv6 target on dual-stack host")
+	assert.True(
+		t,
+		sawV4,
+		"expected at least one IPv4 target on dual-stack host",
+	)
+	assert.True(
+		t,
+		sawV6,
+		"expected at least one IPv6 target on dual-stack host",
+	)
 }
 
 // TestResolveDialAddress_EmptyAfterFilterFallsBackToAll verifies the safety
@@ -333,7 +366,10 @@ func TestResolveDialAddress_EmptyAfterFilterFallsBackToAll(t *testing.T) {
 	}
 	pg := newDialSpreadGovernor()
 	for range 50 {
-		got := pg.resolveDialAddress(context.Background(), "relay.example.com:3001")
+		got := pg.resolveDialAddress(
+			context.Background(),
+			"relay.example.com:3001",
+		)
 		_, ok := valid[got]
 		assert.Truef(t, ok, "expected fallback to full v4 set, got %q", got)
 	}
@@ -349,7 +385,10 @@ func TestResolveDialAddress_DetectionInconclusiveFallsBackToAll(t *testing.T) {
 	pg := newDialSpreadGovernor()
 	sawV4, sawV6 := false, false
 	for range 300 {
-		got := pg.resolveDialAddress(context.Background(), "relay.example.com:3001")
+		got := pg.resolveDialAddress(
+			context.Background(),
+			"relay.example.com:3001",
+		)
 		if dialTargetIsV4(t, got) {
 			sawV4 = true
 		} else {

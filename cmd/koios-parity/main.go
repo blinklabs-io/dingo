@@ -167,7 +167,8 @@ func resolveDingoDataDir() string {
 		return v
 	}
 	if cfg := loadedDingoConfig(); cfg != nil {
-		if dataDir, ok := stringConfigValue(cfg.Plugins.Storage.Metadata.Config, "dataDir"); ok && dataDir != "" {
+		if dataDir, ok := stringConfigValue(cfg.Plugins.Storage.Metadata.Config, "dataDir"); ok &&
+			dataDir != "" {
 			return dataDir
 		}
 		if cfg.DatabasePath != "" {
@@ -349,7 +350,10 @@ func requireNetwork() (string, error) {
 		return "", errors.New("--network is required (preview or preprod)")
 	}
 	if net != "preview" && net != "preprod" {
-		return "", fmt.Errorf("--network must be 'preview' or 'preprod', got %q", net)
+		return "", fmt.Errorf(
+			"--network must be 'preview' or 'preprod', got %q",
+			net,
+		)
 	}
 	return net, nil
 }
@@ -373,9 +377,17 @@ func checkResultErr(result *koiosparity.CheckResult) error {
 			len(result.ErrorEpochs), result.ErrorEpochs,
 		)
 	case len(result.FailEpochs) > 0:
-		return fmt.Errorf("parity check failed: %d failing epoch(s) %v", len(result.FailEpochs), result.FailEpochs)
+		return fmt.Errorf(
+			"parity check failed: %d failing epoch(s) %v",
+			len(result.FailEpochs),
+			result.FailEpochs,
+		)
 	case len(result.ErrorEpochs) > 0:
-		return fmt.Errorf("parity check incomplete: %d error epoch(s) %v", len(result.ErrorEpochs), result.ErrorEpochs)
+		return fmt.Errorf(
+			"parity check incomplete: %d error epoch(s) %v",
+			len(result.ErrorEpochs),
+			result.ErrorEpochs,
+		)
 	default:
 		return nil
 	}

@@ -472,7 +472,7 @@ func leiosTestCertifiedBlockPair(
 			},
 			LeiosHeaderExtension: []cbor.RawMessage{
 				leiosTestRaw(t, true),
-				cbor.RawMessage{0xf6},
+				{0xf6},
 			},
 		},
 	}

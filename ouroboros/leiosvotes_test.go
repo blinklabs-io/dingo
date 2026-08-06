@@ -210,7 +210,11 @@ func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, handler.prototypeVotes, 1)
-	assert.Equal(t, leiosConnectionIdString(conn.Id()), handler.prototypeVotes[0].connKey)
+	assert.Equal(
+		t,
+		leiosConnectionIdString(conn.Id()),
+		handler.prototypeVotes[0].connKey,
+	)
 	assert.Equal(t, vote, handler.prototypeVotes[0].vote)
 }
 

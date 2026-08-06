@@ -46,13 +46,26 @@ func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 
 	unknown := randomHash(t)
 	_, err := BlockByHash(db, unknown)
-	require.ErrorIs(t, err, models.ErrBlockNotFound,
-		"unknown hash must surface as ErrBlockNotFound so fork-resolution can rotate peers")
+	require.ErrorIs(
+		t,
+		err,
+		models.ErrBlockNotFound,
+		"unknown hash must surface as ErrBlockNotFound so fork-resolution can rotate peers",
+	)
 
 	hits, misses := BlockByHashStats()
-	assert.Equal(t, uint64(0), hits, "no hash-index hit expected for unknown hash")
-	assert.Equal(t, uint64(1), misses,
-		"miss counter must record the false-fallback so operators can track the back-fill rate (#2105)")
+	assert.Equal(
+		t,
+		uint64(0),
+		hits,
+		"no hash-index hit expected for unknown hash",
+	)
+	assert.Equal(
+		t,
+		uint64(1),
+		misses,
+		"miss counter must record the false-fallback so operators can track the back-fill rate (#2105)",
+	)
 }
 
 // TestBlockByHashTxn_KnownHashStillResolves guards the fast path: every

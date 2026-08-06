@@ -325,7 +325,9 @@ func (n *Node) runChainsyncStallRecycler(
 						if n.chainSelector != nil {
 							n.chainSelector.SetLocalTip(localTip)
 							if k := n.ledgerState.SecurityParam(); k > 0 {
-								n.chainSelector.SetSecurityParam(uint64(k)) //nolint:gosec
+								n.chainSelector.SetSecurityParam(
+									uint64(k),
+								) //nolint:gosec
 							}
 						}
 						n.processChainsyncRecyclerTick(
@@ -386,7 +388,9 @@ func (n *Node) processChainsyncRecyclerTick(
 		catchUpMultiplier = 5
 	}
 	effectiveGrace := time.Duration(catchUpMultiplier) * grace
-	effectivePlateau := time.Duration(catchUpMultiplier) * plateauRecoveryThreshold
+	effectivePlateau := time.Duration(
+		catchUpMultiplier,
+	) * plateauRecoveryThreshold
 	effectiveCooldown := time.Duration(catchUpMultiplier) * cooldown
 	n.chainsyncState.CheckStalledClients()
 	// Rotate the round-robin header-ingress driver on the stall-check
@@ -636,8 +640,10 @@ func (n *Node) processChainsyncRecyclerTick(
 		if eligibleCount <= 1 && !tracked.ObservabilityOnly {
 			n.config.logger.Warn(
 				"chainsync client stalled but is only eligible peer, skipping recycle",
-				"connection_id", connKey,
-				"stall_timeout", chainsyncCfg.StallTimeout,
+				"connection_id",
+				connKey,
+				"stall_timeout",
+				chainsyncCfg.StallTimeout,
 			)
 			recycleAt[connKey] = now.Add(grace)
 			continue
@@ -649,10 +655,14 @@ func (n *Node) processChainsyncRecyclerTick(
 			// connection attempt and avoid indefinite stalls.
 			n.config.logger.Warn(
 				"chainsync client stalled with no active selection, recycling connection",
-				"connection_id", connKey,
-				"stall_timeout", chainsyncCfg.StallTimeout,
-				"grace_period", grace,
-				"recycle_cooldown", cooldown,
+				"connection_id",
+				connKey,
+				"stall_timeout",
+				chainsyncCfg.StallTimeout,
+				"grace_period",
+				grace,
+				"recycle_cooldown",
+				cooldown,
 			)
 			n.eventBus.PublishAsync(
 				connmanager.ConnectionRecycleRequestedEventType,

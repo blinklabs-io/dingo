@@ -39,7 +39,9 @@ import (
 // rejects a start point the chain no longer holds). It reaches the ledger
 // synchronously through BlockfetchRequestRangeFunc, so it never produces a
 // BatchDone event.
-var errBlockfetchNoBlocks = errors.New("request block range: block(s) not found")
+var errBlockfetchNoBlocks = errors.New(
+	"request block range: block(s) not found",
+)
 
 // newNoBlocksLedgerState builds a LedgerState with one queued header whose
 // range every peer refuses with a NoBlocks error, and returns it alongside the
@@ -217,7 +219,10 @@ func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
 func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	t *testing.T,
 ) {
-	ls, requestCount, resyncChan := newNoBlocksLedgerState(t, "hdr-fork-restart")
+	ls, requestCount, resyncChan := newNoBlocksLedgerState(
+		t,
+		"hdr-fork-restart",
+	)
 	connId := testChainsyncConnId(6103, 3001)
 
 	const attempts = 25

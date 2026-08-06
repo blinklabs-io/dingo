@@ -17,6 +17,7 @@ package mempool
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -224,7 +225,11 @@ func newTestMempool(t *testing.T) *Mempool {
 	return m
 }
 
-func mustAddConsumer(t *testing.T, m *Mempool, connID ouroboros.ConnectionId) *MempoolConsumer {
+func mustAddConsumer(
+	t *testing.T,
+	m *Mempool,
+	connID ouroboros.ConnectionId,
+) *MempoolConsumer {
 	t.Helper()
 	consumer := m.AddConsumer(connID)
 	if consumer == nil {
@@ -1478,7 +1483,12 @@ func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
 		mempoolTxs[0].Hash,
 		"mempool should return copies",
 	)
-	assert.NotEqual(t, byte('X'), mempoolTxs[0].Cbor[0], "CBOR should be copied")
+	assert.NotEqual(
+		t,
+		byte('X'),
+		mempoolTxs[0].Cbor[0],
+		"CBOR should be copied",
+	)
 }
 
 func TestMempool_GetTransaction_ReturnsCopy(t *testing.T) {
@@ -1516,16 +1526,31 @@ func TestMempoolConsumer_ReturnsImmutableCopies(t *testing.T) {
 
 	cachedTx := consumer.GetTxFromCache(txs[0].Hash)
 	require.NotNil(t, cachedTx)
-	assert.NotEqual(t, byte('X'), cachedTx.Cbor[0], "cache should not alias NextTx")
+	assert.NotEqual(
+		t,
+		byte('X'),
+		cachedTx.Cbor[0],
+		"cache should not alias NextTx",
+	)
 	cachedTx.Cbor[0] = 'Y'
 
 	cachedTxAgain := consumer.GetTxFromCache(txs[0].Hash)
 	require.NotNil(t, cachedTxAgain)
-	assert.NotEqual(t, byte('Y'), cachedTxAgain.Cbor[0], "cache reads should be copied")
+	assert.NotEqual(
+		t,
+		byte('Y'),
+		cachedTxAgain.Cbor[0],
+		"cache reads should be copied",
+	)
 
 	poolTx, ok := m.GetTransaction(txs[0].Hash)
 	require.True(t, ok)
-	assert.NotEqual(t, byte('X'), poolTx.Cbor[0], "pool should not alias NextTx")
+	assert.NotEqual(
+		t,
+		byte('X'),
+		poolTx.Cbor[0],
+		"pool should not alias NextTx",
+	)
 	assert.NotEqual(t, byte('Y'), poolTx.Cbor[0], "pool should not alias cache")
 }
 
@@ -1616,7 +1641,9 @@ func TestMempool_MempoolFull(t *testing.T) {
 // Derived from testTxHex with CBOR key 8 added to the body map.
 const testTxWithValidityStartHex = "84a8081a02faf08000818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a4008182582025fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409da928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c7951c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581840000187b820a0a06814746010000222601f4f6"
 
-func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(t *testing.T) {
+func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(
+	t *testing.T,
+) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
@@ -1635,10 +1662,17 @@ func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(t *test
 	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validity interval start")
-	assert.Equal(t, 0, len(m.Transactions()), "rejected TX should not be in mempool")
+	assert.Equal(
+		t,
+		0,
+		len(m.Transactions()),
+		"rejected TX should not be in mempool",
+	)
 }
 
-func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(t *testing.T) {
+func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(
+	t *testing.T,
+) {
 	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
@@ -1656,7 +1690,12 @@ func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(t *t
 	// TX has ValidityIntervalStart=50000000, current slot is at 60000000 → accept
 	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
-	assert.Equal(t, 1, len(m.Transactions()), "accepted TX should be in mempool")
+	assert.Equal(
+		t,
+		1,
+		len(m.Transactions()),
+		"accepted TX should be in mempool",
+	)
 }
 
 func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
@@ -1675,7 +1714,12 @@ func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
 	txBytes := getTestTxBytes(t)
 	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
-	assert.Equal(t, 1, len(m.Transactions()), "TX with no validity start should bypass check")
+	assert.Equal(
+		t,
+		1,
+		len(m.Transactions()),
+		"TX with no validity start should bypass check",
+	)
 }
 
 // =============================================================================
@@ -2340,10 +2384,12 @@ func TestMempool_TTL_ExpiredTransactionsRemoved(t *testing.T) {
 	m.consumersMutex.Lock()
 	for i := range 3 {
 		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("expired-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-100 * time.Millisecond), // already expired
+			Hash: fmt.Sprintf("expired-tx-%d", i),
+			Cbor: fmt.Appendf(nil, "cbor-%d", i),
+			Type: uint(conway.EraIdConway),
+			LastSeen: time.Now().
+				Add(-100 * time.Millisecond),
+			// already expired
 		}
 		m.transactions = append(m.transactions, tx)
 		m.txByHash[tx.Hash] = tx
@@ -2969,13 +3015,23 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
 
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay() }()
-	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+	dingotestutil.RequireReceive(
+		t,
+		validator.started,
+		time.Second,
+		"revalidation start",
+	)
 
 	snapshotDone := make(chan []MempoolTransaction, 1)
 	go func() { snapshotDone <- m.Transactions() }()
 	assert.Len(
 		t,
-		dingotestutil.RequireReceive(t, snapshotDone, time.Second, "mempool snapshot"),
+		dingotestutil.RequireReceive(
+			t,
+			snapshotDone,
+			time.Second,
+			"mempool snapshot",
+		),
 		1,
 	)
 
@@ -2984,13 +3040,26 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
 		_, ok := m.GetTransaction(txs[0].Hash)
 		lookupDone <- ok
 	}()
-	assert.True(t, dingotestutil.RequireReceive(t, lookupDone, time.Second, "transaction lookup"))
+	assert.True(
+		t,
+		dingotestutil.RequireReceive(
+			t,
+			lookupDone,
+			time.Second,
+			"transaction lookup",
+		),
+	)
 
 	consumerDone := make(chan *MempoolTransaction, 1)
 	go func() { consumerDone <- consumer.NextTx(false) }()
 	assert.NotNil(
 		t,
-		dingotestutil.RequireReceive(t, consumerDone, time.Second, "consumer read"),
+		dingotestutil.RequireReceive(
+			t,
+			consumerDone,
+			time.Second,
+			"consumer read",
+		),
 	)
 
 	removeDone := make(chan struct{}, 1)
@@ -2998,10 +3067,23 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
 		m.RemoveTransaction(txs[0].Hash)
 		removeDone <- struct{}{}
 	}()
-	dingotestutil.RequireReceive(t, removeDone, time.Second, "mutation during rebuild")
+	dingotestutil.RequireReceive(
+		t,
+		removeDone,
+		time.Second,
+		"mutation during rebuild",
+	)
 
 	close(validator.release)
-	require.NoError(t, dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"))
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(
+			t,
+			rebuildDone,
+			time.Second,
+			"rebuild completion",
+		),
+	)
 	assert.Empty(t, m.Transactions())
 	assert.Empty(t, m.overlay.applied)
 }
@@ -3017,7 +3099,12 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 	)
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay() }()
-	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+	dingotestutil.RequireReceive(
+		t,
+		validator.started,
+		time.Second,
+		"revalidation start",
+	)
 
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
 	require.NoError(t, err)
@@ -3027,13 +3114,23 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 	}()
 	require.NoError(
 		t,
-		dingotestutil.RequireReceive(t, addDone, time.Second, "concurrent admission"),
+		dingotestutil.RequireReceive(
+			t,
+			addDone,
+			time.Second,
+			"concurrent admission",
+		),
 	)
 
 	close(validator.release)
 	require.NoError(
 		t,
-		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+		dingotestutil.RequireReceive(
+			t,
+			rebuildDone,
+			time.Second,
+			"rebuild completion",
+		),
 	)
 	assert.Len(t, m.Transactions(), 2)
 	assert.Len(t, m.overlay.applied, 2)
@@ -3132,20 +3229,35 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay() }()
-	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+	dingotestutil.RequireReceive(
+		t,
+		validator.started,
+		time.Second,
+		"revalidation start",
+	)
 	addDone := make(chan error, 1)
 	go func() {
 		addDone <- m.AddTransaction(uint(conway.EraIdConway), secondTx)
 	}()
 	require.NoError(
 		t,
-		dingotestutil.RequireReceive(t, addDone, time.Second, "evicting admission"),
+		dingotestutil.RequireReceive(
+			t,
+			addDone,
+			time.Second,
+			"evicting admission",
+		),
 	)
 
 	close(validator.release)
 	require.NoError(
 		t,
-		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+		dingotestutil.RequireReceive(
+			t,
+			rebuildDone,
+			time.Second,
+			"rebuild completion",
+		),
 	)
 	txs := m.Transactions()
 	require.Len(t, txs, 1)
@@ -3166,7 +3278,12 @@ func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
 	err := m.rebuildOverlay()
 	require.ErrorIs(t, err, errValidationSnapshotChanged)
 	assert.Equal(t, int32(2), validator.sessions.Load())
-	assert.Len(t, m.Transactions(), 1, "failed candidates must not alter live state")
+	assert.Len(
+		t,
+		m.Transactions(),
+		1,
+		"failed candidates must not alter live state",
+	)
 	assert.Len(t, m.overlay.applied, 1)
 }
 
@@ -3185,7 +3302,12 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay() }()
-	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+	dingotestutil.RequireReceive(
+		t,
+		validator.started,
+		time.Second,
+		"revalidation start",
+	)
 	m.RemoveTransaction(firstHash)
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
 	require.NoError(t, err)
@@ -3194,7 +3316,12 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	close(validator.release)
 	require.ErrorIs(
 		t,
-		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+		dingotestutil.RequireReceive(
+			t,
+			rebuildDone,
+			time.Second,
+			"rebuild completion",
+		),
 		errRevalidationJournalOverflow,
 	)
 	txs := m.Transactions()
@@ -3214,7 +3341,12 @@ func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
 
 	rebuildDone := make(chan error, 1)
 	go func() { rebuildDone <- m.rebuildOverlay() }()
-	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
+	dingotestutil.RequireReceive(
+		t,
+		validator.started,
+		time.Second,
+		"revalidation start",
+	)
 
 	stopDone := make(chan error, 1)
 	go func() { stopDone <- m.Stop(context.Background()) }()
@@ -3225,13 +3357,20 @@ func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
 	close(validator.release)
 	require.ErrorIs(
 		t,
-		dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"),
+		dingotestutil.RequireReceive(
+			t,
+			rebuildDone,
+			time.Second,
+			"rebuild completion",
+		),
 		ErrMempoolStopped,
 	)
 	assert.Empty(t, m.Transactions())
 }
 
-func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(t *testing.T) {
+func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(
+	t *testing.T,
+) {
 	validator := newBlockingOverlayValidator()
 	validator.shouldBlock.Store(true)
 	m := newTestMempoolWithValidator(t, validator)
@@ -3242,24 +3381,47 @@ func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(t 
 	go func() {
 		addDone <- m.AddTransaction(uint(conway.EraIdConway), txBytes)
 	}()
-	dingotestutil.RequireReceive(t, validator.started, time.Second, "admission validation start")
+	dingotestutil.RequireReceive(
+		t,
+		validator.started,
+		time.Second,
+		"admission validation start",
+	)
 
 	snapshotDone := make(chan []MempoolTransaction, 1)
 	go func() { snapshotDone <- m.Transactions() }()
 	assert.Empty(
 		t,
-		dingotestutil.RequireReceive(t, snapshotDone, time.Second, "admission snapshot"),
+		dingotestutil.RequireReceive(
+			t,
+			snapshotDone,
+			time.Second,
+			"admission snapshot",
+		),
 	)
 
 	consumerDone := make(chan *MempoolConsumer, 1)
 	go func() { consumerDone <- m.AddConsumer(newTestConnectionId(0)) }()
 	assert.NotNil(
 		t,
-		dingotestutil.RequireReceive(t, consumerDone, time.Second, "consumer registration"),
+		dingotestutil.RequireReceive(
+			t,
+			consumerDone,
+			time.Second,
+			"consumer registration",
+		),
 	)
 
 	close(validator.release)
-	require.NoError(t, dingotestutil.RequireReceive(t, addDone, time.Second, "admission completion"))
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(
+			t,
+			addDone,
+			time.Second,
+			"admission completion",
+		),
+	)
 	assert.Len(t, m.Transactions(), 1)
 }
 
@@ -3593,7 +3755,11 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionOutput{buildMockOutput(t, 1600000)},
 	)
 	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
-	require.NoError(t, err, "TX-B should pass (spends TX-A output from overlay)")
+	require.NoError(
+		t,
+		err,
+		"TX-B should pass (spends TX-A output from overlay)",
+	)
 	overlay.applyTx(txB.Hash().String(), 0, nil, txB)
 
 	// Verify both TXs are tracked
@@ -3712,7 +3878,10 @@ func TestStopReturnsErrorWhenCtxFiresBeforeWorkersDrain(t *testing.T) {
 	m.workerWG.Add(1)
 	t.Cleanup(m.workerWG.Done)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Millisecond,
+	)
 	defer cancel()
 
 	err := m.Stop(ctx)
@@ -3840,4 +4009,251 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnStop(t *testing.T) {
 	assert.Nil(t, dingotestutil.RequireReceive(
 		t, got, 2*time.Second, "blocking NextTx released by shutdown",
 	), "shutdown returns nil rather than a transaction")
+}
+
+// blockingRejectingValidator blocks until released like
+// blockingSessionValidator, then reports one designated transaction invalid so
+// a test can observe whether revalidation actually published its result.
+type blockingRejectingValidator struct {
+	started    chan struct{}
+	release    chan struct{}
+	startOnce  sync.Once
+	rejectHash string
+}
+
+func newBlockingRejectingValidator(
+	rejectHash string,
+) *blockingRejectingValidator {
+	return &blockingRejectingValidator{
+		started:    make(chan struct{}),
+		release:    make(chan struct{}),
+		rejectHash: rejectHash,
+	}
+}
+
+func (v *blockingRejectingValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *blockingRejectingValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	return nil
+}
+
+func (v *blockingRejectingValidator) WithTxValidationSession(
+	fn func(
+		func(
+			gledger.Transaction,
+			map[string]struct{},
+			map[string]lcommon.Utxo,
+		) error,
+		func() bool,
+	) error,
+) error {
+	v.startOnce.Do(func() { close(v.started) })
+	validate := func(
+		tx gledger.Transaction,
+		_ map[string]struct{},
+		_ map[string]lcommon.Utxo,
+	) error {
+		<-v.release
+		if tx != nil && tx.Hash().String() == v.rejectHash {
+			return errors.New("simulated invalid transaction")
+		}
+		return nil
+	}
+	return fn(validate, func() bool { return true })
+}
+
+// TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget covers the
+// catch-up budget scaling with the observed backlog.
+//
+// Replay is bounded per round so the loop can observe new mutations, but with a
+// fixed round count the total budget is cap*rounds. A backlog larger than that
+// made every attempt bail with errRevalidationCatchup, and because
+// rebuildOverlay swallows that error and each attempt restarts from a fresh
+// journal, no progress ever carried across attempts: the revalidated pool was
+// never published, so invalid transactions were never removed and the DAG was
+// never rebuilt. That is precisely the sustained-load regime the enlarged
+// journal cap exists to buffer.
+func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
+	t *testing.T,
+) {
+	m := newTestMempool(t)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	invalidHash := m.Transactions()[0].Hash
+
+	validator := newBlockingRejectingValidator(invalidHash)
+	m.validator = validator
+	// One mutation per round, so the fixed budget would be
+	// maxRevalidationCatchupRounds mutations in total.
+	m.revalidationDeltaCap = 1
+	backlog := maxRevalidationCatchupRounds * 3
+
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(
+		t, validator.started, 2*time.Second, "revalidation start",
+	)
+
+	// Queue a backlog well past the fixed round budget. Removals of hashes
+	// absent from the pool are inert replays, so they exercise the budget
+	// without changing what the candidate should conclude.
+	m.mutationMutex.Lock()
+	for i := range backlog {
+		m.recordMutationLocked(mempoolMutation{
+			removed: map[string]struct{}{
+				fmt.Sprintf("absent-%d", i): {},
+			},
+		})
+	}
+	m.mutationMutex.Unlock()
+
+	close(validator.release)
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(
+			t, rebuildDone, 10*time.Second, "rebuild completion",
+		),
+	)
+
+	// Converged and published: the invalid transaction is gone.
+	assert.Empty(
+		t, m.Transactions(),
+		"revalidation must publish its result and drop the invalid tx "+
+			"even when the mutation backlog exceeds one round budget",
+	)
+	assert.Empty(t, m.overlay.applied)
+}
+
+// catchupBudget must include rounds already spent. Without that term, a backlog
+// arriving late in an already-enlarged budget computes a total no larger than
+// the current one, so the budget never grows and the loop bails with
+// errRevalidationCatchup even though the work would have fit.
+func TestCatchupBudgetAccountsForRoundsAlreadySpent(t *testing.T) {
+	const deltaCap = 64
+
+	// A backlog seen at round 0 needs its own rounds plus the base budget.
+	atStart := catchupBudget(0, 10_000, deltaCap)
+	assert.Equal(t, 157+maxRevalidationCatchupRounds, atStart)
+
+	// The same backlog seen deep into an enlarged budget needs strictly more,
+	// because the earlier rounds are gone.
+	deepIn := catchupBudget(150, 10_000, deltaCap)
+	assert.Greater(t, deepIn, atStart,
+		"a late backlog must demand more total rounds than an early one")
+	assert.Equal(t, 150+157+maxRevalidationCatchupRounds, deepIn)
+
+	// The regression: a budget already enlarged for the first backlog must be
+	// exceeded by the same backlog arriving near its end, or the loop bails.
+	assert.Greater(t, deepIn, atStart,
+		"the recomputed budget must exceed the one already in effect")
+
+	// Degenerate caps do not divide by zero or stall.
+	assert.Positive(t, catchupBudget(0, 10, 0))
+	assert.Equal(t, maxRevalidationCatchupRounds, catchupBudget(0, 0, deltaCap))
+}
+
+// TestCatchupBudgetAlwaysExceedsCurrentRound pins the property the catch-up
+// loop actually depends on, as opposed to the arithmetic pinned above: while
+// any work is pending, the recomputed budget is strictly greater than the round
+// the loop has reached, so `round < catchupRounds` can never end the loop. The
+// terminators are an empty journal, the journal cap, or a replay error. If this
+// ever fails, the loop gained a new exit that the surrounding comments and the
+// ARCHITECTURE.md note do not describe.
+func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
+	for _, deltaCap := range []int{1, 8, 64, 4096} {
+		for _, round := range []int{0, 1, 17, 1_000, 100_000} {
+			for _, pending := range []int{1, 2, 63, 64, 65, 1 << 20} {
+				got := catchupBudget(round, pending, deltaCap)
+				assert.Greater(t, got, round,
+					"deltaCap=%d round=%d pending=%d: a pending backlog must leave headroom",
+					deltaCap, round, pending,
+				)
+			}
+		}
+	}
+
+	// With nothing pending the budget stops growing, which is what lets the
+	// loop finish once it samples an empty journal.
+	assert.Equal(
+		t,
+		1_000+maxRevalidationCatchupRounds,
+		catchupBudget(1_000, 0, 64),
+	)
+}
+
+// TestMutationWindowReturnsEmptyNotNil covers mutationWindow's documented
+// never-nil contract. No production path reaches it today, because the caller
+// takes the finalize branch when pending is zero, so without this the contract
+// would be uncovered if that ever changes.
+func TestMutationWindowReturnsEmptyNotNil(t *testing.T) {
+	journal := []mempoolMutation{{seq: 1}, {seq: 2}}
+
+	// Caught up: sequence at or beyond the newest entry.
+	window, pending := mutationWindow(journal, 2, 64)
+	assert.NotNil(t, window)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+
+	// Empty journal.
+	window, pending = mutationWindow([]mempoolMutation{}, 0, 64)
+	assert.NotNil(t, window)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+}
+
+// mutationWindow must bound what it clones. Cloning the whole remaining suffix
+// each round, under mutationMutex, made a large journal quadratic in scans and
+// allocations and blocked admissions and removals.
+func TestMutationWindowClonesOnlyTheBoundedWindow(t *testing.T) {
+	journal := make([]mempoolMutation, 0, 1000)
+	for i := 1; i <= 1000; i++ {
+		journal = append(journal, mempoolMutation{seq: uint64(i)})
+	}
+
+	window, pending := mutationWindow(journal, 0, 10)
+	assert.Len(t, window, 10, "the window is bounded by limit")
+	assert.Equal(t, 1000, pending, "pending reports the whole backlog")
+	assert.Equal(t, uint64(1), window[0].seq)
+	assert.Equal(t, uint64(10), window[9].seq)
+
+	// Resuming after the applied prefix skips it without rescanning from 0.
+	window, pending = mutationWindow(journal, 500, 10)
+	assert.Len(t, window, 10)
+	assert.Equal(t, 500, pending)
+	assert.Equal(t, uint64(501), window[0].seq)
+
+	// A tail shorter than the limit returns just the tail.
+	window, pending = mutationWindow(journal, 995, 10)
+	assert.Len(t, window, 5)
+	assert.Equal(t, 5, pending)
+
+	// Fully drained.
+	window, pending = mutationWindow(journal, 1000, 10)
+	assert.Empty(t, window)
+	assert.Zero(t, pending)
+
+	// A degenerate limit still makes progress rather than returning nothing.
+	window, _ = mutationWindow(journal, 0, 0)
+	assert.Len(t, window, 1)
+
+	// The window is a copy: mutating it must not touch the journal.
+	window, _ = mutationWindow(journal, 0, 3)
+	window[0].seq = 9999
+	assert.Equal(t, uint64(1), journal[0].seq)
 }

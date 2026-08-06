@@ -283,7 +283,9 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		t.Fatal("Put calls did not complete under high contention within timeout")
+		t.Fatal(
+			"Put calls did not complete under high contention within timeout",
+		)
 	}
 
 	stats := cache.CASStats()
@@ -305,7 +307,11 @@ func TestHotCacheConcurrentPutsCompleteUnderHighContention(t *testing.T) {
 	)
 
 	_, ok := cache.Get([]byte("key-0"))
-	assert.True(t, ok, "contention should still leave successfully committed entries")
+	assert.True(
+		t,
+		ok,
+		"contention should still leave successfully committed entries",
+	)
 }
 
 // TestHotCacheRetryBudgetFallback deterministically exercises the CAS
@@ -340,7 +346,9 @@ func TestHotCacheRetryBudgetFallback(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		t.Fatal("Put calls did not complete within timeout under a tiny retry budget")
+		t.Fatal(
+			"Put calls did not complete within timeout under a tiny retry budget",
+		)
 	}
 
 	assert.Positive(
@@ -352,7 +360,11 @@ func TestHotCacheRetryBudgetFallback(t *testing.T) {
 	// Cache must remain usable after the fallback triggers.
 	cache.Put([]byte("after-fallback"), []byte("still-works"))
 	got, ok := cache.Get([]byte("after-fallback"))
-	assert.True(t, ok, "cache should still accept writes after a retry-budget fallback")
+	assert.True(
+		t,
+		ok,
+		"cache should still accept writes after a retry-budget fallback",
+	)
 	assert.Equal(t, []byte("still-works"), got)
 }
 
@@ -440,7 +452,10 @@ func TestHotCacheRegisterCASMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
 
 	require.NoError(t, cache.RegisterCASMetrics(registry, "test"))
-	require.NoError(t, cache.RegisterCASMetrics(registry, "test")) // reuse is a no-op
+	require.NoError(
+		t,
+		cache.RegisterCASMetrics(registry, "test"),
+	) // reuse is a no-op
 
 	cache.Put([]byte("key1"), []byte("value1"))
 	cache.maxCASAttempts = 0
@@ -456,9 +471,21 @@ func TestHotCacheRegisterCASMetrics(t *testing.T) {
 	}
 
 	assert.Positive(t, found["dingo_hot_cache_cas_attempts_total"])
-	assert.Equal(t, float64(1), found["dingo_hot_cache_writers_aborted_after_budget_total"])
-	assert.Contains(t, found, "dingo_hot_cache_successful_commits_after_backoff_total")
-	assert.Contains(t, found, "dingo_hot_cache_successful_commit_backoff_seconds_total")
+	assert.Equal(
+		t,
+		float64(1),
+		found["dingo_hot_cache_writers_aborted_after_budget_total"],
+	)
+	assert.Contains(
+		t,
+		found,
+		"dingo_hot_cache_successful_commits_after_backoff_total",
+	)
+	assert.Contains(
+		t,
+		found,
+		"dingo_hot_cache_successful_commit_backoff_seconds_total",
+	)
 }
 
 func TestHotCacheEmptyCache(t *testing.T) {
@@ -540,7 +567,9 @@ func TestHotCacheSmallMaxSize(t *testing.T) {
 // overflow Put, and asserts the final state never exceeds maxSize. Because
 // eviction is now folded into the overflowing Put's own CAS attempt (see
 // HotCache.evictToFit), this must hold on every round, not just on average.
-func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(t *testing.T) {
+func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
+	t *testing.T,
+) {
 	const maxSize = 10
 	const rounds = 50
 	const numReaders = 50
@@ -570,7 +599,10 @@ func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(t *testing.
 		// One overflow Put racing the readers; this must evict.
 		go func() {
 			defer wg.Done()
-			cache.Put(fmt.Appendf(nil, "key-%d-overflow", round), []byte("value"))
+			cache.Put(
+				fmt.Appendf(nil, "key-%d-overflow", round),
+				[]byte("value"),
+			)
 		}()
 
 		wg.Wait()
@@ -596,7 +628,11 @@ func TestEvictToFitNoEvictionWhenWithinLimits(t *testing.T) {
 	entries := map[string][]byte{"a": []byte("1"), "b": []byte("2")}
 	accessCnt := map[string]uint64{"a": 5, "b": 3}
 
-	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(entries, accessCnt, 4)
+	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(
+		entries,
+		accessCnt,
+		4,
+	)
 
 	assert.Equal(t, entries, gotEntries)
 	assert.Equal(t, accessCnt, gotAccessCnt)
@@ -623,13 +659,32 @@ func TestEvictToFitRemovesLeastFrequentlyUsedFirstBySize(t *testing.T) {
 		"overflow": 1,
 	}
 
-	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(entries, accessCnt, 0)
+	gotEntries, gotAccessCnt, bytesRemoved := cache.evictToFit(
+		entries,
+		accessCnt,
+		0,
+	)
 
 	// target size = max(1, 4*3/4) = 3
 	assert.LessOrEqual(t, len(gotEntries), 3)
-	assert.Contains(t, gotEntries, "most", "highest access count must survive eviction")
-	assert.Contains(t, gotEntries, "more", "second highest access count must survive eviction")
-	assert.NotContains(t, gotEntries, "least", "lowest access count should be evicted first")
+	assert.Contains(
+		t,
+		gotEntries,
+		"most",
+		"highest access count must survive eviction",
+	)
+	assert.Contains(
+		t,
+		gotEntries,
+		"more",
+		"second highest access count must survive eviction",
+	)
+	assert.NotContains(
+		t,
+		gotEntries,
+		"least",
+		"lowest access count should be evicted first",
+	)
 	assert.Equal(t, len(gotEntries), len(gotAccessCnt))
 	assert.Positive(t, bytesRemoved)
 }
@@ -651,7 +706,11 @@ func TestEvictToFitByBytes(t *testing.T) {
 		estimatedBytes += int64(len(k) + len(v))
 	}
 
-	gotEntries, _, bytesRemoved := cache.evictToFit(entries, accessCnt, estimatedBytes)
+	gotEntries, _, bytesRemoved := cache.evictToFit(
+		entries,
+		accessCnt,
+		estimatedBytes,
+	)
 
 	// Each entry is 1 (key) + 40 (value) = 41 bytes; target = 100*3/4 = 75,
 	// so only the highest-count entry ("a") fits.
@@ -688,7 +747,10 @@ func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
 	cache := NewHotCache(0, maxBytes) // maxSize unlimited: purely byte-driven
 
 	for i := range 30 {
-		cache.Put(fmt.Appendf(nil, "key-%d", i), make([]byte, 90)) // 95 bytes each; forces repeated eviction
+		cache.Put(
+			fmt.Appendf(nil, "key-%d", i),
+			make([]byte, 90),
+		) // 95 bytes each; forces repeated eviction
 	}
 
 	data := cache.data.Load()
@@ -720,14 +782,19 @@ func TestHotCacheTotalBytesStaysAccurateAcrossEvictions(t *testing.T) {
 // (see TestHotCacheTotalBytesStaysAccurateAcrossEvictions for how that gap
 // was proven instead). Now that the byte total lives inside hotCacheData
 // itself, this test holds deterministically, every round, by construction.
-func TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention(t *testing.T) {
+func TestHotCachePutNeverPermanentlyExceedsMaxBytesUnderPutContention(
+	t *testing.T,
+) {
 	const maxBytes = 2000 // per-entry cutoff = maxBytes/10 = 200
 	const rounds = 20
 	const numWriters = 200
 	const valueSize = 90 // 90 + ~10-byte key ~= 100, under the per-entry cutoff
 
 	for round := range rounds {
-		cache := NewHotCache(0, maxBytes) // maxSize unlimited: purely byte-driven
+		cache := NewHotCache(
+			0,
+			maxBytes,
+		) // maxSize unlimited: purely byte-driven
 
 		var wg sync.WaitGroup
 		wg.Add(numWriters)

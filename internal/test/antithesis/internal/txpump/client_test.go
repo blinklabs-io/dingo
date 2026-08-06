@@ -59,7 +59,12 @@ func TestNewNodeClient_UnixSocketMissing(t *testing.T) {
 	path := "/tmp/txpump_test_nonexistent_socket_12345.sock"
 	_, err := NewNodeClient(path, 42, nil)
 	require.Error(t, err, "dial to missing socket should fail")
-	require.Contains(t, err.Error(), path, "error should mention the socket path")
+	require.Contains(
+		t,
+		err.Error(),
+		path,
+		"error should mention the socket path",
+	)
 }
 
 func TestNodeClient_SubmitTxNilConnection(t *testing.T) {

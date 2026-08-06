@@ -164,7 +164,10 @@ func DefaultConfig() Config {
 // layer: local chain iteration for N2C server clients and the stability-window
 // value used to bound the seen-header deduplication cache.
 type ChainProvider interface {
-	GetChainFromPoint(point ocommon.Point, inclusive bool) (*chain.ChainIterator, error)
+	GetChainFromPoint(
+		point ocommon.Point,
+		inclusive bool,
+	) (*chain.ChainIterator, error)
 	StabilityWindow() uint64
 }
 
@@ -433,7 +436,8 @@ func (s *State) promoteBestClientLocked() {
 			continue
 		}
 		if tc.Status == ClientStatusStalled {
-			if bestStalledId == nil || tc.LastActivity.After(bestStalledActivity) {
+			if bestStalledId == nil ||
+				tc.LastActivity.After(bestStalledActivity) {
 				idCopy := id
 				bestStalledId = &idCopy
 				bestStalledActivity = tc.LastActivity

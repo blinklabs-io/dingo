@@ -31,13 +31,19 @@ type Selection struct {
 
 // EnvironmentPrefix returns the generic environment prefix for capability.
 func EnvironmentPrefix(capability Capability) string {
-	return "DINGO_PLUGINS_" + strings.ToUpper(strings.ReplaceAll(string(capability), ".", "_")) + "_"
+	return "DINGO_PLUGINS_" + strings.ToUpper(
+		strings.ReplaceAll(string(capability), ".", "_"),
+	) + "_"
 }
 
 // ApplyEnvironment overlays generic plugin environment entries on a YAML
 // selection. CLI provider selectors are intentionally applied by composition
 // after this function, giving selector CLI > environment > YAML precedence.
-func ApplyEnvironment(capability Capability, selection *Selection, environ []string) error {
+func ApplyEnvironment(
+	capability Capability,
+	selection *Selection,
+	environ []string,
+) error {
 	if !capability.Valid() {
 		return fmt.Errorf("unknown plugin capability %q", capability)
 	}
@@ -57,7 +63,10 @@ func ApplyEnvironment(capability Capability, selection *Selection, environ []str
 		case strings.HasPrefix(path, "CONFIG_"):
 			fieldPath := strings.TrimPrefix(path, "CONFIG_")
 			if fieldPath == "" {
-				return fmt.Errorf("empty plugin config environment path: %s", name)
+				return fmt.Errorf(
+					"empty plugin config environment path: %s",
+					name,
+				)
 			}
 			if selection.Config == nil {
 				selection.Config = make(map[string]any)

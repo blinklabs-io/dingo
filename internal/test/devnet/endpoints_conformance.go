@@ -30,8 +30,23 @@ func LoadEndpoints() []NodeEndpoint {
 		return def
 	}
 	return []NodeEndpoint{
-		{Name: "dingo-producer", Address: addr("DEVNET_DINGO_ADDR", "localhost:3010"), Role: "producer", IsDingo: true},
-		{Name: "cardano-producer", Address: addr("DEVNET_CARDANO_ADDR", "localhost:3011"), Role: "producer", IsReference: true},
-		{Name: "cardano-relay", Address: addr("DEVNET_RELAY_ADDR", "localhost:3012"), Role: "relay", IsReference: true},
+		{
+			Name:    "dingo-producer",
+			Address: addr("DEVNET_DINGO_ADDR", "localhost:3010"),
+			Role:    "producer",
+			IsDingo: true,
+		},
+		{
+			Name:        "cardano-producer",
+			Address:     addr("DEVNET_CARDANO_ADDR", "localhost:3011"),
+			Role:        "producer",
+			IsReference: true,
+		},
+		{
+			Name:        "cardano-relay",
+			Address:     addr("DEVNET_RELAY_ADDR", "localhost:3012"),
+			Role:        "relay",
+			IsReference: true,
+		},
 	}
 }

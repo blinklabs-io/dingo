@@ -50,7 +50,11 @@ func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 		"captureEpochBoundarySnapshot",      // snapshot write, end of rollover
 	}
 
-	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)
+	seen, observed := observeProcessEpochRolloverCallOrder(
+		t,
+		targetFunc,
+		wantOrder,
+	)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],
@@ -60,13 +64,19 @@ func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 			m, targetFunc)
 	}
 
-	require.Equal(t, wantOrder, observed,
+	require.Equal(
+		t,
+		wantOrder,
+		observed,
 		"SNAP read point in %s drifted. The mark snapshot's stake must be read "+
 			"after applyStakeRewards and applyMIRCerts, which precede SNAP in "+
 			"cardano-ledger, and before applyPoolRetirements and ProcessEpoch, "+
 			"which credit reward accounts at the boundary slot after it. "+
 			"Expected %v, observed %v.",
-		targetFunc, wantOrder, observed)
+		targetFunc,
+		wantOrder,
+		observed,
+	)
 }
 
 // TestCaptureEpochBoundarySnapshotStakeHookInvoked verifies the SNAP-point stake

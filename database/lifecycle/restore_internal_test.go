@@ -103,7 +103,13 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap")
 	_, err := Snapshot(
-		context.Background(), db, snapshotDir, TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		db,
+		snapshotDir,
+		TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
@@ -114,7 +120,11 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
 	_, err = Restore(
-		context.Background(), newRestoreInternalTestHost(t), nil, snapshotDir, targetDir,
+		context.Background(),
+		newRestoreInternalTestHost(t),
+		nil,
+		snapshotDir,
+		targetDir,
 		RestoreStorageConfig{},
 	)
 	require.Error(t, err)
@@ -138,7 +148,13 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap")
 	_, err := Snapshot(
-		context.Background(), db, snapshotDir, TriggerManual, "test", "badger", "sqlite",
+		context.Background(),
+		db,
+		snapshotDir,
+		TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
 	)
 	require.NoError(t, err)
 
@@ -156,7 +172,11 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 	t.Cleanup(func() { syncDir = orig })
 
 	_, err = Restore(
-		context.Background(), newRestoreInternalTestHost(t), nil, snapshotDir, targetDir,
+		context.Background(),
+		newRestoreInternalTestHost(t),
+		nil,
+		snapshotDir,
+		targetDir,
 		RestoreStorageConfig{},
 	)
 	require.Error(t, err)

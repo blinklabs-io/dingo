@@ -107,10 +107,20 @@ func TestDrepExpiryPredicate(t *testing.T) {
 	for filter, expected := range tests {
 		got, ok := drepExpiryPredicate(filter)
 		if ok != expected.ok {
-			t.Fatalf("drepExpiryPredicate(%q) ok = %v, want %v", filter, ok, expected.ok)
+			t.Fatalf(
+				"drepExpiryPredicate(%q) ok = %v, want %v",
+				filter,
+				ok,
+				expected.ok,
+			)
 		}
 		if got != expected.want {
-			t.Fatalf("drepExpiryPredicate(%q) = %q, want %q", filter, got, expected.want)
+			t.Fatalf(
+				"drepExpiryPredicate(%q) = %q, want %q",
+				filter,
+				got,
+				expected.want,
+			)
 		}
 	}
 }
@@ -122,12 +132,20 @@ func TestDrepExpiryState(t *testing.T) {
 
 	status, remaining := drepExpiryState(0, epoch(120))
 	if status != "unknown" || remaining != nil {
-		t.Fatalf("zero expiry epoch = (%q, %v), want (unknown, nil)", status, remaining)
+		t.Fatalf(
+			"zero expiry epoch = (%q, %v), want (unknown, nil)",
+			status,
+			remaining,
+		)
 	}
 
 	status, remaining = drepExpiryState(120, sql.NullInt64{})
 	if status != "unknown" || remaining != nil {
-		t.Fatalf("unknown latest epoch = (%q, %v), want (unknown, nil)", status, remaining)
+		t.Fatalf(
+			"unknown latest epoch = (%q, %v), want (unknown, nil)",
+			status,
+			remaining,
+		)
 	}
 
 	status, remaining = drepExpiryState(125, epoch(120))
@@ -139,7 +157,11 @@ func TestDrepExpiryState(t *testing.T) {
 	// an equal epoch is already expired rather than about to expire.
 	status, remaining = drepExpiryState(120, epoch(120))
 	if status != "expired" || remaining == nil || *remaining != 0 {
-		t.Fatalf("expiry at current epoch = (%q, %v), want (expired, 0)", status, remaining)
+		t.Fatalf(
+			"expiry at current epoch = (%q, %v), want (expired, 0)",
+			status,
+			remaining,
+		)
 	}
 
 	status, remaining = drepExpiryState(100, epoch(120))
@@ -151,7 +173,11 @@ func TestDrepExpiryState(t *testing.T) {
 	// value is reported as unknown rather than wrapped into a bogus count.
 	status, remaining = drepExpiryState(math.MaxUint64, epoch(120))
 	if status != "unknown" || remaining != nil {
-		t.Fatalf("unrepresentable expiry = (%q, %v), want (unknown, nil)", status, remaining)
+		t.Fatalf(
+			"unrepresentable expiry = (%q, %v), want (unknown, nil)",
+			status,
+			remaining,
+		)
 	}
 }
 
@@ -176,7 +202,12 @@ func TestWithdrawalZeroAmount(t *testing.T) {
 	}
 	for amount, expected := range tests {
 		if got := withdrawalZeroAmount(amount); got != expected {
-			t.Fatalf("withdrawalZeroAmount(%q) = %v, want %v", amount, got, expected)
+			t.Fatalf(
+				"withdrawalZeroAmount(%q) = %v, want %v",
+				amount,
+				got,
+				expected,
+			)
 		}
 	}
 }
@@ -228,7 +259,12 @@ func TestHandleDrepsRejectsInvalidFilters(t *testing.T) {
 		rec := httptest.NewRecorder()
 		a.handleDreps(rec, req)
 		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("GET %s status = %d, want %d", query, rec.Code, http.StatusBadRequest)
+			t.Fatalf(
+				"GET %s status = %d, want %d",
+				query,
+				rec.Code,
+				http.StatusBadRequest,
+			)
 		}
 	}
 }
@@ -252,7 +288,12 @@ func TestHandleStakeLookupRejectsInvalidInput(t *testing.T) {
 		))
 		a.handleStakeLookup(rec, req)
 		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("%s: status = %d, want %d", name, rec.Code, http.StatusBadRequest)
+			t.Fatalf(
+				"%s: status = %d, want %d",
+				name,
+				rec.Code,
+				http.StatusBadRequest,
+			)
 		}
 	}
 }
@@ -261,13 +302,23 @@ func TestServerErrorDoesNotExposeInternalError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/proposals", nil)
 	rec := httptest.NewRecorder()
 
-	serverError(rec, req, "query proposals", errors.New("database password=secret failed"))
+	serverError(
+		rec,
+		req,
+		"query proposals",
+		errors.New("database password=secret failed"),
+	)
 
 	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		t.Fatalf(
+			"status = %d, want %d",
+			rec.Code,
+			http.StatusInternalServerError,
+		)
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "password=secret") || strings.Contains(body, "query proposals") {
+	if strings.Contains(body, "password=secret") ||
+		strings.Contains(body, "query proposals") {
 		t.Fatalf("serverError exposed internal details: %q", body)
 	}
 	if !strings.Contains(body, "internal server error") {

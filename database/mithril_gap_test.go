@@ -256,7 +256,11 @@ func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 	require.NoError(t, err)
 	require.NotNil(t, utxo)
 	require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), []byte(utxo.SpentAtTxId))
+	require.Equal(
+		t,
+		candidate.consumerTx.Hash().Bytes(),
+		[]byte(utxo.SpentAtTxId),
+	)
 }
 
 func findGapRollbackCandidate(t *testing.T) gapRollbackCandidate {

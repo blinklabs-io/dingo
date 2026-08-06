@@ -105,7 +105,9 @@ func TestResolveStakeDistributionForCertificateCardano(t *testing.T) {
 // an artifact whose epoch matches the leaf certificate but whose certificate
 // hash differs is NOT returned. Before the fix, the `||` condition on
 // item.Epoch == leaf.Epoch would incorrectly bind an unverified artifact.
-func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(t *testing.T) {
+func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(
+	t *testing.T,
+) {
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":

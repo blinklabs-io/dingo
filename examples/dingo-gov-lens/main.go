@@ -292,13 +292,19 @@ func main() {
 	}
 
 	a := &app{
-		db:         db,
-		govtoolURL: strings.TrimRight(envOrDefault("GOVTOOL_BASE_URL", "https://preview.gov.tools"), "/"),
+		db: db,
+		govtoolURL: strings.TrimRight(
+			envOrDefault("GOVTOOL_BASE_URL", "https://preview.gov.tools"),
+			"/",
+		),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", a.handleStatus)
 	mux.HandleFunc("GET /api/proposals", a.handleProposals)
-	mux.HandleFunc("GET /api/proposals/{txHash}/{index}", a.handleProposalDetail)
+	mux.HandleFunc(
+		"GET /api/proposals/{txHash}/{index}",
+		a.handleProposalDetail,
+	)
 	mux.HandleFunc("GET /api/dreps", a.handleDreps)
 	mux.HandleFunc("GET /api/dreps/{credential}", a.handleDrepDetail)
 	mux.HandleFunc("GET /api/stake/{credential}", a.handleStakeLookup)
@@ -319,7 +325,8 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("Dingo Gov Lens listening on %s", addr)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.ListenAndServe(); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("listen: %v", err)
 	}
 }
@@ -830,13 +837,18 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	credential := strings.ToLower(r.PathValue("credential"))
-	if !isHex(credential, 56) && !isHex(credential, 58) && !isHex(credential, 64) {
+	if !isHex(credential, 56) && !isHex(credential, 58) &&
+		!isHex(credential, 64) {
 		http.Error(w, "invalid drep credential", http.StatusBadRequest)
 		return
 	}
 	credentialTag, ok := parseCredentialTagParam(r)
 	if !ok {
-		http.Error(w, "invalid or missing credential_tag", http.StatusBadRequest)
+		http.Error(
+			w,
+			"invalid or missing credential_tag",
+			http.StatusBadRequest,
+		)
 		return
 	}
 	var ret drepDetail
@@ -922,13 +934,18 @@ func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	credential := strings.ToLower(r.PathValue("credential"))
-	if !isHex(credential, 56) && !isHex(credential, 58) && !isHex(credential, 64) {
+	if !isHex(credential, 56) && !isHex(credential, 58) &&
+		!isHex(credential, 64) {
 		http.Error(w, "invalid stake credential", http.StatusBadRequest)
 		return
 	}
 	credentialTag, ok := parseCredentialTagParam(r)
 	if !ok {
-		http.Error(w, "invalid or missing credential_tag", http.StatusBadRequest)
+		http.Error(
+			w,
+			"invalid or missing credential_tag",
+			http.StatusBadRequest,
+		)
 		return
 	}
 	var ret stakeLookup
@@ -1061,7 +1078,10 @@ func (a *app) handleEpochs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
-func (a *app) proposalVotes(ctx context.Context, proposalID int64) ([]voteRow, voteStats, error) {
+func (a *app) proposalVotes(
+	ctx context.Context,
+	proposalID int64,
+) ([]voteRow, voteStats, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
 			voter_type,
@@ -1146,7 +1166,11 @@ func (a *app) drepVotes(
 		}
 		item.ActionTypeName = actionTypeName(actionType)
 		item.VoteName = voteName(item.Vote)
-		item.ProposalGovTool = govtoolActionURL(a.govtoolURL, item.ProposalTxHash, item.ActionIndex)
+		item.ProposalGovTool = govtoolActionURL(
+			a.govtoolURL,
+			item.ProposalTxHash,
+			item.ActionIndex,
+		)
 		ret = append(ret, item)
 	}
 	return ret, rows.Err()
@@ -1587,7 +1611,12 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-func serverError(w http.ResponseWriter, r *http.Request, operation string, err error) {
+func serverError(
+	w http.ResponseWriter,
+	r *http.Request,
+	operation string,
+	err error,
+) {
 	log.Printf("%s %s: %s: %v", r.Method, r.URL.Path, operation, err)
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }

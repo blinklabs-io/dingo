@@ -144,7 +144,9 @@ func parseSearchUtxosStartToken(
 	}, nil
 }
 
-func searchUtxoModelToAnyData(utxo *models.UtxoWithOrdering) (*query.AnyUtxoData, error) {
+func searchUtxoModelToAnyData(
+	utxo *models.UtxoWithOrdering,
+) (*query.AnyUtxoData, error) {
 	var aud query.AnyUtxoData
 	ret, err := utxo.Decode()
 	if err != nil {
@@ -537,7 +539,9 @@ func (s *queryServiceServer) SearchUtxos(
 	maxItems := req.Msg.GetMaxItems()     // int32
 	fieldMask := req.Msg.GetFieldMask()
 
-	maxAllowed := int32(s.utxorpc.config.MaxHistoryItems) // #nosec G115 -- DefaultMaxHistoryItems (10000)
+	maxAllowed := int32(
+		s.utxorpc.config.MaxHistoryItems,
+	) // #nosec G115 -- DefaultMaxHistoryItems (10000)
 	if maxItems < 0 {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,

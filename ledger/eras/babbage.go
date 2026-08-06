@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
@@ -279,13 +280,15 @@ func ValidateTxBabbage(
 	}
 	// Evaluate scripts
 	var txInfoV2 script.TxInfoV2
-	txInfoV2, err = script.NewTxInfoV2FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return err
+	if txHasRedeemers(tx) {
+		txInfoV2, err = script.NewTxInfoV2FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return err
+		}
 	}
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
@@ -343,11 +346,16 @@ func ValidateTxBabbage(
 				return err
 			}
 			if usedBudgetV1.Steps > redeemer.ExUnits.Steps || usedBudgetV1.Memory > redeemer.ExUnits.Memory {
-				return fmt.Errorf(
-					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-					usedBudgetV1.Steps, usedBudgetV1.Memory,
-					redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-				)
+				return conway.PlutusScriptFailedError{
+					ScriptHash: tmpScript.Hash(),
+					Tag:        redeemer.Tag,
+					Index:      redeemer.Index,
+					Err: fmt.Errorf(
+						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+						usedBudgetV1.Steps, usedBudgetV1.Memory,
+						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+					),
+				}
 			}
 		case lcommon.PlutusV2Script:
 			txInfoV2, err := script.NewTxInfoV2FromTransaction(
@@ -390,11 +398,16 @@ func ValidateTxBabbage(
 				return err
 			}
 			if usedBudgetV2.Steps > redeemer.ExUnits.Steps || usedBudgetV2.Memory > redeemer.ExUnits.Memory {
-				return fmt.Errorf(
-					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-					usedBudgetV2.Steps, usedBudgetV2.Memory,
-					redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-				)
+				return conway.PlutusScriptFailedError{
+					ScriptHash: tmpScript.Hash(),
+					Tag:        redeemer.Tag,
+					Index:      redeemer.Index,
+					Err: fmt.Errorf(
+						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+						usedBudgetV2.Steps, usedBudgetV2.Memory,
+						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+					),
+				}
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
@@ -472,13 +485,16 @@ func EvaluateTxBabbage(
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
-	txInfoV2, err := script.NewTxInfoV2FromTransaction(
-		ls,
-		tx,
-		slices.Concat(resolvedInputs, resolvedRefInputs),
-	)
-	if err != nil {
-		return 0, lcommon.ExUnits{}, nil, err
+	var txInfoV2 script.TxInfoV2
+	if txHasRedeemers(tx) {
+		txInfoV2, err = script.NewTxInfoV2FromTransaction(
+			ls,
+			tx,
+			slices.Concat(resolvedInputs, resolvedRefInputs),
+		)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 	}
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key

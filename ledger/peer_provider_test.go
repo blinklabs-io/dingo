@@ -152,7 +152,11 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 	// The in-memory DB has no pool registrations, so it returns empty.
 	result, err = adapter.GetPoolRelays()
 	require.NoError(t, err)
-	require.Empty(t, result, "expected empty relays after TTL expiry since DB has no data")
+	require.Empty(
+		t,
+		result,
+		"expected empty relays after TTL expiry since DB has no data",
+	)
 }
 
 func TestPoolRelayProviderInvalidateCache(t *testing.T) {
@@ -254,7 +258,12 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	// Get a second copy from the cache
 	result2, err := adapter.GetPoolRelays()
 	require.NoError(t, err)
-	require.Len(t, result2, 2, "cached slice length should not be affected by append")
+	require.Len(
+		t,
+		result2,
+		2,
+		"cached slice length should not be affected by append",
+	)
 
 	// Verify the cached data is unaffected by mutations
 	require.Equal(

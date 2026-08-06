@@ -108,7 +108,10 @@ func (b *BlobStoreGCS) SetCommitTimestamp(
 		if err := b.Set(txn, []byte(commitTimestampBlobKey), raw); err != nil {
 			return err
 		}
-		b.logger.Infof("commit timestamp %d written to GCS (plaintext)", timestamp)
+		b.logger.Infof(
+			"commit timestamp %d written to GCS (plaintext)",
+			timestamp,
+		)
 		return nil
 	}
 

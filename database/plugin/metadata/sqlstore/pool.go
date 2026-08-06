@@ -230,7 +230,10 @@ func (s *Store) GetPoolByVrfKeyHash(
 
 // activePoolOrNil applies the same current-registration/retirement semantics
 // used by GetPool(..., false) to other lookups that expose active pools.
-func (s *Store) activePoolOrNil(db queryer, pool *models.Pool) (*models.Pool, error) {
+func (s *Store) activePoolOrNil(
+	db queryer,
+	pool *models.Pool,
+) (*models.Pool, error) {
 	if len(pool.Registration) == 0 {
 		return nil, nil
 	}
@@ -265,34 +268,66 @@ func (s *Store) GetPools(
 	if err != nil {
 		return nil, err
 	}
-	hashes := make([]any, len(poolKeyHashes))
+	// Deduplicated before chunking, which is what keeps chunking invisible to
+	// the caller. A single `IN (...)` has set semantics -- naming a value twice
+	// still matches its row once -- but two mentions landing in different
+	// chunks match in both, and the chunks are concatenated. The caller would
+	// then get a pool twice from a request that, unchunked, returned it once.
+	//
+	// The repeat does more damage than it looks. loadPoolsAssociations keys its
+	// index by pool ID and so keeps only the last position for a repeated pool,
+	// leaving the earlier copy with empty registrations and retirements. Callers
+	// deciding on len(pool.Registration), as registeredPoolVrfKeyHash does,
+	// would then get an answer that depends on which copy they reached.
+	hashes := make([]any, 0, len(poolKeyHashes))
+	seen := make(map[string]struct{}, len(poolKeyHashes))
 	for i := range poolKeyHashes {
-		hashes[i] = poolKeyHashes[i].Bytes()
+		raw := poolKeyHashes[i].Bytes()
+		if _, ok := seen[string(raw)]; ok {
+			continue
+		}
+		seen[string(raw)] = struct{}{}
+		hashes = append(hashes, raw)
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	// Chunked over the same bound loadPoolsAssociations below uses. Callers
+	// name every pool on the chain -- the pool distribution behind
+	// leadership-schedule and the peer snapshot both do -- so the list length
+	// is the chain's pool count rather than anything this code picks.
+	//
+	// ParameterLimit is the conservative figure the store contracts to, not
+	// each driver's true ceiling: SQLite has allowed 32766 bound parameters
+	// since 3.32 and PostgreSQL/MySQL allow 65535, so at Cardano's few
+	// thousand registered pools an unchunked list happens to fit today. It
+	// stays chunked because that headroom is a property of the deployment
+	// rather than of this query, and exceeding it fails the read outright
+	// instead of degrading.
+	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(hashes))
+		rows, err := db.QueryContext(context.Background(), `
 SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
        latest_op_cert_sequence, reward_account_credential_tag, id,
        pledge, cost
 FROM pool
-WHERE pool_key_hash IN (`+bindPlaceholders(len(hashes))+`)`,
-		hashes...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		pool, err := scanPool(rows)
+WHERE pool_key_hash IN (`+bindPlaceholders(end-start)+`)`,
+			hashes[start:end]...,
+		)
 		if err != nil {
-			rows.Close()
 			return nil, err
 		}
-		ret = append(ret, *pool)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		for rows.Next() {
+			pool, err := scanPool(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret = append(ret, *pool)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.loadPoolsAssociations(db, ret); err != nil {
 		return nil, err
@@ -359,6 +394,52 @@ WHERE pool_key_hash = ?`,
 		poolKeyHash.Bytes(),
 	).Scan(&sequence, &count)
 	return uint64(sequence), count > 0, err
+}
+
+// LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
+// issues.
+//
+// Exported so a test can pin its query plan against the statement the store
+// actually runs. The index this reads is only worth its write cost while the
+// planner chooses it, and a test EXPLAINing a hand-copied statement would keep
+// passing against the copy after the store's own SQL moved off the index.
+const LatestPoolOpCertSequencesSQL = `
+SELECT pool_key_hash, MAX(sequence)
+FROM pool_opcert_sequence
+GROUP BY pool_key_hash`
+
+// LatestPoolOpCertSequences returns the highest observed op-cert sequence for
+// every pool that has issued a block, keyed by pool key hash.
+//
+// The issuer table records one row per (pool, slot), so the highest sequence
+// is an aggregate rather than the newest row: a pool that rotated to a lower
+// issue number after a higher one has still had the higher number accepted,
+// and that is the number the chain enforces.
+func (s *Store) LatestPoolOpCertSequences(
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		context.Background(),
+		LatestPoolOpCertSequencesSQL,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := map[string]uint64{}
+	for rows.Next() {
+		var poolKeyHash []byte
+		var sequence int64
+		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
+			return nil, err
+		}
+		ret[string(poolKeyHash)] = uint64(sequence)
+	}
+	return ret, rows.Err()
 }
 
 func (s *Store) GetPoolBlockIssuersInSlotRange(
@@ -916,17 +997,25 @@ func (s *Store) GetStakeByPools(
 		return nil, nil, err
 	}
 	stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
-	complete, err := s.getStakeByPoolsFromLive(db, poolKeyHashes, stakes, delegators)
+	complete, err := s.getStakeByPoolsFromLive(
+		db,
+		poolKeyHashes,
+		stakes,
+		delegators,
+	)
 	if err == nil && complete {
 		return stakes, delegators, nil
 	}
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+	if err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "no such table") {
 		return nil, nil, err
 	}
 	return s.getStakeByPoolsDirect(poolKeyHashes, txn)
 }
 
-func emptyPoolStakeMaps(poolKeyHashes [][]byte) (map[string]uint64, map[string]uint64) {
+func emptyPoolStakeMaps(
+	poolKeyHashes [][]byte,
+) (map[string]uint64, map[string]uint64) {
 	stakes := make(map[string]uint64, len(poolKeyHashes))
 	delegators := make(map[string]uint64, len(poolKeyHashes))
 	for _, hash := range poolKeyHashes {
@@ -1328,7 +1417,10 @@ SELECT id FROM ranked WHERE rn = 1`,
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("query in-epoch fresh pool registrations: %w", err)
+			return nil, fmt.Errorf(
+				"query in-epoch fresh pool registrations: %w",
+				err,
+			)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, err
@@ -1966,9 +2058,16 @@ ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 			poolIndex, ok := poolByID[registration.PoolID]
 			if !ok {
 				rows.Close()
-				return fmt.Errorf("pool registration %d references unknown pool %d", registration.ID, registration.PoolID)
+				return fmt.Errorf(
+					"pool registration %d references unknown pool %d",
+					registration.ID,
+					registration.PoolID,
+				)
 			}
-			pools[poolIndex].Registration = append(pools[poolIndex].Registration, *registration)
+			pools[poolIndex].Registration = append(
+				pools[poolIndex].Registration,
+				*registration,
+			)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -1985,7 +2084,10 @@ ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 	registrations := make([]*models.PoolRegistration, 0, registrationCount)
 	for poolIndex := range pools {
 		for registrationIndex := range pools[poolIndex].Registration {
-			registrations = append(registrations, &pools[poolIndex].Registration[registrationIndex])
+			registrations = append(
+				registrations,
+				&pools[poolIndex].Registration[registrationIndex],
+			)
 		}
 	}
 	if err := loadPoolRegistrationChildrenBatch(db, registrations); err != nil {
@@ -2015,7 +2117,10 @@ WHERE r.pool_id IN (` + bindPlaceholders(end-start) + `)
 ORDER BY r.pool_id, r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC,
          CASE WHEN r.certificate_id = 0 THEN 1 ELSE 0 END DESC, r.id DESC`
-		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(query), poolIDs[start:end]...)
+		rows, err := db.QueryContext(
+			context.Background(),
+			s.dialect.Rebind(query),
+			poolIDs[start:end]...)
 		if err != nil {
 			return fmt.Errorf("load pool retirements: %w", err)
 		}
@@ -2032,9 +2137,16 @@ ORDER BY r.pool_id, r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 			index, ok := poolByID[retirement.PoolID]
 			if !ok {
 				rows.Close()
-				return fmt.Errorf("pool retirement %d references unknown pool %d", retirement.ID, retirement.PoolID)
+				return fmt.Errorf(
+					"pool retirement %d references unknown pool %d",
+					retirement.ID,
+					retirement.PoolID,
+				)
 			}
-			pools[index].Retirement = append(pools[index].Retirement, retirement)
+			pools[index].Retirement = append(
+				pools[index].Retirement,
+				retirement,
+			)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -2269,7 +2381,11 @@ func queryReturnedID(
 // certificates may occur in one slot; the transaction block index and
 // certificate index provide the remaining ordering, with retirement events
 // winning ties through the synthetic is_retirement component.
-func latestPoolEventIsRetirement(db queryer, dialect Dialect, poolID uint) (bool, error) {
+func latestPoolEventIsRetirement(
+	db queryer,
+	dialect Dialect,
+	poolID uint,
+) (bool, error) {
 	var retirement bool
 	err := db.QueryRowContext(context.Background(), `
 WITH events AS (

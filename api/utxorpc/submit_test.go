@@ -594,9 +594,13 @@ func TestMatchConsumesWithLookup(t *testing.T) {
 			Address: &cardano.AddressPattern{ExactAddress: bytesA},
 		}
 		spent := &txPatternTestOutput{addr: addrA}
-		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
-			return spent, nil
-		})
+		got := u.matchConsumesWithLookup(
+			tx,
+			pat,
+			func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+				return spent, nil
+			},
+		)
 		require.Equal(t, predMatch, got)
 	})
 
@@ -611,9 +615,13 @@ func TestMatchConsumesWithLookup(t *testing.T) {
 			Address: &cardano.AddressPattern{ExactAddress: bytesB},
 		}
 		spent := &txPatternTestOutput{addr: addrA}
-		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
-			return spent, nil
-		})
+		got := u.matchConsumesWithLookup(
+			tx,
+			pat,
+			func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+				return spent, nil
+			},
+		)
 		require.Equal(t, predNoMatch, got)
 	})
 
@@ -629,13 +637,17 @@ func TestMatchConsumesWithLookup(t *testing.T) {
 			Address: &cardano.AddressPattern{ExactAddress: bytesA},
 		}
 		var n int
-		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
-			n++
-			if n == 1 {
-				return &txPatternTestOutput{addr: addrB}, nil
-			}
-			return &txPatternTestOutput{addr: addrA}, nil
-		})
+		got := u.matchConsumesWithLookup(
+			tx,
+			pat,
+			func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+				n++
+				if n == 1 {
+					return &txPatternTestOutput{addr: addrB}, nil
+				}
+				return &txPatternTestOutput{addr: addrA}, nil
+			},
+		)
 		require.Equal(t, 2, n, "stub should run once per consumed input")
 		require.Equal(t, predMatch, got)
 	})
@@ -646,10 +658,14 @@ func TestMatchConsumesWithLookup(t *testing.T) {
 		pat := &cardano.TxOutputPattern{
 			Address: &cardano.AddressPattern{ExactAddress: bytesA},
 		}
-		got := u.matchConsumesWithLookup(tx, pat, func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
-			t.Fatal("lookup must not be called when there are no inputs")
-			return nil, nil
-		})
+		got := u.matchConsumesWithLookup(
+			tx,
+			pat,
+			func(gledger.TransactionInput) (gledger.TransactionOutput, error) {
+				t.Fatal("lookup must not be called when there are no inputs")
+				return nil, nil
+			},
+		)
 		require.Equal(t, predNoMatch, got)
 	})
 }
@@ -830,7 +846,9 @@ func TestMatchesTxPattern_HasCertificateStakeRegistration(t *testing.T) {
 	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
 
-func TestMatchesTxPattern_HasCertificateStakeRegistrationMismatch(t *testing.T) {
+func TestMatchesTxPattern_HasCertificateStakeRegistrationMismatch(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	h := certPatternHash28(1)
@@ -859,7 +877,9 @@ func TestMatchesTxPattern_HasCertificateStakeRegistrationMismatch(t *testing.T) 
 	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
 }
 
-func testCertPoolRegistration(t *testing.T) *common.PoolRegistrationCertificate {
+func testCertPoolRegistration(
+	t *testing.T,
+) *common.PoolRegistrationCertificate {
 	t.Helper()
 	var op common.PoolKeyHash
 	copy(op[:], certPatternHash28(0x20))
@@ -882,7 +902,9 @@ func testCertPoolRegistration(t *testing.T) *common.PoolRegistrationCertificate 
 	}
 }
 
-func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationTypeOnly(t *testing.T) {
+func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationTypeOnly(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	stake := certPatternHash28(3)
@@ -909,7 +931,9 @@ func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationTypeOnly(t *testing.
 	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
 
-func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationWrongCertType(t *testing.T) {
+func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationWrongCertType(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	h := certPatternHash28(3)
@@ -933,7 +957,9 @@ func TestMatchesTxPattern_HasCertificateEmptyStakeDelegationWrongCertType(t *tes
 	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
 }
 
-func TestMatchesTxPattern_HasCertificateEmptyStakeRegistrationTypeOnly(t *testing.T) {
+func TestMatchesTxPattern_HasCertificateEmptyStakeRegistrationTypeOnly(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	h := certPatternHash28(9)
@@ -957,7 +983,9 @@ func TestMatchesTxPattern_HasCertificateEmptyStakeRegistrationTypeOnly(t *testin
 	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
 
-func TestMatchesTxPattern_HasCertificateEmptyPoolRetirementTypeOnly(t *testing.T) {
+func TestMatchesTxPattern_HasCertificateEmptyPoolRetirementTypeOnly(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	var poolKH common.PoolKeyHash
@@ -978,7 +1006,9 @@ func TestMatchesTxPattern_HasCertificateEmptyPoolRetirementTypeOnly(t *testing.T
 	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
 
-func TestMatchesTxPattern_HasCertificatePoolRetirementEpochOnlyNoPoolKey(t *testing.T) {
+func TestMatchesTxPattern_HasCertificatePoolRetirementEpochOnlyNoPoolKey(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	var poolKH common.PoolKeyHash
@@ -1011,7 +1041,9 @@ func TestMatchesTxPattern_HasCertificatePoolRetirementEpochOnlyNoPoolKey(t *test
 	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, noMatch))
 }
 
-func TestMatchesTxPattern_HasCertificateEmptyPoolRegistrationTypeOnly(t *testing.T) {
+func TestMatchesTxPattern_HasCertificateEmptyPoolRegistrationTypeOnly(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	poolCert := testCertPoolRegistration(t)
@@ -1055,7 +1087,9 @@ func TestMatchesTxPattern_HasCertificateStakeDelegationPoolOnly(t *testing.T) {
 	require.Equal(t, predMatch, u.matchesTxPattern(tx, p))
 }
 
-func TestMatchesTxPattern_HasCertificatePoolRetirementEpochWildcard(t *testing.T) {
+func TestMatchesTxPattern_HasCertificatePoolRetirementEpochWildcard(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	var poolKH common.PoolKeyHash
@@ -1166,7 +1200,9 @@ func TestMatchesTxPattern_HasCertificateNoCerts(t *testing.T) {
 	require.Equal(t, predNoMatch, u.matchesTxPattern(tx, p))
 }
 
-func TestMatchesTxPattern_HasCertificateMalformedPatternUnevaluable(t *testing.T) {
+func TestMatchesTxPattern_HasCertificateMalformedPatternUnevaluable(
+	t *testing.T,
+) {
 	t.Parallel()
 	u := txPatternTestUtxorpc(t)
 	h := certPatternHash28(7)

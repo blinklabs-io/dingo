@@ -127,9 +127,15 @@ func (d *Database) GetActiveGovernanceProposals(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposals, err := d.metadata.GetActiveGovernanceProposals(epoch, txn.Metadata())
+	proposals, err := d.metadata.GetActiveGovernanceProposals(
+		epoch,
+		txn.Metadata(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get active governance proposals: %w", err)
+		return nil, fmt.Errorf(
+			"failed to get active governance proposals: %w",
+			err,
+		)
 	}
 	return proposals, nil
 }

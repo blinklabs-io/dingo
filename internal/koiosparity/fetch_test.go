@@ -55,32 +55,34 @@ const validTotalsTmpl = `[{"epoch_no":%d,"treasury":"1","reserves":"1","fees":"1
 // letting the dispatcher continue through the remaining epoch range.
 func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 	var epochInfoAttempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/tip":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
-		case r.URL.Path == "/pool_list" || r.URL.Path == "/pool_updates":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[]`))
-		case r.URL.Path == "/epoch_info":
-			epochInfoAttempts.Add(1)
-			epoch := r.URL.Query().Get("_epoch_no")
-			if epoch == "12" {
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte("invalid API key"))
-				return
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
+			case r.URL.Path == "/pool_list" || r.URL.Path == "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case r.URL.Path == "/epoch_info":
+				epochInfoAttempts.Add(1)
+				epoch := r.URL.Query().Get("_epoch_no")
+				if epoch == "12" {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte("invalid API key"))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
+			case r.URL.Path == "/totals":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
+			default:
+				t.Errorf("unexpected request path %s", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
 			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
-		case r.URL.Path == "/totals":
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
-		default:
-			t.Errorf("unexpected request path %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
+		}),
+	)
 	defer srv.Close()
 	withTestKoiosBaseURL(t, srv.URL)
 
@@ -95,12 +97,20 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 		FromEpoch:    10,
 		ThroughEpoch: 15,
 	}, slog.New(slog.DiscardHandler))
-	require.Error(t, err, "a permanent client error must surface as a hard Fetch error")
+	require.Error(
+		t,
+		err,
+		"a permanent client error must surface as a hard Fetch error",
+	)
 	require.Nil(t, result)
 	require.True(t, strings.Contains(err.Error(), "epoch 12"))
 	require.ErrorIs(t, err, ErrKoiosPermanent)
-	require.Less(t, epochInfoAttempts.Load(), int32(6),
-		"the epoch dispatcher must stop well short of attempting the full 6-epoch range")
+	require.Less(
+		t,
+		epochInfoAttempts.Load(),
+		int32(6),
+		"the epoch dispatcher must stop well short of attempting the full 6-epoch range",
+	)
 }
 
 // TestFetchTransient503LandsInFailedEpochs guards against over-correcting:
@@ -109,31 +119,33 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 // before — recorded in FailedEpochs with Fetch returning (result, nil) rather
 // than aborting the whole run.
 func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/tip":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
-		case r.URL.Path == "/pool_list" || r.URL.Path == "/pool_updates":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[]`))
-		case r.URL.Path == "/epoch_info":
-			epoch := r.URL.Query().Get("_epoch_no")
-			if epoch == "21" {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte("no server available"))
-				return
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
+			case r.URL.Path == "/pool_list" || r.URL.Path == "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case r.URL.Path == "/epoch_info":
+				epoch := r.URL.Query().Get("_epoch_no")
+				if epoch == "21" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte("no server available"))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
+			case r.URL.Path == "/totals":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
+			default:
+				t.Errorf("unexpected request path %s", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
 			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
-		case r.URL.Path == "/totals":
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
-		default:
-			t.Errorf("unexpected request path %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
+		}),
+	)
 	defer srv.Close()
 	withTestKoiosBaseURL(t, srv.URL)
 
@@ -148,7 +160,11 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 		FromEpoch:    20,
 		ThroughEpoch: 22,
 	}, slog.New(slog.DiscardHandler))
-	require.NoError(t, err, "an exhausted transient failure must not abort the run")
+	require.NoError(
+		t,
+		err,
+		"an exhausted transient failure must not abort the run",
+	)
 	require.NotNil(t, result)
 	require.Equal(t, []uint64{21}, result.FailedEpochs)
 	require.Equal(t, 2, result.EpochsFetched)
@@ -164,47 +180,49 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 	const poolTotal = 20
 	var poolHistoryAttempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/tip":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
-		case r.URL.Path == "/pool_list":
-			pools := make([]string, poolTotal)
-			for i := range pools {
-				pools[i] = fmt.Sprintf(`{"pool_id_bech32":"pool%d"}`, i)
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
+			case r.URL.Path == "/pool_list":
+				pools := make([]string, poolTotal)
+				for i := range pools {
+					pools[i] = fmt.Sprintf(`{"pool_id_bech32":"pool%d"}`, i)
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, `[%s]`, strings.Join(pools, ","))
+			case r.URL.Path == "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case r.URL.Path == "/epoch_info":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
+			case r.URL.Path == "/totals":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
+			case r.URL.Path == "/pool_history":
+				poolHistoryAttempts.Add(1)
+				if r.URL.Query().Get("_pool_bech32") == "pool0" {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte("invalid API key"))
+					return
+				}
+				// Block until the client cancels this request rather than
+				// sleeping a fixed duration: every pool worker shares poolCtx, so
+				// once pool0's failure calls poolCancel, the client aborts this
+				// in-flight request and net/http cancels r.Context() in lockstep
+				// — no arbitrary timing margin needed to hold this pool's
+				// concurrency slot open until the dispatch loop observes
+				// cancellation.
+				<-r.Context().Done()
+			default:
+				t.Errorf("unexpected request path %s", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
 			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, `[%s]`, strings.Join(pools, ","))
-		case r.URL.Path == "/pool_updates":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[]`))
-		case r.URL.Path == "/epoch_info":
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
-		case r.URL.Path == "/totals":
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
-		case r.URL.Path == "/pool_history":
-			poolHistoryAttempts.Add(1)
-			if r.URL.Query().Get("_pool_bech32") == "pool0" {
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte("invalid API key"))
-				return
-			}
-			// Block until the client cancels this request rather than
-			// sleeping a fixed duration: every pool worker shares poolCtx, so
-			// once pool0's failure calls poolCancel, the client aborts this
-			// in-flight request and net/http cancels r.Context() in lockstep
-			// — no arbitrary timing margin needed to hold this pool's
-			// concurrency slot open until the dispatch loop observes
-			// cancellation.
-			<-r.Context().Done()
-		default:
-			t.Errorf("unexpected request path %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
+		}),
+	)
 	defer srv.Close()
 	withTestKoiosBaseURL(t, srv.URL)
 
@@ -222,6 +240,10 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.ErrorIs(t, err, ErrKoiosPermanent)
-	require.Less(t, poolHistoryAttempts.Load(), int32(poolTotal),
-		"scheduling must stop well short of every pool once one hits a permanent error")
+	require.Less(
+		t,
+		poolHistoryAttempts.Load(),
+		int32(poolTotal),
+		"scheduling must stop well short of every pool once one hits a permanent error",
+	)
 }

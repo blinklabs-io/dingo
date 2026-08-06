@@ -24,7 +24,10 @@ func TestDecodeTxIn_BinaryKeyUsesBigEndianOutputIndex(t *testing.T) {
 
 // buildShelleyAddr constructs a minimal Shelley address byte slice:
 // header (addrType<<4 | networkId), 28-byte payment hash, 28-byte staking hash (for base addrs).
-func buildShelleyAddr(addrType, networkID byte, paymentHash, stakingHash []byte) []byte {
+func buildShelleyAddr(
+	addrType, networkID byte,
+	paymentHash, stakingHash []byte,
+) []byte {
 	addr := []byte{(addrType << 4) | networkID}
 	addr = append(addr, paymentHash...)
 	if stakingHash != nil {
@@ -111,7 +114,12 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			t.Parallel()
 			result := &ParsedUTxO{}
 			extractAddressKeys(tc.addr, result)
-			require.Equal(t, tc.wantScript, result.PaymentScript, "PaymentScript")
+			require.Equal(
+				t,
+				tc.wantScript,
+				result.PaymentScript,
+				"PaymentScript",
+			)
 			if tc.wantPayKey {
 				require.Equal(t, payHash, result.PaymentKey, "PaymentKey")
 			} else {
@@ -119,7 +127,12 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			}
 			if tc.wantStakeKey {
 				require.Equal(t, stakeHash, result.StakingKey, "StakingKey")
-				require.Equal(t, tc.wantStakeTag, result.CredentialTag, "CredentialTag")
+				require.Equal(
+					t,
+					tc.wantStakeTag,
+					result.CredentialTag,
+					"CredentialTag",
+				)
 			} else {
 				require.Empty(t, result.StakingKey, "StakingKey should be empty for non-staking-key address types")
 			}

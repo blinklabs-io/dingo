@@ -271,12 +271,16 @@ func (n *Node) apiPluginSelection(
 // effectiveBarkHost decides the interface Bark actually binds to.
 // configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when
 // set -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
-// database lifecycle service's destructive, unauthenticated Restore/Truncate
-// RPCs will be mounted), this defaults to loopback-only rather than letting
-// bark.go's own empty-Host default ("0.0.0.0") expose them on every
+// database lifecycle service's destructive Restore/Truncate/CreateSnapshot/
+// etc. RPCs will be mounted), this defaults to loopback-only rather than
+// letting bark.go's own empty-Host default ("0.0.0.0") expose them on every
 // interface; with no lifecycle service mounted, "" is returned unchanged so
 // bark's own existing default behavior (all interfaces) is preserved for
-// deployments only using it for the read-only Archive service.
+// deployments only using it for the read-only Archive service. Bind address
+// is a network control, independent of the mTLS client-certificate
+// authentication check Bark.Start enforces whenever lifecycleEnabled (see
+// BarkConfig.TlsClientCAFilePath) -- this default narrows exposure as
+// defense in depth, it is not what makes those RPCs safe to reach.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost
@@ -438,7 +442,10 @@ func (n *Node) Run(ctx context.Context) error {
 		dbNeedsRecovery = true
 	}
 	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
-		return fmt.Errorf("check for interrupted database truncate: %w", pendingErr)
+		return fmt.Errorf(
+			"check for interrupted database truncate: %w",
+			pendingErr,
+		)
 	} else if pending != nil {
 		return fmt.Errorf(
 			"database truncate was interrupted after it started (target slot %d, target id %d); rerun the truncate operation before starting the node",
@@ -750,6 +757,14 @@ func (n *Node) Run(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
+	// Recovery changes both the ledger tip and blob contents. Complete it
+	// before starting background maintenance that reads or prunes either store.
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+
 	if n.config.historyExpiry.Enabled {
 		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
@@ -771,12 +786,6 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	// Run DB recovery if needed
-	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
-			return fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}
@@ -1446,8 +1455,9 @@ func (n *Node) Run(ctx context.Context) error {
 		barkHost := effectiveBarkHost(n.config.barkHost, lifecycleEnabled)
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
-				"bark database lifecycle service (Restore/Truncate) defaults to a loopback-only bind since no --bark-host was set; these RPCs are unauthenticated, so widen this only behind your own trusted network/auth controls",
-				"component", "bark",
+				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; its destructive RPCs also require a verified mTLS client certificate (--bark-client-ca-file-path) independent of bind address, but widen this bind only behind your own trusted network controls",
+				"component",
+				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{
@@ -1455,6 +1465,7 @@ func (n *Node) Run(ctx context.Context) error {
 			DB:                  db,
 			TlsCertFilePath:     n.config.tlsCertFilePath,
 			TlsKeyFilePath:      n.config.tlsKeyFilePath,
+			TlsClientCAFilePath: n.config.barkClientCAFilePath,
 			Host:                barkHost,
 			Port:                n.config.barkPort,
 			CORSAllowedOrigins:  n.config.corsAllowedOrigins,
@@ -1738,16 +1749,20 @@ func (n *Node) backfillRewardLiveStake() error {
 		if err != nil {
 			return fmt.Errorf("check reward live stake backfill: %w", err)
 		}
-		staleSnapshots, err := n.db.Metadata().StaleConsensusStakeSnapshotsExist(
-			txn.Metadata(),
-		)
+		staleSnapshots, err := n.db.Metadata().
+			StaleConsensusStakeSnapshotsExist(
+				txn.Metadata(),
+			)
 		if err != nil {
 			return fmt.Errorf("check stake snapshot provenance: %w", err)
 		}
 		if needed {
 			tip, err := n.db.GetTip(txn)
 			if err != nil {
-				return fmt.Errorf("get tip for reward live stake backfill: %w", err)
+				return fmt.Errorf(
+					"get tip for reward live stake backfill: %w",
+					err,
+				)
 			}
 			n.config.logger.Info(
 				"rebuilding reward live stake aggregate",

@@ -175,7 +175,11 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 		}
 
 		// Get the block CBOR from blob store
-		blockCbor, _, err := blob.GetBlock(txn.Blob(), offset.BlockSlot, offset.BlockHash[:])
+		blockCbor, _, err := blob.GetBlock(
+			txn.Blob(),
+			offset.BlockSlot,
+			offset.BlockHash[:],
+		)
 		if err != nil {
 			return fmt.Errorf("get block for utxo extraction: %w", err)
 		}

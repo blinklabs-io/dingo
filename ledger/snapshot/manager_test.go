@@ -1546,8 +1546,12 @@ func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 	// stake answers for the same boundary. The fallback now reconstructs both
 	// halves from the same (snapshot slot, boundary slot) and cross-checks them,
 	// so the reward basis matches the leader-election total.
-	require.Equal(t, uint64(50_000_000), uint64(rewardSnapshot.TotalActiveStake),
-		"the reward basis must agree with the leader-election Mark aggregate")
+	require.Equal(
+		t,
+		uint64(50_000_000),
+		uint64(rewardSnapshot.TotalActiveStake),
+		"the reward basis must agree with the leader-election Mark aggregate",
+	)
 
 	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
 		1, "mark", poolHash, nil,

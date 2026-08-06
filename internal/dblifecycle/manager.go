@@ -398,9 +398,12 @@ func (m *Manager) handleEpochTransition(
 		}
 		m.logger.Warn(
 			"automatic snapshot for epoch exists locally but was never mirrored to the cloud, retrying upload",
-			"component", "dblifecycle",
-			"epoch", evt.NewEpoch,
-			"dir", destDir,
+			"component",
+			"dblifecycle",
+			"epoch",
+			evt.NewEpoch,
+			"dir",
+			destDir,
 		)
 		if err := lifecycle.MirrorToCloud(
 			ctx, m.destinationRegistry, destDir, cloudDest,
@@ -411,9 +414,12 @@ func (m *Manager) handleEpochTransition(
 		}
 		m.logger.Info(
 			"mirrored previously local-only automatic database snapshot to the cloud",
-			"component", "dblifecycle",
-			"epoch", evt.NewEpoch,
-			"dir", destDir,
+			"component",
+			"dblifecycle",
+			"epoch",
+			evt.NewEpoch,
+			"dir",
+			destDir,
 		)
 		if m.cfg.SnapshotRetention > 0 {
 			m.pruneOldSnapshots(ctx)
@@ -507,8 +513,10 @@ func (m *Manager) retryUnmirroredSnapshots(ctx context.Context) {
 		}
 		m.logger.Info(
 			"mirrored previously local-only automatic database snapshot to the cloud",
-			"component", "dblifecycle",
-			"dir", dir,
+			"component",
+			"dblifecycle",
+			"dir",
+			dir,
 		)
 	}
 }
@@ -525,7 +533,10 @@ func (m *Manager) retryUnmirroredSnapshots(ctx context.Context) {
 // at the top of handleEpochTransition -- would prevent the current epoch's
 // own snapshot from ever running, for every future epoch, for as long as
 // that one old snapshot's cloud destination keeps panicking.
-func (m *Manager) retryMirrorToCloud(ctx context.Context, dir string) (err error) {
+func (m *Manager) retryMirrorToCloud(
+	ctx context.Context,
+	dir string,
+) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic retrying cloud mirror: %v", r)
@@ -622,7 +633,11 @@ func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 		// would no longer bound cloud storage at all.
 		if cloudDest != "" {
 			cloudURI := lifecycle.JoinCloudURI(cloudDest, epochName)
-			ok, err := lifecycle.DeleteCloudSnapshot(ctx, m.destinationRegistry, cloudURI)
+			ok, err := lifecycle.DeleteCloudSnapshot(
+				ctx,
+				m.destinationRegistry,
+				cloudURI,
+			)
 			if err != nil {
 				m.logger.Warn(
 					"failed to prune old automatic snapshot's cloud mirror, "+

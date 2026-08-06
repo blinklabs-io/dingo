@@ -75,13 +75,23 @@ func TestChunksPreservesRealRefsInOrder(t *testing.T) {
 	for i := range refs {
 		idx, ok := c.Args[i*2+1].(uint32)
 		if !ok || idx != refs[i].Idx {
-			t.Fatalf("arg %d: expected idx %d, got %v", i, refs[i].Idx, c.Args[i*2+1])
+			t.Fatalf(
+				"arg %d: expected idx %d, got %v",
+				i,
+				refs[i].Idx,
+				c.Args[i*2+1],
+			)
 		}
 	}
 	// Padding (indices 5..7) repeats the last real ref (idx 4).
 	for i := 5; i < wantTerms; i++ {
 		if idx, ok := c.Args[i*2+1].(uint32); !ok || idx != refs[4].Idx {
-			t.Fatalf("padding arg %d: expected repeated idx %d, got %v", i, refs[4].Idx, c.Args[i*2+1])
+			t.Fatalf(
+				"padding arg %d: expected repeated idx %d, got %v",
+				i,
+				refs[4].Idx,
+				c.Args[i*2+1],
+			)
 		}
 	}
 }
@@ -91,14 +101,19 @@ func TestChunksPreservesRealRefsInOrder(t *testing.T) {
 func TestChunksSplitsOverMaxTerms(t *testing.T) {
 	chunks := Chunks(mkRefs(300), 256)
 	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks for 300 refs at max 256, got %d", len(chunks))
+		t.Fatalf(
+			"expected 2 chunks for 300 refs at max 256, got %d",
+			len(chunks),
+		)
 	}
-	if chunks[0].Real != 256 || strings.Count(chunks[0].Condition, "output_idx") != 256 {
+	if chunks[0].Real != 256 ||
+		strings.Count(chunks[0].Condition, "output_idx") != 256 {
 		t.Fatalf("chunk 0: expected 256 real/terms, got Real=%d terms=%d",
 			chunks[0].Real, strings.Count(chunks[0].Condition, "output_idx"))
 	}
 	// Second chunk: 44 real refs, padded to 64.
-	if chunks[1].Real != 44 || strings.Count(chunks[1].Condition, "output_idx") != 64 {
+	if chunks[1].Real != 44 ||
+		strings.Count(chunks[1].Condition, "output_idx") != 64 {
 		t.Fatalf("chunk 1: expected Real=44 terms=64, got Real=%d terms=%d",
 			chunks[1].Real, strings.Count(chunks[1].Condition, "output_idx"))
 	}
@@ -132,19 +147,29 @@ func TestChunksNonPowerOfTwoMaxTerms(t *testing.T) {
 				if terms&(terms-1) != 0 {
 					t.Fatalf(
 						"maxTerms=%d n=%d chunk %d: term count %d is not a power of two",
-						maxTerms, n, i, terms,
+						maxTerms,
+						n,
+						i,
+						terms,
 					)
 				}
 				if terms > maxTerms {
 					t.Fatalf(
 						"maxTerms=%d n=%d chunk %d: term count %d exceeds maxTerms",
-						maxTerms, n, i, terms,
+						maxTerms,
+						n,
+						i,
+						terms,
 					)
 				}
 				if c.Real < 1 || c.Real > terms {
 					t.Fatalf(
 						"maxTerms=%d n=%d chunk %d: Real=%d out of range for %d terms",
-						maxTerms, n, i, c.Real, terms,
+						maxTerms,
+						n,
+						i,
+						c.Real,
+						terms,
 					)
 				}
 				if len(c.Args) != terms*2 {
@@ -165,7 +190,12 @@ func TestChunksNonPowerOfTwoMaxTerms(t *testing.T) {
 					if !ok || idx != want.Idx {
 						t.Fatalf(
 							"maxTerms=%d n=%d chunk %d arg %d: expected idx %d, got %v",
-							maxTerms, n, i, j, want.Idx, c.Args[j*2+1],
+							maxTerms,
+							n,
+							i,
+							j,
+							want.Idx,
+							c.Args[j*2+1],
 						)
 					}
 				}
@@ -193,7 +223,11 @@ func TestChunksNonPowerOfTwoMaxTermsBoundsShapes(t *testing.T) {
 	}
 	// Effective bound is 128 (200 rounded down), so shapes are 1..128: 8 total.
 	if len(shapes) > 8 {
-		t.Fatalf("expected at most 8 distinct shapes, got %d: %v", len(shapes), shapes)
+		t.Fatalf(
+			"expected at most 8 distinct shapes, got %d: %v",
+			len(shapes),
+			shapes,
+		)
 	}
 	for terms := range shapes {
 		if terms&(terms-1) != 0 || terms > 200 {
@@ -214,11 +248,15 @@ func TestChunksMaxTermsBelowOne(t *testing.T) {
 		for i := range got {
 			if got[i].Condition != want[i].Condition ||
 				got[i].Real != want[i].Real {
-				t.Fatalf("maxTerms=%d chunk %d: expected Real=%d/%d terms, got Real=%d/%d terms",
-					maxTerms, i, want[i].Real,
+				t.Fatalf(
+					"maxTerms=%d chunk %d: expected Real=%d/%d terms, got Real=%d/%d terms",
+					maxTerms,
+					i,
+					want[i].Real,
 					strings.Count(want[i].Condition, "output_idx"),
 					got[i].Real,
-					strings.Count(got[i].Condition, "output_idx"))
+					strings.Count(got[i].Condition, "output_idx"),
+				)
 			}
 		}
 	}

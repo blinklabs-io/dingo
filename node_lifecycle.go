@@ -164,7 +164,10 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// reinitializeBackgroundManagers, mirroring reinitializeMidnightIndexer's
 	// stop-here/rebuild-there split for the same reason.
 	if n.koiosParityObserver != nil {
-		stopCtx, cancel := context.WithTimeout(ctx, n.configuredShutdownTimeout())
+		stopCtx, cancel := context.WithTimeout(
+			ctx,
+			n.configuredShutdownTimeout(),
+		)
 		stopErr := n.koiosParityObserver.Stop(stopCtx)
 		cancel()
 		if stopErr != nil {
@@ -606,7 +609,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 				if n.chainsyncState == nil {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
-				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(connId, hash)
+				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(
+					connId,
+					hash,
+				)
 				if !ok {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
@@ -655,6 +661,14 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
+	// Recovery changes both the ledger tip and blob contents. Complete it
+	// before starting background maintenance that reads or prunes either store.
+	if dbNeedsRecovery {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+			return fmt.Errorf("failed to recover database: %w", err)
+		}
+	}
+
 	if n.config.historyExpiry.Enabled {
 		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
@@ -671,11 +685,6 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		}
 	}
 
-	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
-			return fmt.Errorf("failed to recover database: %w", err)
-		}
-	}
 	if err := n.backfillRewardLiveStake(); err != nil {
 		return err
 	}
@@ -1071,7 +1080,10 @@ func (n *Node) reinitializeAPIServers() error {
 			},
 		)
 		if err != nil {
-			return fmt.Errorf("failed to recreate midnight gRPC server: %w", err)
+			return fmt.Errorf(
+				"failed to recreate midnight gRPC server: %w",
+				err,
+			)
 		}
 		if err := n.midnightServer.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("restarting midnight gRPC server: %w", err)
@@ -1250,7 +1262,9 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 // (node.go) but parameterized so a temporary handle (e.g. Truncate's
 // tmpDB, or Restore's staging-directory validation) can target a
 // different directory than n.config.dataDir.
-func (n *Node) storageDependencies(dataDir string) internalplugins.StorageDependencies {
+func (n *Node) storageDependencies(
+	dataDir string,
+) internalplugins.StorageDependencies {
 	return internalplugins.StorageDependencies{
 		DataDir:        dataDir,
 		RunMode:        n.config.runMode,
@@ -1628,7 +1642,9 @@ var syncDataDirParent = fsyncdir.Sync
 // reconcileInterruptedLiveRestoreSwap is what makes every one of those
 // intermediate states — including one this fsync doesn't quite manage to
 // make durable before a crash — safe to resume from at the next startup.
-func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err error) {
+func (n *Node) swapInRestoredDataDir(
+	stagingDir string,
+) (backupDir string, err error) {
 	dataDir := n.config.dataDir
 	parentDir := filepath.Dir(dataDir)
 	backupDir = dataDir + preRestoreBackupSuffix
@@ -1646,13 +1662,19 @@ func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err e
 		if rbErr := os.Rename(backupDir, dataDir); rbErr != nil {
 			return "", fmt.Errorf(
 				"%w: sync %q after moving aside current data directory: %w (rollback also failed: %w; original data preserved at %q)",
-				errRestoreSwapUnrecoverable, parentDir, err, rbErr, backupDir,
+				errRestoreSwapUnrecoverable,
+				parentDir,
+				err,
+				rbErr,
+				backupDir,
 			)
 		}
 		if syncErr := syncDataDirParent(parentDir); syncErr != nil {
 			return "", fmt.Errorf(
 				"sync %q after moving aside current data directory: %w (rolled back, but sync after rollback failed too: %w)",
-				parentDir, err, syncErr,
+				parentDir,
+				err,
+				syncErr,
 			)
 		}
 		return "", fmt.Errorf(
@@ -1664,13 +1686,18 @@ func (n *Node) swapInRestoredDataDir(stagingDir string) (backupDir string, err e
 		if rbErr := os.Rename(backupDir, dataDir); rbErr != nil {
 			return "", fmt.Errorf(
 				"%w: activate restored data directory: %w (rollback also failed: %w; restored data preserved at %q)",
-				errRestoreSwapUnrecoverable, err, rbErr, stagingDir,
+				errRestoreSwapUnrecoverable,
+				err,
+				rbErr,
+				stagingDir,
 			)
 		}
 		if syncErr := syncDataDirParent(parentDir); syncErr != nil {
 			return "", fmt.Errorf(
 				"activate restored data directory: %w (rolled back, but sync %q after rollback failed: %w)",
-				err, parentDir, syncErr,
+				err,
+				parentDir,
+				syncErr,
 			)
 		}
 		return "", fmt.Errorf("activate restored data directory: %w", err)
@@ -1725,7 +1752,11 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 	case os.IsNotExist(backupErr):
 		return nil
 	case backupErr != nil:
-		return fmt.Errorf("stat pre-restore backup %q: %w", backupDir, backupErr)
+		return fmt.Errorf(
+			"stat pre-restore backup %q: %w",
+			backupDir,
+			backupErr,
+		)
 	}
 
 	_, dataErr := os.Stat(dataDir)

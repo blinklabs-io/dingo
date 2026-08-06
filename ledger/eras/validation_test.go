@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/hex"
+	"fmt"
 	"iter"
 	"math"
 	"math/big"
@@ -28,6 +29,9 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/data"
+	"github.com/blinklabs-io/plutigo/lang"
+	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -278,13 +282,153 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		babbage.UtxoValidatePlutusScripts,
 		"babbage.UtxoValidatePlutusScripts",
 	)
-	require.Len(t, babbageUtxoValidationRules, len(babbage.UtxoValidationRules)-1)
+	require.Len(
+		t,
+		babbageUtxoValidationRules,
+		len(babbage.UtxoValidationRules)-1,
+	)
 	requireIndexedRulesExcludeFunc(
 		t,
 		babbageUtxoValidationRules,
 		babbage.UtxoValidatePlutusScripts,
 		"Babbage validation must use Dingo's local Plutus execution path",
 	)
+}
+
+func TestPlutusBudgetMismatchUsesScriptFailureError(t *testing.T) {
+	// A zero declared budget is intentional: restrictive validation should
+	// execute this script with the enormous budget and classify the resulting
+	// overage as a Plutus disagreement.
+	program := &syn.Program[syn.DeBruijn]{
+		Version: lang.LanguageVersionV1,
+		Term: &syn.Lambda[syn.DeBruijn]{
+			Body: &syn.Lambda[syn.DeBruijn]{
+				Body: &syn.Constant{Con: &syn.Unit{}},
+			},
+		},
+	}
+	flatProgram, err := syn.Encode(program)
+	require.NoError(t, err)
+	scriptBytes, err := cbor.Encode(flatProgram)
+	require.NoError(t, err)
+
+	spendInput := newTestInput(0x01, 0)
+
+	tests := []struct {
+		name     string
+		validate func(lcommon.Transaction, lcommon.LedgerState) error
+		reset    func()
+	}{
+		{
+			name: "alonzo",
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+				return ValidateTxAlonzo(
+					tx,
+					0,
+					ls,
+					&alonzo.AlonzoProtocolParameters{
+						ProtocolMajor: 5,
+					},
+				)
+			},
+			reset: func() {
+				alonzoUtxoValidationRules = nil
+			},
+		},
+		{
+			name: "babbage",
+			validate: func(tx lcommon.Transaction, ls lcommon.LedgerState) error {
+				return ValidateTxBabbage(
+					tx,
+					0,
+					ls,
+					&babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+					},
+				)
+			},
+			reset: func() {
+				babbageUtxoValidationRules = nil
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "alonzo" {
+				origRules := alonzoUtxoValidationRules
+				t.Cleanup(func() { alonzoUtxoValidationRules = origRules })
+			} else {
+				origRules := babbageUtxoValidationRules
+				t.Cleanup(func() { babbageUtxoValidationRules = origRules })
+			}
+			tc.reset()
+
+			var plutusScript lcommon.Script
+			witnesses := &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{
+							key: lcommon.RedeemerKey{
+								Tag:   lcommon.RedeemerTagSpend,
+								Index: 0,
+							},
+							val: lcommon.RedeemerValue{
+								ExUnits: lcommon.ExUnits{},
+							},
+						},
+					},
+				},
+			}
+			if tc.name == "alonzo" {
+				v1Script := lcommon.PlutusV1Script(scriptBytes)
+				plutusScript = v1Script
+				witnesses.plutusV1Scripts = []lcommon.PlutusV1Script{v1Script}
+			} else {
+				v2Script := lcommon.PlutusV2Script(scriptBytes)
+				plutusScript = v2Script
+				witnesses.plutusV2Scripts = []lcommon.PlutusV2Script{v2Script}
+			}
+			scriptHash := plutusScript.Hash()
+			addr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeScriptNone,
+				lcommon.AddressNetworkTestnet,
+				scriptHash.Bytes(),
+				nil,
+			)
+			require.NoError(t, err)
+			tx := &mockConwayFeeTx{
+				mockFeeTx: mockFeeTx{
+					txType:    txTypeAlonzo,
+					witnesses: witnesses,
+				},
+				inputs: []lcommon.TransactionInput{spendInput},
+			}
+			ls := newMockLedgerState()
+			ls.addUtxo(
+				spendInput,
+				testAddressOutput{
+					testOutput: newTestOutput(1_000_000),
+					addr:       addr,
+				},
+			)
+			err = tc.validate(tx, ls)
+			require.Error(t, err)
+
+			var plutusErr conway.PlutusScriptFailedError
+			require.ErrorAs(t, err, &plutusErr)
+			assert.Equal(t, scriptHash, plutusErr.ScriptHash)
+			assert.Equal(t, lcommon.RedeemerTagSpend, plutusErr.Tag)
+			assert.Equal(t, uint32(0), plutusErr.Index)
+			assert.Contains(
+				t,
+				plutusErr.Err.Error(),
+				"script exceeded declared budget",
+			)
+		})
+	}
 }
 
 func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
@@ -419,7 +563,9 @@ func TestValidateTxPlutusConwayMissingScriptWitnessFails(t *testing.T) {
 	assert.Equal(t, scriptHash, missing.ScriptHash)
 }
 
-func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(t *testing.T) {
+func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(
+	t *testing.T,
+) {
 	var scriptHash lcommon.ScriptHash
 	scriptHash[0] = 0xaa
 	addr, err := lcommon.NewAddressFromParts(
@@ -482,7 +628,9 @@ func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(t *testi
 	}
 }
 
-func TestValidateTxPlutusConwayNativeScriptWitnessWithoutRedeemerPasses(t *testing.T) {
+func TestValidateTxPlutusConwayNativeScriptWitnessWithoutRedeemerPasses(
+	t *testing.T,
+) {
 	nativeScript := lcommon.NativeScript{}
 	scriptHash := nativeScript.Hash()
 	addr, err := lcommon.NewAddressFromParts(
@@ -588,7 +736,9 @@ func TestValidateTxPlutusConwayMissingRedeemerForScriptRefFails(t *testing.T) {
 	}
 }
 
-func TestValidateTxPlutusConwayRegistrationCertificateMissingRedeemerFails(t *testing.T) {
+func TestValidateTxPlutusConwayRegistrationCertificateMissingRedeemerFails(
+	t *testing.T,
+) {
 	plutusScript := lcommon.PlutusV2Script([]byte{0x03, 0x04})
 	scriptHash := plutusScript.Hash()
 	tx := &mockConwayFeeTx{
@@ -732,7 +882,9 @@ func TestValidateTxPlutusConwayNonSpendMissingScriptWitnessFails(t *testing.T) {
 	}
 }
 
-func TestValidateTxPlutusConwayUnusedReferenceScriptWithoutRedeemerPasses(t *testing.T) {
+func TestValidateTxPlutusConwayUnusedReferenceScriptWithoutRedeemerPasses(
+	t *testing.T,
+) {
 	plutusScript := lcommon.PlutusV2Script([]byte{0x01, 0x02})
 	scriptHash := plutusScript.Hash()
 	addr, err := lcommon.NewAddressFromParts(
@@ -818,13 +970,20 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 }
 
 func TestBuildIndexedUtxoValidationRulesPanicsForStaleSkipIndex(t *testing.T) {
+	// The message is derived from the constant rather than spelled out, so an
+	// upstream reordering that shifts the index does not also require editing
+	// this expectation.
+	staleIndex := alonzoUtxoValidatePlutusScriptsRuleIndex - 1
 	require.PanicsWithValue(
 		t,
-		"test.UtxoValidatePlutusScripts hardcoded rule index 26 no longer resolves to the expected function",
+		fmt.Sprintf(
+			"test.UtxoValidatePlutusScripts hardcoded rule index %d no longer resolves to the expected function",
+			staleIndex,
+		),
 		func() {
 			buildIndexedUtxoValidationRules(
 				alonzo.UtxoValidationRules,
-				alonzoUtxoValidatePlutusScriptsRuleIndex-1,
+				staleIndex,
 				alonzo.UtxoValidatePlutusScripts,
 				"test.UtxoValidatePlutusScripts",
 			)
@@ -840,8 +999,20 @@ func requireRuleIndexResolvesToFunc(
 	name string,
 ) {
 	t.Helper()
-	require.GreaterOrEqual(t, index, 0, "%s rule index must be non-negative", name)
-	require.Less(t, index, len(rules), "%s rule index must be within upstream rules", name)
+	require.GreaterOrEqual(
+		t,
+		index,
+		0,
+		"%s rule index must be non-negative",
+		name,
+	)
+	require.Less(
+		t,
+		index,
+		len(rules),
+		"%s rule index must be within upstream rules",
+		name,
+	)
 	require.Equal(
 		t,
 		utxoValidationRulePtr(want),
@@ -876,7 +1047,12 @@ func requireIndexedRulesExcludeFunc(
 	t.Helper()
 	wantPtr := utxoValidationRulePtr(want)
 	for _, rule := range rules {
-		require.NotEqual(t, wantPtr, utxoValidationRulePtr(rule.validationFunc), message)
+		require.NotEqual(
+			t,
+			wantPtr,
+			utxoValidationRulePtr(rule.validationFunc),
+			message,
+		)
 	}
 }
 
@@ -2647,7 +2823,12 @@ func TestCheckPoolMarginFloor(t *testing.T) {
 
 	// multiple certs: one below floor rejects the whole set.
 	require.Error(t, checkPoolMarginFloor(
-		[]lcommon.Certificate{cip23PoolCert(5, 100), cip23PoolCert(1, 1000)}, floor))
+		[]lcommon.Certificate{
+			cip23PoolCert(5, 100),
+			cip23PoolCert(1, 1000),
+		},
+		floor,
+	))
 
 	// empty cert set: accepted.
 	require.NoError(t, checkPoolMarginFloor(nil, floor))
@@ -2663,4 +2844,115 @@ func TestCheckPoolMarginFloor(t *testing.T) {
 		require.NoError(t, checkPoolMarginFloor(
 			[]lcommon.Certificate{nilReg}, nil))
 	})
+}
+
+// TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion pins the
+// invariant that replaced the one this test used to assert.
+//
+// It previously required PV9 and PV10 to render txInfoMint differently, because
+// gouroboros gated the zero-lovelace ada entry on PV10. That gate was the bug:
+// cardano-ledger's transMintValue takes no protocol version, so pre-Plomin
+// scripts that inspect txInfoMint were costed against a mint field one entry
+// short and diverged from the node that produced the block. gouroboros v0.192.0
+// removed the gate, so the rendering is now identical in every era, and this
+// test fails if the gate returns.
+func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(t *testing.T) {
+	input := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			// Non-zero so the fee field cannot be mistaken for the mint field:
+			// both render as a single-entry map keyed by the empty policy, and
+			// a zero fee would make them identical.
+			fee:       big.NewInt(311_505),
+			witnesses: &mockWitnessSet{},
+		},
+		inputs: []lcommon.TransactionInput{input},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(input, newTestOutput(1_000_000))
+	resolved := []lcommon.Utxo{{Id: input, Output: newTestOutput(1_000_000)}}
+
+	// A tx that mints nothing still carries the ada entry, so no mint fixture
+	// is needed to observe the rendering.
+	cache := newConwayTxInfoCache(ls, tx, resolved)
+	v1, err := cache.v1()
+	require.NoError(t, err)
+	v2, err := cache.v2()
+	require.NoError(t, err)
+
+	// txInfo field order differs by version: V1 is
+	// [inputs, outputs, fee, mint, ...] while V2 inserts reference inputs
+	// ahead of outputs, so its mint sits one later.
+	mintOf := func(d data.PlutusData, idx int) data.PlutusData {
+		constr, ok := d.(*data.Constr)
+		require.True(t, ok)
+		require.Greater(t, len(constr.Fields), idx)
+		return constr.Fields[idx]
+	}
+	for _, tc := range []struct {
+		name string
+		mint data.PlutusData
+	}{
+		{"v1", mintOf(v1.ToPlutusData(), 3)},
+		{"v2", mintOf(v2.ToPlutusData(), 4)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ok := tc.mint.(*data.Map)
+			require.True(t, ok, "txInfoMint must be a map")
+			require.Len(t, m.Pairs, 1,
+				"an empty mint must still carry the zero-lovelace ada entry")
+			policy, ok := m.Pairs[0][0].(*data.ByteString)
+			require.True(t, ok)
+			assert.Empty(t, policy.Inner, "ada policy id is the empty bytestring")
+
+			// Assert the amount too. Without it the fee field, which is also a
+			// single-entry map keyed by the empty policy, satisfies the checks
+			// above and the test would not notice a wrong field index.
+			inner, ok := m.Pairs[0][1].(*data.Map)
+			require.True(t, ok, "ada entry must map asset name to amount")
+			require.Len(t, inner.Pairs, 1)
+			name, ok := inner.Pairs[0][0].(*data.ByteString)
+			require.True(t, ok)
+			assert.Empty(t, name.Inner, "ada asset name is the empty bytestring")
+			amount, ok := inner.Pairs[0][1].(*data.Integer)
+			require.True(t, ok)
+			assert.Zero(t, amount.Inner.Int64(),
+				"the prepended ada entry mints zero")
+		})
+	}
+}
+
+// TestConwayPlutusRejectsNilPparams covers the typed-nil pointer case: a nil
+// *conway.ConwayProtocolParameters satisfies the protocol-parameters type
+// assertion, and the Conway plutus path dereferences pparams for cost models
+// and the protocol version, so an unguarded nil would panic instead of
+// erroring.
+func TestConwayPlutusRejectsNilPparams(t *testing.T) {
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			fee:       big.NewInt(0),
+			witnesses: &mockWitnessSet{},
+		},
+	}
+	ls := newMockLedgerState()
+	var nilPparams *conway.ConwayProtocolParameters
+
+	assert.Equal(
+		t,
+		ErrIncompatibleProtocolParams,
+		ValidateTxPlutusConway(tx, 0, ls, nilPparams),
+	)
+	assert.ErrorIs(
+		t,
+		ValidateTxConway(tx, 0, ls, nilPparams),
+		ErrIncompatibleProtocolParams,
+	)
+	_, _, _, err := EvaluateTxConway(tx, ls, nilPparams)
+	assert.ErrorIs(t, err, ErrIncompatibleProtocolParams)
+	// CertDepositConway takes the same guard and reads pparams fields directly.
+	_, certErr := CertDepositConway(
+		&lcommon.StakeRegistrationCertificate{},
+		nilPparams,
+	)
+	assert.ErrorIs(t, certErr, ErrIncompatibleProtocolParams)
 }

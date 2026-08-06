@@ -318,12 +318,30 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithIntersectTip(cfg.IntersectTip),
 			dingo.WithLogger(logger),
 			dingo.WithDatabasePath(cfg.DatabasePath),
-			dingo.WithPluginSelection(plugin.CapabilityStorageBlob, cfg.Plugins.Storage.Blob),
-			dingo.WithPluginSelection(plugin.CapabilityStorageMetadata, cfg.Plugins.Storage.Metadata),
-			dingo.WithPluginSelection(plugin.CapabilityMempool, cfg.Plugins.Mempool),
-			dingo.WithPluginSelection(plugin.CapabilityAPIBlockfrost, cfg.Plugins.API.Blockfrost),
-			dingo.WithPluginSelection(plugin.CapabilityAPIMesh, cfg.Plugins.API.Mesh),
-			dingo.WithPluginSelection(plugin.CapabilityAPIUtxorpc, cfg.Plugins.API.Utxorpc),
+			dingo.WithPluginSelection(
+				plugin.CapabilityStorageBlob,
+				cfg.Plugins.Storage.Blob,
+			),
+			dingo.WithPluginSelection(
+				plugin.CapabilityStorageMetadata,
+				cfg.Plugins.Storage.Metadata,
+			),
+			dingo.WithPluginSelection(
+				plugin.CapabilityMempool,
+				cfg.Plugins.Mempool,
+			),
+			dingo.WithPluginSelection(
+				plugin.CapabilityAPIBlockfrost,
+				cfg.Plugins.API.Blockfrost,
+			),
+			dingo.WithPluginSelection(
+				plugin.CapabilityAPIMesh,
+				cfg.Plugins.API.Mesh,
+			),
+			dingo.WithPluginSelection(
+				plugin.CapabilityAPIUtxorpc,
+				cfg.Plugins.API.Utxorpc,
+			),
 			dingo.WithNetwork(cfg.Network),
 			dingo.WithNetworkMagic(cfg.NetworkMagic),
 			dingo.WithCardanoNodeConfig(nodeCfg),
@@ -336,6 +354,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
 			dingo.WithBarkPort(cfg.BarkPort),
 			dingo.WithBarkHost(cfg.BarkHost),
+			dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
 			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 				Enabled:   cfg.HistoryExpiry.Enabled,
 				Frequency: cfg.HistoryExpiry.Frequency,

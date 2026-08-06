@@ -147,7 +147,9 @@ type Observer struct {
 // Start to begin processing and Stop to release both.
 func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	if cfg.Source == nil {
-		return nil, errors.New("koiosparity: Observer requires a non-nil RewardParitySource")
+		return nil, errors.New(
+			"koiosparity: Observer requires a non-nil RewardParitySource",
+		)
 	}
 	if cfg.Network != "preview" && cfg.Network != "preprod" {
 		return nil, fmt.Errorf(
@@ -279,7 +281,9 @@ func (o *Observer) Stop(ctx context.Context) error {
 	select {
 	case <-waitCh:
 	case <-ctx.Done():
-		o.cfg.Logger.Warn("koiosparity observer: stop context expired, still waiting for in-flight work before releasing cache")
+		o.cfg.Logger.Warn(
+			"koiosparity observer: stop context expired, still waiting for in-flight work before releasing cache",
+		)
 		<-waitCh
 	}
 	var errs []error
@@ -376,8 +380,15 @@ func (o *Observer) stopping() bool {
 func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	if err := o.fetchIfNeeded(ctx, epoch); err != nil {
 		if cancelled(ctx, err) {
-			o.cfg.Logger.Debug("koiosparity observer: fetch interrupted by shutdown",
-				"network", o.cfg.Network, "epoch", epoch, "error", err)
+			o.cfg.Logger.Debug(
+				"koiosparity observer: fetch interrupted by shutdown",
+				"network",
+				o.cfg.Network,
+				"epoch",
+				epoch,
+				"error",
+				err,
+			)
 			return
 		}
 		o.reportError(epoch, fmt.Errorf("fetch koios reference: %w", err))
@@ -385,12 +396,25 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	}
 
 	result, err := CheckEpoch(
-		ctx, o.cache, o.cfg.Source, o.cfg.Network, epoch, o.cfg.GraceHours, o.cfg.Logger,
+		ctx,
+		o.cache,
+		o.cfg.Source,
+		o.cfg.Network,
+		epoch,
+		o.cfg.GraceHours,
+		o.cfg.Logger,
 	)
 	if err != nil {
 		if cancelled(ctx, err) {
-			o.cfg.Logger.Debug("koiosparity observer: check interrupted by shutdown",
-				"network", o.cfg.Network, "epoch", epoch, "error", err)
+			o.cfg.Logger.Debug(
+				"koiosparity observer: check interrupted by shutdown",
+				"network",
+				o.cfg.Network,
+				"epoch",
+				epoch,
+				"error",
+				err,
+			)
 			return
 		}
 		o.reportError(epoch, fmt.Errorf("check: %w", err))
@@ -509,7 +533,14 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 			poolsResolved = true
 		}
 		_, err := FetchEpochWithPools(
-			ctx, o.koios, o.cache, o.cfg.Network, epoch, poolIDs, firstActiveEpochs, o.cfg.Logger,
+			ctx,
+			o.koios,
+			o.cache,
+			o.cfg.Network,
+			epoch,
+			poolIDs,
+			firstActiveEpochs,
+			o.cfg.Logger,
 		)
 		if err == nil {
 			return nil
@@ -537,8 +568,17 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 // once (the first failure across the observer's lifetime) — only ever
 // called from run's single goroutine, so fatalFired needs no lock.
 func (o *Observer) fail(epoch uint64, err error) {
-	o.cfg.Logger.Error("koiosparity observer: epoch validation failed",
-		"network", o.cfg.Network, "epoch", epoch, "error", err, "strict", o.cfg.Strict)
+	o.cfg.Logger.Error(
+		"koiosparity observer: epoch validation failed",
+		"network",
+		o.cfg.Network,
+		"epoch",
+		epoch,
+		"error",
+		err,
+		"strict",
+		o.cfg.Strict,
+	)
 	if !o.cfg.Strict || o.fatalFired {
 		return
 	}

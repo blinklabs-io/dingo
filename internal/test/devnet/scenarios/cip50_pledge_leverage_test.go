@@ -60,7 +60,9 @@ import (
 //	  go test -tags devnet -run TestCIP50PledgeLeverageRewardEffect ...
 func TestCIP50PledgeLeverageRewardEffect(t *testing.T) {
 	if os.Getenv("DEVNET_CIP50_TEST") != "1" {
-		t.Skip("long-running CIP-50 effect test; set DEVNET_CIP50_TEST=1 and run against a freshly brought-up network (see doc comment). Run a baseline (leverage off) pass and a leveraged (DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED=true) pass.")
+		t.Skip(
+			"long-running CIP-50 effect test; set DEVNET_CIP50_TEST=1 and run against a freshly brought-up network (see doc comment). Run a baseline (leverage off) pass and a leveraged (DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED=true) pass.",
+		)
 	}
 	leveraged := os.Getenv("DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED") == "true"
 
@@ -68,33 +70,60 @@ func TestCIP50PledgeLeverageRewardEffect(t *testing.T) {
 	require.NoError(t, err, "failed to load devnet config")
 
 	endpoints := devnet.LoadEndpoints()
-	h := devnet.NewTestHarness(t, endpoints, devnet.WithNetworkMagic(cfg.NetworkMagic))
+	h := devnet.NewTestHarness(
+		t,
+		endpoints,
+		devnet.WithNetworkMagic(cfg.NetworkMagic),
+	)
 	h.WaitForAllNodesReady(60 * time.Second)
 	observed := h.DingoNode()
 
 	// Wait into epoch 4 so the delayed reward update (three epochs back) has
 	// credited genesis-delegated stake in a non-leveraged network.
 	targetSlot := 4*cfg.EpochLength + cfg.EpochLength/5
-	boundaryTimeout := time.Duration(targetSlot)*cfg.SlotDuration() + cfg.ExpectedBlockTime()*30
-	t.Logf("waiting for slot %d (into epoch 4), timeout %s", targetSlot, boundaryTimeout)
+	boundaryTimeout := time.Duration(
+		targetSlot,
+	)*cfg.SlotDuration() + cfg.ExpectedBlockTime()*30
+	t.Logf(
+		"waiting for slot %d (into epoch 4), timeout %s",
+		targetSlot,
+		boundaryTimeout,
+	)
 	h.WaitForNodeSlot(observed, targetSlot, boundaryTimeout)
 
 	tip, err := h.GetChainTip(observed)
 	require.NoError(t, err, "failed to read observed tip")
-	require.Greater(t, tip.BlockNumber, uint64(0), "network must have forged blocks")
+	require.Greater(
+		t,
+		tip.BlockNumber,
+		uint64(0),
+		"network must have forged blocks",
+	)
 
 	stakeDir := os.Getenv("DEVNET_STAKE_KEYS_DIR")
-	require.NotEmpty(t, stakeDir, "set DEVNET_STAKE_KEYS_DIR to the exposed genesis stake key dir")
+	require.NotEmpty(
+		t,
+		stakeDir,
+		"set DEVNET_STAKE_KEYS_DIR to the exposed genesis stake key dir",
+	)
 	creds, err := devnet.LoadGenesisStakeCredentials(stakeDir)
 	require.NoError(t, err, "failed to load genesis stake credentials")
-	require.NotEmpty(t, creds, "expected at least one delegated stake credential")
+	require.NotEmpty(
+		t,
+		creds,
+		"expected at least one delegated stake credential",
+	)
 
 	ntcAddr := devnet.DingoNtcAddrs()[observed.Name]
 	require.NotEmpty(t, ntcAddr, "no NtC address for %s", observed.Name)
 
 	var rewards map[string]devnet.RewardResult
 	require.Eventually(t, func() bool {
-		rewards, err = devnet.RewardAccountsByNtcForCreds(ntcAddr, cfg.NetworkMagic, creds)
+		rewards, err = devnet.RewardAccountsByNtcForCreds(
+			ntcAddr,
+			cfg.NetworkMagic,
+			creds,
+		)
 		if err != nil {
 			t.Logf("reward query error (retrying): %v", err)
 			return false
@@ -110,14 +139,28 @@ func TestCIP50PledgeLeverageRewardEffect(t *testing.T) {
 		}
 		total += sr.Reward
 	}
-	require.Greater(t, delegated, 0, "expected genesis to have delegated stake to pools")
+	require.Greater(
+		t,
+		delegated,
+		0,
+		"expected genesis to have delegated stake to pools",
+	)
 
 	if leveraged {
 		for k, sr := range rewards {
-			require.Equalf(t, uint64(0), sr.Reward,
-				"pledge leverage with zero pledge must zero member rewards; cred %s has %d", k, sr.Reward)
+			require.Equalf(
+				t,
+				uint64(0),
+				sr.Reward,
+				"pledge leverage with zero pledge must zero member rewards; cred %s has %d",
+				k,
+				sr.Reward,
+			)
 		}
-		t.Logf("CIP-50 leveraged: all %d delegated credentials have zero rewards into epoch 4 (cap engaged)", delegated)
+		t.Logf(
+			"CIP-50 leveraged: all %d delegated credentials have zero rewards into epoch 4 (cap engaged)",
+			delegated,
+		)
 	} else {
 		require.Greater(t, total, uint64(0),
 			"baseline (leverage off): zero-pledge delegated stake must earn positive rewards by epoch 4")

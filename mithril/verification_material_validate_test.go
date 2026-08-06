@@ -147,5 +147,9 @@ func TestValidateVerificationMaterialCardanoDistributionMismatch(t *testing.T) {
 		},
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cardano stake distribution epoch mismatch")
+	require.Contains(
+		t,
+		err.Error(),
+		"cardano stake distribution epoch mismatch",
+	)
 }

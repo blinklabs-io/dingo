@@ -230,7 +230,9 @@ func (p *Peer) decayScoreMetrics(now time.Time) {
 		p.ScoreLastUpdate = now
 		return
 	}
-	factor := math.Exp(-math.Ln2 * elapsed.Seconds() / scoreDecayHalfLife.Seconds())
+	factor := math.Exp(
+		-math.Ln2 * elapsed.Seconds() / scoreDecayHalfLife.Seconds(),
+	)
 	if p.BlockFetchLatencyInit {
 		// Decay toward the score-neutral latency, not the unknown-latency
 		// penalty: every other component decays to its 0.5-score baseline, and

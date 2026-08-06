@@ -153,19 +153,29 @@ func OpenDingoDB(cfg DingoDBConfig) (*DingoDB, error) {
 	case "sqlite", "":
 		driver = "sqlite"
 		path := filepath.Join(cfg.DataDir, "metadata.sqlite")
-		dsn = fmt.Sprintf("file:%s?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=cache_size(-16000)", path)
+		dsn = fmt.Sprintf(
+			"file:%s?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=cache_size(-16000)",
+			path,
+		)
 	case "postgres":
 		if cfg.DSN == "" {
-			return nil, errors.New("--metadata-dsn is required for postgres plugin")
+			return nil, errors.New(
+				"--metadata-dsn is required for postgres plugin",
+			)
 		}
 		driver, dsn = "pgx", cfg.DSN
 	case "mysql":
 		if cfg.DSN == "" {
-			return nil, errors.New("--metadata-dsn is required for mysql plugin")
+			return nil, errors.New(
+				"--metadata-dsn is required for mysql plugin",
+			)
 		}
 		driver, dsn = "mysql", cfg.DSN
 	default:
-		return nil, fmt.Errorf("unsupported metadata plugin %q (sqlite, postgres, mysql)", cfg.Plugin)
+		return nil, fmt.Errorf(
+			"unsupported metadata plugin %q (sqlite, postgres, mysql)",
+			cfg.Plugin,
+		)
 	}
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
@@ -193,13 +203,18 @@ func (d *DingoDB) GetLatestEpoch(ctx context.Context) (uint64, error) {
 	if !epoch.Valid {
 		return 0, errors.New("dingo db: no epoch_summary rows found")
 	}
-	return uint64(epoch.Int64), nil //nolint:gosec // epoch values are non-negative
+	return uint64( //nolint:gosec // epoch values are non-negative
+		epoch.Int64,
+	), nil
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch.
 // Returns nil, nil when Dingo has not yet recorded an epoch_summary row.
 // ctx is forwarded to the DB driver so that a cancelled context aborts the query.
-func (d *DingoDB) GetEpochData(ctx context.Context, epoch uint64) (*DingoEpochData, error) {
+func (d *DingoDB) GetEpochData(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoEpochData, error) {
 	var summary models.EpochSummary
 	if err := d.queryRow(ctx, `SELECT epoch, total_active_stake, total_pool_count, total_delegators, epoch_nonce, boundary_slot, snapshot_ready FROM epoch_summary WHERE epoch = ?`, epoch).Scan(
 		&summary.Epoch, &summary.TotalActiveStake, &summary.TotalPoolCount, &summary.TotalDelegators, &summary.EpochNonce, &summary.BoundarySlot, &summary.SnapshotReady); err != nil {
@@ -218,7 +233,10 @@ func (d *DingoDB) GetEpochData(ctx context.Context, epoch uint64) (*DingoEpochDa
 	}
 
 	data := &DingoEpochData{
-		TotalActiveStake: strconv.FormatUint(uint64(summary.TotalActiveStake), 10),
+		TotalActiveStake: strconv.FormatUint(
+			uint64(summary.TotalActiveStake),
+			10,
+		),
 	}
 
 	var pots models.RewardAdaPots
@@ -275,9 +293,17 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	ctx context.Context,
 	stakeEpoch, paramEpoch uint64,
 ) (map[string]*DingoPoolEpochData, error) {
-	rows, err := d.query(ctx, `SELECT pool_key_hash, delegated_stake, delegator_count FROM reward_pool_input WHERE epoch = ?`, stakeEpoch)
+	rows, err := d.query(
+		ctx,
+		`SELECT pool_key_hash, delegated_stake, delegator_count FROM reward_pool_input WHERE epoch = ?`,
+		stakeEpoch,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("reward_pool_input stake epoch %d: %w", stakeEpoch, err)
+		return nil, fmt.Errorf(
+			"reward_pool_input stake epoch %d: %w",
+			stakeEpoch,
+			err,
+		)
 	}
 	defer rows.Close()
 	m := make(map[string]*DingoPoolEpochData)
@@ -298,9 +324,17 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		return nil, err
 	}
 
-	rows, err = d.query(ctx, `SELECT pool_key_hash, blocks_produced, cost, margin FROM reward_pool_input WHERE epoch = ?`, paramEpoch)
+	rows, err = d.query(
+		ctx,
+		`SELECT pool_key_hash, blocks_produced, cost, margin FROM reward_pool_input WHERE epoch = ?`,
+		paramEpoch,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("reward_pool_input param epoch %d: %w", paramEpoch, err)
+		return nil, fmt.Errorf(
+			"reward_pool_input param epoch %d: %w",
+			paramEpoch,
+			err,
+		)
 	}
 	for rows.Next() {
 		var poolHash []byte
@@ -323,10 +357,18 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		}
 		data.ParamsPresent = true
 		if blocks.Valid {
-			data.BlocksProduced = uint64(blocks.Int64) //nolint:gosec // metadata values are non-negative
+			data.BlocksProduced = uint64( //nolint:gosec // metadata values are non-negative
+				blocks.Int64,
+			)
 		}
 		if cost.Valid {
-			data.FixedCost = strconv.FormatUint(uint64(cost.Int64), 10) //nolint:gosec // metadata values are non-negative
+			data.FixedCost = strconv.FormatUint(
+				//nolint:gosec // metadata values are non-negative
+				uint64(
+					cost.Int64,
+				),
+				10,
+			)
 		}
 		if margin.Rat != nil {
 			data.Margin = margin.String()
@@ -338,9 +380,17 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	_ = rows.Close() //nolint:sqlclosecheck
 
-	rows, err = d.query(ctx, `SELECT pool_key_hash, member_reward_total FROM reward_pool_output WHERE epoch = ?`, stakeEpoch)
+	rows, err = d.query(
+		ctx,
+		`SELECT pool_key_hash, member_reward_total FROM reward_pool_output WHERE epoch = ?`,
+		stakeEpoch,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("reward_pool_output epoch %d: %w", stakeEpoch, err)
+		return nil, fmt.Errorf(
+			"reward_pool_output epoch %d: %w",
+			stakeEpoch,
+			err,
+		)
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -361,11 +411,19 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	return m, rows.Err()
 }
 
-func (d *DingoDB) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+func (d *DingoDB) query(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
 	return d.db.QueryContext(ctx, rebind(query, d.dialect), args...)
 }
 
-func (d *DingoDB) queryRow(ctx context.Context, query string, args ...any) *sql.Row {
+func (d *DingoDB) queryRow(
+	ctx context.Context,
+	query string,
+	args ...any,
+) *sql.Row {
 	return d.db.QueryRowContext(ctx, rebind(query, d.dialect), args...)
 }
 
@@ -398,7 +456,11 @@ func (d *DingoDB) GetRewardAccountOutputs(
 	ctx context.Context,
 	epoch uint64,
 ) ([]*models.RewardAccountOutput, error) {
-	rows, err := d.query(ctx, `SELECT staking_key, pool_key_hash, reward_type, epoch, credential_tag, amount, spendable, guarded, captured_slot, boundary_slot FROM reward_account_output WHERE epoch = ?`, epoch)
+	rows, err := d.query(
+		ctx,
+		`SELECT staking_key, pool_key_hash, reward_type, epoch, credential_tag, amount, spendable, guarded, captured_slot, boundary_slot FROM reward_account_output WHERE epoch = ?`,
+		epoch,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
 	}
@@ -419,7 +481,11 @@ func (d *DingoDB) GetRewardAccountOutputs(
 			&row.CapturedSlot,
 			&row.BoundarySlot,
 		); err != nil {
-			return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
+			return nil, fmt.Errorf(
+				"reward_account_output epoch %d: %w",
+				epoch,
+				err,
+			)
 		}
 		out = append(out, row)
 	}
@@ -449,7 +515,10 @@ func PoolKeyHashHexToBech32(keyHex string) (string, error) {
 		return "", fmt.Errorf("decode hex pool key hash %q: %w", keyHex, err)
 	}
 	if len(b) != 28 {
-		return "", fmt.Errorf("pool key hash: expected 28 bytes, got %d", len(b))
+		return "", fmt.Errorf(
+			"pool key hash: expected 28 bytes, got %d",
+			len(b),
+		)
 	}
 	var pid lcommon.PoolId
 	copy(pid[:], b)

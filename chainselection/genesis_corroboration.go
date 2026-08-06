@@ -303,7 +303,11 @@ func (cs *ChainSelector) GenesisStatus() GenesisStatus {
 			ObservedDensity:    peerTip.observedDensity(window),
 			CorroboratingPeers: corroborators,
 			Corroborated:       cs.isPeerCorroboratedLocked(connId, peerTip),
-			Selectable:         cs.isPeerSelectableLocked(connId, peerTip, false),
+			Selectable: cs.isPeerSelectableLocked(
+				connId,
+				peerTip,
+				false,
+			),
 		})
 	}
 	return status

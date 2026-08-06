@@ -175,14 +175,22 @@ func NewDestinationRegistry() *DestinationRegistry {
 // case this is a no-op: a nil registry has no map to register into and
 // behaves as if it will always have no schemes registered, the same as an
 // empty one.
-func (r *DestinationRegistry) Register(scheme string, factory CloudDestinationFactory) {
+func (r *DestinationRegistry) Register(
+	scheme string,
+	factory CloudDestinationFactory,
+) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.types[scheme]; exists {
-		panic(fmt.Sprintf("lifecycle: cloud destination scheme %q already registered", scheme))
+		panic(
+			fmt.Sprintf(
+				"lifecycle: cloud destination scheme %q already registered",
+				scheme,
+			),
+		)
 	}
 	r.types[scheme] = factory
 }
@@ -193,7 +201,10 @@ func (r *DestinationRegistry) Register(scheme string, factory CloudDestinationFa
 // treating uri as a local path unchanged — this is what lets Restore
 // accept either a local directory or a cloud URI in the same string
 // parameter without breaking existing local-path callers.
-func recognizedCloudScheme(r *DestinationRegistry, uri string) (scheme string, ok bool) {
+func recognizedCloudScheme(
+	r *DestinationRegistry,
+	uri string,
+) (scheme string, ok bool) {
 	u, err := url.Parse(uri)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "", false
@@ -211,7 +222,10 @@ func recognizedCloudScheme(r *DestinationRegistry, uri string) (scheme string, o
 // registered schemes. uri's scheme must have a factory registered on r
 // (see RegisterS3/RegisterGCS/RegisterBuiltinDestinations) or this returns
 // an error. r may be nil, which behaves as an empty registry.
-func ParseCloudDestination(r *DestinationRegistry, uri string) (CloudDestination, error) {
+func ParseCloudDestination(
+	r *DestinationRegistry,
+	uri string,
+) (CloudDestination, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
 		return nil, fmt.Errorf("parse cloud destination %q: %w", uri, err)

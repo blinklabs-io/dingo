@@ -26,13 +26,62 @@ func sampleShape() hardfork.Shape {
 	return hardfork.Shape{
 		SystemStart: testSysStart,
 		Eras: []hardfork.ShapeEntry{
-			{EraID: 0, EraName: "Byron", MinMajorVersion: 0, MaxMajorVersion: 1, Params: byronParams, NextEraTrigger: hardfork.NewTriggerAtVersion(2)},
-			{EraID: 1, EraName: "Shelley", MinMajorVersion: 2, MaxMajorVersion: 2, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(3)},
-			{EraID: 2, EraName: "Allegra", MinMajorVersion: 3, MaxMajorVersion: 3, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(4)},
-			{EraID: 3, EraName: "Mary", MinMajorVersion: 4, MaxMajorVersion: 4, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(5)},
-			{EraID: 4, EraName: "Alonzo", MinMajorVersion: 5, MaxMajorVersion: 6, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(7)},
-			{EraID: 5, EraName: "Babbage", MinMajorVersion: 7, MaxMajorVersion: 8, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerAtVersion(9)},
-			{EraID: 6, EraName: "Conway", MinMajorVersion: 9, MaxMajorVersion: 10, Params: shelleyParams, NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution()},
+			{
+				EraID:           0,
+				EraName:         "Byron",
+				MinMajorVersion: 0,
+				MaxMajorVersion: 1,
+				Params:          byronParams,
+				NextEraTrigger:  hardfork.NewTriggerAtVersion(2),
+			},
+			{
+				EraID:           1,
+				EraName:         "Shelley",
+				MinMajorVersion: 2,
+				MaxMajorVersion: 2,
+				Params:          shelleyParams,
+				NextEraTrigger:  hardfork.NewTriggerAtVersion(3),
+			},
+			{
+				EraID:           2,
+				EraName:         "Allegra",
+				MinMajorVersion: 3,
+				MaxMajorVersion: 3,
+				Params:          shelleyParams,
+				NextEraTrigger:  hardfork.NewTriggerAtVersion(4),
+			},
+			{
+				EraID:           3,
+				EraName:         "Mary",
+				MinMajorVersion: 4,
+				MaxMajorVersion: 4,
+				Params:          shelleyParams,
+				NextEraTrigger:  hardfork.NewTriggerAtVersion(5),
+			},
+			{
+				EraID:           4,
+				EraName:         "Alonzo",
+				MinMajorVersion: 5,
+				MaxMajorVersion: 6,
+				Params:          shelleyParams,
+				NextEraTrigger:  hardfork.NewTriggerAtVersion(7),
+			},
+			{
+				EraID:           5,
+				EraName:         "Babbage",
+				MinMajorVersion: 7,
+				MaxMajorVersion: 8,
+				Params:          shelleyParams,
+				NextEraTrigger:  hardfork.NewTriggerAtVersion(9),
+			},
+			{
+				EraID:           6,
+				EraName:         "Conway",
+				MinMajorVersion: 9,
+				MaxMajorVersion: 10,
+				Params:          shelleyParams,
+				NextEraTrigger:  hardfork.NewTriggerNotDuringThisExecution(),
+			},
 		},
 	}
 }
@@ -52,8 +101,20 @@ func TestShape_Validate_RejectsVersionGap(t *testing.T) {
 	s := hardfork.Shape{
 		SystemStart: testSysStart,
 		Eras: []hardfork.ShapeEntry{
-			{EraID: 0, EraName: "Byron", MinMajorVersion: 0, MaxMajorVersion: 1, Params: byronParams},
-			{EraID: 1, EraName: "Shelley", MinMajorVersion: 3, MaxMajorVersion: 3, Params: shelleyParams},
+			{
+				EraID:           0,
+				EraName:         "Byron",
+				MinMajorVersion: 0,
+				MaxMajorVersion: 1,
+				Params:          byronParams,
+			},
+			{
+				EraID:           1,
+				EraName:         "Shelley",
+				MinMajorVersion: 3,
+				MaxMajorVersion: 3,
+				Params:          shelleyParams,
+			},
 		},
 	}
 	assert.Error(t, s.Validate())
@@ -64,8 +125,20 @@ func TestShape_Validate_RejectsVersionOverlap(t *testing.T) {
 	s := hardfork.Shape{
 		SystemStart: testSysStart,
 		Eras: []hardfork.ShapeEntry{
-			{EraID: 0, EraName: "Byron", MinMajorVersion: 0, MaxMajorVersion: 2, Params: byronParams},
-			{EraID: 1, EraName: "Shelley", MinMajorVersion: 2, MaxMajorVersion: 2, Params: shelleyParams},
+			{
+				EraID:           0,
+				EraName:         "Byron",
+				MinMajorVersion: 0,
+				MaxMajorVersion: 2,
+				Params:          byronParams,
+			},
+			{
+				EraID:           1,
+				EraName:         "Shelley",
+				MinMajorVersion: 2,
+				MaxMajorVersion: 2,
+				Params:          shelleyParams,
+			},
 		},
 	}
 	assert.Error(t, s.Validate())

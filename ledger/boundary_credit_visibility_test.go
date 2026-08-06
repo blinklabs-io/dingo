@@ -66,14 +66,23 @@ func TestBoundaryCreditVisibility_MIRIsIncludedInSnapshot(t *testing.T) {
 	credential := mirCred28(0x51)
 	insertBoundaryAccount(t, gdb, credential)
 	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 1, nil))
-	seedMIRDistribution(t, gdb, 0, epochStartSlot+1, []models.MoveInstantaneousRewardsReward{
-		{Credential: credential, Amount: types.Uint64(amount)},
-	})
+	seedMIRDistribution(
+		t,
+		gdb,
+		0,
+		epochStartSlot+1,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: credential, Amount: types.Uint64(amount)},
+		},
+	)
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	require.False(t, boundaryCreditPostSnapshot(t, gdb, credential),
-		"MIR runs before SNAP in cardano-ledger, so its credit belongs in the mark snapshot")
+	require.False(
+		t,
+		boundaryCreditPostSnapshot(t, gdb, credential),
+		"MIR runs before SNAP in cardano-ledger, so its credit belongs in the mark snapshot",
+	)
 }
 
 // TestBoundaryCreditVisibility_PoolReapIsExcludedFromSnapshot pins POOLREAP
@@ -95,15 +104,20 @@ func TestBoundaryCreditVisibility_PoolReapIsExcludedFromSnapshot(t *testing.T) {
 
 	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
 
-	require.True(t, boundaryCreditPostSnapshot(t, gdb, rewardAccount),
-		"POOLREAP runs after SNAP, so its refund must be excluded from the mark snapshot")
+	require.True(
+		t,
+		boundaryCreditPostSnapshot(t, gdb, rewardAccount),
+		"POOLREAP runs after SNAP, so its refund must be excluded from the mark snapshot",
+	)
 }
 
 // TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot pins the delayed
 // reward update as pre-SNAP by exercising the crediting primitive it uses
 // (Database.AddAccountRewardByCredential), which must leave the journal row
 // unstamped.
-func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(t *testing.T) {
+func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(
+	t *testing.T,
+) {
 	_, db, gdb := newPoolreapTestLedger(t)
 
 	credential := reapCred28(0x53)
@@ -116,6 +130,9 @@ func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(t *testing.T) 
 		)
 	}))
 
-	require.False(t, boundaryCreditPostSnapshot(t, gdb, credential),
-		"the delayed reward update precedes SNAP and belongs in the mark snapshot")
+	require.False(
+		t,
+		boundaryCreditPostSnapshot(t, gdb, credential),
+		"the delayed reward update precedes SNAP and belongs in the mark snapshot",
+	)
 }

@@ -62,7 +62,11 @@ func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
 	vrfKey := make([]byte, 32)
 	vrfKey[0] = 2
 	pool := &models.Pool{PoolKeyHash: poolKey, VrfKeyHash: vrfKey}
-	registration := &models.PoolRegistration{PoolKeyHash: poolKey, VrfKeyHash: vrfKey, AddedSlot: 10}
+	registration := &models.PoolRegistration{
+		PoolKeyHash: poolKey,
+		VrfKeyHash:  vrfKey,
+		AddedSlot:   10,
+	}
 	require.NoError(t, store.ImportPool(pool, registration, nil))
 
 	// The pool remains in historical metadata, but a retirement effective in

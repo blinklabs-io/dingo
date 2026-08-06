@@ -48,7 +48,10 @@ type fakeCloudDestination struct {
 	dir string
 }
 
-func (d *fakeCloudDestination) UploadDir(_ context.Context, localDir string) error {
+func (d *fakeCloudDestination) UploadDir(
+	_ context.Context,
+	localDir string,
+) error {
 	if err := os.MkdirAll(d.dir, 0o755); err != nil {
 		return err
 	}
@@ -71,7 +74,10 @@ func (d *fakeCloudDestination) UploadDir(_ context.Context, localDir string) err
 	return nil
 }
 
-func (d *fakeCloudDestination) DownloadDir(_ context.Context, localDir string) error {
+func (d *fakeCloudDestination) DownloadDir(
+	_ context.Context,
+	localDir string,
+) error {
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
 		return err
@@ -95,14 +101,18 @@ func (d *fakeCloudDestination) DownloadDir(_ context.Context, localDir string) e
 // the fake's "cloud" storage is just an ordinary local directory, so
 // scanning it for per-snapshot subdirectories with a valid manifest.json
 // is exactly the same operation as the local catalog uses.
-func (d *fakeCloudDestination) ListSnapshots(_ context.Context) ([]lifecycle.SnapshotEntry, error) {
+func (d *fakeCloudDestination) ListSnapshots(
+	_ context.Context,
+) ([]lifecycle.SnapshotEntry, error) {
 	return lifecycle.ListSnapshots(d.dir)
 }
 
 // FetchManifest/Delete similarly delegate straight to real local-file
 // operations, since d.dir already resolves to this specific snapshot's
 // own directory when parsed from a per-snapshot URI (base + snapshot ID).
-func (d *fakeCloudDestination) FetchManifest(_ context.Context) (lifecycle.Manifest, error) {
+func (d *fakeCloudDestination) FetchManifest(
+	_ context.Context,
+) (lifecycle.Manifest, error) {
 	return lifecycle.ReadManifest(d.dir)
 }
 
@@ -145,14 +155,17 @@ var (
 // process registry this used to be built against.
 var testDestinationRegistry = func() *lifecycle.DestinationRegistry {
 	r := lifecycle.NewDestinationRegistry()
-	r.Register("faketest", func(uri *url.URL) (lifecycle.CloudDestination, error) {
-		fakeCloudMu.Lock()
-		base := fakeCloudDir
-		fakeCloudMu.Unlock()
-		return &fakeCloudDestination{
-			dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
-		}, nil
-	})
+	r.Register(
+		"faketest",
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			fakeCloudMu.Lock()
+			base := fakeCloudDir
+			fakeCloudMu.Unlock()
+			return &fakeCloudDestination{
+				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+			}, nil
+		},
+	)
 	return r
 }()
 
@@ -194,7 +207,8 @@ func TestFakeCloudBackingDirResetsBetweenTests(t *testing.T) {
 	got := fakeCloudDir
 	fakeCloudMu.Unlock()
 	require.Empty(
-		t, got,
+		t,
+		got,
 		"fakeCloudDir must be reset via t.Cleanup once the test that set it finishes",
 	)
 }
@@ -265,7 +279,10 @@ func TestSetFakeCloudBackingDirSerializesConcurrentTests(t *testing.T) {
 // TestParseCloudDestinationUnknownScheme verifies that a URI whose scheme
 // has no registered factory returns an error.
 func TestParseCloudDestinationUnknownScheme(t *testing.T) {
-	_, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "s3unknown://bucket/prefix")
+	_, err := lifecycle.ParseCloudDestination(
+		testDestinationRegistry,
+		"s3unknown://bucket/prefix",
+	)
 	require.Error(t, err)
 }
 
@@ -276,7 +293,10 @@ func TestParseCloudDestinationUnknownScheme(t *testing.T) {
 // comment on why — so an error telling an operator to try "gs://..." would
 // send them to a scheme ParseCloudDestination itself rejects).
 func TestParseCloudDestinationMissingHost(t *testing.T) {
-	_, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "faketest:///prefix")
+	_, err := lifecycle.ParseCloudDestination(
+		testDestinationRegistry,
+		"faketest:///prefix",
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "s3://bucket/prefix")
 	require.Contains(t, err.Error(), "gcs://bucket/prefix")
@@ -286,7 +306,10 @@ func TestParseCloudDestinationMissingHost(t *testing.T) {
 // TestParseCloudDestinationMalformed verifies that an unparseable URI
 // string returns an error rather than panicking.
 func TestParseCloudDestinationMalformed(t *testing.T) {
-	_, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "not a uri at all ://")
+	_, err := lifecycle.ParseCloudDestination(
+		testDestinationRegistry,
+		"not a uri at all ://",
+	)
 	require.Error(t, err)
 }
 
@@ -294,7 +317,10 @@ func TestParseCloudDestinationMalformed(t *testing.T) {
 // a registered scheme resolves to a usable CloudDestination.
 func TestParseCloudDestinationRegisteredScheme(t *testing.T) {
 	setFakeCloudBackingDir(t, t.TempDir())
-	dest, err := lifecycle.ParseCloudDestination(testDestinationRegistry, "faketest://bucket/prefix")
+	dest, err := lifecycle.ParseCloudDestination(
+		testDestinationRegistry,
+		"faketest://bucket/prefix",
+	)
 	require.NoError(t, err)
 	require.NotNil(t, dest)
 }
@@ -307,8 +333,17 @@ func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
 
 	dir := filepath.Join(t.TempDir(), "snap-local-only")
 	m, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, db, dir, lifecycle.TriggerManual, "test-version", "badger", "sqlite", "",
-		"", "",
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		"",
+		"",
+		"",
 	)
 	require.NoError(t, err)
 	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
@@ -350,17 +385,31 @@ func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
 	// would silently collide with every other snapshot ever uploaded to
 	// the same configured destination.
 	snapshotDir := filepath.Join(backingDir, "prefix", "snap-cloud")
-	require.FileExists(t, filepath.Join(snapshotDir, lifecycle.BlobBackupFileName))
-	require.FileExists(t, filepath.Join(snapshotDir, lifecycle.MetadataBackupFileName))
-	require.FileExists(t, filepath.Join(snapshotDir, lifecycle.ManifestFileName))
+	require.FileExists(
+		t,
+		filepath.Join(snapshotDir, lifecycle.BlobBackupFileName),
+	)
+	require.FileExists(
+		t,
+		filepath.Join(snapshotDir, lifecycle.MetadataBackupFileName),
+	)
+	require.FileExists(
+		t,
+		filepath.Join(snapshotDir, lifecycle.ManifestFileName),
+	)
 
 	// And nothing must have landed flat directly under prefix/.
-	require.NoFileExists(t, filepath.Join(backingDir, "prefix", lifecycle.ManifestFileName))
+	require.NoFileExists(
+		t,
+		filepath.Join(backingDir, "prefix", lifecycle.ManifestFileName),
+	)
 }
 
 // TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal verifies
 // that an unsupported cloud scheme reports an error but the local copy survives.
-func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(t *testing.T) {
+func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -447,7 +496,11 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	entries, ok, err := lifecycle.ListCloudSnapshots(context.Background(), testDestinationRegistry, cloudDest)
+	entries, ok, err := lifecycle.ListCloudSnapshots(
+		context.Background(),
+		testDestinationRegistry,
+		cloudDest,
+	)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, entries, 2)
@@ -458,7 +511,11 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 // TestListCloudSnapshotsEmptyDestReturnsNotOK verifies that an empty
 // cloudDest returns ok=false and no error, not a failure.
 func TestListCloudSnapshotsEmptyDestReturnsNotOK(t *testing.T) {
-	entries, ok, err := lifecycle.ListCloudSnapshots(context.Background(), nil, "")
+	entries, ok, err := lifecycle.ListCloudSnapshots(
+		context.Background(),
+		nil,
+		"",
+	)
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Empty(t, entries)
@@ -468,7 +525,9 @@ func TestListCloudSnapshotsEmptyDestReturnsNotOK(t *testing.T) {
 // unsupported cloud scheme returns a real error, not ok=false.
 func TestListCloudSnapshotsInvalidDestReturnsError(t *testing.T) {
 	_, ok, err := lifecycle.ListCloudSnapshots(
-		context.Background(), testDestinationRegistry, "unsupported-scheme://bucket/prefix",
+		context.Background(),
+		testDestinationRegistry,
+		"unsupported-scheme://bucket/prefix",
 	)
 	require.Error(t, err)
 	require.False(t, ok)

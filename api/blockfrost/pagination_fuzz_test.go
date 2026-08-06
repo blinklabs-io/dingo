@@ -42,7 +42,8 @@ func FuzzParsePagination(f *testing.F) {
 		if params.Page < 1 {
 			t.Fatalf("page = %d, want >= 1", params.Page)
 		}
-		if params.Order != PaginationOrderAsc && params.Order != PaginationOrderDesc {
+		if params.Order != PaginationOrderAsc &&
+			params.Order != PaginationOrderDesc {
 			t.Fatalf("order = %q, want asc or desc", params.Order)
 		}
 	})

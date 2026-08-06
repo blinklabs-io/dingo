@@ -66,7 +66,10 @@ func (n *Node) startKoiosParityObserver() error {
 
 	cachePath := cfg.CachePath
 	if cachePath == "" {
-		cachePath = filepath.Join(n.config.dataDir, defaultKoiosParityCacheSubdir)
+		cachePath = filepath.Join(
+			n.config.dataDir,
+			defaultKoiosParityCacheSubdir,
+		)
 	}
 
 	source, err := koiosparity.NewDatabaseSource(n.db)
@@ -105,7 +108,8 @@ func (n *Node) startKoiosParityObserver() error {
 		if stopErr := observer.Stop(n.ctx); stopErr != nil { //nolint:contextcheck
 			n.config.logger.Warn(
 				"koios parity observer: failed to release cache after failed start",
-				"error", stopErr,
+				"error",
+				stopErr,
 			)
 		}
 		return fmt.Errorf("start koios parity observer: %w", err)

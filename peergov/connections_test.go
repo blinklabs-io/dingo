@@ -294,7 +294,8 @@ func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
 			Id:       connId,
 			IsClient: true,
 		},
-		ConnectedAt:    time.Now().Add(-minStableConnectionDuration - time.Second),
+		ConnectedAt: time.Now().
+			Add(-minStableConnectionDuration - time.Second),
 		ReconnectCount: 5,
 		ReconnectDelay: 8 * time.Second,
 		// Suppress reconnect goroutine; this test only checks close accounting.
@@ -333,7 +334,9 @@ func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
 	}
 }
 
-func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(t *testing.T) {
+func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(
+	t *testing.T,
+) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -374,7 +377,9 @@ func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(t *testing
 	}
 }
 
-func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(t *testing.T) {
+func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(
+	t *testing.T,
+) {
 	var logBuf bytes.Buffer
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
@@ -425,7 +430,9 @@ func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(t *te
 	}
 }
 
-func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesValency(t *testing.T) {
+func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesValency(
+	t *testing.T,
+) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -460,7 +467,9 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("createOutboundConnection should return when inbound valency is satisfied")
+		t.Fatal(
+			"createOutboundConnection should return when inbound valency is satisfied",
+		)
 	}
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
@@ -468,7 +477,10 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 		t.Fatal("reconnecting flag should be cleared after early suppression")
 	}
 	if topologyPeer.ReconnectCount != 0 {
-		t.Fatalf("reconnect count changed unexpectedly: %d", topologyPeer.ReconnectCount)
+		t.Fatalf(
+			"reconnect count changed unexpectedly: %d",
+			topologyPeer.ReconnectCount,
+		)
 	}
 }
 
@@ -494,13 +506,21 @@ func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
 	if peer.Reconnecting {
-		t.Fatal("reconnecting flag should remain clear when governor is stopped")
+		t.Fatal(
+			"reconnecting flag should remain clear when governor is stopped",
+		)
 	}
 	if peer.ReconnectCount != 0 {
-		t.Fatalf("reconnect count changed unexpectedly: %d", peer.ReconnectCount)
+		t.Fatalf(
+			"reconnect count changed unexpectedly: %d",
+			peer.ReconnectCount,
+		)
 	}
 	if peer.ReconnectDelay != time.Nanosecond {
-		t.Fatalf("reconnect delay changed unexpectedly: %s", peer.ReconnectDelay)
+		t.Fatalf(
+			"reconnect delay changed unexpectedly: %s",
+			peer.ReconnectDelay,
+		)
 	}
 }
 
@@ -572,16 +592,18 @@ func TestStop_WaitsForInFlightOutboundDial(t *testing.T) {
 		}
 	}()
 
-	connMgr := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		// A valid network magic is required for the client to proceed
-		// past local validation into the actual on-wire handshake, which
-		// is what leaves the dial blocked (in flight) against a fake
-		// server that never answers.
-		OutboundConnOpts: []ouroboros.ConnectionOptionFunc{
-			ouroboros.WithNetworkMagic(764824073),
+	connMgr := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			// A valid network magic is required for the client to proceed
+			// past local validation into the actual on-wire handshake, which
+			// is what leaves the dial blocked (in flight) against a fake
+			// server that never answers.
+			OutboundConnOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(764824073),
+			},
 		},
-	})
+	)
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		ConnManager: connMgr,
@@ -778,7 +800,9 @@ func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 		if got > emergencyReconnectDelay {
 			t.Fatalf(
 				"close %d: ReconnectDelay = %s, want <= %s (critically-low cap)",
-				i+1, got, emergencyReconnectDelay,
+				i+1,
+				got,
+				emergencyReconnectDelay,
 			)
 		}
 	}

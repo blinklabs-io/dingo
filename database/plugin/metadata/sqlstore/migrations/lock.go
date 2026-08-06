@@ -122,13 +122,18 @@ func (l *advisoryLocker) Acquire(
 			return nil, fmt.Errorf("acquire MySQL migration lock: %w", err)
 		}
 		if !acquired.Valid {
-			return nil, errors.New("MySQL metadata migration lock returned NULL")
+			return nil, errors.New(
+				"MySQL metadata migration lock returned NULL",
+			)
 		}
 		if acquired.Int64 == 0 {
 			return nil, errors.New("MySQL metadata migration lock timed out")
 		}
 		if acquired.Int64 != 1 {
-			return nil, fmt.Errorf("MySQL metadata migration lock returned %d", acquired.Int64)
+			return nil, fmt.Errorf(
+				"MySQL metadata migration lock returned %d",
+				acquired.Int64,
+			)
 		}
 		// The release callback deliberately outlives the acquisition context:
 		// advisory locks still need releasing after startup cancellation.

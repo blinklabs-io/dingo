@@ -140,7 +140,8 @@ func (bi *BlockIndexer) ComputeOffsets(
 	if len(txOffsets.Transactions) < len(txs) {
 		return nil, fmt.Errorf(
 			"transaction count mismatch: block has %d transactions but only %d offsets extracted",
-			len(txs), len(txOffsets.Transactions),
+			len(txs),
+			len(txOffsets.Transactions),
 		)
 	}
 
@@ -183,7 +184,11 @@ func (bi *BlockIndexer) ComputeOffsets(
 
 		// Extract UTxO output offsets from transaction body
 		if err := bi.extractOutputOffsets(blockCbor, txLoc, tx, result); err != nil {
-			return nil, fmt.Errorf("extract output offsets for tx %s: %w", txHash.String(), err)
+			return nil, fmt.Errorf(
+				"extract output offsets for tx %s: %w",
+				txHash.String(),
+				err,
+			)
 		}
 
 		// Store datum offsets from witness set

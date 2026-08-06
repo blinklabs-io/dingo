@@ -30,13 +30,17 @@ func (o *Ouroboros) leiosfetchServerConnOpts() []oleiosfetch.LeiosFetchOptionFun
 			o.instrumentLeiosfetchBlockRequest(o.leiosfetchServerBlockRequest),
 		),
 		oleiosfetch.WithBlockTxsRequestFunc(
-			o.instrumentLeiosfetchBlockTxsRequest(o.leiosfetchServerBlockTxsRequest),
+			o.instrumentLeiosfetchBlockTxsRequest(
+				o.leiosfetchServerBlockTxsRequest,
+			),
 		),
 		oleiosfetch.WithVotesRequestFunc(
 			o.instrumentLeiosfetchVotesRequest(o.leiosfetchServerVotesRequest),
 		),
 		oleiosfetch.WithBlockRangeRequestFunc(
-			o.instrumentLeiosfetchBlockRangeRequest(o.leiosfetchServerBlockRangeRequest),
+			o.instrumentLeiosfetchBlockRangeRequest(
+				o.leiosfetchServerBlockRangeRequest,
+			),
 		),
 	}
 }

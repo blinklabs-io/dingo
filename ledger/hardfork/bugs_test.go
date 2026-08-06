@@ -39,8 +39,11 @@ func TestSummary_Validate_RejectsZeroEpochSize(t *testing.T) {
 			Params: hardfork.EraParams{EpochSize: 0, SlotLength: time.Second},
 		}},
 	}
-	assert.Error(t, s.Validate(),
-		"Validate must reject a Summary with a zero-EpochSize era (SlotToEpoch would divide by zero)")
+	assert.Error(
+		t,
+		s.Validate(),
+		"Validate must reject a Summary with a zero-EpochSize era (SlotToEpoch would divide by zero)",
+	)
 }
 
 // TestSummary_Validate_RejectsZeroSlotLength mirrors the EpochSize check for
@@ -55,8 +58,11 @@ func TestSummary_Validate_RejectsZeroSlotLength(t *testing.T) {
 			Params: hardfork.EraParams{EpochSize: 10, SlotLength: 0},
 		}},
 	}
-	assert.Error(t, s.Validate(),
-		"Validate must reject a Summary with a zero-SlotLength era (TimeToSlot would divide by zero)")
+	assert.Error(
+		t,
+		s.Validate(),
+		"Validate must reject a Summary with a zero-SlotLength era (TimeToSlot would divide by zero)",
+	)
 }
 
 // TestSummary_Validate_ErrorMessageFormatsEraIDAsDecimal pins that the
@@ -69,16 +75,22 @@ func TestSummary_Validate_ErrorMessageFormatsEraIDAsDecimal(t *testing.T) {
 		SystemStart: time.Now(),
 		Eras: []hardfork.EraSummary{
 			{
-				EraID:  5,
-				Start:  hardfork.Bound{},
-				End:    nil, // unbounded, but not the last era
-				Params: hardfork.EraParams{EpochSize: 10, SlotLength: time.Second},
+				EraID: 5,
+				Start: hardfork.Bound{},
+				End:   nil, // unbounded, but not the last era
+				Params: hardfork.EraParams{
+					EpochSize:  10,
+					SlotLength: time.Second,
+				},
 			},
 			{
-				EraID:  7,
-				Start:  end,
-				End:    nil,
-				Params: hardfork.EraParams{EpochSize: 10, SlotLength: time.Second},
+				EraID: 7,
+				Start: end,
+				End:   nil,
+				Params: hardfork.EraParams{
+					EpochSize:  10,
+					SlotLength: time.Second,
+				},
 			},
 		},
 	}
@@ -104,19 +116,35 @@ func TestShape_Validate_VersionContiguityHandlesUintOverflow(t *testing.T) {
 			{
 				EraID: 0, EraName: "A",
 				MinMajorVersion: 0, MaxMajorVersion: math.MaxUint,
-				Params: hardfork.EraParams{EpochSize: 10, SlotLength: time.Second, SafeZoneSlots: 1},
+				Params: hardfork.EraParams{
+					EpochSize:     10,
+					SlotLength:    time.Second,
+					SafeZoneSlots: 1,
+				},
 			},
 			{
 				EraID: 1, EraName: "B",
 				MinMajorVersion: 0, MaxMajorVersion: 0,
-				Params: hardfork.EraParams{EpochSize: 10, SlotLength: time.Second, SafeZoneSlots: 1},
+				Params: hardfork.EraParams{
+					EpochSize:     10,
+					SlotLength:    time.Second,
+					SafeZoneSlots: 1,
+				},
 			},
 		},
 	}
 	err := s.Validate()
-	require.Error(t, err,
-		"Validate must reject a shape where the contiguity check would overflow uint (prev.Max=MaxUint, cur.Min=0)")
+	require.Error(
+		t,
+		err,
+		"Validate must reject a shape where the contiguity check would overflow uint (prev.Max=MaxUint, cur.Min=0)",
+	)
 	// The message should reference the era name so the operator can spot the bad entry.
-	assert.True(t, strings.Contains(err.Error(), "\"B\"") || strings.Contains(err.Error(), "B"),
-		"error should identify the offending era, got: %s", err.Error())
+	assert.True(
+		t,
+		strings.Contains(err.Error(), "\"B\"") ||
+			strings.Contains(err.Error(), "B"),
+		"error should identify the offending era, got: %s",
+		err.Error(),
+	)
 }

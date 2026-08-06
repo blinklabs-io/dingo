@@ -67,14 +67,127 @@ func writeTestTLSCertKey(t *testing.T) (certPath, keyPath string) {
 
 	certOut, err := os.Create(certPath)
 	require.NoError(t, err)
-	require.NoError(t, pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}))
+	require.NoError(
+		t,
+		pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}),
+	)
 	require.NoError(t, certOut.Close())
 
 	keyBytes, err := x509.MarshalECPrivateKey(priv)
 	require.NoError(t, err)
-	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	keyOut, err := os.OpenFile(
+		keyPath,
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		0o600,
+	)
 	require.NoError(t, err)
-	require.NoError(t, pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}))
+	require.NoError(
+		t,
+		pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}),
+	)
+	require.NoError(t, keyOut.Close())
+
+	return certPath, keyPath
+}
+
+// writeTestCA generates a throwaway self-signed CA keypair/cert and writes
+// the cert as a PEM file under a fresh t.TempDir(), returning both the
+// in-memory cert/key (for signing client leaf certs via
+// writeTestClientCert) and the on-disk cert path (for use as a Bark
+// server's TlsClientCAFilePath trust anchor).
+func writeTestCA(
+	t *testing.T,
+) (caCert *x509.Certificate, caKey *ecdsa.PrivateKey, caCertPath string) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "bark-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, template, template, &priv.PublicKey, priv,
+	)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(derBytes)
+	require.NoError(t, err)
+
+	caCertPath = filepath.Join(t.TempDir(), "ca.crt")
+	certOut, err := os.Create(caCertPath)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}),
+	)
+	require.NoError(t, certOut.Close())
+
+	return cert, priv, caCertPath
+}
+
+// writeTestClientCert signs a client leaf certificate (ExtKeyUsageClientAuth)
+// for commonName using caCert/caKey, and writes it plus its own private key
+// as PEM files under a fresh t.TempDir(), returning their paths — for
+// exercising Bark's mTLS ClientCAs verification with a cert that chains to
+// a specific CA (writeTestCA's, to prove acceptance, or a different one, to
+// prove rejection).
+func writeTestClientCert(
+	t *testing.T,
+	caCert *x509.Certificate,
+	caKey *ecdsa.PrivateKey,
+	commonName string,
+) (certPath, keyPath string) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, template, caCert, &priv.PublicKey, caKey,
+	)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "client.crt")
+	keyPath = filepath.Join(dir, "client.key")
+
+	certOut, err := os.Create(certPath)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}),
+	)
+	require.NoError(t, certOut.Close())
+
+	keyBytes, err := x509.MarshalECPrivateKey(priv)
+	require.NoError(t, err)
+	keyOut, err := os.OpenFile(
+		keyPath,
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		0o600,
+	)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}),
+	)
 	require.NoError(t, keyOut.Close())
 
 	return certPath, keyPath
@@ -130,7 +243,9 @@ func TestTLSServerReusesPreloadedCertAfterFilesChange(t *testing.T) {
 	}
 
 	testutil.WaitForCondition(t, func() bool {
-		resp, getErr := client.Get("https://" + addr + "/") //nolint:noctx // test-only request
+		resp, getErr := client.Get(
+			"https://" + addr + "/",
+		) //nolint:noctx // test-only request
 		if getErr != nil {
 			return false
 		}
@@ -165,13 +280,29 @@ func TestHandleServeExitClearsStateOnError(t *testing.T) {
 	b.mu.Unlock()
 	require.NotEmpty(t, b.Addr())
 
-	b.handleServeExit(server, ln, errors.New("simulated Serve/ServeTLS startup failure"))
+	b.handleServeExit(
+		server,
+		ln,
+		errors.New("simulated Serve/ServeTLS startup failure"),
+	)
 
-	require.Empty(t, b.Addr(), "Addr must clear once the serving goroutine exits with an error")
-	require.Nil(t, b.server, "server must be cleared once the serving goroutine exits with an error")
+	require.Empty(
+		t,
+		b.Addr(),
+		"Addr must clear once the serving goroutine exits with an error",
+	)
+	require.Nil(
+		t,
+		b.server,
+		"server must be cleared once the serving goroutine exits with an error",
+	)
 
 	_, acceptErr := ln.Accept()
-	require.Error(t, acceptErr, "listener must be closed once the serving goroutine exits with an error")
+	require.Error(
+		t,
+		acceptErr,
+		"listener must be closed once the serving goroutine exits with an error",
+	)
 }
 
 // TestHandleServeExitIgnoresServerClosed verifies handleServeExit is a
@@ -198,6 +329,11 @@ func TestHandleServeExitIgnoresServerClosed(t *testing.T) {
 
 	b.handleServeExit(server, ln, http.ErrServerClosed)
 
-	require.Same(t, otherServer, b.server, "handleServeExit must not touch state belonging to a different server")
+	require.Same(
+		t,
+		otherServer,
+		b.server,
+		"handleServeExit must not touch state belonging to a different server",
+	)
 	require.NotEmpty(t, b.Addr())
 }

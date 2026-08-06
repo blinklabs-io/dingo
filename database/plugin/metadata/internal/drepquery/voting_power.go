@@ -26,9 +26,19 @@ type dialectSQL struct {
 func sqlDialect(name string) dialectSQL {
 	switch name {
 	case "postgres":
-		return dialectSQL{"BIGINT", "true", "$1 AND ax.drep_type = $2", "JOIN utxo"}
+		return dialectSQL{
+			"BIGINT",
+			"true",
+			"$1 AND ax.drep_type = $2",
+			"JOIN utxo",
+		}
 	case "mysql":
-		return dialectSQL{"UNSIGNED", "1", "? AND ax.drep_type = ?", "JOIN utxo"}
+		return dialectSQL{
+			"UNSIGNED",
+			"1",
+			"? AND ax.drep_type = ?",
+			"JOIN utxo",
+		}
 	default:
 		return dialectSQL{
 			"INTEGER",

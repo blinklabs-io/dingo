@@ -320,7 +320,10 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 	// ledger/snapshot/rotation.go's cleanupOldSnapshots performs once epoch
 	// falls out of the rolling window (deleteBeforeEpoch = currentEpoch-3).
 	txn := db.Transaction(true)
-	require.NoError(t, db.Metadata().DeleteRewardStateBeforeEpoch(epoch+1, txn.Metadata()))
+	require.NoError(
+		t,
+		db.Metadata().DeleteRewardStateBeforeEpoch(epoch+1, txn.Metadata()),
+	)
 	require.NoError(t, txn.Commit())
 
 	// After pruning: reads back as "not present", not an error -- the same

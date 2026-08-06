@@ -574,10 +574,20 @@ func (s *Store) SaveRewardAccountOutputs(
 	// same unique key. Row-at-a-time behavior historically accepted that shape
 	// (the last row won), so collapse duplicates while retaining the latest
 	// value and restore the resulting ID onto every original model below.
-	uniqueParams := make([]sqlitequery.SaveRewardAccountOutputParams, 0, len(params))
+	uniqueParams := make(
+		[]sqlitequery.SaveRewardAccountOutputParams,
+		0,
+		len(params),
+	)
 	latestIndex := make(map[rewardAccountOutputKey]int, len(params))
 	for _, value := range params {
-		key := rewardAccountOutputKey{value.Epoch, value.CredentialTag, string(value.StakingKey), string(value.PoolKeyHash), value.RewardType}
+		key := rewardAccountOutputKey{
+			value.Epoch,
+			value.CredentialTag,
+			string(value.StakingKey),
+			string(value.PoolKeyHash),
+			value.RewardType,
+		}
 		if index, ok := latestIndex[key]; ok {
 			uniqueParams[index] = value
 			continue
@@ -586,31 +596,43 @@ func (s *Store) SaveRewardAccountOutputs(
 		uniqueParams = append(uniqueParams, value)
 	}
 	resolvedIDs := make(map[rewardAccountOutputKey]uint, len(uniqueParams))
-	err := s.withWriteTransaction(context.Background(), txn, func(db queryer) error {
-		// SQLite's parameter limit is the binding constraint in the default
-		// deployment. Keep each statement bounded while reducing the million-row
-		// reward import from one round trip per row to one per chunk.
-		chunkSize := min(1000, max(1, s.dialect.ParameterLimit()/10))
-		for start := 0; start < len(uniqueParams); start += chunkSize {
-			end := min(start+chunkSize, len(uniqueParams))
-			ids, err := s.saveRewardAccountOutputChunk(db, uniqueParams[start:end])
-			if err != nil {
-				return err
+	err := s.withWriteTransaction(
+		context.Background(),
+		txn,
+		func(db queryer) error {
+			// SQLite's parameter limit is the binding constraint in the default
+			// deployment. Keep each statement bounded while reducing the million-row
+			// reward import from one round trip per row to one per chunk.
+			chunkSize := min(1000, max(1, s.dialect.ParameterLimit()/10))
+			for start := 0; start < len(uniqueParams); start += chunkSize {
+				end := min(start+chunkSize, len(uniqueParams))
+				ids, err := s.saveRewardAccountOutputChunk(
+					db,
+					uniqueParams[start:end],
+				)
+				if err != nil {
+					return err
+				}
+				for index, id := range ids {
+					value := uniqueParams[start+index]
+					resolvedIDs[rewardAccountOutputKey{value.Epoch, value.CredentialTag, string(value.StakingKey), string(value.PoolKeyHash), value.RewardType}] = uint(
+						id,
+					)
+				}
 			}
-			for index, id := range ids {
-				value := uniqueParams[start+index]
-				resolvedIDs[rewardAccountOutputKey{value.Epoch, value.CredentialTag, string(value.StakingKey), string(value.PoolKeyHash), value.RewardType}] = uint(id)
-			}
-		}
-		return nil
-	})
+			return nil
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("save reward account outputs: %w", err)
 	}
 	for index, value := range params {
 		id, ok := resolvedIDs[rewardAccountOutputKey{value.Epoch, value.CredentialTag, string(value.StakingKey), string(value.PoolKeyHash), value.RewardType}]
 		if !ok {
-			return fmt.Errorf("save reward account outputs: missing ID at index %d", index)
+			return fmt.Errorf(
+				"save reward account outputs: missing ID at index %d",
+				index,
+			)
 		}
 		outputs[index].ID = id
 	}
@@ -637,10 +659,18 @@ func (s *Store) saveRewardAccountOutputChunk(
 	args := make([]any, 0, len(params)*10)
 	for index, value := range params {
 		values[index] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		args = append(args,
-			value.StakingKey, value.PoolKeyHash, value.RewardType,
-			value.Epoch, value.CredentialTag, value.Amount,
-			value.Spendable, value.Guarded, value.CapturedSlot, value.BoundarySlot,
+		args = append(
+			args,
+			value.StakingKey,
+			value.PoolKeyHash,
+			value.RewardType,
+			value.Epoch,
+			value.CredentialTag,
+			value.Amount,
+			value.Spendable,
+			value.Guarded,
+			value.CapturedSlot,
+			value.BoundarySlot,
 		)
 	}
 	query := `INSERT INTO reward_account_output (` + columns + `)
@@ -660,13 +690,28 @@ boundary_slot = excluded.boundary_slot`
 	lookupArgs := make([]any, 0, len(params)*5)
 	for index, value := range params {
 		predicates[index] = "(epoch = ? AND credential_tag = ? AND staking_key = ? AND pool_key_hash = ? AND reward_type = ?)"
-		lookupArgs = append(lookupArgs, value.Epoch, value.CredentialTag, value.StakingKey, value.PoolKeyHash, value.RewardType)
+		lookupArgs = append(
+			lookupArgs,
+			value.Epoch,
+			value.CredentialTag,
+			value.StakingKey,
+			value.PoolKeyHash,
+			value.RewardType,
+		)
 	}
-	rows, err := db.QueryContext(context.Background(),
+	rows, err := db.QueryContext(
+		context.Background(),
 		`SELECT id, epoch, credential_tag, staking_key, pool_key_hash, reward_type
-FROM reward_account_output WHERE `+strings.Join(predicates, " OR "), lookupArgs...)
+FROM reward_account_output WHERE `+strings.Join(
+			predicates,
+			" OR ",
+		),
+		lookupArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("lookup reward account output batch IDs: %w", err)
+		return nil, fmt.Errorf(
+			"lookup reward account output batch IDs: %w",
+			err,
+		)
 	}
 	defer rows.Close()
 	ids := make(map[rewardAccountOutputKey]int64, len(params))
@@ -676,13 +721,19 @@ FROM reward_account_output WHERE `+strings.Join(predicates, " OR "), lookupArgs.
 		var rewardType string
 		if err := rows.Scan(&id, &epoch, &credentialTag, &stakingKey, &poolKeyHash, &rewardType); err != nil {
 			_ = rows.Close()
-			return nil, fmt.Errorf("scan reward account output batch IDs: %w", err)
+			return nil, fmt.Errorf(
+				"scan reward account output batch IDs: %w",
+				err,
+			)
 		}
 		ids[rewardAccountOutputKey{epoch, credentialTag, string(stakingKey), string(poolKeyHash), rewardType}] = id
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return nil, fmt.Errorf("iterate reward account output batch IDs: %w", err)
+		return nil, fmt.Errorf(
+			"iterate reward account output batch IDs: %w",
+			err,
+		)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close reward account output batch IDs: %w", err)
@@ -691,7 +742,10 @@ FROM reward_account_output WHERE `+strings.Join(predicates, " OR "), lookupArgs.
 	for index, value := range params {
 		id, ok := ids[rewardAccountOutputKey{value.Epoch, value.CredentialTag, string(value.StakingKey), string(value.PoolKeyHash), value.RewardType}]
 		if !ok {
-			return nil, fmt.Errorf("reward account output batch missing key at index %d", index)
+			return nil, fmt.Errorf(
+				"reward account output batch missing key at index %d",
+				index,
+			)
 		}
 		result[index] = id
 	}
