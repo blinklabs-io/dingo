@@ -29,8 +29,18 @@ func mmapReadOnly(path string) ([]byte, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() { _ = file.Close() }()
-	return mmapFile(file)
+	data, cleanup, err := mmapFile(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	// Closed explicitly rather than by defer: a close failure here has to
+	// unmap and surface, not be discarded behind a successful-looking return.
+	if err := file.Close(); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return data, cleanup, nil
 }
 
 // mmapFile maps an already-open file read-only.
