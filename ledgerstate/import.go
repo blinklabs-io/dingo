@@ -1641,9 +1641,18 @@ func synthesizeRetiredScheduledPools(
 		return nil
 	}
 
+	poolKeyHashSize := len(lcommon.PoolKeyHash{})
+	vrfKeyHashSize := len(lcommon.VrfKeyHash{})
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(activePoolDistr))
 	for i := range activePoolDistr {
-		if len(activePoolDistr[i].PoolKeyHash) != 28 {
+		if len(activePoolDistr[i].PoolKeyHash) != poolKeyHashSize {
+			cfg.Logger.Warn(
+				"skipping malformed active pool distribution entry",
+				"index", i,
+				"field", "pool_key_hash",
+				"actual_length", len(activePoolDistr[i].PoolKeyHash),
+				"expected_length", poolKeyHashSize,
+			)
 			continue
 		}
 		var pkh lcommon.PoolKeyHash
@@ -1668,7 +1677,7 @@ func synthesizeRetiredScheduledPools(
 		present[string(existing[i].PoolKeyHash)] = struct{}{}
 	}
 
-	retiredKeyHashes := make([][]byte, 0)
+	retiredKeyHashes := make([][]byte, 0, len(activePoolDistr))
 	for i := range activePoolDistr {
 		select {
 		case <-ctx.Done():
@@ -1678,7 +1687,24 @@ func synthesizeRetiredScheduledPools(
 		default:
 		}
 		pool := activePoolDistr[i]
-		if len(pool.PoolKeyHash) != 28 || len(pool.VrfKeyHash) != 32 {
+		if len(pool.PoolKeyHash) != poolKeyHashSize {
+			cfg.Logger.Warn(
+				"skipping malformed active pool distribution entry",
+				"index", i,
+				"field", "pool_key_hash",
+				"actual_length", len(pool.PoolKeyHash),
+				"expected_length", poolKeyHashSize,
+			)
+			continue
+		}
+		if len(pool.VrfKeyHash) != vrfKeyHashSize {
+			cfg.Logger.Warn(
+				"skipping malformed active pool distribution entry",
+				"index", i,
+				"field", "vrf_key_hash",
+				"actual_length", len(pool.VrfKeyHash),
+				"expected_length", vrfKeyHashSize,
+			)
 			continue
 		}
 		if _, ok := present[string(pool.PoolKeyHash)]; ok {

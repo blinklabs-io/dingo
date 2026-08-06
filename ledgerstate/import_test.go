@@ -1109,6 +1109,22 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 		epoch,
 		slot,
 	))
+	require.NoError(t, db.Metadata().SetEpoch(
+		slot-100,
+		epoch,
+		nil,
+		nil,
+		nil,
+		nil,
+		0,
+		1,
+		200,
+		nil,
+	))
+	active, err := db.Metadata().GetActivePoolKeyHashesAtSlot(slot, nil)
+	require.NoError(t, err)
+	require.Contains(t, active, livePoolKeyHash)
+	require.NotContains(t, active, retiredPoolKeyHash)
 
 	// The retired-but-scheduled pool now resolves with its VRF key hash on
 	// both the denormalized pool row and its registration, the two fields the
