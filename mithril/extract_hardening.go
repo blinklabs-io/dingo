@@ -265,6 +265,13 @@ func openVerifiedDir(dir string) (*os.Root, error) {
 //
 // Close it when the tree is no longer needed. Holding it open costs one
 // descriptor and is what keeps the reads bound to the inspected directory.
+//
+// A nil *vettedDir is a valid value meaning there is no such tree — an
+// ancillary download that failed, a lookup that found nothing — and every
+// method below tolerates it: Path returns "", Root returns nil, Close does
+// nothing. Callers on paths where the tree is optional carry the nil rather
+// than branching around it, so "absent" travels as a value instead of as a
+// second code path that has to be kept in step with the first.
 type vettedDir struct {
 	root *os.Root
 	path string

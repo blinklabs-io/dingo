@@ -1215,3 +1215,127 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 		})
 	}
 }
+
+// TestBootstrapSurvivesAnUnavailableAncillaryArchive covers the non-verified
+// fallback: ancillary locations are advertised, every one of them fails, and
+// the bootstrap has to complete without a ledger state rather than fail.
+//
+// Both backends make this failure explicitly non-fatal unless certificate
+// verification is on, so the result they build carries no ancillary tree — and
+// every use of that tree between the failure and the return has to tolerate its
+// absence. `vettedDir`'s methods are nil-safe for exactly this reason: Path
+// returns "", Root returns nil, Close does nothing. A nil `*vettedDir` is the
+// representation of "there is no ancillary tree", not an error state, so the
+// bootstrap reports it by carrying the nil rather than by branching around it.
+//
+// The failure is staged as an unusable archive rather than absent locations.
+// Absent locations skip the download entirely, which does not exercise the
+// branch that has to decide whether an ancillary error is fatal.
+func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
+	assertNoAncillary := func(t *testing.T, result *BootstrapResult) {
+		t.Helper()
+		assert.Nil(t, result.AncillaryRoot,
+			"a failed ancillary download must leave no handle")
+		assert.Empty(t, result.AncillaryDir,
+			"nor a directory name for one")
+		assert.False(t, result.AncillaryVerified)
+		// The half that has to survive: the immutable tree is what the load
+		// reads, and it is unaffected by the ancillary failure.
+		require.NotNil(t, result.ImmutableRoot)
+		assert.True(t, hasChunkFiles(result.ImmutableDir))
+	}
+
+	t.Run("v1", func(t *testing.T) {
+		archiveData := createChunkArchive(t)
+		snapshots := []SnapshotListItem{{SnapshotBase: SnapshotBase{
+			Digest:               "abc123def456789012345678",
+			Network:              "preprod",
+			Beacon:               Beacon{Epoch: 270, ImmutableFileNumber: 5320},
+			Size:                 int64(len(archiveData)),
+			CompressionAlgorithm: "zstandard",
+		}}}
+		mux := http.NewServeMux()
+		mux.HandleFunc(
+			"/artifact/snapshots",
+			func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(snapshots)
+			},
+		)
+		mux.HandleFunc(
+			"/download/snapshot.tar.zst",
+			func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(archiveData)
+			},
+		)
+		// Downloads cleanly and then fails to extract, so the failure lands
+		// after the goroutine has committed to the ancillary path.
+		mux.HandleFunc(
+			"/download/ancillary.tar.zst",
+			func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("not an archive"))
+			},
+		)
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		snapshots[0].Locations = []string{
+			server.URL + "/download/snapshot.tar.zst",
+		}
+		snapshots[0].AncillaryLocations = []string{
+			server.URL + "/download/ancillary.tar.zst",
+		}
+
+		result, err := Bootstrap(context.Background(), BootstrapConfig{
+			Network:       "preprod",
+			Backend:       BackendV1,
+			AggregatorURL: server.URL,
+			DownloadDir:   t.TempDir(),
+		})
+		require.NoError(t, err,
+			"a failed ancillary download is non-fatal without verification")
+		t.Cleanup(result.CloseHandles)
+		assertNoAncillary(t, result)
+	})
+
+	t.Run("v2", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+		// Served at request time from the field, so replacing it here makes
+		// the download succeed and the extraction fail.
+		fixture.ancillaryArchive = []byte("not an archive")
+
+		cfg := fixture.bootstrapConfig(t.TempDir())
+		cfg.VerifyCertificateChain = false
+		cfg.AncillaryVerificationKey = ""
+
+		result, err := Bootstrap(context.Background(), cfg)
+		require.NoError(t, err,
+			"a failed ancillary download is non-fatal without verification")
+		t.Cleanup(result.CloseHandles)
+		assertNoAncillary(t, result)
+	})
+
+	// Completing the bootstrap is only half of what the non-fatal branch
+	// promises. The other half is that the ledger state then comes from the
+	// main extraction, which is where v1-layout snapshots keep it — so this
+	// runs the whole of Sync rather than stopping at the result.
+	t.Run("v2 falls back to the extraction directory's ledger state",
+		func(t *testing.T) {
+			fixture := newV2Fixture(t, v2FixtureOptions{
+				validImmutable:      true,
+				fallbackLedgerState: true,
+			})
+			fixture.ancillaryArchive = []byte("not an archive")
+
+			result, err := Sync(context.Background(), SyncConfig{
+				Network:         "preprod",
+				DataDir:         t.TempDir(),
+				StorageMode:     "core",
+				Backend:         BackendV2,
+				AggregatorURL:   fixture.server.URL,
+				VerifyCertChain: false,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, uint64(1000), result.LedgerSlot,
+				"the ledger state must come from the extraction directory "+
+					"when the ancillary archive is unusable")
+		})
+}
