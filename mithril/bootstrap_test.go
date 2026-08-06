@@ -1116,3 +1116,82 @@ func chunkDirUnder(base, rel string) *vettedDir {
 	defer baseRoot.Close()
 	return chunkDirIn(baseRoot, base, rel)
 }
+
+// TestBootstrapRefusesADigestThatNamesSomewhereElse covers the one piece of
+// aggregator-supplied text that becomes a directory name.
+//
+// v1 derives `immutable-<digest>` and `ancillary-<digest>` inside the download
+// directory, and `Cleanup` calls os.RemoveAll on both. The digest is the
+// aggregator's string. Joining it raw does not stay inside: a digest beginning
+// with a separator makes the "immutable-" prefix its own path element, which
+// the following ".." then pops — "/../.." reduces to the download directory's
+// grandparent, and that is what gets extracted into and then removed.
+//
+// v2 is closed by a different check: it refuses an artifact whose hash is not
+// the one it computes, and a computed hash is hex. v1 has no computed hash to
+// compare against, so the constraint has to be stated.
+func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
+	archiveData := createChunkArchive(t)
+
+	for _, digest := range []string{
+		"/../../pwned",
+		"/../..",
+		"a/b",
+		"..",
+	} {
+		t.Run(digest, func(t *testing.T) {
+			snapshots := []SnapshotListItem{{SnapshotBase: SnapshotBase{
+				Digest:               digest,
+				Network:              "preprod",
+				Beacon:               Beacon{Epoch: 270, ImmutableFileNumber: 5320},
+				Size:                 int64(len(archiveData)),
+				CompressionAlgorithm: "zstandard",
+			}}}
+			mux := http.NewServeMux()
+			mux.HandleFunc(
+				"/artifact/snapshots",
+				func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewEncoder(w).Encode(snapshots)
+				},
+			)
+			mux.HandleFunc(
+				"/download/snapshot.tar.zst",
+				func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write(archiveData)
+				},
+			)
+			server := httptest.NewServer(mux)
+			t.Cleanup(server.Close)
+			snapshots[0].Locations = []string{
+				server.URL + "/download/snapshot.tar.zst",
+			}
+
+			// The download directory sits inside a root, so an escape has
+			// somewhere observable to land.
+			root := t.TempDir()
+			downloadDir := filepath.Join(root, "downloads")
+			require.NoError(t, os.MkdirAll(downloadDir, 0o750))
+
+			_, err := Bootstrap(context.Background(), BootstrapConfig{
+				Network:       "preprod",
+				Backend:       BackendV1,
+				AggregatorURL: server.URL,
+				DownloadDir:   downloadDir,
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrUnsafeSnapshotDigest)
+
+			// Refused before anything is derived from it, so the download
+			// directory holds nothing and nothing appeared beside it.
+			entries, readErr := os.ReadDir(root)
+			require.NoError(t, readErr)
+			require.Len(t, entries, 1,
+				"nothing may be created outside the download directory")
+			assert.Equal(t, "downloads", entries[0].Name())
+			inside, readErr := os.ReadDir(downloadDir)
+			require.NoError(t, readErr)
+			assert.Empty(t, inside,
+				"a refused digest must not reach the download either")
+		})
+	}
+}

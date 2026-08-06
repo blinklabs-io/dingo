@@ -25,9 +25,45 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+// ErrUnsafeSnapshotDigest reports an aggregator-supplied digest that cannot be
+// used to name a directory inside the download directory.
+var ErrUnsafeSnapshotDigest = errors.New("unsafe snapshot digest")
+
+// validateSnapshotDigest refuses a digest that would not stay one element deep
+// inside the download directory.
+//
+// The digest is the aggregator's string and v1 has nothing to check it
+// against — no computed hash, the way v2 recomputes an artifact's — yet it
+// names two directories, `immutable-<digest>` and `ancillary-<digest>`, that
+// get extracted into and later removed with os.RemoveAll. Joining it raw does
+// not keep it inside: a leading separator makes the `immutable-` prefix its own
+// path element, and a following `..` then pops it, so `/../..` names the
+// download directory's grandparent.
+//
+// Refused rather than reduced. A digest is an identifier, and one that is not a
+// single path element is not a digest — reducing it would silently give two
+// different snapshots the same cache key, which is how a stale extraction gets
+// reused for the wrong artifact.
+func validateSnapshotDigest(digest string) error {
+	if digest == "" {
+		return fmt.Errorf("%w: snapshot has no digest", ErrUnsafeSnapshotDigest)
+	}
+	if digest == "." || digest == ".." ||
+		strings.ContainsRune(digest, '/') ||
+		strings.ContainsRune(digest, '\\') ||
+		strings.ContainsRune(digest, filepath.Separator) {
+		return fmt.Errorf(
+			"%w: %q is not a single path element",
+			ErrUnsafeSnapshotDigest, digest,
+		)
+	}
+	return nil
+}
 
 // Mithril artifact backends.
 const (
@@ -315,6 +351,13 @@ func Bootstrap(
 			cfg.Network,
 			snapshot.Network,
 		)
+	}
+	// Before anything is derived from it. The digest names the extraction and
+	// ancillary directories, so a refusal that came after the first join would
+	// already have said where they are. v2 gets this from recomputing the
+	// artifact hash, which constrains it to hex; v1 has no such check.
+	if err := validateSnapshotDigest(snapshot.Digest); err != nil {
+		return nil, err
 	}
 
 	cfg.Logger.Info(
