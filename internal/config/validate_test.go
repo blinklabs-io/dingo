@@ -16,6 +16,8 @@ package config
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -534,7 +536,11 @@ func TestValidateDelegatorInactivity(t *testing.T) {
 		inactivity uint64
 		wantErr    string
 	}{
-		{name: "disabled ignores out-of-range value", enabled: false, inactivity: 10_001},
+		{
+			name:       "disabled ignores out-of-range value",
+			enabled:    false,
+			inactivity: 10_001,
+		},
 		{name: "enabled at minimum", enabled: true, inactivity: 1},
 		{name: "enabled within range", enabled: true, inactivity: 90},
 		{name: "enabled at maximum", enabled: true, inactivity: 10_000},
@@ -618,6 +624,58 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+// TestValidateDatabaseLifecycleSnapshotDirWritability guards against a raw
+// filesystem permission error surfacing deep inside a snapshot attempt
+// instead of a clean, actionable one at startup -- the failure mode for a
+// --db-snapshot-dir bind-mounted from a host directory the Docker image's
+// non-root user doesn't own (see dingo.yaml.example's snapshotDir entry).
+func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
+	t.Run(
+		"writable directory passes and is created if missing",
+		func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "nested", "snapshots")
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.True(t, info.IsDir())
+		},
+	)
+
+	t.Run(
+		"unwritable directory fails with an actionable error",
+		func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip(
+					"root can write anywhere regardless of mode -- skip when running as root",
+				)
+			}
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "readonly")
+			require.NoError(t, os.Mkdir(dir, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "snapshotDir")
+			assert.Contains(t, err.Error(), "1000:1000")
+		},
+	)
+
+	t.Run("disabled snapshots skip the writability check", func(t *testing.T) {
+		cfg := validTestConfig()
+		cfg.DatabaseLifecycle.SnapshotEnabled = false
+		cfg.DatabaseLifecycle.SnapshotDir = filepath.Join(
+			t.TempDir(), "never-created",
+		)
+		require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+	})
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {
@@ -780,7 +838,11 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
-	assert.Contains(t, err.Error(), "invalid plugins.mempool.config.evictionWatermark")
+	assert.Contains(
+		t,
+		err.Error(),
+		"invalid plugins.mempool.config.evictionWatermark",
+	)
 	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
 }
 

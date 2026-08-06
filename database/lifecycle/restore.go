@@ -64,7 +64,8 @@ func checkNoDataDirOverride(pluginKind string, cfg map[string]any) error {
 			"restore always writes under the given targetDataDir's own staging "+
 			"directory, and honoring a separate override would bypass its "+
 			"atomic-rename interruption safety",
-		pluginKind, override,
+		pluginKind,
+		override,
 	)
 }
 
@@ -84,15 +85,18 @@ var syncDir = fsyncdir.Sync
 // so restore's durability does not depend on trusting every plugin's
 // internals, present and future, to already cover it.
 func syncDirTree(root string) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		return syncDir(path)
-	})
+	return filepath.WalkDir(
+		root,
+		func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			return syncDir(path)
+		},
+	)
 }
 
 // RestoreStorageConfig carries the caller's configured provider-owned
@@ -223,7 +227,11 @@ func RestoreValidated(
 	validate func(Manifest) error,
 	storageConfig RestoreStorageConfig,
 ) (m Manifest, err error) {
-	manifest, snapshotDir, cleanup, err := resolveManifest(ctx, registry, snapshotDir)
+	manifest, snapshotDir, cleanup, err := resolveManifest(
+		ctx,
+		registry,
+		snapshotDir,
+	)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -396,7 +404,11 @@ func resolveManifest(
 ) (manifest Manifest, resolvedDir string, cleanup func(), err error) {
 	resolvedDir = snapshotDir
 	if _, ok := recognizedCloudScheme(registry, snapshotDir); ok {
-		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(ctx, registry, snapshotDir)
+		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(
+			ctx,
+			registry,
+			snapshotDir,
+		)
 		if downloadErr != nil {
 			return Manifest{}, "", nil, downloadErr
 		}
@@ -433,9 +445,22 @@ func requireEmptyOrAbsent(dir string) error {
 // against targetDataDir just long enough to construct it (plugin.Resolve
 // always constructs and starts a provider together — there is no
 // construct-only step), then stops it immediately and undoes whatever it
-// created on disk, since metadata.Restorer's contract requires
-// RestoreFrom to run before the store has ever been started, or after
-// Close() — which StopCapability guarantees here.
+// created, since metadata.Restorer's contract requires RestoreFrom to run
+// before the store has ever been started, or after Close() — which
+// StopCapability guarantees here.
+//
+// "Undo" is two different operations depending on the backend. For a
+// file-based store (sqlite/badger), deleting targetDataDir is enough: that
+// directory is the entirety of what the brief resolve-and-start touched.
+// For a live client/server store (postgres/mysql), that brief start
+// instead ran real migrations against the actual configured remote
+// database — a directory wipe does nothing to that (confirmed via a live
+// end-to-end restore attempt against a real Postgres server, which failed
+// because the migrated-but-otherwise-empty database no longer looked
+// "empty" to RestoreFrom's own precondition check). Resettable-implementing
+// stores get an explicit Reset call for this, and it must happen before
+// StopCapability: Reset needs the still-open connection pool, which
+// StopCapability closes.
 func restoreMetadataStore(
 	ctx context.Context,
 	host *plugin.Host,
@@ -470,12 +495,24 @@ func restoreMetadataStore(
 			manifest.MetadataPlugin,
 		)
 	}
+	if resettable, ok := store.(metadata.Resettable); ok {
+		if err := resettable.Reset(ctx); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return fmt.Errorf(
+				"reset metadata plugin %q before restore: %w",
+				manifest.MetadataPlugin,
+				err,
+			)
+		}
+	}
 	if err := host.StopCapability(ctx, plugin.CapabilityStorageMetadata); err != nil {
 		return fmt.Errorf("stop metadata plugin before restore: %w", err)
 	}
 	// RestoreFrom refuses to overwrite an existing destination -- undo
 	// whatever the brief resolve-and-start above wrote to targetDataDir so
-	// it looks exactly as empty as before that call.
+	// it looks exactly as empty as before that call. Harmless no-op for a
+	// live client/server store, which never wrote real data under
+	// targetDataDir in the first place.
 	if err := os.RemoveAll(targetDataDir); err != nil {
 		return fmt.Errorf(
 			"reset target data directory %q: %w", targetDataDir, err,

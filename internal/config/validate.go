@@ -230,10 +230,34 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
 		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
-		{"plugins.api.utxorpc.config.port", c.BindAddr, utxorpcPort, apiListeners, false},
-		{"plugins.api.blockfrost.config.port", c.BindAddr, blockfrostPort, apiListeners, false},
-		{"plugins.api.mesh.config.port", c.BindAddr, meshPort, apiListeners, false},
-		{"midnight.port", c.Midnight.Host, c.Midnight.Port, apiListeners, false},
+		{
+			"plugins.api.utxorpc.config.port",
+			c.BindAddr,
+			utxorpcPort,
+			apiListeners,
+			false,
+		},
+		{
+			"plugins.api.blockfrost.config.port",
+			c.BindAddr,
+			blockfrostPort,
+			apiListeners,
+			false,
+		},
+		{
+			"plugins.api.mesh.config.port",
+			c.BindAddr,
+			meshPort,
+			apiListeners,
+			false,
+		},
+		{
+			"midnight.port",
+			c.Midnight.Host,
+			c.Midnight.Port,
+			apiListeners,
+			false,
+		},
 	}
 	// Two active listeners contending for a port only fails at bind
 	// time; catch it here. Zero ports are disabled or OS-assigned, so
@@ -483,6 +507,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"databaseLifecycle.snapshotDir is required when databaseLifecycle.snapshotEnabled is true",
 		))
 	}
+	if c.DatabaseLifecycle.SnapshotEnabled &&
+		c.DatabaseLifecycle.SnapshotDir != "" {
+		if err := checkDirWritable(c.DatabaseLifecycle.SnapshotDir); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"databaseLifecycle.snapshotDir %q is not usable: %w (in the "+
+					"Docker image, a directory outside /data/db must be "+
+					"pre-chowned on the host to the container's UID:GID, "+
+					"1000:1000)",
+				c.DatabaseLifecycle.SnapshotDir, err,
+			))
+		}
+	}
 	if c.DatabaseLifecycle.SnapshotRetention < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid databaseLifecycle.snapshotRetention: %d (must not be negative)",
@@ -527,7 +563,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// config-validation time instead of only once the node reaches
 	// startKoiosParityObserver. Empty is valid -- it defers to the node's
 	// own configured Network.
-	if net := c.KoiosParity.Network; net != "" && net != "preview" && net != "preprod" {
+	if net := c.KoiosParity.Network; net != "" && net != "preview" &&
+		net != "preprod" {
 		errs = append(errs, fmt.Errorf(
 			"invalid koiosParity.network %q: must be empty, \"preview\", or \"preprod\"",
 			net,
@@ -603,6 +640,29 @@ func isWildcardAddr(addr string) bool {
 	default:
 		return false
 	}
+}
+
+// checkDirWritable ensures dir exists (creating it if needed) and that this
+// process can actually create files in it, surfacing a clear, actionable
+// error at startup instead of a raw filesystem permission error surfacing
+// later, deep inside a snapshot attempt. This is the common failure mode
+// for a --db-snapshot-dir bind-mounted from a host directory the
+// container's non-root user doesn't own (see the Docker image's pinned
+// UID:GID note in dingo.yaml.example).
+func checkDirWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+	probe, err := os.CreateTemp(dir, ".dingo-writable-check-*")
+	if err != nil {
+		return fmt.Errorf("directory is not writable: %w", err)
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("remove writability probe file: %w", err)
+	}
+	return nil
 }
 
 // validatePathNoTraversal rejects paths containing a ".." component.

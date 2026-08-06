@@ -55,70 +55,31 @@ func backupSQLite(
 			"sqlite backup: in-memory database has nothing to back up",
 		)
 	}
-	if _, err := os.Stat(dstPath); err == nil {
-		return fmt.Errorf(
-			"sqlite backup: destination %q already exists",
-			dstPath,
-		)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("sqlite backup: stat %q: %w", dstPath, err)
-	}
-	dstDir := filepath.Dir(dstPath)
-	if err := os.MkdirAll(dstDir, 0o755); err != nil {
-		return fmt.Errorf(
-			"sqlite backup: create destination directory: %w",
-			err,
-		)
-	}
-
-	// VACUUM INTO targets a private, operation-owned temporary directory,
-	// not dstPath directly, and is only published to dstPath via the
-	// os.Link below once it has fully succeeded -- matching
+	// VACUUM INTO targets a private, operation-owned temporary directory
+	// (via sqlstore.PublishBackupFile), not dstPath directly, and is only
+	// published to dstPath once it has fully succeeded -- matching
 	// database/lifecycle/manifest.go's WriteManifest write-to-temp-then-
 	// rename pattern. VACUUM INTO targeting dstPath directly, cleaned up
-	// with an unconditional os.Remove(dstPath) on failure, is a TOCTOU
-	// race: a concurrent writer that creates a real file at dstPath in the
-	// window between the existence check above and this failure would
-	// have that file silently deleted too, even though it has nothing to
-	// do with this failed operation. os.MkdirTemp's uniquely-named
-	// directory can't collide with anything another goroutine/process is
-	// doing. Publishing with a hard link is no-clobber: unlike Rename,
-	// Link fails if another creator populated dstPath after the initial
-	// existence check.
-	tmpDir, err := os.MkdirTemp(dstDir, ".backup-tmp-*")
+	// with an unconditional os.Remove(dstPath) on failure, would be a
+	// TOCTOU race: a concurrent writer that creates a real file at dstPath
+	// in the window between the existence check and the failure would have
+	// that file silently deleted too, even though it has nothing to do
+	// with this failed operation.
+	err := sqlstore.PublishBackupFile(dstPath, func(stagedPath string) error {
+		backupDB, err := openSQLiteBackupDB(ctx, databasePath)
+		if err != nil {
+			return fmt.Errorf("open source: %w", err)
+		}
+		defer backupDB.Close() //nolint:errcheck
+		if err := runVacuumInto(ctx, backupDB, stagedPath); err != nil {
+			return fmt.Errorf("VACUUM INTO %q: %w", dstPath, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf(
-			"sqlite backup: create temporary directory: %w",
-			err,
-		)
+		return fmt.Errorf("sqlite backup: %w", err)
 	}
-	// Harmless once the success path below has already renamed the backup
-	// file out of tmpDir: RemoveAll on an empty (or, on failure,
-	// still-populated) directory either way only ever touches this
-	// attempt's own private directory, never dstPath.
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-	tmpPath := filepath.Join(tmpDir, filepath.Base(dstPath))
-
-	backupDB, err := openSQLiteBackupDB(ctx, databasePath)
-	if err != nil {
-		return fmt.Errorf("sqlite backup: open source: %w", err)
-	}
-	defer backupDB.Close() //nolint:errcheck
-	if err := runVacuumInto(ctx, backupDB, tmpPath); err != nil {
-		return fmt.Errorf("sqlite backup: VACUUM INTO %q: %w", dstPath, err)
-	}
-	if err := os.Link(tmpPath, dstPath); err != nil {
-		return fmt.Errorf(
-			"sqlite backup: publish %q: %w",
-			dstPath,
-			err,
-		)
-	}
-	// A file's own fsync (already done implicitly by VACUUM INTO closing
-	// the destination file) does not guarantee its directory entry is
-	// persisted -- sync dstDir so the link above is durable too, not
-	// just atomic.
-	return fsyncdir.Sync(dstDir)
+	return nil
 }
 
 // openSQLiteBackupDB opens a short-lived connection for VACUUM INTO. The
@@ -126,7 +87,10 @@ func backupSQLite(
 // deadlock a live snapshot when another metadata operation still owns that
 // connection. A dedicated connection preserves SQLite's WAL snapshot
 // semantics without contending with the pool's connection accounting.
-func openSQLiteBackupDB(ctx context.Context, databasePath string) (*sql.DB, error) {
+func openSQLiteBackupDB(
+	ctx context.Context,
+	databasePath string,
+) (*sql.DB, error) {
 	dsn := sqliteFileURI(databasePath) +
 		"?_txlock=deferred" +
 		"&_pragma=journal_mode(WAL)" +
@@ -245,7 +209,11 @@ func copyFile(ctx context.Context, srcPath, dstPath string) error {
 // bytes.Reader in tests -- rather than a real filesystem copy racing a
 // concurrent cancellation's wall-clock timing, which a fast/cached copy
 // can simply outrun before the cancellation ever lands.
-func copyReaderToFile(ctx context.Context, src io.Reader, dstPath string) (retErr error) {
+func copyReaderToFile(
+	ctx context.Context,
+	src io.Reader,
+	dstPath string,
+) (retErr error) {
 	dst, err := os.OpenFile(
 		dstPath,
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL,

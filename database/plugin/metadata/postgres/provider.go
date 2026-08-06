@@ -151,6 +151,15 @@ func openStore(
 			0x64696e676f6d6574,
 			30*time.Second,
 		),
+		BackupTo: func(ctx context.Context, dstPath string) error {
+			return backupPostgres(ctx, dsn, dstPath)
+		},
+		RestoreFrom: func(ctx context.Context, srcPath string) error {
+			return restorePostgres(ctx, dsn, srcPath)
+		},
+		Reset: func(ctx context.Context) error {
+			return resetDatabase(ctx, db)
+		},
 	})
 	if err != nil {
 		_ = db.Close()

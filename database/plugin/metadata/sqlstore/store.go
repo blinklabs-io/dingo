@@ -53,6 +53,14 @@ type Config struct {
 	// them unset until a native snapshot mechanism is available.
 	BackupTo    func(context.Context, string) error
 	RestoreFrom func(context.Context, string) error
+	// Reset is an optional provider-owned hook clearing all data this store
+	// owns, using the still-open pool (it must run before the store is
+	// closed). See metadata.Resettable's doc comment for why this exists:
+	// a live client/server backend's restore orchestration needs a way to
+	// undo a brief resolve-and-start's real migrations against the actual
+	// remote database, which a directory wipe (sqlite/badger's mechanism)
+	// cannot touch. Left unset, Reset is a harmless no-op.
+	Reset func(context.Context) error
 }
 
 // Store owns the shared database/sql pools. Provider packages own DSN and
@@ -71,6 +79,7 @@ type Store struct {
 	maintenanceEvery  time.Duration
 	backupTo          func(context.Context, string) error
 	restoreFrom       func(context.Context, string) error
+	reset             func(context.Context) error
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceState  atomic.Uint32
@@ -128,6 +137,7 @@ func New(config Config) (*Store, error) {
 		maintenanceEvery: config.MaintenanceInterval,
 		backupTo:         config.BackupTo,
 		restoreFrom:      config.RestoreFrom,
+		reset:            config.Reset,
 	}, nil
 }
 
@@ -149,6 +159,22 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 		return errors.New("metadata restore is not supported by this provider")
 	}
 	return s.restoreFrom(ctx, srcPath)
+}
+
+// Reset clears all data this store owns, for providers that supply the
+// hook (see metadata.Resettable). A no-op for providers that don't --
+// unlike BackupTo/RestoreFrom, silently doing nothing here is correct,
+// not a lost user request: file-based providers (sqlite/badger) have
+// nothing for this to do, since restoreMetadataStore's directory wipe
+// already fully undoes their brief resolve-and-start.
+func (s *Store) Reset(ctx context.Context) error {
+	if s.reset == nil {
+		return nil
+	}
+	if s.closed.Load() {
+		return errors.New("metadata reset: store is closed")
+	}
+	return s.reset(ctx)
 }
 
 // DiskSize returns backend storage usage when the provider supplies it.
