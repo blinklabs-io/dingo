@@ -1239,10 +1239,15 @@ func downloadAncillaryV2(
 		err = errors.New("no usable ancillary locations")
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf(
-			"downloading ancillary archive: %w",
-			err,
-		)
+		// The destination path, not the (empty) return of a failed download:
+		// DownloadSnapshot resumes, so a failed attempt leaves a partial file
+		// there for Cleanup to remove.
+		return nil, filepath.Join(
+				downloadDir, ancillaryFilename,
+			), fmt.Errorf(
+				"downloading ancillary archive: %w",
+				err,
+			)
 	}
 
 	ancillaryDir := filepath.Join(
@@ -1255,7 +1260,7 @@ func downloadAncillaryV2(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
 		WithReplaceDestination(),
 	); extractErr != nil {
-		return nil, "", fmt.Errorf(
+		return nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
 		)

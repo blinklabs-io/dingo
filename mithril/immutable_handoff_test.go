@@ -464,3 +464,74 @@ func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
 	assert.NotEmpty(t, archPath,
 		"the downloaded archive must still be reported so it gets cleaned up")
 }
+
+// TestDownloadAncillaryReportsArchiveOnFailure pins that every error after the
+// download has begun still names the archive, so Cleanup can remove it.
+//
+// DownloadSnapshot resumes, which means a failed attempt deliberately leaves a
+// partial file at the destination. Combined with an error that clears the path,
+// that file is unreachable to cleanup — invisible when the download directory
+// is a temp dir that gets removed wholesale, and a leak when the operator
+// supplied one.
+func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	snapshot := func(locations ...string) *SnapshotListItem {
+		return &SnapshotListItem{
+			SnapshotBase: SnapshotBase{
+				Digest:             "abc123",
+				Network:            "preprod",
+				AncillaryLocations: locations,
+			},
+		}
+	}
+
+	t.Run("every download location fails", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "nope", http.StatusInternalServerError)
+			},
+		))
+		defer srv.Close()
+
+		downloadDir := t.TempDir()
+		tree, archPath, err := downloadAncillary(
+			t.Context(),
+			BootstrapConfig{
+				Logger:                      discard,
+				DownloadMaxTransientRetries: -1,
+			},
+			snapshot(srv.URL),
+			downloadDir,
+		)
+		require.Error(t, err)
+		assert.Nil(t, tree)
+		assert.NotEmpty(t, archPath,
+			"a partial download is left on disk and must stay reachable "+
+				"to cleanup")
+	})
+
+	t.Run("extraction fails after a complete download", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				// Downloads fine, is not a valid archive.
+				_, _ = w.Write([]byte("not an archive"))
+			},
+		))
+		defer srv.Close()
+
+		downloadDir := t.TempDir()
+		tree, archPath, err := downloadAncillary(
+			t.Context(),
+			BootstrapConfig{Logger: discard},
+			snapshot(srv.URL),
+			downloadDir,
+		)
+		require.Error(t, err)
+		assert.Nil(t, tree)
+		require.NotEmpty(t, archPath,
+			"the downloaded archive must stay reachable to cleanup")
+		_, statErr := os.Stat(archPath)
+		assert.NoError(t, statErr,
+			"the reported path must be the archive that is actually there")
+	})
+}

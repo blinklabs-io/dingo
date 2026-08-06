@@ -727,6 +727,13 @@ func downloadAncillary(
 		truncateDigest(snapshot.Digest),
 	)
 
+	// Where the download lands whether or not it completes: DownloadSnapshot
+	// resumes, so a failed attempt deliberately leaves a partial file here.
+	// Reporting the path with every error below is what lets Cleanup remove it
+	// — otherwise a failed ancillary download leaves a file behind in an
+	// operator-supplied download directory, which no temp-dir removal sweeps.
+	ancillaryDest := filepath.Join(downloadDir, ancillaryFilename)
+
 	var ancillaryPath string
 	for i, loc := range snapshot.AncillaryLocations {
 		ancillaryPath, err = DownloadSnapshot(
@@ -755,7 +762,7 @@ func downloadAncillary(
 		)
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf(
+		return nil, ancillaryDest, fmt.Errorf(
 			"downloading ancillary archive "+
 				"(all %d locations failed): %w",
 			len(snapshot.AncillaryLocations),
@@ -773,7 +780,7 @@ func downloadAncillary(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
 		WithReplaceDestination(),
 	); extractErr != nil {
-		return nil, "", fmt.Errorf(
+		return nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
 		)
