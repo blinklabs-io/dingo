@@ -797,8 +797,11 @@ func downloadAncillary(
 
 	extracted := ledgerDir(ancillaryDir)
 	if extracted == nil {
-		// The archive path goes back even so, since it was downloaded and
-		// still wants cleaning up.
+		// Removed here or not at all: Cleanup takes AncillaryDir from the
+		// returned handle, and this path has no handle to return. The archive
+		// path goes back even so, since removing the extraction is not
+		// removing the archive it came from.
+		os.RemoveAll(ancillaryDir)
 		return nil, ancillaryPath, fmt.Errorf(
 			"extracted ancillary data at %s holds no ledger state",
 			ancillaryDir,

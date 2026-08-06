@@ -2980,20 +2980,33 @@ is non-empty, and `Cleanup` removes the archive and the extracted tree as two
 separate paths.
 
 That has to hold for each failure after the download begins, because each one
-leaves a file:
+leaves something:
 
-| failure | what is on disk |
-|---|---|
-| every download location failed | a partial file — `DownloadSnapshot` resumes, so it deliberately does not remove one, and it returns no path for it |
-| extraction failed | the complete archive |
-| extracted tree holds no ledger state | the complete archive; the tree is removed here |
-| ancillary manifest unverified (v2) | the complete archive; the tree is removed here |
+| failure | archive | extraction |
+|---|---|---|
+| every download location failed | a partial file — `DownloadSnapshot` resumes, so it deliberately does not remove one, and it returns no path for it | none yet |
+| extraction failed | complete, reported | none published — exclusive extraction stages elsewhere and renames in only once complete |
+| extracted tree holds no ledger state (v1 and v2) | complete, reported | removed by the downloader |
+| ancillary manifest unverified (v2) | complete, reported | removed by the downloader |
 
-The last two are the ones that read as already cleaned up and are not: removing
-the extraction is not removing the archive it came from. An error that returns
-no path strands the download in the directory the operator supplied, where
-nothing else sweeps it — invisible only when `DownloadDir` was left unset and
-the auto-created temp directory goes wholesale.
+The bottom two rows are where both halves have to be done deliberately, and each
+half reads as though the other covered it.
+
+The archive is reported rather than removed, because it is `Cleanup`'s to
+remove: it comes back with the error, `Bootstrap` records it into
+`AncillaryArchivePath` whenever it is non-empty, and an error that returns no
+path strands the download where nothing else sweeps it. Removing the extraction
+is not removing the archive it came from.
+
+The extraction is removed rather than reported, because it is *not* `Cleanup`'s
+to remove. `AncillaryDir` is taken from the returned handle, and a failure
+returns no handle — so an extraction not removed at the point it is found
+unusable is removed by nothing. That is why both downloaders remove it there
+rather than leaving it to the caller.
+
+Neither leak is visible when `DownloadDir` was left unset, since the
+auto-created temp directory goes wholesale; both are residue in the operator's
+own directory when they supplied one, which is the configuration that matters.
 
 The path reported on a failed download is asked of the downloader
 (`downloadDestinationPath`) rather than assembled at the call site. The filename

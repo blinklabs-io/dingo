@@ -651,3 +651,96 @@ func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
 	assert.NoError(t, statErr,
 		"the reported path must be the archive that is actually there")
 }
+
+// TestDownloadAncillaryRemovesAnUnusableExtraction pins that an ancillary
+// archive extracting to a tree with no ledger state leaves no tree behind.
+//
+// This is the residue the archive-path contract does not cover. Cleanup takes
+// AncillaryDir from the returned handle, and there is no handle on this path —
+// so unless the extraction is removed where it is found unusable, nothing ever
+// removes it. Same shape as the archive leak, one directory over: invisible
+// when DownloadDir was left unset and the auto-created temp directory goes
+// wholesale, residue in the operator's directory when they supplied one.
+//
+// Both downloaders, because the two reached this branch by different routes and
+// only one of them removed.
+func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// No ledger state anywhere in it, which is what makes the tree unusable.
+	archive := writeTestArchive(t, map[string]string{
+		"immutable/00000.chunk": "not ledger state",
+	})
+	data, err := os.ReadFile(archive)
+	require.NoError(t, err)
+
+	serve := func(t *testing.T) string {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(data)
+			},
+		))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+
+	const digest = "abc123"
+	for name, download := range map[string]func(
+		t *testing.T, downloadDir string,
+	) (*vettedDir, string, error){
+		"v1": func(t *testing.T, downloadDir string) (
+			*vettedDir, string, error,
+		) {
+			return downloadAncillary(
+				t.Context(),
+				BootstrapConfig{Logger: discard},
+				&SnapshotListItem{
+					SnapshotBase: SnapshotBase{
+						Digest:             digest,
+						Network:            "preprod",
+						AncillaryLocations: []string{serve(t)},
+					},
+				},
+				downloadDir,
+			)
+		},
+		"v2": func(t *testing.T, downloadDir string) (
+			*vettedDir, string, error,
+		) {
+			return downloadAncillaryV2(
+				t.Context(),
+				BootstrapConfig{Logger: discard},
+				&CardanoDatabaseSnapshot{
+					Hash:    digest,
+					Network: "preprod",
+					Ancillary: CardanoDatabaseAncillary{
+						Locations: []CardanoDatabaseLocation{
+							{URI: serve(t)},
+						},
+					},
+				},
+				downloadDir,
+			)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			downloadDir := t.TempDir()
+			tree, archPath, err := download(t, downloadDir)
+			require.Error(t, err)
+			require.Nil(t, tree, "an unusable tree must not be returned")
+			// The archive is the other half of the contract and still has to
+			// come back, since removing the extraction is not removing it.
+			require.NotEmpty(t, archPath)
+			_, statErr := os.Stat(archPath)
+			assert.NoError(t, statErr,
+				"the archive stays, and stays reported")
+
+			ancillaryDir := filepath.Join(downloadDir, "ancillary-"+digest)
+			_, statErr = os.Stat(ancillaryDir)
+			assert.True(t, os.IsNotExist(statErr),
+				"the unusable extraction must be removed where it is found "+
+					"unusable; nothing downstream has a path to it: %s",
+				ancillaryDir)
+		})
+	}
+}
