@@ -34,6 +34,15 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Contains(t, registry[0].SQL["sqlite"].Expand, "CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`)")
 }
 
+func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
+	t.Parallel()
+	registry, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.NoError(t, validateRegistry(registry, "mysql"))
+	require.Len(t, registry, 1)
+	require.Contains(t, registry[0].SQL["mysql"].Expand, "CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)")
+}
+
 func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {
 	expand, err := loadSQL("v1/sqlite/expand.sql")
 	require.NoError(t, err)
