@@ -662,6 +662,14 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			}
 			txs, err := o.fetchLeiosEbTxsBatched(client, point, data.txCount)
 			if err != nil {
+				// The transactions gathered by this attempt are retained
+				// against the cached endorser block, so a later offer of the
+				// same block completes it instead of starting over. Log what
+				// survived to make that progress visible across attempts.
+				retained := 0
+				if cached, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
+					retained = cached.partialTxCount()
+				}
 				o.config.Logger.Debug(
 					"leios EB transaction fetch failed",
 					"error", err,
@@ -669,6 +677,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 					"slot", point.Slot,
 					"hash", hex.EncodeToString(point.Hash),
 					"fetched", len(txs),
+					"retained", retained,
 					"tx_count", data.txCount,
 				)
 				return
@@ -969,6 +978,20 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 		)
 	}
 	result := make([]cbor.RawMessage, txCount)
+	// Resume from whatever this endorser block already holds. The relay
+	// diffuses transactions over several seconds, so a fetch near the live tip
+	// often ends before the block is whole; the prefix it gathered is retained
+	// against the cached block (below) and seeded back here, so a re-offer
+	// requests only the still-missing tail instead of re-fetching transactions
+	// dingo already has (issue #2629).
+	o.seedLeiosPartialTxs(point.Hash, result)
+	// Retain whatever this attempt ends up holding, so an attempt that stops
+	// short (tail budget, per-attempt deadline, protocol error) leaves the
+	// connection free while its progress survives for the next offer. A
+	// completing attempt's caller stores the whole set, which clears this.
+	defer func() {
+		o.retainLeiosPartialTxs(point.Hash, result)
+	}()
 	// The no-progress guard below guarantees termination (each non-final round
 	// places at least one new transaction, and there are txCount of them); this
 	// is an absolute backstop against a relay that dribbles already-held txs.

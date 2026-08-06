@@ -76,9 +76,21 @@ func (o *Ouroboros) leiosClosureWaitTimeout() time.Duration {
 }
 
 type leiosEndorserBlockData struct {
-	point      ocommon.Point
-	blockRaw   []byte
-	txsRaw     []cbor.RawMessage
+	point    ocommon.Point
+	blockRaw []byte
+	txsRaw   []cbor.RawMessage
+	// partialTxs retains an incomplete fetch: a txCount-long slice whose nil
+	// entries are the transactions still missing (the same representation
+	// leiosNeededBitmap turns into a request bitmap). The relay diffuses an
+	// endorser block's transactions over several seconds, so a fetch near the
+	// live tip routinely runs out of served transactions before the block is
+	// whole. Keeping what it did gather here lets the next offer of the same
+	// block fetch only the missing tail instead of starting over, without
+	// holding a per-connection fetch slot open across the gap (issue #2629).
+	// It is
+	// cleared once txsRaw is complete, and it is bounded by the same cache
+	// TTL and entry cap as any other cached endorser block.
+	partialTxs []cbor.RawMessage
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
@@ -165,6 +177,15 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		if len(existing.txsRaw) > len(data.txsRaw) {
 			data.txsRaw = existing.txsRaw
 		}
+		// Carry retained partial-fetch state forward for the same reason: a
+		// manifest-only store arrives on every connection that offers the
+		// block, and dropping the partial would send the next re-offer back to
+		// a from-scratch fetch.
+		data.partialTxs = existing.partialTxs
+	}
+	if data.completeTxCache() {
+		// The transaction set is whole; the resume state is now dead weight.
+		data.partialTxs = nil
 	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
@@ -210,6 +231,126 @@ func (o *Ouroboros) leiosDatabase() *database.Database {
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
 	return data != nil && len(data.txsRaw) == data.txCount
+}
+
+// partialTxCount returns how many of the endorser block's transactions are
+// held from an incomplete fetch.
+func (data *leiosEndorserBlockData) partialTxCount() int {
+	if data == nil {
+		return 0
+	}
+	n := 0
+	for _, raw := range data.partialTxs {
+		if raw != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// mergeLeiosPartialTxs unions two sparse transaction slices into a txCount-long
+// slice, preferring entries already held. Cached transaction bytes are never
+// mutated after being published, so entries are aliased rather than cloned.
+func mergeLeiosPartialTxs(
+	held, add []cbor.RawMessage,
+	txCount int,
+) (merged []cbor.RawMessage, added int) {
+	if txCount <= 0 {
+		return nil, 0
+	}
+	merged = make([]cbor.RawMessage, txCount)
+	copy(merged, held)
+	for idx, raw := range add {
+		if idx >= txCount || raw == nil || merged[idx] != nil {
+			continue
+		}
+		merged[idx] = raw
+		added++
+	}
+	return merged, added
+}
+
+// seedLeiosPartialTxsLocked fills result with the transactions already held for
+// this endorser block. txsRaw is a dense prefix (a complete set, or one stored
+// by an earlier caller); partialTxs is sparse.
+func (data *leiosEndorserBlockData) seedLeiosPartialTxsLocked(
+	result []cbor.RawMessage,
+) {
+	for idx, raw := range data.txsRaw {
+		if idx >= len(result) || raw == nil {
+			break
+		}
+		result[idx] = raw
+	}
+	for idx, raw := range data.partialTxs {
+		if idx >= len(result) || raw == nil || result[idx] != nil {
+			continue
+		}
+		result[idx] = raw
+	}
+}
+
+// seedLeiosPartialTxs primes a fetch working slice with everything already held
+// for hash, so a resumed fetch requests only the still-missing transactions.
+// It reads the in-memory cache only: a fetch is driven by an offer for a block
+// dingo is currently tracking, so a blob-store round trip on the fetch path
+// would cost I/O without adding coverage.
+func (o *Ouroboros) seedLeiosPartialTxs(
+	hash []byte,
+	result []cbor.RawMessage,
+) {
+	if len(result) == 0 {
+		return
+	}
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	data, ok := o.leiosEndorserBlocks[leiosBlockKey(hash)]
+	if !ok || data == nil || data.expired(time.Now()) {
+		return
+	}
+	data.seedLeiosPartialTxsLocked(result)
+}
+
+// retainLeiosPartialTxs merges an incomplete fetch result into the cached
+// endorser block so a later offer of the same block can complete it. It is a
+// no-op for a block that is not cached (nothing to complete) or already
+// complete. The retained set only grows: two connections that each fetch part
+// of the block contribute to one union rather than overwriting each other.
+func (o *Ouroboros) retainLeiosPartialTxs(
+	hash []byte,
+	partial []cbor.RawMessage,
+) {
+	if len(partial) == 0 {
+		return
+	}
+	key := leiosBlockKey(hash)
+	o.leiosMu.Lock()
+	defer o.leiosMu.Unlock()
+	existing, ok := o.leiosEndorserBlocks[key]
+	if !ok || existing == nil || existing.completeTxCache() ||
+		existing.txCount <= 0 {
+		return
+	}
+	merged, added := mergeLeiosPartialTxs(
+		existing.partialTxs,
+		partial,
+		existing.txCount,
+	)
+	if added == 0 {
+		return
+	}
+	// Cached entries are replaced, never mutated in place: lookups hand out the
+	// pointer and readers then use it without the lock, so publishing a copy
+	// keeps those readers on a consistent snapshot. insertedAt is preserved so
+	// retaining a partial cannot extend an endorser block's cache lifetime
+	// indefinitely.
+	updated := *existing
+	updated.partialTxs = merged
+	for _, cacheKey := range existing.cacheKeys {
+		if o.leiosEndorserBlocks[cacheKey] == existing {
+			o.leiosEndorserBlocks[cacheKey] = &updated
+		}
+	}
 }
 
 func (data *leiosEndorserBlockData) expired(now time.Time) bool {
