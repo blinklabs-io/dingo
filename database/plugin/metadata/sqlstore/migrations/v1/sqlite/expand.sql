@@ -180,6 +180,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS `idx_pool_pool_key_hash` ON `pool`(`pool_key_h
 CREATE TABLE IF NOT EXISTS `pool_opcert_sequence` (`pool_key_hash` blob,`id` integer PRIMARY KEY AUTOINCREMENT,`slot` integer,`sequence` integer);
 CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_slot` ON `pool_opcert_sequence`(`slot`);
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_slot` ON `pool_opcert_sequence`(`pool_key_hash`,`slot`);
+CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`);
 CREATE TABLE IF NOT EXISTS `pool_registration` (`margin` text,`metadata_url` text,`vrf_key_hash` blob,`pool_key_hash` blob,`reward_account` blob,`reward_account_credential_tag` integer NOT NULL DEFAULT 0,`metadata_hash` blob,`pledge` text,`cost` text,`certificate_id` integer,`id` integer PRIMARY KEY AUTOINCREMENT,`pool_id` integer,`added_slot` integer,`deposit_amount` text,CONSTRAINT `fk_pool_registration` FOREIGN KEY (`pool_id`) REFERENCES `pool`(`id`) ON DELETE CASCADE);
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_pool_reg_pool_slot` ON `pool_registration`(`pool_id`,`added_slot`);
 CREATE INDEX IF NOT EXISTS `idx_pool_registration_certificate_id` ON `pool_registration`(`certificate_id`);

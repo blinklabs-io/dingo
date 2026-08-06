@@ -30,19 +30,15 @@ var migrationSQL embed.FS
 
 const (
 	initialSchemaRelease = "v1alpha1"
-	opCertIndexRelease   = "v2alpha1"
 )
 
-// schemaVersions names every migration in ascending version order. A version
-// with no post-backfill work simply ships no contract.sql; only the initial
-// version needs one on record.
+// schemaVersions names every migration in ascending version order.
 var schemaVersions = []struct {
 	Version int
 	Name    string
 	Dir     string
 }{
 	{Version: 1, Name: initialSchemaRelease, Dir: "v1"},
-	{Version: 2, Name: opCertIndexRelease, Dir: "v2"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

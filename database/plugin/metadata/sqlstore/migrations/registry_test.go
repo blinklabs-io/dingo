@@ -27,40 +27,20 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 2)
+	require.Len(t, registry, 1)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
-	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 302)
-	require.Equal(t, 2, registry[1].Version)
-	require.Equal(t, "v2alpha1", registry[1].Name)
-	// v2 adds an index and nothing else, so it ships no contract.sql; the
-	// loader has to read that absence as empty rather than as an error.
-	require.Empty(t, registry[1].SQL["sqlite"].Contract)
+	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
+	require.Contains(t, registry[0].SQL["sqlite"].Expand, "CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`)")
 }
 
-// TestMySQLTranslationPrefixesBlobIndexAddedByLaterVersion pins the schema
-// context a later migration is translated against.
-//
-// Every CREATE TABLE lives in v1, and MySQL only learns which columns are
-// blobs by reading them. v2 indexes pool_key_hash without creating the table
-// it belongs to, so translating v2 against its own lone statement would leave
-// the prefix length off and MySQL would reject the key. This fails if the
-// registry ever goes back to translating a version in isolation.
-func TestMySQLTranslationPrefixesBlobIndexAddedByLaterVersion(t *testing.T) {
+func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	t.Parallel()
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 2)
-
-	statements := registry[1].SQL["mysql"].Expand
-	require.Len(t, statements, 1)
-	require.Contains(t, statements[0], "`pool_key_hash`(255)")
-	// The prefix belongs to the blob column alone; an integer column given one
-	// would be a different error in the same place.
-	require.Contains(t, statements[0], "`sequence`)")
-	// MySQL has no CREATE INDEX IF NOT EXISTS; re-running is made safe by the
-	// runner's duplicate-object tolerance instead.
-	require.NotContains(t, statements[0], "IF NOT EXISTS")
+	require.NoError(t, validateRegistry(registry, "mysql"))
+	require.Len(t, registry, 1)
+	require.Contains(t, registry[0].SQL["mysql"].Expand, "CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)")
 }
 
 func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {
