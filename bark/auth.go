@@ -176,7 +176,11 @@ func newOperatorAuthInterceptor(
 	destructive map[string]bool,
 	readOnly map[string]bool,
 ) connect.Interceptor {
-	return &operatorAuthInterceptor{logger: logger, destructive: destructive, readOnly: readOnly}
+	return &operatorAuthInterceptor{
+		logger:      logger,
+		destructive: destructive,
+		readOnly:    readOnly,
+	}
 }
 
 type operatorAuthInterceptor struct {
@@ -201,7 +205,10 @@ type operatorAuthInterceptor struct {
 // unclassified procedure here is logged (so an operator notices and fixes
 // the classification) and still authenticated exactly like a known
 // destructive one, never allowed through by default.
-func (i *operatorAuthInterceptor) authorize(ctx context.Context, procedure string) error {
+func (i *operatorAuthInterceptor) authorize(
+	ctx context.Context,
+	procedure string,
+) error {
 	if i.readOnly[procedure] {
 		return nil
 	}
@@ -209,8 +216,10 @@ func (i *operatorAuthInterceptor) authorize(ctx context.Context, procedure strin
 		i.logger.Warn(
 			"unclassified DatabaseService procedure treated as destructive (fail closed) — "+
 				"add it to destructiveDatabaseProcedures or readOnlyDatabaseProcedures in bark/auth.go",
-			"component", "bark",
-			"procedure", procedure,
+			"component",
+			"bark",
+			"procedure",
+			procedure,
 		)
 	}
 	id := peerIdentityFromContext(ctx)
@@ -220,7 +229,10 @@ func (i *operatorAuthInterceptor) authorize(ctx context.Context, procedure strin
 			"component", "bark",
 			"procedure", procedure,
 		)
-		return connect.NewError(connect.CodeUnauthenticated, errAnonymousDestructiveCall)
+		return connect.NewError(
+			connect.CodeUnauthenticated,
+			errAnonymousDestructiveCall,
+		)
 	}
 	i.logger.Info(
 		"destructive DatabaseService RPC authenticated",
@@ -232,7 +244,12 @@ func (i *operatorAuthInterceptor) authorize(ctx context.Context, procedure strin
 	return nil
 }
 
-func (i *operatorAuthInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+// WrapUnary runs authorize against the incoming request's procedure before
+// calling the real handler — this is where every DatabaseService unary RPC
+// (all six destructive ones included) actually gets gated.
+func (i *operatorAuthInterceptor) WrapUnary(
+	next connect.UnaryFunc,
+) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 		if err := i.authorize(ctx, req.Spec().Procedure); err != nil {
 			return nil, err
@@ -241,12 +258,20 @@ func (i *operatorAuthInterceptor) WrapUnary(next connect.UnaryFunc) connect.Unar
 	}
 }
 
+// WrapStreamingClient is a pass-through no-op: it governs outgoing calls
+// this process makes as a Connect client, which this interceptor is never
+// installed on — Bark only uses it server-side, to gate incoming requests.
 func (i *operatorAuthInterceptor) WrapStreamingClient(
 	next connect.StreamingClientFunc,
 ) connect.StreamingClientFunc {
 	return next
 }
 
+// WrapStreamingHandler is WrapUnary's server-streaming counterpart, for
+// completeness: no procedure in destructiveDatabaseProcedures streams
+// today, but a future addition (or bark#17's proposed LifecycleService,
+// reusing this same interceptor) might, and this ensures authorize runs
+// for that case too rather than silently skipping it.
 func (i *operatorAuthInterceptor) WrapStreamingHandler(
 	next connect.StreamingHandlerFunc,
 ) connect.StreamingHandlerFunc {

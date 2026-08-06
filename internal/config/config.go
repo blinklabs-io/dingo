@@ -459,7 +459,7 @@ type Config struct {
 	// see its own doc comment) is mounted, rather than bark's own
 	// all-interfaces "0.0.0.0" default; set explicitly to widen that on
 	// purpose.
-	BarkHost string `yaml:"barkHost" envconfig:"DINGO_BARK_HOST"`
+	BarkHost string `yaml:"barkHost"               envconfig:"DINGO_BARK_HOST"`
 	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
 	// certificates (mTLS) against. Required whenever the database lifecycle
 	// service is mounted (databaseLifecycle.snapshotDir set alongside
@@ -468,11 +468,11 @@ type Config struct {
 	// refuse any caller whose connection didn't present a certificate
 	// verified against this CA — see bark.Bark.Start and bark/auth.go. Also
 	// requires TlsCertFilePath/TlsKeyFilePath to be set.
-	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath" envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
-	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort          uint     `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort            uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool     `yaml:"intersectTip"                                                     split_words:"true"`
+	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath"   envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins"     envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort          uint     `yaml:"metricsPort"                                                        split_words:"true"`
+	DebugPort            uint     `yaml:"debugPort"              envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip         bool     `yaml:"intersectTip"                                                       split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.

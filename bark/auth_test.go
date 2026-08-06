@@ -47,7 +47,9 @@ import (
 // later landing in neither set and silently being served without mTLS. This
 // version fails loudly on that: any procedure absent from both sets, or
 // (a bug in itself) present in both, is a test failure.
-func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(t *testing.T) {
+func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(
+	t *testing.T,
+) {
 	fd := databasev1alpha1.File_v1alpha1_database_database_proto
 	services := fd.Services()
 	var svcIdx int
@@ -74,8 +76,12 @@ func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(t *testing.T) 
 				"readOnlyDatabaseProcedures) -- a new DatabaseService RPC "+
 				"must be explicitly added to one of those, not silently "+
 				"left unauthenticated by default", procedure)
-		assert.Falsef(t, isDestructive && isReadOnly,
-			"procedure %q is classified as both destructive and read-only", procedure)
+		assert.Falsef(
+			t,
+			isDestructive && isReadOnly,
+			"procedure %q is classified as both destructive and read-only",
+			procedure,
+		)
 	}
 }
 
@@ -90,7 +96,9 @@ func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(t *testing.T) 
 // what keeps that situation from actually arising in practice, but this
 // test pins that authorize itself does not depend on that check having
 // run.
-func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(t *testing.T) {
+func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(
+	t *testing.T,
+) {
 	const unclassified = "/bark.v1alpha1.database.DatabaseService/SomeFutureRPC"
 	require.False(t, destructiveDatabaseProcedures[unclassified])
 	require.False(t, readOnlyDatabaseProcedures[unclassified])
@@ -120,7 +128,9 @@ func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(t *testing.
 // middleware with a non-empty PeerCertificates and an empty VerifiedChains,
 // and that is exactly the case that must resolve to Verified: false.
 func TestPeerCertContextMiddleware_KeysOffVerifiedChains(t *testing.T) {
-	leaf, _, _ := writeTestCA(t) // any in-memory *x509.Certificate works as a stand-in leaf here
+	leaf, _, _ := writeTestCA(
+		t,
+	) // any in-memory *x509.Certificate works as a stand-in leaf here
 
 	interceptor := &operatorAuthInterceptor{
 		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -158,18 +168,25 @@ func TestPeerCertContextMiddleware_KeysOffVerifiedChains(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotCtx context.Context
-			next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-				gotCtx = r.Context()
-			})
+			next := http.HandlerFunc(
+				func(_ http.ResponseWriter, r *http.Request) {
+					gotCtx = r.Context()
+				},
+			)
 
 			req := httptest.NewRequest(http.MethodPost, "/", nil)
 			req.TLS = tc.tlsState
-			peerCertContextMiddleware(next).ServeHTTP(httptest.NewRecorder(), req)
+			peerCertContextMiddleware(
+				next,
+			).ServeHTTP(httptest.NewRecorder(), req)
 
 			id := peerIdentityFromContext(gotCtx)
 			require.Equal(t, tc.wantVerified, id.Verified)
 
-			err := interceptor.authorize(gotCtx, databaseconnect.DatabaseServiceRestoreProcedure)
+			err := interceptor.authorize(
+				gotCtx,
+				databaseconnect.DatabaseServiceRestoreProcedure,
+			)
 			if tc.wantVerified {
 				require.NoError(t, err)
 			} else {
@@ -241,7 +258,11 @@ func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
 
 	err = b.Start(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TlsCertFilePath and TlsKeyFilePath are required")
+	assert.Contains(
+		t,
+		err.Error(),
+		"TlsCertFilePath and TlsKeyFilePath are required",
+	)
 }
 
 // TestStart_RejectsClientCAWithoutTLS_NoLifecycle exercises startServer's
@@ -261,5 +282,9 @@ func TestStart_RejectsClientCAWithoutTLS_NoLifecycle(t *testing.T) {
 
 	err = b.Start(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TlsClientCAFilePath requires tls cert and key")
+	assert.Contains(
+		t,
+		err.Error(),
+		"TlsClientCAFilePath requires tls cert and key",
+	)
 }

@@ -1456,7 +1456,8 @@ func (n *Node) Run(ctx context.Context) error {
 		if barkHost != n.config.barkHost {
 			n.config.logger.Warn(
 				"bark database lifecycle service (Restore/Truncate and friends) defaults to a loopback-only bind since no --bark-host was set; its destructive RPCs also require a verified mTLS client certificate (--bark-client-ca-file-path) independent of bind address, but widen this bind only behind your own trusted network controls",
-				"component", "bark",
+				"component",
+				"bark",
 			)
 		}
 		barkConfig := bark.BarkConfig{

@@ -270,7 +270,9 @@ func (b *Bark) Start(ctx context.Context) error {
 			newDatabaseServiceHandler(b),
 			compress1KB,
 			connect.WithInterceptors(newOperatorAuthInterceptor(
-				b.config.Logger, destructiveDatabaseProcedures, readOnlyDatabaseProcedures,
+				b.config.Logger,
+				destructiveDatabaseProcedures,
+				readOnlyDatabaseProcedures,
 			)),
 		)
 		mux.Handle(databasePath, databaseHandler)
@@ -416,7 +418,9 @@ func (b *Bark) startServer(server *http.Server) error {
 		server.TLSConfig.Certificates = []tls.Certificate{cert}
 
 		if b.config.TlsClientCAFilePath != "" {
-			pool, caErr := tlsutil.LoadClientCAPool(b.config.TlsClientCAFilePath)
+			pool, caErr := tlsutil.LoadClientCAPool(
+				b.config.TlsClientCAFilePath,
+			)
 			if caErr != nil {
 				return fmt.Errorf(
 					"failed to load client CA for bark gRPC %s server: %w",

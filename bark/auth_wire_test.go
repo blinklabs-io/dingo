@@ -102,75 +102,92 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 		)
 	}
 
-	t.Run("anonymous client: read-only succeeds, destructive is rejected", func(t *testing.T) {
-		client := newClient("", "")
+	t.Run(
+		"anonymous client: read-only succeeds, destructive is rejected",
+		func(t *testing.T) {
+			client := newClient("", "")
 
-		_, err := client.GetDatabaseInfo(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
-		)
-		require.NoError(t, err, "read-only RPCs must stay reachable without a client cert")
+			_, err := client.GetDatabaseInfo(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+			)
+			require.NoError(
+				t,
+				err,
+				"read-only RPCs must stay reachable without a client cert",
+			)
 
-		_, err = client.CancelOperation(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
-				OperationId: "nonexistent",
-			}),
-		)
-		require.Error(t, err)
-		require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
-	})
+			_, err = client.CancelOperation(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
+					OperationId: "nonexistent",
+				}),
+			)
+			require.Error(t, err)
+			require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+		},
+	)
 
-	t.Run("cert signed by an untrusted CA is treated as unverified, not rejected outright", func(t *testing.T) {
-		client := newClient(untrustedClientCertPath, untrustedClientKeyPath)
+	t.Run(
+		"cert signed by an untrusted CA is treated as unverified, not rejected outright",
+		func(t *testing.T) {
+			client := newClient(untrustedClientCertPath, untrustedClientKeyPath)
 
-		// Whether this specific connection gets rejected at the handshake
-		// or reaches the application layer anonymous is not something this
-		// pins: a client can fail to actually present its configured
-		// certificate for reasons entirely unrelated to CA trust (e.g. no
-		// mutually acceptable signature scheme), in which case the
-		// connection proceeds like any anonymous one rather than erroring,
-		// alongside Go's documented handshake-level rejection of a
-		// genuinely-received-but-untrusted chain. What must hold regardless
-		// of which of those occurred is the actual security property:
-		// peerCertContextMiddleware keys off r.TLS.VerifiedChains
-		// (populated only for a chain that resolved to a trusted ClientCAs
-		// root), not r.TLS.PeerCertificates (populated for whatever the
-		// client presented, verified or not) — so this untrusted cert must
-		// never be treated as an authenticated operator, regardless of
-		// which path the connection actually took to get here.
-		_, err := client.GetDatabaseInfo(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
-		)
-		if err != nil {
-			// The handshake was rejected outright — also an acceptable
-			// outcome, and nothing further to check on this connection.
-			return
-		}
+			// Whether this specific connection gets rejected at the handshake
+			// or reaches the application layer anonymous is not something this
+			// pins: a client can fail to actually present its configured
+			// certificate for reasons entirely unrelated to CA trust (e.g. no
+			// mutually acceptable signature scheme), in which case the
+			// connection proceeds like any anonymous one rather than erroring,
+			// alongside Go's documented handshake-level rejection of a
+			// genuinely-received-but-untrusted chain. What must hold regardless
+			// of which of those occurred is the actual security property:
+			// peerCertContextMiddleware keys off r.TLS.VerifiedChains
+			// (populated only for a chain that resolved to a trusted ClientCAs
+			// root), not r.TLS.PeerCertificates (populated for whatever the
+			// client presented, verified or not) — so this untrusted cert must
+			// never be treated as an authenticated operator, regardless of
+			// which path the connection actually took to get here.
+			_, err := client.GetDatabaseInfo(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+			)
+			if err != nil {
+				// The handshake was rejected outright — also an acceptable
+				// outcome, and nothing further to check on this connection.
+				return
+			}
 
-		_, err = client.CancelOperation(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
-				OperationId: "nonexistent",
-			}),
-		)
-		require.Error(t, err)
-		require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err),
-			"an unverified cert must be rejected on a destructive RPC exactly like an anonymous caller")
-	})
+			_, err = client.CancelOperation(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
+					OperationId: "nonexistent",
+				}),
+			)
+			require.Error(t, err)
+			require.Equal(
+				t,
+				connect.CodeUnauthenticated,
+				connect.CodeOf(err),
+				"an unverified cert must be rejected on a destructive RPC exactly like an anonymous caller",
+			)
+		},
+	)
 
-	t.Run("cert signed by the configured CA passes the auth check", func(t *testing.T) {
-		client := newClient(trustedClientCertPath, trustedClientKeyPath)
+	t.Run(
+		"cert signed by the configured CA passes the auth check",
+		func(t *testing.T) {
+			client := newClient(trustedClientCertPath, trustedClientKeyPath)
 
-		_, err := client.CancelOperation(
-			context.Background(),
-			connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
-				OperationId: "nonexistent",
-			}),
-		)
-		require.Error(t, err)
-		require.Equal(t, connect.CodeNotFound, connect.CodeOf(err),
-			"should fail on the unknown operation id, not authentication")
-	})
+			_, err := client.CancelOperation(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
+					OperationId: "nonexistent",
+				}),
+			)
+			require.Error(t, err)
+			require.Equal(t, connect.CodeNotFound, connect.CodeOf(err),
+				"should fail on the unknown operation id, not authentication")
+		},
+	)
 }

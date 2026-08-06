@@ -95,7 +95,9 @@ func writeTestTLSCertKey(t *testing.T) (certPath, keyPath string) {
 // in-memory cert/key (for signing client leaf certs via
 // writeTestClientCert) and the on-disk cert path (for use as a Bark
 // server's TlsClientCAFilePath trust anchor).
-func writeTestCA(t *testing.T) (caCert *x509.Certificate, caKey *ecdsa.PrivateKey, caCertPath string) {
+func writeTestCA(
+	t *testing.T,
+) (caCert *x509.Certificate, caKey *ecdsa.PrivateKey, caCertPath string) {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -122,7 +124,10 @@ func writeTestCA(t *testing.T) (caCert *x509.Certificate, caKey *ecdsa.PrivateKe
 	caCertPath = filepath.Join(t.TempDir(), "ca.crt")
 	certOut, err := os.Create(caCertPath)
 	require.NoError(t, err)
-	require.NoError(t, pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}))
+	require.NoError(
+		t,
+		pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}),
+	)
 	require.NoError(t, certOut.Close())
 
 	return cert, priv, caCertPath
@@ -165,14 +170,24 @@ func writeTestClientCert(
 
 	certOut, err := os.Create(certPath)
 	require.NoError(t, err)
-	require.NoError(t, pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}))
+	require.NoError(
+		t,
+		pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}),
+	)
 	require.NoError(t, certOut.Close())
 
 	keyBytes, err := x509.MarshalECPrivateKey(priv)
 	require.NoError(t, err)
-	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	keyOut, err := os.OpenFile(
+		keyPath,
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+		0o600,
+	)
 	require.NoError(t, err)
-	require.NoError(t, pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}))
+	require.NoError(
+		t,
+		pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}),
+	)
 	require.NoError(t, keyOut.Close())
 
 	return certPath, keyPath

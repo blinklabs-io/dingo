@@ -116,7 +116,12 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 
 	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
 	caCert, caKey, caCertPath := writeTestCA(t)
-	clientCertPath, clientKeyPath := writeTestClientCert(t, caCert, caKey, "wire-test-operator")
+	clientCertPath, clientKeyPath := writeTestClientCert(
+		t,
+		caCert,
+		caKey,
+		"wire-test-operator",
+	)
 
 	b, err := NewBark(BarkConfig{
 		DB:                  db,

@@ -74,7 +74,10 @@ func LoadClientCAPool(path string) (*x509.CertPool, error) {
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no valid PEM certificates found in client CA file %q", path)
+		return nil, fmt.Errorf(
+			"no valid PEM certificates found in client CA file %q",
+			path,
+		)
 	}
 	return pool, nil
 }
