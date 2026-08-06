@@ -474,6 +474,139 @@ func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 			"block's nonce -- neither the checkpoint nor the tip's")
 }
 
+// TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks covers
+// the case the sibling test above cannot: a tip that sits BEFORE the
+// candidate-freeze cutoff, with blocks stored past it.
+//
+// The reply describes the chain at the acquired tip, but both nonce lookups
+// address the blob store, and the blob store is not bounded by the tip. A
+// rollback leaves the abandoned blocks in place until they are overwritten,
+// and a stored fork holds blocks at higher slots that the chain never adopted.
+// Either way blocks exist above the tip, and either lookup reaching one of them
+// reports a nonce for a block this reply does not claim to have applied.
+//
+// Two separate bounds are what keep that from happening, and each fails
+// differently:
+//
+//   - The evolving nonce takes the last block of the FOLD, not of the epoch.
+//     Bounding it at the epoch's end instead would return the stored block
+//     above the tip.
+//   - The candidate takes min(cutoff, fold end). Before the cutoff the
+//     candidate has not frozen and still tracks the evolving nonce, so
+//     bounding it at the cutoff alone would likewise reach past the tip.
+//
+// The fixture puts the tip at 1200 and a further block at 1300, both below the
+// 1940 cutoff, so a lookup that ignores either bound lands on slot 1300 and
+// both nonces name a block the tip precedes.
+func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	// Conway's window is 4k/f = 4*6/0.4 = 60 slots, so with the epoch running
+	// [1000, 2000) the candidate freezes at slot 1940 -- past every block here.
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 1000
+		earlySlot   uint64 = 1100
+		tipSlot     uint64 = 1200
+		beyondSlot  uint64 = 1300
+	)
+
+	checkpointEvolving := bytes.Repeat([]byte{0x51}, 32)
+	checkpointCandidate := bytes.Repeat([]byte{0x52}, 32)
+	earlyNonce := bytes.Repeat([]byte{0x53}, 32)
+	tipNonce := bytes.Repeat([]byte{0x54}, 32)
+	// The nonce no bound may let through. It is given a stored row like the
+	// others so that a lookup overshooting the tip returns this value rather
+	// than reporting a missing row -- the assertion then names the real fault
+	// instead of a fallback to the CBOR path these placeholder bodies cannot
+	// satisfy.
+	beyondNonce := bytes.Repeat([]byte{0x55}, 32)
+
+	earlyHash := bytes.Repeat([]byte{0x56}, 32)
+	tipHash := bytes.Repeat([]byte{0x57}, 32)
+	beyondHash := bytes.Repeat([]byte{0x58}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		for _, blk := range []struct {
+			slot     uint64
+			hash     []byte
+			prevHash []byte
+			number   uint64
+			nonce    []byte
+		}{
+			{earlySlot, earlyHash, bytes.Repeat([]byte{0x59}, 32), 1, earlyNonce},
+			{tipSlot, tipHash, earlyHash, 2, tipNonce},
+			{beyondSlot, beyondHash, tipHash, 3, beyondNonce},
+		} {
+			if err := db.BlockCreate(models.Block{
+				Slot:     blk.slot,
+				Hash:     blk.hash,
+				PrevHash: blk.prevHash,
+				Cbor:     []byte{0x80},
+				Number:   blk.number,
+				Type:     conway.BlockTypeConway,
+			}, txn); err != nil {
+				return err
+			}
+			if err := db.SetBlockNonce(
+				blk.hash, blk.slot, blk.nonce, false, txn,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	require.NoError(t, db.Metadata().SetEpoch(
+		epochStart,                  // slot
+		1,                           // epoch
+		bytes.Repeat([]byte{2}, 32), // nonce
+		checkpointEvolving,          // evolvingNonce
+		checkpointCandidate,         // candidateNonce
+		bytes.Repeat([]byte{3}, 32), // lastEpochBlockNonce
+		eras.ConwayEraDesc.Id,       // era
+		1,                           // slotLength
+		uint(epochLength),           // lengthInSlots
+		nil,                         // txn
+	))
+	// The tip stops short of the stored block above it, which is what a node
+	// that rolled back or holds a losing fork looks like.
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, tipHash)},
+		nil,
+	))
+
+	ls := newChainDepStateLedger(t, db)
+
+	result, err := ls.Query(chainDepStateQuery())
+	require.NoError(t, err)
+	arr, _ := result.([]any)
+	require.Len(t, arr, 1)
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(tipNonce),
+	}, decoded.EvolvingNonce,
+		"the fold ends at the tip, so the evolving nonce is the tip's -- the "+
+			"block stored above it was never applied on this chain")
+	// Before the cutoff the candidate has not frozen, so it equals the
+	// evolving nonce. That it is the TIP's and not slot 1300's is the whole
+	// point: the candidate's bound is the earlier of the cutoff and the fold's
+	// end, and here the fold's end is what binds.
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(tipNonce),
+	}, decoded.CandidateNonce,
+		"the candidate still tracks the evolving nonce this far before the "+
+			"cutoff, so it too stops at the tip rather than at the cutoff")
+}
+
 // TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent covers the lab
 // nonce, which is the only field of the record that moves with every block
 // rather than only at an epoch boundary.

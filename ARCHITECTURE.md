@@ -1692,6 +1692,17 @@ consensus. The candidate's freeze cutoff comes from the full epoch length in
 both cases: where the epoch ends is what fixes it, not how far a given call
 folds.
 
+Stopping early takes two bounds, because the blob store these lookups address
+is not bounded by the chain's tip — a rollback leaves the abandoned blocks in
+place until they are overwritten, and a stored fork holds blocks the chain never
+adopted. The evolving nonce therefore takes the last block before the fold's
+end rather than before the epoch's end, and the candidate takes the last block
+before `min(freeze cutoff, fold end)`: past the cutoff the candidate has frozen
+and the cutoff binds, but before it the candidate still tracks the evolving
+nonce and only the fold's end keeps a stored block above the tip out of it.
+Folding to the epoch's end collapses both bounds to what the boundary
+computation has always used.
+
 The previous epoch's last-block hash is resolved through the active chain index
 (`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
 retain synthetic endorser/genesis blobs and fork blobs that are useful for other
