@@ -192,10 +192,10 @@ func importLedgerState(
 	// main extraction tree.
 	//
 	// Both are searched through the handle the bootstrap vetted them with, and
-	// the state file is opened through the same handle rather than by the name
-	// the search produced. That is what makes the manifest verification mean
-	// something downstream: the bytes imported come from the tree that was
-	// verified, not from whatever holds its name once the import starts.
+	// discovery hands back the state and UTxO table already open rather than
+	// names for them. That is what makes the manifest verification mean
+	// something downstream: the bytes imported come from the files that were
+	// verified, and no name is resolved between checking and reading.
 	type searchTree struct {
 		name string
 		root *os.Root
@@ -221,17 +221,16 @@ func importLedgerState(
 	}
 
 	var (
-		stateRel  string
-		stateRoot *os.Root
-		stateDir  string
+		snapshot *ledgerstate.SnapshotFiles
+		stateDir string
 	)
 	for _, tree := range searchTrees {
-		rel, findErr := ledgerstate.FindLedgerStateAtOrBefore(
+		files, findErr := ledgerstate.OpenSnapshotAtOrBefore(
 			tree.root,
 			maxTrustedSlot,
 		)
 		if findErr == nil {
-			stateRel, stateRoot, stateDir = rel, tree.root, tree.name
+			snapshot, stateDir = files, tree.name
 			break
 		}
 		logger.Debug(
@@ -242,14 +241,19 @@ func importLedgerState(
 		)
 	}
 
-	if stateRel == "" {
+	if snapshot == nil {
 		return 0, nil, fmt.Errorf(
 			"no ledger state at or before certified ImmutableDB tip slot %d; "+
 				"refusing to trust a volatile ancillary ledger state",
 			maxTrustedSlot,
 		)
 	}
-	lstatePath := filepath.Join(stateDir, filepath.FromSlash(stateRel))
+	// Held open for the whole import: the UTxO stream is read from the table
+	// handle, and closing early would put a name back in its place.
+	defer snapshot.Close()
+	lstatePath := filepath.Join(
+		stateDir, filepath.FromSlash(snapshot.StatePath),
+	)
 
 	logger.Info(
 		"found ledger state file",
@@ -258,32 +262,20 @@ func importLedgerState(
 		"max_trusted_slot", maxTrustedSlot,
 	)
 
-	// Parse the snapshot, read through the handle the search used.
-	stateFile, err := ledgerstate.RootOpen(stateRoot, stateRel)
-	if err != nil {
-		return 0, nil, fmt.Errorf("opening ledger state: %w", err)
-	}
-	state, err := ledgerstate.ParseSnapshotFile(stateFile)
-	_ = stateFile.Close()
+	// Parsed from the file discovery opened. There is no name here to reopen:
+	// lstatePath exists only for the messages above and below.
+	state, err := ledgerstate.ParseSnapshotFile(snapshot.State)
 	if err != nil {
 		return 0, nil, fmt.Errorf("parsing ledger state: %w", err)
 	}
 
-	// Check for UTxO-HD tvar file (UTxOs stored separately). Held open for the
-	// whole import, since that is what the UTxO stream is read from.
-	tvarRel := ledgerstate.FindUTxOTableForState(stateRoot, stateRel)
-	if tvarRel != "" {
-		tvarFile, openErr := ledgerstate.RootOpen(stateRoot, tvarRel)
-		if openErr != nil {
-			return 0, nil, fmt.Errorf(
-				"opening UTxO table: %w", openErr,
-			)
-		}
-		defer func() { _ = tvarFile.Close() }()
+	// UTxO-HD keeps the UTxO set in a table beside the state; discovery opened
+	// it from the same directory handle, so the two belong to one snapshot.
+	if snapshot.Table != nil {
 		state.UTxOTablePath = filepath.Join(
-			stateDir, filepath.FromSlash(tvarRel),
+			stateDir, filepath.FromSlash(snapshot.TablePath),
 		)
-		state.UTxOTableFile = tvarFile
+		state.UTxOTableFile = snapshot.Table
 		logger.Info(
 			"found UTxO table file (UTxO-HD format)",
 			"component", "mithril",

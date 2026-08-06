@@ -206,3 +206,60 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "no verified directory handle")
 }
+
+// TestImportLedgerStateRefusesSymlinkedState covers the ancillary tree's file
+// level from the consumer end.
+//
+// The directory handle stops the tree being swapped, but says nothing about the
+// entries inside it, and `os.Root` follows a symlink whose target stays within
+// the root. Extraction never writes one, so a symlink at the state file is
+// planted — following it would import a ledger state somebody else chose, from
+// inside a directory whose manifest signature checked out.
+//
+// The state file is a one-element CBOR array, which parses far enough to fail
+// distinctively. That is what makes the control case below prove its point: the
+// tree is reachable and would have been read, were the entry not a symlink.
+func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
+	build := func(t *testing.T, symlink bool) *BootstrapResult {
+		t.Helper()
+		dir := t.TempDir()
+		slotDir := filepath.Join(dir, "ledger", "100")
+		require.NoError(t, os.MkdirAll(slotDir, 0o750))
+		name := "state"
+		if symlink {
+			name = "real"
+		}
+		require.NoError(t, os.WriteFile(
+			filepath.Join(slotDir, name), []byte{0x81, 0x00}, 0o640,
+		))
+		if symlink {
+			requireSymlinkSupport(
+				t, "real", filepath.Join(slotDir, "state"),
+			)
+		}
+		root, err := openVerifiedDir(dir)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = root.Close() })
+		return &BootstrapResult{AncillaryDir: dir, AncillaryRoot: root}
+	}
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Control: an ordinary state file is discovered and read, reaching the
+	// parser. Without this the refusal below could be any other failure.
+	_, _, err := importLedgerState(
+		t.Context(), nil, discard, nil, build(t, false),
+		false, ^uint64(0), nil,
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "parsing ledger state",
+		"the control tree must be read, or the refusal proves nothing")
+
+	_, _, err = importLedgerState(
+		t.Context(), nil, discard, nil, build(t, true),
+		false, ^uint64(0), nil,
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no ledger state",
+		"a symlinked state file must be refused, not followed")
+}

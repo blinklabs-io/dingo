@@ -1006,16 +1006,12 @@ func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 		"verification goes through the handle, so a tree swapped in behind "+
 			"the name is not what it is about")
 
-	// And so does the read the import performs: the ledger state discovered
-	// and opened through the handle is the verified one, not the replacement.
-	rel, err := ledgerstate.FindLedgerStateAtOrBefore(
-		cached.Root(), ^uint64(0),
-	)
+	// And so does the read the import performs: discovery opens the state file
+	// itself, from the verified tree, so what is parsed is what was signed.
+	files, err := ledgerstate.OpenSnapshotAtOrBefore(cached.Root(), ^uint64(0))
 	require.NoError(t, err)
-	f, err := ledgerstate.RootOpen(cached.Root(), rel)
-	require.NoError(t, err)
-	defer f.Close()
-	loaded, err := io.ReadAll(f)
+	defer files.Close()
+	loaded, err := io.ReadAll(files.State)
 	require.NoError(t, err)
 	assert.Equal(t, state, loaded,
 		"the import must read the tree the manifest was verified against")

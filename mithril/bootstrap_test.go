@@ -1040,3 +1040,67 @@ func hasChunkFiles(dir string) bool {
 	}
 	return holdsChunkFile(entries)
 }
+
+// findImmutableDir and chunkDirUnder open the extraction directory, vet it, and
+// run the lookup in one call.
+//
+// Test-only. Production holds a single vetted handle on the extraction
+// directory — the ledger-state fallback reads through the same one — and calls
+// findImmutableDirIn / chunkDirIn with it, so that the ImmutableDB that was
+// accepted and the ledger state that gets imported cannot come from two
+// different resolutions of that directory's name. These wrappers keep the tests
+// that only care about the lookup itself from having to stage that.
+
+// findImmutableDir looks for the ImmutableDB directory in the
+// extracted archive. It checks several common layouts:
+//   - extractDir itself (contains .chunk files)
+//   - extractDir/immutable/
+//   - extractDir/db/immutable/
+//   - any single top-level dir containing immutable/
+//
+// A candidate reached through a symlink is not accepted. Extraction never
+// creates one, so a symlink in the extracted tree is evidence the tree was
+// tampered with rather than produced by this node, and accepting it would load
+// the chain from a directory somebody else chose. Reporting the snapshot as
+// absent instead re-extracts it from the verified archive, which discards the
+// tampered tree.
+//
+// The same holds for a tree substituted while the lookup runs: the handle the
+// tree was inspected through is what is handed back, so the snapshot that gets
+// loaded is the one that was inspected and not whatever later holds its name.
+// The caller must Close the result.
+func findImmutableDir(extractDir string) *vettedDir {
+	// The extraction directory is checked before it is read, not after. It is
+	// derived inside the download directory rather than chosen by the
+	// operator, so a symlink there is planted content like anything else
+	// below it — and asking whether it holds chunk files by pathname would
+	// follow it and report a cached snapshot this node never extracted.
+	root, err := openVerifiedDir(extractDir)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	return findImmutableDirIn(root, extractDir)
+}
+
+// chunkDirUnder returns rel beneath base when rel is a directory holding chunk
+// files, with both base and rel verified rather than only the last one, and nil
+// when it is not. The caller must Close the result.
+//
+// Verifying only the last component is enough when the one above it is the
+// operator's. Where that one is itself derived content — the extraction
+// directory holding `immutable`, say — it has to be vetted too, or a symlink
+// one level up carries the whole lookup.
+//
+// The directory is returned by the lookup that inspected it, as the handle it
+// was inspected through, rather than as a name the caller reassembles. A caller
+// that builds the name itself is naming whatever occupies it now, not what was
+// verified a moment ago — and so is a caller handed only a name.
+func chunkDirUnder(base, rel string) *vettedDir {
+	baseRoot, err := openVerifiedDir(base)
+	if err != nil {
+		return nil
+	}
+	defer baseRoot.Close()
+	return chunkDirIn(baseRoot, base, rel)
+}

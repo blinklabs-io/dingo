@@ -2640,12 +2640,27 @@ Every read of a bootstrapped tree goes through one of them:
 | tree | opened by | read by |
 |---|---|---|
 | immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRoot`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
-| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.FindLedgerStateAtOrBefore`, `RootOpen`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
 | extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
 
 The v2 pipelined copy reads through the same handle extraction is writing
 through. The directory names are carried alongside for messages; they are not
-what the load resolves.
+what the load resolves. Each bootstrap opens the extraction directory once and
+derives both the immutable lookup and the ledger-state fallback from that one
+handle — vetting it twice would be two resolutions of one name, so the tree
+whose ImmutableDB was accepted could differ from the tree whose ledger state is
+imported.
+
+Inside the ancillary tree the same rule applies one level down, to files.
+`ledgerstate.OpenSnapshotAtOrBefore` *opens* the ledger state and its UTxO-HD
+table as it selects them and hands back the open files, because a returned name
+would be resolved again by whoever read it. It also verifies every component on
+the way down — ledger directory, slot directory, state, table — since `os.Root`
+confines traversal to the root but still follows a symlink whose target stays
+inside it, and extraction never writes a symlink. A planted one is refused
+rather than followed, and a table that is a symlink fails the snapshot instead
+of being reported absent: a caller cannot otherwise tell "this snapshot has no
+table" from "this snapshot's table is somebody else's".
 
 The ancillary tree matters most here, because what binds it is a signature. One
 handle spans the cache-reuse check, the manifest verification, and the import,

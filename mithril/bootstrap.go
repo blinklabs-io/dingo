@@ -600,10 +600,29 @@ func Bootstrap(
 
 	// Step 4: Extract main archive (skip if already extracted)
 	//
-	// The handle findImmutableDir opened is held from here until Cleanup, so
-	// the tree that is loaded is the tree this lookup accepted. Closed on every
-	// error path below, since the result that would own it is never returned.
-	immutableTree := findImmutableDir(extractDir)
+	// One handle on the extraction directory, and both trees taken from it: the
+	// immutable DB below it, and — when the ancillary archive carries no ledger
+	// state — the ledger state below it too. Vetting the directory twice would
+	// be two resolutions of one name, so the ImmutableDB that was accepted and
+	// the ledger state that gets imported could come from different trees.
+	//
+	// Both handles are held from here until Cleanup, and closed on every error
+	// path below, since the result that would own them is never returned.
+	var extractTree *os.Root
+	var immutableTree *vettedDir
+	defer func() {
+		if !success {
+			immutableTree.Close()
+			if extractTree != nil {
+				_ = extractTree.Close()
+			}
+		}
+	}()
+
+	// Absent on a first run, which is not an error — it means no cached tree.
+	if extractTree, err = openVerifiedDir(extractDir); err == nil {
+		immutableTree = findImmutableDirIn(extractTree, extractDir)
+	}
 	if immutableTree != nil {
 		cfg.Logger.Info(
 			"snapshot already extracted, skipping",
@@ -611,8 +630,15 @@ func Bootstrap(
 			"immutable_dir", immutableTree.Path(),
 		)
 	} else {
+		// Reopened after extracting, not before: publication renames a staging
+		// directory onto extractDir, so a handle taken beforehand would refer
+		// to the directory that rename replaced.
+		if extractTree != nil {
+			_ = extractTree.Close()
+			extractTree = nil
+		}
 		// Replace: a previous run may have left a partial extraction
-		// here, which findImmutableDir above did not accept.
+		// here, which the lookup above did not accept.
 		_, err = ExtractArchive(
 			ctx, archivePath, extractDir, cfg.Logger,
 			WithReplaceDestination(),
@@ -624,7 +650,12 @@ func Bootstrap(
 			)
 		}
 
-		immutableTree = findImmutableDir(extractDir)
+		if extractTree, err = openVerifiedDir(extractDir); err != nil {
+			return nil, fmt.Errorf(
+				"verifying extraction directory %s: %w", extractDir, err,
+			)
+		}
+		immutableTree = findImmutableDirIn(extractTree, extractDir)
 		if immutableTree == nil {
 			return nil, fmt.Errorf(
 				"immutable DB directory not found in "+
@@ -633,30 +664,10 @@ func Bootstrap(
 			)
 		}
 	}
-	defer func() {
-		if !success {
-			immutableTree.Close()
-		}
-	}()
 
 	// Wait for ancillary download to finish (also deferred above
 	// for the error-return path; calling Wait twice is safe).
 	ancWg.Wait()
-
-	// The ledger-state import falls back to the extraction directory when the
-	// ancillary tree carries no ledger state, so that directory is vetted and
-	// held open too rather than searched by name.
-	extractTree, err := openVerifiedDir(extractDir)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"verifying extraction directory %s: %w", extractDir, err,
-		)
-	}
-	defer func() {
-		if !success {
-			_ = extractTree.Close()
-		}
-	}()
 
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
@@ -850,52 +861,27 @@ func (r *BootstrapResult) CloseHandles() {
 	}
 }
 
-// findImmutableDir looks for the ImmutableDB directory in the
-// extracted archive. It checks several common layouts:
-//   - extractDir itself (contains .chunk files)
-//   - extractDir/immutable/
-//   - extractDir/db/immutable/
-//   - any single top-level dir containing immutable/
-//
-// A candidate reached through a symlink is not accepted. Extraction never
-// creates one, so a symlink in the extracted tree is evidence the tree was
-// tampered with rather than produced by this node, and accepting it would load
-// the chain from a directory somebody else chose. Reporting the snapshot as
-// absent instead re-extracts it from the verified archive, which discards the
-// tampered tree.
-//
-// The same holds for a tree substituted while the lookup runs: the handle the
-// tree was inspected through is what is handed back, so the snapshot that gets
-// loaded is the one that was inspected and not whatever later holds its name.
-// The caller must Close the result.
-func findImmutableDir(extractDir string) *vettedDir {
-	// The extraction directory is checked before it is read, not after. It is
-	// derived inside the download directory rather than chosen by the
-	// operator, so a symlink there is planted content like anything else
-	// below it — and asking whether it holds chunk files by pathname would
-	// follow it and report a cached snapshot this node never extracted.
-	root, err := openVerifiedDir(extractDir)
-	if err != nil {
-		return nil
-	}
-	return findImmutableDirIn(root, extractDir)
-}
-
 // findImmutableDirIn is findImmutableDir with the extraction directory already
 // open, so that every read — the layout enumeration as much as the per-
 // candidate checks — resolves through the one handle that was vetted.
 //
-// It takes ownership of root, which is either carried by the returned vettedDir
-// (when the extraction directory is itself the answer) or closed.
+// root stays the caller's. When the extraction directory is itself the answer,
+// the returned vettedDir gets its own handle on it, derived from this one
+// through the open descriptor rather than by resolving the name a second time.
+// That is what lets a caller hold one vetted extraction handle and give both
+// the immutable lookup and the ledger-state fallback a share of it.
 //
 // Taking the handle as a parameter is also what lets a test place a directory
 // swap between the open and the reads, which is the window the enumeration and
 // the returned path were exposed to.
 func findImmutableDirIn(root *os.Root, extractDir string) *vettedDir {
 	if hasChunkFilesIn(root, ".") {
-		return vetted(root, extractDir, ".")
+		self, err := root.OpenRoot(".")
+		if err != nil {
+			return nil
+		}
+		return vetted(self, extractDir, ".")
 	}
-	defer root.Close()
 	chunkDir := func(rel string) *vettedDir {
 		if err := assertNoSymlinkComponents(root, rel); err != nil {
 			return nil
@@ -1179,25 +1165,23 @@ func VerifyCertificateChainWithMode(
 	)
 }
 
-// chunkDirUnder returns rel beneath base when rel is a directory holding chunk
-// files, with both base and rel verified rather than only the last one, and nil
-// when it is not. The caller must Close the result.
+// chunkDirIn returns rel beneath an already-open, already-vetted base when rel
+// is a directory holding chunk files, and nil when it is not. base is the name
+// baseRoot was vetted under, for the returned vettedDir's own name check.
 //
-// Verifying only the last component is enough when the one above it is the
-// operator's. Where that one is itself derived content — the extraction
-// directory holding `immutable`, say — it has to be vetted too, or a symlink
-// one level up carries the whole lookup.
+// Both components end up checked rather than only the last: verifying only the
+// last is enough when the one above it is the operator's, but where that one is
+// itself derived content — the extraction directory holding `immutable`, say —
+// a symlink one level up would carry the whole lookup. The caller supplying a
+// vetted baseRoot is what covers that half.
 //
-// The directory is returned by the lookup that inspected it, as the handle it
-// was inspected through, rather than as a name the caller reassembles. A caller
-// that builds the name itself is naming whatever occupies it now, not what was
-// verified a moment ago — and so is a caller handed only a name.
-func chunkDirUnder(base, rel string) *vettedDir {
-	baseRoot, err := openVerifiedDir(base)
-	if err != nil {
-		return nil
-	}
-	defer baseRoot.Close()
+// The directory is returned as the handle it was inspected through rather than
+// as a name the caller reassembles. A caller that builds the name itself is
+// naming whatever occupies it now, not what was verified a moment ago — and so
+// is a caller handed only a name.
+//
+// baseRoot stays the caller's; the returned vettedDir owns the child handle.
+func chunkDirIn(baseRoot *os.Root, base, rel string) *vettedDir {
 	root, err := openVerifiedRoot(baseRoot, rel)
 	if err != nil {
 		return nil

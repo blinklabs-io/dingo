@@ -302,27 +302,37 @@ func bootstrapV2(
 			err,
 		)
 	}
-	// Both components are checked, not just the last one. chunkDirUnder vets
-	// the directory it is handed against its own parent, which here is the
-	// extraction directory — itself derived inside the download directory and
-	// no more trustworthy than what it contains.
+	// Both components are checked, not just the last one. The extraction
+	// directory is itself derived inside the download directory and no more
+	// trustworthy than what it contains, so it is vetted first and the
+	// immutable directory is then taken from that handle.
 	//
-	// The handle it opened is held until Cleanup, so the load reads the tree
-	// this lookup accepted rather than whatever holds its name by then. Closed
-	// on every error path below, since the result that would own it is never
-	// returned.
-	immutableTree := chunkDirUnder(extractDir, "immutable")
+	// One handle, because the ledger-state import falls back to this same
+	// directory: vetting it twice would be two resolutions of one name, and the
+	// tree whose ImmutableDB was accepted could then differ from the tree whose
+	// ledger state gets imported.
+	//
+	// Both are held until Cleanup and closed on every error path below, since
+	// the result that would own them is never returned.
+	extractTree, err := openVerifiedDir(extractDir)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"verifying extraction directory %s: %w", extractDir, err,
+		)
+	}
+	immutableTree := chunkDirIn(extractTree, extractDir, "immutable")
+	defer func() {
+		if !success {
+			immutableTree.Close()
+			_ = extractTree.Close()
+		}
+	}()
 	if immutableTree == nil {
 		return nil, fmt.Errorf(
 			"immutable DB directory not found at %s after download",
 			filepath.Join(extractDir, "immutable"),
 		)
 	}
-	defer func() {
-		if !success {
-			immutableTree.Close()
-		}
-	}()
 
 	// Wait for ancillary download to finish (also deferred above
 	// for the error-return path; calling Wait twice is safe).
@@ -345,21 +355,6 @@ func bootstrapV2(
 			"verified Mithril bootstrap produced no ancillary data",
 		)
 	}
-
-	// The ledger-state import falls back to the extraction directory when the
-	// ancillary tree carries no ledger state, so that directory is vetted and
-	// held open too rather than searched by name.
-	extractTree, err := openVerifiedDir(extractDir)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"verifying extraction directory %s: %w", extractDir, err,
-		)
-	}
-	defer func() {
-		if !success {
-			_ = extractTree.Close()
-		}
-	}()
 
 	cfg.Logger.Info(
 		"Mithril bootstrap ready for loading",
