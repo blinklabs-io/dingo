@@ -125,6 +125,18 @@ type CandidateEntry struct {
 
 // DecodeEpochCandidatesCbor decodes a MidnightEpochCandidates.CandidatesCbor
 // blob back into its candidate entries.
+//
+// This (and DecodeCandidateInputsCbor below) uses fxamacker/cbor's
+// package-level Unmarshal directly (bare defaults: 131,072 max
+// array elements/map pairs, 32 max nested levels) rather than
+// gouroboros's raised-limit wrapper. That is intentional: the data
+// decoded here is never externally-supplied CBOR — it is the same
+// node's own MidnightEpochCandidates.CandidatesCbor/TxInputsCbor
+// blob, previously produced by EncodeCandidateInputsCbor/the
+// snapshot-writing code in this file from committee-candidate
+// registrations observed on-chain during a single epoch. That
+// naturally bounds the entry count far below fxamacker's defaults,
+// so no explicit larger limit is needed for this path.
 func DecodeEpochCandidatesCbor(data []byte) ([]CandidateEntry, error) {
 	var entries []CandidateEntry
 	if err := fxcbor.Unmarshal(data, &entries); err != nil {

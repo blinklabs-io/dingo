@@ -22,6 +22,75 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
+// Local CBOR decode limits policy
+//
+// This package decodes untrusted, mainnet-scale CBOR (Mithril/node
+// ledger-state snapshots): stake distribution maps, UTxO sets, pool
+// and DRep/account maps can each legitimately contain well over 1M
+// entries. Every decode path in this package enforces an explicit,
+// documented limit rather than relying on an implicit library
+// default:
+//
+//   - decodeRawArray / cbor.Decode (via gouroboros's cbor wrapper):
+//     a full cbor.Decode of a map or array is bounded by
+//     gouroboros's internal decode mode, which sets
+//     MaxMapPairs=10,000,000 and MaxArrayElements=10,000,000 (raised
+//     from fxamacker/cbor's own defaults of 131,072/131,072, which
+//     are too small for mainnet stake maps). Dingo has no public
+//     hook to reconfigure this; it is gouroboros's policy, applied
+//     to every cbor.Decode call in this package. This does NOT cover
+//     manual header-reading APIs below (DecodeMapHeader,
+//     NewStreamDecoder combined with manual iteration): those read a
+//     raw count/byte off the wire with no built-in cap from the
+//     decoder itself, so every such call site must add its own
+//     explicit check.
+//   - decodeMapEntries / decodeMapEntriesLimit (manual map walker,
+//     used for non-comparable Cardano credential keys): capped at
+//     maxMapEntries (10,000,000 entries, matching gouroboros's map
+//     limit above) for both definite- and indefinite-length maps.
+//   - parseUTxOsStreamingWithProgress (UTxO map streaming decode):
+//     for the definite-length map, the DecodeMapHeader-reported
+//     count is checked against the same maxMapEntries cap
+//     (checkUTxOMapEntryCount) before entries are streamed, so a
+//     corrupted or adversarial header cannot drive an unbounded
+//     loop. The indefinite-length map has no header count to check
+//     up front, so parseIndefiniteUTxOMapWithProgress instead
+//     enforces the same cap as a running check
+//     (checkUTxOMapRunningEntryCount) against every streamed entry.
+//     Unlike the definite-length path, the running check can only
+//     reject after entries below the cap have already been streamed
+//     to importUTxOs's batch callback and committed to the database.
+//     That is safe by construction rather than by accident: every
+//     UTxO write goes through an idempotent "insert if absent" upsert
+//     (see ImportUtxos/CreateUtxoIfAbsent), and ImportLedgerState
+//     never marks the UTxO phase checkpoint or advances the chain tip
+//     when this check fails, so a re-run (checkpoint-resumed or from
+//     scratch) safely redoes the phase without duplicating rows, and
+//     nothing downstream treats the partially-imported database as a
+//     complete ledger state. A preflight full count or a transaction
+//     wrapping the whole phase were both considered and rejected: the
+//     former would require a second full pass over a potentially
+//     multi-GB indefinite-length stream purely to detect the rare
+//     corrupted/adversarial case, and the latter would hold one
+//     transaction open across the entire UTxO set, defeating the
+//     batched-commit design used by every import phase in
+//     import.go.
+//   - decodeRawElements (Conway-era array-or-int-keyed-map record
+//     encoding): the int-keyed map variant caps the maximum
+//     integer key at maxAllowedKey (256) to bound the
+//     make([][]byte, maxKey+1) allocation; real Conway records have
+//     fewer than 64 fields.
+//   - cborItemSize / cborItemSizeDepth (manual CBOR item sizer):
+//     recursion capped at maxCborDepth (128) to prevent stack
+//     exhaustion from adversarially nested CBOR.
+//   - extractAllEraBounds / navigateTelescope (HardFork telescope
+//     traversal): recursion capped at MaxTelescopeDepth (16); real
+//     data has at most 7 Cardano eras (Byron through Conway).
+//
+// If any of these limits is ever raised, update this comment and
+// DATABASE.md's CBOR/offset encoding notes together, and extend the
+// regression tests in cbor_decode_test.go to cover the new boundary.
+
 // decodeRawArray decodes a CBOR array, returning elements as raw
 // byte slices. Each element's raw CBOR is preserved for deferred
 // decoding.
@@ -52,7 +121,22 @@ type MapEntry struct {
 // indefinite length) by calculating the byte size of each CBOR
 // item directly. This handles indefinite-length maps (0xbf prefix)
 // and non-comparable keys (arrays, e.g. Cardano credentials).
+//
+// The entry-count limit is fixed at maxMapEntries; use
+// decodeMapEntriesLimit directly (test-only) to exercise the
+// boundary check against a smaller limit without constructing
+// mainnet-scale fixtures.
 func decodeMapEntries(data []byte) ([]MapEntry, error) {
+	return decodeMapEntriesLimit(data, maxMapEntries)
+}
+
+// decodeMapEntriesLimit is decodeMapEntries parameterized by the
+// maximum allowed entry count. Production code always calls it via
+// decodeMapEntries with limit=maxMapEntries; tests call it directly
+// with a small limit to prove the boundary check accepts exactly
+// `limit` entries and rejects `limit`+1 without allocating
+// mainnet-scale fixtures.
+func decodeMapEntriesLimit(data []byte, limit int) ([]MapEntry, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty data")
 	}
@@ -68,11 +152,11 @@ func decodeMapEntries(data []byte) ([]MapEntry, error) {
 			if data[pos] == 0xff {
 				return entries, nil
 			}
-			if len(entries) >= maxMapEntries {
+			if len(entries) >= limit {
 				return nil, fmt.Errorf(
 					"indefinite-length map exceeded "+
 						"max entries (%d)",
-					maxMapEntries,
+					limit,
 				)
 			}
 
@@ -128,11 +212,13 @@ func decodeMapEntries(data []byte) ([]MapEntry, error) {
 		return nil, fmt.Errorf("reading map header: %w", err)
 	}
 
-	if count > maxMapEntries {
+	// #nosec G115 -- limit is always non-negative (caller-controlled
+	// constant or a small test value), so this conversion is safe.
+	if count > uint64(limit) {
 		return nil, fmt.Errorf(
 			"definite-length map claims %d entries, "+
 				"exceeds max (%d)",
-			count, maxMapEntries,
+			count, limit,
 		)
 	}
 	entries := make([]MapEntry, 0, count)
