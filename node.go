@@ -808,6 +808,7 @@ func (n *Node) Run(ctx context.Context) error {
 			Metadata:                n.db.Metadata(),
 			SlotTimer:               n.ledgerState,
 			Logger:                  n.config.logger,
+			PromRegistry:            n.config.promRegistry,
 			CNightPolicyID:          n.config.midnight.CNightPolicyID,
 			CNightAssetName:         n.config.midnight.CNightAssetName,
 			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
@@ -1534,6 +1535,7 @@ func (n *Node) Run(ctx context.Context) error {
 				ShutdownTimeout: n.config.shutdownTimeout,
 				Database:        midnightserver.NewDatabase(n.db),
 				SlotTimer:       n.ledgerState,
+				PromRegistry:    n.config.promRegistry,
 			},
 		)
 		if err != nil {

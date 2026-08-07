@@ -35,6 +35,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/midnight"
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
@@ -132,6 +133,10 @@ type Config struct {
 	// slot. Required by GetBlockByHash, GetLatestBlock, GetStableBlock, and
 	// GetLatestStableBlock.
 	SlotTimer SlotTimer
+	// PromRegistry registers the server's request-count and latency
+	// instruments. Nil is safe -- they just never expose themselves to a
+	// registry.
+	PromRegistry prometheus.Registerer
 }
 
 // Server runs the MidnightState gRPC service over its own listener.
@@ -140,6 +145,7 @@ type Server struct {
 	config     Config
 	grpcServer *grpc.Server
 	health     *health.Server
+	metrics    *serverMetrics
 }
 
 // New validates cfg and returns a Server. It does not bind or serve; call
@@ -163,7 +169,10 @@ func New(cfg Config) (*Server, error) {
 			"midnight grpc: both tls cert and key must be specified",
 		)
 	}
-	return &Server{config: cfg}, nil
+	return &Server{
+		config:  cfg,
+		metrics: newServerMetrics(cfg.PromRegistry),
+	}, nil
 }
 
 // Start binds the listener and serves the gRPC server in a background
@@ -174,7 +183,9 @@ func New(cfg Config) (*Server, error) {
 func (s *Server) Start(ctx context.Context) error {
 	useTLS := s.config.TLSCertFilePath != "" && s.config.TLSKeyFilePath != ""
 
-	var opts []grpc.ServerOption
+	opts := []grpc.ServerOption{
+		grpc.UnaryInterceptor(s.metrics.unaryInterceptor),
+	}
 	serverType := "non-TLS"
 	if useTLS {
 		serverType = "TLS"
