@@ -295,10 +295,12 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 	)
 }
 
-func TestPlutusBudgetMismatchUsesScriptFailureError(t *testing.T) {
+func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// A zero declared budget is intentional: restrictive validation should
 	// execute this script with the enormous budget and classify the resulting
-	// overage as a Plutus disagreement.
+	// overage as a Plutus disagreement. The script is small enough that its CEK
+	// steps remain in the trailing slippage batch. Haskell flushes that batch on
+	// a successful return, producing the complete 112100 CPU / 800 memory cost.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -425,7 +427,7 @@ func TestPlutusBudgetMismatchUsesScriptFailureError(t *testing.T) {
 			assert.Contains(
 				t,
 				plutusErr.Err.Error(),
-				"script exceeded declared budget",
+				"script exceeded declared budget: used (112100 cpu, 800 mem)",
 			)
 		})
 	}
