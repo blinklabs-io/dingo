@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -260,6 +262,11 @@ func Bootstrap(
 			err,
 		)
 	}
+	if err := validateSnapshotIdentity(
+		snapshot.Network, snapshot.Digest,
+	); err != nil {
+		return nil, fmt.Errorf("validating snapshot metadata: %w", err)
+	}
 	if cfg.Network != "" && snapshot.Network != "" &&
 		cfg.Network != snapshot.Network {
 		return nil, fmt.Errorf(
@@ -415,11 +422,11 @@ func Bootstrap(
 	}()
 
 	// Step 3: Download snapshot archive (skip if already complete)
-	archiveFilename := fmt.Sprintf(
+	archiveFilename := filepath.Base(fmt.Sprintf(
 		"%s-%s.tar.zst",
 		snapshot.Network,
 		truncateDigest(snapshot.Digest),
-	)
+	))
 	archivePath := filepath.Join(downloadDir, archiveFilename)
 	snapshotCacheKey := snapshot.Digest
 
@@ -490,7 +497,7 @@ func Bootstrap(
 		ancWg.Go(func() {
 			candidateDir := filepath.Join(
 				downloadDir,
-				"ancillary-"+snapshotCacheKey,
+				filepath.Base("ancillary-"+snapshotCacheKey),
 			)
 			if hasLedgerFiles(candidateDir) {
 				cfg.Logger.Info(
@@ -505,13 +512,13 @@ func Bootstrap(
 				// a prior successful extraction).
 				candidateArchive := filepath.Join(
 					downloadDir,
-					fmt.Sprintf(
+					filepath.Base(fmt.Sprintf(
 						"%s-%s-ancillary.tar.zst",
 						snapshot.Network,
 						truncateDigest(
 							snapshot.Digest,
 						),
-					),
+					)),
 				)
 				if _, err := os.Stat(candidateArchive); err == nil {
 					ancillaryArchivePath = candidateArchive
@@ -611,11 +618,11 @@ func downloadAncillary(
 		"size", snapshot.AncillarySize,
 	)
 
-	ancillaryFilename := fmt.Sprintf(
+	ancillaryFilename := filepath.Base(fmt.Sprintf(
 		"%s-%s-ancillary.tar.zst",
 		snapshot.Network,
 		truncateDigest(snapshot.Digest),
-	)
+	))
 
 	var ancillaryPath string
 	for i, loc := range snapshot.AncillaryLocations {
@@ -1066,6 +1073,33 @@ func truncateDigest(digest string) string {
 		return digest[:16]
 	}
 	return digest
+}
+
+// snapshotDigestLength is the expected length of a Mithril snapshot digest:
+// a Blake2b-256 (v1) or SHA-256 (v2, see CardanoDatabaseSnapshot.ComputeHash)
+// hash, hex-encoded (32 bytes -> 64 hex characters).
+const snapshotDigestLength = 64
+
+// digestPattern matches a digest of exactly snapshotDigestLength hex
+// characters.
+var digestPattern = regexp.MustCompile(
+	fmt.Sprintf(`^[0-9a-fA-F]{%d}$`, snapshotDigestLength),
+)
+
+// validateSnapshotIdentity rejects Mithril aggregator-supplied network and
+// digest values before they are used to construct any filesystem path.
+// Both fields arrive unauthenticated at this point in the flow —
+// certificate/hash verification, when enabled, happens later — so they must
+// be constrained to a known network name and the expected hex digest format
+// first.
+func validateSnapshotIdentity(network, digest string) error {
+	if !slices.Contains(AcceptedNetworks(), network) {
+		return fmt.Errorf("unrecognized Mithril snapshot network %q", network)
+	}
+	if !digestPattern.MatchString(digest) {
+		return fmt.Errorf("invalid Mithril snapshot digest %q", digest)
+	}
+	return nil
 }
 
 // hasFileInSubdirs checks if a file with the given name exists in

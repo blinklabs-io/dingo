@@ -869,6 +869,66 @@ func TestBootstrapV2RejectsNetworkMismatchBeforeDownload(t *testing.T) {
 	assert.Zero(t, fixture.immutableHits.Load())
 }
 
+// TestBootstrapV2RejectsPathTraversalInArtifactNetwork verifies that a v2
+// artifact whose self-hash checks out but whose Network field contains a
+// path-traversal sequence is rejected before any immutable archive is
+// downloaded — artifact.Hash alone isn't enough to trust the metadata,
+// since Network is a separate, unconstrained field.
+func TestBootstrapV2RejectsPathTraversalInArtifactNetwork(t *testing.T) {
+	artifact := &CardanoDatabaseSnapshot{
+		MerkleRoot: "root",
+		Network:    "../../../../tmp/evil",
+		Beacon:     Beacon{Epoch: 0, ImmutableFileNumber: 0},
+	}
+	artifact.Hash = artifact.ComputeHash()
+
+	var immutableHit atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"/artifact/cardano-database",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(
+				t,
+				json.NewEncoder(w).Encode(
+					[]CardanoDatabaseSnapshotListItem{
+						{Hash: artifact.Hash, Beacon: artifact.Beacon},
+					},
+				),
+			)
+		},
+	)
+	mux.HandleFunc(
+		"/artifact/cardano-database/"+artifact.Hash,
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(artifact))
+		},
+	)
+	mux.HandleFunc(
+		"/files/imm/",
+		func(w http.ResponseWriter, r *http.Request) {
+			immutableHit.Store(true)
+			w.WriteHeader(http.StatusOK)
+		},
+	)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	_, err := Bootstrap(context.Background(), BootstrapConfig{
+		Backend:       BackendV2,
+		AggregatorURL: server.URL,
+		DownloadDir:   t.TempDir(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validating artifact metadata")
+	require.False(
+		t,
+		immutableHit.Load(),
+		"immutable download must not be attempted for unvalidated metadata",
+	)
+}
+
 func TestBootstrapV2VerifiedRequiresAncillaryKey(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
