@@ -22,6 +22,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -161,9 +163,19 @@ func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 // TestPoolStakeDistribution_CarriesTheTipItWasReadAt covers the Tip field.
 //
 // Callers that report a "state as of" point need the point the stake rows were
-// actually read at, not one sampled afterwards. Both come from the same
-// transaction as the rows, so the pair cannot straddle a block or epoch
-// boundary.
+// read at. Comparing Tip against a GetTip taken after the call proves nothing:
+// with no writer in between the two agree under any implementation, including
+// one that sampled the tip separately. So the tip is set to a known point
+// first and asserted exactly, then moved and asserted again -- a Tip that was
+// hardcoded, left at its zero value, or captured once would fail one of the
+// two.
+//
+// The stronger property, that the tip and the stake rows come from the same
+// transaction, is not observable from outside a single call: both are taken
+// from one epochAtTip(txn) and the call returns before anything else can
+// interleave. It is held by construction here and asserted at the UTxO RPC
+// layer, where TestReadState_LedgerTipComesFromTheDistributionRead checks the
+// handler renders this point and never samples the live tip.
 func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 	db := newTestDB(t)
 	seedPoolDistr2Fixture(
@@ -173,14 +185,34 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 	)
 	ls := newPoolDistr2Ledger(t, db)
 
+	first := ochainsync.Tip{
+		Point:       ocommon.NewPoint(111, repeatedBytes(32, 0x0A)),
+		BlockNumber: 7,
+	}
+	require.NoError(t, db.SetTip(first, nil))
+
 	dist, err := ls.PoolStakeDistribution(nil)
 	require.NoError(t, err)
 	require.NotNil(t, dist)
+	assert.Equal(t, first.Point.Slot, dist.Tip.Point.Slot)
+	assert.Equal(t, first.Point.Hash, dist.Tip.Point.Hash)
 
-	tip, err := db.GetTip(nil)
+	// Advancing the chain must move the reported point.
+	second := ochainsync.Tip{
+		Point:       ocommon.NewPoint(222, repeatedBytes(32, 0x0B)),
+		BlockNumber: 8,
+	}
+	require.NoError(t, db.SetTip(second, nil))
+
+	again, err := ls.PoolStakeDistribution(nil)
 	require.NoError(t, err)
-	assert.Equal(t, tip.Point.Slot, dist.Tip.Point.Slot)
-	assert.Equal(t, tip.Point.Hash, dist.Tip.Point.Hash)
+	require.NotNil(t, again)
+	assert.Equal(t, second.Point.Slot, again.Tip.Point.Slot)
+	assert.Equal(t, second.Point.Hash, again.Tip.Point.Hash)
+
+	// The earlier result is a snapshot, not a live view of the chain.
+	assert.Equal(t, first.Point.Slot, dist.Tip.Point.Slot)
+	assert.Equal(t, first.Point.Hash, dist.Tip.Point.Hash)
 }
 
 // TestPoolStakeDistribution_FilterReportsOnlyRequestedPools covers the bounded

@@ -1794,22 +1794,26 @@ along with any era not explicitly listed.
 `GetPoolDistr2` reports each pool's share of the active stake from the mark
 snapshot at `praos.StakeSnapshotEpoch` — the snapshot leader election itself
 reads — rather than from live stake, so a schedule computed from it agrees with
-what the node will accept. The read itself lives in
-`ledger.LedgerState.PoolStakeDistribution`, which the UTxO RPC
-`v1beta QueryService.ReadState` handler also calls; `queryShelleyPoolDistr2` is
-only the adaptation of that result into the node-to-client reply shape. Sharing
-the read is what stops the two surfaces naming different VRF keys or different
-snapshots for the same chain. It returns pools ordered by pool key hash, which
-`GetPoolDistr2` does not need because its reply is a map, and UTxO RPC does
-because its reply is a repeated field. It also carries the tip its transaction
-read, so a caller reporting a "state as of" point names the point the rows came
-from rather than sampling the tip again afterwards. Which epoch that is comes from the tip read inside
+what the node will accept. Which epoch that is comes from the tip read inside
 the query's own transaction, not from the in-memory consensus snapshot: the
 snapshot is published after the write that advances the chain, so the two can
 sit on opposite sides of an epoch boundary, and stake rows read for the wrong
 epoch still yield a well-formed distribution summing to one. Like
 `GetChainDepState`'s tip-and-epoch pairing, the fix is to take both from the
-same transaction. Each pool's VRF key hash is resolved through
+same transaction — and that tip is returned alongside the rows, so a caller
+reporting a "state as of" point names the point they were read at rather than
+sampling the tip again afterwards and reporting a point the chain has since
+moved to.
+
+The read itself lives in `ledger.LedgerState.PoolStakeDistribution`, which the
+UTxO RPC `v1beta QueryService.ReadState` handler also calls;
+`queryShelleyPoolDistr2` is only the adaptation of that result into the
+node-to-client reply shape. Sharing the read is what stops the two surfaces
+naming different VRF keys or different snapshots for the same chain. It returns
+pools ordered by pool key hash, which `GetPoolDistr2` does not need because its
+reply is a map, and UTxO RPC does because its reply is a repeated field.
+
+Each pool's VRF key hash is resolved through
 `registeredPoolVrfKeyHash`, the same function header validation uses, so the
 key the reply names is the key a block must carry to be accepted. A query
 carrying a pool filter reads only the snapshot rows for the pools it names,
