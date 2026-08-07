@@ -58,7 +58,7 @@ func TestBuildVerificationMaterial(t *testing.T) {
 
 	material, err := BuildVerificationMaterial(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			LeafCertificate: &Certificate{
 				Hash:  "leaf",
@@ -118,7 +118,7 @@ func TestBuildVerificationMaterialRejectsMismatchedEpochFallback(t *testing.T) {
 
 	_, err := BuildVerificationMaterial(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			LeafCertificate: &Certificate{
 				Hash:  "leaf",
@@ -158,7 +158,7 @@ func TestBuildVerificationMaterialUsesSupportingCertificatesFromChain(
 
 	material, err := BuildVerificationMaterial(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			LeafCertificate: &Certificate{
 				Hash:  "leaf",

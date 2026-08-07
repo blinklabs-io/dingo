@@ -47,7 +47,7 @@ func TestResolveStakeDistributionForCertificateMithril(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeMithrilStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -86,7 +86,7 @@ func TestResolveStakeDistributionForCertificateCardano(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -135,7 +135,7 @@ func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(
 	// Mithril variant: same epoch, different cert hash -> must fail.
 	_, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeMithrilStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -154,7 +154,7 @@ func TestResolveStakeDistributionEpochMatchDoesNotOverrideCertHash(
 	// Cardano variant: same epoch, different cert hash -> must fail.
 	_, err = ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoStakeDistribution,
 			LeafCertificate: &Certificate{
@@ -209,7 +209,7 @@ func TestResolveStakeDistributionFallbackMithril(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoImmutableFilesFull,
 			LeafCertificate: &Certificate{
@@ -266,7 +266,7 @@ func TestResolveStakeDistributionFallbackCardano(t *testing.T) {
 
 	result, err := ResolveStakeDistributionForCertificate(
 		context.Background(),
-		NewClient(server.URL),
+		NewClient(server.URL, WithAllowInsecureHTTP()),
 		&CertificateChainVerificationResult{
 			SignedEntityKind: signedEntityTypeCardanoImmutableFilesFull,
 			LeafCertificate: &Certificate{
