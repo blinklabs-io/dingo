@@ -341,6 +341,22 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "block producer with local and agent KES keys",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+			wantErr: "cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		},
+		{
+			name:    "invalid KES agent mode",
+			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
+			wantErr: "invalid shelleyKesAgentMode",
+		},
+		{
 			name: "no network and no magic",
 			modify: func(c *Config) {
 				c.Network = ""

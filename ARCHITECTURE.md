@@ -510,6 +510,15 @@ sequenceDiagram
     BF->>EB: publish SlotBattleEvent
 ```
 
+When block production uses `--shelley-kes-agent-socket`, node composition loads
+the VRF key and operational certificate locally, then injects a
+`kesagent.Client` into the builder and forger. In `serve-key` mode the client
+receives and validates the evolving KES secret key; in `sign` mode it forwards
+header signing requests so the secret key remains with the agent. The node
+owns the client lifecycle: failed forging initialization closes a temporary
+client, successful startup retains it, and live lifecycle operations and node
+shutdown stop the client before wiping any locally held key material.
+
 ## Directory Structure
 
 ```

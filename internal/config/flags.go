@@ -526,6 +526,18 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to Shelley operational certificate",
 	),
+	stringFlag(
+		"ShelleyKESAgentSocket",
+		"shelley-kes-agent-socket",
+		"",
+		"path to a bursa KES agent service socket; sources the KES signing key from the agent instead of --shelley-kes-key (VRF key and opcert flags still apply)",
+	),
+	stringFlag(
+		"ShelleyKESAgentMode",
+		"shelley-kes-agent-mode",
+		"",
+		"KES agent service mode: serve-key (default) or sign",
+	),
 	uint64Flag(
 		"SlotsPerKESPeriod",
 		"slots-per-kes-period",

@@ -70,6 +70,7 @@ type BlockForger struct {
 
 	// Production mode components
 	creds            *PoolCredentials
+	kes              KESSigner
 	leaderChecker    LeaderChecker
 	blockBuilder     BlockBuilder
 	blockBroadcaster BlockBroadcaster
@@ -253,7 +254,15 @@ type ForgerConfig struct {
 	SlotDuration time.Duration
 
 	// Production mode configuration
-	Credentials      *PoolCredentials
+	Credentials *PoolCredentials
+	// KESSigner sources KES signatures, KES period evolution, and the
+	// operational certificate. When nil, Credentials is used (the default
+	// local key-file path, unchanged behavior). Set to a KES-agent client to
+	// source the KES key from an external agent; VRF proving and the pool ID
+	// still come from Credentials. When a distinct KESSigner is provided,
+	// Credentials only needs its VRF key and operational certificate loaded
+	// (see PoolCredentials.LoadVRFAndOpCert), not a local KES signing key.
+	KESSigner        KESSigner
 	LeaderChecker    LeaderChecker
 	BlockBuilder     BlockBuilder
 	BlockBroadcaster BlockBroadcaster
@@ -302,11 +311,17 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		cfg.SlotDuration = time.Second // Default 1 second slots
 	}
 
+	kesSigner := cfg.KESSigner
+	if kesSigner == nil {
+		kesSigner = cfg.Credentials
+	}
+
 	f := &BlockForger{
 		mode:             cfg.Mode,
 		logger:           cfg.Logger,
 		slotDuration:     cfg.SlotDuration,
 		creds:            cfg.Credentials,
+		kes:              kesSigner,
 		leaderChecker:    cfg.LeaderChecker,
 		blockBuilder:     cfg.BlockBuilder,
 		blockBroadcaster: cfg.BlockBroadcaster,
@@ -331,7 +346,22 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
 
 	if cfg.Mode == ModeProduction {
-		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
+		// The fully local path requires a complete credential set (VRF, KES
+		// signing key, and opcert). When an external KESSigner is supplied
+		// (e.g. a KES agent), the KES signing key lives with the agent, so
+		// Credentials only needs its VRF key and operational certificate.
+		if cfg.Credentials == nil {
+			return nil, errors.New(
+				"production mode requires loaded credentials",
+			)
+		}
+		if cfg.KESSigner != nil {
+			if !cfg.Credentials.HasVRFAndOpCert() {
+				return nil, errors.New(
+					"production mode with a KES agent requires the VRF key and operational certificate",
+				)
+			}
+		} else if !cfg.Credentials.IsLoaded() {
 			return nil, errors.New(
 				"production mode requires loaded credentials",
 			)
@@ -374,14 +404,14 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	// certificate info without waiting for the first forged block.
 	// Dynamic gauges (currentKESPeriod, remainingKESPeriods) are
 	// updated on every slot-win in updateKESMetrics().
-	if f.metrics != nil && f.creds != nil {
-		opCert := f.creds.GetOpCert()
+	if f.metrics != nil && f.kes != nil {
+		opCert := f.kes.GetOpCert()
 		if opCert != nil {
 			f.metrics.opCertStartKES.Set(
 				float64(opCert.KESPeriod),
 			)
 			f.metrics.opCertExpiryKES.Set(
-				float64(f.creds.OpCertExpiryPeriod()),
+				float64(f.kes.OpCertExpiryPeriod()),
 			)
 		}
 	}
@@ -701,7 +731,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	// Ensure KES key is at correct period
-	if err := f.creds.UpdateKESPeriod(kesPeriod); err != nil {
+	if err := f.kes.UpdateKESPeriod(kesPeriod); err != nil {
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
@@ -910,15 +940,15 @@ func (f *BlockForger) updateKESMetrics(
 	}
 	f.metrics.currentKESPeriod.Set(float64(currentPeriod))
 	f.metrics.remainingKESPeriods.Set(
-		float64(f.creds.PeriodsRemaining(currentPeriod)),
+		float64(f.kes.PeriodsRemaining(currentPeriod)),
 	)
-	opCert := f.creds.GetOpCert()
+	opCert := f.kes.GetOpCert()
 	if opCert != nil {
 		f.metrics.opCertStartKES.Set(
 			float64(opCert.KESPeriod),
 		)
 		f.metrics.opCertExpiryKES.Set(
-			float64(f.creds.OpCertExpiryPeriod()),
+			float64(f.kes.OpCertExpiryPeriod()),
 		)
 	}
 }
@@ -943,7 +973,7 @@ func (f *BlockForger) VRFProofForSlot(
 		return make([]byte, vrf.ProofSize), make([]byte, vrf.OutputSize), nil
 	}
 
-	if f.creds == nil || !f.creds.IsLoaded() {
+	if f.creds == nil || !f.creds.HasVRFAndOpCert() {
 		return nil, nil, errors.New("credentials not loaded")
 	}
 
@@ -974,11 +1004,11 @@ func (f *BlockForger) SignBlockHeader(
 		return make([]byte, 448), nil // KES signature size for depth 6
 	}
 
-	if f.creds == nil || !f.creds.IsLoaded() {
-		return nil, errors.New("credentials not loaded")
+	if f.kes == nil {
+		return nil, errors.New("KES signer not configured")
 	}
 
-	return f.creds.KESSign(kesPeriod, headerBytes)
+	return f.kes.KESSign(kesPeriod, headerBytes)
 }
 
 // SlotTracker returns the forger's slot tracker, which can be used

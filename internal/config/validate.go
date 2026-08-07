@@ -390,8 +390,17 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		if c.ShelleyVRFKey == "" {
 			missing = append(missing, "shelleyVrfKey")
 		}
-		if c.ShelleyKESKey == "" {
+		// The KES signing key is only required when the key is local. With a
+		// KES agent socket configured the key lives with the agent, which is
+		// the whole point of that flag; requiring both made the agent-only
+		// configuration impossible to start.
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
 			missing = append(missing, "shelleyKesKey")
+		}
+		if c.ShelleyKESKey != "" && c.ShelleyKESAgentSocket != "" {
+			errs = append(errs, errors.New(
+				"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
+			))
 		}
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
@@ -402,6 +411,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				missing,
 			))
 		}
+	}
+	if c.ShelleyKESAgentMode != "" &&
+		c.ShelleyKESAgentMode != "serve-key" &&
+		c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"invalid shelleyKesAgentMode %q: must be \"serve-key\" or \"sign\"",
+			c.ShelleyKESAgentMode,
+		))
 	}
 
 	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].
