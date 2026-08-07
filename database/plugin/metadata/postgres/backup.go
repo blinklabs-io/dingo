@@ -374,23 +374,37 @@ type qualifiedTable struct{ schema, name string }
 const migrationsTableName = "schema_migrations"
 
 // refuseIfTargetHasData errors out, before resetDatabase drops anything,
-// if any table other than migrationsTableName already contains a row.
-// dingo's own migrations never insert into a domain table -- only
-// schema_migrations records bookkeeping rows (verified: no migration file
-// under sqlstore/migrations/v1 contains an INSERT INTO a domain table) --
-// so a database restoreMetadataStore's brief resolve-and-start just
-// finished migrating has zero rows in everything else. A nonzero count
-// anywhere else means this target isn't that: most plausibly a live
-// node's own database, pointed at by a reused or misconfigured DSN, whose
-// accumulated real data resetDatabase's unconditional DROP TABLE would
-// otherwise destroy with no way back.
+// if any table other than the migrations runner's own bookkeeping table
+// already contains a row. dingo's own migrations never insert into a
+// domain table -- only schema_migrations records bookkeeping rows
+// (verified: no migration file under sqlstore/migrations/v1 contains an
+// INSERT INTO a domain table) -- so a database restoreMetadataStore's
+// brief resolve-and-start just finished migrating has zero rows in
+// everything else. A nonzero count anywhere else means this target isn't
+// that: most plausibly a live node's own database, pointed at by a reused
+// or misconfigured DSN, whose accumulated real data resetDatabase's
+// unconditional DROP TABLE would otherwise destroy with no way back.
+//
+// The exemption is scoped to (schema, name), not name alone: resetDatabase
+// scans every non-system schema, and migrations/runner.go's own
+// hasUserTables query creates schema_migrations in current_schema()
+// (typically "public", but operator-configurable via search_path) -- a
+// same-named table an operator's own tooling created in some OTHER schema
+// is not dingo's bookkeeping table, and a name-only exemption would let a
+// populated one of those slip past this check and then get dropped anyway.
 func refuseIfTargetHasData(
 	ctx context.Context,
 	db *sql.DB,
 	tables []qualifiedTable,
 ) error {
+	var migrationsSchema string
+	if err := db.QueryRowContext(
+		ctx, "SELECT current_schema()",
+	).Scan(&migrationsSchema); err != nil {
+		return fmt.Errorf("determine current schema: %w", err)
+	}
 	for _, t := range tables {
-		if t.name == migrationsTableName {
+		if t.name == migrationsTableName && t.schema == migrationsSchema {
 			continue
 		}
 		quoted := pgQuoteIdentifier(t.schema) + "." + pgQuoteIdentifier(t.name)

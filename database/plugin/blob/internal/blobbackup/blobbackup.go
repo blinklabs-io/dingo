@@ -313,14 +313,30 @@ func Restore(
 							"actually read%s",
 						errPrefix, term.RecordCount, term.Checksum,
 						recordCount, checksum.Sum32(),
-						partialDataWarning(committedBatches),
+						partialDataWarning(committedBatches, err),
+					)
+				}
+				// A well-formed backup ends exactly here -- confirm the
+				// underlying stream agrees before accepting it: a second
+				// backup concatenated after this one, or trailing garbage,
+				// must be rejected as a malformed backup rather than
+				// silently ignored while only the first one is restored.
+				var trailing [1]byte
+				if _, trailErr := io.ReadFull(cr, trailing[:]); !errors.Is(
+					trailErr, io.EOF,
+				) {
+					_ = txn.Rollback()
+					return fmt.Errorf(
+						"%s: backup stream has trailing data after its "+
+							"terminator (concatenated or malformed backup)%s",
+						errPrefix, partialDataWarning(committedBatches, err),
 					)
 				}
 				break
 			}
 			_ = txn.Rollback()
 			return fmt.Errorf(
-				"%s: %w%s", errPrefix, err, partialDataWarning(committedBatches),
+				"%s: %w%s", errPrefix, err, partialDataWarning(committedBatches, err),
 			)
 		}
 		// Never fails: hash.Hash's Write always reports success. Mirrors
@@ -331,7 +347,7 @@ func Restore(
 			_ = txn.Rollback()
 			return fmt.Errorf(
 				"%s: set key %x: %w%s",
-				errPrefix, key, err, partialDataWarning(committedBatches),
+				errPrefix, key, err, partialDataWarning(committedBatches, err),
 			)
 		}
 		batchRecords++
@@ -341,7 +357,7 @@ func Restore(
 			if err := flush(); err != nil {
 				return fmt.Errorf(
 					"%s: commit batch: %w%s",
-					errPrefix, err, partialDataWarning(committedBatches),
+					errPrefix, err, partialDataWarning(committedBatches, err),
 				)
 			}
 		}
@@ -349,21 +365,35 @@ func Restore(
 	if err := flush(); err != nil {
 		return fmt.Errorf(
 			"%s: commit final batch: %w%s",
-			errPrefix, err, partialDataWarning(committedBatches),
+			errPrefix, err, partialDataWarning(committedBatches, err),
 		)
 	}
 	return nil
 }
 
-// partialDataWarning returns an empty string if committedBatches is zero
-// (the store is still untouched -- a failure here is no different from any
-// other Restore failure), or an explicit suffix describing how many
-// batches are already durably committed and un-undoable, so an operator
-// reading a failed Restore's error output knows the store must be
-// discarded rather than assumed safe to retry against.
-func partialDataWarning(committedBatches int) string {
-	if committedBatches == 0 {
+// partialDataWarning returns an empty string only if the store is
+// genuinely still untouched: no earlier batch committed, and the current
+// failure isn't itself a commit that partially applied
+// (types.ErrPartialCommit -- a cloud store's transaction Commit can report
+// failure while having already durably written some of its keys, if the
+// store's own internal compensating undo also failed; see s3Txn.Commit/
+// gcsTxn.Commit). Otherwise it returns an explicit suffix, so an operator
+// reading a failed Restore's error output doesn't have to already know
+// either of these internal details to realize the store must be
+// discarded, not assumed safe to retry against.
+func partialDataWarning(committedBatches int, err error) string {
+	currentBatchPartial := errors.Is(err, types.ErrPartialCommit)
+	if committedBatches == 0 && !currentBatchPartial {
 		return ""
+	}
+	if currentBatchPartial {
+		return fmt.Sprintf(
+			" (%d earlier batch(es) already committed, and this failing "+
+				"batch's own commit may have partially applied too -- the "+
+				"store now contains partial data and must be discarded; "+
+				"do not retry Restore against it)",
+			committedBatches,
+		)
 	}
 	return fmt.Sprintf(
 		" (%d batch(es) already committed to the store -- it now contains "+

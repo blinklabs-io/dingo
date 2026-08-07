@@ -263,6 +263,50 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	)
 }
 
+// TestResetRefusesWhenOtherSchemaHasSchemaMigrationsTableWithData guards a
+// real gap: refuseIfTargetHasData originally exempted any table literally
+// named "schema_migrations" regardless of which schema it lived in, but
+// resetDatabase scans every non-system schema -- an operator's own tooling
+// (or an unrelated app sharing this database) could have its own,
+// differently-scoped table that happens to share that common name. A
+// name-only exemption let a populated one of those slip past this check
+// and then get dropped anyway by resetDatabase's unconditional DROP TABLE.
+// The exemption must be scoped to (schema, name), matching exactly the
+// schema migrations/runner.go's own hasUserTables uses (current_schema()).
+func TestResetRefusesWhenOtherSchemaHasSchemaMigrationsTableWithData(t *testing.T) {
+	baseDSN := postgresIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_othermig")
+	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec("CREATE SCHEMA other_app")
+	require.NoError(t, err)
+	_, err = admin.Exec("CREATE TABLE other_app.schema_migrations (id int)")
+	require.NoError(t, err)
+	_, err = admin.Exec(
+		"INSERT INTO other_app.schema_migrations (id) VALUES (1)",
+	)
+	require.NoError(t, err)
+
+	err = store.Reset(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already contains data")
+
+	var count int
+	require.NoError(t, admin.QueryRow(
+		"SELECT count(*) FROM other_app.schema_migrations",
+	).Scan(&count))
+	require.Equal(
+		t, 1, count,
+		"a refused Reset must not have touched the other schema's table",
+	)
+}
+
 // TestResetToleratesView guards a real gap: databaseIsEmpty/resetDatabase
 // originally counted every information_schema.tables row as a base
 // table, so a view sitting alongside dingo's own tables (something an

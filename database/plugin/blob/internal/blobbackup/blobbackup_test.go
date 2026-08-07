@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"maps"
@@ -165,16 +166,24 @@ func TestContextWriterStopsOnCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-// TestPartialDataWarning validates the two states an operator needs to be
-// able to tell apart from a failed Restore's error text alone: zero
-// committed batches means the store is still untouched (empty string, no
-// special handling needed), while any nonzero count means the store now
-// holds real, un-undoable data and the message must say so explicitly.
+// TestPartialDataWarning validates the states an operator needs to be able
+// to tell apart from a failed Restore's error text alone: zero committed
+// batches with an ordinary error means the store is still untouched (empty
+// string, no special handling needed); a nonzero count means the store
+// already holds real, un-undoable data; and -- even with zero committed
+// batches -- a failure wrapping types.ErrPartialCommit means the failing
+// batch's own commit may have partially applied despite being reported as
+// failed, which committedBatches alone can't see since it only increments
+// on a successful Commit.
 func TestPartialDataWarning(t *testing.T) {
-	require.Empty(t, partialDataWarning(0))
+	require.Empty(t, partialDataWarning(0, errors.New("ordinary failure")))
 
-	msg := partialDataWarning(3)
+	msg := partialDataWarning(3, errors.New("ordinary failure"))
 	require.Contains(t, msg, "3 batch")
+	require.Contains(t, msg, "discarded")
+
+	msg = partialDataWarning(0, fmt.Errorf("commit: %w", types.ErrPartialCommit))
+	require.NotEmpty(t, msg)
 	require.Contains(t, msg, "discarded")
 }
 
@@ -236,6 +245,9 @@ type fakeTxn struct {
 }
 
 func (t *fakeTxn) Commit() error {
+	if t.store.failCommitErr != nil {
+		return t.store.failCommitErr
+	}
 	maps.Copy(t.store.data, t.pending)
 	return nil
 }
@@ -244,6 +256,11 @@ func (t *fakeTxn) Rollback() error { return nil }
 
 type fakeStore struct {
 	data map[string][]byte
+	// failCommitErr, when set, is returned by every fakeTxn.Commit instead
+	// of actually applying that transaction's pending writes -- used to
+	// simulate a cloud store's Commit reporting failure (e.g. wrapping
+	// types.ErrPartialCommit) without needing a real S3/GCS backend.
+	failCommitErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -353,4 +370,67 @@ func TestRestoreRejectsTerminatorWithMismatchedCount(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "corrupted")
+}
+
+// TestRestoreReportsPartialDataOnErrPartialCommit guards a real gap:
+// committedBatches only increments after a batch's Commit succeeds, but a
+// cloud store's Commit can fail while having already durably written some
+// of that same batch's keys, if its own internal compensating undo also
+// failed (types.ErrPartialCommit). That leaves committedBatches at zero
+// even though the store may no longer be empty, so partialDataWarning must
+// also check for that sentinel directly, not rely on the counter alone.
+func TestRestoreReportsPartialDataOnErrPartialCommit(t *testing.T) {
+	src := newFakeStore()
+	txn := src.NewTransaction(true)
+	require.NoError(t, src.Set(txn, []byte("key-a"), []byte("value-a")))
+	require.NoError(t, txn.Commit())
+
+	var buf bytes.Buffer
+	require.NoError(
+		t,
+		Backup(context.Background(), src, &buf, testMaxValueLen, "test backup"),
+	)
+
+	dst := newFakeStore()
+	dst.failCommitErr = fmt.Errorf("commit: %w", types.ErrPartialCommit)
+	err := Restore(
+		context.Background(), dst, &buf, testMaxValueLen, "test restore",
+	)
+	require.Error(t, err)
+	require.Contains(
+		t, err.Error(), "discarded",
+		"a commit failure wrapping ErrPartialCommit must warn about "+
+			"partial data even though no batch ever counted as committed",
+	)
+}
+
+// TestRestoreRejectsTrailingDataAfterTerminator guards a real gap: Restore
+// used to stop reading as soon as it validated the terminator, without
+// confirming the underlying stream actually ended there -- a second backup
+// concatenated after the first (or trailing garbage) was silently ignored
+// instead of being rejected as a malformed backup.
+func TestRestoreRejectsTrailingDataAfterTerminator(t *testing.T) {
+	src := newFakeStore()
+	txn := src.NewTransaction(true)
+	require.NoError(t, src.Set(txn, []byte("key-a"), []byte("value-a")))
+	require.NoError(t, txn.Commit())
+
+	var buf bytes.Buffer
+	require.NoError(
+		t,
+		Backup(context.Background(), src, &buf, testMaxValueLen, "test backup"),
+	)
+	// Append a second copy of the exact same, otherwise fully valid backup
+	// stream right after the first -- copied out first since appending a
+	// bytes.Buffer's own current contents back into itself risks reading
+	// from memory the same growth reallocation is still overwriting.
+	original := append([]byte(nil), buf.Bytes()...)
+	buf.Write(original)
+
+	dst := newFakeStore()
+	err := Restore(
+		context.Background(), dst, &buf, testMaxValueLen, "test restore",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "trailing data")
 }
