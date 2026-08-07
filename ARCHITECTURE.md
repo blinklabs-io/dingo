@@ -2824,6 +2824,24 @@ Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
 everything downstream of `Bootstrap()` is backend-agnostic.
 
+`snapshot.Network`/`Digest` (v1) and `artifact.Network`/`Hash` (v2) arrive
+from the aggregator before certificate/hash verification runs, so
+`bootstrap.go`'s `validateSnapshotIdentity` rejects them before either
+backend derives a filesystem path from them. The network must be either
+one of the default networks (`AcceptedNetworks()`, mirroring
+`AcceptedBackends()`) or an exact match for the operator's own configured
+`BootstrapConfig.Network` — trusted because it's already restricted to
+alphanumeric/hyphen/underscore by `internal/config`'s `ValidateNetworkName`
+before it ever reaches this package — which lets a private/self-hosted
+aggregator serve a non-default network name (e.g. a devnet) without
+loosening what an untrusted response can put on a path. The digest/hash
+must match the expected 64-character hex format (Blake2b-256/SHA-256,
+hex-encoded). Every filename or directory built from these fields, for
+both the cache-hit check and the actual download/extraction, is
+additionally passed through `filepath.Base` at its construction site, so
+none of them can ever evaluate a different path even if validation is
+ever loosened.
+
 ### Catch-up vs bootstrap dispatch
 
 `mithril.Sync` (the `dingo mithril sync` entry point) selects what to do from

@@ -1268,7 +1268,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:  "abc123def456789012345678",
+				Digest:  "f123456789abcdef0f123456789abcdef0f123456789abcdef0f123456789abc",
 				Network: "preprod",
 				Beacon: Beacon{
 					Epoch:               270,
@@ -1303,7 +1303,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 			},
 			ProtocolMessage: ProtocolMessage{
 				MessageParts: map[string]string{
-					"snapshot_digest": "abc123def456789012345678",
+					"snapshot_digest": "f123456789abcdef0f123456789abcdef0f123456789abcdef0f123456789abc",
 					"current_epoch":   "270",
 				},
 			},
