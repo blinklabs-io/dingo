@@ -227,15 +227,17 @@ var errNodeSettingsGateInitializationLost = errors.New(
 )
 
 func isOnlyNodeSettingsGateInitializationRace(err error) bool {
-	if err == errNodeSettingsGateInitializationLost {
-		return true
+	if errors.Is(err, errNodeSettingsGateInitializationLost) {
+		var joined interface{ Unwrap() []error }
+		if !errors.As(err, &joined) {
+			return true
+		}
+		causes := joined.Unwrap()
+		return len(causes) == 1 && errors.Is(
+			causes[0], errNodeSettingsGateInitializationLost,
+		)
 	}
-	var joined interface{ Unwrap() []error }
-	if !errors.As(err, &joined) {
-		return false
-	}
-	causes := joined.Unwrap()
-	return len(causes) == 1 && causes[0] == errNodeSettingsGateInitializationLost
+	return false
 }
 
 // InsertNodeSettingsGatesIfAbsent inserts a complete first-fill set in one
