@@ -158,6 +158,31 @@ func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 		"unfiltered fractions must sum to one, got %s", sum)
 }
 
+// TestPoolStakeDistribution_CarriesTheTipItWasReadAt covers the Tip field.
+//
+// Callers that report a "state as of" point need the point the stake rows were
+// actually read at, not one sampled afterwards. Both come from the same
+// transaction as the rows, so the pair cannot straddle a block or epoch
+// boundary.
+func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
+	db := newTestDB(t)
+	seedPoolDistr2Fixture(
+		t, db,
+		repeatedBytes(28, 0x11), repeatedBytes(32, 0xAA),
+		3_000_000, 0,
+	)
+	ls := newPoolDistr2Ledger(t, db)
+
+	dist, err := ls.PoolStakeDistribution(nil)
+	require.NoError(t, err)
+	require.NotNil(t, dist)
+
+	tip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, tip.Point.Slot, dist.Tip.Point.Slot)
+	assert.Equal(t, tip.Point.Hash, dist.Tip.Point.Hash)
+}
+
 // TestPoolStakeDistribution_FilterReportsOnlyRequestedPools covers the bounded
 // read. The filter selects which pools are reported; it does not change what
 // they are a share of, so a filtered reply's fractions sum to less than one.

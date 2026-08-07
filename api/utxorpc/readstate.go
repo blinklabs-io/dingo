@@ -23,6 +23,7 @@ import (
 
 	"connectrpc.com/connect"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	betacardano "github.com/utxorpc/go-codegen/utxorpc/v1beta/cardano"
 	betaquery "github.com/utxorpc/go-codegen/utxorpc/v1beta/query"
 )
@@ -107,7 +108,22 @@ func (s *betaQueryServiceServer) ReadState(
 func (s *betaQueryServiceServer) readStakePoolDistribution(
 	query *betacardano.GetStakePoolDistribution,
 ) (*connect.Response[betaquery.ReadStateResponse], error) {
-	poolFilter, err := poolKeyHashFilter(query.GetPoolKeyhashes())
+	// LedgerState is an optional dependency: Utxorpc.Start admits an untyped
+	// nil and documents that handlers check per request (it rejects only a
+	// typed nil, which would slip past a check like this one). Without this a
+	// node configured with no ledger state answers ReadState with a panicking
+	// listener rather than a status a client can act on.
+	if s.utxorpc.config.LedgerState == nil {
+		return nil, connect.NewError(
+			connect.CodeUnavailable,
+			errors.New("ledger state not available"),
+		)
+	}
+
+	poolFilter, err := poolKeyHashFilter(
+		query.GetPoolKeyhashes(),
+		s.utxorpc.config.MaxPoolFilter,
+	)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
@@ -154,7 +170,7 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 		})
 	}
 
-	tip := s.utxorpc.betaLedgerTip()
+	tip := s.utxorpc.betaChainPoint(dist.Tip.Point)
 	return connect.NewResponse(&betaquery.ReadStateResponse{
 		Result: &betaquery.AnyChainStateData{
 			Result: &betaquery.AnyChainStateData_Cardano{
@@ -182,9 +198,22 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 // request's empty slice straight through would return nothing.
 func poolKeyHashFilter(
 	poolKeyHashes [][]byte,
+	maxPoolFilter int,
 ) ([]lcommon.PoolKeyHash, error) {
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
+	}
+	// Bounded like ReadUtxos' and ReadData's key lists: the filter is client
+	// supplied and sizes both the allocation here and the snapshot and
+	// registration reads it drives, so an unbounded one lets a single request
+	// choose how much work the node does. A caller wanting every pool sends an
+	// empty filter, which costs one bulk read regardless of pool count.
+	if len(poolKeyHashes) > maxPoolFilter {
+		return nil, fmt.Errorf(
+			"too many pool key hashes: %d exceeds maximum of %d",
+			len(poolKeyHashes),
+			maxPoolFilter,
+		)
 	}
 	filter := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 	for _, raw := range poolKeyHashes {
@@ -207,14 +236,21 @@ func poolKeyHashFilter(
 	return filter, nil
 }
 
-// betaLedgerTip returns the current tip as a v1beta ChainPoint, naming the
-// snapshot a ReadState reply was evaluated against.
+// betaChainPoint renders a point as a v1beta ChainPoint, looking up the block
+// height that completes it.
 //
-// A tip whose block cannot be read still has a slot and a hash, which is what
-// identifies the point; only the height is unknown. Failing the whole query
-// over a missing height would withhold an answer the node does have.
-func (u *Utxorpc) betaLedgerTip() *betaquery.ChainPoint {
-	point := u.config.LedgerState.Tip().Point
+// The point is passed in rather than sampled from the ledger here, so a caller
+// can name the point its answer was actually read at. Sampling Tip() at
+// response-building time would report a tip the chain had moved on to, which
+// across an epoch boundary names an epoch whose stake snapshot is not the one
+// the reply carries.
+//
+// A point whose block cannot be read still has a slot and a hash, which is what
+// identifies it; only the height is unknown. Failing the whole query over a
+// missing height would withhold an answer the node does have.
+func (u *Utxorpc) betaChainPoint(
+	point ocommon.Point,
+) *betaquery.ChainPoint {
 	br := blockRef{Slot: point.Slot, Hash: point.Hash}
 	if model, err := u.config.LedgerState.GetBlock(point); err != nil {
 		u.config.Logger.Warn(

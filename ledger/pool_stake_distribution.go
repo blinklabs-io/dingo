@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // PoolStakeShare is one pool's entry in the active stake distribution.
@@ -43,6 +44,13 @@ type PoolStakeShare struct {
 // PoolStakeDistribution is the stake distribution across block-producing pools
 // as of SnapshotEpoch.
 type PoolStakeDistribution struct {
+	// Tip is the chain tip read inside the same transaction as the stake rows.
+	// It is what the distribution was evaluated against, so a caller reporting
+	// a "the state as of" point must use this rather than sampling the tip
+	// again afterwards: between the two reads the chain can advance, and across
+	// an epoch boundary the later tip names an epoch whose snapshot is not the
+	// one these rows came from.
+	Tip ochainsync.Tip
 	// SnapshotEpoch names the mark snapshot the distribution was read from,
 	// which is the snapshot this node elects leaders from rather than live
 	// stake.
@@ -96,7 +104,7 @@ func (ls *LedgerState) PoolStakeDistribution(
 	// in-memory consensus snapshot; see epochAtTip for why. A chain that has
 	// applied no blocks has no epoch record covering its tip, and epoch zero is
 	// the right answer there.
-	_, current, err := ls.epochAtTip(txn)
+	tip, current, err := ls.epochAtTip(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +186,7 @@ func (ls *LedgerState) PoolStakeDistribution(
 	}
 
 	dist := &PoolStakeDistribution{
+		Tip:              tip,
 		SnapshotEpoch:    snapshotEpoch,
 		TotalActiveStake: totalActiveStake,
 		Pools:            make([]PoolStakeShare, 0, len(keyHashes)),

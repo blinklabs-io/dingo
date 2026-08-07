@@ -55,9 +55,15 @@ type readStateLedgerStub struct {
 	gotFilter    []lcommon.PoolKeyHash
 	gotFilterNil bool
 	calls        int
+	// tipCalls proves the handler does not sample the live tip when building
+	// the reply; the point must come from the distribution read instead.
+	tipCalls int
 }
 
-func (s *readStateLedgerStub) Tip() ochainsync.Tip { return s.tip }
+func (s *readStateLedgerStub) Tip() ochainsync.Tip {
+	s.tipCalls++
+	return s.tip
+}
 
 func (s *readStateLedgerStub) GetBlock(ocommon.Point) (models.Block, error) {
 	if s.blockErr != nil {
@@ -135,11 +141,11 @@ func TestReadState_ReportsStakePoolDistribution(t *testing.T) {
 	vrfB := testVrfKeyHash(0x02)
 
 	stub := &readStateLedgerStub{
-		tip: ochainsync.Tip{
-			Point: ocommon.NewPoint(1234, []byte{0xDE, 0xAD}),
-		},
 		block: models.Block{Slot: 1234, Hash: []byte{0xDE, 0xAD}, Number: 77},
 		dist: &ledger.PoolStakeDistribution{
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(1234, []byte{0xDE, 0xAD}),
+			},
 			SnapshotEpoch:    9,
 			TotalActiveStake: 4_000_000,
 			Pools: []ledger.PoolStakeShare{
@@ -336,6 +342,104 @@ func TestReadState_NilStakePoolDistributionMessageMeansEveryPool(t *testing.T) {
 	assert.True(t, stub.gotFilterNil)
 }
 
+// TestReadState_LedgerTipComesFromTheDistributionRead covers the ledger_tip
+// field, which the proto defines as the point the query was evaluated against.
+//
+// The distribution is read in one transaction that takes its own tip; sampling
+// Tip() again while building the reply would report a point the chain had since
+// moved to. Across an epoch boundary that names an epoch whose stake snapshot
+// is not the one the reply carries, so a client cannot treat the pair as one
+// snapshot. The stub's live tip is deliberately set far ahead of the read tip
+// so the two cannot be confused.
+func TestReadState_LedgerTipComesFromTheDistributionRead(t *testing.T) {
+	readTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(1000, []byte{0x0A}),
+	}
+	stub := &readStateLedgerStub{
+		tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(9999, []byte{0xFF}),
+		},
+		block: models.Block{Slot: 1000, Hash: []byte{0x0A}, Number: 42},
+		dist: &ledger.PoolStakeDistribution{
+			Tip: readTip,
+		},
+	}
+	srv := newReadStateServer(t, stub)
+
+	resp, err := srv.ReadState(
+		context.Background(),
+		stakePoolDistributionRequest(),
+	)
+	require.NoError(t, err)
+
+	tip := resp.Msg.GetLedgerTip()
+	require.NotNil(t, tip)
+	assert.Equal(t, uint64(1000), tip.GetSlot(),
+		"the reported point must be the one the distribution was read at")
+	assert.Equal(t, []byte{0x0A}, tip.GetHash())
+	assert.Equal(t, uint64(42), tip.GetHeight())
+	assert.Zero(t, stub.tipCalls,
+		"the live tip must not be sampled while building the reply")
+}
+
+// TestReadState_MissingLedgerStateIsUnavailable covers a server configured with
+// no ledger state. Utxorpc.Start admits an untyped nil and documents that
+// handlers check per request, so this has to be a status rather than a panic in
+// a network listener.
+func TestReadState_MissingLedgerStateIsUnavailable(t *testing.T) {
+	srv := newReadStateServer(t, nil)
+
+	_, err := srv.ReadState(
+		context.Background(),
+		stakePoolDistributionRequest(),
+	)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+}
+
+// TestReadState_RejectsOversizedPoolFilter covers the bound on the client
+// supplied filter. The filter sizes the snapshot and registration reads it
+// drives, so an unbounded one lets one request choose how much work the node
+// does; the other UTxO RPC key lists are capped the same way.
+func TestReadState_RejectsOversizedPoolFilter(t *testing.T) {
+	stub := &readStateLedgerStub{dist: &ledger.PoolStakeDistribution{}}
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:   stub,
+		MaxPoolFilter: 2,
+	})
+	srv := &betaQueryServiceServer{utxorpc: u}
+
+	atLimit := [][]byte{
+		testPoolKeyHash(0x01).Bytes(),
+		testPoolKeyHash(0x02).Bytes(),
+	}
+	_, err := srv.ReadState(
+		context.Background(),
+		stakePoolDistributionRequest(atLimit...),
+	)
+	require.NoError(t, err, "a filter at the limit is accepted")
+
+	overLimit := append(atLimit, testPoolKeyHash(0x03).Bytes())
+	_, err = srv.ReadState(
+		context.Background(),
+		stakePoolDistributionRequest(overLimit...),
+	)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+	assert.Equal(t, 1, stub.calls,
+		"an oversized filter must not reach the ledger")
+}
+
+// TestNewUtxorpc_DefaultsMaxPoolFilter pins the cap being defaulted rather than
+// left at zero, which would reject every filtered request.
+func TestNewUtxorpc_DefaultsMaxPoolFilter(t *testing.T) {
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	assert.Equal(t, DefaultMaxPoolFilter, u.config.MaxPoolFilter)
+}
+
 // TestReadState_LedgerErrorIsInternal covers the ledger read failing. The
 // caller's request was well formed, so this is not InvalidArgument.
 func TestReadState_LedgerErrorIsInternal(t *testing.T) {
@@ -355,11 +459,12 @@ func TestReadState_LedgerErrorIsInternal(t *testing.T) {
 // the reply is served with an unknown height rather than failed.
 func TestReadState_TipHeightFallsBackWhenBlockMissing(t *testing.T) {
 	stub := &readStateLedgerStub{
-		tip: ochainsync.Tip{
-			Point: ocommon.NewPoint(4321, []byte{0xBE, 0xEF}),
-		},
 		blockErr: errors.New("no such block"),
-		dist:     &ledger.PoolStakeDistribution{},
+		dist: &ledger.PoolStakeDistribution{
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(4321, []byte{0xBE, 0xEF}),
+			},
+		},
 	}
 	srv := newReadStateServer(t, stub)
 
