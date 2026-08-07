@@ -1055,6 +1055,80 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 	)
 }
 
+// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
+// review finding on ledgerstate/utxo.go: the indefinite-length UTxO map's
+// running entry-count check can only reject entry `limit`+1 after earlier
+// batches have already been streamed to the UTxO callback and committed to
+// the database (there is no header count to check up front, unlike the
+// definite-length path). This is safe rather than a partial-import bug
+// because every UTxO write is an idempotent "insert if absent" upsert: a
+// later re-run over the same data (e.g. after the cap is raised or
+// corrupted data is replaced) reapplies the same rows without duplicating
+// them, converging to exactly one row per UTxO.
+func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	const (
+		// One more entry than the cap below, so the running check
+		// rejects the map — but only after two full utxoBatchSize
+		// (10,000-entry) batches were already committed.
+		totalEntries = 20001
+		limit        = 20000
+		slot         = uint64(500)
+	)
+	data := buildIndefiniteUTxOMapCbor(t, totalEntries)
+	store := db.Metadata()
+
+	importBatch := func(batch []ParsedUTxO) error {
+		utxos := make([]models.Utxo, 0, len(batch))
+		for i := range batch {
+			utxos = append(utxos, UTxOToModel(&batch[i], slot))
+		}
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		if err := store.ImportUtxos(utxos, txn.Metadata()); err != nil {
+			return err
+		}
+		return txn.Commit()
+	}
+
+	_, err = parseIndefiniteUTxOMapWithProgressLimit(
+		data, importBatch, nil, limit,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeded max entries")
+	require.Contains(t, err.Error(), "duplicate-safe")
+
+	committed, err := store.GetUtxosAddedAfterSlot(slot-1, nil)
+	require.NoError(t, err)
+	require.Len(
+		t, committed, limit,
+		"the two full batches before the rejected entry "+
+			"should already be committed",
+	)
+
+	// Simulate a retry (checkpoint-resumed or from scratch) once the
+	// underlying issue is resolved: re-running over a limit that now
+	// covers every entry must converge without duplicating the rows
+	// the first pass already committed.
+	total, err := parseIndefiniteUTxOMapWithProgressLimit(
+		data, importBatch, nil, totalEntries,
+	)
+	require.NoError(t, err)
+	require.Equal(t, totalEntries, total)
+
+	final, err := store.GetUtxosAddedAfterSlot(slot-1, nil)
+	require.NoError(t, err)
+	require.Len(
+		t, final, totalEntries,
+		"retry must converge to exactly one row per UTxO, no duplicates",
+	)
+}
+
 func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)

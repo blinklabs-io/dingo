@@ -57,6 +57,24 @@ import (
 //     up front, so parseIndefiniteUTxOMapWithProgress instead
 //     enforces the same cap as a running check
 //     (checkUTxOMapRunningEntryCount) against every streamed entry.
+//     Unlike the definite-length path, the running check can only
+//     reject after entries below the cap have already been streamed
+//     to importUTxOs's batch callback and committed to the database.
+//     That is safe by construction rather than by accident: every
+//     UTxO write goes through an idempotent "insert if absent" upsert
+//     (see ImportUtxos/CreateUtxoIfAbsent), and ImportLedgerState
+//     never marks the UTxO phase checkpoint or advances the chain tip
+//     when this check fails, so a re-run (checkpoint-resumed or from
+//     scratch) safely redoes the phase without duplicating rows, and
+//     nothing downstream treats the partially-imported database as a
+//     complete ledger state. A preflight full count or a transaction
+//     wrapping the whole phase were both considered and rejected: the
+//     former would require a second full pass over a potentially
+//     multi-GB indefinite-length stream purely to detect the rare
+//     corrupted/adversarial case, and the latter would hold one
+//     transaction open across the entire UTxO set, defeating the
+//     batched-commit design used by every import phase in
+//     import.go.
 //   - decodeRawElements (Conway-era array-or-int-keyed-map record
 //     encoding): the int-keyed map variant caps the maximum
 //     integer key at maxAllowedKey (256) to bound the

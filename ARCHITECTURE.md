@@ -2887,7 +2887,16 @@ independently — the definite-length UTxO map's `DecodeMapHeader`-reported
 count is checked up front (`checkUTxOMapEntryCount`), and the
 indefinite-length UTxO map, which has no header count to check up front, is
 capped with an equivalent running check against every streamed entry
-(`checkUTxOMapRunningEntryCount`). Recursion in the manual CBOR item-sizer
+(`checkUTxOMapRunningEntryCount`). Because there is no upfront count, entries
+below the cap are already streamed to the UTxO import batch callback (and
+therefore committed to the database) by the time the running check rejects
+entry `maxMapEntries`+1 — this is safe rather than a partial-import bug:
+every UTxO write is an idempotent "insert if absent" upsert, and
+`ImportLedgerState` never marks the UTxO import phase checkpoint or advances
+the chain tip when this check fails, so a later re-run (checkpoint-resumed or
+from scratch) can only reapply the same rows, and nothing downstream ever
+treats the partially-imported database as a complete, ready ledger state.
+Recursion in the manual CBOR item-sizer
 and the HardFork "telescope" traversal is capped at 128 and 16 levels
 respectively to bound stack depth against
 adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is

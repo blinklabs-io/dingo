@@ -57,10 +57,33 @@ func checkUTxOMapEntryCount(count int) error {
 // limit to prove the boundary check accepts exactly `limit` entries
 // and rejects entry `limit`+1 without streaming a mainnet-scale
 // fixture.
+//
+// Because there is no upfront count, batches of entries below the
+// cap are delivered to the UTxO callback (and therefore committed to
+// the database, see importUTxOs in import.go) before this check can
+// reject entry `limit`+1. That is intentionally not treated as a
+// partial-import bug: every row importUTxOs writes goes through
+// ImportUtxos, an idempotent "insert if absent" upsert, so re-running
+// the same phase (whether via checkpoint resume or a from-scratch
+// retry) can never duplicate or corrupt those rows. And the failure
+// here aborts ImportLedgerState before it sets the UTxO phase
+// checkpoint or advances the chain tip (see ImportLedgerState and
+// mithril.Sync's sync_status handling), so the already-committed rows
+// are never treated as a complete, ready ledger state. See
+// "Local CBOR decode limits policy" in cbor_decode.go for the
+// corresponding note on why this doesn't need a preflight count or a
+// transactional rollback of the UTxO phase.
 func checkUTxOMapRunningEntryCount(entryIndex, limit int) error {
 	if entryIndex >= limit {
 		return fmt.Errorf(
-			"indefinite-length UTxO map exceeded max entries (%d)",
+			"indefinite-length UTxO map exceeded max entries (%d); "+
+				"UTxO rows already committed before this point are "+
+				"harmless and duplicate-safe on a future import, but "+
+				"the import checkpoint and chain tip were not "+
+				"advanced, so the database is not left in a usable "+
+				"state — this indicates the map is corrupted or "+
+				"genuinely exceeds the configured cap and needs "+
+				"investigation, not a bare retry",
 			limit,
 		)
 	}
