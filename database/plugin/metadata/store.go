@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -57,9 +58,54 @@ type SettingsStore interface {
 	// idempotent insert that succeeds on repeated calls. If the row
 	// already exists, implementations must not overwrite immutable
 	// fields and should only populate network fields when they are
-	// currently unset so callers like checkNodeSettings can perform
+	// currently unset so callers like CheckNodeSettings can perform
 	// a one-time network backfill.
 	SetNodeSettings(*types.NodeSettings) error
+
+	// GetNodeSettingsGates returns the persisted node settings gate
+	// values, keyed by gate name. These are the values enforced on every
+	// startup by database/nodesettings.Evaluate; an empty result means no
+	// gates have been recorded yet, which is normal before the first
+	// successful start.
+	GetNodeSettingsGates() (nodesettings.Values, error)
+
+	// SetNodeSettingsGates persists gates, one row per gate, so that a
+	// later call overwrites an earlier value for the same name. The
+	// recorded epoch and slot are stamped on every row written by this
+	// call and are zero when the write happens before the first block
+	// has been processed. A nil or empty gates is a no-op.
+	SetNodeSettingsGates(
+		gates nodesettings.Values,
+		recordedEpoch uint64,
+		recordedSlot uint64,
+	) error
+
+	// InsertNodeSettingsGateIfAbsent persists a single gate only if no row
+	// for name exists yet, returning whether this call created it. This is
+	// SetNodeSettingsGates's conditional counterpart, used for a gate's
+	// first-ever write specifically: two concurrent openers can both reach
+	// SettingsStore with no gates persisted yet -- reachable in practice
+	// only with a metadata plugin shared across processes by design
+	// (postgres, mysql) -- and an unconditional upsert would let whichever
+	// one commits last silently overwrite the other's value with no
+	// record that a collision happened. A caller that gets inserted=false
+	// lost the race and must re-read what is now actually persisted rather
+	// than assume its own write took effect.
+	InsertNodeSettingsGateIfAbsent(
+		name string,
+		value string,
+		recordedEpoch uint64,
+		recordedSlot uint64,
+	) (inserted bool, err error)
+
+	// InsertNodeSettingsGatesIfAbsent persists the complete first-fill set in
+	// one metadata transaction. It returns false when another initializer
+	// already claimed any member of the set; no partial set is committed.
+	InsertNodeSettingsGatesIfAbsent(
+		gates nodesettings.Values,
+		recordedEpoch uint64,
+		recordedSlot uint64,
+	) (inserted bool, err error)
 }
 
 // TransactionStore creates backend-owned read and write snapshots.

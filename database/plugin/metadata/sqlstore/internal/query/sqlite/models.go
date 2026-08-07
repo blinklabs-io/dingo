@@ -259,6 +259,13 @@ type NodeSetting struct {
 	Network     string
 }
 
+type NodeSettingsGate struct {
+	Name          string
+	Value         string
+	RecordedEpoch int64
+	RecordedSlot  int64
+}
+
 type OffchainMetadatum struct {
 	FetchedAt      sql.NullTime
 	NextFetchAfter sql.NullTime

@@ -58,8 +58,11 @@ func serveRun(
 	// Historical metadata backfill is only needed for API mode.
 	// API mode rebuilds any pending deferred indexes at the end of
 	// resumeBackfill; Core mode has no backfill step, so it falls
-	// through to the explicit repair below.
-	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
+	// through to the explicit repair below. Uses effectiveStorageMode,
+	// not the raw configured value, so this choice agrees with the mode
+	// openConfiguredDatabase actually opened above and the mode node.Run
+	// is about to run with (see effectiveStorageMode's doc comment).
+	if effectiveStorageMode(cfg).IsAPI() {
 		if err := resumeBackfill(
 			cmd.Context(), cfg, logger,
 		); err != nil {
@@ -324,17 +327,57 @@ func resumeBackfill(
 	return nil
 }
 
+// effectiveStorageMode returns the storage mode this run will actually end
+// up with once internal/node.Run applies its own dev-mode override ("dev
+// mode always uses API storage for full transaction metadata"), so any
+// preflight step that opens the database before node.Run gets to run --
+// openConfiguredDatabase chief among them -- opens it in the same mode
+// node.Run will, rather than whatever was configured.
+//
+// Without this, a dev-mode config with storageMode: core (permitted through
+// by validate.go's dev-mode exemption for midnight.enabled, since dev mode
+// is documented to upgrade to API before the contradiction would matter)
+// would have this preflight open a database in core mode first. That
+// latches storage_mode="core" as a node settings gate, and storage_mode is
+// a LatchEnum that only ever moves api-to-core, never back -- so the very
+// next open, from node.Run in its already-upgraded api mode, would fail
+// enforcement against the gate this preflight just recorded.
+func effectiveStorageMode(cfg *config.Config) dingo.StorageMode {
+	mode := dingo.StorageMode(cfg.StorageMode)
+	// internal/node.Run normalizes an unset mode to core before it reaches
+	// WithStorageMode, so do the same here rather than returning "". The
+	// values happen to converge today only because database.New applies its
+	// own empty-to-core default, and leaning on that would leave this
+	// helper's contract -- return exactly what node.Run will open with --
+	// dependent on a third component's default staying put. storage_mode is
+	// a one-way latch, so a future divergence here is not the kind that
+	// merely looks untidy.
+	if mode == "" {
+		mode = dingo.StorageModeCore
+	}
+	if cfg.RunMode.IsDevMode() && !mode.IsAPI() {
+		return dingo.StorageModeAPI
+	}
+	return mode
+}
+
 func openConfiguredDatabase(
 	ctx context.Context,
 	cfg *config.Config,
 	logger *slog.Logger,
 	maxConnections int,
 ) (*internalplugins.DatabaseRuntime, error) {
+	storageMode := string(effectiveStorageMode(cfg))
 	return internalplugins.OpenDatabase(
 		ctx,
 		&database.Config{
 			DataDir: cfg.DatabasePath, Logger: logger,
-			StorageMode: cfg.StorageMode, Network: cfg.Network,
+			StorageMode:    storageMode,
+			Network:        cfg.Network,
+			NetworkMagic:   cfg.NetworkMagic,
+			StartEra:       string(cfg.StartEra),
+			BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+			MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 		},
 		internalplugins.StorageSelections{
 			Blob:     cfg.Plugins.Storage.Blob,
@@ -342,7 +385,7 @@ func openConfiguredDatabase(
 		},
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
-			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
+			StorageMode: storageMode, MaxConnections: maxConnections,
 			Logger: logger,
 		},
 	)

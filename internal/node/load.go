@@ -134,7 +134,12 @@ func ensureDB(
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, Logger: logger,
-		StorageMode: cfg.StorageMode, Network: cfg.Network,
+		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
+		NetworkMagic:   cfg.NetworkMagic,
+		StartEra:       string(cfg.StartEra),
+		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 	}
 	runtime, err := internalplugins.OpenDatabase(
 		context.Background(),
