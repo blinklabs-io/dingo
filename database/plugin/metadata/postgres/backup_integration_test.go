@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,8 +61,22 @@ func createIsolatedDatabase(t *testing.T, dsn, namePrefix string) string {
 	_, err = admin.Exec(`CREATE DATABASE "` + database + `"`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = admin.Exec(`DROP DATABASE "` + database + `"`)
-		_ = admin.Close()
+		// Every caller closes its own store(s) against this database via a
+		// t.Cleanup registered after this one, which Go runs first (LIFO) --
+		// but terminate any backend connections that might still be open
+		// anyway (a test's own store failing to close cleanly, or a still-
+		// idle pooled connection) so DROP DATABASE below doesn't fail with
+		// "database is being accessed by other users" and silently leave it
+		// behind for good, accumulating unreclaimed databases on a shared
+		// CI/Postgres server.
+		_, _ = admin.Exec(
+			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity `+
+				`WHERE datname = $1 AND pid <> pg_backend_pid()`,
+			database,
+		)
+		_, err := admin.Exec(`DROP DATABASE "` + database + `"`)
+		require.NoError(t, err, "cleanup: drop isolated test database %q", database)
+		require.NoError(t, admin.Close())
 	})
 	parsed, err := url.Parse(dsn)
 	require.NoError(t, err)
@@ -72,7 +87,12 @@ func createIsolatedDatabase(t *testing.T, dsn, namePrefix string) string {
 // TestBackupToRestoreFromIntegration validates the full round trip against
 // a real Postgres server: BackupTo produces a real pg_dump archive from a
 // store with known data, and RestoreFrom into a separate empty database
-// reproduces that same data exactly.
+// reproduces that same data exactly. Writes to two independent tables
+// (commit_timestamp via SetCommitTimestamp, and the real node_settings
+// table via SetNodeSettings) rather than just one, so a pg_dump/pg_restore
+// path that silently dropped or corrupted some other real user table would
+// still be caught here instead of passing on the strength of a single
+// table's data alone.
 func TestBackupToRestoreFromIntegration(t *testing.T) {
 	baseDSN := postgresIntegrationDSN(t)
 	srcDSN := createIsolatedDatabase(t, baseDSN, "pgbackup_src")
@@ -88,6 +108,10 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	txn := srcStore.Transaction()
 	require.NoError(t, srcStore.SetCommitTimestamp(4242, txn))
 	require.NoError(t, txn.Commit())
+	require.NoError(t, srcStore.SetNodeSettings(&types.NodeSettings{
+		StorageMode: types.StorageModeAPI,
+		Network:     "preview",
+	}))
 
 	dumpPath := filepath.Join(t.TempDir(), "backup.dump")
 	require.NoError(t, srcStore.BackupTo(context.Background(), dumpPath))
@@ -107,6 +131,11 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	restoredTimestamp, err := dstStore.GetCommitTimestamp()
 	require.NoError(t, err)
 	require.Equal(t, int64(4242), restoredTimestamp)
+
+	restoredSettings, err := dstStore.GetNodeSettings()
+	require.NoError(t, err)
+	require.Equal(t, types.StorageModeAPI, restoredSettings.StorageMode)
+	require.Equal(t, "preview", restoredSettings.Network)
 }
 
 // TestBackupRejectsExistingDestinationIntegration validates that a second
@@ -201,4 +230,42 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 	restoredTimestamp, err := dstStore.GetCommitTimestamp()
 	require.NoError(t, err)
 	require.Equal(t, int64(777), restoredTimestamp)
+}
+
+// TestResetToleratesView guards a real gap: databaseIsEmpty/resetDatabase
+// originally counted every information_schema.tables row as a base
+// table, so a view sitting alongside dingo's own tables (something an
+// operator's own tooling, or a future dingo migration, could add) would
+// be counted as occupying the database and then fail resetDatabase
+// outright -- postgres rejects "DROP TABLE" naming a view. Both must
+// restrict to table_type = 'BASE TABLE' and leave the view untouched.
+func TestResetToleratesView(t *testing.T) {
+	baseDSN := postgresIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_view")
+	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"CREATE VIEW pgbackup_view_test AS SELECT id FROM node_settings",
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, store.Reset(context.Background()))
+
+	empty, err := databaseIsEmpty(context.Background(), admin)
+	require.NoError(t, err)
+	require.True(t, empty, "reset must leave a base-table-empty database, "+
+		"even with a view still present")
+
+	var viewCount int
+	require.NoError(t, admin.QueryRow(
+		"SELECT count(*) FROM information_schema.views "+
+			"WHERE table_name = 'pgbackup_view_test'",
+	).Scan(&viewCount))
+	require.Equal(t, 1, viewCount, "reset must not have touched the view")
 }

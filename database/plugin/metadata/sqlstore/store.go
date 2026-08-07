@@ -164,9 +164,14 @@ func (s *Store) RestoreFrom(ctx context.Context, srcPath string) error {
 // Reset clears all data this store owns, for providers that supply the
 // hook (see metadata.Resettable). A no-op for providers that don't --
 // unlike BackupTo/RestoreFrom, silently doing nothing here is correct,
-// not a lost user request: file-based providers (sqlite/badger) have
-// nothing for this to do, since restoreMetadataStore's directory wipe
-// already fully undoes their brief resolve-and-start.
+// not a lost user request: sqlite (the only file-based provider built on
+// this shared Store) has nothing for this to do, since restoreMetadataStore's
+// directory wipe already fully undoes its brief resolve-and-start. Every
+// backend built on this shared Store -- sqlite included -- therefore
+// satisfies metadata.Resettable's interface, but only postgres/mysql wire
+// a non-nil Config.Reset into it; sqlite's Reset is a documented no-op, not
+// evidence that it "needs more than a directory wipe" the way
+// metadata.Resettable's own doc comment describes for the backends that do.
 func (s *Store) Reset(ctx context.Context) error {
 	if s.reset == nil {
 		return nil

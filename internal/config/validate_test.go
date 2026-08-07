@@ -668,14 +668,51 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 		},
 	)
 
-	t.Run("disabled snapshots skip the writability check", func(t *testing.T) {
-		cfg := validTestConfig()
-		cfg.DatabaseLifecycle.SnapshotEnabled = false
-		cfg.DatabaseLifecycle.SnapshotDir = filepath.Join(
-			t.TempDir(), "never-created",
-		)
-		require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
-	})
+	t.Run(
+		"disabled snapshots skip the writability check when bark is also disabled",
+		func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = false
+			cfg.BarkPort = 0
+			cfg.DatabaseLifecycle.SnapshotDir = filepath.Join(
+				t.TempDir(), "never-created",
+			)
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+		},
+	)
+
+	// TestValidateDatabaseLifecycleSnapshotDirWritability/bark-enabled
+	// guards against a real gap: snapshotDir also backs Bark's
+	// DatabaseService CreateSnapshot/Restore RPCs whenever bark is
+	// enabled (barkPort > 0) with a snapshotDir configured -- regardless
+	// of whether automatic epoch-boundary snapshots (snapshotEnabled) are
+	// on. Checking only snapshotEnabled left that combination (Bark
+	// snapshots without automatic ones) completely unvalidated.
+	t.Run(
+		"unwritable directory fails even with automatic snapshots disabled, when bark is enabled",
+		func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip(
+					"root can write anywhere regardless of mode -- skip when running as root",
+				)
+			}
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "readonly")
+			require.NoError(t, os.Mkdir(dir, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = false
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			cfg.BarkPort = 8091
+			cfg.BarkClientCAFilePath = "/certs/ca.crt"
+			cfg.TlsCertFilePath = "/certs/tls.crt"
+			cfg.TlsKeyFilePath = "/certs/tls.key"
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "snapshotDir")
+			assert.Contains(t, err.Error(), "1000:1000")
+		},
+	)
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {

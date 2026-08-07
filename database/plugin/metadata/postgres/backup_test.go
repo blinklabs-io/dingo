@@ -65,6 +65,22 @@ func TestConnEnvFoldsNonKeywordParamsIntoPGOPTIONS(t *testing.T) {
 	require.Contains(t, env, "PGOPTIONS=-c timezone=UTC")
 }
 
+// TestConnEnvEscapesSpacesAndBackslashesInPGOPTIONS guards a real gap:
+// the postgres server parses the whole PGOPTIONS value with its own
+// whitespace-splitting tokenizer (pg_split_opts), so an unescaped space
+// in a GUC value (e.g. application_name) would be read as ending that
+// token, silently truncating the value and starting a new, malformed
+// "-c" fragment from whatever follows -- and an unescaped backslash
+// would be read as escaping whatever character comes after it instead
+// of being treated as a literal character.
+func TestConnEnvEscapesSpacesAndBackslashesInPGOPTIONS(t *testing.T) {
+	env, _, err := connEnv(
+		"postgres://alice@db.internal:5432/mydb?application_name=my%20app%5Cname",
+	)
+	require.NoError(t, err)
+	require.Contains(t, env, `PGOPTIONS=-c application_name=my\ app\\name`)
+}
+
 // TestConnEnvPassesThroughRawOptionsParam guards the search_path-isolation
 // case dialect_integration_test.go's postgresDSNWithSearchPath relies on:
 // an explicit "options=-c..." DSN parameter is pgconn's own placeholder for
@@ -81,7 +97,16 @@ func TestConnEnvPassesThroughRawOptionsParam(t *testing.T) {
 // TestConnEnvOmitsPasswordWhenAbsent validates that no PGPASSWORD entry is
 // emitted at all when the DSN carries no password, rather than an empty
 // "PGPASSWORD=" that could mask a real .pgpass/PGPASSFILE lookup.
+//
+// connEnv extends the real process environment (see
+// TestConnEnvInheritsParentEnvironment), so this only proves anything if
+// the test runner itself doesn't already have PGPASSWORD set -- clear it
+// first and restore whatever was there afterward, rather than trusting
+// the ambient environment to be clean (CI/integration setups for this
+// exact backend commonly export it).
 func TestConnEnvOmitsPasswordWhenAbsent(t *testing.T) {
+	t.Setenv("PGPASSWORD", "")
+	require.NoError(t, os.Unsetenv("PGPASSWORD"))
 	env, _, err := connEnv("postgres://alice@db.internal:5432/mydb")
 	require.NoError(t, err)
 	for _, kv := range env {

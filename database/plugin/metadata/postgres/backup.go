@@ -19,6 +19,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -91,12 +92,6 @@ var runPgRestore = func(ctx context.Context, env []string, database, srcPath str
 // style (URI or keyword=value) dingo's own postgres provider might be
 // configured with, unlike a bespoke parser tied to one style.
 //
-// SSL fidelity is necessarily approximate: pgconn.Config exposes a resolved
-// *tls.Config, not the original sslmode string, so this can only distinguish
-// "TLS requested" from "not requested" -- not verify-ca from verify-full.
-// That's an acceptable approximation for a dump/restore connection, which
-// only needs "encrypted or not," not certificate-verification behavior.
-//
 // Any DSN query parameter pgconn doesn't recognize as one of the fields
 // above (e.g. an operator-set "timezone", or a "search_path" isolating
 // tests -- see dialect_integration_test.go's postgresDSNWithSearchPath) is
@@ -112,9 +107,9 @@ func connEnv(dsn string) (env []string, database string, err error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("parse connection string: %w", err)
 	}
-	sslmode := "disable"
-	if cfg.TLSConfig != nil {
-		sslmode = "require"
+	sslmode, err := postgresSSLMode(cfg.TLSConfig)
+	if err != nil {
+		return nil, "", err
 	}
 	env = append(os.Environ(),
 		"PGHOST="+cfg.Host,
@@ -135,11 +130,78 @@ func connEnv(dsn string) (env []string, database string, err error) {
 	return env, cfg.Database, nil
 }
 
+// postgresSSLMode recovers the PGSSLMODE pg_dump/pg_restore should use from
+// pgconn's already-resolved *tls.Config, which -- unlike the original DSN
+// -- no longer carries the operator's own sslmode string directly.
+// Collapsing every non-nil TLSConfig to a blanket "require" silently
+// downgrades an operator's verify-ca/verify-full configuration to
+// "encrypted but unverified," a real MITM exposure for exactly the
+// deployments that asked for stronger verification. pgconn's own
+// configTLS sets these tls.Config fields distinctly per mode, so the
+// original mode can be recovered exactly: ServerName only for
+// verify-full, a custom VerifyPeerCertificate only for verify-ca (and the
+// require-with-sslrootcert-present case, which it treats identically to
+// verify-ca), and neither for a bare "require"/"prefer"/"allow".
+//
+// A custom root CA or client certificate configured for verify-ca/
+// verify-full cannot be forwarded, though: pgconn parses sslrootcert/
+// sslcert/sslkey into in-memory certificate material (x509.CertPool /
+// tls.Certificate) and discards the original file paths entirely, and
+// pg_dump/pg_restore's PGSSLROOTCERT/PGSSLCERT/PGSSLKEY need real files
+// on disk. Rather than silently falling back to weaker verification (or
+// the system trust store instead of the operator's own CA) in that case,
+// this fails loudly -- the caller learns backup/restore can't run safely
+// against this connection instead of getting one that quietly skipped
+// identity verification. (This does mean a legitimate sslrootcert=system
+// configuration is also rejected here, since a system-trust CertPool and
+// a custom-file CertPool are indistinguishable once resolved -- an
+// accepted, documented false-positive in favor of never weakening a
+// misclassified custom CA.)
+func postgresSSLMode(tlsConfig *tls.Config) (string, error) {
+	if tlsConfig == nil {
+		return "disable", nil
+	}
+	if len(tlsConfig.Certificates) > 0 {
+		return "", errors.New(
+			"postgres backup/restore: connection is configured with a client " +
+				"TLS certificate (sslcert/sslkey), which pg_dump/pg_restore " +
+				"cannot be given -- the original key/certificate files are " +
+				"not recoverable from the parsed connection",
+		)
+	}
+	switch {
+	case tlsConfig.ServerName != "":
+		if tlsConfig.RootCAs != nil {
+			return "", errors.New(
+				"postgres backup/restore: connection uses sslmode=verify-full " +
+					"with a custom root CA (sslrootcert), which pg_dump/pg_restore " +
+					"cannot be given -- the original CA file is not recoverable " +
+					"from the parsed connection",
+			)
+		}
+		return "verify-full", nil
+	case tlsConfig.VerifyPeerCertificate != nil:
+		if tlsConfig.RootCAs != nil {
+			return "", errors.New(
+				"postgres backup/restore: connection uses sslmode=verify-ca " +
+					"with a custom root CA (sslrootcert), which pg_dump/pg_restore " +
+					"cannot be given -- the original CA file is not recoverable " +
+					"from the parsed connection",
+			)
+		}
+		return "verify-ca", nil
+	default:
+		return "require", nil
+	}
+}
+
 // runtimeParamsToOptions renders pgconn's parsed RuntimeParams as a PGOPTIONS
 // value. An "options" entry is already a raw "-c name=value"-style fragment
-// (pgconn stores a DSN's own "options=" parameter under this key verbatim)
-// and is passed through as-is; every other key is a plain GUC name/value
-// pair rendered as its own "-c" flag. Sorted for deterministic output.
+// (pgconn stores a DSN's own "options=" parameter under this key verbatim,
+// presumably already correctly escaped by whoever wrote it) and is passed
+// through as-is; every other key is a plain GUC name/value pair rendered
+// as its own "-c" flag, with the value escaped via escapePGOption. Sorted
+// for deterministic output.
 func runtimeParamsToOptions(params map[string]string) string {
 	keys := make([]string, 0, len(params))
 	for key := range params {
@@ -152,9 +214,31 @@ func runtimeParamsToOptions(params map[string]string) string {
 			parts = append(parts, params[key])
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("-c %s=%s", key, params[key]))
+		parts = append(
+			parts,
+			fmt.Sprintf("-c %s=%s", key, escapePGOption(params[key])),
+		)
 	}
 	return strings.Join(parts, " ")
+}
+
+// escapePGOption backslash-escapes a PGOPTIONS value's embedded spaces and
+// backslashes. The server parses the whole options startup parameter with
+// its own whitespace-splitting tokenizer (pg_split_opts), which treats a
+// backslash as an escape for the following character -- without this, a
+// value containing a literal space (e.g. a search_path or a quoted
+// identifier) would be read as two separate tokens, and a value containing
+// a literal backslash (e.g. a Windows-style path) would be misinterpreted
+// as escaping whatever character follows it.
+func escapePGOption(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r == '\\' || r == ' ' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // backupPostgres writes a pg_dump custom-format archive of the database dsn
@@ -212,11 +296,16 @@ func restorePostgres(ctx context.Context, dsn, srcPath string) error {
 // of them -- checking only the search_path-visible schemas would let a
 // table sitting in some other schema go undetected here, surfacing as a
 // raw pg_restore conflict instead of this package's own clean error.
+// Restricted to table_type = 'BASE TABLE' so a view (or foreign table)
+// doesn't count as occupying the database: resetDatabase below can't
+// clear one with DROP TABLE, so counting it here would make an
+// otherwise-empty database wrongly report "not empty" with no way to fix it.
 func databaseIsEmpty(ctx context.Context, db *sql.DB) (bool, error) {
 	var count int
 	err := db.QueryRowContext(ctx, `
 		SELECT count(*) FROM information_schema.tables
 		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+		AND table_type = 'BASE TABLE'
 	`).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check target database: %w", err)
@@ -237,10 +326,17 @@ func databaseIsEmpty(ctx context.Context, db *sql.DB) (bool, error) {
 // exactly "public" (an operator-configured non-default search_path is
 // exactly what postgresDSNWithSearchPath-style DSNs use). CASCADE handles
 // FK dependency ordering without needing a specific drop order.
+//
+// Restricted to table_type = 'BASE TABLE', matching databaseIsEmpty: a
+// view or foreign table sitting alongside dingo's own tables would make
+// DROP TABLE fail outright (postgres rejects dropping a view that way),
+// aborting the whole reset over something dingo's migrations never
+// created and has no reason to touch.
 func resetDatabase(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, `
 		SELECT table_schema, table_name FROM information_schema.tables
 		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+		AND table_type = 'BASE TABLE'
 	`)
 	if err != nil {
 		return fmt.Errorf("list tables: %w", err)

@@ -44,8 +44,9 @@ type Restorer interface {
 // That orchestration briefly resolves-and-starts the plugin against the
 // target just to type-assert it, since plugin.Resolve always constructs
 // and starts a provider together with no construct-only step -- for a
-// file-based store (sqlite/badger) simply deleting the target directory
-// undoes that brief start completely, but a live client/server store
+// file-based metadata store (sqlite is the only one today; badger is a
+// blob backend, not metadata) simply deleting the target directory undoes
+// that brief start completely, but a live client/server store
 // (postgres/mysql) has no such directory: its Start already ran real
 // migrations against the actual configured remote database, and a
 // directory wipe does nothing to undo that. Reset clears exactly that

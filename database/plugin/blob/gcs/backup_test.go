@@ -19,7 +19,6 @@ package gcs
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"io"
 	"log/slog"
 	"os"
@@ -27,106 +26,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
 	"github.com/stretchr/testify/require"
 )
-
-// TestWriteReadRecordRoundTrip validates that writeRecord/readRecord's
-// length-prefixed framing preserves keys and values exactly (including a
-// zero-length value), and that reading past the last record reports a
-// clean io.EOF rather than a spurious error.
-func TestWriteReadRecordRoundTrip(t *testing.T) {
-	var buf bytes.Buffer
-	require.NoError(
-		t,
-		writeRecord(&buf, []byte("key-one"), []byte("value-one")),
-	)
-	require.NoError(t, writeRecord(&buf, []byte("key-two"), []byte{}))
-
-	key, value, err := readRecord(&buf)
-	require.NoError(t, err)
-	require.Equal(t, []byte("key-one"), key)
-	require.Equal(t, []byte("value-one"), value)
-
-	key, value, err = readRecord(&buf)
-	require.NoError(t, err)
-	require.Equal(t, []byte("key-two"), key)
-	require.Empty(t, value)
-
-	_, _, err = readRecord(&buf)
-	require.ErrorIs(t, err, io.EOF)
-}
-
-// TestReadRecordRejectsOversizedKeyLength validates that a declared key
-// length above maxBackupKeyLen is rejected before any allocation sized by
-// that untrusted length, guarding against a corrupted or adversarial
-// backup stream driving an oversized allocation.
-func TestReadRecordRejectsOversizedKeyLength(t *testing.T) {
-	var buf bytes.Buffer
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], maxBackupKeyLen+1)
-	buf.Write(lenBuf[:])
-	_, _, err := readRecord(&buf)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "exceeds")
-}
-
-// TestReadRecordRejectsOversizedValueLength validates that a declared
-// value length above maxBlobReadBytes is rejected before any allocation
-// sized by that untrusted length, the value-side counterpart of the
-// key-length check above.
-func TestReadRecordRejectsOversizedValueLength(t *testing.T) {
-	var buf bytes.Buffer
-	var keyLenBuf [4]byte
-	binary.BigEndian.PutUint32(keyLenBuf[:], 1)
-	buf.Write(keyLenBuf[:])
-	buf.WriteByte('k')
-	var valLenBuf [8]byte
-	binary.BigEndian.PutUint64(valLenBuf[:], uint64(maxBlobReadBytes)+1)
-	buf.Write(valLenBuf[:])
-	_, _, err := readRecord(&buf)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "exceeds")
-}
-
-// TestReadRecordRejectsTruncatedStream validates that a record cut short
-// mid-value produces a real error, not an io.EOF that could be mistaken
-// for a clean end of the backup stream.
-func TestReadRecordRejectsTruncatedStream(t *testing.T) {
-	var buf bytes.Buffer
-	require.NoError(t, writeRecord(&buf, []byte("key"), []byte("value")))
-	truncated := buf.Bytes()[:buf.Len()-2]
-	_, _, err := readRecord(bytes.NewReader(truncated))
-	require.Error(t, err)
-	require.NotErrorIs(t, err, io.EOF)
-}
-
-// TestContextWriterStopsOnCancellation validates that contextWriter checks
-// ctx before each Write, so cancelling mid-Backup stops further output
-// instead of running to completion regardless of cancellation.
-func TestContextWriterStopsOnCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	w := &contextWriter{ctx: ctx, w: io.Discard}
-	_, err := w.Write([]byte("x"))
-	require.NoError(t, err)
-	cancel()
-	_, err = w.Write([]byte("x"))
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-// TestContextReaderStopsOnCancellation is contextWriter's Restore-side
-// counterpart: validates contextReader checks ctx before each Read, so
-// cancelling mid-Restore stops further reads instead of consuming the
-// entire stream regardless of cancellation.
-func TestContextReaderStopsOnCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	r := &contextReader{ctx: ctx, r: bytes.NewReader([]byte("xxxxxxxx"))}
-	buf := make([]byte, 4)
-	_, err := r.Read(buf)
-	require.NoError(t, err)
-	cancel()
-	_, err = r.Read(buf)
-	require.ErrorIs(t, err, context.Canceled)
-}
 
 // hasGCSCredentials mirrors internal/integration/cloud_test.go's helper of
 // the same purpose, scoped locally so this package's tests can skip
@@ -172,7 +74,7 @@ func newTestGCSStore(t *testing.T) *BlobStoreGCS {
 	require.NoError(t, err)
 	require.NoError(t, store.Start())
 	t.Cleanup(func() { _ = store.Stop() })
-	empty, err := store.isEmpty(context.Background())
+	empty, err := blobbackup.IsEmpty(context.Background(), store)
 	require.NoError(t, err)
 	if !empty {
 		t.Skip(
@@ -244,9 +146,15 @@ func TestRestoreRejectsNonEmptyStore(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	require.NoError(t, writeRecord(&buf, []byte("k"), []byte("v")))
+	require.NoError(
+		t,
+		blobbackup.WriteRecord(&buf, []byte("k"), []byte("v"), maxBlobReadBytes),
+	)
 	err := store.Restore(context.Background(), bytes.NewReader(
-		append(append(backupMagic[:], backupVersion), buf.Bytes()...),
+		append(
+			append(blobbackup.Magic[:], blobbackup.Version),
+			buf.Bytes()...,
+		),
 	))
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "already contains data"))

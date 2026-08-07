@@ -23,7 +23,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
@@ -129,7 +128,7 @@ func restoreSQLite(ctx context.Context, dataDir, srcPath string) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("sqlite restore: stat %q: %w", dstPath, err)
 	}
-	if err := createDirDurable(dataDir); err != nil {
+	if err := sqlstore.CreateDirDurable(dataDir); err != nil {
 		return fmt.Errorf(
 			"sqlite restore: create data directory: %w",
 			err,
@@ -137,45 +136,6 @@ func restoreSQLite(ctx context.Context, dataDir, srcPath string) error {
 	}
 	if err := copyFile(ctx, srcPath, dstPath); err != nil {
 		return fmt.Errorf("sqlite restore: %w", err)
-	}
-	return nil
-}
-
-// createDirDurable is os.MkdirAll(dir, 0o755), but additionally fsyncs the
-// parent of every directory component it actually had to create, so each
-// new directory's own entry is durable -- not just, per copyFile's own
-// directory-sync, the eventual contents placed inside it. A directory's
-// fsync only guarantees ITS children's directory entries are persisted; a
-// power loss right after mkdir could otherwise leave the newly created
-// directory itself unreachable (or entirely absent) from its parent after
-// a crash, even though metadata.sqlite was safely and durably written
-// inside it a moment later.
-func createDirDurable(dir string) error {
-	var created []string
-	for cur := dir; ; {
-		if _, err := os.Stat(cur); err == nil {
-			break
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("stat %q: %w", cur, err)
-		}
-		created = append(created, cur)
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			// Reached the filesystem root without finding an existing
-			// ancestor -- MkdirAll below will fail on this same path.
-			break
-		}
-		cur = parent
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create directory %q: %w", dir, err)
-	}
-	// Shallowest first: each level's own directory entry should be
-	// durable before its child's existence under it is relied upon.
-	for _, dir := range slices.Backward(created) {
-		if err := fsyncdir.Sync(filepath.Dir(dir)); err != nil {
-			return err
-		}
 	}
 	return nil
 }

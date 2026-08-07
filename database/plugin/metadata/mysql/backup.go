@@ -97,17 +97,63 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("parse address %q: %w", cfg.Addr, err)
 	}
+	sslMode, err := mysqlSSLMode(cfg.TLSConfig)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	args = []string{
 		"--host=" + host,
 		"--port=" + port,
 		"--user=" + cfg.User,
 		"--protocol=tcp",
+		"--ssl-mode=" + sslMode,
 	}
 	env = os.Environ()
 	if cfg.Passwd != "" {
 		env = append(env, "MYSQL_PWD="+cfg.Passwd)
 	}
 	return env, args, cfg.DBName, nil
+}
+
+// mysqlSSLMode maps go-sql-driver/mysql's TLSConfig setting (dingo's own
+// sslMode provider config field, per mysql/provider.go's openStore) to the
+// mysqldump/mysql client tools' --ssl-mode flag. Left unmapped, these
+// tools default to PREFERRED (opportunistic, unverified TLS) regardless
+// of what the app's own connection pool is actually configured with --
+// silently using a different, weaker transport for backup/restore than
+// the one guarding every other connection this process makes. "true"
+// (verify CA and hostname, the driver's strictest mode) must map to
+// VERIFY_IDENTITY specifically, not a weaker mode, or a verify-required
+// deployment's dump/restore connection would go out unverified.
+//
+// A custom registered TLS config name (via mysql.RegisterTLSConfig,
+// referencing an arbitrary *tls.Config) can't be mapped at all -- there is
+// no fixed meaning to translate, and guessing a specific --ssl-mode could
+// just as easily under- or over-verify relative to what that custom
+// config actually does. This fails loudly rather than silently picking a
+// mode that might weaken it.
+func mysqlSSLMode(tlsConfig string) (string, error) {
+	switch tlsConfig {
+	case "", "false":
+		// Matches the driver's own default: no TLS is attempted at all
+		// (mysqldump/mysql's own default of PREFERRED would instead try
+		// opportunistic TLS the app's own connection never uses).
+		return "DISABLED", nil
+	case "true":
+		return "VERIFY_IDENTITY", nil
+	case "skip-verify":
+		return "REQUIRED", nil
+	case "preferred":
+		return "PREFERRED", nil
+	default:
+		return "", fmt.Errorf(
+			"mysql backup/restore: unsupported tls config %q -- mysqldump/"+
+				"mysql cannot be given a custom named TLS config "+
+				"(mysql.RegisterTLSConfig); only \"\", \"false\", \"true\", "+
+				"\"skip-verify\", or \"preferred\" are supported",
+			tlsConfig,
+		)
+	}
 }
 
 // backupMySQL writes a mysqldump SQL archive of the database dsn points at
@@ -134,7 +180,15 @@ func backupMySQL(ctx context.Context, dsn, dstPath string) error {
 	if database == "" {
 		return errors.New("mysql backup: no database configured to back up")
 	}
-	args = append(args, database)
+	// Without --single-transaction, mysqldump reads InnoDB tables one at a
+	// time with no shared snapshot: a node actively writing metadata during
+	// the dump can leave the backup with rows from different points in
+	// time, producing ledger state that never actually existed at any
+	// single instant. --single-transaction opens one REPEATABLE READ
+	// transaction for the whole dump, giving a consistent snapshot without
+	// blocking concurrent writers (InnoDB-only; dingo's metadata schema is
+	// InnoDB throughout).
+	args = append(args, "--single-transaction", database)
 	err = sqlstore.PublishBackupFile(dstPath, func(stagedPath string) error {
 		return runMysqldump(ctx, env, args, stagedPath)
 	})
@@ -181,7 +235,11 @@ func restoreMySQL(ctx context.Context, dsn, srcPath string) error {
 	return nil
 }
 
-// databaseIsEmpty reports whether database has no tables yet.
+// databaseIsEmpty reports whether database has no base tables yet.
+// Restricted to table_type = 'BASE TABLE' so a view doesn't count as
+// occupying the database: resetDatabase below only drops tables, so
+// counting a view here would make an otherwise-empty database wrongly
+// report "not empty" with no way to fix it.
 func databaseIsEmpty(
 	ctx context.Context,
 	db *sql.DB,
@@ -190,7 +248,8 @@ func databaseIsEmpty(
 	var count int
 	err := db.QueryRowContext(
 		ctx,
-		"SELECT count(*) FROM information_schema.tables WHERE table_schema = ?",
+		"SELECT count(*) FROM information_schema.tables "+
+			"WHERE table_schema = ? AND table_type = 'BASE TABLE'",
 		database,
 	).Scan(&count)
 	if err != nil {
@@ -210,10 +269,26 @@ func databaseIsEmpty(
 // created instead. Foreign key checks are disabled for the duration so
 // tables can be dropped in any order regardless of FK dependencies,
 // restored via defer before returning either way.
+//
+// SET FOREIGN_KEY_CHECKS is session-scoped, but *sql.DB is a connection
+// pool -- ExecContext on db directly can run each call on a different
+// pooled connection, so the DROP TABLE statements could land on a
+// connection where foreign key checks are still enabled and fail on the
+// first parent table with a real FK dependent still present (order from
+// information_schema.tables is not guaranteed to be FK-safe). Pinning
+// everything to one dedicated *sql.Conn makes the disable/restore and
+// every drop share the exact session the SET statement changed.
+//
+// Restricted to table_type = 'BASE TABLE', matching databaseIsEmpty: MySQL
+// doesn't error on "DROP TABLE" naming a view, it just emits a note and
+// leaves the view in place, which would silently defeat the reset (a
+// later restore recreating that view then fails because it already
+// exists) instead of failing loudly or actually clearing it.
 func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
 	rows, err := db.QueryContext(
 		ctx,
-		"SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+		"SELECT table_name FROM information_schema.tables "+
+			"WHERE table_schema = ? AND table_type = 'BASE TABLE'",
 		database,
 	)
 	if err != nil {
@@ -234,11 +309,16 @@ func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
 	if len(tables) == 0 {
 		return nil
 	}
-	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=0"); err != nil {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	if _, err := conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=0"); err != nil {
 		return fmt.Errorf("disable foreign key checks: %w", err)
 	}
 	defer func() {
-		_, _ = db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=1")
+		_, _ = conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=1")
 	}()
 	for _, name := range tables {
 		quoted := mysqlQuoteIdentifier(
@@ -246,7 +326,7 @@ func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
 		) + "." + mysqlQuoteIdentifier(
 			name,
 		)
-		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoted); err != nil {
+		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoted); err != nil {
 			return fmt.Errorf("drop table %s: %w", quoted, err)
 		}
 	}

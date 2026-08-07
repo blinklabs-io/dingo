@@ -53,6 +53,61 @@ func TestPublishBackupFileRejectsExistingDestination(t *testing.T) {
 	require.Equal(t, []byte("existing"), data)
 }
 
+// TestSyncFile validates that syncFile durably persists a real file's
+// contents without error, and reports a clean error for a path that
+// doesn't exist -- PublishBackupFile relies on the latter to fail loudly
+// if a write callback ever claims success without actually producing a
+// file at stagedPath.
+func TestSyncFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "staged.bin")
+	require.NoError(t, os.WriteFile(path, []byte("data"), 0o600))
+	require.NoError(t, syncFile(path))
+
+	require.Error(t, syncFile(filepath.Join(t.TempDir(), "missing.bin")))
+}
+
+// TestPublishBackupFileSyncsStagedFileEvenWhenWriteCallbackDoesNot guards
+// a real gap: PublishBackupFile assumed its write callback already
+// fsynced the staged file, which holds for sqlite's VACUUM INTO but not
+// for pg_dump/mysqldump, neither of which fsyncs its own output --
+// without an explicit sync here, a crash right after publish could leave
+// a durable directory entry pointing at a file whose contents were never
+// actually flushed to disk. Every existing test callback in this file
+// already writes via a plain os.WriteFile (no explicit sync of its own),
+// so a successful round trip here is already exercising the callback-
+// doesn't-sync path; this test additionally confirms the published file's
+// content survived intact through that path.
+func TestPublishBackupFileSyncsStagedFileEvenWhenWriteCallbackDoesNot(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "backup.bin")
+	err := PublishBackupFile(dst, func(stagedPath string) error {
+		// Deliberately unsynced write, mirroring pg_dump/mysqldump's own
+		// behavior of never fsyncing the file they produce.
+		return os.WriteFile(stagedPath, []byte("unsynced-by-caller"), 0o600)
+	})
+	require.NoError(t, err)
+	data, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	require.Equal(t, []byte("unsynced-by-caller"), data)
+}
+
+// TestCreateDirDurable validates the basic happy path (a multi-level
+// nested directory that doesn't exist yet is created successfully) --
+// its actual crash-durability guarantee (each created level's directory
+// entry fsynced before relying on it) isn't observable from a single-
+// process test, but this at least guards the plain MkdirAll-equivalent
+// behavior every caller depends on.
+func TestCreateDirDurable(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "dir")
+	require.NoError(t, CreateDirDurable(dir))
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+
+	// Calling it again against an already-existing directory (nothing left
+	// to create) must be a harmless no-op, not an error.
+	require.NoError(t, CreateDirDurable(dir))
+}
+
 // TestPublishBackupFileFailureDoesNotClobberConcurrentDestination guards the
 // TOCTOU property PublishBackupFile exists for: a failed write must not
 // touch dstPath even if something else created it concurrently, in the

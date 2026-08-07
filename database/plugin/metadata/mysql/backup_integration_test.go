@@ -202,3 +202,50 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(777), restoredTimestamp)
 }
+
+// TestResetToleratesView guards a real gap: databaseIsEmpty/resetDatabase
+// originally counted every information_schema.tables row as a base
+// table, so a view sitting alongside dingo's own tables (something an
+// operator's own tooling, or a future dingo migration, could add) would
+// be counted as occupying the database -- and MySQL doesn't error on
+// "DROP TABLE" naming a view, it just emits a note and silently leaves it
+// in place, defeating the reset instead of failing loudly or actually
+// clearing it. Both must restrict to table_type = 'BASE TABLE' and leave
+// the view untouched.
+func TestResetToleratesView(t *testing.T) {
+	baseDSN := mysqlIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "mysqlbackup_view")
+	store, err := openStore(
+		context.Background(),
+		Config{DSN: dsn},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"CREATE VIEW mysqlbackup_view_test AS SELECT id FROM node_settings",
+	)
+	require.NoError(t, err)
+
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	require.NoError(t, err)
+	require.NoError(t, store.Reset(context.Background()))
+
+	empty, err := databaseIsEmpty(context.Background(), admin, parsed.DBName)
+	require.NoError(t, err)
+	require.True(t, empty, "reset must leave a base-table-empty database, "+
+		"even with a view still present")
+
+	var viewCount int
+	require.NoError(t, admin.QueryRow(
+		"SELECT count(*) FROM information_schema.views "+
+			"WHERE table_schema = ? AND table_name = 'mysqlbackup_view_test'",
+		parsed.DBName,
+	).Scan(&viewCount))
+	require.Equal(t, 1, viewCount, "reset must not have touched the view")
+}

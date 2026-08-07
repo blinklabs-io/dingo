@@ -495,7 +495,22 @@ func restoreMetadataStore(
 			manifest.MetadataPlugin,
 		)
 	}
+	backupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
 	if resettable, ok := store.(metadata.Resettable); ok {
+		// Resettable.Reset destroys a live client/server target's actual
+		// tables directly, with no staging copy and no rollback -- unlike
+		// the file-based (sqlite/badger) path, which only ever mutates a
+		// disposable stagingDir that RestoreValidated's caller-side defer
+		// discards on any later failure. Confirm the backup this restore
+		// intends to load actually exists before paying that cost, so a
+		// missing/mistyped snapshotDir fails before a real target
+		// database's tables are dropped, instead of after.
+		if _, err := os.Stat(backupPath); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return fmt.Errorf(
+				"metadata backup %q: %w", backupPath, err,
+			)
+		}
 		if err := resettable.Reset(ctx); err != nil {
 			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
 			return fmt.Errorf(
@@ -523,7 +538,6 @@ func restoreMetadataStore(
 			"recreate target data directory %q: %w", targetDataDir, err,
 		)
 	}
-	backupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
 	if err := restorer.RestoreFrom(ctx, backupPath); err != nil {
 		return fmt.Errorf("restore metadata store: %w", err)
 	}
