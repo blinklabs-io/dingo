@@ -102,6 +102,33 @@ func PublishBackupFile(
 	// dstPath directly, but cheap insurance against a future caller that
 	// doesn't hold that invariant).
 	publishedInfo, statErr := lstatFile(dstPath)
+	// Registered before the statErr check below returns, not after: a
+	// failed verification lstat must still attempt the same cleanup this
+	// defer does for every later failure, or this specific path strands
+	// dstPath with no cleanup attempt at all, requiring manual deletion
+	// before any retry can proceed.
+	defer func() {
+		if err == nil {
+			return
+		}
+		compareInfo := publishedInfo
+		if statErr != nil {
+			// The verification lstat itself failed, so there is no
+			// publishedInfo to compare against -- fall back to the still-
+			// staged file's identity instead. stagedPath is only removed
+			// by the tmpDir cleanup defer above, which -- registered
+			// earlier, so it runs after this one -- hasn't fired yet.
+			var stagedErr error
+			compareInfo, stagedErr = os.Lstat(stagedPath)
+			if stagedErr != nil {
+				return
+			}
+		}
+		if info, lstatErr := os.Lstat(dstPath); lstatErr == nil &&
+			os.SameFile(compareInfo, info) {
+			_ = os.Remove(dstPath)
+		}
+	}()
 	if statErr != nil {
 		// os.Link just reported success, so dstPath disappearing (or
 		// becoming unreadable) immediately after is itself the failure to
@@ -110,15 +137,6 @@ func PublishBackupFile(
 		// and the caller would believe the snapshot exists.
 		return fmt.Errorf("verify published %q: %w", dstPath, statErr)
 	}
-	defer func() {
-		if err == nil {
-			return
-		}
-		if info, lstatErr := os.Lstat(dstPath); lstatErr == nil &&
-			os.SameFile(publishedInfo, info) {
-			_ = os.Remove(dstPath)
-		}
-	}()
 	// A file's own fsync does not guarantee its directory entry is
 	// persisted -- sync dstDir so the link above is durable too, not
 	// just atomic.

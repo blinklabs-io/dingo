@@ -188,4 +188,13 @@ func TestPublishBackupFileFailsWhenPublishedDestinationVanishes(t *testing.T) {
 		"a failed post-publish verification must fail PublishBackupFile, "+
 			"not be silently swallowed while the function still reports success",
 	)
+	_, statErr := os.Stat(dst)
+	require.True(
+		t, errors.Is(statErr, fs.ErrNotExist),
+		"a failed post-publish verification must still attempt the same "+
+			"cleanup every other late failure does (falling back to the "+
+			"still-staged file's identity, since there is no publishedInfo "+
+			"to compare against), not strand dstPath with no cleanup "+
+			"attempt at all",
+	)
 }
