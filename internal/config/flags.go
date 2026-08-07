@@ -640,6 +640,11 @@ var flagSpecs = []flagSpec{
 		"mithril-verify-certs",
 		"verify Mithril certificate chains",
 	),
+	boolFlag(
+		"Mithril.AllowInsecureHTTP",
+		"mithril-allow-insecure-http",
+		"allow plain-HTTP Mithril aggregator/artifact URLs (local dev/test only)",
+	),
 
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(

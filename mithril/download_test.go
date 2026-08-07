@@ -50,9 +50,10 @@ func TestDownloadSnapshot(t *testing.T) {
 	var progressCalled atomic.Int32
 
 	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:      server.URL + "/snapshot.tar.zst",
-		DestDir:  destDir,
-		Filename: "test-snapshot.tar.zst",
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
+		Filename:          "test-snapshot.tar.zst",
 		OnProgress: func(p DownloadProgress) {
 			progressCalled.Add(1)
 			// Use assert (not require) because this callback
@@ -129,9 +130,10 @@ func TestDownloadSnapshotResume(t *testing.T) {
 	path, err := DownloadSnapshot(
 		context.Background(),
 		DownloadConfig{
-			URL:      server.URL + "/snapshot.tar.zst",
-			DestDir:  destDir,
-			Filename: "resume-test.tar.zst",
+			URL:               server.URL + "/snapshot.tar.zst",
+			AllowInsecureHTTP: true,
+			DestDir:           destDir,
+			Filename:          "resume-test.tar.zst",
 		},
 	)
 	require.NoError(t, err)
@@ -176,12 +178,13 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 
 	destDir := t.TempDir()
 	cfg := DownloadConfig{
-		URL:            server.URL + "/snapshot.tar.zst",
-		DestDir:        destDir,
-		Filename:       "idle-retry.tar.zst",
-		ExpectedSize:   int64(len(fullContent)),
-		IdleTimeout:    50 * time.Millisecond,
-		MaxIdleRetries: 1,
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
+		Filename:          "idle-retry.tar.zst",
+		ExpectedSize:      int64(len(fullContent)),
+		IdleTimeout:       50 * time.Millisecond,
+		MaxIdleRetries:    1,
 	}
 	timeout := cfg.IdleTimeout*time.Duration(cfg.MaxIdleRetries+1) +
 		500*time.Millisecond
@@ -265,12 +268,13 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 
 	destDir := t.TempDir()
 	cfg := DownloadConfig{
-		URL:            server.URL + "/snapshot.tar.zst",
-		DestDir:        destDir,
-		Filename:       "idle-progress-reset.tar.zst",
-		ExpectedSize:   int64(len(fullContent)),
-		IdleTimeout:    50 * time.Millisecond,
-		MaxIdleRetries: 1,
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
+		Filename:          "idle-progress-reset.tar.zst",
+		ExpectedSize:      int64(len(fullContent)),
+		IdleTimeout:       50 * time.Millisecond,
+		MaxIdleRetries:    1,
 	}
 	timeout := 3*cfg.IdleTimeout + 500*time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -320,6 +324,78 @@ func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
 	require.Contains(t, err.Error(), "MaxIdleRetries")
 }
 
+// TestDownloadSnapshotRejectsPlainHTTPByDefault proves a plain-HTTP
+// artifact URL is rejected before any request is attempted
+// (DSA-2026-04-24-03): the aggregator-supplied download location is
+// untrusted, so the scheme is checked up front rather than relying on
+// httpsOnlyRedirect, which only governs where a redirect may lead.
+func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
+	called := false
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:     server.URL + "/snapshot.tar.zst",
+		DestDir: t.TempDir(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must use https")
+	require.False(
+		t,
+		called,
+		"no request should reach a rejected plain-HTTP URL",
+	)
+}
+
+// TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch proves
+// DownloadConfig.AllowInsecureHTTP is a working, explicit escape hatch
+// (used throughout this package's own httptest-based tests).
+func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
+	content := []byte("fake-snapshot-data")
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(content)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           t.TempDir(),
+		Filename:          "insecure-ok.tar.zst",
+	})
+	require.NoError(t, err)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, content, data)
+}
+
+// TestDownloadSnapshotAcceptsHTTPSByDefault proves a well-formed HTTPS
+// artifact URL passes scheme validation (the connection itself fails
+// against the loopback TLS test server's self-signed certificate, which
+// is expected — the point is that it isn't rejected for its scheme).
+func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
+	server := httptest.NewTLSServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:     server.URL + "/snapshot.tar.zst",
+		DestDir: t.TempDir(),
+	})
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "must use https")
+}
+
 func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
 	idleCh := make(chan struct{}, 1)
 	reader := newIdleTimeoutReader(
@@ -363,8 +439,9 @@ func TestDownloadSnapshotContextCancel(t *testing.T) {
 
 	destDir := t.TempDir()
 	_, err := DownloadSnapshot(ctx, DownloadConfig{
-		URL:     server.URL + "/snapshot.tar.zst",
-		DestDir: destDir,
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
 	})
 	require.Error(t, err)
 }
@@ -384,6 +461,7 @@ func TestDownloadSnapshotServerError(t *testing.T) {
 	destDir := t.TempDir()
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
 		URL:                 server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP:   true,
 		DestDir:             destDir,
 		MaxTransientRetries: -1, // disable retries so the test stays fast
 	})
@@ -414,6 +492,7 @@ func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
 	destDir := t.TempDir()
 	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
 		URL:                 server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP:   true,
 		DestDir:             destDir,
 		Filename:            "transient-retry.tar.zst",
 		MaxTransientRetries: 2,
@@ -445,6 +524,7 @@ func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
 	destDir := t.TempDir()
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
 		URL:                 server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP:   true,
 		DestDir:             destDir,
 		MaxTransientRetries: 2,
 	})
@@ -525,10 +605,11 @@ func TestDownloadSnapshotSizeVerification(t *testing.T) {
 	path, err := DownloadSnapshot(
 		context.Background(),
 		DownloadConfig{
-			URL:          server.URL + "/snapshot.tar.zst",
-			DestDir:      destDir,
-			Filename:     "good.tar.zst",
-			ExpectedSize: int64(len(content)),
+			URL:               server.URL + "/snapshot.tar.zst",
+			AllowInsecureHTTP: true,
+			DestDir:           destDir,
+			Filename:          "good.tar.zst",
+			ExpectedSize:      int64(len(content)),
 		},
 	)
 	require.NoError(t, err)
@@ -554,10 +635,11 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 	_, err := DownloadSnapshot(
 		context.Background(),
 		DownloadConfig{
-			URL:          server.URL + "/snapshot.tar.zst",
-			DestDir:      destDir,
-			Filename:     "bad.tar.zst",
-			ExpectedSize: 99999,
+			URL:               server.URL + "/snapshot.tar.zst",
+			AllowInsecureHTTP: true,
+			DestDir:           destDir,
+			Filename:          "bad.tar.zst",
+			ExpectedSize:      99999,
 		},
 	)
 	require.Error(t, err)
@@ -574,8 +656,9 @@ func TestDownloadSnapshotDefaultFilename(t *testing.T) {
 
 	destDir := t.TempDir()
 	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:     server.URL + "/snapshot.tar.zst",
-		DestDir: destDir,
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           destDir,
 		// Filename is empty, should default to "snapshot.tar.zst"
 	})
 	require.NoError(t, err)
@@ -691,9 +774,10 @@ func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
 	path, err := DownloadSnapshot(
 		context.Background(),
 		DownloadConfig{
-			URL:      server.URL + "/snapshot.tar.zst",
-			DestDir:  destDir,
-			Filename: "mismatch-test.tar.zst",
+			URL:               server.URL + "/snapshot.tar.zst",
+			AllowInsecureHTTP: true,
+			DestDir:           destDir,
+			Filename:          "mismatch-test.tar.zst",
 		},
 	)
 	require.NoError(t, err)
@@ -745,9 +829,10 @@ func TestDownloadSnapshotResumeMissingContentRange(t *testing.T) {
 	path, err := DownloadSnapshot(
 		context.Background(),
 		DownloadConfig{
-			URL:      server.URL + "/snapshot.tar.zst",
-			DestDir:  destDir,
-			Filename: "no-range.tar.zst",
+			URL:               server.URL + "/snapshot.tar.zst",
+			AllowInsecureHTTP: true,
+			DestDir:           destDir,
+			Filename:          "no-range.tar.zst",
 		},
 	)
 	require.NoError(t, err)

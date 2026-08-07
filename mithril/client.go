@@ -633,12 +633,24 @@ func AncillaryVerificationKeyURLForNetwork(network string) (string, error) {
 
 // Client is an HTTP client for the Mithril aggregator REST API.
 type Client struct {
-	aggregatorURL string
-	httpClient    *http.Client
+	aggregatorURL     string
+	httpClient        *http.Client
+	allowInsecureHTTP bool
 }
 
 // ClientOption is a functional option for configuring a Client.
 type ClientOption func(*Client)
+
+// WithAllowInsecureHTTP permits the client to send requests to a
+// plain-HTTP aggregator URL. By default, NewClient's aggregatorURL
+// and every request it issues must use HTTPS; this is an explicit
+// escape hatch for local development and tests (e.g. against an
+// httptest server) and should not be set in production.
+func WithAllowInsecureHTTP() ClientOption {
+	return func(c *Client) {
+		c.allowInsecureHTTP = true
+	}
+}
 
 // WithHTTPClient sets a custom *http.Client for the Mithril client.
 // Note: the default client enforces HTTPS-only redirects via
@@ -672,6 +684,17 @@ func NewClient(
 	return c
 }
 
+// newMithrilClient constructs a Client, applying WithAllowInsecureHTTP
+// when allowInsecureHTTP is set. It centralizes the option plumbing
+// shared by every BootstrapConfig/SyncConfig call site so callers don't
+// each re-derive a ClientOption slice from a bool.
+func newMithrilClient(aggregatorURL string, allowInsecureHTTP bool) *Client {
+	if allowInsecureHTTP {
+		return NewClient(aggregatorURL, WithAllowInsecureHTTP())
+	}
+	return NewClient(aggregatorURL)
+}
+
 // httpsOnlyRedirect rejects redirects to non-HTTPS URLs to prevent
 // downgrade attacks and SSRF.
 func httpsOnlyRedirect(
@@ -685,6 +708,34 @@ func httpsOnlyRedirect(
 		return fmt.Errorf(
 			"redirect to non-HTTPS URL blocked: %s",
 			req.URL,
+		)
+	}
+	return nil
+}
+
+// requireSecureURL rejects a non-HTTPS rawURL unless allowInsecureHTTP
+// is set. It complements httpsOnlyRedirect: that guards where a redirect
+// may lead, this guards the initial request, which a redirect policy
+// never sees. label identifies the URL's role (e.g. "mithril aggregator
+// URL") in the returned error.
+func requireSecureURL(
+	rawURL string,
+	label string,
+	allowInsecureHTTP bool,
+) error {
+	if allowInsecureHTTP {
+		return nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("parsing %s %q: %w", label, rawURL, err)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf(
+			"%s %q must use https; set an explicit allow-insecure-http "+
+				"option for local development or tests",
+			label,
+			rawURL,
 		)
 	}
 	return nil
@@ -910,6 +961,9 @@ func (c *Client) doGet(
 	ctx context.Context,
 	reqURL string,
 ) (io.ReadCloser, error) {
+	if err := requireSecureURL(reqURL, "mithril aggregator URL", c.allowInsecureHTTP); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,

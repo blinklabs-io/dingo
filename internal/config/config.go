@@ -798,6 +798,12 @@ type MithrilConfig struct {
 	// AggregatorURL overrides the default aggregator URL for the network.
 	// If empty, the URL is auto-detected from the configured network.
 	AggregatorURL string `yaml:"aggregatorUrl"          envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
+	// AllowInsecureHTTP permits AggregatorURL and the snapshot artifact
+	// locations the aggregator returns to use plain HTTP instead of
+	// HTTPS. Defaults to false; this is an explicit escape hatch for
+	// local development and tests against a plaintext aggregator and
+	// should not be enabled in production.
+	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"      envconfig:"DINGO_MITHRIL_ALLOW_INSECURE_HTTP"`
 	// Backend selects the Mithril artifact backend: "v2" (default) uses
 	// incremental Cardano database artifacts; "v1" uses the legacy full
 	// snapshot archives, which upstream Mithril is phasing out.

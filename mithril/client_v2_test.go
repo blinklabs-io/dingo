@@ -181,7 +181,7 @@ func TestGetLatestCardanoDatabaseSnapshot(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
 	snapshot, err := client.GetLatestCardanoDatabaseSnapshot(
 		context.Background(),
 	)
@@ -202,7 +202,7 @@ func TestGetLatestCardanoDatabaseSnapshotEmpty(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
 	_, err := client.GetLatestCardanoDatabaseSnapshot(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no Cardano database snapshots")
@@ -223,7 +223,7 @@ func TestGetCardanoDatabaseDigests(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	client := NewClient(srv.URL)
+	client := NewClient(srv.URL, WithAllowInsecureHTTP())
 	entries, err := client.GetCardanoDatabaseDigests(context.Background())
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
