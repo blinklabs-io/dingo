@@ -361,3 +361,45 @@ func TestResetRefusesWhenDependentViewExists(t *testing.T) {
 		"a refused reset must not have touched the underlying table either",
 	)
 }
+
+// TestResetRefusesWhenDependentMaterializedViewExists guards a real gap,
+// found by actually running this exact scenario against a live Postgres
+// server: information_schema.view_table_usage (what
+// refuseIfDependentViewsExist originally queried) only ever covers
+// SQL-standard views, not materialized ones -- it returns zero rows for a
+// materialized view's dependency on its source table, even though DROP
+// TABLE ... CASCADE cascades to a dependent materialized view exactly the
+// same way it does to a regular one. Reset must refuse for a materialized
+// view too, not just a plain one.
+func TestResetRefusesWhenDependentMaterializedViewExists(t *testing.T) {
+	baseDSN := postgresIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_matview")
+	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	admin, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.Exec(
+		"CREATE MATERIALIZED VIEW pgbackup_matview_test AS " +
+			"SELECT id FROM node_settings",
+	)
+	require.NoError(t, err)
+
+	err = store.Reset(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "pgbackup_matview_test")
+	require.Contains(t, err.Error(), "node_settings")
+
+	var viewCount int
+	require.NoError(t, admin.QueryRow(
+		"SELECT count(*) FROM pg_matviews "+
+			"WHERE matviewname = 'pgbackup_matview_test'",
+	).Scan(&viewCount))
+	require.Equal(
+		t, 1, viewCount,
+		"a refused reset must not have touched the materialized view",
+	)
+}

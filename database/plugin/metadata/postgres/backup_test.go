@@ -215,6 +215,33 @@ func TestBackupPostgresFailureDoesNotTouchDestination(t *testing.T) {
 	require.Equal(t, []byte("concurrent"), data)
 }
 
+// TestValidatePostgresBackupPropagatesFailure validates that
+// validatePostgresBackup surfaces a failing "pg_restore --list" (a
+// corrupt, truncated, or otherwise invalid archive) as an error, using the
+// runPgRestoreList seam so this needs no real archive or postgres server.
+func TestValidatePostgresBackupPropagatesFailure(t *testing.T) {
+	original := runPgRestoreList
+	t.Cleanup(func() { runPgRestoreList = original })
+	runPgRestoreList = func(context.Context, string) error {
+		return errors.New("simulated corrupt archive")
+	}
+	err := validatePostgresBackup(context.Background(), "/tmp/backup.dump")
+	require.Error(t, err)
+}
+
+// TestValidatePostgresBackupAcceptsValidArchive validates the success path
+// via the same seam.
+func TestValidatePostgresBackupAcceptsValidArchive(t *testing.T) {
+	original := runPgRestoreList
+	t.Cleanup(func() { runPgRestoreList = original })
+	runPgRestoreList = func(context.Context, string) error {
+		return nil
+	}
+	require.NoError(
+		t, validatePostgresBackup(context.Background(), "/tmp/backup.dump"),
+	)
+}
+
 // TestPgRestoreArgsIncludesExplicitDatabase guards a real bug found via a
 // live integration run: pg_restore, unlike pg_dump, does not fall back to
 // PGDATABASE alone to pick a connection target -- omitting -d/--dbname

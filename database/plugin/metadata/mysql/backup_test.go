@@ -302,3 +302,34 @@ func TestBackupMySQLRequiresConfiguredDatabase(t *testing.T) {
 	)
 	require.Error(t, err)
 }
+
+// TestValidateMySQLBackupRejectsMissingFile validates that
+// validateMySQLBackup reports a missing backup file as an error.
+func TestValidateMySQLBackupRejectsMissingFile(t *testing.T) {
+	err := validateMySQLBackup(
+		context.Background(),
+		filepath.Join(t.TempDir(), "missing.sql"),
+	)
+	require.Error(t, err)
+}
+
+// TestValidateMySQLBackupRejectsEmptyFile guards a real gap existence
+// alone doesn't catch: a zero-byte backup file (e.g. mysqldump crashing
+// before writing anything, or PublishBackupFile publishing an empty
+// staged file) passes a plain os.Stat existence check but is obviously
+// not a usable backup.
+func TestValidateMySQLBackupRejectsEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.sql")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	err := validateMySQLBackup(context.Background(), path)
+	require.Error(t, err)
+}
+
+// TestValidateMySQLBackupAcceptsNonEmptyFile validates the success path.
+func TestValidateMySQLBackupAcceptsNonEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backup.sql")
+	require.NoError(
+		t, os.WriteFile(path, []byte("-- MySQL dump\n"), 0o600),
+	)
+	require.NoError(t, validateMySQLBackup(context.Background(), path))
+}

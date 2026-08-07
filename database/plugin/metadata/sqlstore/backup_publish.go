@@ -25,6 +25,12 @@ import (
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 )
 
+// lstatFile is os.Lstat by default; a package-level var (not a direct
+// call) so a test can inject a failure right after a successful os.Link,
+// deterministically exercising the "dstPath vanished the instant after
+// publish" path without needing an actual filesystem race.
+var lstatFile = os.Lstat
+
 // PublishBackupFile runs write against a path inside a private, uniquely
 // named staging directory next to dstPath, then publishes the result to
 // dstPath (which must not already exist) with an os.Link and fsyncs dstDir
@@ -95,9 +101,17 @@ func PublishBackupFile(
 	// under this package's own contract today, since nothing else writes
 	// dstPath directly, but cheap insurance against a future caller that
 	// doesn't hold that invariant).
-	publishedInfo, statErr := os.Lstat(dstPath)
+	publishedInfo, statErr := lstatFile(dstPath)
+	if statErr != nil {
+		// os.Link just reported success, so dstPath disappearing (or
+		// becoming unreadable) immediately after is itself the failure to
+		// report -- proceeding as if publish succeeded here would return
+		// nil from this function with no file actually durably in place,
+		// and the caller would believe the snapshot exists.
+		return fmt.Errorf("verify published %q: %w", dstPath, statErr)
+	}
 	defer func() {
-		if err == nil || statErr != nil {
+		if err == nil {
 			return
 		}
 		if info, lstatErr := os.Lstat(dstPath); lstatErr == nil &&

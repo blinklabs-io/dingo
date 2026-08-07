@@ -164,3 +164,28 @@ func TestPublishBackupFileCleansUpDestinationOnLateFailure(t *testing.T) {
 			"too, so a retry isn't permanently blocked",
 	)
 }
+
+// TestPublishBackupFileFailsWhenPublishedDestinationVanishes guards a real
+// gap: the verification lstat right after os.Link used to be consulted
+// only to decide whether the deferred cleanup should run, not treated as
+// a failure of the publish itself -- so if dstPath disappeared (or became
+// unreadable) in the instant after a successful Link, this function could
+// still reach the end of its happy path and return nil, reporting success
+// with no durable backup file actually in place.
+func TestPublishBackupFileFailsWhenPublishedDestinationVanishes(t *testing.T) {
+	original := lstatFile
+	t.Cleanup(func() { lstatFile = original })
+	lstatFile = func(string) (os.FileInfo, error) {
+		return nil, errors.New("simulated lstat failure right after publish")
+	}
+
+	dst := filepath.Join(t.TempDir(), "backup.bin")
+	err := PublishBackupFile(dst, func(stagedPath string) error {
+		return os.WriteFile(stagedPath, []byte("hello"), 0o600)
+	})
+	require.Error(
+		t, err,
+		"a failed post-publish verification must fail PublishBackupFile, "+
+			"not be silently swallowed while the function still reports success",
+	)
+}

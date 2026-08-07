@@ -57,3 +57,19 @@ type Restorer interface {
 type Resettable interface {
 	Reset(ctx context.Context) error
 }
+
+// BackupValidator is implemented by metadata store plugins that can check a
+// backup file's structural integrity before it's used to restore, without
+// touching any target database. RestoreFrom's own parsing eventually
+// catches a corrupt or truncated backup on its own for every plugin, but
+// for a Resettable provider specifically that discovery happens too late:
+// restoreMetadataStore (database/lifecycle/restore.go) unconditionally
+// resets a live remote target -- dropping its real tables, with no staging
+// copy and no rollback -- before RestoreFrom ever runs, so a backup that
+// turns out to be invalid only once RestoreFrom tries to use it means the
+// reset already happened for nothing, with the target now empty and no way
+// back. Validating first, while the target is still untouched, lets that
+// failure abort before the reset instead of after it.
+type BackupValidator interface {
+	ValidateBackup(ctx context.Context, srcPath string) error
+}

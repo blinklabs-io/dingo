@@ -202,6 +202,7 @@ func openStore(
 			}
 			return resetDatabase(ctx, db, database)
 		},
+		ValidateBackup: validateMySQLBackup,
 	})
 	if err != nil {
 		_ = db.Close()

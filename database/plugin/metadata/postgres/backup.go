@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -81,6 +82,39 @@ var runPgRestore = func(ctx context.Context, env []string, database, srcPath str
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("pg_restore: %w: %s", err, stderr.String())
+	}
+	return nil
+}
+
+// runPgRestoreList invokes "pg_restore --list" against srcPath, indirected
+// the same way runPgDump/runPgRestore are. Unlike a real restore, --list
+// only parses the archive's table of contents and prints it -- it never
+// connects to any database or applies anything -- so this is a cheap,
+// genuine structural check that srcPath is an intact, uncorrupted pg_dump
+// custom-format archive, safe to run before restoreMetadataStore's
+// Resettable.Reset destroys the live target's real tables. See
+// metadata.BackupValidator's doc comment for why that ordering matters.
+var runPgRestoreList = func(ctx context.Context, srcPath string) error {
+	cmd := exec.CommandContext( //nolint:gosec // G204: srcPath is our own staging/snapshot path, not user input
+		ctx,
+		"pg_restore",
+		"--list",
+		srcPath,
+	)
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pg_restore --list: %w: %s", err, stderr.String())
+	}
+	return nil
+}
+
+// validatePostgresBackup is the sqlstore.Config.ValidateBackup hook (see
+// metadata.BackupValidator's doc comment).
+func validatePostgresBackup(ctx context.Context, srcPath string) error {
+	if err := runPgRestoreList(ctx, srcPath); err != nil {
+		return fmt.Errorf("postgres backup validation: %w", err)
 	}
 	return nil
 }
@@ -421,9 +455,18 @@ func resetDatabase(ctx context.Context, db *sql.DB) error {
 }
 
 // refuseIfDependentViewsExist errors out, before resetDatabase drops
-// anything, if any view depends on a table about to be dropped -- see
-// resetDatabase's own doc comment for why CASCADE makes this a real risk
-// and why failing loudly is the only safe option here.
+// anything, if any view (or materialized view) depends on a table about to
+// be dropped -- see resetDatabase's own doc comment for why CASCADE makes
+// this a real risk and why failing loudly is the only safe option here.
+//
+// Queries pg_depend/pg_rewrite/pg_class directly rather than
+// information_schema.view_table_usage: confirmed live against a real
+// Postgres server, that information_schema view only ever covers
+// SQL-standard views (pg_class.relkind = 'v') and returns zero rows for a
+// materialized view's dependency on its source table -- even though DROP
+// TABLE ... CASCADE cascades to a dependent materialized view exactly the
+// same way it does to a regular one ("NOTICE: drop cascades to
+// materialized view"). Restricting to relkind IN ('v', 'm') catches both.
 func refuseIfDependentViewsExist(
 	ctx context.Context,
 	db *sql.DB,
@@ -432,8 +475,21 @@ func refuseIfDependentViewsExist(
 	for _, t := range tables {
 		var viewSchema, viewName string
 		err := db.QueryRowContext(ctx, `
-			SELECT view_schema, view_name FROM information_schema.view_table_usage
-			WHERE table_schema = $1 AND table_name = $2
+			SELECT dependent_ns.nspname, dependent_view.relname
+			FROM pg_depend
+			JOIN pg_rewrite
+				ON pg_depend.objid = pg_rewrite.oid
+			JOIN pg_class AS dependent_view
+				ON pg_rewrite.ev_class = dependent_view.oid
+			JOIN pg_class AS source_table
+				ON pg_depend.refobjid = source_table.oid
+			JOIN pg_namespace AS source_ns
+				ON source_ns.oid = source_table.relnamespace
+			JOIN pg_namespace AS dependent_ns
+				ON dependent_ns.oid = dependent_view.relnamespace
+			WHERE source_ns.nspname = $1
+			AND source_table.relname = $2
+			AND dependent_view.relkind IN ('v', 'm')
 			LIMIT 1
 		`, t.schema, t.name).Scan(&viewSchema, &viewName)
 		if errors.Is(err, sql.ErrNoRows) {

@@ -160,6 +160,7 @@ func openStore(
 		Reset: func(ctx context.Context) error {
 			return resetDatabase(ctx, db)
 		},
+		ValidateBackup: validatePostgresBackup,
 	})
 	if err != nil {
 		_ = db.Close()

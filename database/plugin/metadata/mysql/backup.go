@@ -233,6 +233,30 @@ func backupMySQL(ctx context.Context, dsn, dstPath string) error {
 	return nil
 }
 
+// validateMySQLBackup is the sqlstore.Config.ValidateBackup hook (see
+// metadata.BackupValidator's doc comment). Deliberately weaker than
+// postgres's validatePostgresBackup: mysqldump's plain-SQL output has no
+// equivalent to pg_restore --list -- MySQL ships no tool that parses or
+// validates a SQL dump's structure without actually executing it against a
+// real server -- so this only confirms the file opens and is non-empty,
+// catching a missing, unreadable, or zero-byte backup. A truncated-mid-
+// statement or otherwise corrupted-but-non-empty dump is still only caught
+// later, by restoreMySQL's own mysql client invocation, after Reset has
+// already run rather than before it.
+func validateMySQLBackup(ctx context.Context, srcPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("mysql backup validation: %w", err)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("mysql backup validation: %q is empty", srcPath)
+	}
+	return nil
+}
+
 // restoreMySQL loads a mysqldump SQL archive at srcPath into the database
 // dsn points at. The target must not already contain any dingo tables --
 // mysqldump/mysql have no equivalent of a fresh, never-created data

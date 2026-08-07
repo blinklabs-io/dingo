@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -441,6 +442,52 @@ func requireEmptyOrAbsent(dir string) error {
 	return nil
 }
 
+// blobBackupMagic/blobBackupVersion mirror blobbackup.Magic/blobbackup.
+// Version (database/plugin/blob/internal/blobbackup) exactly, duplicated
+// here rather than imported: that package is internal to
+// database/plugin/blob, and Go's internal-package visibility rules block
+// importing it from this package's own, separate tree. Kept in sync by
+// hand -- if blobbackup's header format ever changes, this must change
+// with it.
+var blobBackupMagic = [4]byte{'D', 'B', 'L', 'B'}
+
+const blobBackupVersion = 2
+
+// validateBlobBackupHeader confirms path's first 5 bytes are a recognized
+// blobbackup magic+version header, without needing a real blob store (or
+// resolving the blob plugin at all) to check it. A corrupted, truncated,
+// or simply wrong file at this path would otherwise only be discovered by
+// restoreBlobStore, which runs after restoreMetadataStore's Resettable.
+// Reset has already destroyed a live remote metadata target's real
+// tables -- see metadata.BackupValidator's doc comment for the same
+// concern on the metadata side. This is necessarily shallow (only the
+// fixed 5-byte header, not the full stream's per-record framing or its
+// terminator checksum) since this package cannot reach blobbackup's own
+// deeper validation logic across that internal-package boundary. Callers
+// must only use this for a snapshotDir whose manifest actually recorded a
+// blobbackup-format blob plugin (s3 or gcs) -- badger's native format
+// starts with different bytes entirely.
+func validateBlobBackupHeader(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %q: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck
+	var header [5]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return fmt.Errorf("read %q header: %w", path, err)
+	}
+	if [4]byte(header[:4]) != blobBackupMagic {
+		return fmt.Errorf("%q is not a recognized blob backup stream", path)
+	}
+	if header[4] != blobBackupVersion {
+		return fmt.Errorf(
+			"%q has unsupported blob backup version %d", path, header[4],
+		)
+	}
+	return nil
+}
+
 // restoreMetadataStore resolves the manifest-recorded metadata plugin
 // against targetDataDir just long enough to construct it (plugin.Resolve
 // always constructs and starts a provider together — there is no
@@ -520,6 +567,38 @@ func restoreMetadataStore(
 			if _, err := os.Stat(path); err != nil {
 				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
 				return fmt.Errorf("backup %q: %w", path, err)
+			}
+		}
+		// Existence alone doesn't catch a corrupt or truncated backup --
+		// RestoreFrom's own parsing eventually would, but only after this
+		// Reset has already destroyed the live target's real tables. Where
+		// a plugin can check its own backup's structural integrity cheaply
+		// without touching any database (see metadata.BackupValidator's doc
+		// comment), do that first.
+		if validator, ok := store.(metadata.BackupValidator); ok {
+			if err := validator.ValidateBackup(ctx, backupPath); err != nil {
+				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+				return fmt.Errorf(
+					"validate metadata backup %q: %w", backupPath, err,
+				)
+			}
+		}
+		// The blob backup gets the same treatment, shallower: this package
+		// cannot import database/plugin/blob/internal/blobbackup (Go's
+		// internal-package visibility blocks it from outside that tree), so
+		// this only confirms the blobbackup-format header (magic + version)
+		// that s3/gcs both use, not the full per-record framing or its
+		// terminator checksum blobbackup.Restore itself verifies. badger
+		// uses an entirely different native format, not blobbackup's, so
+		// this only applies when the manifest actually recorded one of the
+		// plugins that writes it.
+		if manifest.BlobPlugin == "s3" || manifest.BlobPlugin == "gcs" {
+			blobBackupPath := filepath.Join(snapshotDir, BlobBackupFileName)
+			if err := validateBlobBackupHeader(blobBackupPath); err != nil {
+				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+				return fmt.Errorf(
+					"validate blob backup %q: %w", blobBackupPath, err,
+				)
 			}
 		}
 		if err := resettable.Reset(ctx); err != nil {

@@ -61,6 +61,14 @@ type Config struct {
 	// remote database, which a directory wipe (sqlite/badger's mechanism)
 	// cannot touch. Left unset, Reset is a harmless no-op.
 	Reset func(context.Context) error
+	// ValidateBackup is an optional provider-owned hook checking a backup
+	// file's structural integrity without touching any database -- see
+	// metadata.BackupValidator's doc comment for why this exists
+	// specifically for Resettable providers: their restore orchestration
+	// resets a live remote target before RestoreFrom ever parses the
+	// backup, so an invalid backup needs to be caught before that reset,
+	// not after it. Left unset, ValidateBackup is a harmless no-op.
+	ValidateBackup func(context.Context, string) error
 }
 
 // Store owns the shared database/sql pools. Provider packages own DSN and
@@ -80,6 +88,7 @@ type Store struct {
 	backupTo          func(context.Context, string) error
 	restoreFrom       func(context.Context, string) error
 	reset             func(context.Context) error
+	validateBackup    func(context.Context, string) error
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceState  atomic.Uint32
@@ -138,6 +147,7 @@ func New(config Config) (*Store, error) {
 		backupTo:         config.BackupTo,
 		restoreFrom:      config.RestoreFrom,
 		reset:            config.Reset,
+		validateBackup:   config.ValidateBackup,
 	}, nil
 }
 
@@ -187,6 +197,19 @@ func (s *Store) Reset(ctx context.Context) error {
 		return errors.New("metadata reset: store is closed")
 	}
 	return s.reset(ctx)
+}
+
+// ValidateBackup checks a backup file's structural integrity, for
+// providers that supply the hook (see metadata.BackupValidator). A no-op
+// for providers that don't -- every backend built on this shared Store
+// therefore satisfies metadata.BackupValidator's interface, but only
+// providers whose restore orchestration needs it wire a non-nil
+// Config.ValidateBackup in.
+func (s *Store) ValidateBackup(ctx context.Context, srcPath string) error {
+	if s.validateBackup == nil {
+		return nil
+	}
+	return s.validateBackup(ctx, srcPath)
 }
 
 // DiskSize returns backend storage usage when the provider supplies it.
