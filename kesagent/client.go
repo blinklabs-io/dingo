@@ -112,6 +112,9 @@ type Client struct {
 	// so a push already in flight cannot repopulate key material after the
 	// shutdown wipe.
 	closed bool
+	// stopped is set when the Start context is cancelled. It closes the
+	// registration race between a successful dial and the cancellation watcher.
+	stopped bool
 	// stop cancels the background loop's own context, so Close stops the
 	// loop rather than leaving it running against a cancelled-later node
 	// context. conn is the loop's current connection, closed by Close and by
@@ -194,6 +197,8 @@ func (c *Client) Start(ctx context.Context) {
 			<-runCtx.Done()
 			c.mu.Lock()
 			conn := c.conn
+			c.stopped = true
+			c.conn = nil
 			c.mu.Unlock()
 			if conn != nil {
 				_ = conn.Close()
@@ -208,12 +213,31 @@ func (c *Client) Start(ctx context.Context) {
 	})
 }
 
-// setConn records the loop's current connection so the cancellation watcher
-// and Close can unblock a parked read. Passing nil clears it.
+// setConn records or clears the loop's current connection so Close can unblock
+// a parked read. Passing nil clears it.
 func (c *Client) setConn(conn net.Conn) {
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
+}
+
+// registerConn atomically records a newly connected socket with the client
+// lifecycle state. A context cancellation or Close racing the dial cannot
+// leave an untracked connection behind.
+func (c *Client) registerConn(ctx context.Context, conn net.Conn) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ErrClosed
+	}
+	if c.stopped {
+		return context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.conn = conn
+	return nil
 }
 
 // dial connects to the agent and reads/verifies the Hello handshake.
@@ -292,10 +316,12 @@ func (c *Client) runServeKey(ctx context.Context) {
 		}
 		c.logger.Info("connected to KES agent (serve-key)")
 		backoff = c.cfg.MinReconnect
-		// Recorded rather than watched per connection: the single watcher
-		// started by Start closes whatever is current, so reconnects do not
-		// accumulate goroutines.
-		c.setConn(conn)
+		// Recorded atomically with the lifecycle state so cancellation racing
+		// this dial cannot leave the connection untracked.
+		if err := c.registerConn(ctx, conn); err != nil {
+			_ = conn.Close()
+			return
+		}
 		for {
 			var kp KeyPush
 			if err := readFrame(conn, &kp); err != nil {
@@ -361,6 +387,17 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 		wipe(kp.KESSignKey)
 		return
 	}
+	internal := kp.Period - c.start
+	maxPeriod := kes.MaxPeriod(depth)
+	if internal >= maxPeriod {
+		c.logger.Warn(
+			"ignoring KES key push: pushed period is at or beyond key expiry",
+			"relative_period", internal,
+			"max_period", maxPeriod,
+		)
+		wipe(kp.KESSignKey)
+		return
+	}
 	// Derive the public key from the pushed secret and require it to match the
 	// operational certificate. The vkey compared above is only what the agent
 	// asserts; this checks the key actually sent.
@@ -378,8 +415,6 @@ func (c *Client) applyKeyPush(kp KeyPush) {
 		wipe(kp.KESSignKey)
 		return
 	}
-	internal := kp.Period - c.start
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// A push racing shutdown must not repopulate key material after the wipe.
@@ -429,12 +464,16 @@ func (c *Client) runSign(ctx context.Context) {
 					continue
 				}
 				c.logger.Info("connected to KES agent (sign)")
-				conn = newConn
 				// Recorded so the client's cancellation watcher can close a
 				// connection parked in readFrame; otherwise a shutdown while a
 				// request is in flight leaks this goroutine and the socket
 				// until the agent replies.
-				c.setConn(conn)
+				if err := c.registerConn(ctx, newConn); err != nil {
+					_ = newConn.Close()
+					req.resp <- signResp{err: err}
+					return
+				}
+				conn = newConn
 				backoff = c.cfg.MinReconnect
 			}
 			sig, err := roundTripSign(

@@ -397,6 +397,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
 			missing = append(missing, "shelleyKesKey")
 		}
+		if c.ShelleyKESKey != "" && c.ShelleyKESAgentSocket != "" {
+			errs = append(errs, errors.New(
+				"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
+			))
+		}
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
 		}

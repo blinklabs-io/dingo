@@ -237,13 +237,11 @@ func (n *Node) kesAgentEnabled() bool {
 	return n.config.shelleyKESAgentSocket != ""
 }
 
-// kesAgentMode returns the configured KES agent service mode, defaulting to
-// serve-key when a socket is set without an explicit mode.
-// kesAgentMode resolves the configured agent mode. An unset value defaults to
-// serve-key; anything else must be an exact match, so a typo fails at startup
-// with a clear message instead of silently selecting serve-key and surfacing
-// later as a confusing handshake mismatch (or, against a serve-key agent,
-// appearing to work).
+// kesAgentMode resolves the configured KES agent service mode. An unset value
+// defaults to serve-key; anything else must be an exact match, so a typo fails
+// at startup with a clear message instead of silently selecting serve-key and
+// surfacing later as a confusing handshake mismatch (or, against a serve-key
+// agent, appearing to work).
 func (n *Node) kesAgentMode() (string, error) {
 	switch n.config.shelleyKESAgentMode {
 	case "":

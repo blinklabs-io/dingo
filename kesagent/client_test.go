@@ -16,6 +16,7 @@ package kesagent
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -335,6 +336,35 @@ func TestSignModeRejectsClosedClient(t *testing.T) {
 	_, err = client.KESSign(0, []byte("message"))
 	if !errors.Is(err, ErrClosed) {
 		t.Fatalf("expected ErrClosed, got %v", err)
+	}
+}
+
+func TestRegisterConnRejectsCanceledContext(t *testing.T) {
+	_, _, opcert := newTestKES(t, 0)
+	client, err := New(Config{
+		SocketPath: "/unused",
+		Mode:       ModeServeKey,
+		OpCert:     opcert,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	clientConn, serverConn := net.Pipe()
+	defer func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	}()
+
+	if err := client.registerConn(ctx, clientConn); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled context error, got %v", err)
+	}
+	client.mu.Lock()
+	registered := client.conn != nil
+	client.mu.Unlock()
+	if registered {
+		t.Fatal("canceled connection was registered")
 	}
 }
 
@@ -689,5 +719,29 @@ func TestServeKeyRejectsMalformedKeyWithoutPanic(t *testing.T) {
 	}
 	if !kes.VerifySignedKES(vkey, 1, msg, sig) {
 		t.Fatal("a malformed key was installed")
+	}
+}
+
+func TestServeKeyRejectsExpiredPush(t *testing.T) {
+	const start = uint64(0)
+	vkey, master, opcert := newTestKES(t, start)
+	client, err := New(Config{
+		SocketPath: "/unused",
+		Mode:       ModeServeKey,
+		OpCert:     opcert,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	client.applyKeyPush(KeyPush{
+		Type:       KeyPushType,
+		Period:     start + kes.MaxPeriod(kes.CardanoKesDepth),
+		Depth:      kes.CardanoKesDepth,
+		KESSignKey: bytes.Clone(master.Data),
+		KESVKey:    vkey,
+	})
+	if client.HasKey() {
+		t.Fatal("expired KES key push was installed")
 	}
 }
