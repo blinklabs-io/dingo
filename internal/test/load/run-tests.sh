@@ -26,6 +26,15 @@ cleanup() {
 trap cleanup EXIT
 
 cd "${PROJECT_ROOT}"
+
+# The producer-disagreement warning below detects over-accounting. Exercise a
+# Haskell-derived exact-cost case first so this gate also detects a missing
+# successful-return CEK flush, which would under-account without a warning.
+go test \
+	-count=1 \
+	-run '^TestPlutusBudgetComparisonIncludesFinalSlippageBatch$' \
+	./ledger/eras
+
 ./dingo load database/immutable/testdata 2>&1 | tee "${LOAD_LOG}"
 
 if grep -Fq \
