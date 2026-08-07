@@ -74,6 +74,68 @@ func FullPotRewardsStandardNetwork(
 	return "", false
 }
 
+// MusashiNetworkIdentityConflict reports whether network/networkMagic mixes the
+// experimental Musashi network (the IOG Leios prototype) with a *different*
+// predefined network, returning the name of the network it collides with.
+//
+// This matters because Musashi is identified by either half of its identity —
+// the name "musashi" or network magic 164 — and that identity switches on
+// consensus/ledger trust bypasses (SkipLeaderStakeThresholdCheck,
+// SkipDijkstraTxValidation). Either half alone is enough to enable them, so a
+// half-matching configuration is dangerous in both directions:
+//
+//   - network "preview" with magic 164 runs the prototype's non-validating
+//     rules on a node the operator configured as preview; and
+//   - network "musashi" with magic 2 is worse still, because the handshake
+//     uses the magic: the node actually joins preview while trusting the
+//     prototype's rules.
+//
+// A custom name or an unregistered magic is not a conflict — those are private
+// prototype deployments (e.g. a Musashi mirror). Devnet is excluded for the
+// same reason it is excluded from FullPotRewardsStandardNetwork: it is a local
+// test network, not a production-like profile.
+func MusashiNetworkIdentityConflict(
+	network string,
+	networkMagic uint32,
+) (string, bool) {
+	nameIsMusashi := network == ouroboros.NetworkCardanoMusashi.Name
+	magicIsMusashi := networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+	if nameIsMusashi && !magicIsMusashi && networkMagic != 0 {
+		if known, ok := ouroboros.NetworkByNetworkMagic(networkMagic); ok &&
+			known.Name != ouroboros.NetworkCardanoMusashi.Name &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	if magicIsMusashi && !nameIsMusashi && network != "" {
+		if known, ok := ouroboros.NetworkByName(network); ok &&
+			known.Name != ouroboros.NetworkCardanoMusashi.Name &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	return "", false
+}
+
+// MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
+// identifies the Musashi prototype network, and is therefore permitted to run
+// with the prototype's consensus/ledger trust bypasses.
+//
+// A conflicting identity (see MusashiNetworkIdentityConflict) is deliberately
+// *not* the prototype network. Startup validation rejects those configurations
+// outright, but returning false here keeps the bypasses off even for an
+// embedder that builds a Config directly and never calls Validate.
+func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
+	if _, conflict := MusashiNetworkIdentityConflict(
+		network,
+		networkMagic,
+	); conflict {
+		return false
+	}
+	return network == ouroboros.NetworkCardanoMusashi.Name ||
+		networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+}
+
 // Validate checks the fully merged configuration (defaults, YAML,
 // environment, CLI flags) for invalid values and nonsensical
 // combinations. Every problem found is returned, joined into a single
@@ -432,6 +494,29 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				network,
 			))
 		}
+	}
+
+	// The Musashi prototype network's identity switches on consensus/ledger
+	// trust bypasses, so it must never be half-claimed by a configuration
+	// that also names or addresses a standard network. Rejected outright
+	// rather than defused silently: the operator asked for two mutually
+	// exclusive networks and only one of them can be what they meant.
+	if network, ok := MusashiNetworkIdentityConflict(
+		c.Network,
+		c.NetworkMagic,
+	); ok {
+		errs = append(errs, fmt.Errorf(
+			"network identity conflict: network %q with networkMagic %d "+
+				"identifies both the %q network and the Musashi prototype "+
+				"network (name %q, magic %d); the Musashi prototype disables "+
+				"consensus and ledger validation and must not be reachable "+
+				"from a standard network configuration",
+			c.Network,
+			c.NetworkMagic,
+			network,
+			ouroboros.NetworkCardanoMusashi.Name,
+			ouroboros.NetworkCardanoMusashi.NetworkMagic,
+		))
 	}
 
 	// Network identity

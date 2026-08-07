@@ -631,11 +631,11 @@ func (n *Node) Run(ctx context.Context) error {
 			// the omission is negligible. TPraos bootstrap pool-threshold
 			// checks are waived separately inside header validation after
 			// genesis overlay slots are handled.
-			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
+			SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
 			// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
 			// trusted by the prototype; skip dingo's per-tx validation to match it
 			// and keep block application at the production rate.
-			SkipDijkstraTxValidation: n.config.isMusashiNetwork(),
+			SkipDijkstraTxValidation: n.config.prototypeTrustBypassesEnabled(),
 			// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
 			// off by default (0), effective only in Dijkstra and later.
 			MinPoolMargin: n.config.minPoolMargin,
