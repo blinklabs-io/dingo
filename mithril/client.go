@@ -713,32 +713,36 @@ func httpsOnlyRedirect(
 	return nil
 }
 
-// requireSecureURL rejects a non-HTTPS rawURL unless allowInsecureHTTP
-// is set. It complements httpsOnlyRedirect: that guards where a redirect
-// may lead, this guards the initial request, which a redirect policy
-// never sees. label identifies the URL's role (e.g. "mithril aggregator
-// URL") in the returned error.
+// requireSecureURL rejects a non-HTTPS rawURL. allowInsecureHTTP widens
+// that to also accept http, and only http — a malformed URL or any
+// other scheme is always rejected, escape hatch or not. It complements
+// httpsOnlyRedirect: that guards where a redirect may lead, this guards
+// the initial request, which a redirect policy never sees. label
+// identifies the URL's role (e.g. "mithril aggregator URL") in the
+// returned error.
 func requireSecureURL(
 	rawURL string,
 	label string,
 	allowInsecureHTTP bool,
 ) error {
-	if allowInsecureHTTP {
-		return nil
-	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("parsing %s %q: %w", label, rawURL, err)
 	}
-	if parsed.Scheme != "https" {
-		return fmt.Errorf(
-			"%s %q must use https; set an explicit allow-insecure-http "+
-				"option for local development or tests",
-			label,
-			rawURL,
-		)
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecureHTTP {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf(
+		"%s %q must use https; set an explicit allow-insecure-http "+
+			"option for local development or tests",
+		label,
+		rawURL,
+	)
 }
 
 // ListSnapshots retrieves the list of available snapshots from the

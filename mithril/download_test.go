@@ -389,8 +389,9 @@ func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:     server.URL + "/snapshot.tar.zst",
-		DestDir: t.TempDir(),
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             t.TempDir(),
+		MaxTransientRetries: -1,
 	})
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "must use https")

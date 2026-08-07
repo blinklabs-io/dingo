@@ -815,6 +815,24 @@ func TestRequireSecureURL(t *testing.T) {
 			rawURL:  "://not-a-url",
 			wantErr: true,
 		},
+		{
+			name:              "malformed URL rejected even with escape hatch",
+			rawURL:            "://not-a-url",
+			allowInsecureHTTP: true,
+			wantErr:           true,
+		},
+		{
+			name:    "non-http(s) scheme rejected by default",
+			rawURL:  "ftp://aggregator.example.com/aggregator",
+			wantErr: true,
+		},
+		{
+			name: "non-http(s) scheme rejected even with escape hatch " +
+				"(it widens to http, not to any scheme)",
+			rawURL:            "ftp://aggregator.example.com/aggregator",
+			allowInsecureHTTP: true,
+			wantErr:           true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
