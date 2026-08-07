@@ -44,6 +44,19 @@ var errCatchUpLocalAhead = errors.New(
 // vetted lookup — and falling back would silently reinstate the name-resolved
 // open this exists to replace, which is the kind of downgrade nobody notices
 // until it matters.
+//
+// Where the result also carries per-file digests, every file is checked against
+// them as it is opened, from the descriptor the read then goes through. The
+// handle and the digests answer different questions: the handle says the tip
+// read, the catch-up check and the blob copy are about the directory the
+// bootstrap vetted, and the digests say the bytes in it are the certified
+// bytes. Without the second, a writer sharing the download directory renames a
+// file of their own over a verified one — never leaving the directory the
+// handle refers to — and the copy loads what they wrote.
+//
+// v2 always carries them. v1 does not: it certifies one archive rather than the
+// files inside it, so after extraction there is nothing to re-check against and
+// its reads are bound to the directory alone.
 func openBootstrappedImmutable(
 	result *BootstrapResult,
 ) (*immutable.ImmutableDb, error) {
@@ -54,7 +67,15 @@ func openBootstrappedImmutable(
 			result.ImmutableDir,
 		)
 	}
-	imm, err := immutable.NewFromRoot(result.ImmutableRoot)
+	var imm *immutable.ImmutableDb
+	var err error
+	if len(result.ImmutableDigests) > 0 {
+		imm, err = immutable.NewFromRootVerified(
+			result.ImmutableRoot, result.ImmutableDigests, 0,
+		)
+	} else {
+		imm, err = immutable.NewFromRoot(result.ImmutableRoot)
+	}
 	if err != nil {
 		return nil, fmt.Errorf(
 			"opening certified ImmutableDB: %w", err,

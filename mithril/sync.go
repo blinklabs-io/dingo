@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -497,41 +496,44 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if copyChain == nil {
 		return SyncResult{}, errors.New("primary chain not available")
 	}
-	// pipeImm is bound to the handle downloadImmutables holds open, so it is
-	// only usable from inside the callback below: that handle is closed when
-	// the download returns, and the sequencer drains before it does. Nothing
-	// after Bootstrap may read it — the post-bootstrap copy opens its own.
-	var pipeImm *immutable.ImmutableDb
 	var pipeLastChunk uint64
 	pipeCopied := false
 	const pipelineCopyChunkStride = 64
-	onChunkContiguous := func(
-		immutableDir string,
-		immutableRoot *os.Root,
-		num uint64,
-	) error {
-		if pipeImm == nil {
-			// Through the handle extraction is writing through, not through
-			// its name: the copy has to be reading the chunks this process
-			// just wrote, and only the handle says so.
-			var nerr error
-			if pipeImm, nerr = immutable.NewFromRoot(
-				immutableRoot,
-			); nerr != nil {
-				return fmt.Errorf(
-					"opening immutable DB for pipelined copy: %w", nerr,
-				)
-			}
-		}
+	onChunkContiguous := func(chunk ContiguousChunk) error {
 		// Throttle: copy every N contiguous chunks rather than on each one;
 		// the post-bootstrap copy finishes whatever remainder is left.
-		if pipeCopied && num < pipeLastChunk+pipelineCopyChunkStride {
+		if pipeCopied && chunk.Num < pipeLastChunk+pipelineCopyChunkStride {
 			return nil
 		}
-		maxSlot, ok, serr := pipeImm.LastSlotInChunk(num)
+		// Opened per call, and only usable from inside this callback: it is
+		// bound to the handle downloadImmutables holds open, which is closed
+		// when the download returns, and the sequencer drains before it does.
+		// Nothing after Bootstrap may read it — the post-bootstrap copy opens
+		// its own.
+		//
+		// Through the handle extraction is writing through, not through its
+		// name: the copy has to be reading the chunks this process just wrote,
+		// and only the handle says so. Verified against the same digests the
+		// pool checked, because the handle settles the directory and not the
+		// files in it.
+		//
+		// Bounded to the contiguous prefix, which is why it is rebuilt each
+		// call rather than kept. The pool writes chunks above the prefix out
+		// of order, so one of those may be present and half written; the bound
+		// keeps the reader from opening it at all, rather than opening it and
+		// refusing a file that is merely unfinished.
+		pipeImm, nerr := immutable.NewFromRootVerified(
+			chunk.Root, chunk.Digests, chunk.Num+1,
+		)
+		if nerr != nil {
+			return fmt.Errorf(
+				"opening immutable DB for pipelined copy: %w", nerr,
+			)
+		}
+		maxSlot, ok, serr := pipeImm.LastSlotInChunk(chunk.Num)
 		if serr != nil {
 			return fmt.Errorf(
-				"pipelined copy bound for chunk %d: %w", num, serr,
+				"pipelined copy bound for chunk %d: %w", chunk.Num, serr,
 			)
 		}
 		if !ok {
@@ -552,7 +554,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"pipelined copy to slot %d: %w", maxSlot, cerr,
 			)
 		}
-		pipeLastChunk = num
+		pipeLastChunk = chunk.Num
 		pipeCopied = true
 		return nil
 	}

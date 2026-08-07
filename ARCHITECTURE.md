@@ -2906,29 +2906,74 @@ Every read of a bootstrapped tree goes through one of them:
 
 | tree | opened by | read by |
 |---|---|---|
-| immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRoot`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
+| immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
 | ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
 | extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
 
 The v2 pipelined copy reads through the same handle extraction is writing
-through. The directory names are carried alongside for messages; they are not
-what the load resolves. Each bootstrap opens the extraction directory once and
+through, verified against the same digests and bounded to the contiguous prefix
+(see below). The directory names are carried alongside for messages; they are
+not what the load resolves. Each bootstrap opens the extraction directory once and
 derives both the immutable lookup and the ledger-state fallback from that one
 handle — vetting it twice would be two resolutions of one name, so the tree
 whose ImmutableDB was accepted could differ from the tree whose ledger state is
 imported.
 
-One limit is worth stating rather than leaving to be discovered. The handles
-bind *directories*, and on the immutable side the individual chunk files are
-still opened by name through that handle as the load reaches them — long after
-`checkImmutableTrio` verified their digests against the certified map. A writer
-inside the extraction directory can therefore still replace a chunk file
-between its digest check and its read. Closing that would mean holding a
-descriptor for every file in the snapshot from verification until load, which
-for a mainnet ImmutableDB is thousands of them, or re-hashing at read time. The
-ledger state is not in this position — there are two files, so discovery opens
-and carries them — which is why the ancillary side is bound to its signature and
-the immutable side is bound only to its directory.
+##### Handles bind directories; digests bind bytes
+
+A handle settles *which directory* is read. It settles nothing about the files
+inside it, and those are a second substitution: a writer who shares the download
+directory never has to leave the directory the handle refers to in order to
+rename a file of their own over a verified one. Both halves of every tree's
+verification therefore have to reach the read, and a check that closed the file
+it looked at has not reached anything.
+
+That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
+downloaded trio as its archive lands and closes it; the tip read, the catch-up
+check and the blob copy open those files again. `verifyAncillaryManifest` hashes
+every file the ancillary key signed and closes it; the import opens the state
+and table it selects afterwards. In each case the tree between the two is the
+same tree — that is what the handle is for — and the bytes need not be.
+
+So the digests travel beside the handle and are re-established at the open the
+reader keeps:
+
+| tree | what travels | where it is re-checked |
+|---|---|---|
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` hashes each chunk, primary and secondary file as it opens it, and the read goes through that same descriptor |
+| immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
+| ancillary (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | `verifySignedSnapshot` hashes the state and table discovery opened, before either reaches a parser |
+
+A file the map does not cover is refused rather than read. The manifest walk and
+the digest list both already reject an unlisted file, but those are statements
+about the tree as it was checked; a file planted afterwards is refused only at
+the point of use. For the same reason an ancillary tree flagged `AncillaryVerified`
+without a digest map is refused outright — the flag would otherwise rest on a
+check nothing downstream can repeat.
+
+Re-hashing is the cost the alternative was not worth. Binding by retained
+descriptor would mean holding one for every file in the snapshot from
+verification until load, which for a mainnet ImmutableDB is tens of thousands;
+binding by file identity (`os.SameFile`, size, mtime) is defeatable by an
+attacker who creates the replacement, since inode numbers are reused and
+timestamps are settable. Hashing at the open costs one extra pass over data the
+reader is about to read anyway, so it is served from page cache and bounded by
+SHA-256 throughput rather than by I/O.
+
+The pipelined copy is bounded as well as verified, because it reads a tree the
+download pool is still filling. Archives arrive out of order, so a chunk above
+the contiguous prefix may be present and half written; `NewFromRootVerified`'s
+chunk limit keeps the reader inside the prefix whose archives have been
+verified, rather than opening an unfinished file and refusing it as if it had
+been tampered with. The bound is the reason that database is rebuilt per
+callback rather than kept.
+
+`checkImmutableTrio` hashes through the immutable directory's handle for a
+different reason, and remains necessary: it decides whether a downloaded archive
+is kept and lets the pool retry another location, and it runs while the tree is
+still being assembled and its name still resolvable. Hashing a joined pathname
+there would report a repointed name as a corrupt download — sending the pool
+round the locations again and deleting a trio this process wrote.
 
 Inside the ancillary tree the same rule applies one level down, to files.
 `ledgerstate.OpenSnapshotAtOrBefore` *opens* the ledger state and its UTxO-HD
@@ -2991,7 +3036,9 @@ so the tree whose digests satisfied the ancillary key is the tree whose bytes
 get loaded. Verifying and then importing by name would leave those two steps
 describing possibly different directories, with nothing but timing between
 them — and the manifest walk that proves the payload is completely covered would
-be about a third.
+be about a third. The manifest's digests travel with that handle for the same
+reason one level down, and the files discovery selected are checked against them
+before parsing; see *Handles bind directories; digests bind bytes* above.
 
 A result carrying no handle is refused rather than opened by name — by
 `openBootstrappedImmutable` for the immutable side and by `importLedgerState`

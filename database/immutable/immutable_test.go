@@ -15,6 +15,7 @@
 package immutable_test
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -304,5 +305,214 @@ func copyChunkTrio(t *testing.T, name, dir string) {
 		); err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
+	}
+}
+
+// trioDigests is the digest map a Mithril v2 bootstrap holds for the files in
+// dir: the certified SHA-256 of every chunk/primary/secondary it downloaded,
+// keyed by the name the reader will ask for.
+func trioDigests(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	digests := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		sum := sha256.Sum256(data)
+		digests[entry.Name()] = hex.EncodeToString(sum[:])
+	}
+	return digests
+}
+
+// TestNewFromRootVerifiedReadsTheVerifiedTree is the baseline the refusals
+// below are only meaningful against: a tree whose files match their certified
+// digests reads exactly as an unverified open of the same tree does.
+func TestNewFromRootVerifiedReadsTheVerifiedTree(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "immutable")
+	copyChunkTrio(t, "00000", dir)
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	plain, err := immutable.NewFromRoot(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	want, err := plain.GetTip()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if want == nil {
+		t.Fatal("test fixture produced no tip")
+	}
+
+	imm, err := immutable.NewFromRootVerified(root, trioDigests(t, dir), 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	got, err := imm.GetTip()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if got == nil || got.Slot != want.Slot {
+		t.Fatalf("expected tip slot %d, got %v", want.Slot, got)
+	}
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = iter.Close() }()
+	block, err := iter.Next()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if block == nil {
+		t.Fatal("expected to read a block from a tree that verifies")
+	}
+}
+
+// TestNewFromRootVerifiedRefusesAFileSubstitutedAfterTheDigestCheck is the
+// finding. The digest map stands for the check a Mithril bootstrap performs
+// when the archive lands; the substitution happens afterwards, which is all a
+// writer sharing the download directory has to do to have uncertified bytes
+// read. A handle on the directory does not stop it — the file is reached by
+// name inside a directory that is still the right one.
+func TestNewFromRootVerifiedRefusesAFileSubstitutedAfterTheDigestCheck(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "immutable")
+	copyChunkTrio(t, "00000", dir)
+	digests := trioDigests(t, dir)
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = root.Close() }()
+	imm, err := immutable.NewFromRootVerified(root, digests, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	// Renamed over rather than written through: the extracted file belongs to
+	// this process, so replacing the name is what a writer with the directory
+	// but not the file actually does.
+	theirs := filepath.Join(base, "theirs.chunk")
+	data, err := os.ReadFile(filepath.Join(testDataDir, "00001.chunk"))
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := os.WriteFile(theirs, data, 0o640); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := os.Rename(
+		theirs, filepath.Join(dir, "00000.chunk"),
+	); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = iter.Close() }()
+	_, err = iter.Next()
+	if !errors.Is(err, immutable.ErrDigestMismatch) {
+		t.Fatalf(
+			"reading a substituted chunk must fail as a digest mismatch, got %v",
+			err,
+		)
+	}
+}
+
+// TestNewFromRootVerifiedRefusesAFileTheDigestsDoNotCover keeps "no digest" an
+// error rather than an open. A file nothing certified is exactly what an
+// attacker adds, and reading it because the map is silent about it would make
+// the map's coverage the attacker's choice.
+func TestNewFromRootVerifiedRefusesAFileTheDigestsDoNotCover(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "immutable")
+	copyChunkTrio(t, "00000", dir)
+	digests := trioDigests(t, dir)
+	delete(digests, "00000.chunk")
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = root.Close() }()
+	imm, err := immutable.NewFromRootVerified(root, digests, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = iter.Close() }()
+	if _, err := iter.Next(); err == nil {
+		t.Fatal("expected an uncovered file to be refused")
+	}
+}
+
+// TestNewFromRootVerifiedStopsAtTheChunkLimit covers the pipelined copy, which
+// reads a tree the download pool is still writing into. Chunks arrive out of
+// order, so a chunk above the contiguous prefix may be present and half
+// written; the bound keeps the reader inside the prefix whose digests have
+// been checked instead of failing on one that is merely unfinished.
+func TestNewFromRootVerifiedStopsAtTheChunkLimit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "immutable")
+	copyChunkTrio(t, "00000", dir)
+	copyChunkTrio(t, "00001", dir)
+	digests := trioDigests(t, dir)
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	full, err := immutable.NewFromRootVerified(root, digests, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if _, ok, err := full.LastSlotInChunk(1); err != nil || !ok {
+		t.Fatalf("both chunks must be visible unbounded: ok=%v err=%v", ok, err)
+	}
+
+	bounded, err := immutable.NewFromRootVerified(root, digests, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if _, ok, err := bounded.LastSlotInChunk(1); err != nil || ok {
+		t.Fatalf(
+			"chunk 1 is above the bound and must be invisible: ok=%v err=%v",
+			ok, err,
+		)
+	}
+	boundedTip, err := bounded.GetTip()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	fullTip, err := full.GetTip()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if boundedTip == nil || fullTip == nil {
+		t.Fatal("test fixture produced no tip")
+	}
+	if boundedTip.Slot >= fullTip.Slot {
+		t.Fatalf(
+			"the bound must hold the tip inside the prefix: bounded %d, full %d",
+			boundedTip.Slot, fullTip.Slot,
+		)
 	}
 }

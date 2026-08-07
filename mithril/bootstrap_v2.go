@@ -187,6 +187,7 @@ func bootstrapV2(
 		"immutable-"+artifact.Hash,
 	)
 	var ancillaryTree *vettedDir
+	var ancillaryDigests map[string]string
 	var ancillaryArchivePath string
 	var ancillaryErr error
 	// Closed only when the result that would own it is never returned; on
@@ -226,9 +227,8 @@ func bootstrapV2(
 			// verified *or* loaded — where re-resolving the name at each step
 			// would leave each step describing a possibly different tree.
 			if cached := ledgerDir(candidateDir); cached != nil {
-				if err := verifyAncillaryExtraction(
-					cfg, cached,
-				); err != nil {
+				cachedDigests, err := verifyAncillaryExtraction(cfg, cached)
+				if err != nil {
 					cached.Close()
 					cfg.Logger.Warn(
 						"cached ancillary data failed "+
@@ -262,13 +262,14 @@ func bootstrapV2(
 						"path", cached.Path(),
 					)
 					ancillaryTree = cached
+					ancillaryDigests = cachedDigests
 					if _, err := os.Stat(candidateArchive); err == nil {
 						ancillaryArchivePath = candidateArchive
 					}
 					return
 				}
 			}
-			tree, archPath, ancErr := downloadAncillaryV2(
+			tree, treeDigests, archPath, ancErr := downloadAncillaryV2(
 				ancCtx, cfg, artifact, downloadDir,
 			)
 			// Recorded whether or not the tree turned out usable, so a
@@ -284,6 +285,7 @@ func bootstrapV2(
 			// across. Reopening the directory by name here would hand the
 			// import a tree nothing verified, under a flag saying otherwise.
 			ancillaryTree = tree
+			ancillaryDigests = treeDigests
 		})
 	}
 
@@ -377,16 +379,21 @@ func bootstrapV2(
 		},
 		ImmutableDir:  immutableTree.Path(),
 		ImmutableRoot: immutableTree.Root(),
-		ExtractDir:    extractDir,
-		ExtractRoot:   extractTree,
-		AncillaryDir:  ancillaryTree.Path(),
-		AncillaryRoot: ancillaryTree.Root(),
+		// The digest list the certificate's merkle root covers, carried on so
+		// the load can re-check each file from the descriptor it reads through
+		// rather than trusting a check that ran before the file was closed.
+		ImmutableDigests: digests,
+		ExtractDir:       extractDir,
+		ExtractRoot:      extractTree,
+		AncillaryDir:     ancillaryTree.Path(),
+		AncillaryRoot:    ancillaryTree.Root(),
 		// Both paths that accept an ancillary tree verify it through the very
 		// handle carried here — the cache-reuse path opens it once and keeps
 		// it, and downloadAncillaryV2 returns the handle it checked. So the
 		// flag is a claim about the directory this handle refers to, which is
 		// the only thing that makes it worth anything.
 		AncillaryVerified:    ancillaryTree != nil && cfg.VerifyCertificateChain,
+		AncillaryDigests:     ancillaryDigests,
 		AncillaryArchivePath: ancillaryArchivePath,
 	}
 	if createdTempDir {
@@ -812,9 +819,12 @@ func downloadImmutables(
 		dlCtx, cancelDownloads = context.WithCancelCause(ctx)
 		defer cancelDownloads(nil)
 		seqProcess := func(num uint64) error {
-			if err := cfg.OnChunkContiguous(
-				immutableDir, immutableRoot, num,
-			); err != nil {
+			if err := cfg.OnChunkContiguous(ContiguousChunk{
+				Dir:     immutableDir,
+				Root:    immutableRoot,
+				Digests: digests,
+				Num:     num,
+			}); err != nil {
 				copyErr = err
 				cancelDownloads(err)
 				return err
@@ -846,7 +856,7 @@ func downloadImmutables(
 				return err
 			}
 			if bytes, err := checkImmutableTrio(
-				immutableDir, num, digests,
+				immutableRoot, num, digests,
 			); err == nil {
 				onArchiveDone(bytes)
 				if seq != nil {
@@ -878,7 +888,7 @@ func downloadImmutables(
 					continue
 				}
 				bytes, lastErr = checkImmutableTrio(
-					immutableDir, num, digests,
+					immutableRoot, num, digests,
 				)
 				if lastErr != nil {
 					removeImmutableTrio(immutableRoot, num)
@@ -1066,8 +1076,22 @@ func immutableArchivePath(archiveDir string, num uint64) string {
 // checkImmutableTrio verifies the SHA-256 digests of the three files
 // of an immutable file number against the verified digest map.
 // Returns the cumulative file size on success.
+//
+// Hashed through the immutable directory's handle rather than by joining its
+// name. Extraction writes through that handle, so hashing anything else would
+// be a digest of a file this process did not necessarily write — and the
+// mismatch a repointed name produces would be reported as a corrupt download,
+// sending the pool round the locations again instead of refusing.
+//
+// What this cannot establish on its own is that the file it hashed is the file
+// something later reads: it closes each one, and the load opens it again by
+// name. That second half is immutable.NewFromRootVerified's, which re-checks
+// these same digests from the descriptor the read goes through. Neither is
+// redundant — this one decides whether a downloaded archive is kept and lets
+// the pool retry another location, and it runs while the tree is still being
+// assembled.
 func checkImmutableTrio(
-	dir string,
+	root *os.Root,
 	num uint64,
 	digests map[string]string,
 ) (int64, error) {
@@ -1078,7 +1102,7 @@ func checkImmutableTrio(
 		if !ok {
 			return 0, fmt.Errorf("no digest entry for %s", name)
 		}
-		sum, size, err := sha256File(filepath.Join(dir, name))
+		sum, size, err := sha256FileInRoot(root, name)
 		if err != nil {
 			return 0, err
 		}
@@ -1152,19 +1176,22 @@ func removeImmutableTrio(root *os.Root, num uint64) {
 	}
 }
 
-// sha256File returns the hex SHA-256 digest and size of a file.
-func sha256File(path string) (string, int64, error) {
-	f, err := os.Open(
-		path,
-	) //nolint:gosec // callers construct the path from controlled directories
+// sha256FileInRoot returns the hex SHA-256 digest and size of a file directly
+// beneath root, resolved through the handle rather than by name.
+func sha256FileInRoot(root *os.Root, name string) (string, int64, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		return "", 0, err
 	}
 	defer f.Close()
+	return sha256Reader(f, name)
+}
+
+func sha256Reader(r io.Reader, name string) (string, int64, error) {
 	hasher := sha256.New()
-	size, err := io.Copy(hasher, f)
+	size, err := io.Copy(hasher, r)
 	if err != nil {
-		return "", 0, fmt.Errorf("hashing %s: %w", path, err)
+		return "", 0, fmt.Errorf("hashing %s: %w", name, err)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
@@ -1187,9 +1214,9 @@ func downloadAncillaryV2(
 	cfg BootstrapConfig,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) (*vettedDir, string, error) {
+) (*vettedDir, map[string]string, string, error) {
 	if len(artifact.Ancillary.Locations) == 0 {
-		return nil, "", errors.New(
+		return nil, nil, "", errors.New(
 			"no ancillary locations in Cardano database snapshot",
 		)
 	}
@@ -1250,7 +1277,7 @@ func downloadAncillaryV2(
 			DestDir:  downloadDir,
 			Filename: ancillaryFilename,
 		})
-		return nil, dest, fmt.Errorf(
+		return nil, nil, dest, fmt.Errorf(
 			"downloading ancillary archive: %w",
 			err,
 		)
@@ -1266,7 +1293,7 @@ func downloadAncillaryV2(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
 		WithReplaceDestination(),
 	); extractErr != nil {
-		return nil, ancillaryPath, fmt.Errorf(
+		return nil, nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
 		)
@@ -1283,14 +1310,13 @@ func downloadAncillaryV2(
 		os.RemoveAll(ancillaryDir)
 		// The archive path goes back even so, since it was downloaded and
 		// still wants cleaning up.
-		return nil, ancillaryPath, fmt.Errorf(
+		return nil, nil, ancillaryPath, fmt.Errorf(
 			"extracted ancillary data at %s holds no ledger state",
 			ancillaryDir,
 		)
 	}
-	if verifyErr := verifyAncillaryExtraction(
-		cfg, extracted,
-	); verifyErr != nil {
+	digests, verifyErr := verifyAncillaryExtraction(cfg, extracted)
+	if verifyErr != nil {
 		// Remove the unverified extraction so it cannot be
 		// picked up by the resume path on a later run.
 		extracted.Close()
@@ -1299,7 +1325,7 @@ func downloadAncillaryV2(
 		// Cleanup removes the two separately, so an unverified manifest that
 		// cleared this path would leave the download behind in a directory the
 		// operator supplied and nothing else sweeps.
-		return nil, ancillaryPath, verifyErr
+		return nil, nil, ancillaryPath, verifyErr
 	}
 
 	cfg.Logger.Info(
@@ -1308,7 +1334,7 @@ func downloadAncillaryV2(
 		"path", extracted.Path(),
 	)
 
-	return extracted, ancillaryPath, nil
+	return extracted, digests, ancillaryPath, nil
 }
 
 // verifyAncillaryExtraction checks a verified bootstrap's ancillary tree
@@ -1324,29 +1350,30 @@ func downloadAncillaryV2(
 func verifyAncillaryExtraction(
 	cfg BootstrapConfig,
 	ancillary *vettedDir,
-) error {
+) (map[string]string, error) {
 	if !cfg.VerifyCertificateChain {
-		return nil
+		return nil, nil
 	}
 	if cfg.AncillaryVerificationKey == "" {
-		return errors.New(
+		return nil, errors.New(
 			"ancillary verification key is required for verified bootstrap",
 		)
 	}
 	if ancillary == nil {
-		return errors.New(
+		return nil, errors.New(
 			"verified ancillary archive was not vetted",
 		)
 	}
 	if !hasLedgerFilesIn(ancillary.Root()) {
-		return errors.New(
+		return nil, errors.New(
 			"verified ancillary archive contains no ledger state",
 		)
 	}
-	if err := verifyAncillaryManifest(
+	digests, err := verifyAncillaryManifest(
 		ancillary.Root(), cfg.AncillaryVerificationKey,
-	); err != nil {
-		return fmt.Errorf(
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
 			"ancillary manifest verification failed: %w",
 			err,
 		)
@@ -1355,7 +1382,7 @@ func verifyAncillaryExtraction(
 		"ancillary manifest verified",
 		"component", "mithril",
 	)
-	return nil
+	return digests, nil
 }
 
 // ancillaryManifest is the signed manifest shipped inside a v2
@@ -1381,47 +1408,53 @@ func (m *ancillaryManifest) computeHash() []byte {
 // verifies the Ed25519 signature over its file digest map with the
 // configured ancillary verification key, and checks every listed
 // file's SHA-256 digest.
+//
+// It returns the signed digest map on success. The caller carries it to the
+// import, because this pass hashes each file and closes it while the import
+// opens the state and table it selects afterwards — so the bytes that get
+// parsed have to be checked against these digests again, from the descriptors
+// the import reads through.
 func verifyAncillaryManifest(
 	root *os.Root,
 	ancillaryVerificationKey string,
-) error {
+) (map[string]string, error) {
 	data, err := readFileIn(root, ancillaryManifestFilename)
 	if err != nil {
-		return fmt.Errorf("reading ancillary manifest: %w", err)
+		return nil, fmt.Errorf("reading ancillary manifest: %w", err)
 	}
 	var manifest ancillaryManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return fmt.Errorf("parsing ancillary manifest: %w", err)
+		return nil, fmt.Errorf("parsing ancillary manifest: %w", err)
 	}
 	if len(manifest.Data) == 0 {
-		return errors.New("ancillary manifest lists no files")
+		return nil, errors.New("ancillary manifest lists no files")
 	}
 	if manifest.Signature == "" {
-		return errors.New("ancillary manifest has no signature")
+		return nil, errors.New("ancillary manifest has no signature")
 	}
 
 	key, err := ParseVerificationKey(ancillaryVerificationKey)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"parsing ancillary verification key: %w",
 			err,
 		)
 	}
 	if len(key.RawKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"ancillary verification key has unexpected size %d",
 			len(key.RawKeyBytes),
 		)
 	}
 	signature, err := decodeHexString(manifest.Signature)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"decoding ancillary manifest signature: %w",
 			err,
 		)
 	}
 	if len(signature) != ed25519.SignatureSize {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"ancillary manifest signature has unexpected size %d",
 			len(signature),
 		)
@@ -1431,26 +1464,26 @@ func verifyAncillaryManifest(
 		manifest.computeHash(),
 		signature,
 	) {
-		return errors.New("ancillary manifest signature is invalid")
+		return nil, errors.New("ancillary manifest signature is invalid")
 	}
 
 	for _, relPath := range slices.Sorted(maps.Keys(manifest.Data)) {
 		if !filepath.IsLocal(relPath) {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"ancillary manifest contains non-local path %q",
 				relPath,
 			)
 		}
 		sum, err := sha256FileIn(root, relPath)
 		if err != nil {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"hashing ancillary file %s: %w",
 				relPath,
 				err,
 			)
 		}
 		if sum != manifest.Data[relPath] {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"ancillary file %s digest mismatch",
 				relPath,
 			)
@@ -1481,9 +1514,9 @@ func verifyAncillaryManifest(
 			return nil
 		},
 	); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return manifest.Data, nil
 }
 
 // readFileIn reads a slash-separated path relative to root.

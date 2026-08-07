@@ -15,8 +15,11 @@
 package immutable
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -39,11 +42,33 @@ type ImmutableDb struct {
 	// guarantee, because the directory sits in a download area a concurrent
 	// writer may reach and the decision to trust it was made earlier.
 	root *os.Root
+	// digests, when set, is the certified SHA-256 of every file this database
+	// may read, keyed by the name directly beneath the data directory.
+	//
+	// A handle on the directory says which directory is read; it says nothing
+	// about which bytes the files in it hold. Those are two separate
+	// substitutions, and only the first is closed by holding the directory
+	// open: a writer who cannot escape the directory can still rename a file
+	// of their own over `00000.chunk` inside it. So each file is verified from
+	// the descriptor the read then goes through — see openEntry.
+	digests map[string]string
+	// chunkLimit, when non-zero, bounds the database to the first chunkLimit
+	// chunk names. See NewFromRootVerified.
+	chunkLimit uint64
 }
 
 var ErrPointBeyondLastChunk = errors.New(
 	"immutable DB: point is beyond the last chunk",
 )
+
+// ErrDigestMismatch reports a file whose contents are not the contents that
+// were certified for it: either the digest of what was opened differs from the
+// certified one, or nothing certified that name at all.
+//
+// The second is not a lesser case. A file the digest map does not cover is one
+// nobody vouched for, and reading it because the map is silent would leave the
+// map's coverage up to whoever added the file.
+var ErrDigestMismatch = errors.New("immutable DB: file digest mismatch")
 
 type Block struct {
 	Hash  []byte
@@ -92,6 +117,51 @@ func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
 	return i, nil
 }
 
+// NewFromRootVerified is NewFromRoot for a tree whose files are individually
+// certified: every file is checked against digests as it is opened, and the
+// read then goes through that same open descriptor.
+//
+// NewFromRoot binds the reads to a directory. This binds them to the bytes.
+// The two are not the same guarantee, and the difference is the whole point
+// here: a Mithril bootstrap hashes each downloaded file when it lands, and
+// whatever consumes it opens it again later. Between those, a writer who
+// shares the download directory can rename a file of their own over the
+// verified one without ever leaving the directory the handle refers to, and
+// the second open reads what they wrote. Verifying at the open the reader
+// keeps closes that, because a rename afterwards does not reach a descriptor
+// that is already open.
+//
+// digests maps a name directly beneath the data directory ("00000.chunk") to
+// its lowercase hex SHA-256. An empty or nil map is refused: it would verify
+// nothing while looking as though it did.
+//
+// chunkLimit, when non-zero, bounds the database to the first chunkLimit chunk
+// names. The pipelined bootstrap copy reads a tree its download pool is still
+// filling, and chunks arrive out of order — so a chunk above the contiguous
+// prefix may be present and half written. The bound keeps the reader inside
+// the prefix whose archives have been verified rather than failing on one that
+// is merely unfinished.
+//
+// The caller keeps ownership of root on the same terms as NewFromRoot.
+func NewFromRootVerified(
+	root *os.Root,
+	digests map[string]string,
+	chunkLimit uint64,
+) (*ImmutableDb, error) {
+	if len(digests) == 0 {
+		return nil, errors.New(
+			"immutable DB: verified open requires a digest map",
+		)
+	}
+	i, err := NewFromRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	i.digests = digests
+	i.chunkLimit = chunkLimit
+	return i, nil
+}
+
 // entryPath names an entry in the data directory for use in messages. It is
 // never opened when a root handle is held; see openEntry.
 func (i *ImmutableDb) entryPath(name string) string {
@@ -99,11 +169,53 @@ func (i *ImmutableDb) entryPath(name string) string {
 }
 
 // openEntry opens a file directly beneath the data directory.
+//
+// When the database was opened with digests, the returned descriptor is one
+// whose contents have been confirmed to be the certified contents. Everything
+// downstream reads through it, so no name is resolved a second time between
+// the check and the read.
 func (i *ImmutableDb) openEntry(name string) (*os.File, error) {
+	var f *os.File
+	var err error
 	if i.root != nil {
-		return i.root.Open(name)
+		f, err = i.root.Open(name)
+	} else {
+		f, err = os.Open(i.entryPath(name))
 	}
-	return os.Open(i.entryPath(name))
+	if err != nil {
+		return nil, err
+	}
+	if i.digests == nil {
+		return f, nil
+	}
+	if err := i.verifyEntry(f, name); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// verifyEntry hashes an open entry and compares it with the certified digest
+// for its name, leaving the descriptor rewound for the caller to read.
+func (i *ImmutableDb) verifyEntry(f *os.File, name string) error {
+	expected, ok := i.digests[name]
+	if !ok {
+		return fmt.Errorf("%w: %s is not certified", ErrDigestMismatch, name)
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return fmt.Errorf("hashing %s: %w", i.entryPath(name), err)
+	}
+	if sum := hex.EncodeToString(hasher.Sum(nil)); sum != expected {
+		return fmt.Errorf(
+			"%w: %s computed %s, certified %s",
+			ErrDigestMismatch, name, sum, expected,
+		)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewinding %s: %w", i.entryPath(name), err)
+	}
+	return nil
 }
 
 // removeEntry removes a file directly beneath the data directory.
@@ -138,6 +250,11 @@ func (i *ImmutableDb) getChunkNames() ([]string, error) {
 		ret = append(ret, chunkName)
 	}
 	slices.Sort(ret)
+	// Bounded reads see a shorter database rather than a failing one; see
+	// NewFromRootVerified.
+	if i.chunkLimit > 0 && uint64(len(ret)) > i.chunkLimit {
+		ret = ret[:i.chunkLimit]
+	}
 	return ret, nil
 }
 

@@ -17,9 +17,11 @@ package mithril
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -199,21 +201,38 @@ func importLedgerState(
 	type searchTree struct {
 		name string
 		root *os.Root
+		// digests is the signed ancillary manifest's digest map, present
+		// exactly when verified is set. Discovery hands back open files, and
+		// these are what the selected ones are re-checked against before
+		// anything is parsed.
+		digests map[string]string
 		// verified reports that this tree's contents were checked against the
 		// signed ancillary manifest. Nothing is looked at after one of these.
 		verified bool
 	}
 	searchTrees := []searchTree{}
 	if result.AncillaryRoot != nil {
+		// A tree claiming a signature but carrying no digest map cannot have
+		// its selected files re-checked, so the claim would stand on a check
+		// that ran earlier and closed every file it looked at. Refused rather
+		// than downgraded to an unverified read of a tree the flag says is
+		// verified.
+		if result.AncillaryVerified && len(result.AncillaryDigests) == 0 {
+			return 0, nil, errors.New(
+				"ancillary tree is marked verified but carries no signed " +
+					"manifest digests to check its files against",
+			)
+		}
 		searchTrees = append(searchTrees, searchTree{
 			result.AncillaryDir,
 			result.AncillaryRoot,
+			result.AncillaryDigests,
 			result.AncillaryVerified,
 		})
 	}
 	if result.ExtractRoot != nil {
 		searchTrees = append(searchTrees, searchTree{
-			result.ExtractDir, result.ExtractRoot, false,
+			result.ExtractDir, result.ExtractRoot, nil, false,
 		})
 	}
 	if len(searchTrees) == 0 {
@@ -226,6 +245,7 @@ func importLedgerState(
 	var (
 		snapshot *ledgerstate.SnapshotFiles
 		stateDir string
+		signedBy map[string]string
 	)
 	for _, tree := range searchTrees {
 		files, findErr := ledgerstate.OpenSnapshotAtOrBefore(
@@ -233,7 +253,7 @@ func importLedgerState(
 			maxTrustedSlot,
 		)
 		if findErr == nil {
-			snapshot, stateDir = files, tree.name
+			snapshot, stateDir, signedBy = files, tree.name, tree.digests
 			break
 		}
 		// Only a tree with no usable ledger state moves on to the next. One
@@ -282,6 +302,19 @@ func importLedgerState(
 	// Held open for the whole import: the UTxO stream is read from the table
 	// handle, and closing early would put a name back in its place.
 	defer snapshot.Close()
+	// The manifest check hashed these files and closed them; discovery opened
+	// them again. Between those two the tree is the same tree — the handle
+	// says so — but a file inside it need not be the same file, and what gets
+	// parsed below would then not be what the ancillary key signed. So the
+	// signature is re-established here, on the descriptors the import reads
+	// through, before any of their bytes reach a parser.
+	if signedBy != nil {
+		if err := verifySignedSnapshot(snapshot, signedBy); err != nil {
+			return 0, nil, fmt.Errorf(
+				"verifying ledger state in %s: %w", stateDir, err,
+			)
+		}
+	}
 	lstatePath := filepath.Join(
 		stateDir, filepath.FromSlash(snapshot.StatePath),
 	)
@@ -405,4 +438,77 @@ func importLedgerState(
 		return 0, nil, fmt.Errorf("importing ledger state: %w", err)
 	}
 	return state.Tip.Slot, state.Tip.BlockHash, nil
+}
+
+// errAncillaryDigestMismatch reports a file selected for import whose bytes are
+// not the bytes the signed ancillary manifest covered — either because they
+// changed after the manifest was checked, or because nothing in the manifest
+// covers that file at all.
+//
+// The second is not the lesser case. verifyAncillaryManifest already refuses a
+// tree holding a file the manifest does not list, but that is a statement about
+// the tree as it was then; a file planted afterwards has to be refused where it
+// is used, or it is refused only by a check that has already run.
+var errAncillaryDigestMismatch = errors.New(
+	"ancillary file is not the file the manifest signature covers",
+)
+
+// verifySignedSnapshot re-establishes the ancillary signature over the files
+// snapshot discovery selected and opened.
+//
+// It hashes the open descriptors rather than the paths beside them. Those paths
+// exist for log lines: resolving one here would reintroduce exactly the gap
+// this closes, since the file it named at manifest time and the file it names
+// now are not required to be the same file. Each descriptor is left rewound, so
+// the parser reads the bytes that were just hashed.
+func verifySignedSnapshot(
+	files *ledgerstate.SnapshotFiles,
+	digests map[string]string,
+) error {
+	for _, entry := range []struct {
+		name string
+		file *os.File
+	}{
+		{files.StatePath, files.State},
+		{files.TablePath, files.Table},
+	} {
+		// A legacy snapshot embeds its UTxO set in the state file and has no
+		// table.
+		if entry.file == nil {
+			continue
+		}
+		expected, ok := digests[entry.name]
+		if !ok {
+			return fmt.Errorf(
+				"%w: %s is not covered by the manifest",
+				errAncillaryDigestMismatch, entry.name,
+			)
+		}
+		sum, err := sha256OpenFile(entry.file)
+		if err != nil {
+			return fmt.Errorf("hashing %s: %w", entry.name, err)
+		}
+		if sum != expected {
+			return fmt.Errorf(
+				"%w: %s computed %s, signed %s",
+				errAncillaryDigestMismatch, entry.name, sum, expected,
+			)
+		}
+	}
+	return nil
+}
+
+// sha256OpenFile hashes an open file from its start and rewinds it.
+func sha256OpenFile(f *os.File) (string, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }

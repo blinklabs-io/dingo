@@ -992,7 +992,8 @@ func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 	require.NotNil(t, cached, "the cached tree is reusable as it stands")
 	t.Cleanup(cached.Close)
 	require.Equal(t, candidateDir, cached.Path())
-	require.NoError(t, verifyAncillaryExtraction(cfg, cached))
+	_, verifyErr := verifyAncillaryExtraction(cfg, cached)
+	require.NoError(t, verifyErr)
 
 	// A writer takes the name for ledger state of their own, after the cache
 	// check has run and while verification and the import are still to come.
@@ -1019,7 +1020,8 @@ func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 			"or this test proves nothing")
 
 	// Verification still describes the tree that was inspected.
-	require.NoError(t, verifyAncillaryExtraction(cfg, cached),
+	_, verifyErr = verifyAncillaryExtraction(cfg, cached)
+	require.NoError(t, verifyErr,
 		"verification goes through the handle, so a tree swapped in behind "+
 			"the name is not what it is about")
 

@@ -151,19 +151,32 @@ type BootstrapConfig struct {
 	// pipelining: chunks are fetched in parallel (out of order) but this
 	// callback is invoked for each immutable file number in strict
 	// contiguous order (0,1,2,...) as soon as that prefix is fully
-	// downloaded. immutableDir is the directory the chunks are extracted
-	// into, and immutableRoot is the open handle extraction writes through —
-	// read through the handle, since the name can be repointed while the
-	// download runs and the handle cannot. It lets the caller copy blocks into
-	// the blob store while later chunks are still downloading. When nil,
-	// downloads run to completion before any processing (legacy behaviour).
+	// downloaded. It lets the caller copy blocks into the blob store while
+	// later chunks are still downloading. When nil, downloads run to
+	// completion before any processing (legacy behaviour).
 	// The callback runs on a single consumer goroutine and serializes
 	// processing, so it needs no internal locking.
-	OnChunkContiguous func(
-		immutableDir string,
-		immutableRoot *os.Root,
-		num uint64,
-	) error
+	OnChunkContiguous func(chunk ContiguousChunk) error
+}
+
+// ContiguousChunk describes the contiguous immutable prefix a pipelined
+// bootstrap has finished downloading, verifying and extracting.
+type ContiguousChunk struct {
+	// Dir is the directory the chunks are extracted into. It is the name the
+	// directory was vetted under, for messages; read through Root.
+	Dir string
+	// Root is the open handle extraction writes through. Read through it
+	// rather than through Dir: the name can be repointed while the download
+	// runs and the handle cannot.
+	Root *os.Root
+	// Digests is the certified SHA-256 of every file the download covers,
+	// keyed by the name beneath Dir. The handle settles which directory is
+	// read and these settle which bytes, which is the half a handle cannot
+	// carry — see BootstrapResult.ImmutableDigests.
+	Digests map[string]string
+	// Num is the highest immutable file number whose trio is complete. Every
+	// number at or below it has been downloaded, verified and extracted.
+	Num uint64
 }
 
 // VerificationMode selects the level of Mithril certificate verification.
@@ -219,6 +232,21 @@ type BootstrapResult struct {
 	// pathname — a silent fallback would reinstate exactly the open this
 	// replaces.
 	ImmutableRoot *os.Root
+	// ImmutableDigests is the certified SHA-256 of every file in ImmutableDir,
+	// keyed by the name beneath it ("00000.chunk"). Set by the v2 backend,
+	// which downloads each immutable trio against a digest list covered by the
+	// certificate's merkle root; nil for v1, which certifies one archive
+	// rather than the files inside it and so has nothing to re-check against.
+	//
+	// It is carried beside ImmutableRoot because the two answer different
+	// questions and both have to be answered. The handle says the load reads
+	// the directory that was vetted. It says nothing about the files in it: a
+	// writer who shares the download directory can rename a file of their own
+	// over a verified one without ever leaving the directory the handle refers
+	// to. The digests are what let the load refuse those bytes, checked from
+	// the descriptor the read goes through rather than from a name reopened
+	// after the check.
+	ImmutableDigests map[string]string
 	// ExtractDir is the root directory where the archive was
 	// extracted. Contains db/immutable/, db/ledger/, etc.
 	ExtractDir string
@@ -241,6 +269,16 @@ type BootstrapResult struct {
 	// downgrade, and the fallback stays available — v1 keeps its ledger state
 	// in the main archive, so looking there is how that layout works at all.
 	AncillaryVerified bool
+	// AncillaryDigests is the signed ancillary manifest's digest map: every
+	// file the ancillary key vouched for, keyed by its slash-separated path
+	// under AncillaryDir. Set only when AncillaryVerified is true.
+	//
+	// The manifest check hashes each file and closes it; the import opens the
+	// state and table it selects afterwards. Between those two the tree is the
+	// same tree, but a file in it need not be the same file — so the map
+	// travels with the handle and the selected files are checked again from
+	// the descriptors the import reads through, before anything is parsed.
+	AncillaryDigests map[string]string
 	// ExtractRoot is an open handle on ExtractDir.
 	//
 	// The ledger-state import falls back to the main extraction directory when

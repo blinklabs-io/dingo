@@ -15,6 +15,8 @@
 package mithril
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -373,12 +375,20 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 	run := func(t *testing.T, verified bool) error {
 		t.Helper()
 		// An ancillary tree with a ledger directory but nothing in it: what an
-		// emptied tree, or one holding only volatile states, looks like.
+		// emptied tree, or one holding only volatile states, looks like. A
+		// verified one still carries the manifest that covered it — a
+		// signature over no files at all is refused long before this point —
+		// so the search reaches the decision below rather than the
+		// consistency check on the two.
 		anc := t.TempDir()
 		require.NoError(t, os.MkdirAll(filepath.Join(anc, "ledger"), 0o750))
 		ancRoot, err := openVerifiedDir(anc)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = ancRoot.Close() })
+		var ancDigests map[string]string
+		if verified {
+			ancDigests = map[string]string{"ledger/100/state": "00"}
+		}
 
 		extractDir := t.TempDir()
 		slotDir := filepath.Join(extractDir, "db", "ledger", "100")
@@ -396,6 +406,7 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 				AncillaryDir:      anc,
 				AncillaryRoot:     ancRoot,
 				AncillaryVerified: verified,
+				AncillaryDigests:  ancDigests,
 				ExtractDir:        extractDir,
 				ExtractRoot:       extractRoot,
 			},
@@ -624,7 +635,7 @@ func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
 	defer srv.Close()
 
 	downloadDir := t.TempDir()
-	tree, archPath, err := downloadAncillaryV2(
+	tree, _, archPath, err := downloadAncillaryV2(
 		t.Context(),
 		BootstrapConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -707,7 +718,7 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 		"v2": func(t *testing.T, downloadDir string) (
 			*vettedDir, string, error,
 		) {
-			return downloadAncillaryV2(
+			tree, _, archPath, err := downloadAncillaryV2(
 				t.Context(),
 				BootstrapConfig{Logger: discard},
 				&CardanoDatabaseSnapshot{
@@ -721,6 +732,7 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 				},
 				downloadDir,
 			)
+			return tree, archPath, err
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -743,4 +755,324 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 				ancillaryDir)
 		})
 	}
+}
+
+// requireTrioDigests is the digest map a v2 bootstrap holds once it has checked
+// every archive it downloaded: the certified SHA-256 of each file, keyed by the
+// name the reader asks for.
+func requireTrioDigests(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	digests := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		require.NoError(t, err)
+		sum := sha256.Sum256(data)
+		digests[entry.Name()] = hex.EncodeToString(sum[:])
+	}
+	return digests
+}
+
+// TestBootstrappedImmutableRefusesAFileSubstitutedAfterVerification covers the
+// other half of the handoff above.
+//
+// TestBootstrapImmutableSurvivesHandoffSwap pins that the load reads the
+// directory the bootstrap vetted. That is a claim about which directory, and
+// it leaves the files inside it unaccounted for: the download pool hashes each
+// trio when its archive lands and closes it, and the tip read, the catch-up
+// check and the blob copy open it again by name afterwards. A writer who shares
+// the download directory never has to leave it — renaming a file of their own
+// over `00000.chunk` puts uncertified bytes into the blob store under a
+// verified directory handle.
+//
+// So the digests travel with the handle and each file is verified from the
+// descriptor the read then goes through. Staged rather than raced: the window
+// is not observable from outside the process, so the substitution is placed
+// where a concurrent writer would land it.
+func TestBootstrappedImmutableRefusesAFileSubstitutedAfterVerification(
+	t *testing.T,
+) {
+	// Which file is taken decides which read notices, so both the tip read and
+	// the block copy are covered.
+	for _, tc := range []struct {
+		name string
+		file string
+		read func(*immutable.ImmutableDb) error
+	}{
+		{
+			name: "secondary index, read for the tip",
+			file: "00000.secondary",
+			read: func(imm *immutable.ImmutableDb) error {
+				_, err := imm.GetTip()
+				return err
+			},
+		},
+		{
+			name: "chunk, read for the blob copy",
+			file: "00000.chunk",
+			read: func(imm *immutable.ImmutableDb) error {
+				iter, err := imm.BlocksFromPoint(ocommon.Point{})
+				if err != nil {
+					return err
+				}
+				defer func() { _ = iter.Close() }()
+				_, err = iter.Next()
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			extractDir := filepath.Join(parent, "immutable-abc123")
+			immutableDir := filepath.Join(extractDir, "immutable")
+			requireChunkTrio(t, "00000", immutableDir)
+
+			found := chunkDirUnder(extractDir, "immutable")
+			require.NotNil(t, found)
+			t.Cleanup(found.Close)
+			result := &BootstrapResult{
+				ImmutableDir:     found.Path(),
+				ImmutableRoot:    found.Root(),
+				ImmutableDigests: requireTrioDigests(t, immutableDir),
+			}
+
+			// Control: the tree as downloaded reads, so the refusal below is
+			// about the substitution and not about verified reads never
+			// working.
+			require.NoError(t, tc.read(mustOpenBootstrapped(t, result)),
+				"the certified tree must read, or the refusal proves nothing")
+
+			// A writer takes one file, after the pool verified it and before
+			// the load opens it. Renamed over rather than written through: the
+			// extracted file belongs to this process, so replacing the name is
+			// what a writer holding the directory actually does.
+			theirs := filepath.Join(parent, "theirs")
+			data, err := os.ReadFile(
+				filepath.Join(
+					immutableTestdataDir,
+					"00001"+filepath.Ext(tc.file),
+				),
+			)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(theirs, data, 0o640))
+			require.NoError(t, os.Rename(
+				theirs, filepath.Join(immutableDir, tc.file),
+			))
+
+			err = tc.read(mustOpenBootstrapped(t, result))
+			require.Error(t, err)
+			assert.ErrorIs(t, err, immutable.ErrDigestMismatch,
+				"a file substituted after its digest was checked must not "+
+					"be read")
+		})
+	}
+}
+
+// TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest is the ancillary
+// counterpart.
+//
+// verifyAncillaryManifest hashes every file the signed manifest covers and
+// closes each one; discovery opens the selected state and table again when the
+// import runs. The tree between them is the same tree — the handle guarantees
+// that — but a file inside it need not be the same file, and the bytes that get
+// parsed are then not the bytes the ancillary key signed. So the manifest
+// travels with the handle and the selected files are re-checked from the
+// descriptors the import reads through.
+func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// A one-element CBOR array: parses far enough to fail distinctively, so a
+	// tree that is read reports "parsing ledger state" rather than anything
+	// that could be confused with a refusal.
+	stateBytes := []byte{0x81, 0x00}
+
+	// Which file is taken decides nothing about the outcome, which is the
+	// point: the table is signed on the same terms as the state.
+	for _, name := range []string{"state", "tables"} {
+		t.Run(name, func(t *testing.T) {
+			build := func(t *testing.T, substitute bool) *BootstrapResult {
+				t.Helper()
+				dir := t.TempDir()
+				slotDir := filepath.Join(dir, "ledger", "100")
+				require.NoError(t, os.MkdirAll(slotDir, 0o750))
+				files := map[string][]byte{
+					"state":  stateBytes,
+					"tables": []byte("utxo table"),
+				}
+				digests := map[string]string{}
+				for entry, data := range files {
+					require.NoError(t, os.WriteFile(
+						filepath.Join(slotDir, entry), data, 0o640,
+					))
+					sum := sha256.Sum256(data)
+					digests["ledger/100/"+entry] = hex.EncodeToString(sum[:])
+				}
+				root, err := openVerifiedDir(dir)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = root.Close() })
+				if substitute {
+					// After the manifest passed and before the import opens
+					// anything.
+					theirs := filepath.Join(t.TempDir(), "theirs")
+					require.NoError(t, os.WriteFile(
+						theirs, []byte("somebody else's bytes"), 0o640,
+					))
+					require.NoError(t, os.Rename(
+						theirs, filepath.Join(slotDir, name),
+					))
+				}
+				return &BootstrapResult{
+					AncillaryDir:      dir,
+					AncillaryRoot:     root,
+					AncillaryVerified: true,
+					AncillaryDigests:  digests,
+				}
+			}
+
+			// Control: the tree the manifest covered is read.
+			_, _, err := importLedgerState(
+				t.Context(), nil, discard, nil, build(t, false),
+				false, ^uint64(0), nil,
+			)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "parsing ledger state",
+				"the signed tree must be read, or the refusal proves nothing")
+
+			_, _, err = importLedgerState(
+				t.Context(), nil, discard, nil, build(t, true),
+				false, ^uint64(0), nil,
+			)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errAncillaryDigestMismatch,
+				"a signed file substituted after the manifest check must "+
+					"not be imported")
+			assert.NotContains(t, err.Error(), "parsing ledger state",
+				"the substituted bytes must be refused before they are "+
+					"parsed")
+		})
+	}
+}
+
+// TestImportLedgerStateRefusesAStateTheManifestDoesNotCover keeps a selected
+// file with no manifest entry an error rather than an import.
+//
+// The completeness walk in verifyAncillaryManifest rejects an uncovered file at
+// verification time, but that is a check on the tree as it was then. Selecting
+// a file nothing signed has to fail at the point of use too, or an entry
+// planted afterwards is refused only by a check that already ran.
+func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir := t.TempDir()
+	slotDir := filepath.Join(dir, "ledger", "200")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(slotDir, "state"), []byte{0x81, 0x00}, 0o640,
+	))
+	root, err := openVerifiedDir(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	_, _, err = importLedgerState(
+		t.Context(), nil, discard, nil,
+		&BootstrapResult{
+			AncillaryDir:      dir,
+			AncillaryRoot:     root,
+			AncillaryVerified: true,
+			// Covers a different slot: the selected state is not in it.
+			AncillaryDigests: map[string]string{"ledger/100/state": "00"},
+		},
+		false, ^uint64(0), nil,
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAncillaryDigestMismatch)
+}
+
+// TestCheckImmutableTrioHashesThroughTheHandle pins the download pool's half.
+//
+// The pool verifies each trio as its archive lands, while the extraction
+// directory is still being filled and its name is still resolvable by anybody
+// who shares the download directory. Joining that name to hash a file would
+// produce the digest of whatever tree holds it at that instant — and the
+// mismatch a repointed name causes would be reported as a corrupt download,
+// sending the pool round the locations again and deleting a trio it wrote.
+func TestCheckImmutableTrioHashesThroughTheHandle(t *testing.T) {
+	parent := t.TempDir()
+	ours := filepath.Join(parent, "immutable")
+	requireChunkTrio(t, "00000", ours)
+	digests := requireTrioDigests(t, ours)
+
+	root, err := os.OpenRoot(ours)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	// A writer takes the name for a tree of their own, while the pool is still
+	// working. Same file names, different bytes — a tree with different names
+	// would fail on the open rather than on the digest, which is not the case
+	// under test.
+	theirs := filepath.Join(parent, "theirs")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+		data, err := os.ReadFile(
+			filepath.Join(immutableTestdataDir, "00001"+ext),
+		)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(theirs, "00000"+ext), data, 0o640,
+		))
+	}
+	requireDirectorySwap(t, ours, filepath.Join(parent, "moved-aside"))
+	requireDirectorySwap(t, theirs, ours)
+
+	// The premise: the name denotes the writer's tree now, and their files
+	// carry different bytes, so a digest taken by name would not match.
+	planted, err := os.ReadFile(filepath.Join(ours, "00000.chunk"))
+	require.NoError(t, err)
+	byName := sha256.Sum256(planted)
+	require.NotEqual(t, digests["00000.chunk"], hex.EncodeToString(byName[:]),
+		"the substitution must be observable through the name, or this "+
+			"test proves nothing")
+
+	bytes, err := checkImmutableTrio(root, 0, digests)
+	require.NoError(t, err,
+		"the trio this process extracted must be what gets hashed")
+	assert.Positive(t, bytes)
+}
+
+// TestVerifySignedSnapshotLeavesTheFilesReadable pins the half of the re-check
+// that is easy to get wrong quietly: hashing consumes a descriptor, so a
+// verification that did not rewind would hand the import an empty state and an
+// empty UTxO table and look like a successful check while doing it.
+func TestVerifySignedSnapshotLeavesTheFilesReadable(t *testing.T) {
+	dir := t.TempDir()
+	slotDir := filepath.Join(dir, "ledger", "100")
+	require.NoError(t, os.MkdirAll(slotDir, 0o750))
+	contents := map[string][]byte{
+		"state":  []byte{0x81, 0x00},
+		"tables": []byte("utxo table bytes"),
+	}
+	digests := map[string]string{}
+	for entry, data := range contents {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(slotDir, entry), data, 0o640,
+		))
+		sum := sha256.Sum256(data)
+		digests["ledger/100/"+entry] = hex.EncodeToString(sum[:])
+	}
+	root, err := openVerifiedDir(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	files, err := ledgerstate.OpenSnapshotAtOrBefore(root, ^uint64(0))
+	require.NoError(t, err)
+	defer files.Close()
+	require.NotNil(t, files.Table, "the fixture must exercise the table too")
+
+	require.NoError(t, verifySignedSnapshot(files, digests))
+
+	state, err := io.ReadAll(files.State)
+	require.NoError(t, err)
+	assert.Equal(t, contents["state"], state)
+	table, err := io.ReadAll(files.Table)
+	require.NoError(t, err)
+	assert.Equal(t, contents["tables"], table)
 }
