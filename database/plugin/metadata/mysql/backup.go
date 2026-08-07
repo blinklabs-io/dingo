@@ -97,17 +97,18 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("parse address %q: %w", cfg.Addr, err)
 	}
-	sslMode, err := mysqlSSLMode(cfg.TLSConfig)
+	sslArgs, err := mysqlSSLArgs(cfg.TLSConfig)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	args = []string{
-		"--host=" + host,
-		"--port=" + port,
-		"--user=" + cfg.User,
+	args = make([]string, 0, 4+len(sslArgs))
+	args = append(args,
+		"--host="+host,
+		"--port="+port,
+		"--user="+cfg.User,
 		"--protocol=tcp",
-		"--ssl-mode=" + sslMode,
-	}
+	)
+	args = append(args, sslArgs...)
 	env = os.Environ()
 	if cfg.Passwd != "" {
 		env = append(env, "MYSQL_PWD="+cfg.Passwd)
@@ -115,38 +116,47 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 	return env, args, cfg.DBName, nil
 }
 
-// mysqlSSLMode maps go-sql-driver/mysql's TLSConfig setting (dingo's own
-// sslMode provider config field, per mysql/provider.go's openStore) to the
-// mysqldump/mysql client tools' --ssl-mode flag. Left unmapped, these
-// tools default to PREFERRED (opportunistic, unverified TLS) regardless
-// of what the app's own connection pool is actually configured with --
-// silently using a different, weaker transport for backup/restore than
-// the one guarding every other connection this process makes. "true"
-// (verify CA and hostname, the driver's strictest mode) must map to
-// VERIFY_IDENTITY specifically, not a weaker mode, or a verify-required
-// deployment's dump/restore connection would go out unverified.
+// mysqlSSLArgs maps go-sql-driver/mysql's TLSConfig setting (dingo's own
+// sslMode provider config field, per mysql/provider.go's openStore) to CLI
+// flags for the mysqldump/mysql client tools actually shipped in this
+// repo's Docker image: Debian's default-mysql-client package, confirmed
+// live (running the actual bookworm image) to be MariaDB's client
+// (mariadb-client-10.11), not real MySQL. MariaDB's mysql/mysqldump have
+// never adopted MySQL 5.7+'s --ssl-mode flag at all -- every value fails
+// outright with "unknown variable 'ssl-mode=...'" -- so this must speak
+// MariaDB's older, coarser --ssl/--skip-ssl/--ssl-verify-server-cert flags
+// instead of the newer --ssl-mode=X form.
+//
+// That older flag set can only really express two things: whether TLS is
+// attempted at all, and whether the server's certificate is verified once
+// it is. There is no client-side flag to make an unverified TLS attempt a
+// hard requirement the way MySQL's own REQUIRED mode does, so
+// "skip-verify" (required, unverified) and "preferred" (opportunistic)
+// necessarily collapse to the same "--ssl" here -- an accepted, documented
+// fidelity gap forced by the shipped client, not a design choice. "true"
+// (verify CA and hostname, the driver's strictest mode) still maps to its
+// own distinct, fully verified flags, since that's the one case a silent
+// weakening would be a real regression from what the app's own connection
+// pool is configured to require.
 //
 // A custom registered TLS config name (via mysql.RegisterTLSConfig,
 // referencing an arbitrary *tls.Config) can't be mapped at all -- there is
-// no fixed meaning to translate, and guessing a specific --ssl-mode could
-// just as easily under- or over-verify relative to what that custom
-// config actually does. This fails loudly rather than silently picking a
-// mode that might weaken it.
-func mysqlSSLMode(tlsConfig string) (string, error) {
+// no fixed meaning to translate, and guessing could just as easily under-
+// or over-verify relative to what that custom config actually does. This
+// fails loudly rather than silently picking flags that might weaken it.
+func mysqlSSLArgs(tlsConfig string) ([]string, error) {
 	switch tlsConfig {
 	case "", "false":
 		// Matches the driver's own default: no TLS is attempted at all
-		// (mysqldump/mysql's own default of PREFERRED would instead try
+		// (mysqldump/mysql's own default of --ssl on would instead try
 		// opportunistic TLS the app's own connection never uses).
-		return "DISABLED", nil
+		return []string{"--skip-ssl"}, nil
 	case "true":
-		return "VERIFY_IDENTITY", nil
-	case "skip-verify":
-		return "REQUIRED", nil
-	case "preferred":
-		return "PREFERRED", nil
+		return []string{"--ssl", "--ssl-verify-server-cert"}, nil
+	case "skip-verify", "preferred":
+		return []string{"--ssl"}, nil
 	default:
-		return "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"mysql backup/restore: unsupported tls config %q -- mysqldump/"+
 				"mysql cannot be given a custom named TLS config "+
 				"(mysql.RegisterTLSConfig); only \"\", \"false\", \"true\", "+

@@ -143,8 +143,14 @@ func CreateDirDurable(dir string) error {
 // syncFile opens path and fsyncs it. Used to durably persist a staged
 // backup file's contents before PublishBackupFile links it into place,
 // for callers (pg_dump, mysqldump) that don't fsync their own output.
+//
+// Opened with O_WRONLY, not a plain (read-only) os.Open: on Windows,
+// flushing a file handle requires GENERIC_WRITE access -- a read-only
+// handle's FlushFileBuffers call fails with ERROR_ACCESS_DENIED. See
+// internal/fsyncdir's Windows implementation, which hit this same trap for
+// directory handles and had to open with write access for the same reason.
 func syncFile(path string) error {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return fmt.Errorf("open %q: %w", path, err)
 	}

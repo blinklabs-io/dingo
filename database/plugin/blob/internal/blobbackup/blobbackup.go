@@ -39,7 +39,24 @@ import (
 // front rather than misparsed.
 var Magic = [4]byte{'D', 'B', 'L', 'B'}
 
-const Version = 1
+// Version 2 added the mandatory terminatorMarker (see its own doc comment)
+// -- a version 1 stream (this whole cloud-backup mechanism's first cut,
+// never released) had no way to distinguish a truncated file from a
+// complete one, so there is no migration path from it and none is needed:
+// nothing has shipped a version 1 backup for this to stay compatible with.
+const Version = 2
+
+// terminatorMarker is an out-of-band declared key length -- larger than any
+// real record's, which WriteRecord bounds to MaxKeyLen -- that Backup
+// writes once after the last real record, and ReadRecord requires seeing
+// before treating end-of-stream as clean. Without an explicit terminator, a
+// backup file truncated exactly at a record boundary (a partial copy, a
+// storage-layer truncation, a cut-short upload) reads back identically to a
+// complete one: io.ReadFull simply reports a clean io.EOF either way, so
+// Restore would have no way to tell "every key was captured" from "the
+// stream stopped early but happened to stop cleanly" -- a silent partial
+// restore that looks like a successful complete one.
+const terminatorMarker uint32 = 0xFFFFFFFF
 
 // DefaultRestoreBatchRecords/DefaultRestoreBatchBytes bound how many records
 // Restore accumulates per write transaction. A cloud store's transaction
@@ -114,6 +131,17 @@ func Backup(
 	}
 	it.Rewind()
 	for it.Valid() {
+		// The per-key work below (a potentially large ValueCopy network
+		// read, or the next iterator page fetch) isn't itself ctx-aware --
+		// NewIterator manages its own internal call context rather than
+		// accepting this one (see the comment above) -- so an in-flight
+		// operation can't be preempted mid-call. Checking here bounds how
+		// long a cancellation takes to actually stop this loop to "at most
+		// one more per-key operation," instead of running to the end of
+		// the walk regardless of ctx.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		item := it.Item()
 		if item == nil {
 			it.Next()
@@ -136,6 +164,24 @@ func Backup(
 	// loop above exiting cleanly is not proof every key was seen.
 	if err := it.Err(); err != nil {
 		return fmt.Errorf("%s: blob iterator: %w", errPrefix, err)
+	}
+	// Recorded once the walk is confirmed complete (the it.Err() check just
+	// above), so its presence in a backup file is itself proof every key was
+	// captured -- see terminatorMarker's own doc comment.
+	if err := writeTerminator(cw); err != nil {
+		return fmt.Errorf("%s: %w", errPrefix, err)
+	}
+	return nil
+}
+
+// writeTerminator writes terminatorMarker's 4 bytes directly, bypassing
+// WriteRecord's normal per-record framing (there is no key or value to
+// follow it).
+func writeTerminator(w io.Writer) error {
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], terminatorMarker)
+	if _, err := w.Write(buf[:]); err != nil {
+		return fmt.Errorf("write terminator: %w", err)
 	}
 	return nil
 }
@@ -252,7 +298,16 @@ func IsEmpty(ctx context.Context, store Store) (bool, error) {
 		return false, err
 	}
 	it.Rewind()
-	return !it.Valid(), nil
+	empty := !it.Valid()
+	// Rewind can itself fail mid-listing (a paginator error on the very
+	// first page), which Valid() reports identically to "no keys" -- check
+	// again so a transient S3/GCS listing failure can't be misreported as
+	// an empty store, letting Restore wrongly merge data into a bucket
+	// that was never actually confirmed empty.
+	if err := it.Err(); err != nil {
+		return false, err
+	}
+	return empty, nil
 }
 
 // WriteRecord frames key/value as [4-byte BE key length][key][8-byte BE
@@ -295,13 +350,16 @@ func WriteRecord(w io.Writer, key, value []byte, maxValueLen int64) error {
 }
 
 // ReadRecord reads one record written by WriteRecord. Returns io.EOF (and
-// no other data) only when the stream ends cleanly at a record boundary;
-// any other read failure, including a partial record, is a real error.
-// Declared lengths are validated against sane bounds before allocating a
-// buffer of that size, so a corrupted or adversarial stream can only ever
-// produce a normal error, not an attempted multi-gigabyte allocation --
-// mirrors badger's Restore validating its own length-prefixed framing the
-// same way (see validateLoadRecordSizes in the badger plugin).
+// no other data) only once it reads terminatorMarker in the key-length
+// position -- a plain end-of-file there (the stream simply having no more
+// bytes) means the backup was truncated before its terminator, and is a
+// real error, not a clean end; any other read failure, including a partial
+// record, is also a real error. Declared lengths are validated against
+// sane bounds before allocating a buffer of that size, so a corrupted or
+// adversarial stream can only ever produce a normal error, not an attempted
+// multi-gigabyte allocation -- mirrors badger's Restore validating its own
+// length-prefixed framing the same way (see validateLoadRecordSizes in the
+// badger plugin).
 func ReadRecord(
 	r io.Reader,
 	maxValueLen int64,
@@ -309,11 +367,21 @@ func ReadRecord(
 	var keyLenBuf [4]byte
 	if _, err := io.ReadFull(r, keyLenBuf[:]); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, nil, io.EOF
+			// Deliberately not %w-wrapping io.EOF: this must NOT satisfy
+			// errors.Is(_, io.EOF), or Restore's loop would treat a
+			// truncated-before-the-terminator stream as a clean, complete
+			// end instead of the data-loss bug it actually is.
+			return nil, nil, errors.New(
+				"unexpected end of stream: missing terminator " +
+					"(backup is truncated)",
+			)
 		}
 		return nil, nil, fmt.Errorf("read key length: %w", err)
 	}
 	keyLen := binary.BigEndian.Uint32(keyLenBuf[:])
+	if keyLen == terminatorMarker {
+		return nil, nil, io.EOF
+	}
 	if keyLen > MaxKeyLen {
 		return nil, nil, fmt.Errorf(
 			"key length %d exceeds %d byte limit (corrupted or invalid backup)",

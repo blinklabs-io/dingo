@@ -106,21 +106,24 @@ func TestConnArgsInheritsParentEnvironment(t *testing.T) {
 
 // TestConnArgsMapsSSLMode guards a real gap: connArgs used to drop the
 // DSN's TLS setting entirely, so mysqldump/mysql always connected in
-// plaintext (or failed outright against a server enforcing TLS) no
-// matter what the app's own connection pool was configured with. Every
-// recognized go-sql-driver/mysql TLSConfig value must map to the
-// corresponding --ssl-mode flag -- "true" (verify CA and hostname) in
-// particular must not collapse to a weaker mode.
+// plaintext (or failed outright against a server enforcing TLS) no matter
+// what the app's own connection pool was configured with. It then guarded
+// a second real gap found by actually running the Docker image's shipped
+// client: that client is MariaDB's (mariadb-client-10.11), which rejects
+// "--ssl-mode" entirely ("unknown variable"), so the mapping must produce
+// MariaDB's older --ssl/--skip-ssl/--ssl-verify-server-cert flags instead
+// -- "true" (verify CA and hostname) in particular must not collapse to a
+// weaker, unverified mode.
 func TestConnArgsMapsSSLMode(t *testing.T) {
 	tests := []struct {
 		tlsConfig string
-		wantFlag  string
+		wantArgs  []string
 	}{
-		{"", "--ssl-mode=DISABLED"},
-		{"false", "--ssl-mode=DISABLED"},
-		{"true", "--ssl-mode=VERIFY_IDENTITY"},
-		{"skip-verify", "--ssl-mode=REQUIRED"},
-		{"preferred", "--ssl-mode=PREFERRED"},
+		{"", []string{"--skip-ssl"}},
+		{"false", []string{"--skip-ssl"}},
+		{"true", []string{"--ssl", "--ssl-verify-server-cert"}},
+		{"skip-verify", []string{"--ssl"}},
+		{"preferred", []string{"--ssl"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.tlsConfig, func(t *testing.T) {
@@ -130,7 +133,9 @@ func TestConnArgsMapsSSLMode(t *testing.T) {
 			}
 			_, args, _, err := connArgs(dsn)
 			require.NoError(t, err)
-			require.Contains(t, args, tt.wantFlag)
+			for _, want := range tt.wantArgs {
+				require.Contains(t, args, want)
+			}
 		})
 	}
 }

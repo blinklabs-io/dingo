@@ -33,7 +33,8 @@ const testMaxValueLen int64 = 256 << 20
 // TestWriteReadRecordRoundTrip validates that WriteRecord/ReadRecord's
 // length-prefixed framing preserves keys and values exactly (including a
 // zero-length value), and that reading past the last record reports a
-// clean io.EOF rather than a spurious error.
+// clean io.EOF once (and only once) the terminator written by
+// writeTerminator has actually been read.
 func TestWriteReadRecordRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(
@@ -44,6 +45,7 @@ func TestWriteReadRecordRoundTrip(t *testing.T) {
 		t,
 		WriteRecord(&buf, []byte("key-two"), []byte{}, testMaxValueLen),
 	)
+	require.NoError(t, writeTerminator(&buf))
 
 	key, value, err := ReadRecord(&buf, testMaxValueLen)
 	require.NoError(t, err)
@@ -57,6 +59,30 @@ func TestWriteReadRecordRoundTrip(t *testing.T) {
 
 	_, _, err = ReadRecord(&buf, testMaxValueLen)
 	require.ErrorIs(t, err, io.EOF)
+}
+
+// TestReadRecordRejectsMissingTerminator guards the real gap this format's
+// terminator marker exists to close: a backup file truncated exactly at a
+// record boundary (a partial copy, a storage-layer truncation) used to read
+// back as a clean io.EOF -- indistinguishable from a genuinely complete
+// backup -- silently dropping every key after the cut. Without a
+// terminator, ReadRecord must now report a real error instead.
+func TestReadRecordRejectsMissingTerminator(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(
+		t,
+		WriteRecord(&buf, []byte("key-one"), []byte("value-one"), testMaxValueLen),
+	)
+	// No writeTerminator call: this is exactly what a file truncated right
+	// after a complete record looks like.
+
+	_, _, err := ReadRecord(&buf, testMaxValueLen)
+	require.NoError(t, err, "the one complete record still reads back fine")
+
+	_, _, err = ReadRecord(&buf, testMaxValueLen)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, io.EOF)
+	require.Contains(t, err.Error(), "terminator")
 }
 
 // TestReadRecordRejectsOversizedKeyLength validates that a declared key
