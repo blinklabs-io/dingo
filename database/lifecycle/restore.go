@@ -125,7 +125,7 @@ type RestoreStorageConfig struct {
 // Restore populates targetDataDir (which must not already exist, or must
 // be empty) from the snapshot at snapshotDir, then opens the result with
 // database.New to confirm it passes the same startup consistency checks
-// (checkNodeSettings, checkCommitTimestamp) any other dingo startup does,
+// (CheckNodeSettings, checkCommitTimestamp) any other dingo startup does,
 // and that its tip matches what the manifest recorded. The opened database
 // is closed again before returning — the caller is responsible for
 // (re)opening it for real use.
@@ -606,7 +606,7 @@ func restoreBlobStore(
 }
 
 // validateRestoredDatabase opens the restored store the same way a normal
-// dingo startup would, letting database.New's own checkNodeSettings and
+// dingo startup would, letting database.New's own CheckNodeSettings and
 // checkCommitTimestamp checks validate internal consistency, then
 // additionally confirms the restored tip matches what the manifest
 // recorded before closing it again.

@@ -34,6 +34,26 @@ func newTestDatabase(
 	config *Config,
 ) (*Database, error) {
 	tb.Helper()
+	return newTestDatabaseWithHost(tb, config, false)
+}
+
+// newTestDatabaseWithHost is the shared body behind newTestDatabase and
+// openForRecoveryTest (database/node_settings_gates_test.go): register the
+// badger and sqlite providers, resolve the blob and metadata stores from
+// config, and call New. The two callers differ only in keepOnError: New can
+// return a non-nil *Database alongside an error on a CommitTimestampError,
+// since that database is available for recovery rather than closed.
+// newTestDatabase passes false -- none of its many callers need the failed
+// handle, so it is closed (via a host stop) and discarded like any other
+// open error. openForRecoveryTest passes true, matching node.go's
+// dbNeedsRecovery path, which specifically needs the *Database New still
+// returns alongside the error.
+func newTestDatabaseWithHost(
+	tb testing.TB,
+	config *Config,
+	keepOnError bool,
+) (*Database, error) {
+	tb.Helper()
 	if config == nil {
 		config = DefaultConfig
 	}
@@ -67,10 +87,10 @@ func newTestDatabase(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
-	db, err := New(config, Stores{Blob: blobStore, Metadata: metadataStore})
-	if err != nil {
+	db, dbErr := New(config, Stores{Blob: blobStore, Metadata: metadataStore})
+	if db == nil || (dbErr != nil && !keepOnError) {
 		_ = host.Stop(context.Background())
-		return nil, err
+		return nil, dbErr
 	}
 	testDatabaseHosts.Store(db, host)
 	tb.Cleanup(func() {
@@ -78,7 +98,7 @@ func newTestDatabase(
 			tb.Errorf("close test database runtime: %v", closeErr)
 		}
 	})
-	return db, err
+	return db, dbErr
 }
 
 func closeTestDatabase(db *Database) error {

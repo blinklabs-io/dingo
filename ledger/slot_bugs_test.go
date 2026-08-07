@@ -92,7 +92,7 @@ func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
 // indistinguishable from a valid slot.
 func TestNearNowSlot_FutureSystemStartReturnsZero(t *testing.T) {
 	cfg := futureSystemStartCfg(t, time.Now().Add(time.Hour))
-	got := nearNowSlot(cfg.ShelleyGenesis())
+	got := nearNowSlot(cfg.ShelleyGenesis(), time.Now())
 	assert.Equal(
 		t,
 		uint64(0),

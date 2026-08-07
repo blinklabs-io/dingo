@@ -407,11 +407,17 @@ func DefaultLoggingConfig() LoggingConfig {
 }
 
 // MidnightConfig holds configuration for the Midnight indexer and its
-// optional gRPC API surface. Indexing is only active when Dingo is running
-// in API storage mode; Port 0 disables only the gRPC server.
+// optional gRPC API surface. Indexing is only active when Enabled is true
+// AND Dingo is running in API storage mode -- both are required, since the
+// indexer depends on the API-mode indexes to function; Validate rejects
+// Enabled without API storage mode. Port 0 disables only the gRPC server.
 type MidnightConfig struct {
-	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
-	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
+	// Enabled opts into running the Midnight indexer. Default false: an
+	// api-mode deployment that wants Midnight indexing must set this
+	// explicitly.
+	Enabled bool   `yaml:"enabled" envconfig:"DINGO_MIDNIGHT_ENABLED"`
+	Port    uint   `yaml:"port"    envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host    string `yaml:"host"    envconfig:"DINGO_MIDNIGHT_HOST"`
 
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
@@ -632,6 +638,13 @@ type Config struct {
 
 	// Database lifecycle (snapshot/restore/truncate) configuration
 	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
+
+	// provenance records, for gated fields only, whether their value came
+	// from an operator (CLI flag, environment variable, or YAML file) or
+	// is still the built-in default. Populated by ApplyFlags and
+	// RecordSourceProvenance, not by LoadConfig itself — see provenance.go
+	// and RecordSourceProvenance's own doc comment for why.
+	provenance Provenance
 }
 
 // PluginsConfig is the canonical configuration tree for compiled-in plugin
@@ -799,6 +812,23 @@ func clearMidnightNetworkDefaults(cfg *Config, network string) {
 		cfg.Midnight.PermissionedCandidatePolicy == defaults.PermissionedCandidatePolicy {
 		cfg.Midnight.PermissionedCandidatePolicy = ""
 	}
+}
+
+// ReapplyMidnightNetworkDefaults re-derives the network-keyed Midnight
+// defaults after a caller has changed cfg.Network. ApplyFlags already does
+// this inline for a CLI flag that changes Network; this exported wrapper
+// gives any other caller that changes cfg.Network after LoadConfig/ApplyFlags
+// have run (e.g. internal/settingsresolve.Apply resuming Network from a
+// persisted gate) the same re-derivation, so the previous network's
+// constants do not linger under the new network. Explicitly configured
+// values are preserved: clearMidnightNetworkDefaults skips any field the
+// config file set (midnightYAMLFieldSet), and applyMidnightNetworkDefaults
+// only fills fields that are still empty.
+func ReapplyMidnightNetworkDefaults(cfg *Config, previousNetwork string) {
+	if cfg.Network != previousNetwork {
+		clearMidnightNetworkDefaults(cfg, previousNetwork)
+	}
+	applyMidnightNetworkDefaults(cfg)
 }
 
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
@@ -1041,7 +1071,34 @@ func cloneConfig(cfg *Config) *Config {
 	)
 	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
 	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
+	if cfg.provenance != nil {
+		clone.provenance = make(Provenance, len(cfg.provenance))
+		maps.Copy(clone.provenance, cfg.provenance)
+	}
 	return &clone
+}
+
+// resolveConfigFile applies the same default config file discovery
+// LoadConfig has always used: an explicit configFile wins outright;
+// otherwise ~/.dingo/dingo.yaml is used if it exists, else
+// /etc/dingo/dingo.yaml if that exists, else "" (no config file).
+// RecordSourceProvenance (provenance.go) calls this too, so it inspects
+// the exact same file LoadConfig actually read.
+func resolveConfigFile(configFile string) string {
+	if configFile != "" {
+		return configFile
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		userPath := filepath.Join(homeDir, ".dingo", "dingo.yaml")
+		if _, err := os.Stat(userPath); err == nil {
+			return userPath
+		}
+	}
+	systemPath := "/etc/dingo/dingo.yaml"
+	if _, err := os.Stat(systemPath); err == nil {
+		return systemPath
+	}
+	return ""
 }
 
 func LoadConfig(configFile string) (*Config, error) {
@@ -1049,25 +1106,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	defer configMu.Unlock()
 	cfg := cloneConfig(globalConfig)
 	midnightYAMLFields = nil
-
-	// Load config file as YAML if provided
-	if configFile == "" {
-		// Check for config file in this path: ~/.dingo/dingo.yaml
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			userPath := filepath.Join(homeDir, ".dingo", "dingo.yaml")
-			if _, err := os.Stat(userPath); err == nil {
-				configFile = userPath
-			}
-		}
-
-		// Try to check for /etc/dingo/dingo.yaml if still not found
-		if configFile == "" {
-			systemPath := "/etc/dingo/dingo.yaml"
-			if _, err := os.Stat(systemPath); err == nil {
-				configFile = systemPath
-			}
-		}
-	}
+	configFile = resolveConfigFile(configFile)
 
 	if configFile != "" {
 		buf, err := os.ReadFile(configFile)
@@ -1320,6 +1359,19 @@ func GetConfig() *Config {
 	configMu.RLock()
 	defer configMu.RUnlock()
 	return cloneConfig(globalConfig)
+}
+
+// PublishConfig replaces the process-wide configuration snapshot returned
+// by GetConfig with a clone of cfg. LoadConfig and ApplyFlags already
+// publish their own results this way; call PublishConfig after any later
+// mutation of a *Config a caller is threading through by pointer, since
+// consumers such as LoadTopologyConfig read the package-level snapshot via
+// GetConfig, not the caller's own pointer, and would otherwise silently
+// see a stale value.
+func PublishConfig(cfg *Config) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	globalConfig = cloneConfig(cfg)
 }
 
 var globalTopologyConfig = &topology.TopologyConfig{}

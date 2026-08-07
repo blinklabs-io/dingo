@@ -122,11 +122,14 @@ type OffchainMetadataConfig struct {
 }
 
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
-// Indexing is only active in API storage mode. Port 0 disables the gRPC
-// listener while leaving indexing eligible to run.
+// Indexing is only active when Enabled is true AND Dingo is running in API
+// storage mode -- both are required, since the indexer depends on the
+// api-mode indexes to function. Port 0 disables the gRPC listener while
+// leaving indexing eligible to run.
 type MidnightConfig struct {
-	Port uint
-	Host string
+	Enabled bool
+	Port    uint
+	Host    string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -614,6 +617,7 @@ func (c *Config) syncCompatFields() {
 		GraceHours: c.cfg.KoiosParity.GraceHours,
 	}
 	c.midnight = MidnightConfig{
+		Enabled:                     c.cfg.Midnight.Enabled,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -1399,6 +1403,7 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			*c = NewConfig()
 		}
 		c.cfg.Midnight = internalconfig.MidnightConfig{
+			Enabled:                     cfg.Enabled,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,

@@ -60,6 +60,39 @@ func (q *Queries) GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, erro
 	return i, err
 }
 
+const getNodeSettingsGates = `-- name: GetNodeSettingsGates :many
+SELECT name, value
+FROM node_settings_gate
+`
+
+type GetNodeSettingsGatesRow struct {
+	Name  string
+	Value string
+}
+
+func (q *Queries) GetNodeSettingsGates(ctx context.Context) ([]GetNodeSettingsGatesRow, error) {
+	rows, err := q.db.QueryContext(ctx, getNodeSettingsGates)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetNodeSettingsGatesRow{}
+	for rows.Next() {
+		var i GetNodeSettingsGatesRow
+		if err := rows.Scan(&i.Name, &i.Value); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertNodeSettings = `-- name: InsertNodeSettings :execrows
 INSERT INTO node_settings (id, storage_mode, network)
 VALUES (1, ?, ?)
@@ -79,6 +112,32 @@ func (q *Queries) InsertNodeSettings(ctx context.Context, arg InsertNodeSettings
 	return result.RowsAffected()
 }
 
+const insertNodeSettingsGateIfAbsent = `-- name: InsertNodeSettingsGateIfAbsent :execrows
+INSERT INTO node_settings_gate (name, value, recorded_epoch, recorded_slot)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (name) DO NOTHING
+`
+
+type InsertNodeSettingsGateIfAbsentParams struct {
+	Name          string
+	Value         string
+	RecordedEpoch int64
+	RecordedSlot  int64
+}
+
+func (q *Queries) InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertNodeSettingsGateIfAbsent,
+		arg.Name,
+		arg.Value,
+		arg.RecordedEpoch,
+		arg.RecordedSlot,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setCommitTimestamp = `-- name: SetCommitTimestamp :exec
 INSERT INTO commit_timestamp (id, timestamp)
 VALUES (1, ?)
@@ -87,5 +146,31 @@ ON CONFLICT (id) DO UPDATE SET timestamp = excluded.timestamp
 
 func (q *Queries) SetCommitTimestamp(ctx context.Context, timestamp sql.NullInt64) error {
 	_, err := q.db.ExecContext(ctx, setCommitTimestamp, timestamp)
+	return err
+}
+
+const upsertNodeSettingsGate = `-- name: UpsertNodeSettingsGate :exec
+INSERT INTO node_settings_gate (name, value, recorded_epoch, recorded_slot)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (name) DO UPDATE SET
+    value = excluded.value,
+    recorded_epoch = excluded.recorded_epoch,
+    recorded_slot = excluded.recorded_slot
+`
+
+type UpsertNodeSettingsGateParams struct {
+	Name          string
+	Value         string
+	RecordedEpoch int64
+	RecordedSlot  int64
+}
+
+func (q *Queries) UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error {
+	_, err := q.db.ExecContext(ctx, upsertNodeSettingsGate,
+		arg.Name,
+		arg.Value,
+		arg.RecordedEpoch,
+		arg.RecordedSlot,
+	)
 	return err
 }

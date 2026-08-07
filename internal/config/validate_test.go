@@ -526,6 +526,76 @@ func TestValidatePledgeLeverage(t *testing.T) {
 	}
 }
 
+// TestValidateMidnightEnabled pins the contradiction check: the Midnight
+// indexer needs the api-mode indexes to function, so midnight.enabled
+// requires storageMode "api". Dev mode is exempted because node.Run
+// force-upgrades storage mode to api at startup regardless of what is
+// configured (see TestValidateMidnightEnabledAllowedInDevMode).
+func TestValidateMidnightEnabled(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     bool
+		storageMode string
+		wantErr     string
+	}{
+		{
+			name:        "disabled with core mode",
+			enabled:     false,
+			storageMode: storageModeCore,
+		},
+		{
+			name:        "disabled with api mode",
+			enabled:     false,
+			storageMode: storageModeAPI,
+		},
+		{
+			name:        "enabled with api mode",
+			enabled:     true,
+			storageMode: storageModeAPI,
+		},
+		{
+			name:        "enabled with core mode",
+			enabled:     true,
+			storageMode: storageModeCore,
+			wantErr:     `midnight.enabled requires storageMode "api"`,
+		},
+		{
+			name:        "enabled with unset storage mode",
+			enabled:     true,
+			storageMode: "",
+			wantErr:     `midnight.enabled requires storageMode "api"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Midnight.Enabled = tt.enabled
+			cfg.StorageMode = tt.storageMode
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMidnightEnabledAllowedInDevMode verifies that dev mode's
+// storage-mode force-upgrade (node.Run) is honored the same way it already
+// is for the API listener ports above: midnight.enabled with a configured
+// core storage mode must not be rejected when runMode is dev, because the
+// node will actually start in api mode.
+func TestValidateMidnightEnabledAllowedInDevMode(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.Midnight.Enabled = true
+	assert.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+	assert.NoError(t, cfg.validate(RunModeDev, minUnprivilegedPort))
+}
+
 // TestValidateDelegatorInactivity pins the CIP-0163 range check: the
 // inactivity window is only validated when the gate is enabled, and must
 // fall in [1, 10000] when it is.

@@ -236,6 +236,11 @@ var flagSpecs = []flagSpec{
 		"offchain-metadata-allow-private-addresses",
 		"allow off-chain metadata fetches to private, loopback, and link-local addresses",
 	),
+	boolFlag(
+		"Midnight.Enabled",
+		"midnight-enabled",
+		`enable the Midnight indexer (requires storageMode "api")`,
+	),
 	uintFlag(
 		"Midnight.Port",
 		"midnight-port",
@@ -703,6 +708,12 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	for _, spec := range flagSpecs {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
+		}
+		// Only gated fields, per provenance's documented contract: this loop
+		// walks every registered flag, and recording the rest would fill the
+		// map with entries nothing reads.
+		if flags.Changed(spec.name) && isGatedField(spec.field) {
+			cfg.recordProvenance(spec.field, SourceFlag)
 		}
 	}
 	if cfg.Network != previousNetwork {

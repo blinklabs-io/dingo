@@ -749,7 +749,8 @@ When `Node.Run()` is called, components are initialized in this order:
  7. History Expiry worker (if configured), after recovery has settled the
     ledger tip and blob contents
  8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
-    backfill + EventBus subscription (if API storage mode).
+    backfill + EventBus subscription (if `midnight.enabled` AND API storage
+    mode; both are required).
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
     Technical Committee and Council governance datums, Ariadne permissioned-candidate
     parameters, and committee-candidate UTxO snapshots (taken at epoch boundaries via
@@ -1325,7 +1326,7 @@ The swap is crash-recoverable, not just correct in the no-failure case. Both ren
 
 `Service.SetLiveNode` lets a caller reach this path through the same `Snapshot`/`Restore`/`Truncate` call shapes as the offline path; `*dingo.Node` satisfies `dblifecycle.LiveNode` structurally (the interface is defined in `internal/dblifecycle`, not `dingo`, so the dependency only goes one way). `node.go`'s `Run()` is the one place that actually does this today: when bark is enabled with a snapshot directory configured, it builds a `dblifecycle.Service`, binds it via `SetLiveNode(n)`, and hands it to `bark.BarkConfig.Lifecycle` for `bark/database.go`'s `DatabaseService` handler to call.
 
-Every rebuilt component (`database.New`'s cache metrics, `chain.NewManager`, `ledger.NewLedgerState`, the mempool/chainsync/connmanager/peerGov/snapshot managers, the block producer) registers Prometheus collectors under fixed names against `n.config.promRegistry` — re-registering the same names on a real (non-nil) registry panics. `New()` installs a `rebuildableRegisterer` (`metrics_registerer.go`) as `n.config.promRegistry` after the node's own one-time metrics (build info, RTS gauges, the EventBus's) are registered directly against the pre-wrap registerer, so those survive untouched; `closeStorageForLiveLifecycleOp` calls `n.rebuildableMetrics.unregisterAll()` before any rebuilt component (or `Truncate`'s own temporary target-resolution database) re-registers. `n.ouroboros` is a third case, distinct from both: it's built in `Run()` — *after* `n.config.promRegistry` has already become the wrapper — but, like `chainSelector`/`bark`, it is never reconstructed by a live restore/truncate. Registering its blockfetch/protocol/Leios collectors via `n.config.promRegistry` directly (the same call every genuinely rebuilt component makes) would make them indistinguishable from those components' collectors once tracked in `r.collectors`, so `unregisterAll` would wipe them right along with the components actually being rebuilt — and since nothing ever reconstructs `n.ouroboros` to re-register them, its metrics would permanently vanish from every scrape after the very first live restore/truncate. `retainedComponentPromRegistry()` is the one exception to "everything reads `n.config.promRegistry`": `n.ouroboros`'s construction call uses it instead, resolving to the real registry underneath `n.rebuildableMetrics` (`.inner`) rather than the wrapper itself, so its collectors are never tracked by the wrapper in the first place and `unregisterAll` cannot touch them. `Register` holds its lock for the whole call — the actual registration against the underlying registerer *and* recording the collector in its tracked list — not just the append: holding it only around the append would leave a window where a concurrent `unregisterAll`'s snapshot-and-clear could run between a `Register` call's underlying registration succeeding and it recording that collector, letting the collector "escape" that cleanup pass even though it's genuinely registered; the next rebuild cycle's attempt to register a fresh collector under the same name then hits a duplicate-registration error most callers don't handle gracefully. `Truncate`'s temporary target-resolution database (`tmpDB`) is deferred-closed as soon as `database.New` returns, before checking its error — `database.New` can return a non-nil `*Database` alongside a recoverable `CommitTimestampError`, and an early return on that error before the `defer` is registered would leak `tmpDB`'s open badger/sqlite handles, so `reinitializeAndResume`'s reopen of the same data directory a moment later could hit a lock-contention failure instead of gracefully recovering the same error.
+Every rebuilt component (`database.New`'s cache metrics, `chain.NewManager`, `ledger.NewLedgerState`, the mempool/chainsync/connmanager/peerGov/snapshot managers, the block producer, the Midnight indexer and its gRPC server) registers Prometheus collectors under fixed names against `n.config.promRegistry` — re-registering the same names on a real (non-nil) registry panics. `New()` installs a `rebuildableRegisterer` (`metrics_registerer.go`) as `n.config.promRegistry` after the node's own one-time metrics (build info, RTS gauges, the EventBus's) are registered directly against the pre-wrap registerer, so those survive untouched; `closeStorageForLiveLifecycleOp` calls `n.rebuildableMetrics.unregisterAll()` before any rebuilt component (or `Truncate`'s own temporary target-resolution database) re-registers. `n.ouroboros` is a third case, distinct from both: it's built in `Run()` — *after* `n.config.promRegistry` has already become the wrapper — but, like `chainSelector`/`bark`, it is never reconstructed by a live restore/truncate. Registering its blockfetch/protocol/Leios collectors via `n.config.promRegistry` directly (the same call every genuinely rebuilt component makes) would make them indistinguishable from those components' collectors once tracked in `r.collectors`, so `unregisterAll` would wipe them right along with the components actually being rebuilt — and since nothing ever reconstructs `n.ouroboros` to re-register them, its metrics would permanently vanish from every scrape after the very first live restore/truncate. `retainedComponentPromRegistry()` is the one exception to "everything reads `n.config.promRegistry`": `n.ouroboros`'s construction call uses it instead, resolving to the real registry underneath `n.rebuildableMetrics` (`.inner`) rather than the wrapper itself, so its collectors are never tracked by the wrapper in the first place and `unregisterAll` cannot touch them. `Register` holds its lock for the whole call — the actual registration against the underlying registerer *and* recording the collector in its tracked list — not just the append: holding it only around the append would leave a window where a concurrent `unregisterAll`'s snapshot-and-clear could run between a `Register` call's underlying registration succeeding and it recording that collector, letting the collector "escape" that cleanup pass even though it's genuinely registered; the next rebuild cycle's attempt to register a fresh collector under the same name then hits a duplicate-registration error most callers don't handle gracefully. `Truncate`'s temporary target-resolution database (`tmpDB`) is deferred-closed as soon as `database.New` returns, before checking its error — `database.New` can return a non-nil `*Database` alongside a recoverable `CommitTimestampError`, and an early return on that error before the `defer` is registered would leak `tmpDB`'s open badger/sqlite handles, so `reinitializeAndResume`'s reopen of the same data directory a moment later could hit a lock-contention failure instead of gracefully recovering the same error.
 
 ### Database Models
 
@@ -1644,6 +1645,22 @@ When the next-epoch nonce becomes stable before that header horizon opens,
 the node-level leader adapter derives only the immediate next Praos epoch's
 slot range from the current epoch dimensions so schedule precomputation can
 proceed without broadening general ledger forecasts.
+
+All of the above (`SlotToTime`, `TimeToSlot`, `SlotToEpoch`, `EpochInfo`, the
+near-now extrapolation, and `EndorserBlockWaitDuration`) is implemented by
+`SlotTimeConverter` (`ledger/slot_time_converter.go`), not directly on
+`LedgerState`. This is the first subsystem extracted from `LedgerState` under
+the ongoing decomposition tracked by issue #2254 (the read-mostly
+consensus/tip-state snapshot mechanism described above under "Genesis-overlay
+activity" predates this and was extracted separately). `SlotTimeConverter`
+holds no lock of its own and depends on `LedgerState` only through three
+narrow read-only callbacks (`HardForkSummary`, `ShelleyGenesis`, `EpochCache`)
+injected via `SlotTimeConverterDeps`, so it never reaches back into
+`LedgerState`'s locking or working state directly. `LedgerState` builds it
+eagerly in `NewLedgerState` and holds it behind the thin, delegating wrapper
+methods (`ledger/slot.go`) that keep its own public API unchanged; `SlotClock`
+consumes it directly through a `slotTimeConverterProvider` adapter
+(`ledger/slot_clock.go`) rather than looping back through `LedgerState`.
 
 ### Operational Certificate Validation
 
@@ -2869,6 +2886,39 @@ Ledger-state import decodes treasury and reserves from the certified
 tip. It does not derive a genesis baseline, because the imported account state
 already includes every pot transition through that tip.
 
+The ancillary ledger-state CBOR is mainnet-scale (stake distribution, UTxO,
+pool, and DRep/account maps can each legitimately exceed 1M entries), so
+`ledgerstate` enforces explicit local decode limits rather than relying on an
+implicit library default; see the "Local CBOR decode limits policy" comment
+in `ledgerstate/cbor_decode.go` for the full per-path breakdown. In summary: a
+full `cbor.Decode` of a map or array (used for whole-item decodes in this
+package) is capped by gouroboros's own policy at 10,000,000 map pairs/array
+elements and 256 nested levels — dingo has no public hook to reconfigure
+that. That cap does NOT extend to manual header-reading APIs
+(`DecodeMapHeader`, `NewStreamDecoder` combined with manual iteration): those
+read a raw count/byte off the wire with no built-in bound from the decoder
+itself, so every such call site enforces its own explicit check.
+`ledgerstate`'s hand-rolled map/array walkers (`decodeMapEntries`) and the
+UTxO-map streaming decoder enforce the same 10,000,000-entry cap
+independently — the definite-length UTxO map's `DecodeMapHeader`-reported
+count is checked up front (`checkUTxOMapEntryCount`), and the
+indefinite-length UTxO map, which has no header count to check up front, is
+capped with an equivalent running check against every streamed entry
+(`checkUTxOMapRunningEntryCount`). Because there is no upfront count, entries
+below the cap are already streamed to the UTxO import batch callback (and
+therefore committed to the database) by the time the running check rejects
+entry `maxMapEntries`+1 — this is safe rather than a partial-import bug:
+every UTxO write is an idempotent "insert if absent" upsert, and
+`ImportLedgerState` never marks the UTxO import phase checkpoint or advances
+the chain tip when this check fails, so a later re-run (checkpoint-resumed or
+from scratch) can only reapply the same rows, and nothing downstream ever
+treats the partially-imported database as a complete, ready ledger state.
+Recursion in the manual CBOR item-sizer
+and the HardFork "telescope" traversal is capped at 128 and 16 levels
+respectively to bound stack depth against
+adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is
+accepted exactly at the limit and rejected one past it.
+
 For Conway governance, ledger-state import persists active proposals, the
 per-purpose previous governance action IDs, and the ratified action IDs from
 `ConwayGovState.cgsDRepPulsingState`'s completed `RatifyState.rsEnacted` list.
@@ -3796,7 +3846,24 @@ panic (Badger) instead of a clean unavailable response.
 ### Midnight Indexer (`midnight/indexer/`)
 
 An optional block scanner that indexes Midnight chain events into multiple
-`midnight_*` metadata tables. It subscribes to `ledger.block`
+`midnight_*` metadata tables. Starting it requires BOTH `midnight.enabled`
+(`MidnightConfig.Enabled`, default false) AND API storage mode; storage mode
+alone is no longer sufficient. This is deliberately more restrictive than
+the Midnight gRPC server's own gate (`storageMode.IsAPI() && midnight.port
+> 0`, unchanged), which does not consult `midnight.enabled`: the server
+only serves whatever the `midnight_*` tables already hold, so it is not
+tied to the flag that starts the scanner writing to them.
+
+**Breaking change**: before `midnight.enabled` existed, the indexer started
+automatically for every API-storage-mode node. An existing api-mode
+deployment that relied on that implicit start must now set
+`midnight.enabled: true` (or `--midnight-enabled` / `DINGO_MIDNIGHT_ENABLED`)
+explicitly, or the indexer silently stops running on upgrade even though
+storage mode has not changed. `Config.Validate` rejects the reverse
+mistake (`midnight.enabled: true` with a non-api storage mode) at startup
+with a message naming both settings.
+
+Once eligible to run, it subscribes to `ledger.block`
 (`ledger.BlockEventType`) and for each applied block scans every transaction:
 
 - **cNIGHT create**: an output carrying the configured `cnight_policy_id` +
@@ -4093,7 +4160,134 @@ tier, the plugin-form name takes precedence when both forms are set.
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
-`ApplyFlags` and may still replace an invalid or unset value. Once every
+`ApplyFlags` and may still replace an invalid or unset value. Between
+`LoadConfig` and `ApplyFlags`, `cmd/dingo` calls `Config.RecordSourceProvenance`,
+which records, for a small set of gated fields, whether the current value
+came from the YAML file or an environment variable; `ApplyFlags` then
+records a flag override on top of that for any field the operator actually
+passed. `RecordSourceProvenance` runs as its own step rather than inside
+`LoadConfig` because an `internal/config` test `reflect.DeepEqual`s the whole
+`*Config` that `LoadConfig` returns against a hand-built struct literal, and
+a literal cannot populate an unexported field.
+
+Immediately after `ApplyFlags`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
+(`internal/settingsresolve`), which lets a data directory's already-persisted
+node settings supply the effective value for any override-eligible gate
+(`database/nodesettings.Gates`) the operator left at its built-in default —
+the mechanism behind `dingo -n preprod`, a stop, and then a bare `dingo`
+resuming preprod instead of failing to sync from scratch, while
+`dingo -n preview` against that same database is still a fatal error naming
+the conflict, because an operator-supplied value (tracked via the same
+provenance this section describes) is never silently discarded. `Gate.OverrideEligible`
+requires a gate's persisted value to be self-sufficient, needing no companion
+configuration that is not itself persisted; `full_pot_rewards` is the one
+ledger `LatchBool` gate that is deliberately *not* eligible, because its
+companion, `UnsafeFullPotRewardsOnStandardNetworks`, is neither gated nor
+persisted — resuming the latch alone from a database would enable full-pot
+rewards without the flag that makes them usable on a standard network, and
+the resulting startup failure would name a flag the operator never passed
+without ever mentioning that the value came from the database. `Apply` is
+also a no-op — returning `nil` without touching the directory — when
+`DatabasePath` exists but is empty, the same as when it does not exist at
+all: an empty directory (a freshly mounted container/k8s volume, or a
+`dingo database restore` target) has nothing persisted to resume from, and
+without this check `readPersistedGateValues` would resolve a metadata
+provider and run its migration registry as a side effect of merely
+starting it, creating a database in a directory `lifecycle.RestoreValidated`'s
+`requireEmptyOrAbsent` check needs to still find empty. This has to
+run before `ApplyDefaults`, `Validate`, and topology loading, all of which
+derive from `Network`, and it works at all only because `DatabasePath`
+defaults to `.dingo` and is not itself network-derived. `settingsresolve`
+is its own package, not part of `internal/config`, specifically so that
+`internal/config` — imported by roughly half the tree — does not have to
+depend on the plugin host and storage plugins that opening a metadata store
+requires. It opens only the metadata store (`plugin.Resolve[metadata.MetadataStore]`
+directly, never `internal/plugins.ResolveStorage`, which also resolves the
+blob store) at `DatabasePath`, reads the legacy `node_settings` row and
+`node_settings_gate`, and closes the store and stops its plugin host on
+every path, including every error path, before returning — leaving either
+open would block the real `database.New` that follows moments later. Before
+opening anything, it reads the `dbinfo` sidecar (`database/dbinfo`, a small
+JSON file named `dingo.dbinfo` recording only the metadata plugin that
+created the database) and refuses to proceed if it names a different
+plugin than the one configured: resolving a metadata store runs its
+migration registry as a side effect of merely starting it, so opening the
+wrong provider first would silently create a fresh, empty database beside
+the real one instead of ever reaching `node_settings_gate`'s own
+`metadata_plugin` gate, which would otherwise have caught the mismatch. The
+sidecar itself is written by `database/commit_timestamp.go`'s
+`writeDBInfoSidecar`, guarded so it is never written with an empty plugin
+name (the partial `Config`s `mithril/sync.go` and `database/lifecycle/restore.go`
+reopen with) and never overwrites a sidecar that is already present.
+`evaluateAndPersistGates` calls it on every open, not only one that writes a
+gate to `node_settings_gate` — a steady-state start with nothing new to
+persist still restores a sidecar an operator deleted, rather than leaving
+this pre-open check silently disabled from then on. A database
+directory that does not exist, or one this process cannot open for any
+reason, makes `settingsresolve.Apply` a silent no-op — a corrupt or in-use
+database is `database.New`'s problem to report properly, and failing here
+would only mask its better error behind a worse one.
+
+A sidecar write failure is fatal while the `metadata_plugin` gate is not
+yet persisted: a database in that state has no `metadata_plugin` gate row
+yet for this pre-open check to compare against
+until that same call creates it, so the sidecar is the only thing that will
+catch a mistyped provider the next time this directory is opened, and losing
+it here fails the database open rather than starting silently unprotected.
+Every other call — backfilling a sidecar an operator deleted from an
+already-established database — keeps the original warn-and-continue
+behavior, since `node_settings_gate`'s own gate row is already the real
+enforcement for it by then.
+
+On every path that returns without an error — including the no-op ones
+above, where `cfg` is left completely unchanged — `Apply` finishes by
+calling `config.PublishConfig(cfg)`, mirroring what `LoadConfig` and
+`ApplyFlags` already do for the same process-wide snapshot. This is not
+optional bookkeeping: `config.LoadTopologyConfig` (and any other consumer
+of `config.GetConfig`) reads that snapshot, not the `*Config` pointer
+`cmd/dingo`'s `PersistentPreRunE` is threading through by hand, so an
+override `Apply` made directly on `cfg` — resuming `Network` from a
+persisted gate, for instance — would otherwise be visible to every
+consumer holding that pointer while topology resolution alone kept seeing
+the pre-override value. A shipped version of this exact gap let a bare
+resume mutate `cfg.Network` to the persisted network while topology
+resolved against the previous default, so the node dialed the *other*
+network's relays while handshaking with the *resumed* network's magic —
+every handshake failed on a network-magic mismatch, and the node could
+not sync with anything despite `cfg.Network` itself being correct.
+`PublishConfig` closes that gap by keeping the snapshot and the pointer in
+lockstep on every `Apply` return, not just the ones that changed
+something.
+
+`Apply` overriding `cfg.Network` from a persisted gate has the same
+implication for the network-keyed Midnight constants
+(`internal/config`'s `midnightNetworkDefaults`,
+`applyMidnightNetworkDefaults`/`clearMidnightNetworkDefaults`) that it has
+for topology above: `LoadConfig` derives those constants once for whatever
+network was configured at that point, and `ApplyFlags` only re-derives them
+when a CLI flag changed `Network` — neither one runs again after `Apply`
+changes `Network` a third time. Left alone, an operator who enables
+Midnight (`midnight.enabled`) but leaves `Network` at its built-in default
+would keep the *previous* default network's constants after a bare resume,
+because `applyMidnightNetworkDefaults` only fills fields that are still
+empty and the stale values are not. `Apply` closes this the same way
+`ApplyFlags` already does for its own `Network`-changing case: after the
+override loop above runs (and before returning `nil`, so the corrected
+values are in place before the `PublishConfig` defer fires), it calls the
+exported `config.ReapplyMidnightNetworkDefaults(cfg, previousNetwork)`,
+which clears the previous network's still-default values
+(`clearMidnightNetworkDefaults`, skipping any field the config file set —
+`midnightYAMLFieldSet`) and re-fills from the new network
+(`applyMidnightNetworkDefaults`). This runs unconditionally, independent of
+whether Midnight ends up enabled, so the published config snapshot is
+internally consistent either way. An operator-configured Midnight value is
+never touched by this: it was never empty to begin with, so
+`applyMidnightNetworkDefaults`'s empty-field check alone would already
+leave it alone, and `clearMidnightNetworkDefaults`'s YAML-field check
+additionally refuses to clear it even in the coincidental case where an
+explicit value happens to equal the previous network's default.
+
+Once every
 source is merged, `Config.ApplyDefaults()` fills in unset values whose
 defaults are derived from other settings (an empty `runMode` selects `serve`;
 `plugins.mempool.config.capacity` defaults by run mode — Leios raises it — and the watermarks,
@@ -4155,6 +4349,136 @@ Key configuration areas:
   size, response cap, and private-address policy
 - Block producer credentials (VRF key, KES key, operational certificate)
 - External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
+
+### Node Settings Gate Enforcement
+
+Beyond `settingsresolve.Apply`'s pre-open resolution above, node startup
+enforces `database/nodesettings.Gates()` in two phases, split by what each
+stage can know rather than by gate importance.
+
+Phase 1 runs inside `database.New` (`database/commit_timestamp.go`'s
+`CheckNodeSettings`) and validates every gate a bare database open can
+supply — `storage_mode`, `network`, `network_magic`, `start_era`, the plugin
+selections, and `blob_store_id` — persisting first-start values via
+`writeGateValues`. It deliberately excludes every bool-derived gate
+(`history_expiry_active`, `historical_validation_relaxed`,
+`strict_utxo_validation_relaxed`, `pledge_leverage`, `full_pot_rewards`,
+`delegator_inactivity`, `min_pool_margin`): `database.Config` has two callers
+that construct a partial config with only `DataDir`, `Logger`,
+`StorageMode`, and `Network` set (`mithril/sync.go`,
+`database/lifecycle/restore.go`), and a bool's zero value cannot be told
+apart from "the operator turned it off." Computing
+`historical_validation_relaxed` from a zero `validateHistorical` would
+fabricate a relaxed ("on") taint against every normally-created database;
+computing `history_expiry_active` from a zero `Enabled` would fabricate the
+forbidden "off" latch direction against a database that legitimately ran
+with expiry on. Either would make phase 1 reject `dingo mithril sync` and
+every restore against an otherwise-healthy database.
+
+`start_era` has the same ambiguity as the two partial-caller fields above,
+but in reverse: its empty string means both "explicitly no start era" (the
+ordinary case for a full node startup) and "this caller's Config never
+populated the field" (the same partial callers). Phase 1 tells the two
+apart via `MetadataPlugin`, which only a full caller ever sets: when it is
+non-empty, an empty `StartEra` is recorded as the canonical sentinel
+`nodesettings.NoStartEra` rather than left as `""`, so the ordinary case of
+running with no start era override is actually persisted, and a later
+`--start-era dijkstra` against that database is rejected as a change to a
+frozen value instead of silently accepted as that gate's first-ever fill.
+Before this, `start_era`'s `FrozenFillOnce` class treated the empty
+configured value the same way it treats a genuinely unknown one, so a
+database that ran with no start era override recorded nothing at all for
+the gate. `internal/settingsresolve`'s `start_era` binding and
+`internal/dblifecycle`'s `intendedGateValues` emit the same sentinel, since
+neither of those callers has the partial-config ambiguity phase 1 does — both
+work from a fully-resolved `*config.Config` — so all three writers and the
+manifest gate comparison agree on one encoding for "no start era" rather
+than three independent string literals that could drift apart.
+
+Phase 2 is `(*Database).EnforceNodeSettings`
+(`database/enforce_node_settings.go`), called from `Node.Run` (`node.go`)
+with a `nodesettings.Values` built by `(n *Node) nodeSettingsGateValues()`
+(`node.go`) — one assembly function shared by both of phase 2's call sites
+below, so they cannot drift into passing different values for the same
+gates. It supplies the five era genesis hashes — each passed as an empty
+string when the loaded cardano config leaves it unset, so the gate's
+`FrozenFillOnce` class treats an older database's missing era hash as
+fillable rather than a mismatch, since era hashes are added over time and an
+older database legitimately lacks the newer ones — plus the ledger-semantics
+gates phase 1 excludes. Every value phase 2 supplies is treated as explicit,
+the same way phase 1 treats its own gates: `node.go` assembles them from the
+fully-resolved node configuration, not a partial one, so there is no
+"not yet known" case to leave override room for.
+
+Phase 2 runs at one of two points, chosen by whether the database needed
+recovery. On the normal path, it runs immediately after `database.New`'s
+error handling completes and before the pending-truncate check — after the
+cardano config has been parsed but strictly before the ledger can apply its
+first block, since the era genesis hashes it validates come only from
+`Config.CardanoNodeConfig()`. When `dbNeedsRecovery` is set instead, that
+first call site only logs that enforcement is deferred and does not call
+`EnforceNodeSettings`: a database awaiting commit-timestamp recovery has a
+known-inconsistent commit state, and evaluating gates against it could
+report a mismatch that has nothing to do with the operator's configuration
+and would mask the recovery path that is about to repair that same
+inconsistency. The deferred call runs later in the same `Run`, immediately
+after `n.ledgerState.RecoverCommitTimestampConflict()` succeeds and before
+`n.config.historyExpiry.Enabled` starts the pruner, the Midnight indexer is
+created, or any network listener starts — so it still lands before
+anything can apply a block or act on a ledger feature flag phase 2 would
+have rejected. Deferring rather than skipping matters because the ledger
+feature flags phase 2 gates (pledge leverage, full-pot rewards, delegator
+inactivity, and the two validation taints) are wired into the ledger from
+`n.config` independently of gate enforcement: skipping enforcement outright
+on a recovery-needed startup would let a forbidden transition — disabling
+an already-enabled `full_pot_rewards`, for instance — silently take effect
+in the ledger for that entire run, and would later record a legitimate
+transition's activation stamped with whatever epoch and slot a subsequent
+startup happened to reach, not the epoch it actually took effect in. A
+mismatch found by the deferred call fails startup the same way the normal
+path's does, by returning an error out of `Run`, which unwinds through the
+same `started` cleanup stack every other startup failure does.
+
+The recovery path defers phase 1 the same way, and for a reason that is
+easy to miss: `database.New`'s `init` calls `checkCommitTimestamp` before
+`CheckNodeSettings`, and returns immediately on a `CommitTimestampError`
+without ever reaching phase 1 — so on the recovery path, phase 1 has not
+merely been deferred by `New`, it has not run at all for that startup.
+Nothing in the original recovery flow re-ran it afterward, which meant
+`storage_mode`, `network`, `network_magic`, `start_era`, the plugin
+selections, and `blob_store_id` all went completely unenforced for the
+entire recovery run. This mattered most for the plugin gates: a fresh or
+swapped blob store's `GetCommitTimestamp` returns `(0, nil)`, which against
+a non-zero metadata timestamp is exactly a `CommitTimestampError` — so
+swapping the blob provider was one of the most direct ways to land on this
+path, and `blob_plugin`/`blob_store_id`, the gates that would have caught
+it, were exactly the ones going unchecked. `Node.Run` now calls the
+exported `(*database.Database).CheckNodeSettings` explicitly on the
+`dbNeedsRecovery` path, immediately after
+`RecoverCommitTimestampConflict()` succeeds and before the deferred phase 2
+call described above — re-running phase 1 there is safe because any
+database that can reach a genuine commit-timestamp mismatch has already
+completed one successful full open, so `blob_store_id` is already
+persisted: an unchanged blob store reads the same id back, and a swapped
+one mismatches against the persisted id, the correct loud failure.
+
+Both phases share one `evaluateAndPersistGates` helper
+(`database/commit_timestamp.go`) for the read-persisted/evaluate/
+fail-on-mismatch/write/verify-write body; `CheckNodeSettings` and
+`EnforceNodeSettings` differ only in which `nodesettings.Values` map they
+pass in.
+
+That body also guards against two openers racing the same gate's
+first-ever write: it reserves each gate name absent from what it just read
+as persisted via `SettingsStore.InsertNodeSettingsGateIfAbsent` (a
+conditional insert, distinct from the plain upsert used for every other
+write) before persisting anything, and a caller that loses re-reads what
+is now actually persisted and evaluates its own configuration against that
+instead of assuming its own write landed. This only matters when the
+metadata plugin is shared across processes by design (postgres, mysql);
+sqlite is opened per-process, and the default blob plugin's exclusive
+per-directory lock already rules out two full database opens racing at
+once regardless of metadata plugin.
 
 ## Stake Snapshots
 
