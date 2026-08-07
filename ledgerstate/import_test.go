@@ -1055,6 +1055,115 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 	)
 }
 
+// TestSynthesizeRetiredScheduledPoolsResolvesVrfKey verifies that a pool
+// present only in the imported active pool distribution (absent from the live
+// pool table) becomes resolvable via GetPool(includeInactive=true) carrying the
+// VRF key hash from the distribution, and is tombstoned with a retirement at
+// the snapshot epoch. This mirrors a pool that retired at the epoch boundary
+// but still leads the current epoch's fixed schedule, whose header VRF-key
+// binding check would otherwise fail on a Mithril-imported node.
+func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	// A currently-registered pool that the import already wrote.
+	livePoolKeyHash := bytes.Repeat([]byte{0x11}, 28)
+	liveVrfKeyHash := bytes.Repeat([]byte{0x12}, 32)
+	importTestPool(t, db, &models.Pool{
+		PoolKeyHash: livePoolKeyHash,
+		VrfKeyHash:  liveVrfKeyHash,
+	})
+
+	// A retired-but-scheduled pool present only in the active pool distr.
+	retiredPoolKeyHash := bytes.Repeat([]byte{0x21}, 28)
+	retiredVrfKeyHash := bytes.Repeat([]byte{0x22}, 32)
+
+	const epoch = uint64(305)
+	const slot = uint64(130267768)
+
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	require.NoError(t, synthesizeRetiredScheduledPools(
+		context.Background(),
+		cfg,
+		[]ParsedActivePoolStake{
+			{
+				PoolKeyHash:      livePoolKeyHash,
+				StakeNumerator:   1,
+				StakeDenominator: 10,
+				VrfKeyHash:       liveVrfKeyHash,
+			},
+			{
+				PoolKeyHash:      retiredPoolKeyHash,
+				StakeNumerator:   2,
+				StakeDenominator: 10,
+				VrfKeyHash:       retiredVrfKeyHash,
+			},
+		},
+		epoch,
+		slot,
+	))
+	require.NoError(t, db.Metadata().SetEpoch(
+		slot-100,
+		epoch,
+		nil,
+		nil,
+		nil,
+		nil,
+		0,
+		1,
+		200,
+		nil,
+	))
+	active, err := db.Metadata().GetActivePoolKeyHashesAtSlot(slot, nil)
+	require.NoError(t, err)
+	require.Contains(t, active, livePoolKeyHash)
+	require.NotContains(t, active, retiredPoolKeyHash)
+
+	// The retired-but-scheduled pool now resolves with its VRF key hash on
+	// both the denormalized pool row and its registration, the two fields the
+	// header VRF-key binding check reads.
+	retired, err := db.Metadata().GetPool(
+		testPoolKeyHash(retiredPoolKeyHash),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, retired)
+	require.Equal(t, retiredVrfKeyHash, []byte(retired.VrfKeyHash))
+	require.NotEmpty(t, retired.Registration)
+	require.Equal(
+		t,
+		retiredVrfKeyHash,
+		retired.Registration[0].VrfKeyHash,
+	)
+	require.Equal(t, slot, retired.Registration[0].AddedSlot)
+
+	// It carries a retirement tombstone at the snapshot epoch (synthetic
+	// certificate_id 0), keeping it out of active-pool/stake/reward queries.
+	require.NotEmpty(t, retired.Retirement)
+	require.Equal(t, epoch, retired.Retirement[0].Epoch)
+	require.Equal(t, uint(0), retired.Retirement[0].CertificateID)
+
+	// The already-registered pool is left untouched: no duplicate registration
+	// and no retirement tombstone.
+	live, err := db.Metadata().GetPool(
+		testPoolKeyHash(livePoolKeyHash),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, live)
+	require.Len(t, live.Registration, 1)
+	require.Empty(t, live.Retirement)
+}
+
 func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
