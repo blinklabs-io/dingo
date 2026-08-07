@@ -2873,16 +2873,23 @@ The ancillary ledger-state CBOR is mainnet-scale (stake distribution, UTxO,
 pool, and DRep/account maps can each legitimately exceed 1M entries), so
 `ledgerstate` enforces explicit local decode limits rather than relying on an
 implicit library default; see the "Local CBOR decode limits policy" comment
-in `ledgerstate/cbor_decode.go` for the full per-path breakdown. In summary:
-gouroboros's `cbor.Decode`/`cbor.NewStreamDecoder` wrapper (used for every
-full-item decode in this package) caps at 10,000,000 map pairs/array elements
-and 256 nested levels — dingo has no public hook to reconfigure that, it is
-gouroboros's own policy. `ledgerstate`'s hand-rolled map/array walkers
-(`decodeMapEntries`, the streaming UTxO-map header check) enforce the same
-10,000,000-entry cap independently, since they read entry/element counts
-directly off the wire without going through gouroboros's decoder. Recursion
-in the manual CBOR item-sizer and the HardFork "telescope" traversal is
-capped at 128 and 16 levels respectively to bound stack depth against
+in `ledgerstate/cbor_decode.go` for the full per-path breakdown. In summary: a
+full `cbor.Decode` of a map or array (used for whole-item decodes in this
+package) is capped by gouroboros's own policy at 10,000,000 map pairs/array
+elements and 256 nested levels — dingo has no public hook to reconfigure
+that. That cap does NOT extend to manual header-reading APIs
+(`DecodeMapHeader`, `NewStreamDecoder` combined with manual iteration): those
+read a raw count/byte off the wire with no built-in bound from the decoder
+itself, so every such call site enforces its own explicit check.
+`ledgerstate`'s hand-rolled map/array walkers (`decodeMapEntries`) and the
+UTxO-map streaming decoder enforce the same 10,000,000-entry cap
+independently — the definite-length UTxO map's `DecodeMapHeader`-reported
+count is checked up front (`checkUTxOMapEntryCount`), and the
+indefinite-length UTxO map, which has no header count to check up front, is
+capped with an equivalent running check against every streamed entry
+(`checkUTxOMapRunningEntryCount`). Recursion in the manual CBOR item-sizer
+and the HardFork "telescope" traversal is capped at 128 and 16 levels
+respectively to bound stack depth against
 adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is
 accepted exactly at the limit and rejected one past it.
 

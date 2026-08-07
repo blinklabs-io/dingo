@@ -32,22 +32,31 @@ import (
 // default:
 //
 //   - decodeRawArray / cbor.Decode (via gouroboros's cbor wrapper):
-//     bounded by gouroboros's internal decode mode, which sets
+//     a full cbor.Decode of a map or array is bounded by
+//     gouroboros's internal decode mode, which sets
 //     MaxMapPairs=10,000,000 and MaxArrayElements=10,000,000 (raised
 //     from fxamacker/cbor's own defaults of 131,072/131,072, which
 //     are too small for mainnet stake maps). Dingo has no public
 //     hook to reconfigure this; it is gouroboros's policy, applied
-//     to every cbor.Decode/cbor.NewStreamDecoder call in this
-//     package.
+//     to every cbor.Decode call in this package. This does NOT cover
+//     manual header-reading APIs below (DecodeMapHeader,
+//     NewStreamDecoder combined with manual iteration): those read a
+//     raw count/byte off the wire with no built-in cap from the
+//     decoder itself, so every such call site must add its own
+//     explicit check.
 //   - decodeMapEntries / decodeMapEntriesLimit (manual map walker,
 //     used for non-comparable Cardano credential keys): capped at
 //     maxMapEntries (10,000,000 entries, matching gouroboros's map
 //     limit above) for both definite- and indefinite-length maps.
 //   - parseUTxOsStreamingWithProgress (UTxO map streaming decode):
-//     the definite-length map header count is checked against the
-//     same maxMapEntries cap before entries are streamed, so a
+//     for the definite-length map, the DecodeMapHeader-reported
+//     count is checked against the same maxMapEntries cap
+//     (checkUTxOMapEntryCount) before entries are streamed, so a
 //     corrupted or adversarial header cannot drive an unbounded
-//     loop.
+//     loop. The indefinite-length map has no header count to check
+//     up front, so parseIndefiniteUTxOMapWithProgress instead
+//     enforces the same cap as a running check
+//     (checkUTxOMapRunningEntryCount) against every streamed entry.
 //   - decodeRawElements (Conway-era array-or-int-keyed-map record
 //     encoding): the int-keyed map variant caps the maximum
 //     integer key at maxAllowedKey (256) to bound the

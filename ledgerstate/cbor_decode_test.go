@@ -16,6 +16,7 @@ package ledgerstate
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -200,6 +201,99 @@ func TestParseUTxOsStreaming_RejectsOversizedMapHeader(t *testing.T) {
 		t,
 		callbackInvoked,
 		"callback must not run for a rejected oversized header",
+	)
+}
+
+// utxoTvarTxOutHex is a real MemPack TxOut (tag 2, AddrHash28
+// ADA-only), reused from TestDecodeMempackTxOutTag2, used below as a
+// minimal but genuinely parseable TxOut value so indefinite-length
+// UTxO map fixtures exercise the real parseUTxOEntry path rather
+// than a trivial placeholder.
+const utxoTvarTxOutHex = "02015691d68ad87582fc89b9ac43fd0227cfa4108efb79" +
+	"1b9987b290a9ba85b06c5a4edd9c1b857a1b55106ee4" +
+	"0191bb091025984a9d01000000f68597d600c99f00"
+
+// buildIndefiniteUTxOMapCbor builds an indefinite-length (0xbf ...
+// 0xff) CBOR UTxO map with n entries, each a valid 34-byte binary
+// TxIn (32-byte hash + big-endian output index) mapped to the same
+// valid MemPack TxOut payload, both CBOR byte-string wrapped as
+// parseUTxOEntry expects.
+func buildIndefiniteUTxOMapCbor(t *testing.T, n int) []byte {
+	t.Helper()
+	txOutBytes, err := hex.DecodeString(utxoTvarTxOutHex)
+	require.NoError(t, err)
+
+	data := []byte{0xbf}
+	for i := range n {
+		txIn := make([]byte, 34)
+		binary.BigEndian.PutUint16(txIn[32:], uint16(i))
+		data = append(data, mustEncodeCbor(t, txIn)...)
+		data = append(data, mustEncodeCbor(t, txOutBytes)...)
+	}
+	data = append(data, 0xff)
+	return data
+}
+
+func TestCheckUTxOMapRunningEntryCount(t *testing.T) {
+	t.Parallel()
+
+	const limit = 5
+	require.NoError(t, checkUTxOMapRunningEntryCount(0, limit))
+	require.NoError(t, checkUTxOMapRunningEntryCount(limit-1, limit))
+
+	err := checkUTxOMapRunningEntryCount(limit, limit)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeded max entries")
+}
+
+func TestParseIndefiniteUTxOMap_AtLimitAccepted(t *testing.T) {
+	t.Parallel()
+	const limit = 3
+	data := buildIndefiniteUTxOMapCbor(t, limit)
+
+	var total int
+	count, err := parseIndefiniteUTxOMapWithProgressLimit(
+		data,
+		func(batch []ParsedUTxO) error {
+			total += len(batch)
+			return nil
+		},
+		nil,
+		limit,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, limit, count)
+	require.Equal(t, limit, total)
+}
+
+func TestParseIndefiniteUTxOMap_OverLimitRejected(t *testing.T) {
+	t.Parallel()
+	const limit = 3
+	// limit valid entries, then a single arbitrary non-0xff byte in
+	// place of a (limit+1)th entry. The running-count check must
+	// fire before the decoder ever reads that byte as an entry, so
+	// it doesn't need to be well-formed CBOR to prove rejection.
+	data := buildIndefiniteUTxOMapCbor(t, limit)
+	data = append(data[:len(data)-1], 0x00, 0xff)
+	callbackInvoked := false
+
+	_, err := parseIndefiniteUTxOMapWithProgressLimit(
+		data,
+		func(batch []ParsedUTxO) error {
+			callbackInvoked = true
+			return nil
+		},
+		nil,
+		limit,
+	)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeded max entries")
+	require.False(
+		t,
+		callbackInvoked,
+		"callback must not run once the running cap rejects an entry",
 	)
 }
 

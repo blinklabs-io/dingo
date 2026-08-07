@@ -47,6 +47,26 @@ func checkUTxOMapEntryCount(count int) error {
 	return nil
 }
 
+// checkUTxOMapRunningEntryCount enforces limit against a running
+// entry count while streaming an indefinite-length UTxO map, which
+// (unlike the definite-length case checked up front by
+// checkUTxOMapEntryCount) has no declared header count to validate
+// before entries are read. Production code always calls this via
+// parseIndefiniteUTxOMapWithProgress with limit=maxMapEntries; tests
+// call parseIndefiniteUTxOMapWithProgressLimit directly with a small
+// limit to prove the boundary check accepts exactly `limit` entries
+// and rejects entry `limit`+1 without streaming a mainnet-scale
+// fixture.
+func checkUTxOMapRunningEntryCount(entryIndex, limit int) error {
+	if entryIndex >= limit {
+		return fmt.Errorf(
+			"indefinite-length UTxO map exceeded max entries (%d)",
+			limit,
+		)
+	}
+	return nil
+}
+
 // decodeTxIn extracts the transaction hash and output index from a
 // TxIn encoded in various formats:
 //   - CBOR array: [hash, index]
@@ -640,11 +660,31 @@ func parseUTxOsFromFileWithProgress(
 // parseIndefiniteUTxOMapWithProgress streams UTxO entries from an
 // indefinite-length CBOR map (0xbf ... 0xff). Each entry is a
 // TxIn key and TxOut value decoded using the existing parsers.
-// An optional progress callback receives byte-level progress.
+// An optional progress callback receives byte-level progress. The
+// entry count is capped at maxMapEntries; see
+// checkUTxOMapRunningEntryCount for why indefinite-length maps need
+// a running check rather than an upfront header check.
 func parseIndefiniteUTxOMapWithProgress(
 	data []byte,
 	callback UTxOCallback,
 	progress func(UTxOParseProgress),
+) (int, error) {
+	return parseIndefiniteUTxOMapWithProgressLimit(
+		data, callback, progress, maxMapEntries,
+	)
+}
+
+// parseIndefiniteUTxOMapWithProgressLimit is
+// parseIndefiniteUTxOMapWithProgress parameterized by the maximum
+// allowed entry count. Production code always calls it via
+// parseIndefiniteUTxOMapWithProgress with limit=maxMapEntries; tests
+// call it directly with a small limit to exercise the boundary
+// check without streaming a mainnet-scale fixture.
+func parseIndefiniteUTxOMapWithProgressLimit(
+	data []byte,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+	limit int,
 ) (int, error) {
 	if len(data) < 2 || data[0] != 0xbf {
 		return 0, errors.New("expected indefinite map (0xbf)")
@@ -676,6 +716,15 @@ func parseIndefiniteUTxOMapWithProgress(
 		if data[absPos] == 0xff {
 			mapComplete = true
 			return nil, nil, true, nil
+		}
+
+		// Indefinite-length maps have no declared header count to
+		// check up front (unlike the definite-length path, which
+		// checkUTxOMapEntryCount validates before any entry is
+		// streamed), so the cap must be enforced as a running check
+		// here on every entry instead.
+		if err := checkUTxOMapRunningEntryCount(entryIndex, limit); err != nil {
+			return nil, nil, false, err
 		}
 
 		idx := entryIndex
