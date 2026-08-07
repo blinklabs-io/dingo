@@ -342,7 +342,6 @@ func resetDatabase(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("list tables: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
-	type qualifiedTable struct{ schema, name string }
 	var tables []qualifiedTable
 	for rows.Next() {
 		var t qualifiedTable
@@ -354,10 +353,63 @@ func resetDatabase(ctx context.Context, db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("list tables: %w", err)
 	}
+	if err := refuseIfTargetHasData(ctx, db, tables); err != nil {
+		return err
+	}
 	for _, t := range tables {
 		quoted := pgQuoteIdentifier(t.schema) + "." + pgQuoteIdentifier(t.name)
 		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoted+" CASCADE"); err != nil {
 			return fmt.Errorf("drop table %s: %w", quoted, err)
+		}
+	}
+	return nil
+}
+
+type qualifiedTable struct{ schema, name string }
+
+// migrationsTableName is sqlstore/migrations' own bookkeeping table --
+// every real Start() populates it with one row per applied migration, so
+// it's the one table a freshly migrated, otherwise-empty database is
+// expected to already have data in.
+const migrationsTableName = "schema_migrations"
+
+// refuseIfTargetHasData errors out, before resetDatabase drops anything,
+// if any table other than migrationsTableName already contains a row.
+// dingo's own migrations never insert into a domain table -- only
+// schema_migrations records bookkeeping rows (verified: no migration file
+// under sqlstore/migrations/v1 contains an INSERT INTO a domain table) --
+// so a database restoreMetadataStore's brief resolve-and-start just
+// finished migrating has zero rows in everything else. A nonzero count
+// anywhere else means this target isn't that: most plausibly a live
+// node's own database, pointed at by a reused or misconfigured DSN, whose
+// accumulated real data resetDatabase's unconditional DROP TABLE would
+// otherwise destroy with no way back.
+func refuseIfTargetHasData(
+	ctx context.Context,
+	db *sql.DB,
+	tables []qualifiedTable,
+) error {
+	for _, t := range tables {
+		if t.name == migrationsTableName {
+			continue
+		}
+		quoted := pgQuoteIdentifier(t.schema) + "." + pgQuoteIdentifier(t.name)
+		var hasData bool
+		err := db.QueryRowContext(
+			ctx, "SELECT EXISTS (SELECT 1 FROM "+quoted+")",
+		).Scan(&hasData)
+		if err != nil {
+			return fmt.Errorf("check table %s for data: %w", quoted, err)
+		}
+		if hasData {
+			return fmt.Errorf(
+				"postgres reset: table %s already contains data -- "+
+					"refusing to reset a target that isn't a freshly "+
+					"migrated, empty database (this looks like a live "+
+					"database's own data, not something restoreMetadataStore's "+
+					"brief resolve-and-start just created)",
+				quoted,
+			)
 		}
 	}
 	return nil

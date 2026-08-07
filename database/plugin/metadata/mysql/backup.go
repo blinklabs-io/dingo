@@ -319,6 +319,9 @@ func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
 	if len(tables) == 0 {
 		return nil
 	}
+	if err := refuseIfTargetHasData(ctx, db, database, tables); err != nil {
+		return err
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection: %w", err)
@@ -338,6 +341,55 @@ func resetDatabase(ctx context.Context, db *sql.DB, database string) error {
 		)
 		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoted); err != nil {
 			return fmt.Errorf("drop table %s: %w", quoted, err)
+		}
+	}
+	return nil
+}
+
+// migrationsTableName is sqlstore/migrations' own bookkeeping table --
+// every real Start() populates it with one row per applied migration, so
+// it's the one table a freshly migrated, otherwise-empty database is
+// expected to already have data in.
+const migrationsTableName = "schema_migrations"
+
+// refuseIfTargetHasData errors out, before resetDatabase drops anything,
+// if any table other than migrationsTableName already contains a row.
+// dingo's own migrations never insert into a domain table -- only
+// schema_migrations records bookkeeping rows (verified: no migration file
+// under sqlstore/migrations/v1 contains an INSERT INTO a domain table) --
+// so a database restoreMetadataStore's brief resolve-and-start just
+// finished migrating has zero rows in everything else. A nonzero count
+// anywhere else means this target isn't that: most plausibly a live
+// node's own database, pointed at by a reused or misconfigured DSN, whose
+// accumulated real data resetDatabase's unconditional DROP TABLE would
+// otherwise destroy with no way back.
+func refuseIfTargetHasData(
+	ctx context.Context,
+	db *sql.DB,
+	database string,
+	tables []string,
+) error {
+	for _, name := range tables {
+		if name == migrationsTableName {
+			continue
+		}
+		quoted := mysqlQuoteIdentifier(database) + "." + mysqlQuoteIdentifier(name)
+		var hasData int
+		err := db.QueryRowContext(
+			ctx, "SELECT EXISTS (SELECT 1 FROM "+quoted+")",
+		).Scan(&hasData)
+		if err != nil {
+			return fmt.Errorf("check table %s for data: %w", quoted, err)
+		}
+		if hasData != 0 {
+			return fmt.Errorf(
+				"mysql reset: table %s already contains data -- refusing "+
+					"to reset a target that isn't a freshly migrated, empty "+
+					"database (this looks like a live database's own data, "+
+					"not something restoreMetadataStore's brief "+
+					"resolve-and-start just created)",
+				quoted,
+			)
 		}
 	}
 	return nil

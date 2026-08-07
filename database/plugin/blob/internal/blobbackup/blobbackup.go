@@ -29,6 +29,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -56,6 +57,19 @@ const Version = 2
 // Restore would have no way to tell "every key was captured" from "the
 // stream stopped early but happened to stop cleanly" -- a silent partial
 // restore that looks like a successful complete one.
+//
+// The marker's 4 bytes alone are not sufficient proof of a clean end,
+// though: 0xFFFFFFFF ("all bits set") is a realistic corruption pattern
+// for some storage/flash failure modes, not just an arbitrary value picked
+// at random, so a truncated or corrupted stream that happens to place
+// those exact 4 bytes at a key-length read position would otherwise be
+// silently accepted as complete -- the same class of bug this marker
+// exists to close, just moved to a different trigger. The terminator
+// therefore carries a 12-byte footer after the marker (an 8-byte record
+// count and a 4-byte CRC32 checksum, both computed over every record
+// actually written), and ReadRecord's caller must verify both match what
+// it actually read before treating the terminator as genuine -- see
+// Restore.
 const terminatorMarker uint32 = 0xFFFFFFFF
 
 // DefaultRestoreBatchRecords/DefaultRestoreBatchBytes bound how many records
@@ -130,6 +144,8 @@ func Backup(
 		return fmt.Errorf("%s: blob iterator: %w", errPrefix, err)
 	}
 	it.Rewind()
+	checksum := crc32.NewIEEE()
+	var recordCount uint64
 	for it.Valid() {
 		// The per-key work below (a potentially large ValueCopy network
 		// read, or the next iterator page fetch) isn't itself ctx-aware --
@@ -140,7 +156,7 @@ func Backup(
 		// one more per-key operation," instead of running to the end of
 		// the walk regardless of ctx.
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("%s: %w", errPrefix, err)
 		}
 		item := it.Item()
 		if item == nil {
@@ -157,6 +173,14 @@ func Backup(
 		if err := WriteRecord(cw, key, value, maxValueLen); err != nil {
 			return fmt.Errorf("%s: %w", errPrefix, err)
 		}
+		// Never fails: hash.Hash's Write always reports success, per its
+		// io.Writer contract. Feeds the checksum the exact same bytes just
+		// written above, so the terminator's footer can prove to Restore
+		// that every record was actually captured, not just that
+		// something ending in terminatorMarker's bytes was seen -- see
+		// terminatorMarker's own doc comment.
+		_ = WriteRecord(checksum, key, value, maxValueLen)
+		recordCount++
 		it.Next()
 	}
 	// A cloud iterator can fail mid-walk (a paginator error partway through
@@ -168,18 +192,20 @@ func Backup(
 	// Recorded once the walk is confirmed complete (the it.Err() check just
 	// above), so its presence in a backup file is itself proof every key was
 	// captured -- see terminatorMarker's own doc comment.
-	if err := writeTerminator(cw); err != nil {
+	if err := writeTerminator(cw, recordCount, checksum.Sum32()); err != nil {
 		return fmt.Errorf("%s: %w", errPrefix, err)
 	}
 	return nil
 }
 
-// writeTerminator writes terminatorMarker's 4 bytes directly, bypassing
-// WriteRecord's normal per-record framing (there is no key or value to
-// follow it).
-func writeTerminator(w io.Writer) error {
-	var buf [4]byte
-	binary.BigEndian.PutUint32(buf[:], terminatorMarker)
+// writeTerminator writes terminatorMarker's 4 bytes, followed by recordCount
+// (8 bytes) and checksum (4 bytes), bypassing WriteRecord's normal
+// per-record framing (there is no key or value to follow it).
+func writeTerminator(w io.Writer, recordCount uint64, checksum uint32) error {
+	var buf [16]byte
+	binary.BigEndian.PutUint32(buf[0:4], terminatorMarker)
+	binary.BigEndian.PutUint64(buf[4:12], recordCount)
+	binary.BigEndian.PutUint32(buf[12:16], checksum)
 	if _, err := w.Write(buf[:]); err != nil {
 		return fmt.Errorf("write terminator: %w", err)
 	}
@@ -195,7 +221,11 @@ func writeTerminator(w io.Writer) error {
 // so those earlier batches are not retroactively undone by a later batch's
 // failure. A failed Restore must not be retried against the same store --
 // IsEmpty's precondition check below will (correctly) refuse it as no longer
-// empty; discard the store and start over instead.
+// empty; discard the store and start over instead. Every error return below
+// that can only occur once at least one earlier batch already committed
+// (see partialDataWarning) says so explicitly, so an operator reading the
+// failure doesn't have to already know this internal batching detail to
+// realize the store can't just be retried against.
 func Restore(
 	ctx context.Context,
 	store Store,
@@ -235,6 +265,14 @@ func Restore(
 	txn := store.NewTransaction(true)
 	batchRecords := 0
 	batchBytes := 0
+	// committedBatches tracks how many earlier batches have already been
+	// durably committed at the point any later step fails, so every error
+	// path below can tell the caller whether this store is still untouched
+	// (safe to just discard and retry with a fresh one -- no different from
+	// any other Restore failure) or already holds real, un-undoable partial
+	// data (per this function's own doc comment) that must not be mistaken
+	// for an empty, retry-ready store.
+	committedBatches := 0
 	flush := func() error {
 		if batchRecords == 0 {
 			return nil
@@ -248,37 +286,91 @@ func Restore(
 			_ = txn.Rollback()
 			return err
 		}
+		committedBatches++
 		txn = store.NewTransaction(true)
 		batchRecords = 0
 		batchBytes = 0
 		return nil
 	}
+	checksum := crc32.NewIEEE()
+	var recordCount uint64
 	for {
 		key, value, err := ReadRecord(cr, maxValueLen)
-		if errors.Is(err, io.EOF) {
-			break
-		}
 		if err != nil {
+			if term, ok := errors.AsType[*ErrTerminator](err); ok {
+				// The marker's mere presence isn't proof of a clean end --
+				// see terminatorMarker's doc comment -- so a mismatch here
+				// means the stream is corrupted (or a coincidental
+				// corruption pattern happened to resemble the marker
+				// itself), not that Restore actually captured everything.
+				if term.RecordCount != recordCount ||
+					term.Checksum != checksum.Sum32() {
+					_ = txn.Rollback()
+					return fmt.Errorf(
+						"%s: backup stream is corrupted or truncated -- "+
+							"terminator declares %d record(s) (checksum "+
+							"%08x), but %d record(s) (checksum %08x) were "+
+							"actually read%s",
+						errPrefix, term.RecordCount, term.Checksum,
+						recordCount, checksum.Sum32(),
+						partialDataWarning(committedBatches),
+					)
+				}
+				break
+			}
 			_ = txn.Rollback()
-			return fmt.Errorf("%s: %w", errPrefix, err)
+			return fmt.Errorf(
+				"%s: %w%s", errPrefix, err, partialDataWarning(committedBatches),
+			)
 		}
+		// Never fails: hash.Hash's Write always reports success. Mirrors
+		// Backup's own checksum update so the two sides compare directly.
+		_ = WriteRecord(checksum, key, value, maxValueLen)
+		recordCount++
 		if err := store.Set(txn, key, value); err != nil {
 			_ = txn.Rollback()
-			return fmt.Errorf("%s: set key %x: %w", errPrefix, key, err)
+			return fmt.Errorf(
+				"%s: set key %x: %w%s",
+				errPrefix, key, err, partialDataWarning(committedBatches),
+			)
 		}
 		batchRecords++
 		batchBytes += len(key) + len(value)
 		if batchRecords >= DefaultRestoreBatchRecords ||
 			batchBytes >= DefaultRestoreBatchBytes {
 			if err := flush(); err != nil {
-				return fmt.Errorf("%s: commit batch: %w", errPrefix, err)
+				return fmt.Errorf(
+					"%s: commit batch: %w%s",
+					errPrefix, err, partialDataWarning(committedBatches),
+				)
 			}
 		}
 	}
 	if err := flush(); err != nil {
-		return fmt.Errorf("%s: commit final batch: %w", errPrefix, err)
+		return fmt.Errorf(
+			"%s: commit final batch: %w%s",
+			errPrefix, err, partialDataWarning(committedBatches),
+		)
 	}
 	return nil
+}
+
+// partialDataWarning returns an empty string if committedBatches is zero
+// (the store is still untouched -- a failure here is no different from any
+// other Restore failure), or an explicit suffix describing how many
+// batches are already durably committed and un-undoable, so an operator
+// reading a failed Restore's error output knows the store must be
+// discarded rather than assumed safe to retry against.
+func partialDataWarning(committedBatches int) string {
+	if committedBatches == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		" (%d batch(es) already committed to the store -- it now contains "+
+			"partial data and must be discarded; do not retry Restore "+
+			"against it)",
+		committedBatches,
+	)
 }
 
 // IsEmpty reports whether store has no keys at all.
@@ -349,15 +441,33 @@ func WriteRecord(w io.Writer, key, value []byte, maxValueLen int64) error {
 	return nil
 }
 
-// ReadRecord reads one record written by WriteRecord. Returns io.EOF (and
-// no other data) only once it reads terminatorMarker in the key-length
-// position -- a plain end-of-file there (the stream simply having no more
-// bytes) means the backup was truncated before its terminator, and is a
-// real error, not a clean end; any other read failure, including a partial
-// record, is also a real error. Declared lengths are validated against
-// sane bounds before allocating a buffer of that size, so a corrupted or
-// adversarial stream can only ever produce a normal error, not an attempted
-// multi-gigabyte allocation -- mirrors badger's Restore validating its own
+// ErrTerminator is returned by ReadRecord (wrapping io.EOF, so an existing
+// errors.Is(err, io.EOF) check still recognizes it as end-of-stream)
+// instead of a plain io.EOF whenever it reads terminatorMarker in a
+// key-length position. Its RecordCount/Checksum are the footer's own
+// declared values -- see terminatorMarker's doc comment for why a caller
+// (Restore) must use errors.As to recover them and compare against what it
+// actually read before accepting this as a genuine, uncorrupted end, rather
+// than treating the marker's mere presence as sufficient proof on its own.
+type ErrTerminator struct {
+	RecordCount uint64
+	Checksum    uint32
+}
+
+func (e *ErrTerminator) Error() string { return "end of stream (terminator)" }
+func (e *ErrTerminator) Unwrap() error { return io.EOF }
+
+// ReadRecord reads one record written by WriteRecord. Returns an
+// *ErrTerminator (which wraps io.EOF) only once it reads terminatorMarker
+// in the key-length position, and has also read the fixed-size footer that
+// follows it; a plain end-of-file at the key-length read itself (the
+// stream simply having no more bytes) means the backup was truncated
+// before ever reaching its terminator, and is a real error, not a clean
+// end. Any other read failure, including a partial record, is also a real
+// error. Declared lengths are validated against sane bounds before
+// allocating a buffer of that size, so a corrupted or adversarial stream
+// can only ever produce a normal error, not an attempted multi-gigabyte
+// allocation -- mirrors badger's Restore validating its own
 // length-prefixed framing the same way (see validateLoadRecordSizes in the
 // badger plugin).
 func ReadRecord(
@@ -380,7 +490,14 @@ func ReadRecord(
 	}
 	keyLen := binary.BigEndian.Uint32(keyLenBuf[:])
 	if keyLen == terminatorMarker {
-		return nil, nil, io.EOF
+		var footer [12]byte
+		if _, err := io.ReadFull(r, footer[:]); err != nil {
+			return nil, nil, fmt.Errorf("read terminator footer: %w", err)
+		}
+		return nil, nil, &ErrTerminator{
+			RecordCount: binary.BigEndian.Uint64(footer[:8]),
+			Checksum:    binary.BigEndian.Uint32(footer[8:12]),
+		}
 	}
 	if keyLen > MaxKeyLen {
 		return nil, nil, fmt.Errorf(

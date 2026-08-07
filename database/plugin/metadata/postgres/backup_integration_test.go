@@ -232,6 +232,37 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 	require.Equal(t, int64(777), restoredTimestamp)
 }
 
+// TestResetRefusesWhenTargetHasData guards a real gap: Reset used to drop
+// every table unconditionally once Start had migrated it, with nothing
+// checking whether the target already held real, previously accumulated
+// data (e.g. a live node's own database, reused or pointed at by a
+// misconfigured DSN) rather than being freshly migrated and still empty --
+// silently destroying it. Reset must refuse instead, leaving the data
+// exactly as it found it.
+func TestResetRefusesWhenTargetHasData(t *testing.T) {
+	baseDSN := postgresIntegrationDSN(t)
+	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_hasdata")
+	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.NoError(t, store.Start(context.Background()))
+
+	txn := store.Transaction()
+	require.NoError(t, store.SetCommitTimestamp(999, txn))
+	require.NoError(t, txn.Commit())
+
+	err = store.Reset(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already contains data")
+
+	restoredTimestamp, err := store.GetCommitTimestamp()
+	require.NoError(t, err)
+	require.Equal(
+		t, int64(999), restoredTimestamp,
+		"a refused Reset must not have touched the existing data",
+	)
+}
+
 // TestResetToleratesView guards a real gap: databaseIsEmpty/resetDatabase
 // originally counted every information_schema.tables row as a base
 // table, so a view sitting alongside dingo's own tables (something an
