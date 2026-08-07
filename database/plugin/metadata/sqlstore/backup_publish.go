@@ -100,7 +100,12 @@ func PublishBackupFile(
 	// creator populated at this exact path in the meantime (not possible
 	// under this package's own contract today, since nothing else writes
 	// dstPath directly, but cheap insurance against a future caller that
-	// doesn't hold that invariant).
+	// doesn't hold that invariant). This guard is itself not atomic --
+	// os.SameFile and os.Remove are two separate syscalls, with no portable
+	// equivalent of "delete this path only if it's still this inode" to
+	// close that window -- so it remains a best-effort check backed by the
+	// documented invariant above, not a hard guarantee; closing it for real
+	// would need real locking infrastructure this code doesn't have.
 	publishedInfo, statErr := lstatFile(dstPath)
 	// Registered before the statErr check below returns, not after: a
 	// failed verification lstat must still attempt the same cleanup this
@@ -126,7 +131,14 @@ func PublishBackupFile(
 		}
 		if info, lstatErr := os.Lstat(dstPath); lstatErr == nil &&
 			os.SameFile(compareInfo, info) {
-			_ = os.Remove(dstPath)
+			// A file's own removal does not guarantee the directory entry
+			// naming it is durably gone -- sync dstDir afterward the same
+			// way the success path does after its own mutations, or a
+			// crash right after this "successful" cleanup could leave the
+			// removed entry reappearing once the filesystem recovers.
+			if removeErr := os.Remove(dstPath); removeErr == nil {
+				_ = fsyncdir.Sync(dstDir)
+			}
 		}
 	}()
 	if statErr != nil {
