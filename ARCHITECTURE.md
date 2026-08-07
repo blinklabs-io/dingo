@@ -2869,6 +2869,23 @@ Ledger-state import decodes treasury and reserves from the certified
 tip. It does not derive a genesis baseline, because the imported account state
 already includes every pot transition through that tip.
 
+The ancillary ledger-state CBOR is mainnet-scale (stake distribution, UTxO,
+pool, and DRep/account maps can each legitimately exceed 1M entries), so
+`ledgerstate` enforces explicit local decode limits rather than relying on an
+implicit library default; see the "Local CBOR decode limits policy" comment
+in `ledgerstate/cbor_decode.go` for the full per-path breakdown. In summary:
+gouroboros's `cbor.Decode`/`cbor.NewStreamDecoder` wrapper (used for every
+full-item decode in this package) caps at 10,000,000 map pairs/array elements
+and 256 nested levels — dingo has no public hook to reconfigure that, it is
+gouroboros's own policy. `ledgerstate`'s hand-rolled map/array walkers
+(`decodeMapEntries`, the streaming UTxO-map header check) enforce the same
+10,000,000-entry cap independently, since they read entry/element counts
+directly off the wire without going through gouroboros's decoder. Recursion
+in the manual CBOR item-sizer and the HardFork "telescope" traversal is
+capped at 128 and 16 levels respectively to bound stack depth against
+adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is
+accepted exactly at the limit and rejected one past it.
+
 For Conway governance, ledger-state import persists active proposals, the
 per-purpose previous governance action IDs, and the ratified action IDs from
 `ConwayGovState.cgsDRepPulsingState`'s completed `RatifyState.rsEnacted` list.

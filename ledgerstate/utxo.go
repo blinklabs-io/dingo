@@ -32,6 +32,21 @@ import (
 // PaymentKeyHash/StakeKeyHash returned a meaningful credential.
 var zeroBlake2b224 ledger.Blake2b224
 
+// checkUTxOMapEntryCount validates a definite-length UTxO map's
+// declared entry count against maxMapEntries before any entries are
+// streamed. See "Local CBOR decode limits policy" in
+// cbor_decode.go for why this cap exists and matches the one used
+// by decodeMapEntries.
+func checkUTxOMapEntryCount(count int) error {
+	if count > maxMapEntries {
+		return fmt.Errorf(
+			"UTxO map claims %d entries, exceeds max (%d)",
+			count, maxMapEntries,
+		)
+	}
+	return nil
+}
+
 // decodeTxIn extracts the transaction hash and output index from a
 // TxIn encoded in various formats:
 //   - CBOR array: [hash, index]
@@ -294,6 +309,14 @@ func parseUTxOsStreamingWithProgress(
 			"decoding UTxO map header: %w",
 			err,
 		)
+	}
+	// The map header count comes straight off the wire and is not
+	// otherwise bounds-checked by DecodeMapHeader (unlike a full
+	// cbor.Decode of a map, which is capped internally). Enforce the
+	// same maxMapEntries cap used by decodeMapEntries so a corrupted
+	// or adversarial header can't drive an unbounded loop below.
+	if err := checkUTxOMapEntryCount(count); err != nil {
+		return 0, err
 	}
 
 	i := 0
