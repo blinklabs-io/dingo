@@ -322,14 +322,26 @@ func Restore(
 				// must be rejected as a malformed backup rather than
 				// silently ignored while only the first one is restored.
 				var trailing [1]byte
-				if _, trailErr := io.ReadFull(cr, trailing[:]); !errors.Is(
-					trailErr, io.EOF,
-				) {
+				_, trailErr := io.ReadFull(cr, trailing[:])
+				switch {
+				case trailErr == nil:
 					_ = txn.Rollback()
 					return fmt.Errorf(
 						"%s: backup stream has trailing data after its "+
 							"terminator (concatenated or malformed backup)%s",
 						errPrefix, partialDataWarning(committedBatches, err),
+					)
+				case errors.Is(trailErr, io.EOF):
+					// The genuine, expected clean end.
+				default:
+					// A different failure entirely (context cancellation via
+					// contextReader, a real I/O error) -- report it as
+					// itself, not misreport it as trailing data.
+					_ = txn.Rollback()
+					return fmt.Errorf(
+						"%s: read after backup terminator: %w%s",
+						errPrefix, trailErr,
+						partialDataWarning(committedBatches, err),
 					)
 				}
 				break

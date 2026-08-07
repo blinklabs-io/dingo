@@ -434,3 +434,50 @@ func TestRestoreRejectsTrailingDataAfterTerminator(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "trailing data")
 }
+
+// errAfterEOFReader wraps an io.Reader, substituting err for the wrapped
+// reader's own io.EOF once it's exhausted -- used below to simulate a real
+// I/O failure (or, in production, a cancelled contextReader) landing
+// exactly on the read that checks for trailing data after a validated
+// terminator, as opposed to that read cleanly finding nothing left.
+type errAfterEOFReader struct {
+	r   io.Reader
+	err error
+}
+
+func (r *errAfterEOFReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, r.err
+	}
+	return n, err
+}
+
+// TestRestoreReportsUnderlyingErrorAfterTerminatorNotTrailingData guards a
+// real gap: the trailing-data check couldn't tell "one more byte was
+// actually read" (real trailing data) apart from "the read itself failed
+// for an unrelated reason" (context cancellation, a real I/O error) --
+// both took the same "!errors.Is(err, io.EOF)" branch and were reported as
+// trailing data, discarding the real error and its diagnostic value.
+func TestRestoreReportsUnderlyingErrorAfterTerminatorNotTrailingData(t *testing.T) {
+	src := newFakeStore()
+	txn := src.NewTransaction(true)
+	require.NoError(t, src.Set(txn, []byte("key-a"), []byte("value-a")))
+	require.NoError(t, txn.Commit())
+
+	var buf bytes.Buffer
+	require.NoError(
+		t,
+		Backup(context.Background(), src, &buf, testMaxValueLen, "test backup"),
+	)
+	sentinel := errors.New("simulated read failure after terminator")
+	reader := &errAfterEOFReader{r: bytes.NewReader(buf.Bytes()), err: sentinel}
+
+	dst := newFakeStore()
+	err := Restore(
+		context.Background(), dst, reader, testMaxValueLen, "test restore",
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, sentinel)
+	require.NotContains(t, err.Error(), "trailing data")
+}
