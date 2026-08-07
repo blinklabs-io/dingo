@@ -729,6 +729,9 @@ func requireSecureURL(
 	if err != nil {
 		return fmt.Errorf("parsing %s %q: %w", label, rawURL, err)
 	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf("parsing %s %q: URL must include a host", label, rawURL)
+	}
 	switch parsed.Scheme {
 	case "https":
 		return nil

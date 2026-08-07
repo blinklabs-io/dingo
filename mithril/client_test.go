@@ -833,6 +833,17 @@ func TestRequireSecureURL(t *testing.T) {
 			allowInsecureHTTP: true,
 			wantErr:           true,
 		},
+		{
+			name:    "https URL with no host rejected",
+			rawURL:  "https:///aggregator",
+			wantErr: true,
+		},
+		{
+			name:              "https URL with no host rejected even with escape hatch",
+			rawURL:            "https:///aggregator",
+			allowInsecureHTTP: true,
+			wantErr:           true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
