@@ -875,58 +875,27 @@ func TestBootstrapV2RejectsNetworkMismatchBeforeDownload(t *testing.T) {
 // downloaded — artifact.Hash alone isn't enough to trust the metadata,
 // since Network is a separate, unconstrained field.
 func TestBootstrapV2RejectsPathTraversalInArtifactNetwork(t *testing.T) {
-	artifact := &CardanoDatabaseSnapshot{
-		MerkleRoot: "root",
-		Network:    "../../../../tmp/evil",
-		Beacon:     Beacon{Epoch: 0, ImmutableFileNumber: 0},
-	}
-	artifact.Hash = artifact.ComputeHash()
+	// Use the full fixture (real digest/immutable/ancillary/cert wiring) so
+	// that, if validateSnapshotIdentity were removed, the bootstrap would
+	// actually reach and attempt the immutable download this test guards
+	// against — not fail earlier for an unrelated reason (e.g. missing
+	// locations), which would let the immutableHits assertion pass
+	// vacuously.
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	fixture.artifact.Network = "../../../../tmp/evil"
+	cfg := fixture.bootstrapConfig(t.TempDir())
+	// Neither an operator-configured network expectation nor certificate
+	// verification is in play, so the pre-existing cfg.Network-mismatch
+	// check and the certificate's own network check (two distinct,
+	// unrelated guards) can't mask whether validateSnapshotIdentity itself
+	// is the one rejecting this.
+	cfg.Network = ""
+	cfg.VerifyCertificateChain = false
 
-	var immutableHit atomic.Bool
-	mux := http.NewServeMux()
-	mux.HandleFunc(
-		"/artifact/cardano-database",
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			require.NoError(
-				t,
-				json.NewEncoder(w).Encode(
-					[]CardanoDatabaseSnapshotListItem{
-						{Hash: artifact.Hash, Beacon: artifact.Beacon},
-					},
-				),
-			)
-		},
-	)
-	mux.HandleFunc(
-		"/artifact/cardano-database/"+artifact.Hash,
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			require.NoError(t, json.NewEncoder(w).Encode(artifact))
-		},
-	)
-	mux.HandleFunc(
-		"/files/imm/",
-		func(w http.ResponseWriter, r *http.Request) {
-			immutableHit.Store(true)
-			w.WriteHeader(http.StatusOK)
-		},
-	)
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-
-	_, err := Bootstrap(context.Background(), BootstrapConfig{
-		Backend:       BackendV2,
-		AggregatorURL: server.URL,
-		DownloadDir:   t.TempDir(),
-	})
+	_, err := Bootstrap(context.Background(), cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validating artifact metadata")
-	require.False(
-		t,
-		immutableHit.Load(),
-		"immutable download must not be attempted for unvalidated metadata",
-	)
+	require.Zero(t, fixture.immutableHits.Load())
 }
 
 func TestBootstrapV2VerifiedRequiresAncillaryKey(t *testing.T) {

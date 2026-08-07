@@ -263,7 +263,7 @@ func Bootstrap(
 		)
 	}
 	if err := validateSnapshotIdentity(
-		snapshot.Network, snapshot.Digest,
+		cfg.Network, snapshot.Network, snapshot.Digest,
 	); err != nil {
 		return nil, fmt.Errorf("validating snapshot metadata: %w", err)
 	}
@@ -477,7 +477,7 @@ func Bootstrap(
 	// vs ancillary/) so they are independent.
 	extractDir := filepath.Join(
 		downloadDir,
-		"immutable-"+snapshotCacheKey,
+		filepath.Base("immutable-"+snapshotCacheKey),
 	)
 	var ancillaryDir string
 	var ancillaryArchivePath string
@@ -662,7 +662,7 @@ func downloadAncillary(
 
 	ancillaryDir := filepath.Join(
 		downloadDir,
-		"ancillary-"+snapshot.Digest,
+		filepath.Base("ancillary-"+snapshot.Digest),
 	)
 	if _, extractErr := ExtractArchive(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
@@ -1091,9 +1091,16 @@ var digestPattern = regexp.MustCompile(
 // Both fields arrive unauthenticated at this point in the flow —
 // certificate/hash verification, when enabled, happens later — so they must
 // be constrained to a known network name and the expected hex digest format
-// first.
-func validateSnapshotIdentity(network, digest string) error {
-	if !slices.Contains(AcceptedNetworks(), network) {
+// first. expectedNetwork is the operator's own configured BootstrapConfig/
+// SyncConfig.Network (already restricted to alphanumeric/hyphen/underscore
+// by internal/config's ValidateNetworkName), which is trusted and accepted
+// in addition to the fixed default-network list — this lets an operator
+// bootstrap against a private/self-hosted aggregator for a non-default
+// network (e.g. a devnet) without loosening what an untrusted aggregator
+// response can put on a path. Pass "" when there is no such expectation.
+func validateSnapshotIdentity(expectedNetwork, network, digest string) error {
+	if network == "" ||
+		(network != expectedNetwork && !slices.Contains(AcceptedNetworks(), network)) {
 		return fmt.Errorf("unrecognized Mithril snapshot network %q", network)
 	}
 	if !digestPattern.MatchString(digest) {

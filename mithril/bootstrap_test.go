@@ -350,33 +350,58 @@ func TestBootstrapUnknownNetwork(t *testing.T) {
 func TestValidateSnapshotIdentity(t *testing.T) {
 	validDigest := "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
 	tests := []struct {
-		name    string
-		network string
-		digest  string
-		wantErr bool
+		name            string
+		expectedNetwork string
+		network         string
+		digest          string
+		wantErr         bool
 	}{
-		{"valid mainnet", "mainnet", validDigest, false},
-		{"valid preprod", "preprod", validDigest, false},
-		{"valid preview", "preview", validDigest, false},
-		{"too-short hex digest", "preprod", "abc123", true},
-		{"unknown network", "devnet", validDigest, true},
-		{"empty network", "", validDigest, true},
-		{"network with path traversal", "../../../etc", validDigest, true},
-		{"empty digest", "preprod", "", true},
-		{"digest with slash", "preprod", "abc/def", true},
-		{"digest with path traversal", "preprod", "../../etc/passwd", true},
-		{"digest with space", "preprod", "abc 123", true},
-		{"non-hex digest", "preprod", "not-hex-at-all", true},
+		{"valid mainnet", "", "mainnet", validDigest, false},
+		{"valid preprod", "", "preprod", validDigest, false},
+		{"valid preview", "", "preview", validDigest, false},
+		{"too-short hex digest", "", "preprod", "abc123", true},
+		{"unknown network", "", "devnet", validDigest, true},
+		{"empty network", "", "", validDigest, true},
+		{"network with path traversal", "", "../../../etc", validDigest, true},
+		{"empty digest", "", "preprod", "", true},
+		{"digest with slash", "", "preprod", "abc/def", true},
+		{"digest with path traversal", "", "preprod", "../../etc/passwd", true},
+		{"digest with space", "", "preprod", "abc 123", true},
+		{"non-hex digest", "", "preprod", "not-hex-at-all", true},
 		{
 			"too-long digest",
+			"",
 			"preprod",
 			strings.Repeat("a", 65),
+			true,
+		},
+		{
+			"custom network matching operator config is trusted",
+			"devnet",
+			"devnet",
+			validDigest,
+			false,
+		},
+		{
+			"custom network not matching operator config is rejected",
+			"devnet",
+			"some-other-net",
+			validDigest,
+			true,
+		},
+		{
+			"path traversal rejected even with a custom expected network",
+			"devnet",
+			"../../../etc",
+			validDigest,
 			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSnapshotIdentity(tt.network, tt.digest)
+			err := validateSnapshotIdentity(
+				tt.expectedNetwork, tt.network, tt.digest,
+			)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {

@@ -81,7 +81,7 @@ func bootstrapV2(
 		)
 	}
 	if err := validateSnapshotIdentity(
-		artifact.Network, artifact.Hash,
+		cfg.Network, artifact.Network, artifact.Hash,
 	); err != nil {
 		return nil, fmt.Errorf("validating artifact metadata: %w", err)
 	}
@@ -188,7 +188,7 @@ func bootstrapV2(
 
 	extractDir := filepath.Join(
 		downloadDir,
-		"immutable-"+artifact.Hash,
+		filepath.Base("immutable-"+artifact.Hash),
 	)
 	var ancillaryDir string
 	var ancillaryArchivePath string
@@ -1133,7 +1133,7 @@ func downloadAncillaryV2(
 
 	ancillaryDir := filepath.Join(
 		downloadDir,
-		"ancillary-"+artifact.Hash,
+		filepath.Base("ancillary-"+artifact.Hash),
 	)
 	if _, extractErr := ExtractArchive(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
