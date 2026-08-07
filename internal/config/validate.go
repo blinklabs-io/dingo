@@ -637,6 +637,29 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"databaseLifecycle.snapshotDir is required when databaseLifecycle.snapshotEnabled is true",
 		))
 	}
+	// snapshotDir is only actually live for a run mode that starts the
+	// full node (serving): that's the only path wiring up dblifecycle.
+	// Manager, whose Start reads SnapshotEnabled and whose Bark-triggered
+	// CreateSnapshot/Restore needs barkPort > 0 (matching the
+	// barkClientCaFilePath gate above) -- neither ever runs under a
+	// one-shot load/sync/mithril/database invocation, even if the same
+	// shared config file has snapshotEnabled or Bark turned on for its
+	// normal serve deployment. Gating on serving avoids those one-shot
+	// commands eagerly creating the directory and probe-writing into it
+	// (see checkDirWritable) for a subsystem they never start.
+	if serving &&
+		(c.DatabaseLifecycle.SnapshotEnabled || c.BarkPort > 0) &&
+		c.DatabaseLifecycle.SnapshotDir != "" {
+		if err := checkDirWritable(c.DatabaseLifecycle.SnapshotDir); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"databaseLifecycle.snapshotDir %q is not usable: %w (if "+
+					"running the official Docker image, a directory outside "+
+					"/data/db must be pre-chowned on the host to the "+
+					"container's UID:GID, 1000:1000)",
+				c.DatabaseLifecycle.SnapshotDir, err,
+			))
+		}
+	}
 	if c.DatabaseLifecycle.SnapshotRetention < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid databaseLifecycle.snapshotRetention: %d (must not be negative)",
@@ -758,6 +781,33 @@ func isWildcardAddr(addr string) bool {
 	default:
 		return false
 	}
+}
+
+// checkDirWritable ensures dir exists (creating it if needed) and that this
+// process can actually create files in it, surfacing a clear, actionable
+// error at startup instead of a raw filesystem permission error surfacing
+// later, deep inside a snapshot attempt. This is the common failure mode
+// for a --db-snapshot-dir bind-mounted from a host directory the
+// container's non-root user doesn't own (see the Docker image's pinned
+// UID:GID note in dingo.yaml.example).
+func checkDirWritable(dir string) (err error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+	probe, err := os.CreateTemp(dir, ".dingo-writable-check-*")
+	if err != nil {
+		return fmt.Errorf("directory is not writable: %w", err)
+	}
+	name := probe.Name()
+	// Deferred (rather than a plain call after Close) so the probe file is
+	// still cleaned up on every path, including one a later change might
+	// add between Close and here that returns early.
+	defer func() {
+		if removeErr := os.Remove(name); removeErr != nil && err == nil {
+			err = fmt.Errorf("remove writability probe file: %w", removeErr)
+		}
+	}()
+	return probe.Close()
 }
 
 // validatePathNoTraversal rejects paths containing a ".." component.
