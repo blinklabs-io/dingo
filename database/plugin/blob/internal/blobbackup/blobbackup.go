@@ -96,7 +96,11 @@ const MaxKeyLen = 64 << 10
 // native snapshot mechanism of its own.
 type Store interface {
 	NewTransaction(readWrite bool) types.Txn
-	NewIterator(txn types.Txn, opts types.BlobIteratorOptions) types.BlobIterator
+	NewIterator(
+		txn types.Txn,
+		opts types.BlobIteratorOptions,
+	) types.BlobIterator
+	Get(txn types.Txn, key []byte) ([]byte, error)
 	Set(txn types.Txn, key, value []byte) error
 }
 
@@ -134,8 +138,17 @@ func Backup(
 	// NewIterator opens its own network-call context internally (via
 	// opContext) rather than accepting one, so there is nothing here for
 	// contextcheck to actually flag -- ctx cancellation is still honored via
-	// contextWriter on every Write below.
-	it := store.NewIterator(txn, types.BlobIteratorOptions{}) //nolint:contextcheck
+	// contextWriter on every Write below. It also already returns a
+	// rewound iterator (both s3StreamIterator.NewIterator and its GCS
+	// counterpart call Rewind internally before returning) -- calling
+	// Rewind again here would issue a second, redundant listing request
+	// before any iteration even starts, doubling the cost and doubling the
+	// chance of a transient listing failure aborting an otherwise-valid
+	// backup.
+	it := store.NewIterator(
+		txn,
+		types.BlobIteratorOptions{},
+	) //nolint:contextcheck
 	if it == nil {
 		return fmt.Errorf("%s: blob iterator is nil", errPrefix)
 	}
@@ -143,18 +156,17 @@ func Backup(
 	if err := it.Err(); err != nil {
 		return fmt.Errorf("%s: blob iterator: %w", errPrefix, err)
 	}
-	it.Rewind()
 	checksum := crc32.NewIEEE()
 	var recordCount uint64
 	for it.Valid() {
-		// The per-key work below (a potentially large ValueCopy network
-		// read, or the next iterator page fetch) isn't itself ctx-aware --
-		// NewIterator manages its own internal call context rather than
-		// accepting this one (see the comment above) -- so an in-flight
-		// operation can't be preempted mid-call. Checking here bounds how
-		// long a cancellation takes to actually stop this loop to "at most
-		// one more per-key operation," instead of running to the end of
-		// the walk regardless of ctx.
+		// The per-key work below (a potentially large Get network read, or
+		// the next iterator page fetch) isn't itself ctx-aware -- NewIterator
+		// manages its own internal call context rather than accepting this
+		// one (see the comment above) -- so an in-flight operation can't be
+		// preempted mid-call. Checking here bounds how long a cancellation
+		// takes to actually stop this loop to "at most one more per-key
+		// operation," instead of running to the end of the walk regardless
+		// of ctx.
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("%s: %w", errPrefix, err)
 		}
@@ -164,7 +176,20 @@ func Backup(
 			continue
 		}
 		key := item.Key()
-		value, err := item.ValueCopy(nil)
+		// store.Get, not item.ValueCopy: a key whose history has expired
+		// stores a tombstone marker in place of real content, and
+		// ValueCopy deliberately turns that into a fatal
+		// *types.HistoryExpiredError for normal read callers (see
+		// s3Item/gcsItem.ValueCopy) -- which would otherwise make Backup
+		// fail outright the moment any single block's history has expired,
+		// an entirely routine operational state for any node running with
+		// history expiry enabled. Get returns the exact same bytes with no
+		// such interpretation, so the tombstone marker itself round-trips
+		// through the backup like any other opaque value, and a restored
+		// store ends up with the identical tombstoned/expired state as the
+		// source instead of either failing the whole backup or silently
+		// fabricating real block content that was never there.
+		value, err := store.Get(txn, key)
 		if err != nil {
 			return fmt.Errorf(
 				"%s: read value for key %x: %w", errPrefix, key, err,
@@ -348,7 +373,10 @@ func Restore(
 			}
 			_ = txn.Rollback()
 			return fmt.Errorf(
-				"%s: %w%s", errPrefix, err, partialDataWarning(committedBatches, err),
+				"%s: %w%s",
+				errPrefix,
+				err,
+				partialDataWarning(committedBatches, err),
 			)
 		}
 		// Never fails: hash.Hash's Write always reports success. Mirrors
@@ -423,7 +451,10 @@ func IsEmpty(ctx context.Context, store Store) (bool, error) {
 	txn := store.NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
 	// See the identical comment on the NewIterator call in Backup above.
-	it := store.NewIterator(txn, types.BlobIteratorOptions{}) //nolint:contextcheck
+	it := store.NewIterator(
+		txn,
+		types.BlobIteratorOptions{},
+	) //nolint:contextcheck
 	if it == nil {
 		return false, errors.New("blob iterator is nil")
 	}
@@ -431,13 +462,13 @@ func IsEmpty(ctx context.Context, store Store) (bool, error) {
 	if err := it.Err(); err != nil {
 		return false, err
 	}
-	it.Rewind()
 	empty := !it.Valid()
-	// Rewind can itself fail mid-listing (a paginator error on the very
-	// first page), which Valid() reports identically to "no keys" -- check
-	// again so a transient S3/GCS listing failure can't be misreported as
-	// an empty store, letting Restore wrongly merge data into a bucket
-	// that was never actually confirmed empty.
+	// NewIterator's own internal Rewind can itself fail mid-listing (a
+	// paginator error on the very first page), which Valid() reports
+	// identically to "no keys" -- check again so a transient S3/GCS
+	// listing failure can't be misreported as an empty store, letting
+	// Restore wrongly merge data into a bucket that was never actually
+	// confirmed empty.
 	if err := it.Err(); err != nil {
 		return false, err
 	}

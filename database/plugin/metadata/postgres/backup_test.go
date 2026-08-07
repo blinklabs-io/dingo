@@ -114,6 +114,56 @@ func TestConnEnvOmitsPasswordWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestPostgresSSLModeClassifiesAgainstNamedHost guards a real gap:
+// pgconn sets ServerName (for SNI) for require/prefer/verify-ca just as
+// much as for verify-full whenever the DSN names a host rather than a
+// bare IP -- confirmed empirically via pgconn.ParseConfig directly, not
+// assumed from reading its source. An earlier version of postgresSSLMode
+// used ServerName != "" as its first, catch-all check, so it
+// misclassified require/prefer/verify-ca against a named host as
+// verify-full -- silently sending pg_dump/pg_restore out with full chain
+// and hostname verification for a connection the app pool itself only
+// requires encryption (or CA validation without hostname checking) for,
+// which fails outright against a self-signed or otherwise
+// hostname-mismatched certificate the app connection accepts fine.
+func TestPostgresSSLModeClassifiesAgainstNamedHost(t *testing.T) {
+	tests := []struct {
+		sslmode  string
+		wantMode string
+	}{
+		{"require", "require"},
+		{"prefer", "require"},
+		{"verify-ca", "verify-ca"},
+		{"verify-full", "verify-full"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sslmode, func(t *testing.T) {
+			env, _, err := connEnv(
+				"postgres://alice@db.internal:5432/mydb?sslmode=" + tt.sslmode,
+			)
+			require.NoError(t, err)
+			require.Contains(t, env, "PGSSLMODE="+tt.wantMode)
+		})
+	}
+}
+
+// TestConnEnvForwardsFallbackHosts guards a real gap, confirmed
+// empirically against pgconn.ParseConfig directly: a multi-host DSN's
+// additional hosts land in cfg.Fallbacks, not cfg.Host/cfg.Port (which
+// only ever hold the first one), so connEnv used to silently drop every
+// host but the first -- pg_dump/pg_restore would fail outright the
+// moment that first host was down, instead of trying the others the
+// app's own connection pool would.
+func TestConnEnvForwardsFallbackHosts(t *testing.T) {
+	env, _, err := connEnv(
+		"postgres://alice@host1.internal:5432,host2.internal:5433/mydb" +
+			"?sslmode=disable",
+	)
+	require.NoError(t, err)
+	require.Contains(t, env, "PGHOST=host1.internal,host2.internal")
+	require.Contains(t, env, "PGPORT=5432,5433")
+}
+
 // TestConnEnvRejectsInvalidDSN validates that a malformed connection
 // string is reported as an error up front, rather than producing a
 // partially-populated (and silently wrong) PG* environment.

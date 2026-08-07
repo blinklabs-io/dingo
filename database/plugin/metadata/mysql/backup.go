@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
@@ -87,7 +88,19 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("parse connection string: %w", err)
 	}
-	if cfg.Net != "tcp" {
+	// tcp4/tcp6 (Go's net.Dial address-family-restricted variants, which
+	// the driver's own Config.Net accepts same as the metadata store's own
+	// connection pool does -- this isn't a provider-specific restriction to
+	// mirror) are accepted alongside plain tcp: mysqldump/mysql have no CLI
+	// flag to force IPv4-only or IPv6-only dialing the way the driver's Net
+	// setting does, so --host/--port here resolves however the host name
+	// naturally does, which in the common single-A/AAAA-record case matches
+	// what tcp4/tcp6 would have forced anyway. unix remains rejected: it
+	// needs an entirely different --socket flag, not --host/--port, a real
+	// scope difference rather than a fidelity gap this can paper over.
+	switch cfg.Net {
+	case "tcp", "tcp4", "tcp6":
+	default:
 		return nil, nil, "", fmt.Errorf(
 			"unsupported network %q: backup/restore requires a tcp connection",
 			cfg.Net,
@@ -109,7 +122,19 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 		"--protocol=tcp",
 	)
 	args = append(args, sslArgs...)
-	env = os.Environ()
+	// A stale MYSQL_PWD already set in this process's own environment (an
+	// operator's shell/systemd unit using that variable for some unrelated
+	// tool, or a leftover from a previous deployment) must not survive into
+	// a DSN that specifies no password -- exec.Cmd.Env only keeps the last
+	// duplicate key, so appending our own value below already wins when
+	// the DSN has one, but omitting it entirely (the empty-password case)
+	// would otherwise silently leave that ambient value in effect,
+	// authenticating with different credentials than the DSN itself
+	// specifies rather than the empty password the app's own connection
+	// pool actually uses.
+	env = slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "MYSQL_PWD=")
+	})
 	if cfg.Passwd != "" {
 		env = append(env, "MYSQL_PWD="+cfg.Passwd)
 	}
@@ -373,7 +398,11 @@ func refuseIfTargetHasData(
 		if name == migrationsTableName {
 			continue
 		}
-		quoted := mysqlQuoteIdentifier(database) + "." + mysqlQuoteIdentifier(name)
+		quoted := mysqlQuoteIdentifier(
+			database,
+		) + "." + mysqlQuoteIdentifier(
+			name,
+		)
 		var hasData int
 		err := db.QueryRowContext(
 			ctx, "SELECT EXISTS (SELECT 1 FROM "+quoted+")",

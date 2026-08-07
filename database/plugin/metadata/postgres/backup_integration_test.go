@@ -75,7 +75,12 @@ func createIsolatedDatabase(t *testing.T, dsn, namePrefix string) string {
 			database,
 		)
 		_, err := admin.Exec(`DROP DATABASE "` + database + `"`)
-		require.NoError(t, err, "cleanup: drop isolated test database %q", database)
+		require.NoError(
+			t,
+			err,
+			"cleanup: drop isolated test database %q",
+			database,
+		)
 		require.NoError(t, admin.Close())
 	})
 	parsed, err := url.Parse(dsn)
@@ -273,7 +278,9 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 // and then get dropped anyway by resetDatabase's unconditional DROP TABLE.
 // The exemption must be scoped to (schema, name), matching exactly the
 // schema migrations/runner.go's own hasUserTables uses (current_schema()).
-func TestResetRefusesWhenOtherSchemaHasSchemaMigrationsTableWithData(t *testing.T) {
+func TestResetRefusesWhenOtherSchemaHasSchemaMigrationsTableWithData(
+	t *testing.T,
+) {
 	baseDSN := postgresIntegrationDSN(t)
 	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_othermig")
 	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
@@ -314,7 +321,7 @@ func TestResetRefusesWhenOtherSchemaHasSchemaMigrationsTableWithData(t *testing.
 // be counted as occupying the database and then fail resetDatabase
 // outright -- postgres rejects "DROP TABLE" naming a view. Both must
 // restrict to table_type = 'BASE TABLE' and leave the view untouched.
-func TestResetToleratesView(t *testing.T) {
+func TestResetRefusesWhenDependentViewExists(t *testing.T) {
 	baseDSN := postgresIntegrationDSN(t)
 	dsn := createIsolatedDatabase(t, baseDSN, "pgbackup_view")
 	store, err := openStore(Config{DSN: dsn}, metadata.ProviderDependencies{})
@@ -330,17 +337,27 @@ func TestResetToleratesView(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, store.Reset(context.Background()))
-
-	empty, err := databaseIsEmpty(context.Background(), admin)
-	require.NoError(t, err)
-	require.True(t, empty, "reset must leave a base-table-empty database, "+
-		"even with a view still present")
+	err = store.Reset(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "pgbackup_view_test")
+	require.Contains(t, err.Error(), "node_settings")
 
 	var viewCount int
 	require.NoError(t, admin.QueryRow(
 		"SELECT count(*) FROM information_schema.views "+
 			"WHERE table_name = 'pgbackup_view_test'",
 	).Scan(&viewCount))
-	require.Equal(t, 1, viewCount, "reset must not have touched the view")
+	require.Equal(
+		t, 1, viewCount, "a refused reset must not have touched the view",
+	)
+
+	var tableCount int
+	require.NoError(t, admin.QueryRow(
+		"SELECT count(*) FROM information_schema.tables "+
+			"WHERE table_name = 'node_settings' AND table_type = 'BASE TABLE'",
+	).Scan(&tableCount))
+	require.Equal(
+		t, 1, tableCount,
+		"a refused reset must not have touched the underlying table either",
+	)
 }

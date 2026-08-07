@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,7 +78,9 @@ func TestSyncFile(t *testing.T) {
 // so a successful round trip here is already exercising the callback-
 // doesn't-sync path; this test additionally confirms the published file's
 // content survived intact through that path.
-func TestPublishBackupFileSyncsStagedFileEvenWhenWriteCallbackDoesNot(t *testing.T) {
+func TestPublishBackupFileSyncsStagedFileEvenWhenWriteCallbackDoesNot(
+	t *testing.T,
+) {
 	dst := filepath.Join(t.TempDir(), "backup.bin")
 	err := PublishBackupFile(dst, func(stagedPath string) error {
 		// Deliberately unsynced write, mirroring pg_dump/mysqldump's own
@@ -125,4 +128,39 @@ func TestPublishBackupFileFailureDoesNotClobberConcurrentDestination(
 	data, err := os.ReadFile(dst)
 	require.NoError(t, err)
 	require.Equal(t, []byte("concurrent"), data)
+}
+
+// TestPublishBackupFileCleansUpDestinationOnLateFailure guards a real gap:
+// once os.Link publishes dstPath, every remaining step (the directory
+// syncs, removing the staging directory) was already just making that
+// publish more durable, not deciding whether it happened -- but a failure
+// in any of them still made this function report the whole call as
+// failed, while leaving dstPath behind to permanently fail the
+// "destination already exists" check at the top of any retry, forcing an
+// operator to notice and delete it by hand. Simulates a late failure by
+// making the staging directory itself undeletable (chmod 0o500, no write
+// permission) right after the file is written into it -- os.Link into
+// dstDir still succeeds since that's a different directory, but the later
+// os.RemoveAll(tmpDir) then fails.
+func TestPublishBackupFileCleansUpDestinationOnLateFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits")
+	}
+	dst := filepath.Join(t.TempDir(), "backup.bin")
+	var tmpDir string
+	err := PublishBackupFile(dst, func(stagedPath string) error {
+		tmpDir = filepath.Dir(stagedPath)
+		if err := os.WriteFile(stagedPath, []byte("hello"), 0o600); err != nil {
+			return err
+		}
+		return os.Chmod(tmpDir, 0o500)
+	})
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o700) })
+	require.Error(t, err)
+	_, statErr := os.Stat(dst)
+	require.True(
+		t, errors.Is(statErr, fs.ErrNotExist),
+		"a late failure must clean up the already-published destination "+
+			"too, so a retry isn't permanently blocked",
+	)
 }

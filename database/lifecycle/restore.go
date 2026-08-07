@@ -501,15 +501,26 @@ func restoreMetadataStore(
 		// tables directly, with no staging copy and no rollback -- unlike
 		// the file-based (sqlite/badger) path, which only ever mutates a
 		// disposable stagingDir that RestoreValidated's caller-side defer
-		// discards on any later failure. Confirm the backup this restore
-		// intends to load actually exists before paying that cost, so a
-		// missing/mistyped snapshotDir fails before a real target
-		// database's tables are dropped, instead of after.
-		if _, err := os.Stat(backupPath); err != nil {
-			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
-			return fmt.Errorf(
-				"metadata backup %q: %w", backupPath, err,
-			)
+		// discards on any later failure. Confirm both backups this restore
+		// intends to load actually exist before paying that cost -- not
+		// just the metadata one: restoreBlobStore opens BlobBackupFileName
+		// later, after this Reset has already run, so a missing blob
+		// backup would otherwise still leave a live remote metadata target
+		// reset with no way back, even though the overall restore is
+		// guaranteed to fail moments later. Existence only, deliberately
+		// not also requiring a regular file: TestRestoreInterruptedByProcess
+		// KillLeavesTargetUntouched (database/lifecycle/restore_interrupt_
+		// test.go) legitimately replaces the metadata backup with a FIFO to
+		// get a deterministic, timing-guess-free synchronization point for
+		// its own real-SIGKILL test, and os.Stat (unlike os.Open) never
+		// blocks on a FIFO either way, so this check doesn't interfere with
+		// that regardless.
+		for _, name := range []string{MetadataBackupFileName, BlobBackupFileName} {
+			path := filepath.Join(snapshotDir, name)
+			if _, err := os.Stat(path); err != nil {
+				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+				return fmt.Errorf("backup %q: %w", path, err)
+			}
 		}
 		if err := resettable.Reset(ctx); err != nil {
 			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)

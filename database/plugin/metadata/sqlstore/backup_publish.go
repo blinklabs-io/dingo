@@ -44,7 +44,7 @@ import (
 func PublishBackupFile(
 	dstPath string,
 	write func(stagedPath string) error,
-) error {
+) (err error) {
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf("destination %q already exists", dstPath)
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -84,6 +84,27 @@ func PublishBackupFile(
 	if err := os.Link(stagedPath, dstPath); err != nil {
 		return fmt.Errorf("publish %q: %w", dstPath, err)
 	}
+	// dstPath now durably exists -- every step below is just making that
+	// publish more durable, not deciding whether it happened. If any of
+	// them still fails, this function reports the whole call as failed,
+	// but dstPath already satisfies the "already exists" check at the top,
+	// permanently blocking any retry until an operator notices and deletes
+	// it by hand. Best-effort remove it on the way out instead, guarded by
+	// os.SameFile against ever deleting some different file a concurrent
+	// creator populated at this exact path in the meantime (not possible
+	// under this package's own contract today, since nothing else writes
+	// dstPath directly, but cheap insurance against a future caller that
+	// doesn't hold that invariant).
+	publishedInfo, statErr := os.Lstat(dstPath)
+	defer func() {
+		if err == nil || statErr != nil {
+			return
+		}
+		if info, lstatErr := os.Lstat(dstPath); lstatErr == nil &&
+			os.SameFile(publishedInfo, info) {
+			_ = os.Remove(dstPath)
+		}
+	}()
 	// A file's own fsync does not guarantee its directory entry is
 	// persisted -- sync dstDir so the link above is durable too, not
 	// just atomic.

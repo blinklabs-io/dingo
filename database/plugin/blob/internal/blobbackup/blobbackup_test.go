@@ -80,7 +80,12 @@ func TestReadRecordRejectsMissingTerminator(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(
 		t,
-		WriteRecord(&buf, []byte("key-one"), []byte("value-one"), testMaxValueLen),
+		WriteRecord(
+			&buf,
+			[]byte("key-one"),
+			[]byte("value-one"),
+			testMaxValueLen,
+		),
 	)
 	// No writeTerminator call: this is exactly what a file truncated right
 	// after a complete record looks like.
@@ -182,7 +187,10 @@ func TestPartialDataWarning(t *testing.T) {
 	require.Contains(t, msg, "3 batch")
 	require.Contains(t, msg, "discarded")
 
-	msg = partialDataWarning(0, fmt.Errorf("commit: %w", types.ErrPartialCommit))
+	msg = partialDataWarning(
+		0,
+		fmt.Errorf("commit: %w", types.ErrPartialCommit),
+	)
 	require.NotEmpty(t, msg)
 	require.Contains(t, msg, "discarded")
 }
@@ -224,8 +232,9 @@ type fakeIterator struct {
 	pos   int
 }
 
-func (it *fakeIterator) Rewind()                    { it.pos = 0 }
-func (it *fakeIterator) Seek([]byte)                {}
+func (it *fakeIterator) Rewind()     { it.pos = 0 }
+func (it *fakeIterator) Seek([]byte) {}
+
 func (it *fakeIterator) Valid() bool                { return it.pos < len(it.items) }
 func (it *fakeIterator) ValidForPrefix([]byte) bool { return it.Valid() }
 func (it *fakeIterator) Next()                      { it.pos++ }
@@ -282,6 +291,19 @@ func (s *fakeStore) NewIterator(
 	return &fakeIterator{items: items}
 }
 
+func (s *fakeStore) Get(txn types.Txn, key []byte) ([]byte, error) {
+	if ft, ok := txn.(*fakeTxn); ok {
+		if v, staged := ft.pending[string(key)]; staged {
+			return v, nil
+		}
+	}
+	v, ok := s.data[string(key)]
+	if !ok {
+		return nil, errors.New("blobbackup test: key not found")
+	}
+	return v, nil
+}
+
 func (s *fakeStore) Set(txn types.Txn, key, value []byte) error {
 	ft, ok := txn.(*fakeTxn)
 	if !ok {
@@ -310,7 +332,13 @@ func TestBackupRestoreRoundTripFake(t *testing.T) {
 	dst := newFakeStore()
 	require.NoError(
 		t,
-		Restore(context.Background(), dst, &buf, testMaxValueLen, "test restore"),
+		Restore(
+			context.Background(),
+			dst,
+			&buf,
+			testMaxValueLen,
+			"test restore",
+		),
 	)
 	require.Equal(t, []byte("value-a"), dst.data["key-a"])
 }
@@ -459,7 +487,9 @@ func (r *errAfterEOFReader) Read(p []byte) (int, error) {
 // for an unrelated reason" (context cancellation, a real I/O error) --
 // both took the same "!errors.Is(err, io.EOF)" branch and were reported as
 // trailing data, discarding the real error and its diagnostic value.
-func TestRestoreReportsUnderlyingErrorAfterTerminatorNotTrailingData(t *testing.T) {
+func TestRestoreReportsUnderlyingErrorAfterTerminatorNotTrailingData(
+	t *testing.T,
+) {
 	src := newFakeStore()
 	txn := src.NewTransaction(true)
 	require.NoError(t, src.Set(txn, []byte("key-a"), []byte("value-a")))

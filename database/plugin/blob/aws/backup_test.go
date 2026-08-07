@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,7 +78,36 @@ func newTestS3Store(t *testing.T, prefix string) *BlobStoreS3 {
 	require.NoError(t, err)
 	require.NoError(t, store.Start())
 	t.Cleanup(func() { _ = store.Stop() })
+	// Registered after (so it runs before, via t.Cleanup's LIFO order,
+	// while the store is still started) Stop's own cleanup: CI's MinIO
+	// container is destroyed after each job and needs no cleanup, but a
+	// developer running these tests locally against a real, persistent
+	// bucket (the ~/.aws/credentials fallback above exists for exactly
+	// that) would otherwise accumulate every run's objects in it forever,
+	// since Stop itself does nothing to the bucket's actual contents.
+	t.Cleanup(func() { cleanupTestS3Store(t, store) })
 	return store
+}
+
+// cleanupTestS3Store deletes every key currently under store's own unique
+// prefix -- never anything outside it, so this can't touch another test's
+// or another run's keys sharing the same bucket.
+func cleanupTestS3Store(t *testing.T, store *BlobStoreS3) {
+	t.Helper()
+	txn := store.NewTransaction(true)
+	defer txn.Rollback() //nolint:errcheck
+	it := store.NewIterator(txn, types.BlobIteratorOptions{})
+	if it == nil {
+		return
+	}
+	defer it.Close()
+	for it.Valid() {
+		if item := it.Item(); item != nil {
+			_ = store.Delete(txn, item.Key())
+		}
+		it.Next()
+	}
+	_ = txn.Commit()
 }
 
 // TestBackupRestoreRoundTrip validates the full round trip against a real
@@ -128,7 +158,12 @@ func TestRestoreRejectsNonEmptyStore(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(
 		t,
-		blobbackup.WriteRecord(&buf, []byte("k"), []byte("v"), maxBlobReadBytes),
+		blobbackup.WriteRecord(
+			&buf,
+			[]byte("k"),
+			[]byte("v"),
+			maxBlobReadBytes,
+		),
 	)
 	err := store.Restore(context.Background(), bytes.NewReader(
 		append(

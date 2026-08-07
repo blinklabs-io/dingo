@@ -176,6 +176,13 @@ func (s *Store) Reset(ctx context.Context) error {
 	if s.reset == nil {
 		return nil
 	}
+	// Serialized with Start/CloseContext via the same startMu they already
+	// hold: without it, a concurrent CloseContext could close the pool
+	// while s.reset(ctx) is mid-flight (or land in the TOCTOU window right
+	// after the closed check below), leaving a live database partially
+	// reset with its connection pool pulled out from under it.
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
 	if s.closed.Load() {
 		return errors.New("metadata reset: store is closed")
 	}

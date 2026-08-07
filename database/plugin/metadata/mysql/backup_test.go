@@ -70,12 +70,50 @@ func TestConnArgsOmitsPasswordWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestConnArgsStripsStaleAmbientPasswordWhenDSNHasNone guards a real gap:
+// connArgs used to build its subprocess environment from a plain
+// os.Environ(), only ever appending its own MYSQL_PWD when the DSN had a
+// password -- so a MYSQL_PWD already set in this process's own
+// environment (an operator's shell/systemd unit using that variable for
+// something else, or a leftover from a previous deployment) silently
+// survived into a DSN that specifies no password at all, authenticating
+// mysqldump/mysql with different credentials than the DSN itself
+// specifies rather than the empty password the app's own connection pool
+// actually uses.
+func TestConnArgsStripsStaleAmbientPasswordWhenDSNHasNone(t *testing.T) {
+	t.Setenv("MYSQL_PWD", "stale-ambient-password")
+	env, _, _, err := connArgs("alice@tcp(db.internal:3306)/mydb")
+	require.NoError(t, err)
+	for _, kv := range env {
+		require.NotContains(t, kv, "MYSQL_PWD=")
+	}
+}
+
 // TestConnArgsRejectsNonTCPNetwork validates that a unix-socket DSN is
 // rejected up front with a clear error, since backup/restore's --host/
 // --port CLI flags only make sense for a TCP connection.
 func TestConnArgsRejectsNonTCPNetwork(t *testing.T) {
 	_, _, _, err := connArgs("alice@unix(/tmp/mysql.sock)/mydb")
 	require.Error(t, err)
+}
+
+// TestConnArgsAcceptsAddressFamilyRestrictedTCP guards a real gap:
+// connArgs used to reject tcp4/tcp6 outright even though
+// mysqldriver.Config.Net (and the metadata store's own connection pool)
+// accepts them same as plain tcp -- there is no equivalent
+// mysqldump/mysql CLI flag to force IPv4-only or IPv6-only dialing, but
+// that's a reason to fall back to plain --host/--port resolution, not to
+// refuse the DSN outright.
+func TestConnArgsAcceptsAddressFamilyRestrictedTCP(t *testing.T) {
+	for _, network := range []string{"tcp4", "tcp6"} {
+		t.Run(network, func(t *testing.T) {
+			_, args, _, err := connArgs(
+				"alice@" + network + "(db.internal:3306)/mydb",
+			)
+			require.NoError(t, err)
+			require.Contains(t, args, "--host=db.internal")
+		})
+	}
 }
 
 // TestConnArgsRejectsInvalidDSN validates that a malformed connection
@@ -146,7 +184,9 @@ func TestConnArgsMapsSSLMode(t *testing.T) {
 // a clear error rather than guessing an --ssl-mode that could silently
 // under- or over-verify relative to what that custom config actually does.
 func TestConnArgsRejectsCustomNamedTLSConfig(t *testing.T) {
-	_, _, _, err := connArgs("alice@tcp(db.internal:3306)/mydb?tls=my-custom-config")
+	_, _, _, err := connArgs(
+		"alice@tcp(db.internal:3306)/mydb?tls=my-custom-config",
+	)
 	require.Error(t, err)
 }
 

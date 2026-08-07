@@ -111,9 +111,31 @@ func connEnv(dsn string) (env []string, database string, err error) {
 	if err != nil {
 		return nil, "", err
 	}
+	// A multi-host DSN's additional hosts land in cfg.Fallbacks, not
+	// cfg.Host/cfg.Port (which only ever hold the first one) -- forward
+	// them all via libpq's own comma-separated PGHOST/PGPORT syntax (a
+	// documented feature since PG 10) so pg_dump/pg_restore get the same
+	// candidate host list the app's own pgx pool would try, instead of
+	// failing outright the moment the first-listed host happens to be down
+	// or is serving as a read-only standby. target_session_attrs (e.g.
+	// "primary", to skip a standby that does answer) cannot be forwarded
+	// the same way, though: pgconn consumes it purely for its own internal
+	// connection-selection logic during ParseConfig and does not expose it
+	// back on Config or in RuntimeParams -- confirmed empirically, the
+	// value is simply gone once parsed, the same class of one-way loss as
+	// sslrootcert's file path in postgresSSLMode above. A libpq client
+	// (pg_dump/pg_restore included) does support target_session_attrs
+	// itself, but only via that original string, which this package never
+	// has a hold of.
+	hosts := []string{cfg.Host}
+	ports := []string{strconv.Itoa(int(cfg.Port))}
+	for _, fb := range cfg.Fallbacks {
+		hosts = append(hosts, fb.Host)
+		ports = append(ports, strconv.Itoa(int(fb.Port)))
+	}
 	env = append(os.Environ(),
-		"PGHOST="+cfg.Host,
-		"PGPORT="+strconv.Itoa(int(cfg.Port)),
+		"PGHOST="+strings.Join(hosts, ","),
+		"PGPORT="+strings.Join(ports, ","),
 		"PGUSER="+cfg.User,
 		"PGDATABASE="+cfg.Database,
 		"PGSSLMODE="+sslmode,
@@ -137,11 +159,20 @@ func connEnv(dsn string) (env []string, database string, err error) {
 // downgrades an operator's verify-ca/verify-full configuration to
 // "encrypted but unverified," a real MITM exposure for exactly the
 // deployments that asked for stronger verification. pgconn's own
-// configTLS sets these tls.Config fields distinctly per mode, so the
-// original mode can be recovered exactly: ServerName only for
-// verify-full, a custom VerifyPeerCertificate only for verify-ca (and the
-// require-with-sslrootcert-present case, which it treats identically to
-// verify-ca), and neither for a bare "require"/"prefer"/"allow".
+// configTLS sets these tls.Config fields distinctly per mode -- verified
+// empirically against pgconn.ParseConfig directly, not just read from its
+// source, since the DSN-to-tls.Config mapping is exactly the fact this
+// function depends on: ServerName is set for require/prefer/verify-ca
+// *and* verify-full alike whenever the DSN names a host rather than a bare
+// IP (it's used for SNI regardless of verification level), so it does NOT
+// distinguish verify-full from the others on its own -- an earlier version
+// of this function used ServerName != "" as its first, catch-all check and
+// so misclassified require/prefer/verify-ca-against-a-named-host as
+// verify-full. The fields that actually discriminate are
+// VerifyPeerCertificate (a custom callback, set only for verify-ca and the
+// require-with-sslrootcert-present case pgconn treats identically) and
+// InsecureSkipVerify (false only for verify-full; true for
+// require/prefer/verify-ca alike).
 //
 // A custom root CA or client certificate configured for verify-ca/
 // verify-full cannot be forwarded, though: pgconn parses sslrootcert/
@@ -170,17 +201,11 @@ func postgresSSLMode(tlsConfig *tls.Config) (string, error) {
 		)
 	}
 	switch {
-	case tlsConfig.ServerName != "":
-		if tlsConfig.RootCAs != nil {
-			return "", errors.New(
-				"postgres backup/restore: connection uses sslmode=verify-full " +
-					"with a custom root CA (sslrootcert), which pg_dump/pg_restore " +
-					"cannot be given -- the original CA file is not recoverable " +
-					"from the parsed connection",
-			)
-		}
-		return "verify-full", nil
 	case tlsConfig.VerifyPeerCertificate != nil:
+		// sslmode=verify-ca (and the require-with-sslrootcert-present case,
+		// which pgconn treats identically): checked before InsecureSkipVerify
+		// below, since pgconn sets InsecureSkipVerify=true for this mode too
+		// -- VerifyPeerCertificate is what actually singles it out.
 		if tlsConfig.RootCAs != nil {
 			return "", errors.New(
 				"postgres backup/restore: connection uses sslmode=verify-ca " +
@@ -190,8 +215,23 @@ func postgresSSLMode(tlsConfig *tls.Config) (string, error) {
 			)
 		}
 		return "verify-ca", nil
-	default:
+	case tlsConfig.InsecureSkipVerify:
+		// sslmode=require/prefer: TLS attempted with no certificate
+		// verification at all. ServerName may still be set here purely for
+		// SNI -- its presence is not evidence of verify-full.
 		return "require", nil
+	default:
+		// Only verify-full leaves InsecureSkipVerify false: full chain and
+		// hostname (via ServerName) verification.
+		if tlsConfig.RootCAs != nil {
+			return "", errors.New(
+				"postgres backup/restore: connection uses sslmode=verify-full " +
+					"with a custom root CA (sslrootcert), which pg_dump/pg_restore " +
+					"cannot be given -- the original CA file is not recoverable " +
+					"from the parsed connection",
+			)
+		}
+		return "verify-full", nil
 	}
 }
 
@@ -332,6 +372,18 @@ func databaseIsEmpty(ctx context.Context, db *sql.DB) (bool, error) {
 // DROP TABLE fail outright (postgres rejects dropping a view that way),
 // aborting the whole reset over something dingo's migrations never
 // created and has no reason to touch.
+//
+// CASCADE handling dependency ordering means it isn't limited to other
+// tables, though: confirmed live against a real Postgres server, DROP
+// TABLE ... CASCADE also drops any VIEW that depends on the table, not
+// just other tables referencing it via foreign keys. Silently destroying
+// an operator's own view that way would be exactly the kind of collateral
+// damage table_type = 'BASE TABLE' filtering above exists to prevent, so
+// refuseIfDependentViewsExist checks for that first and fails loudly
+// instead -- there is no way to recreate the view correctly at this point
+// in the restore flow even if this function captured its definition
+// first, since RestoreFrom (which runs after Reset, not before) is what
+// recreates the tables such a view would depend on.
 func resetDatabase(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, `
 		SELECT table_schema, table_name FROM information_schema.tables
@@ -353,6 +405,9 @@ func resetDatabase(ctx context.Context, db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("list tables: %w", err)
 	}
+	if err := refuseIfDependentViewsExist(ctx, db, tables); err != nil {
+		return err
+	}
 	if err := refuseIfTargetHasData(ctx, db, tables); err != nil {
 		return err
 	}
@@ -361,6 +416,42 @@ func resetDatabase(ctx context.Context, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+quoted+" CASCADE"); err != nil {
 			return fmt.Errorf("drop table %s: %w", quoted, err)
 		}
+	}
+	return nil
+}
+
+// refuseIfDependentViewsExist errors out, before resetDatabase drops
+// anything, if any view depends on a table about to be dropped -- see
+// resetDatabase's own doc comment for why CASCADE makes this a real risk
+// and why failing loudly is the only safe option here.
+func refuseIfDependentViewsExist(
+	ctx context.Context,
+	db *sql.DB,
+	tables []qualifiedTable,
+) error {
+	for _, t := range tables {
+		var viewSchema, viewName string
+		err := db.QueryRowContext(ctx, `
+			SELECT view_schema, view_name FROM information_schema.view_table_usage
+			WHERE table_schema = $1 AND table_name = $2
+			LIMIT 1
+		`, t.schema, t.name).Scan(&viewSchema, &viewName)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf(
+				"check table %s.%s for dependent views: %w",
+				t.schema, t.name, err,
+			)
+		}
+		return fmt.Errorf(
+			"postgres reset: view %s.%s depends on table %s.%s -- "+
+				"refusing to reset, since dropping the table would "+
+				"cascade-drop the view; drop or redefine the view "+
+				"before restoring",
+			viewSchema, viewName, t.schema, t.name,
+		)
 	}
 	return nil
 }
