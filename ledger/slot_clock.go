@@ -518,32 +518,43 @@ func (sc *SlotClock) emitTick(tick SlotTick) {
 }
 
 // =============================================================================
-// LedgerState adapter
+// SlotTimeConverter adapter
 // =============================================================================
 
-// ledgerStateSlotProvider adapts LedgerState to the SlotTimeProvider interface.
-type ledgerStateSlotProvider struct {
-	ls *LedgerState
+// slotTimeConverterProvider adapts a SlotTimeConverter to the
+// SlotTimeProvider interface: only SlotToEpoch's return type differs
+// (models.Epoch vs. the tick-facing EpochInfo), so this is otherwise a thin
+// pass-through.
+type slotTimeConverterProvider struct {
+	conv *SlotTimeConverter
 }
 
-// newLedgerStateSlotProvider creates a new adapter wrapping the given LedgerState
-func newLedgerStateSlotProvider(ls *LedgerState) *ledgerStateSlotProvider {
-	return &ledgerStateSlotProvider{ls: ls}
+// newSlotTimeConverterProvider creates a new adapter wrapping the given
+// SlotTimeConverter.
+func newSlotTimeConverterProvider(
+	conv *SlotTimeConverter,
+) *slotTimeConverterProvider {
+	return &slotTimeConverterProvider{conv: conv}
 }
 
-// SlotToTime delegates to LedgerState.SlotToTime
-func (p *ledgerStateSlotProvider) SlotToTime(slot uint64) (time.Time, error) {
-	return p.ls.SlotToTime(slot)
+// SlotToTime delegates to SlotTimeConverter.SlotToTime
+func (p *slotTimeConverterProvider) SlotToTime(
+	slot uint64,
+) (time.Time, error) {
+	return p.conv.SlotToTime(slot)
 }
 
-// TimeToSlot delegates to LedgerState.TimeToSlot
-func (p *ledgerStateSlotProvider) TimeToSlot(t time.Time) (uint64, error) {
-	return p.ls.TimeToSlot(t)
+// TimeToSlot delegates to SlotTimeConverter.TimeToSlot
+func (p *slotTimeConverterProvider) TimeToSlot(t time.Time) (uint64, error) {
+	return p.conv.TimeToSlot(t)
 }
 
-// SlotToEpoch delegates to LedgerState.SlotToEpoch and converts the result
-func (p *ledgerStateSlotProvider) SlotToEpoch(slot uint64) (EpochInfo, error) {
-	epoch, err := p.ls.SlotToEpoch(slot)
+// SlotToEpoch delegates to SlotTimeConverter.SlotToEpoch and converts the
+// result
+func (p *slotTimeConverterProvider) SlotToEpoch(
+	slot uint64,
+) (EpochInfo, error) {
+	epoch, err := p.conv.SlotToEpoch(slot)
 	if err != nil {
 		return EpochInfo{}, err
 	}
