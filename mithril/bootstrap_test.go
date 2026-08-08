@@ -494,6 +494,45 @@ func TestFindImmutableDir(t *testing.T) {
 			setup:    func(t *testing.T, baseDir string) {},
 			expected: "",
 		},
+		// Extraction never creates a symlink, so one in the extracted tree
+		// is evidence the tree was tampered with rather than produced by
+		// this node. Reporting the snapshot as absent re-extracts it from
+		// the verified archive instead of reading the chain through a path
+		// someone else chose.
+		{
+			name: "symlinked immutable dir",
+			setup: func(t *testing.T, baseDir string) {
+				t.Helper()
+				outside := t.TempDir()
+				require.NoError(t, os.WriteFile(
+					filepath.Join(outside, "00000.chunk"),
+					[]byte("data"),
+					0o640,
+				))
+				requireSymlinkSupport(
+					t, outside, filepath.Join(baseDir, "immutable"),
+				)
+			},
+			expected: "",
+		},
+		{
+			name: "symlinked intermediate component",
+			setup: func(t *testing.T, baseDir string) {
+				t.Helper()
+				outside := t.TempDir()
+				dir := filepath.Join(outside, "immutable")
+				require.NoError(t, os.MkdirAll(dir, 0o750))
+				require.NoError(t, os.WriteFile(
+					filepath.Join(dir, "00000.chunk"),
+					[]byte("data"),
+					0o640,
+				))
+				requireSymlinkSupport(
+					t, outside, filepath.Join(baseDir, "db"),
+				)
+			},
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -502,14 +541,15 @@ func TestFindImmutableDir(t *testing.T) {
 			tt.setup(t, baseDir)
 
 			result := findImmutableDir(baseDir)
+			t.Cleanup(result.Close)
 			switch tt.expected {
 			case "":
-				require.Empty(t, result)
+				require.Nil(t, result)
 			case "ROOT":
-				require.Equal(t, baseDir, result)
+				require.Equal(t, baseDir, result.Path())
 			default:
 				expected := filepath.Join(baseDir, tt.expected)
-				require.Equal(t, expected, result)
+				require.Equal(t, expected, result.Path())
 			}
 		})
 	}
@@ -899,4 +939,403 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unexpected signed entity kind")
+}
+
+// TestFindImmutableDirRefusesSymlinkedExtractDir covers the extraction
+// directory itself being a symlink.
+//
+// The per-candidate checks below it never see this: the fast path asks whether
+// the extraction directory holds chunk files directly, and following a symlink
+// there reports a cached snapshot that this node never extracted. Bootstrap
+// then skips extraction entirely and loads the chain from the link's target,
+// which is the outcome the symlink refusal exists to prevent.
+func TestFindImmutableDirRefusesSymlinkedExtractDir(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outside, "00000.chunk"), []byte("theirs"), 0o640,
+	))
+
+	extractDir := filepath.Join(root, "immutable-abc123")
+	requireSymlinkSupport(t, "outside", extractDir)
+
+	assert.Nil(t, findImmutableDir(extractDir),
+		"a symlinked extraction directory is not a cached snapshot")
+}
+
+// TestFindImmutableDirRefusesSwappedExtractDir covers the extraction directory
+// being replaced after it has been opened and vetted.
+//
+// The lookup ends by handing back a pathname, and whoever loads the chain
+// resolves that name again — a handle cannot be carried across that boundary,
+// because the immutable DB is opened by name. So a directory swapped in behind
+// the name is read in place of the tree that was inspected, unless the name is
+// confirmed to still denote that tree before it is returned.
+//
+// The layout below is only reachable through the top-level enumeration, which
+// is the second half of the same problem: enumerating the pathname lists the
+// replacement's entries, and a name taken from there is checked against the
+// tree that was opened while resolving into the replacement.
+func TestFindImmutableDirRefusesSwappedExtractDir(t *testing.T) {
+	parent := t.TempDir()
+	extractDir := filepath.Join(parent, "immutable-abc123")
+	ours := filepath.Join(extractDir, "snapshot-data", "immutable")
+	require.NoError(t, os.MkdirAll(ours, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(ours, "00000.chunk"), []byte("ours"), 0o640,
+	))
+
+	root, err := openVerifiedDir(extractDir)
+	require.NoError(t, err)
+
+	// A writer with access to the download directory puts a tree of their own
+	// under the same name and layout, as one could between the open and the
+	// read.
+	theirs := filepath.Join(parent, "theirs", "snapshot-data", "immutable")
+	require.NoError(t, os.MkdirAll(theirs, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(theirs, "00000.chunk"), []byte("theirs"), 0o640,
+	))
+	requireDirectorySwap(t, extractDir, filepath.Join(parent, "moved-aside"))
+	requireDirectorySwap(t, filepath.Join(parent, "theirs"), extractDir)
+
+	assert.Nil(t, findImmutableDirIn(root, extractDir),
+		"a swapped extraction directory is not the tree that was inspected")
+}
+
+// TestChunkDirUnderReturnsVerifiedPath pins the v2 handoff: the path is
+// produced by the lookup that verified it rather than assembled by the caller,
+// so the two cannot disagree.
+func TestChunkDirUnderReturnsVerifiedPath(t *testing.T) {
+	extractDir := t.TempDir()
+	immutable := filepath.Join(extractDir, "immutable")
+	require.NoError(t, os.MkdirAll(immutable, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(immutable, "00000.chunk"), []byte("data"), 0o640,
+	))
+
+	found := chunkDirUnder(extractDir, "immutable")
+	require.NotNil(t, found)
+	t.Cleanup(found.Close)
+	assert.Equal(t, immutable, found.Path())
+}
+
+// TestChunkDirUnderRefusesSymlinkedBase keeps the v2 lookup on the same footing
+// as the v1 one: the extraction directory is derived inside the download
+// directory, so a symlink there is planted content rather than a layout choice.
+func TestChunkDirUnderRefusesSymlinkedBase(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside", "immutable")
+	require.NoError(t, os.MkdirAll(outside, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outside, "00000.chunk"), []byte("theirs"), 0o640,
+	))
+
+	extractDir := filepath.Join(root, "immutable-abc123")
+	requireSymlinkSupport(t, "outside", extractDir)
+
+	assert.Nil(t, chunkDirUnder(extractDir, "immutable"),
+		"a symlinked extraction directory holds no cached snapshot")
+}
+
+// hasChunkFiles reports whether dir holds chunk files.
+//
+// Test-only. The production lookups resolve a candidate through a handle on
+// its parent, because there the directory is derived inside the download
+// directory and may have been tampered with. These assertions inspect a
+// directory the test itself created, so a plain read says what they mean.
+func hasChunkFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	return holdsChunkFile(entries)
+}
+
+// findImmutableDir and chunkDirUnder open the extraction directory, vet it, and
+// run the lookup in one call.
+//
+// Test-only. Production holds a single vetted handle on the extraction
+// directory — the ledger-state fallback reads through the same one — and calls
+// findImmutableDirIn / chunkDirIn with it, so that the ImmutableDB that was
+// accepted and the ledger state that gets imported cannot come from two
+// different resolutions of that directory's name. These wrappers keep the tests
+// that only care about the lookup itself from having to stage that.
+
+// findImmutableDir looks for the ImmutableDB directory in the
+// extracted archive. It checks several common layouts:
+//   - extractDir itself (contains .chunk files)
+//   - extractDir/immutable/
+//   - extractDir/db/immutable/
+//   - any single top-level dir containing immutable/
+//
+// A candidate reached through a symlink is not accepted. Extraction never
+// creates one, so a symlink in the extracted tree is evidence the tree was
+// tampered with rather than produced by this node, and accepting it would load
+// the chain from a directory somebody else chose. Reporting the snapshot as
+// absent instead re-extracts it from the verified archive, which discards the
+// tampered tree.
+//
+// The same holds for a tree substituted while the lookup runs: the handle the
+// tree was inspected through is what is handed back, so the snapshot that gets
+// loaded is the one that was inspected and not whatever later holds its name.
+// The caller must Close the result.
+func findImmutableDir(extractDir string) *vettedDir {
+	// The extraction directory is checked before it is read, not after. It is
+	// derived inside the download directory rather than chosen by the
+	// operator, so a symlink there is planted content like anything else
+	// below it — and asking whether it holds chunk files by pathname would
+	// follow it and report a cached snapshot this node never extracted.
+	root, err := openVerifiedDir(extractDir)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	return findImmutableDirIn(root, extractDir)
+}
+
+// chunkDirUnder returns rel beneath base when rel is a directory holding chunk
+// files, with both base and rel verified rather than only the last one, and nil
+// when it is not. The caller must Close the result.
+//
+// Verifying only the last component is enough when the one above it is the
+// operator's. Where that one is itself derived content — the extraction
+// directory holding `immutable`, say — it has to be vetted too, or a symlink
+// one level up carries the whole lookup.
+//
+// The directory is returned by the lookup that inspected it, as the handle it
+// was inspected through, rather than as a name the caller reassembles. A caller
+// that builds the name itself is naming whatever occupies it now, not what was
+// verified a moment ago — and so is a caller handed only a name.
+func chunkDirUnder(base, rel string) *vettedDir {
+	baseRoot, err := openVerifiedDir(base)
+	if err != nil {
+		return nil
+	}
+	defer baseRoot.Close()
+	return chunkDirIn(baseRoot, base, rel)
+}
+
+// TestBootstrapRefusesADigestThatNamesSomewhereElse covers the one piece of
+// aggregator-supplied text that becomes a directory name.
+//
+// v1 derives `immutable-<digest>` and `ancillary-<digest>` inside the download
+// directory, and `Cleanup` calls os.RemoveAll on both. The digest is the
+// aggregator's string. Joining it raw does not stay inside: a digest beginning
+// with a separator makes the "immutable-" prefix its own path element, and the
+// ".." that follows pops it, so the first ".." buys nothing and every one after
+// it climbs a level. The depth is the digest's to choose — "/../.." reaches the
+// download directory's parent, "/../../.." its grandparent — and whatever it
+// reaches is what gets extracted into and then removed.
+//
+// v2 is closed by a different check: it refuses an artifact whose hash is not
+// the one it computes, and a computed hash is hex. v1 has no computed hash to
+// compare against, so the constraint has to be stated.
+func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
+	archiveData := createChunkArchive(t)
+
+	for _, digest := range []string{
+		// One level up from the download directory, then two, then a named
+		// entry beside it. Nesting the download directory two deep below the
+		// test root is what keeps the deepest of these observable — an escape
+		// that climbed past the root would land in the system temp directory,
+		// where this test could assert nothing about it.
+		"/../..",
+		"/../../..",
+		"/../../pwned",
+		// Neither of these escapes; both are still refused, because a digest
+		// that is not one path element is not a digest.
+		"a/b",
+		"..",
+	} {
+		t.Run(digest, func(t *testing.T) {
+			snapshots := []SnapshotListItem{{SnapshotBase: SnapshotBase{
+				Digest:               digest,
+				Network:              "preprod",
+				Beacon:               Beacon{Epoch: 270, ImmutableFileNumber: 5320},
+				Size:                 int64(len(archiveData)),
+				CompressionAlgorithm: "zstandard",
+			}}}
+			mux := http.NewServeMux()
+			mux.HandleFunc(
+				"/artifact/snapshots",
+				func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewEncoder(w).Encode(snapshots)
+				},
+			)
+			mux.HandleFunc(
+				"/download/snapshot.tar.zst",
+				func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write(archiveData)
+				},
+			)
+			server := httptest.NewServer(mux)
+			t.Cleanup(server.Close)
+			snapshots[0].Locations = []string{
+				server.URL + "/download/snapshot.tar.zst",
+			}
+
+			// Two levels of nesting below the root, so both the parent and
+			// the grandparent of the download directory are somewhere this
+			// test can look afterwards.
+			root := t.TempDir()
+			nested := filepath.Join(root, "nested")
+			downloadDir := filepath.Join(nested, "downloads")
+			require.NoError(t, os.MkdirAll(downloadDir, 0o750))
+
+			_, err := Bootstrap(context.Background(), BootstrapConfig{
+				Network:       "preprod",
+				Backend:       BackendV1,
+				AggregatorURL: server.URL,
+				DownloadDir:   downloadDir,
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrUnsafeSnapshotDigest)
+
+			// Refused before anything is derived from it, so every level the
+			// digest could have named is untouched — including the two above
+			// the download directory, which is where extraction would have
+			// gone and where Cleanup would then have pointed os.RemoveAll.
+			for dir, want := range map[string]string{
+				root:   "nested",
+				nested: "downloads",
+			} {
+				entries, readErr := os.ReadDir(dir)
+				require.NoError(t, readErr)
+				require.Len(t, entries, 1,
+					"nothing may be created above the download directory, "+
+						"but %s gained an entry", dir)
+				assert.Equal(t, want, entries[0].Name())
+			}
+			inside, readErr := os.ReadDir(downloadDir)
+			require.NoError(t, readErr)
+			assert.Empty(t, inside,
+				"a refused digest must not reach the download either")
+		})
+	}
+}
+
+// TestBootstrapSurvivesAnUnavailableAncillaryArchive covers the non-verified
+// fallback: ancillary locations are advertised, every one of them fails, and
+// the bootstrap has to complete without a ledger state rather than fail.
+//
+// Both backends make this failure explicitly non-fatal unless certificate
+// verification is on, so the result they build carries no ancillary tree — and
+// every use of that tree between the failure and the return has to tolerate its
+// absence. `vettedDir`'s methods are nil-safe for exactly this reason: Path
+// returns "", Root returns nil, Close does nothing. A nil `*vettedDir` is the
+// representation of "there is no ancillary tree", not an error state, so the
+// bootstrap reports it by carrying the nil rather than by branching around it.
+//
+// The failure is staged as an unusable archive rather than absent locations.
+// Absent locations skip the download entirely, which does not exercise the
+// branch that has to decide whether an ancillary error is fatal.
+func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
+	assertNoAncillary := func(t *testing.T, result *BootstrapResult) {
+		t.Helper()
+		assert.Nil(t, result.AncillaryRoot,
+			"a failed ancillary download must leave no handle")
+		assert.Empty(t, result.AncillaryDir,
+			"nor a directory name for one")
+		assert.False(t, result.AncillaryVerified)
+		// The half that has to survive: the immutable tree is what the load
+		// reads, and it is unaffected by the ancillary failure.
+		require.NotNil(t, result.ImmutableRoot)
+		assert.True(t, hasChunkFiles(result.ImmutableDir))
+	}
+
+	t.Run("v1", func(t *testing.T) {
+		archiveData := createChunkArchive(t)
+		snapshots := []SnapshotListItem{{SnapshotBase: SnapshotBase{
+			Digest:               "abc123def456789012345678",
+			Network:              "preprod",
+			Beacon:               Beacon{Epoch: 270, ImmutableFileNumber: 5320},
+			Size:                 int64(len(archiveData)),
+			CompressionAlgorithm: "zstandard",
+		}}}
+		mux := http.NewServeMux()
+		mux.HandleFunc(
+			"/artifact/snapshots",
+			func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(snapshots)
+			},
+		)
+		mux.HandleFunc(
+			"/download/snapshot.tar.zst",
+			func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(archiveData)
+			},
+		)
+		// Downloads cleanly and then fails to extract, so the failure lands
+		// after the goroutine has committed to the ancillary path.
+		mux.HandleFunc(
+			"/download/ancillary.tar.zst",
+			func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("not an archive"))
+			},
+		)
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		snapshots[0].Locations = []string{
+			server.URL + "/download/snapshot.tar.zst",
+		}
+		snapshots[0].AncillaryLocations = []string{
+			server.URL + "/download/ancillary.tar.zst",
+		}
+
+		result, err := Bootstrap(context.Background(), BootstrapConfig{
+			Network:       "preprod",
+			Backend:       BackendV1,
+			AggregatorURL: server.URL,
+			DownloadDir:   t.TempDir(),
+		})
+		require.NoError(t, err,
+			"a failed ancillary download is non-fatal without verification")
+		t.Cleanup(result.CloseHandles)
+		assertNoAncillary(t, result)
+	})
+
+	t.Run("v2", func(t *testing.T) {
+		fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+		// Served at request time from the field, so replacing it here makes
+		// the download succeed and the extraction fail.
+		fixture.ancillaryArchive = []byte("not an archive")
+
+		cfg := fixture.bootstrapConfig(t.TempDir())
+		cfg.VerifyCertificateChain = false
+		cfg.AncillaryVerificationKey = ""
+
+		result, err := Bootstrap(context.Background(), cfg)
+		require.NoError(t, err,
+			"a failed ancillary download is non-fatal without verification")
+		t.Cleanup(result.CloseHandles)
+		assertNoAncillary(t, result)
+	})
+
+	// Completing the bootstrap is only half of what the non-fatal branch
+	// promises. The other half is that the ledger state then comes from the
+	// main extraction, which is where v1-layout snapshots keep it — so this
+	// runs the whole of Sync rather than stopping at the result.
+	t.Run("v2 falls back to the extraction directory's ledger state",
+		func(t *testing.T) {
+			fixture := newV2Fixture(t, v2FixtureOptions{
+				validImmutable:      true,
+				fallbackLedgerState: true,
+			})
+			fixture.ancillaryArchive = []byte("not an archive")
+
+			result, err := Sync(context.Background(), SyncConfig{
+				Network:         "preprod",
+				DataDir:         t.TempDir(),
+				StorageMode:     "core",
+				Backend:         BackendV2,
+				AggregatorURL:   fixture.server.URL,
+				VerifyCertChain: false,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, uint64(1000), result.LedgerSlot,
+				"the ledger state must come from the extraction directory "+
+					"when the ancillary archive is unusable")
+		})
 }

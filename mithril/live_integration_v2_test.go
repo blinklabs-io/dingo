@@ -126,9 +126,10 @@ func TestLiveMithrilV2Verification(t *testing.T) {
 		downloadDir,
 		extractDir,
 	))
-	bytes, err := checkImmutableTrio(
-		filepath.Join(extractDir, "immutable"), 0, digests,
-	)
+	immutableRoot, err := os.OpenRoot(filepath.Join(extractDir, "immutable"))
+	require.NoError(t, err)
+	defer func() { _ = immutableRoot.Close() }()
+	bytes, err := checkImmutableTrio(immutableRoot, 0, digests)
 	require.NoError(t, err)
 	assert.Positive(t, bytes)
 

@@ -2824,6 +2824,461 @@ Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
 everything downstream of `Bootstrap()` is backend-agnostic.
 
+`ExtractArchive` treats the destination filesystem as untrusted, because an
+archive's contents being safe does not make the directory it is written into
+safe.
+
+Every write goes through an `os.Root` handle opened on the extraction root, so
+paths are resolved relative to that handle rather than re-walked as strings.
+This is what makes the guarantee hold under mutation: a directory replaced
+after any inspection cannot redirect a later write, because the handle refers
+to the directory itself and not to a name someone else can repoint. An entry
+resolving outside the root is refused by the runtime, so containment does not
+depend on a check that a writer could invalidate between inspection and open.
+Inspecting components and then opening by absolute path cannot offer that, and
+`O_NOFOLLOW` would not close it either — it constrains only the final
+component, not traversal through a replaced parent.
+
+Entries are additionally rejected if a symlink already sits anywhere along the
+path they are written to, not only at its last component. `os.Root` refuses an
+absolute symlink outright and refuses a relative one whose target leaves the
+root, so what this covers is the case it does follow: a relative symlink
+pointing back inside the destination. That cannot carry bytes out, but it does
+mean the tree on disk stops matching the tree the archive described, with a
+directory the archive never created holding its contents.
+
+Every component is inspected because inspecting the complete path does not
+amount to the same thing — it reports on the last component and *resolves*
+everything before it, so a symlink at `immutable` goes unnoticed while a write
+to `immutable/sub/00000.chunk` follows it. Components are walked shortest
+first, so each is inspected before it is used to reach the next.
+
+The destination is created and opened through a handle on its parent rather
+than by pathname, so a symlink swapped in for it is not followed. Opening
+cannot be made to reject one outright — `os.Root` follows a symlink whose
+target stays inside the root, and Go offers no directory open keyed on
+`O_NOFOLLOW` — so the opened handle is compared against the entry afterwards,
+the same way publication compares the staging directory. Directories *above*
+the parent are not inspected: they are chosen by the operator and are not part
+of this threat, and walking higher would reject ordinary layouts, since on
+macOS every temporary path resolves through `/var`, itself a symlink to
+`/private/var`.
+
+Directories the extractor creates carry `0750`. Group traversal is part of the
+contract for deployments that separate the downloader from the node, and it has
+to be restored explicitly on an exclusive extraction: staging is created `0700`
+so a partial extraction is never group-readable, and rename preserves the source
+mode, so publication widens the mode through the staging handle first.
+
+A **merge** destination that already exists keeps whatever mode it has.
+`MkdirAll` does not alter an existing directory, and merging writes into the
+destination rather than replacing it, so a pre-existing `0700` directory stays
+`0700`. That is deliberate: the mode of a directory the operator created is
+theirs to choose, and silently widening it would be the extractor overriding a
+decision it has no standing to make.
+
+An **exclusive** destination always ends up `0750`, however it started, because
+publication does not write into it — it renames the staging tree over it, and
+the mode arrives with that tree. An empty destination cleared out of the way
+and one replaced via `WithReplaceDestination` both end that way.
+
+Destinations come in two shapes, selected by the caller:
+
+- **Exclusive** (v1 snapshot, ancillary, digests): extraction is staged in a
+  fresh `0700` directory alongside the destination and renamed into place only
+  once complete, so a failed run publishes nothing and a pre-existing entry is
+  discarded rather than merged with. A non-empty destination is refused unless
+  the caller passes `WithReplaceDestination` to recover from an interrupted
+  run. The parent directory is held open for the whole extraction and publication
+  resolves through that handle, so a parent replaced at any point cannot
+  redirect it.
+
+  Without `WithReplaceDestination` the destination must be empty, which is not
+  the same as absent: an operator creating the directory ahead of time, or a
+  previous run cleaning up after itself, both leave one behind.
+
+  Publication attempts the rename before inspecting the destination at all,
+  because on a POSIX filesystem that single call already is the whole contract:
+  renaming over an absent or empty destination succeeds, over a populated one
+  fails with `ENOTEMPTY`, and over a file fails with `ENOTDIR` leaving the file
+  exactly as it was. One syscall has no interior, so there is no interleaving
+  for a concurrent writer to lose content to. Inspecting first and then acting
+  can only be worse than that, however narrow the gap is made.
+
+  The inspect-and-clear path exists for Windows, which refuses to rename over
+  an existing directory even an empty one, so a failed rename there does not on
+  its own mean the destination holds anything. Clearing an empty directory and
+  retrying is what keeps the behaviour uniform. A file or symlink is refused
+  untouched, and the removal is directory-only, so a writer who swaps the
+  directory for a file after it has been identified as a directory has the
+  removal fail rather than their file unlinked. `os.Root.Remove` would not do:
+  it unlinks a regular file as readily as it removes a directory, which is
+  exactly the behaviour that made such a swap costly.
+
+  Both platforms have a directory-only primitive, reached differently. Unix
+  uses `unlinkat` with `AT_REMOVEDIR`, addressed through the parent handle, so
+  neither the entry nor the parent can be redirected. Windows uses
+  `RemoveDirectory`, which fails on a file and on a populated directory but
+  addresses the entry by name, because Windows has no handle-relative removal;
+  a substituted parent could redirect it, which Windows makes hard by refusing
+  to move a directory while handles are open beneath it, and the parent is held
+  open for the whole extraction.
+
+  `WithReplaceDestination` remains the only path that removes a destination
+  holding content, which is what that option exists to authorise.
+
+  Renaming names its source, so it moves whatever occupies the staging name at
+  the instant it runs rather than the directory extraction wrote into, and Go
+  offers no rename keyed on a descriptor. A writer with access to the parent
+  can therefore move the staging directory aside and leave a tree or symlink of
+  their own under that name. Publication cannot prevent that substitution, so
+  it detects it: the staging directory's identity is recorded when it is
+  created, and what landed at the destination is compared against it
+  afterwards. A mismatch, or a symlink, removes the destination — only that
+  rename put anything there, the destination having been left empty or absent
+  beforehand — and fails the publish, so a substituted tree is never left
+  standing.
+- **Merge** (`WithMergeIntoDestination`, v2 per-immutable archives): many
+  archives populate one shared directory concurrently, so extraction writes
+  into it directly and accumulates. Staging is unavailable here, so the
+  destination itself is what gets created and opened through the parent handle,
+  and the per-component symlink checks carry the rest of the guarantee.
+
+The two are mutually exclusive and passing both is an error. They describe
+incompatible things, and merge silently winning would leave a caller that meant
+to replace quietly keeping the old tree.
+
+The v2 download applies the same rule to the directory it accumulates into:
+`<extract>/immutable` is created and opened through a handle on `<extract>`,
+and a failed trio is removed through that handle. Removing
+`<extract>/immutable/00000.chunk` by pathname resolves `immutable` on the way
+to the file, so a symlink there would make a failed download unlink somebody
+else's files.
+
+The same rule governs the cache-reuse fast paths — `findImmutableDir` and the
+ancillary "already extracted, skipping" checks — which decide whether a
+previous run left a usable tree and, when they say yes, skip extraction
+entirely. A candidate reached through a symlink is refused and the snapshot
+reported absent. Extraction never creates a symlink, so one in an extracted
+tree is evidence of tampering rather than something this node produced;
+treating the tree as absent re-extracts it from the verified archive, which
+discards it. Accepting it would load the chain from a directory somebody else
+chose.
+
+The directory being inspected is checked, not just the candidates below it.
+`immutable-<digest>` and `ancillary-<digest>` are derived inside the download
+directory rather than chosen by the operator, so a symlink at one of them is
+planted content like anything under it — and asking whether it holds chunk or
+ledger files by pathname would follow it. Each is opened through a handle on
+its parent and read through that handle. Directories *above* a candidate are
+the operator's and resolve normally, which is where extraction draws the same
+line.
+
+"Derived inside the download directory" is a property the digest has to be
+constrained to give, not one the join provides. The digest is the aggregator's
+string, and joining it raw does not stay inside: a leading separator makes the
+`immutable-` prefix its own path element, and the `..` that follows pops it, so
+the first `..` buys nothing and every one after it climbs a level. How far is
+the digest's to choose — `/../..` names the download directory's *parent*,
+`/../../..` its grandparent, and so on up — and whatever it names is then
+extracted into and, on `Cleanup`, removed with `os.RemoveAll`. v2 is closed by
+a check it already had, refusing an artifact whose hash is not the one it
+recomputes, and a computed hash is hex. v1 has nothing to recompute, so
+`validateSnapshotDigest` states the constraint directly and refuses anything
+that is not a single path element, before the first join. Refused rather than
+reduced: reducing it would give two different snapshots the same cache key, and
+a stale extraction would then be reused for the wrong artifact.
+
+Reading through the handle is half of it. A name refers to whatever occupies it
+at the moment it is resolved, so a lookup that ends by handing back a pathname
+discards everything the handle established: the consumer resolves that name
+afresh, and a tree swapped in behind it is read as though it were the one that
+was inspected. Each candidate is therefore opened once and then read *and*
+returned through that one handle — the immutable lookups
+(`findImmutableDir`, the v2 `<extract>/immutable` check) return a `vettedDir`,
+which carries the open handle alongside the name. Comparing a fresh resolution
+of the name against another fresh resolution would not do — a candidate replaced
+after it was read appears on both sides, the two agree, and a tree that was never
+inspected is returned. `findImmutableDir` reads its layout enumeration through
+the handle for the same reason: names taken from a re-walked pathname would be
+checked against the tree that was opened while resolving into the replacement.
+
+The handle then travels to the consumer rather than stopping at the package
+boundary. `BootstrapResult` carries three — `ImmutableRoot`, `AncillaryRoot`,
+and `ExtractRoot` — held from the lookup that vetted each until `CloseHandles`
+(which `Cleanup` calls first, since Windows will not remove a directory with an
+open handle beneath it). `CloseHandles` clears the fields, so it runs only once
+the work that reads them has joined.
+
+Every read of a bootstrapped tree goes through one of them:
+
+| tree | opened by | read by |
+|---|---|---|
+| immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
+| ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
+| extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
+
+The v2 pipelined copy reads through the same handle extraction is writing
+through, verified against the same digests and bounded to the contiguous prefix
+(see below). The directory names are carried alongside for messages; they are
+not what the load resolves. Each bootstrap opens the extraction directory once and
+derives both the immutable lookup and the ledger-state fallback from that one
+handle — vetting it twice would be two resolutions of one name, so the tree
+whose ImmutableDB was accepted could differ from the tree whose ledger state is
+imported.
+
+##### Handles bind directories; digests bind bytes; the inode has to be ours
+
+A handle settles *which directory* is read. It settles nothing about the files
+inside it, and those are a second substitution: a writer who shares the download
+directory never has to leave the directory the handle refers to in order to
+rename a file of their own over a verified one. Both halves of every tree's
+verification therefore have to reach the read, and a check that closed the file
+it looked at has not reached anything.
+
+There is a third layer under both, and it has to come first, because the two
+above are worthless without it. A digest binds bytes to a *descriptor*, and a
+descriptor is only as good as the inode behind it: a write through the same
+inode is visible through a descriptor already open on it, so no amount of
+verifying at the open catches it. What rules that out is owning the inode.
+Extraction therefore creates every file exclusively (`createExtractedFile`), so
+every extracted file is one this process made, at its own `0640`, owned by it.
+`O_CREATE|O_TRUNC` would have kept whatever inode was there — and merge
+extraction writes straight into a shared destination, where the name it is
+about to write can already be occupied by a world-writable file somebody else
+created. Certified bytes would then sit inside a file still theirs to rewrite.
+
+An occupied name is cleared and the create retried once, because `O_EXCL` alone
+would refuse a resume, which legitimately overwrites a partial file an
+interrupted run left. The clearing is `removeExtractedFile` — `unlinkat`
+without `AT_REMOVEDIR` on Unix, `DeleteFile` on Windows — which removes files
+and cannot remove a directory, so a directory at that name still fails the
+extraction as it always did rather than being deleted. It is the same rule as
+`removeEmptyExtractDir` one level up and exists for the same reason: the type
+has to be settled by the operation, not by a check in front of it, or a writer
+between the two turns "refuse the directory" into "unlink their file". Losing
+the race between the clear and the create is likewise a refusal rather than an
+adoption.
+
+Its traversal is verified rather than resolved. `Root.OpenRoot` on the whole
+path confines resolution to the root but still follows a symlink whose target
+stays inside it, which is enough to unlink a different file in the tree — and
+extraction's symlink checks run once, before the work, so the window is real.
+`openVerifiedParent` therefore opens each component through the one above it
+and confirms the handle refers to the entry the name denotes, holding those
+handles across the removal. On Windows only the immediate parent's own name is
+resolved a second time, since it has no handle-relative removal; that is the
+same residue `removeEmptyExtractDir` carries, now narrowed to one component and
+mitigated by the handle held on it.
+
+After that, an in-place write needs write permission on a `0640` file owned by
+the node's user — which is the node's own user, and no filesystem check defends
+a boundary that has already been crossed.
+
+That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
+downloaded trio as its archive lands and closes it; the tip read, the catch-up
+check and the blob copy open those files again. `verifyAncillaryManifest` hashes
+every file the ancillary key signed and closes it; the import opens the state
+and table it selects afterwards. In each case the tree between the two is the
+same tree — that is what the handle is for — and the bytes need not be.
+
+So the digests travel beside the handle and are re-established at the open the
+reader keeps:
+
+| tree | what travels | where it is re-checked |
+|---|---|---|
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` hashes each chunk, primary and secondary file as it opens it, and the read goes through that same descriptor |
+| immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
+| ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
+| ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
+
+A file the map does not cover is refused rather than read. The manifest walk and
+the digest list both already reject an unlisted file, but those are statements
+about the tree as it was checked; a file planted afterwards is refused only at
+the point of use. For the same reason an ancillary tree flagged `AncillaryVerified`
+without a digest map is refused outright — the flag would otherwise rest on a
+check nothing downstream can repeat.
+
+Note what the last two rows do *not* do: hash a descriptor and hand the parser
+that same descriptor. It looks equivalent and is not, because the parser then
+reads the file a second time. Where the payload fits in memory the fix is to
+read once and give both the buffer; where it does not, it is to map once and
+hash the mapping. Either way there is no second read to catch out.
+
+Re-hashing is the cost the alternative was not worth. Binding by retained
+descriptor would mean holding one for every file in the snapshot from
+verification until load, which for a mainnet ImmutableDB is tens of thousands;
+binding by file identity (`os.SameFile`, size, mtime) is defeatable by an
+attacker who creates the replacement, since inode numbers are reused and
+timestamps are settable. Hashing at the open costs one extra pass over data the
+reader is about to read anyway, so it is served from page cache and bounded by
+SHA-256 throughput rather than by I/O.
+
+A digest map that is present but empty is refused rather than treated as
+absent. Absence is v1, which certifies an archive and not the files in it;
+emptiness is a v2 result that lost its digests. Selecting the unverified read on
+emptiness would make "verify nothing" reachable by removing something, which is
+the direction a fail-open always comes from.
+
+The pipelined copy is bounded as well as verified, because it reads a tree the
+download pool is still filling. Archives arrive out of order, so a chunk above
+the contiguous prefix may be present and half written; `NewFromRootVerified`'s
+bound keeps the reader inside the prefix whose archives have been verified,
+rather than opening an unfinished file and refusing it as if it had been
+tampered with. The bound is the reason that database is rebuilt per callback
+rather than kept.
+
+Both the bound and the lookup are by chunk *name*, never by position in the
+directory listing (`immutable.ChunkName`, `LastSlotInChunk`). The two coincide
+only for a range starting at chunk 0, and a catch-up downloads only the
+archives above the import marker — so a position lookup would answer about a
+different chunk than the caller named and bound the copy by the wrong slot.
+`ContiguousChunk` carries `Start` alongside `Num` for the same reason: below
+`Start` the files belong to the blob store this run is adding to and are not in
+the extraction directory at all.
+
+Names are compared numerically rather than as text, both when sorting the
+listing and when applying the bound (`ChunkNameAbove`). `ChunkName` pads to
+five digits, so names are a fixed width only below 100000; past that `"99999"`
+sorts after `"100000"` as text. The listing's order is what the tip read and
+the point search rest on, so a lexical sort there would report the wrong tip
+and bisect a list that is not ordered, and a lexical bound would hide the chunk
+just below it while admitting the one just above.
+
+That ordering is only numeric while every name is `ChunkName`'s own output, so
+the listing drops anything that is not (`isCanonicalChunkName`, by
+round-tripping rather than by pattern, so the two cannot drift). A differently
+padded `0000001.chunk` is seven characters and would otherwise sort above every
+six-digit chunk and become the tip. Dropped rather than refused, unlike the
+slot entries in a ledger tree: there, ignoring a candidate selects another one,
+whereas a name that is not a chunk name names no chunk at all — and a verified
+database refuses anything absent from its digest map regardless.
+
+`checkImmutableTrio` hashes through the immutable directory's handle for a
+different reason, and remains necessary: it decides whether a downloaded archive
+is kept and lets the pool retry another location, and it runs while the tree is
+still being assembled and its name still resolvable. Hashing a joined pathname
+there would report a repointed name as a corrupt download — sending the pool
+round the locations again and deleting a trio this process wrote.
+
+Inside the ancillary tree the same rule applies one level down, to files.
+`ledgerstate.OpenSnapshotAtOrBefore` *opens* the ledger state and its UTxO-HD
+table as it selects them and hands back the open files, because a returned name
+would be resolved again by whoever read it. It also verifies every component on
+the way down — ledger directory, slot directory, state, table — since `os.Root`
+confines traversal to the root but still follows a symlink whose target stays
+inside it, and extraction never writes a symlink.
+
+Each candidate is settled by *opening* it rather than by inspecting it and
+opening it afterwards: asking whether `ledger` is a directory and later opening
+`ledger` are two questions, and a writer between them can make the answers
+describe different directories — the second still verified, just not the one the
+choice was made about. So a slot directory that never had a state is skipped
+and the next one down tried, while a symlink or a substitution fails the
+snapshot outright. Absence is settled by lstat, which describes the entry
+rather than what it points at: opening a dangling symlink fails exactly as
+opening an absent file does, so deciding by the open would read planted content
+as an unfinished extraction.
+
+That rule binds the enumeration as much as the selection, and the enumeration
+is the easier of the two to leave a hole in. `ReadDir` reports a symlink as a
+symlink rather than as whatever it points at, so a slot entry that is neither a
+directory nor a regular file never resembles a candidate at all — and an entry
+quietly left out of the candidate list is indistinguishable from one that was
+never there. So every entry naming a slot becomes a candidate or a refusal:
+directories are UTxO-HD candidates, regular files are legacy ones, and anything
+else fails the snapshot.
+
+Selection is then by slot across both layouts, with UTxO-HD winning a tie on the
+same slot number. Preferring UTxO-HD is a tie-break between layouts, not a
+licence to import an older state than the tree holds — draining the directories
+first and consulting the files only afterwards would let a legacy state at a
+newer slot be pre-empted by a directory at an older one.
+
+The same rule governs every choice between candidates, not just slot
+directories — which layout (`ledger/` before `db/ledger/`) and which tree (the
+ancillary one before the extraction directory) are picked the same way. Only a
+candidate that is genuinely absent moves on to the next; one that exists and is
+unusable fails the lookup. Otherwise making a candidate unopenable is a way of
+selecting the one after it.
+
+Tree selection carries one rule more, because emptying a tree is destruction
+rather than planting and would otherwise slip past the above. Nothing is looked
+at after an ancillary tree whose contents the ancillary key signed
+(`AncillaryVerified`), even when it yields no state: the extraction directory is
+not covered by that signature, so falling through would let whoever emptied the
+first tree choose the second. Where nothing was verified there is no downgrade
+to make and the fallback stays — v1 keeps its ledger state in the main archive,
+so looking there is how that layout works at all, and it is also what covers an
+ancillary tree holding only states newer than the certified tip.
+
+A symlinked UTxO table fails on the same rule rather than being reported
+absent: a caller cannot otherwise tell "this snapshot has no table" from "this
+snapshot's table is somebody else's".
+
+The ancillary tree matters most here, because what binds it is a signature. One
+handle spans the cache-reuse check, the manifest verification, and the import,
+so the tree whose digests satisfied the ancillary key is the tree whose bytes
+get loaded. Verifying and then importing by name would leave those two steps
+describing possibly different directories, with nothing but timing between
+them — and the manifest walk that proves the payload is completely covered would
+be about a third. The manifest's digests travel with that handle for the same
+reason one level down, and the files discovery selected are checked against them
+before parsing; see *Handles bind directories; digests bind bytes; the inode
+has to be ours* above.
+
+A result carrying no handle is refused rather than opened by name — by
+`openBootstrappedImmutable` for the immutable side and by `importLedgerState`
+for the ancillary one. Both bootstrap paths set them, so an absent handle means
+the result did not come from a vetted lookup, and a fallback would be invisible:
+the load would succeed, having read a directory nothing checked. For the same
+reason `node.WithImmutableDB` treats a nil argument as an error rather than as a
+pathname fallback.
+
+#### What a failed ancillary download leaves behind
+
+The ancillary downloaders (`downloadAncillary` for v1, `downloadAncillaryV2`
+for v2) return the archive path alongside every error, not only on success.
+`Bootstrap` records it into `BootstrapResult.AncillaryArchivePath` whenever it
+is non-empty, and `Cleanup` removes the archive and the extracted tree as two
+separate paths.
+
+That has to hold for each failure after the download begins, because each one
+leaves something:
+
+| failure | archive | extraction |
+|---|---|---|
+| every download location failed | a partial file — `DownloadSnapshot` resumes, so it deliberately does not remove one, and it returns no path for it | none yet |
+| extraction failed | complete, reported | none published — exclusive extraction stages elsewhere and renames in only once complete |
+| extracted tree holds no ledger state (v1 and v2) | complete, reported | removed by the downloader |
+| ancillary manifest unverified (v2) | complete, reported | removed by the downloader |
+
+The bottom two rows are where both halves have to be done deliberately, and each
+half reads as though the other covered it.
+
+The archive is reported rather than removed, because it is `Cleanup`'s to
+remove: it comes back with the error, `Bootstrap` records it into
+`AncillaryArchivePath` whenever it is non-empty, and an error that returns no
+path strands the download where nothing else sweeps it. Removing the extraction
+is not removing the archive it came from.
+
+The extraction is removed rather than reported, because it is *not* `Cleanup`'s
+to remove. `AncillaryDir` is taken from the returned handle, and a failure
+returns no handle — so an extraction not removed at the point it is found
+unusable is removed by nothing. That is why both downloaders remove it there
+rather than leaving it to the caller.
+
+Neither leak is visible when `DownloadDir` was left unset, since the
+auto-created temp directory goes wholesale; both are residue in the operator's
+own directory when they supplied one, which is the configuration that matters.
+
+The path reported on a failed download is asked of the downloader
+(`downloadDestinationPath`) rather than assembled at the call site. The filename
+carries the network name, which comes from the aggregator, and the downloader
+reduces it to its last element before writing; joining it raw would name a
+different file for a network like `../../etc` — one outside the download
+directory, which `Cleanup` would then remove.
+
 ### Catch-up vs bootstrap dispatch
 
 `mithril.Sync` (the `dingo mithril sync` entry point) selects what to do from
