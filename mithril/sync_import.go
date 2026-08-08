@@ -302,19 +302,6 @@ func importLedgerState(
 	// Held open for the whole import: the UTxO stream is read from the table
 	// handle, and closing early would put a name back in its place.
 	defer snapshot.Close()
-	// The manifest check hashed these files and closed them; discovery opened
-	// them again. Between those two the tree is the same tree — the handle
-	// says so — but a file inside it need not be the same file, and what gets
-	// parsed below would then not be what the ancillary key signed. So the
-	// signature is re-established here, on the descriptors the import reads
-	// through, before any of their bytes reach a parser.
-	if signedBy != nil {
-		if err := verifySignedSnapshot(snapshot, signedBy); err != nil {
-			return 0, nil, fmt.Errorf(
-				"verifying ledger state in %s: %w", stateDir, err,
-			)
-		}
-	}
 	lstatePath := filepath.Join(
 		stateDir, filepath.FromSlash(snapshot.StatePath),
 	)
@@ -326,9 +313,30 @@ func importLedgerState(
 		"max_trusted_slot", maxTrustedSlot,
 	)
 
-	// Parsed from the file discovery opened. There is no name here to reopen:
-	// lstatePath exists only for the messages above and below.
-	state, err := ledgerstate.ParseSnapshotFile(snapshot.State)
+	// Read once, from the file discovery opened. There is no name here to
+	// reopen: lstatePath exists only for the messages above and below.
+	//
+	// The bytes are then both what the signature is checked against and what
+	// the parser is given. Hashing the descriptor and handing the parser the
+	// same descriptor would not be that: the parser re-reads, and a write
+	// through the file between the two reads is visible to the second — an
+	// in-place write reaches a descriptor already open on the file, which is
+	// the one substitution the handle and the descriptor cannot rule out.
+	// One buffer leaves nothing to change.
+	stateBytes, err := io.ReadAll(snapshot.State)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading ledger state: %w", err)
+	}
+	if signedBy != nil {
+		if err := verifySignedState(
+			snapshot.StatePath, stateBytes, signedBy,
+		); err != nil {
+			return 0, nil, fmt.Errorf(
+				"verifying ledger state in %s: %w", stateDir, err,
+			)
+		}
+	}
+	state, err := ledgerstate.ParseSnapshotBytes(stateBytes)
 	if err != nil {
 		return 0, nil, fmt.Errorf("parsing ledger state: %w", err)
 	}
@@ -336,10 +344,13 @@ func importLedgerState(
 	// UTxO-HD keeps the UTxO set in a table beside the state; discovery opened
 	// it from the same directory handle, so the two belong to one snapshot.
 	if snapshot.Table != nil {
-		state.UTxOTablePath = filepath.Join(
-			stateDir, filepath.FromSlash(snapshot.TablePath),
-		)
-		state.UTxOTableFile = snapshot.Table
+		if err := attachSignedTable(
+			state, snapshot, stateDir, signedBy,
+		); err != nil {
+			return 0, nil, fmt.Errorf(
+				"verifying ledger state in %s: %w", stateDir, err,
+			)
+		}
 		logger.Info(
 			"found UTxO table file (UTxO-HD format)",
 			"component", "mithril",
@@ -453,62 +464,88 @@ var errAncillaryDigestMismatch = errors.New(
 	"ancillary file is not the file the manifest signature covers",
 )
 
-// verifySignedSnapshot re-establishes the ancillary signature over the files
-// snapshot discovery selected and opened.
+// verifySignedState re-establishes the ancillary signature over the ledger
+// state the import is about to parse.
 //
-// It hashes the open descriptors rather than the paths beside them. Those paths
-// exist for log lines: resolving one here would reintroduce exactly the gap
-// this closes, since the file it named at manifest time and the file it names
-// now are not required to be the same file. Each descriptor is left rewound, so
-// the parser reads the bytes that were just hashed.
-func verifySignedSnapshot(
-	files *ledgerstate.SnapshotFiles,
+// It takes the bytes rather than the descriptor, and the caller passes those
+// same bytes to the parser. Hashing a descriptor and rewinding it looks
+// equivalent and is not: the parser then reads the file a second time, and an
+// in-place write between the two reads is visible through a descriptor already
+// open on it. That is the substitution neither the directory handle nor the
+// descriptor rules out, and one buffer is what removes it.
+//
+// The path is used only for the message. Resolving it would reintroduce the
+// gap being closed, since the file it named when the manifest was checked and
+// the file it names now are not required to be the same file.
+func verifySignedState(
+	statePath string,
+	data []byte,
 	digests map[string]string,
 ) error {
-	for _, entry := range []struct {
-		name string
-		file *os.File
-	}{
-		{files.StatePath, files.State},
-		{files.TablePath, files.Table},
-	} {
-		// A legacy snapshot embeds its UTxO set in the state file and has no
-		// table.
-		if entry.file == nil {
-			continue
-		}
-		expected, ok := digests[entry.name]
-		if !ok {
-			return fmt.Errorf(
-				"%w: %s is not covered by the manifest",
-				errAncillaryDigestMismatch, entry.name,
-			)
-		}
-		sum, err := sha256OpenFile(entry.file)
-		if err != nil {
-			return fmt.Errorf("hashing %s: %w", entry.name, err)
-		}
-		if sum != expected {
-			return fmt.Errorf(
-				"%w: %s computed %s, signed %s",
-				errAncillaryDigestMismatch, entry.name, sum, expected,
-			)
-		}
+	expected, ok := digests[statePath]
+	if !ok {
+		return fmt.Errorf(
+			"%w: %s is not covered by the manifest",
+			errAncillaryDigestMismatch, statePath,
+		)
+	}
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != expected {
+		return fmt.Errorf(
+			"%w: %s computed %s, signed %s",
+			errAncillaryDigestMismatch, statePath, got, expected,
+		)
 	}
 	return nil
 }
 
-// sha256OpenFile hashes an open file from its start and rewinds it.
-func sha256OpenFile(f *os.File) (string, error) {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return "", err
+// attachSignedTable points the import at the UTxO-HD table discovery opened,
+// and at the digest the manifest holds for it.
+//
+// The table is mapped rather than read — it is gigabytes — so the state's
+// read-once-and-hash-the-buffer does not transfer. The digest travels down
+// instead and is checked against the mapping the decoder walks, which keeps
+// the check and the parse on one set of bytes. Carrying it is therefore not
+// bookkeeping: an absent digest is how an unsigned table is decoded, so a
+// signed one that failed to arrive would be decoded unchecked.
+func attachSignedTable(
+	state *ledgerstate.RawLedgerState,
+	snapshot *ledgerstate.SnapshotFiles,
+	stateDir string,
+	digests map[string]string,
+) error {
+	state.UTxOTablePath = filepath.Join(
+		stateDir, filepath.FromSlash(snapshot.TablePath),
+	)
+	state.UTxOTableFile = snapshot.Table
+	if digests == nil {
+		return nil
 	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, f); err != nil {
-		return "", err
+	digest, err := signedTableDigest(digests, snapshot.TablePath)
+	if err != nil {
+		return err
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return "", err
+	state.UTxOTableDigest = digest
+	return nil
+}
+
+// signedTableDigest returns the digest the manifest holds for a UTxO-HD table.
+//
+// A table the manifest does not cover is refused rather than passed on with no
+// digest. An empty digest is how an unsigned tree is decoded — v1, and any tree
+// nothing vouched for — so letting one through here would turn "nobody signed
+// this file" into "nothing needs checking", which is the direction that must
+// never be reachable by removing an entry.
+func signedTableDigest(
+	digests map[string]string,
+	tablePath string,
+) (string, error) {
+	digest, ok := digests[tablePath]
+	if !ok {
+		return "", fmt.Errorf(
+			"%w: %s is not covered by the manifest",
+			errAncillaryDigestMismatch, tablePath,
+		)
 	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	return digest, nil
 }

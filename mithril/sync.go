@@ -522,8 +522,12 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		// of order, so one of those may be present and half written; the bound
 		// keeps the reader from opening it at all, rather than opening it and
 		// refusing a file that is merely unfinished.
+		//
+		// The bound is the chunk's name rather than a count of chunks, and the
+		// lookup below is by number rather than by position, because the two
+		// coincide only for a range starting at chunk 0.
 		pipeImm, nerr := immutable.NewFromRootVerified(
-			chunk.Root, chunk.Digests, chunk.Num+1,
+			chunk.Root, chunk.Digests, immutable.ChunkName(chunk.Num),
 		)
 		if nerr != nil {
 			return fmt.Errorf(

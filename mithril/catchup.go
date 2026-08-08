@@ -57,6 +57,12 @@ var errCatchUpLocalAhead = errors.New(
 // v2 always carries them. v1 does not: it certifies one archive rather than the
 // files inside it, so after extraction there is nothing to re-check against and
 // its reads are bound to the directory alone.
+//
+// The absence of a map, not its emptiness, is what selects that unverified
+// read. A map that is present but empty is a v2 result that lost its digests,
+// and treating it as v1 would answer "verify nothing" to a question nobody
+// asked — reachable by removing something, which is the direction a fail-open
+// always comes from. NewFromRootVerified refuses it instead.
 func openBootstrappedImmutable(
 	result *BootstrapResult,
 ) (*immutable.ImmutableDb, error) {
@@ -69,9 +75,9 @@ func openBootstrappedImmutable(
 	}
 	var imm *immutable.ImmutableDb
 	var err error
-	if len(result.ImmutableDigests) > 0 {
+	if result.ImmutableDigests != nil {
 		imm, err = immutable.NewFromRootVerified(
-			result.ImmutableRoot, result.ImmutableDigests, 0,
+			result.ImmutableRoot, result.ImmutableDigests, "",
 		)
 	} else {
 		imm, err = immutable.NewFromRoot(result.ImmutableRoot)

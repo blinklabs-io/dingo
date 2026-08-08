@@ -52,14 +52,25 @@ type ImmutableDb struct {
 	// of their own over `00000.chunk` inside it. So each file is verified from
 	// the descriptor the read then goes through — see openEntry.
 	digests map[string]string
-	// chunkLimit, when non-zero, bounds the database to the first chunkLimit
-	// chunk names. See NewFromRootVerified.
-	chunkLimit uint64
+	// maxChunk, when non-empty, is the highest chunk name this database will
+	// expose. See NewFromRootVerified.
+	maxChunk string
 }
 
 var ErrPointBeyondLastChunk = errors.New(
 	"immutable DB: point is beyond the last chunk",
 )
+
+// ChunkName returns the name an immutable file number is stored under, without
+// an extension: five digits, zero padded.
+//
+// Exported because callers that know a chunk by its number have to ask for it
+// by name — the position of a name in a sorted listing is not its number
+// whenever the range on disk does not start at zero, which is what a catch-up
+// produces.
+func ChunkName(num uint64) string {
+	return fmt.Sprintf("%05d", num)
+}
 
 // ErrDigestMismatch reports a file whose contents are not the contents that
 // were certified for it: either the digest of what was opened differs from the
@@ -135,18 +146,19 @@ func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
 // its lowercase hex SHA-256. An empty or nil map is refused: it would verify
 // nothing while looking as though it did.
 //
-// chunkLimit, when non-zero, bounds the database to the first chunkLimit chunk
-// names. The pipelined bootstrap copy reads a tree its download pool is still
-// filling, and chunks arrive out of order — so a chunk above the contiguous
-// prefix may be present and half written. The bound keeps the reader inside
-// the prefix whose archives have been verified rather than failing on one that
-// is merely unfinished.
+// maxChunk, when non-empty, hides every chunk named above it (use ChunkName).
+// The pipelined bootstrap copy reads a tree its download pool is still filling,
+// and chunks arrive out of order — so a chunk above the contiguous prefix may
+// be present and half written. The bound keeps the reader inside the prefix
+// whose archives have been verified rather than failing on one that is merely
+// unfinished. A name rather than a count, because a count would mean the same
+// thing as a position, and a position is not a chunk number.
 //
 // The caller keeps ownership of root on the same terms as NewFromRoot.
 func NewFromRootVerified(
 	root *os.Root,
 	digests map[string]string,
-	chunkLimit uint64,
+	maxChunk string,
 ) (*ImmutableDb, error) {
 	if len(digests) == 0 {
 		return nil, errors.New(
@@ -158,7 +170,7 @@ func NewFromRootVerified(
 		return nil, err
 	}
 	i.digests = digests
-	i.chunkLimit = chunkLimit
+	i.maxChunk = maxChunk
 	return i, nil
 }
 
@@ -251,9 +263,12 @@ func (i *ImmutableDb) getChunkNames() ([]string, error) {
 	}
 	slices.Sort(ret)
 	// Bounded reads see a shorter database rather than a failing one; see
-	// NewFromRootVerified.
-	if i.chunkLimit > 0 && uint64(len(ret)) > i.chunkLimit {
-		ret = ret[:i.chunkLimit]
+	// NewFromRootVerified. Chunk names are fixed width and zero padded, so
+	// comparing them as strings orders them as numbers.
+	if i.maxChunk != "" {
+		ret = slices.DeleteFunc(ret, func(name string) bool {
+			return name > i.maxChunk
+		})
 	}
 	return ret, nil
 }
@@ -443,12 +458,15 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	return ret, nil
 }
 
-// LastSlotInChunk returns the slot of the last block in the chunk at the
-// given 0-based index. The second return value is false when num is beyond
-// the chunks currently present, with no error. This bounds an incremental
-// copy to a contiguous chunk prefix while later chunks may still be
-// downloading out of order: chunks 0..num are known complete, so num maps
-// to the num-th sorted chunk name.
+// LastSlotInChunk returns the slot of the last block in the immutable file
+// numbered num. The second return value is false when no chunk of that number
+// is present, with no error. This bounds an incremental copy to a contiguous
+// chunk prefix while later chunks may still be downloading out of order.
+//
+// By number, not by position in the sorted listing. The two coincide only when
+// the range on disk starts at chunk 0, and a catch-up downloads only the
+// archives above the import marker — so a position lookup would answer about a
+// different chunk than the caller named, and bound the copy by the wrong slot.
 func (i *ImmutableDb) LastSlotInChunk(
 	num uint64,
 ) (uint64, bool, error) {
@@ -456,10 +474,11 @@ func (i *ImmutableDb) LastSlotInChunk(
 	if err != nil {
 		return 0, false, err
 	}
-	if num >= uint64(len(chunkNames)) {
+	name := ChunkName(num)
+	if !slices.Contains(chunkNames, name) {
 		return 0, false, nil
 	}
-	secondary, err := i.getChunkSecondaryIndex(chunkNames[num])
+	secondary, err := i.getChunkSecondaryIndex(name)
 	if err != nil {
 		return 0, false, err
 	}

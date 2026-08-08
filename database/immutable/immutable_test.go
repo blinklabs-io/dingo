@@ -354,7 +354,7 @@ func TestNewFromRootVerifiedReadsTheVerifiedTree(t *testing.T) {
 		t.Fatal("test fixture produced no tip")
 	}
 
-	imm, err := immutable.NewFromRootVerified(root, trioDigests(t, dir), 0)
+	imm, err := immutable.NewFromRootVerified(root, trioDigests(t, dir), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -398,7 +398,7 @@ func TestNewFromRootVerifiedRefusesAFileSubstitutedAfterTheDigestCheck(
 		t.Fatalf("unexpected error: %s", err)
 	}
 	defer func() { _ = root.Close() }()
-	imm, err := immutable.NewFromRootVerified(root, digests, 0)
+	imm, err := immutable.NewFromRootVerified(root, digests, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -449,7 +449,7 @@ func TestNewFromRootVerifiedRefusesAFileTheDigestsDoNotCover(t *testing.T) {
 		t.Fatalf("unexpected error: %s", err)
 	}
 	defer func() { _ = root.Close() }()
-	imm, err := immutable.NewFromRootVerified(root, digests, 0)
+	imm, err := immutable.NewFromRootVerified(root, digests, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -480,7 +480,7 @@ func TestNewFromRootVerifiedStopsAtTheChunkLimit(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 
-	full, err := immutable.NewFromRootVerified(root, digests, 0)
+	full, err := immutable.NewFromRootVerified(root, digests, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -488,7 +488,9 @@ func TestNewFromRootVerifiedStopsAtTheChunkLimit(t *testing.T) {
 		t.Fatalf("both chunks must be visible unbounded: ok=%v err=%v", ok, err)
 	}
 
-	bounded, err := immutable.NewFromRootVerified(root, digests, 1)
+	bounded, err := immutable.NewFromRootVerified(
+		root, digests, immutable.ChunkName(0),
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -514,5 +516,47 @@ func TestNewFromRootVerifiedStopsAtTheChunkLimit(t *testing.T) {
 			"the bound must hold the tip inside the prefix: bounded %d, full %d",
 			boundedTip.Slot, fullTip.Slot,
 		)
+	}
+}
+
+// TestLastSlotInChunkIsByNumberNotPosition covers a range that does not start
+// at zero, which a Mithril catch-up produces: it downloads only the archives
+// above the import marker, so the lowest chunk on disk is not chunk 0.
+//
+// Answering by position then names a different chunk than the caller asked
+// for — silently, and further off the higher the marker — so the copy would be
+// bounded by the wrong slot.
+func TestLastSlotInChunkIsByNumberNotPosition(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "immutable")
+	copyChunkTrio(t, "00001", dir)
+	copyChunkTrio(t, "00002", dir)
+
+	imm, err := immutable.New(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	// The two chunks are at positions 0 and 1 and are numbered 1 and 2, so
+	// every assertion below distinguishes the two readings.
+	got, ok, err := imm.LastSlotInChunk(1)
+	if err != nil || !ok {
+		t.Fatalf("chunk 1 must be present: ok=%v err=%v", ok, err)
+	}
+	want, ok, err := imm.LastSlotInChunk(2)
+	if err != nil || !ok {
+		t.Fatalf("chunk 2 must be present: ok=%v err=%v", ok, err)
+	}
+	if got >= want {
+		t.Fatalf(
+			"chunk 1 must end before chunk 2: got %d and %d — position "+
+				"lookup would return chunk 2's slot for chunk 1",
+			got, want,
+		)
+	}
+	// Chunk 0 was never downloaded. Occupying position 0 is not the same as
+	// being present, and reporting it as present is how the copy comes to read
+	// a chunk that is not there.
+	if _, ok, err := imm.LastSlotInChunk(0); err != nil || ok {
+		t.Fatalf("chunk 0 is absent and must report so: ok=%v err=%v", ok, err)
 	}
 }

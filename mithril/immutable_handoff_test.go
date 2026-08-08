@@ -886,9 +886,12 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(t *testing.T) 
 	// that could be confused with a refusal.
 	stateBytes := []byte{0x81, 0x00}
 
-	// Which file is taken decides nothing about the outcome, which is the
-	// point: the table is signed on the same terms as the state.
-	for _, name := range []string{"state", "tables"} {
+	// The state only. The table is not hashed here at all any more — its
+	// digest travels to the import and is checked against the mapping the
+	// decoder walks, which is covered by
+	// ledgerstate.TestParseUTxOsFromOpenFileChecksTheMappedBytes and by
+	// TestSignedTableDigestRefusesAnUncoveredTable above.
+	for _, name := range []string{"state"} {
 		t.Run(name, func(t *testing.T) {
 			build := func(t *testing.T, substitute bool) *BootstrapResult {
 				t.Helper()
@@ -1038,41 +1041,103 @@ func TestCheckImmutableTrioHashesThroughTheHandle(t *testing.T) {
 	assert.Positive(t, bytes)
 }
 
-// TestVerifySignedSnapshotLeavesTheFilesReadable pins the half of the re-check
-// that is easy to get wrong quietly: hashing consumes a descriptor, so a
-// verification that did not rewind would hand the import an empty state and an
-// empty UTxO table and look like a successful check while doing it.
-func TestVerifySignedSnapshotLeavesTheFilesReadable(t *testing.T) {
+// TestVerifySignedStateChecksTheBytesItIsGiven pins that the check is about a
+// buffer rather than about a file.
+//
+// The caller reads the state once and hands the same slice here and to the
+// parser. A check that took the descriptor instead would look identical and
+// leave the parser re-reading a file that can change under it, so the shape of
+// this signature is the guarantee.
+func TestVerifySignedStateChecksTheBytesItIsGiven(t *testing.T) {
+	signed := []byte("the signed ledger state")
+	sum := sha256.Sum256(signed)
+	digests := map[string]string{
+		"ledger/100/state": hex.EncodeToString(sum[:]),
+	}
+
+	require.NoError(t, verifySignedState("ledger/100/state", signed, digests))
+
+	err := verifySignedState(
+		"ledger/100/state", []byte("somebody else's bytes"), digests,
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAncillaryDigestMismatch)
+
+	// A path the manifest does not cover is refused rather than accepted for
+	// want of anything to compare against.
+	err = verifySignedState("ledger/200/state", signed, digests)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAncillaryDigestMismatch)
+}
+
+// TestSignedTableDigestRefusesAnUncoveredTable covers the table's half of the
+// handoff.
+//
+// The table cannot be read into a buffer — it is gigabytes — so its digest
+// travels down to the import, which checks it against the mapping the decoder
+// walks. What has to happen here is the selection: a table the manifest does
+// not cover must fail rather than travel down with no digest, because an empty
+// digest is how an unsigned tree is decoded unchecked.
+func TestSignedTableDigestRefusesAnUncoveredTable(t *testing.T) {
+	digests := map[string]string{"ledger/100/tables": "abc123"}
+	snapshot := &ledgerstate.SnapshotFiles{
+		StatePath: "ledger/100/state",
+		TablePath: "ledger/100/tables",
+		Table:     &os.File{},
+	}
+
+	// The digest has to arrive on the state the import hands down, not merely
+	// be looked up: an absent one is how an unsigned table is decoded, so one
+	// that was found and dropped would be decoded unchecked.
+	state := &ledgerstate.RawLedgerState{}
+	require.NoError(
+		t, attachSignedTable(state, snapshot, "/anc", digests),
+	)
+	assert.Equal(t, "abc123", state.UTxOTableDigest)
+	assert.Same(t, snapshot.Table, state.UTxOTableFile)
+
+	snapshot.TablePath = "ledger/100/tables/tvar"
+	err := attachSignedTable(
+		&ledgerstate.RawLedgerState{}, snapshot, "/anc", digests,
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAncillaryDigestMismatch)
+
+	// An unsigned tree carries no map and decodes unchecked, as before.
+	snapshot.TablePath = "ledger/100/tables"
+	unsigned := &ledgerstate.RawLedgerState{}
+	require.NoError(t, attachSignedTable(unsigned, snapshot, "/anc", nil))
+	assert.Empty(t, unsigned.UTxOTableDigest)
+}
+
+// TestOpenBootstrappedImmutableRefusesAnEmptyDigestMap keeps the choice
+// between a verified and an unverified open a statement about the backend
+// rather than about how many entries a map happens to hold.
+//
+// v1 carries no digests at all, and that is the only case that may read
+// unverified. A map that is present but empty is not that case — it is a v2
+// result that lost its digests — and selecting on emptiness would read it
+// unverified, which is the one outcome nothing should be able to reach by
+// removing something.
+func TestOpenBootstrappedImmutableRefusesAnEmptyDigestMap(t *testing.T) {
 	dir := t.TempDir()
-	slotDir := filepath.Join(dir, "ledger", "100")
-	require.NoError(t, os.MkdirAll(slotDir, 0o750))
-	contents := map[string][]byte{
-		"state":  []byte{0x81, 0x00},
-		"tables": []byte("utxo table bytes"),
-	}
-	digests := map[string]string{}
-	for entry, data := range contents {
-		require.NoError(t, os.WriteFile(
-			filepath.Join(slotDir, entry), data, 0o640,
-		))
-		sum := sha256.Sum256(data)
-		digests["ledger/100/"+entry] = hex.EncodeToString(sum[:])
-	}
-	root, err := openVerifiedDir(dir)
+	requireChunkTrio(t, "00000", dir)
+	root, err := os.OpenRoot(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = root.Close() })
 
-	files, err := ledgerstate.OpenSnapshotAtOrBefore(root, ^uint64(0))
-	require.NoError(t, err)
-	defer files.Close()
-	require.NotNil(t, files.Table, "the fixture must exercise the table too")
+	// Control: no map at all is v1, which reads.
+	_, err = openBootstrappedImmutable(&BootstrapResult{
+		ImmutableDir:  dir,
+		ImmutableRoot: root,
+	})
+	require.NoError(t, err, "v1 carries no digests and must still open")
 
-	require.NoError(t, verifySignedSnapshot(files, digests))
-
-	state, err := io.ReadAll(files.State)
-	require.NoError(t, err)
-	assert.Equal(t, contents["state"], state)
-	table, err := io.ReadAll(files.Table)
-	require.NoError(t, err)
-	assert.Equal(t, contents["tables"], table)
+	_, err = openBootstrappedImmutable(&BootstrapResult{
+		ImmutableDir:     dir,
+		ImmutableRoot:    root,
+		ImmutableDigests: map[string]string{},
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "digest map")
 }

@@ -115,6 +115,19 @@ type RawLedgerState struct {
 	// alongside it for messages. The caller keeps ownership and must hold the
 	// file open for the duration of the import.
 	UTxOTableFile *os.File
+	// UTxOTableDigest, when set, is the hex SHA-256 the table's contents must
+	// have, checked against the mapped bytes immediately before they are
+	// decoded.
+	//
+	// A caller holding a signature over the table needs this rather than
+	// hashing UTxOTableFile itself: the table is mapped rather than read, so a
+	// digest taken from the descriptor beforehand describes a read that then
+	// happens again. Handing the digest down means the bytes that are checked
+	// and the bytes that are decoded are one mapping.
+	//
+	// Empty means nothing signed this table — v1, and any tree nothing
+	// vouched for — and it is decoded unchecked, as it was before.
+	UTxOTableDigest string
 	// UTxOHD indicates that the snapshot used the UTxO-HD ledger
 	// state wrapper. These snapshots keep the real UTxO set in an
 	// external table file and the inline UTxO field is only a
@@ -767,6 +780,7 @@ func importUTxOs(
 		// with rather than by re-resolving UTxOTablePath.
 		_, err = parseUTxOsFromOpenFileWithProgress(
 			cfg.State.UTxOTableFile,
+			cfg.State.UTxOTableDigest,
 			batchCallback,
 			reportProgress,
 		)

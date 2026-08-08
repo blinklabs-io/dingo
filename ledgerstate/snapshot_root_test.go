@@ -15,6 +15,8 @@
 package ledgerstate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -723,5 +725,78 @@ func TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats(t *testing.T) {
 			"expected the newer legacy state, got %q from %s",
 			string(got), files.StatePath,
 		)
+	}
+}
+
+// TestParseSnapshotBytesParsesWhatTheCallerHolds keeps the buffer the caller
+// verified the thing that gets parsed.
+//
+// A caller checking a signature over a snapshot has to hash something and
+// parse something, and those have to be the same bytes. Handing the parser a
+// file leaves it to re-read, and the file may have changed in between; handing
+// it the buffer removes the question.
+func TestParseSnapshotBytesParsesWhatTheCallerHolds(t *testing.T) {
+	// A one-element CBOR array: enough structure to reach the snapshot
+	// decoder and fail there rather than earlier.
+	if _, err := ParseSnapshotBytes([]byte{0x81, 0x00}); err == nil {
+		t.Fatal("expected the fixture to reach the decoder and fail")
+	}
+	if _, err := ParseSnapshotBytes(nil); err == nil {
+		t.Fatal("expected empty input to be refused")
+	}
+}
+
+// TestParseUTxOsFromOpenFileChecksTheMappedBytes covers the one file the
+// import cannot read into a buffer first.
+//
+// The UTxO table is mapped rather than read — it is gigabytes — so the
+// state file's "hash the buffer you parse" does not transfer. What does
+// transfer is checking the mapping itself: the digest is taken over the same
+// mapped bytes the decoder then walks, so there is no second read of the file
+// between the check and the parse.
+func TestParseUTxOsFromOpenFileChecksTheMappedBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tables")
+	// A one-element outer array holding an empty map: the smallest tvar the
+	// decoder accepts.
+	payload := []byte{0x81, 0xa0}
+	if err := os.WriteFile(path, payload, 0o640); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	sum := sha256.Sum256(payload)
+	signed := hex.EncodeToString(sum[:])
+
+	open := func(t *testing.T) *os.File {
+		t.Helper()
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		return f
+	}
+
+	// Control: the signed table parses, so the refusal below is about the
+	// digest and not about the fixture.
+	if _, err := parseUTxOsFromOpenFileWithProgress(
+		open(t), signed, func([]ParsedUTxO) error { return nil }, nil,
+	); err != nil {
+		t.Fatalf("the signed table must parse: %s", err)
+	}
+
+	_, err := parseUTxOsFromOpenFileWithProgress(
+		open(t),
+		hex.EncodeToString(make([]byte, 32)),
+		func([]ParsedUTxO) error { return nil },
+		nil,
+	)
+	if !errors.Is(err, ErrTableDigestMismatch) {
+		t.Fatalf("expected a table digest mismatch, got %v", err)
+	}
+
+	// No digest is the unsigned path — v1, and any tree nothing vouched for.
+	if _, err := parseUTxOsFromOpenFileWithProgress(
+		open(t), "", func([]ParsedUTxO) error { return nil }, nil,
+	); err != nil {
+		t.Fatalf("an unsigned table must still parse: %s", err)
 	}
 }

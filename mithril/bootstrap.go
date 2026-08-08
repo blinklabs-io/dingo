@@ -150,8 +150,11 @@ type BootstrapConfig struct {
 	// OnChunkContiguous, when set, enables download<->processing
 	// pipelining: chunks are fetched in parallel (out of order) but this
 	// callback is invoked for each immutable file number in strict
-	// contiguous order (0,1,2,...) as soon as that prefix is fully
-	// downloaded. It lets the caller copy blocks into the blob store while
+	// contiguous order as soon as that prefix is fully downloaded. The order
+	// runs from StartImmutable upwards, not from zero — a catch-up leaves
+	// everything below the marker to the blob store this run is adding to, so
+	// those archives are neither downloaded nor extracted here and the files
+	// need not exist. It lets the caller copy blocks into the blob store while
 	// later chunks are still downloading. When nil, downloads run to
 	// completion before any processing (legacy behaviour).
 	// The callback runs on a single consumer goroutine and serializes
@@ -174,8 +177,15 @@ type ContiguousChunk struct {
 	// read and these settle which bytes, which is the half a handle cannot
 	// carry — see BootstrapResult.ImmutableDigests.
 	Digests map[string]string
+	// Start is the lowest immutable file number this run covers, from
+	// BootstrapConfig.StartImmutable. Anything below it was left to the blob
+	// store the run is adding to and is not in Dir.
+	Start uint64
 	// Num is the highest immutable file number whose trio is complete. Every
-	// number at or below it has been downloaded, verified and extracted.
+	// number in [Start, Num] has been downloaded, verified and extracted;
+	// below Start, nothing has, which is why the range is given rather than
+	// implied. Chunks are addressed by number — a number is not a position in
+	// Dir's listing unless Start is zero.
 	Num uint64
 }
 

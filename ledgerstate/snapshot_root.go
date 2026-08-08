@@ -521,5 +521,17 @@ func ParseSnapshotFile(f *os.File) (*RawLedgerState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshot file: %w", err)
 	}
+	return ParseSnapshotBytes(data)
+}
+
+// ParseSnapshotBytes parses a ledger state snapshot the caller already holds.
+//
+// A caller checking a signature over the snapshot needs this rather than
+// ParseSnapshotFile: it has to hash something and parse something, and those
+// have to be the same bytes. Hashing a descriptor and then handing the parser
+// the same descriptor is not the same thing — the parser re-reads, and a write
+// through the file in between is visible to the second read. Reading once and
+// giving both the buffer leaves nothing to change.
+func ParseSnapshotBytes(data []byte) (*RawLedgerState, error) {
 	return parseSnapshotData(data)
 }

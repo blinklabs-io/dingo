@@ -2919,7 +2919,7 @@ handle — vetting it twice would be two resolutions of one name, so the tree
 whose ImmutableDB was accepted could differ from the tree whose ledger state is
 imported.
 
-##### Handles bind directories; digests bind bytes
+##### Handles bind directories; digests bind bytes; the inode has to be ours
 
 A handle settles *which directory* is read. It settles nothing about the files
 inside it, and those are a second substitution: a writer who shares the download
@@ -2927,6 +2927,24 @@ directory never has to leave the directory the handle refers to in order to
 rename a file of their own over a verified one. Both halves of every tree's
 verification therefore have to reach the read, and a check that closed the file
 it looked at has not reached anything.
+
+There is a third layer under both, and it has to come first, because the two
+above are worthless without it. A digest binds bytes to a *descriptor*, and a
+descriptor is only as good as the inode behind it: a write through the same
+inode is visible through a descriptor already open on it, so no amount of
+verifying at the open catches it. What rules that out is owning the inode.
+Extraction therefore unlinks any existing entry and creates the file
+exclusively (`createExtractedFile`), so every extracted file is one this
+process made, at its own `0640`, owned by it. `O_CREATE|O_TRUNC` would have
+kept whatever inode was there — and merge extraction writes straight into a
+shared destination, where the name it is about to write can already be occupied
+by a world-writable file somebody else created. Certified bytes would then sit
+inside a file still theirs to rewrite. With the unlink, losing the race between
+it and the create is a refusal rather than an adoption.
+
+After that, an in-place write needs write permission on a `0640` file owned by
+the node's user — which is the node's own user, and no filesystem check defends
+a boundary that has already been crossed.
 
 That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
 downloaded trio as its archive lands and closes it; the tip read, the catch-up
@@ -2942,7 +2960,8 @@ reader keeps:
 |---|---|---|
 | immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` hashes each chunk, primary and secondary file as it opens it, and the read goes through that same descriptor |
 | immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
-| ancillary (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | `verifySignedSnapshot` hashes the state and table discovery opened, before either reaches a parser |
+| ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
+| ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
 
 A file the map does not cover is refused rather than read. The manifest walk and
 the digest list both already reject an unlisted file, but those are statements
@@ -2950,6 +2969,12 @@ about the tree as it was checked; a file planted afterwards is refused only at
 the point of use. For the same reason an ancillary tree flagged `AncillaryVerified`
 without a digest map is refused outright — the flag would otherwise rest on a
 check nothing downstream can repeat.
+
+Note what the last two rows do *not* do: hash a descriptor and hand the parser
+that same descriptor. It looks equivalent and is not, because the parser then
+reads the file a second time. Where the payload fits in memory the fix is to
+read once and give both the buffer; where it does not, it is to map once and
+hash the mapping. Either way there is no second read to catch out.
 
 Re-hashing is the cost the alternative was not worth. Binding by retained
 descriptor would mean holding one for every file in the snapshot from
@@ -2960,13 +2985,28 @@ timestamps are settable. Hashing at the open costs one extra pass over data the
 reader is about to read anyway, so it is served from page cache and bounded by
 SHA-256 throughput rather than by I/O.
 
+A digest map that is present but empty is refused rather than treated as
+absent. Absence is v1, which certifies an archive and not the files in it;
+emptiness is a v2 result that lost its digests. Selecting the unverified read on
+emptiness would make "verify nothing" reachable by removing something, which is
+the direction a fail-open always comes from.
+
 The pipelined copy is bounded as well as verified, because it reads a tree the
 download pool is still filling. Archives arrive out of order, so a chunk above
 the contiguous prefix may be present and half written; `NewFromRootVerified`'s
-chunk limit keeps the reader inside the prefix whose archives have been
-verified, rather than opening an unfinished file and refusing it as if it had
-been tampered with. The bound is the reason that database is rebuilt per
-callback rather than kept.
+bound keeps the reader inside the prefix whose archives have been verified,
+rather than opening an unfinished file and refusing it as if it had been
+tampered with. The bound is the reason that database is rebuilt per callback
+rather than kept.
+
+Both the bound and the lookup are by chunk *name*, never by position in the
+directory listing (`immutable.ChunkName`, `LastSlotInChunk`). The two coincide
+only for a range starting at chunk 0, and a catch-up downloads only the
+archives above the import marker — so a position lookup would answer about a
+different chunk than the caller named and bound the copy by the wrong slot.
+`ContiguousChunk` carries `Start` alongside `Num` for the same reason: below
+`Start` the files belong to the blob store this run is adding to and are not in
+the extraction directory at all.
 
 `checkImmutableTrio` hashes through the immutable directory's handle for a
 different reason, and remains necessary: it decides whether a downloaded archive
@@ -3038,7 +3078,8 @@ describing possibly different directories, with nothing but timing between
 them — and the manifest walk that proves the payload is completely covered would
 be about a third. The manifest's digests travel with that handle for the same
 reason one level down, and the files discovery selected are checked against them
-before parsing; see *Handles bind directories; digests bind bytes* above.
+before parsing; see *Handles bind directories; digests bind bytes; the inode
+has to be ours* above.
 
 A result carrying no handle is refused rather than opened by name — by
 `openBootstrappedImmutable` for the immutable side and by `importLedgerState`

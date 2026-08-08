@@ -823,6 +823,7 @@ func downloadImmutables(
 				Dir:     immutableDir,
 				Root:    immutableRoot,
 				Digests: digests,
+				Start:   startArchive,
 				Num:     num,
 			}); err != nil {
 				copyErr = err
