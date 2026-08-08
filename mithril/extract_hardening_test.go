@@ -1188,3 +1188,51 @@ func TestOpenVerifiedDirAllowsSymlinkedAncestor(t *testing.T) {
 	require.NoError(t, err)
 	_ = opened.Close()
 }
+
+// TestExtractDoesNotAdoptAPreExistingFile is the difference between an inode
+// this process owns and one it merely writes to.
+//
+// Merge extraction writes straight into a shared destination, so a name it is
+// about to write can already be occupied by a file somebody else created.
+// Opening that with O_CREATE|O_TRUNC keeps their inode, their owner and their
+// mode, and puts certified bytes inside a file they can still write to — which
+// no amount of verifying at the descriptor helps, because a same-inode write
+// is visible through a descriptor already open on it.
+//
+// So the entry is unlinked and created exclusively: what gets written is
+// always an inode created here, owned by this process, at extraction's own
+// mode.
+func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	// Group- and world-writable, as somebody planting a file to write to
+	// later would leave it.
+	planted := filepath.Join(dir, "00000.chunk")
+	require.NoError(t, os.WriteFile(planted, []byte("theirs"), 0o666))
+	before, err := os.Stat(planted)
+	require.NoError(t, err)
+
+	file, err := createExtractedFile(root, "00000.chunk")
+	require.NoError(t, err)
+	_, writeErr := file.WriteString("ours")
+	require.NoError(t, writeErr)
+	require.NoError(t, file.Close())
+
+	after, err := os.Stat(planted)
+	require.NoError(t, err)
+	assert.False(t, os.SameFile(before, after),
+		"extraction must not write into an inode somebody else created")
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0o640), after.Mode().Perm(),
+			"the extracted file must carry extraction's own mode, not the "+
+				"mode it found")
+	}
+	contents, err := os.ReadFile(planted)
+	require.NoError(t, err)
+	assert.Equal(t, "ours", string(contents),
+		"the extracted bytes must still land at the name the archive asked "+
+			"for")
+}
