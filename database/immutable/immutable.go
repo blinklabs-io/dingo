@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -71,6 +72,19 @@ var ErrPointBeyondLastChunk = errors.New(
 // produces.
 func ChunkName(num uint64) string {
 	return fmt.Sprintf("%05d", num)
+}
+
+// isCanonicalChunkName reports whether name is exactly what ChunkName produces
+// for some number: decimal digits, and padded the way ChunkName pads.
+//
+// Round-tripping rather than pattern matching, so the two can never drift: if
+// ChunkName's format changes, this follows it.
+func isCanonicalChunkName(name string) bool {
+	num, err := strconv.ParseUint(name, 10, 64)
+	if err != nil {
+		return false
+	}
+	return ChunkName(num) == name
 }
 
 // ChunkNameAbove reports whether chunk name sorts after bound numerically.
@@ -275,6 +289,20 @@ func (i *ImmutableDb) getChunkNames() ([]string, error) {
 			continue
 		}
 		chunkName := strings.TrimSuffix(entryName, entryExt)
+		// Only ChunkName's own output. The ordering below is numeric because
+		// these names are canonical, and one that is not — differently
+		// padded, or not a number at all — would sort by neither rule and
+		// could take the last position, which is the tip.
+		//
+		// Dropped rather than refused, unlike the slot entries in a ledger
+		// tree: there, ignoring a candidate selects another one, while a name
+		// that is not a chunk name names no chunk at all. A verified database
+		// refuses anything absent from its digest map in any case, so the
+		// only reading that lets a planted file decide the tip is the one
+		// that keeps it.
+		if !isCanonicalChunkName(chunkName) {
+			continue
+		}
 		ret = append(ret, chunkName)
 	}
 	// Numerically, not lexically. Names are a fixed width only below 100000,

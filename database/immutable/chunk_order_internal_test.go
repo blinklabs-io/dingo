@@ -54,3 +54,46 @@ func TestChunkNamesSortNumericallyPastFiveDigits(t *testing.T) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
 }
+
+// TestChunkNamesDropsNonCanonicalNames keeps the numeric ordering's premise
+// true rather than assumed.
+//
+// Ordering by width and then by text is only numeric ordering while every name
+// is ChunkName's own output. A differently padded name breaks it — "0000001"
+// is seven characters, so it sorts above every six-digit chunk and becomes the
+// tip — and the tip is what bounds the copy and what the catch-up compares
+// against.
+//
+// Dropped rather than refused, unlike the slot entries in a ledger tree. There
+// the choice is between candidates, so ignoring one selects another; here a
+// name that is not a chunk name names no chunk, and the verified reader
+// refuses anything absent from the digest map in any case. Including it is the
+// only option that lets a planted file decide the tip.
+func TestChunkNamesDropsNonCanonicalNames(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		"00000", "00001",
+		"0000001", // canonical for no number: wider than ChunkName pads to
+		"1e5",     // not a number at all
+		"00002x",  // trailing junk
+		"-00003",  // negative
+	} {
+		if err := os.WriteFile(
+			filepath.Join(dir, name+chunkFileExtension), []byte("x"), 0o640,
+		); err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+	}
+	imm, err := New(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	got, err := imm.getChunkNames()
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	want := []string{"00000", "00001"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+}

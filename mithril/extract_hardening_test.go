@@ -1267,3 +1267,41 @@ func TestExtractRefusesADirectoryAtAFileName(t *testing.T) {
 	require.NoError(t, statErr, "the directory must survive the refusal")
 	assert.True(t, info.IsDir())
 }
+
+// TestRemoveExtractedFileRefusesASymlinkedParent keeps the clearing step's
+// traversal under the same rule as the checks in front of it.
+//
+// os.Root confines resolution to the root but still follows a symlink whose
+// target stays inside it, so opening the parent with Root.OpenRoot would let a
+// component substituted mid-extraction redirect the unlink — and the retry
+// after it — at another directory in the tree. Every component is therefore
+// opened through its parent and confirmed to be the entry the name denotes,
+// which rejects a symlink and a substitution with one check.
+func TestRemoveExtractedFileRefusesASymlinkedParent(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0o750))
+	victim := filepath.Join(dir, "real", "00000.chunk")
+	require.NoError(t, os.WriteFile(victim, []byte("ours"), 0o640))
+	// Relative and inside the root: os.Root refuses an absolute link or one
+	// leaving the root outright, so only this shape reaches the check.
+	requireSymlinkSupport(t, "real", filepath.Join(dir, "link"))
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	// Control: through the real name it is removed, so the refusal below is
+	// about the symlink and not about the removal never working.
+	require.NoError(t, removeExtractedFile(
+		root, "real/00000.chunk", filepath.Join(dir, "real", "00000.chunk"),
+	))
+	require.NoError(t, os.WriteFile(victim, []byte("ours"), 0o640))
+
+	err = removeExtractedFile(
+		root, "link/00000.chunk", filepath.Join(dir, "link", "00000.chunk"),
+	)
+	require.Error(t, err, "a symlinked parent must not be traversed")
+	_, statErr := os.Lstat(victim)
+	assert.NoError(t, statErr,
+		"the file behind the symlink must survive the refusal")
+}

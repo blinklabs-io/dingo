@@ -185,6 +185,48 @@ func openExtractRoot(parentRoot *os.Root, name string) (*os.Root, error) {
 	return openVerifiedRoot(parentRoot, name)
 }
 
+// openVerifiedParent walks the directory components of name from root and
+// returns a handle on the immediate parent, the final component, and a
+// function releasing the handles the walk opened.
+//
+// Each component is opened through the one above it and confirmed to be the
+// entry that name denotes (openVerifiedRoot), rather than handing the whole
+// path to Root.OpenRoot. Root confines resolution to the root but still
+// follows a symlink whose target stays inside it, so one component substituted
+// mid-extraction would redirect whatever the caller does with the handle at
+// another directory in the tree — and extraction's symlink checks run once,
+// before the work, which is precisely the window that matters here.
+//
+// The returned handle is root itself when name has no directory part; the
+// release function is a no-op then, since closing the caller's root is not
+// this function's to do.
+func openVerifiedParent(
+	root *os.Root,
+	name string,
+) (*os.Root, string, func(), error) {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(name)), "/")
+	parent := root
+	var opened []*os.Root
+	release := func() {
+		for i := len(opened) - 1; i >= 0; i-- {
+			_ = opened[i].Close()
+		}
+	}
+	for _, part := range parts[:len(parts)-1] {
+		if part == "" || part == "." {
+			continue
+		}
+		next, err := openVerifiedRoot(parent, part)
+		if err != nil {
+			release()
+			return nil, "", nil, err
+		}
+		opened = append(opened, next)
+		parent = next
+	}
+	return parent, parts[len(parts)-1], release, nil
+}
+
 // openVerifiedRoot opens an existing name under parentRoot and confirms the
 // handle refers to the entry that name refers to.
 //

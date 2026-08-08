@@ -19,7 +19,6 @@ package mithril
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
@@ -39,22 +38,21 @@ import (
 // AT_REMOVEDIR cannot remove a directory at all, so the refusal is the
 // operation rather than a guard in front of it.
 //
-// The traversal stays with os.Root: only the final component reaches the
-// syscall, so a name cannot walk out of the root on the way to being removed.
+// The traversal verifies every component on the way down
+// (openVerifiedParent), so only the final one reaches the syscall and no
+// symlink substituted mid-extraction can redirect it. Root.OpenRoot on the
+// whole path would not do: it confines resolution to the root but follows a
+// symlink whose target stays inside it, which is enough to unlink a different
+// file in the tree.
 //
 // fullPath is unused here; the Windows implementation needs it because it has
 // no handle-relative removal to address the entry through.
 func removeExtractedFile(root *os.Root, name, _ string) error {
-	parent := root
-	base := name
-	if dir := filepath.Dir(name); dir != "." && dir != "" {
-		nested, err := root.OpenRoot(dir)
-		if err != nil {
-			return fmt.Errorf("opening %s: %w", dir, err)
-		}
-		defer nested.Close()
-		parent, base = nested, filepath.Base(name)
+	parent, base, release, err := openVerifiedParent(root, name)
+	if err != nil {
+		return err
 	}
+	defer release()
 	dir, err := parent.Open(".")
 	if err != nil {
 		return fmt.Errorf("opening extraction directory: %w", err)

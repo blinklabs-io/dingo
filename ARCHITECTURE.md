@@ -2952,6 +2952,17 @@ between the two turns "refuse the directory" into "unlink their file". Losing
 the race between the clear and the create is likewise a refusal rather than an
 adoption.
 
+Its traversal is verified rather than resolved. `Root.OpenRoot` on the whole
+path confines resolution to the root but still follows a symlink whose target
+stays inside it, which is enough to unlink a different file in the tree — and
+extraction's symlink checks run once, before the work, so the window is real.
+`openVerifiedParent` therefore opens each component through the one above it
+and confirms the handle refers to the entry the name denotes, holding those
+handles across the removal. On Windows only the immediate parent's own name is
+resolved a second time, since it has no handle-relative removal; that is the
+same residue `removeEmptyExtractDir` carries, now narrowed to one component and
+mitigated by the handle held on it.
+
 After that, an in-place write needs write permission on a `0640` file owned by
 the node's user — which is the node's own user, and no filesystem check defends
 a boundary that has already been crossed.
@@ -3025,6 +3036,15 @@ sorts after `"100000"` as text. The listing's order is what the tip read and
 the point search rest on, so a lexical sort there would report the wrong tip
 and bisect a list that is not ordered, and a lexical bound would hide the chunk
 just below it while admitting the one just above.
+
+That ordering is only numeric while every name is `ChunkName`'s own output, so
+the listing drops anything that is not (`isCanonicalChunkName`, by
+round-tripping rather than by pattern, so the two cannot drift). A differently
+padded `0000001.chunk` is seven characters and would otherwise sort above every
+six-digit chunk and become the tip. Dropped rather than refused, unlike the
+slot entries in a ledger tree: there, ignoring a candidate selects another one,
+whereas a name that is not a chunk name names no chunk at all — and a verified
+database refuses anything absent from its digest map regardless.
 
 `checkImmutableTrio` hashes through the immutable directory's handle for a
 different reason, and remains necessary: it decides whether a downloaded archive

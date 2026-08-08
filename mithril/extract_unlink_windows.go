@@ -19,6 +19,7 @@ package mithril
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
@@ -31,14 +32,28 @@ import (
 // then removing would let a writer swap a file in between and have it
 // unlinked, which is the whole reason this is not os.Root.Remove.
 //
-// Unlike the Unix path this addresses the entry by name rather than through
-// the parent handle, because Windows has no handle-relative removal. A
-// substituted parent could therefore redirect it, which Windows makes hard by
-// refusing to move a directory while handles are open beneath it — the
-// extraction root is held open throughout. Same limit as
-// removeEmptyExtractDir, for the same reason.
-func removeExtractedFile(_ *os.Root, _, fullPath string) error {
-	path, err := windows.UTF16PtrFromString(fullPath)
+// Unlike the Unix path the deletion itself is addressed by name, because
+// Windows has no handle-relative removal — the same limit removeEmptyExtractDir
+// carries, for the same reason.
+//
+// What is narrowed is everything above it. Every directory component is walked
+// through its parent's handle and confirmed to be the entry the name denotes
+// (openVerifiedParent), and those handles are held across the deletion, so a
+// reparse point substituted mid-extraction is refused during the walk rather
+// than followed by DeleteFile. Only the immediate parent's own name is
+// resolved a second time, and Windows makes substituting it hard by refusing
+// to move a directory while handles are open on it.
+func removeExtractedFile(root *os.Root, name, fullPath string) error {
+	parent, base, release, err := openVerifiedParent(root, name)
+	if err != nil {
+		return err
+	}
+	defer release()
+	// Built from the verified walk rather than taken from the caller, so the
+	// name deleted is the one the handles above were checked for. fullPath is
+	// kept for the error, which is what an operator sees.
+	target := filepath.Join(parent.Name(), base)
+	path, err := windows.UTF16PtrFromString(target)
 	if err != nil {
 		return fmt.Errorf("resolving extraction destination: %w", err)
 	}
