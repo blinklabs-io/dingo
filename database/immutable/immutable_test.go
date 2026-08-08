@@ -560,3 +560,51 @@ func TestLastSlotInChunkIsByNumberNotPosition(t *testing.T) {
 		t.Fatalf("chunk 0 is absent and must report so: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestNewFromRootVerifiedBoundHoldsPastFiveDigits covers the width change.
+//
+// ChunkName pads to five digits, which stops being a fixed width at 100000 —
+// and comparing "99999" with "100000" as strings puts them the wrong way
+// round, because '9' sorts after '1'. The bound would then hide the chunk
+// immediately below it and admit the one above, which is both halves of what
+// it exists to prevent.
+//
+// No fixture is needed on disk for this: the names alone decide it, and a
+// real tree at those numbers is a hundred thousand files.
+func TestNewFromRootVerifiedBoundHoldsPastFiveDigits(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		bound string
+		above bool
+	}{
+		{name: "00000", bound: "00000", above: false},
+		{name: "00001", bound: "00000", above: true},
+		// The pair a string comparison gets backwards, both ways round.
+		{name: "99999", bound: "100000", above: false},
+		{name: "100000", bound: "99999", above: true},
+		{name: "100000", bound: "100000", above: false},
+		{name: "100001", bound: "100000", above: true},
+		{name: "999999", bound: "1000000", above: false},
+	} {
+		if got := immutable.ChunkNameAbove(
+			tc.name, tc.bound,
+		); got != tc.above {
+			t.Errorf(
+				"chunk %s above bound %s: got %v, want %v",
+				tc.name, tc.bound, got, tc.above,
+			)
+		}
+	}
+
+	// And the numbers those names come from stay ordered through the change.
+	if immutable.ChunkNameAbove(
+		immutable.ChunkName(99999), immutable.ChunkName(100000),
+	) {
+		t.Error("chunk 99999 must be inside a bound of 100000")
+	}
+	if !immutable.ChunkNameAbove(
+		immutable.ChunkName(100000), immutable.ChunkName(99999),
+	) {
+		t.Error("chunk 100000 must be outside a bound of 99999")
+	}
+}

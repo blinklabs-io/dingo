@@ -613,47 +613,67 @@ func clearEmptyDestination(
 // to give a clearer error than the runtime would; O_NOFOLLOW makes the final
 // component race-free where the platform supports it.
 //
-// Any existing entry is unlinked first and the file is then created
-// exclusively, so what gets written is always an inode created here. Opening
-// an existing name with O_CREATE|O_TRUNC keeps whatever inode is there,
-// including its owner and its mode — and merge extraction writes straight into
-// a shared destination, where a name it is about to write can already be
-// occupied by a file somebody else created, world-writable. Certified bytes
-// would then live inside a file that is still theirs to rewrite, which no
-// later verification can catch: a same-inode write is visible through a
-// descriptor already open on it, so binding the read to the descriptor does
-// not help. Owning the inode is what makes that binding worth anything.
+// The file is created exclusively, so what gets written is always an inode
+// created here. Opening an existing name with O_CREATE|O_TRUNC keeps whatever
+// inode is there, including its owner and its mode — and merge extraction
+// writes straight into a shared destination, where a name it is about to write
+// can already be occupied by a file somebody else created, world-writable.
+// Certified bytes would then live inside a file that is still theirs to
+// rewrite, which no later verification can catch: a same-inode write is
+// visible through a descriptor already open on it, so binding the read to the
+// descriptor does not help. Owning the inode is what makes that binding worth
+// anything.
 //
-// O_EXCL without the unlink would refuse a resume, which legitimately
-// overwrites a partial file an interrupted run left behind. With it, the
-// window between the unlink and the create is a refusal rather than an
-// adoption: somebody who wins it makes the extraction fail, not succeed into
-// their file.
+// An occupied name is cleared and the create retried once, because O_EXCL
+// alone would refuse a resume — which legitimately overwrites a partial file
+// an interrupted run left behind. The clearing removes files and refuses
+// directories (removeExtractedFile), so a directory at the name still fails
+// the extraction as it always did rather than being deleted; it is one
+// operation, not a type check followed by a removal that could act on
+// something else by then. Whoever wins the window between the two creates
+// makes the extraction fail, not succeed into their file.
 func createExtractedFile(root *os.Root, name string) (*os.File, error) {
 	if err := assertNoSymlinkComponents(root, name); err != nil {
 		return nil, err
 	}
-	// Remove rather than Truncate: unlinking is what breaks the association
-	// with an inode somebody else may hold open or own. A symlink at the name
-	// is unlinked as the link rather than followed, which is also what the
-	// checks above want.
-	if err := root.Remove(name); err != nil &&
-		!errors.Is(err, fs.ErrNotExist) {
+	file, err := createExtractedFileExclusive(root, name)
+	if err == nil {
+		return file, nil
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf(
+			"%w: opening %s: %w", ErrExtractUnsafePath, name, err,
+		)
+	}
+	// Unlinking rather than truncating is what breaks the association with an
+	// inode somebody else may own or hold open. A symlink at the name is
+	// unlinked as the link rather than followed, which is also what the checks
+	// above want.
+	if err := removeExtractedFile(
+		root, name, filepath.Join(root.Name(), name),
+	); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf(
 			"%w: clearing %s: %w", ErrExtractUnsafePath, name, err,
 		)
 	}
-	file, err := root.OpenFile(
-		name,
-		os.O_CREATE|os.O_EXCL|os.O_WRONLY|openNoFollowFlag,
-		0o640,
-	)
+	file, err = createExtractedFileExclusive(root, name)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: opening %s: %w", ErrExtractUnsafePath, name, err,
 		)
 	}
 	return file, nil
+}
+
+func createExtractedFileExclusive(
+	root *os.Root,
+	name string,
+) (*os.File, error) {
+	return root.OpenFile(
+		name,
+		os.O_CREATE|os.O_EXCL|os.O_WRONLY|openNoFollowFlag,
+		0o640,
+	)
 }
 
 // mkdirExtracted creates a directory relative to the extraction root.

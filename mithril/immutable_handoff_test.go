@@ -888,9 +888,9 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(t *testing.T) 
 
 	// The state only. The table is not hashed here at all any more — its
 	// digest travels to the import and is checked against the mapping the
-	// decoder walks, which is covered by
-	// ledgerstate.TestParseUTxOsFromOpenFileChecksTheMappedBytes and by
-	// TestSignedTableDigestRefusesAnUncoveredTable above.
+	// decoder walks. That half is covered by
+	// TestSignedTableDigestRefusesAnUncoveredTable, further down this file,
+	// and by ledgerstate.TestParseUTxOsFromOpenFileChecksTheMappedBytes.
 	for _, name := range []string{"state"} {
 		t.Run(name, func(t *testing.T) {
 			build := func(t *testing.T, substitute bool) *BootstrapResult {

@@ -1236,3 +1236,34 @@ func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
 		"the extracted bytes must still land at the name the archive asked "+
 			"for")
 }
+
+// TestExtractRefusesADirectoryAtAFileName keeps the clearing step from being a
+// removal of whatever it finds.
+//
+// Making the extracted file's inode our own means getting rid of what occupies
+// the name, and the easy way to do that removes an empty directory as readily
+// as a file. That is a different act: a file at the name was going to have its
+// contents replaced anyway, but a directory is something extraction was never
+// asked to touch — before this it failed on one, and it must keep failing
+// rather than start deleting.
+//
+// It also has to be the removal that refuses, not a check before it. A check
+// establishes what the name holds and the removal acts on what it holds now,
+// and a writer between the two turns "refuse the directory" into "unlink their
+// file".
+func TestExtractRefusesADirectoryAtAFileName(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+
+	occupied := filepath.Join(dir, "00000.chunk")
+	require.NoError(t, os.Mkdir(occupied, 0o750))
+
+	_, err = createExtractedFile(root, "00000.chunk")
+	require.Error(t, err, "a directory at the name must fail the extraction")
+
+	info, statErr := os.Lstat(occupied)
+	require.NoError(t, statErr, "the directory must survive the refusal")
+	assert.True(t, info.IsDir())
+}

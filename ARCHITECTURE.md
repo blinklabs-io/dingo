@@ -2933,14 +2933,24 @@ above are worthless without it. A digest binds bytes to a *descriptor*, and a
 descriptor is only as good as the inode behind it: a write through the same
 inode is visible through a descriptor already open on it, so no amount of
 verifying at the open catches it. What rules that out is owning the inode.
-Extraction therefore unlinks any existing entry and creates the file
-exclusively (`createExtractedFile`), so every extracted file is one this
-process made, at its own `0640`, owned by it. `O_CREATE|O_TRUNC` would have
-kept whatever inode was there — and merge extraction writes straight into a
-shared destination, where the name it is about to write can already be occupied
-by a world-writable file somebody else created. Certified bytes would then sit
-inside a file still theirs to rewrite. With the unlink, losing the race between
-it and the create is a refusal rather than an adoption.
+Extraction therefore creates every file exclusively (`createExtractedFile`), so
+every extracted file is one this process made, at its own `0640`, owned by it.
+`O_CREATE|O_TRUNC` would have kept whatever inode was there — and merge
+extraction writes straight into a shared destination, where the name it is
+about to write can already be occupied by a world-writable file somebody else
+created. Certified bytes would then sit inside a file still theirs to rewrite.
+
+An occupied name is cleared and the create retried once, because `O_EXCL` alone
+would refuse a resume, which legitimately overwrites a partial file an
+interrupted run left. The clearing is `removeExtractedFile` — `unlinkat`
+without `AT_REMOVEDIR` on Unix, `DeleteFile` on Windows — which removes files
+and cannot remove a directory, so a directory at that name still fails the
+extraction as it always did rather than being deleted. It is the same rule as
+`removeEmptyExtractDir` one level up and exists for the same reason: the type
+has to be settled by the operation, not by a check in front of it, or a writer
+between the two turns "refuse the directory" into "unlink their file". Losing
+the race between the clear and the create is likewise a refusal rather than an
+adoption.
 
 After that, an in-place write needs write permission on a `0640` file owned by
 the node's user — which is the node's own user, and no filesystem check defends
@@ -3007,6 +3017,14 @@ different chunk than the caller named and bound the copy by the wrong slot.
 `ContiguousChunk` carries `Start` alongside `Num` for the same reason: below
 `Start` the files belong to the blob store this run is adding to and are not in
 the extraction directory at all.
+
+Names are compared numerically rather than as text, both when sorting the
+listing and when applying the bound (`ChunkNameAbove`). `ChunkName` pads to
+five digits, so names are a fixed width only below 100000; past that `"99999"`
+sorts after `"100000"` as text. The listing's order is what the tip read and
+the point search rest on, so a lexical sort there would report the wrong tip
+and bisect a list that is not ordered, and a lexical bound would hide the chunk
+just below it while admitting the one just above.
 
 `checkImmutableTrio` hashes through the immutable directory's handle for a
 different reason, and remains necessary: it decides whether a downloaded archive

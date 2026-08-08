@@ -15,6 +15,7 @@
 package immutable
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -70,6 +71,21 @@ var ErrPointBeyondLastChunk = errors.New(
 // produces.
 func ChunkName(num uint64) string {
 	return fmt.Sprintf("%05d", num)
+}
+
+// ChunkNameAbove reports whether chunk name sorts after bound numerically.
+//
+// Not a plain string comparison. ChunkName pads to five digits, so names are a
+// fixed width only below 100000 — past that they grow, and "99999" > "100000"
+// as strings while 99999 < 100000 as numbers. A bound compared lexically would
+// then hide the chunk just below it and admit the one just above, which is
+// both of the things a bound exists to prevent. Longer means larger first, and
+// only equal widths compare as text.
+func ChunkNameAbove(name, bound string) bool {
+	if len(name) != len(bound) {
+		return len(name) > len(bound)
+	}
+	return name > bound
 }
 
 // ErrDigestMismatch reports a file whose contents are not the contents that
@@ -261,13 +277,21 @@ func (i *ImmutableDb) getChunkNames() ([]string, error) {
 		chunkName := strings.TrimSuffix(entryName, entryExt)
 		ret = append(ret, chunkName)
 	}
-	slices.Sort(ret)
+	// Numerically, not lexically. Names are a fixed width only below 100000,
+	// and every lookup here works off this order — the tip is the last entry
+	// and the point search bisects it — so a lexical sort past that width
+	// would report the wrong tip and bisect a list that is not ordered.
+	slices.SortFunc(ret, func(a, b string) int {
+		if len(a) != len(b) {
+			return cmp.Compare(len(a), len(b))
+		}
+		return strings.Compare(a, b)
+	})
 	// Bounded reads see a shorter database rather than a failing one; see
-	// NewFromRootVerified. Chunk names are fixed width and zero padded, so
-	// comparing them as strings orders them as numbers.
+	// NewFromRootVerified.
 	if i.maxChunk != "" {
 		ret = slices.DeleteFunc(ret, func(name string) bool {
-			return name > i.maxChunk
+			return ChunkNameAbove(name, i.maxChunk)
 		})
 	}
 	return ret, nil
