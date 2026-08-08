@@ -1202,6 +1202,15 @@ func TestOpenVerifiedDirAllowsSymlinkedAncestor(t *testing.T) {
 // So the entry is unlinked and created exclusively: what gets written is
 // always an inode created here, owned by this process, at extraction's own
 // mode.
+//
+// The assertion is a write through the descriptor they kept, not a comparison
+// of the two stat results. os.SameFile compares device and inode number, and
+// an inode number is reused as soon as it is freed — an earlier version of
+// this test unlinked the planted file, saw the number handed straight back on
+// Linux, and reported adoption where there was none. That is the same reason
+// the production code does not identify files by os.SameFile either. Holding
+// the descriptor open also pins the old inode, so the reuse cannot happen and
+// the test is deterministic rather than dependent on the allocator.
 func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	root, err := os.OpenRoot(dir)
@@ -1209,11 +1218,13 @@ func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
 	t.Cleanup(func() { _ = root.Close() })
 
 	// Group- and world-writable, as somebody planting a file to write to
-	// later would leave it.
+	// later would leave it — and they keep a descriptor on it, which is the
+	// whole point of planting one.
 	planted := filepath.Join(dir, "00000.chunk")
 	require.NoError(t, os.WriteFile(planted, []byte("theirs"), 0o666))
-	before, err := os.Stat(planted)
+	theirs, err := os.OpenFile(planted, os.O_WRONLY, 0)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = theirs.Close() })
 
 	file, err := createExtractedFile(root, "00000.chunk")
 	require.NoError(t, err)
@@ -1221,20 +1232,24 @@ func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
 	require.NoError(t, writeErr)
 	require.NoError(t, file.Close())
 
-	after, err := os.Stat(planted)
+	// They write through the descriptor they held all along. If extraction
+	// had adopted their inode this reaches the extracted file, and no check
+	// downstream could tell.
+	_, err = theirs.WriteAt([]byte("XXXX"), 0)
 	require.NoError(t, err)
-	assert.False(t, os.SameFile(before, after),
-		"extraction must not write into an inode somebody else created")
-	if runtime.GOOS != "windows" {
-		assert.Equal(t, os.FileMode(0o640), after.Mode().Perm(),
-			"the extracted file must carry extraction's own mode, not the "+
-				"mode it found")
-	}
+
 	contents, err := os.ReadFile(planted)
 	require.NoError(t, err)
 	assert.Equal(t, "ours", string(contents),
-		"the extracted bytes must still land at the name the archive asked "+
-			"for")
+		"a writer holding the pre-existing inode must not reach the "+
+			"extracted file")
+	if runtime.GOOS != "windows" {
+		info, statErr := os.Stat(planted)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o640), info.Mode().Perm(),
+			"the extracted file must carry extraction's own mode, not the "+
+				"mode it found")
+	}
 }
 
 // TestExtractRefusesADirectoryAtAFileName keeps the clearing step from being a
