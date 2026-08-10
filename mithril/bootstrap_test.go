@@ -456,9 +456,10 @@ func TestBootstrapRejectsPathTraversalInSnapshotNetwork(t *testing.T) {
 	}
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
-		DownloadDir:   t.TempDir(),
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       t.TempDir(),
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validating snapshot metadata")
@@ -509,9 +510,10 @@ func TestBootstrapRejectsPathTraversalInSnapshotDigest(t *testing.T) {
 	}
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
-		DownloadDir:   t.TempDir(),
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       t.TempDir(),
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validating snapshot metadata")
