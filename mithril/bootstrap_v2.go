@@ -63,7 +63,7 @@ func bootstrapV2(
 	cfg BootstrapConfig,
 	aggregatorURL string,
 ) (*BootstrapResult, error) {
-	client := NewClient(aggregatorURL)
+	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
 
 	// Step 1: Fetch latest artifact and verify its self-hash
 	artifact, err := client.GetLatestCardanoDatabaseSnapshot(ctx)
@@ -602,6 +602,7 @@ func downloadDigestsArchive(
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
 	if err != nil {
@@ -974,6 +975,7 @@ func fetchImmutableArchive(
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
 	if err != nil {
@@ -1103,6 +1105,7 @@ func downloadAncillaryV2(
 				IdleTimeout:         cfg.DownloadIdleTimeout,
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+				AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 			},
 		)
 		if err == nil {

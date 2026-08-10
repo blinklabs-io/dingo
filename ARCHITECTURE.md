@@ -2824,6 +2824,20 @@ Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
 everything downstream of `Bootstrap()` is backend-agnostic.
 
+Transport security is a separate boundary from the certificate/ancillary
+authentication above and covers both backends uniformly: the configured
+aggregator URL (`client.go`'s `Client.doGet`) and every snapshot/ancillary
+artifact location the aggregator returns (`download.go`'s
+`DownloadConfig.Validate`) must use HTTPS, checked before the first request
+of each — not just on redirects, where `httpsOnlyRedirect` already blocked
+a downgrade target. An aggregator response can put a plaintext URL in the
+first hop itself, so redirect policy alone doesn't cover it.
+`Mithril.AllowInsecureHTTP` (`--mithril-allow-insecure-http`,
+`DINGO_MITHRIL_ALLOW_INSECURE_HTTP`) is the explicit, default-off escape
+hatch for local development and tests against a plaintext aggregator; it
+threads from config through `SyncConfig`/`BootstrapConfig` down to both
+checks and must not be set in production.
+
 ### Catch-up vs bootstrap dispatch
 
 `mithril.Sync` (the `dingo mithril sync` entry point) selects what to do from

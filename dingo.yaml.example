@@ -532,6 +532,11 @@ mithril:
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
   aggregatorUrl: ""
+  # Allow the aggregator URL and snapshot artifact locations to use plain
+  # HTTP instead of HTTPS. Default: false. This is an explicit escape
+  # hatch for local development and tests against a plaintext aggregator;
+  # do not enable it in production.
+  allowInsecureHttp: false
   # Mithril artifact backend: "v2" (default) restores from incremental
   # per-immutable-file archives verified against the certified merkle
   # root; "v1" uses the legacy full snapshot tarballs (being phased
