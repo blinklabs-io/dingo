@@ -485,19 +485,32 @@ func (m *VoteManager) EnableVoting(
 			err,
 		)
 	}
-	// Only fall through to registering in the static registry when the
-	// on-chain key doesn't already vouch for this one. Registering here
-	// unconditionally would make a rotated on-chain key that already
-	// passed ValidateVotingKey fail to enable voting anyway, on nothing
-	// more than a stale entry a peer or this operator never got around to
-	// updating in leiosVoterPublicKeys -- the on-chain key is already the
-	// stronger, PoP-verified trust source, so a conflict against a weaker
-	// one it has superseded is not a real problem.
-	onChain, ok := entry.onChainKeys[hex.EncodeToString(poolKeyHash[:])]
-	onChainMatch := ok && onChain.Equal(key.PublicKey())
+	// A resolvable on-chain key for this pool is authoritative: if it
+	// disagrees with key, enabling voting anyway would succeed here but
+	// emit nothing, since resolveVoterKey (checked by every emission)
+	// prefers the same on-chain key and would keep rejecting it. Reject
+	// now instead of failing silently later -- this also catches an
+	// epoch transition landing a key rotation between a caller's
+	// ValidateVotingKey check and this call.
+	//
+	// Only fall through to registering in the static registry when there
+	// is no on-chain key to compare against. Requiring a registry entry
+	// unconditionally would make an on-chain-only key that already passed
+	// ValidateVotingKey fail to enable voting anyway, on nothing more than
+	// a stale entry a peer or this operator never got around to updating
+	// in leiosVoterPublicKeys -- the on-chain key is already the stronger,
+	// PoP-verified trust source, so a conflict against a weaker one it has
+	// superseded is not a real problem.
+	onChain, onChainKnown := entry.onChainKeys[hex.EncodeToString(poolKeyHash[:])]
+	if onChainKnown && !onChain.Equal(key.PublicKey()) {
+		return fmt.Errorf(
+			"configured leios voting key does not match the on-chain registered key for pool %s",
+			poolKeyHash.String(),
+		)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if onChainMatch {
+	if onChainKnown {
 		m.logger.Debug(
 			"leios voting key matches the on-chain registration, skipping static registry",
 			"pool", poolKeyHash.String(),

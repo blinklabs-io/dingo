@@ -1310,6 +1310,48 @@ func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 	assert.True(t, votingKey.PublicKey().Equal(rotatedKey.PublicKey()))
 }
 
+// TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration
+// proves EnableVoting hard-rejects a configured key that disagrees with a
+// resolvable on-chain key for the pool, rather than falling back to the
+// registry and succeeding with a key that would never actually verify:
+// resolveVoterKey (checked by every emission) prefers the same on-chain
+// key, so silently enabling voting here would just make every subsequent
+// emission fail instead of failing loudly now.
+func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
+	t *testing.T,
+) {
+	onChainKey := testSigningKey(t, 201)
+	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	require.NoError(t, err)
+	wrongKey := testSigningKey(t, 202)
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			emptyRegistry, regErr := NewVoterRegistry(nil)
+			require.NoError(t, regErr)
+			cfg.Registry = emptyRegistry
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       onChainKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	require.Error(t, fixture.mgr.EnableVoting(poolKeyHash, wrongKey))
+
+	fixture.mgr.mu.Lock()
+	votingKey := fixture.mgr.votingKey
+	fixture.mgr.mu.Unlock()
+	assert.Nil(t, votingKey, "a rejected key must not be enabled")
+}
+
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
 	fixture := newManagerFixture(t)
 	var poolKeyHash lcommon.PoolKeyHash
