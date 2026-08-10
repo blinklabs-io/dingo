@@ -460,7 +460,8 @@ func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
 	tree, archPath, err := downloadAncillary(
 		t.Context(),
 		BootstrapConfig{
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AllowInsecureHTTP: true,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 		&SnapshotListItem{
 			SnapshotBase: SnapshotBase{
@@ -518,6 +519,7 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 		tree, archPath, err := downloadAncillary(
 			t.Context(),
 			BootstrapConfig{
+				AllowInsecureHTTP:           true,
 				Logger:                      discard,
 				DownloadMaxTransientRetries: -1,
 				DownloadMaxIdleRetries:      1,
@@ -549,7 +551,10 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 		downloadDir := t.TempDir()
 		tree, archPath, err := downloadAncillary(
 			t.Context(),
-			BootstrapConfig{Logger: discard},
+			BootstrapConfig{
+				Logger:            discard,
+				AllowInsecureHTTP: true,
+			},
 			snapshot(srv.URL),
 			downloadDir,
 		)
@@ -584,6 +589,7 @@ func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T)
 	_, archPath, err := downloadAncillary(
 		t.Context(),
 		BootstrapConfig{
+			AllowInsecureHTTP:           true,
 			Logger:                      slog.New(slog.NewTextHandler(io.Discard, nil)),
 			DownloadMaxTransientRetries: -1,
 		},
@@ -638,7 +644,8 @@ func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
 	tree, _, archPath, err := downloadAncillaryV2(
 		t.Context(),
 		BootstrapConfig{
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AllowInsecureHTTP: true,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 			// Verification on is what reaches the manifest check at all; with
 			// it off the archive would simply be accepted.
 			VerifyCertificateChain:   true,
@@ -704,7 +711,10 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 		) {
 			return downloadAncillary(
 				t.Context(),
-				BootstrapConfig{Logger: discard},
+				BootstrapConfig{
+					Logger:            discard,
+					AllowInsecureHTTP: true,
+				},
 				&SnapshotListItem{
 					SnapshotBase: SnapshotBase{
 						Digest:             digest,
@@ -720,7 +730,10 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 		) {
 			tree, _, archPath, err := downloadAncillaryV2(
 				t.Context(),
-				BootstrapConfig{Logger: discard},
+				BootstrapConfig{
+					Logger:            discard,
+					AllowInsecureHTTP: true,
+				},
 				&CardanoDatabaseSnapshot{
 					Hash:    digest,
 					Network: "preprod",

@@ -309,7 +309,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
-		"midnight_indexing", storageMode.IsAPI(),
+		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
 	)
 
@@ -354,6 +354,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
 			dingo.WithBarkPort(cfg.BarkPort),
 			dingo.WithBarkHost(cfg.BarkHost),
+			dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
 			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 				Enabled:   cfg.HistoryExpiry.Enabled,
 				Frequency: cfg.HistoryExpiry.Frequency,
@@ -382,6 +383,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				},
 			),
 			dingo.WithMidnightConfig(dingo.MidnightConfig{
+				Enabled:                     cfg.Midnight.Enabled,
 				Port:                        cfg.Midnight.Port,
 				Host:                        cfg.Midnight.Host,
 				CNightPolicyID:              cfg.Midnight.CNightPolicyID,

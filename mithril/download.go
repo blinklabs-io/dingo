@@ -117,6 +117,11 @@ type DownloadConfig struct {
 	// connections are pooled across files. When nil, a per-call client
 	// with keep-alives disabled is used (single-archive downloads).
 	HTTPClient *http.Client
+	// AllowInsecureHTTP permits URL to use plain HTTP instead of HTTPS.
+	// By default, Validate rejects a non-HTTPS URL; this is an explicit
+	// escape hatch for local development and tests (e.g. against an
+	// httptest server) and should not be set in production.
+	AllowInsecureHTTP bool
 }
 
 // Validate checks DownloadConfig values before use.
@@ -126,6 +131,11 @@ func (cfg DownloadConfig) Validate() error {
 			"download config MaxIdleRetries must be >= 0, got %d",
 			cfg.MaxIdleRetries,
 		)
+	}
+	if cfg.URL != "" {
+		if err := requireSecureURL(cfg.URL, "download URL", cfg.AllowInsecureHTTP); err != nil {
+			return err
+		}
 	}
 	return nil
 }

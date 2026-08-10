@@ -177,6 +177,7 @@ func Snapshot(
 	}
 	tip, tipErr := db.GetTip(nil)
 	commitTimestamp, commitTimestampErr := db.Metadata().GetCommitTimestamp()
+	gates, gatesErr := db.Metadata().GetNodeSettingsGates()
 
 	var backupErr, closeErr, metadataErr error
 	var backupWG sync.WaitGroup
@@ -211,6 +212,12 @@ func Snapshot(
 			commitTimestampErr,
 		)
 	}
+	if gatesErr != nil {
+		return Manifest{}, fmt.Errorf(
+			"get node settings gates: %w",
+			gatesErr,
+		)
+	}
 	if backupErr != nil {
 		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
 	}
@@ -241,6 +248,7 @@ func Snapshot(
 		TipBlockNumber:  tip.BlockNumber,
 		BlobPlugin:      blobPluginName,
 		MetadataPlugin:  metadataPluginName,
+		Gates:           gates,
 		DingoVersion:    dingoVersion,
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),

@@ -150,6 +150,20 @@ func (d *Database) LatestPoolOpCertSequence(
 	return d.metadata.LatestPoolOpCertSequence(pkh, txn.Metadata())
 }
 
+// LatestPoolOpCertSequences returns the highest observed op-cert sequence for
+// every pool that has issued a block, keyed by pool key hash. This backs the
+// GetChainDepState local-state-query, whose counters cover every cold key the
+// chain has accepted a certificate for rather than only the active pools.
+func (d *Database) LatestPoolOpCertSequences(
+	txn *Txn,
+) (map[string]uint64, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.LatestPoolOpCertSequences(txn.Metadata())
+}
+
 // GetPools returns pools by key hash.
 func (d *Database) GetPools(
 	pkhs []lcommon.PoolKeyHash,

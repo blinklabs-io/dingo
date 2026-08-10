@@ -438,7 +438,9 @@ type LedgerStateConfig struct {
 	// the local pool stake-threshold check while d remains active.
 	// Interim measure until reward calculation lands and reward balances can be
 	// included in the leadership stake. Set from the network in node.go (true
-	// on musashi, false otherwise).
+	// on musashi, false otherwise) via Config.prototypeTrustBypassesEnabled,
+	// which requires an unambiguous Musashi identity so this can never be
+	// reached from a preview/preprod/mainnet configuration.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. dingo already trusts (logs, does not reject)
@@ -448,8 +450,12 @@ type LedgerStateConfig struct {
 	// (Musashi) certified closure and ranking-block transactions are trusted in
 	// the same way. Running dingo's rule set only to discard any disagreement is
 	// wasted work that prevents the node from reaching tip under load. Set true
-	// on Musashi in node.go. Interim until the Leios certificate / endorser-
-	// availability surface is complete (#2587).
+	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
+	// requires an unambiguous Musashi identity so this can never be reached
+	// from a preview/preprod/mainnet configuration. Applies to Dijkstra-era
+	// transactions only — see LedgerState.skipDijkstraTxValidation. Interim
+	// until the Leios certificate / endorser-availability surface is complete
+	// (#2587).
 	SkipDijkstraTxValidation bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
@@ -588,10 +594,14 @@ type LedgerState struct {
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
-	// nowFunc overrides the wall clock used by the operational slot/time
-	// fallbacks. Nil outside tests, which inject a fixed clock so those
-	// fallbacks are deterministic.
-	nowFunc func() time.Time
+	// timeConverter owns slot/wall-clock time conversion (SlotToTime,
+	// TimeToSlot, SlotToEpoch, EpochInfo) and the operational near-now
+	// fallbacks used while the applied ledger is behind the wall clock.
+	// NewLedgerState builds it eagerly; timeConv() (see slot.go) only lazily
+	// builds it for bare-constructed LedgerStates that skip NewLedgerState
+	// (test-only), guarded by timeConverterOnce.
+	timeConverter     *SlotTimeConverter
+	timeConverterOnce sync.Once
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
@@ -842,6 +852,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	ls.timeConverter = ls.newTimeConverter()
 	ls.publishSnapshotsLocked()
 	// Cache configured chain checkpoints (keyed by block height) so the
 	// hot block-processing path does an O(1) lookup. Nil when the network
@@ -1717,7 +1728,7 @@ func (ls *LedgerState) initScheduler() error {
 	slotClockConfig := SlotClockConfig{
 		Logger: ls.config.Logger,
 	}
-	provider := newLedgerStateSlotProvider(ls)
+	provider := newSlotTimeConverterProvider(ls.timeConv())
 	ls.slotClock = NewSlotClock(provider, slotClockConfig)
 	ls.slotTickChan = ls.slotClock.Subscribe()
 
@@ -4180,6 +4191,54 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 	return shouldValidate && (ls.reachedTip.Load() || reachesTip)
 }
 
+// skipDijkstraTxValidation reports whether the per-transaction rule set is
+// *skipped* for a transaction being validated under era eraId — true means
+// ValidateTxFunc is not called for it.
+//
+// This is the ledger half of the Musashi prototype's accepted non-validating
+// behaviour (see LedgerStateConfig.SkipDijkstraTxValidation), and its scope is
+// deliberately narrow: the bypass applies to Dijkstra-era transactions only.
+// Transactions validated under any earlier era — Conway and before — still run
+// their full rule set even when the prototype flag is set, because the
+// prototype's trust argument (endorser transactions are stored but never
+// applied, so ranking-block transactions that spend endorser-resident outputs
+// are unresolvable) exists only in Dijkstra/Leios. Header validation is
+// likewise unaffected: KES, VRF proof, registered-VRF-key binding and opcert
+// checks all still apply, and only the stake-derived leader threshold is
+// downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
+//
+// Note what this flag does *not* decide: whether a Dijkstra validation failure
+// rejects the block. That is trustDijkstraTxValidationError, which is
+// profile-independent — so on the Dijkstra path the accept/reject outcome is
+// the same either way, and this flag only governs whether the rules are run at
+// all (CPU cost and disagreement logging).
+func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
+	return eraId == dijkstra.EraIdDijkstra &&
+		ls.config.SkipDijkstraTxValidation
+}
+
+// trustDijkstraTxValidationError reports whether a per-transaction validation
+// failure under era eraId is logged and trusted instead of rejecting the block.
+//
+// This is deliberately *not* gated on the network profile or on
+// SkipDijkstraTxValidation: a Dijkstra block reaches here only because it was
+// admitted to the chain by its Leios certificate, an endorser block may be only
+// partially resolvable, and the certificate/validation surface is still
+// evolving — so rewinding a certified chain on a disagreement is not yet the
+// right response on any profile. Dijkstra is only in the active era table when
+// EnableDijkstra is set (Musashi, runMode "leios", or startEra "dijkstra"), so
+// a default preview/preprod/mainnet node never reaches this path.
+//
+// The consequence for the trust boundary is worth stating plainly:
+// SkipDijkstraTxValidation changes whether the rules run, not whether a bad
+// Dijkstra transaction is rejected. Tightening this to enforce was item 5 of
+// #2587, which was closed without that item being done; it needs its own
+// change, with DevNet/Leios validation, rather than riding along with a
+// configuration-boundary fix.
+func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
+	return eraId == dijkstra.EraIdDijkstra
+}
+
 func (ls *LedgerState) ledgerProcessBlock(
 	txn *database.Txn,
 	point ocommon.Point,
@@ -4473,8 +4532,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// throughput below the block-production rate, so skip it. The normal
 			// CIP-conformant / Dijkstra path applies endorser txs (complete UTxO)
 			// and validates normally — it is never skipped here.
-			skipDijkstraValidation := validationEra.Id == dijkstra.EraIdDijkstra &&
-				ls.config.SkipDijkstraTxValidation
+			skipDijkstraValidation := ls.skipDijkstraTxValidation(
+				validationEra.Id,
+			)
 			if validationEra.ValidateTxFunc != nil && !skipDijkstraValidation {
 				// Use the previous era's protocol
 				// parameters when validating an era-1
@@ -4532,7 +4592,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// tighten to enforce once endorser-block availability and
 				// Leios certificate validation are complete.
 				if err != nil &&
-					validationEra.Id == dijkstra.EraIdDijkstra {
+					ls.trustDijkstraTxValidationError(validationEra.Id) {
 					ls.config.Logger.Warn(
 						"Dijkstra tx validation disagreement (trusting Leios-certified block)",
 						"component",

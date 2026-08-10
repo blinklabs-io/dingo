@@ -152,11 +152,12 @@ func TestBootstrap(t *testing.T) {
 
 	var progressCalled atomic.Int32
 	result, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:          "preprod",
-		Backend:          BackendV1,
-		AggregatorURL:    server.URL,
-		DownloadDir:      downloadDir,
-		CleanupAfterLoad: true,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       downloadDir,
+		CleanupAfterLoad:  true,
 		OnProgress: func(p DownloadProgress) {
 			progressCalled.Add(1)
 		},
@@ -227,10 +228,11 @@ func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
 	)
 
 	result, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:       "preprod",
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
-		DownloadDir:   downloadDir,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
+		DownloadDir:       downloadDir,
 	})
 	require.NoError(t, err)
 	require.Equal(
@@ -266,6 +268,7 @@ func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 		Network:                "preprod",
 		Backend:                BackendV1,
 		AggregatorURL:          server.URL,
+		AllowInsecureHTTP:      true,
 		VerifyCertificateChain: true,
 	})
 	require.Error(t, err)
@@ -282,9 +285,10 @@ func TestBootstrapNoSnapshots(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:       "preprod",
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no snapshots available")
@@ -313,9 +317,10 @@ func TestBootstrapNoLocations(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
-		Network:       "preprod",
-		Backend:       BackendV1,
-		AggregatorURL: server.URL,
+		Network:           "preprod",
+		Backend:           BackendV1,
+		AggregatorURL:     server.URL,
+		AllowInsecureHTTP: true,
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no download locations")
@@ -633,7 +638,7 @@ func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -699,7 +704,7 @@ func TestVerifyCertificateChainWithModeSTMRejectsContentHashMismatch(
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	_, err = VerifyCertificateChainWithMode(
 		context.Background(),
 		client,
@@ -792,7 +797,7 @@ func TestVerifyCertificateChainWithModeReturnsDetails(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	result, err := VerifyCertificateChainWithMode(
 		context.Background(),
 		client,
@@ -935,6 +940,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 		Network:                "preprod",
 		Backend:                BackendV1,
 		AggregatorURL:          server.URL,
+		AllowInsecureHTTP:      true,
 		VerifyCertificateChain: true,
 	})
 	require.Error(t, err)
@@ -1185,10 +1191,11 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 			require.NoError(t, os.MkdirAll(downloadDir, 0o750))
 
 			_, err := Bootstrap(context.Background(), BootstrapConfig{
-				Network:       "preprod",
-				Backend:       BackendV1,
-				AggregatorURL: server.URL,
-				DownloadDir:   downloadDir,
+				AllowInsecureHTTP: true,
+				Network:           "preprod",
+				Backend:           BackendV1,
+				AggregatorURL:     server.URL,
+				DownloadDir:       downloadDir,
 			})
 			require.Error(t, err)
 			assert.ErrorIs(t, err, ErrUnsafeSnapshotDigest)
@@ -1285,10 +1292,11 @@ func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
 		}
 
 		result, err := Bootstrap(context.Background(), BootstrapConfig{
-			Network:       "preprod",
-			Backend:       BackendV1,
-			AggregatorURL: server.URL,
-			DownloadDir:   t.TempDir(),
+			AllowInsecureHTTP: true,
+			Network:           "preprod",
+			Backend:           BackendV1,
+			AggregatorURL:     server.URL,
+			DownloadDir:       t.TempDir(),
 		})
 		require.NoError(t, err,
 			"a failed ancillary download is non-fatal without verification")
@@ -1326,12 +1334,16 @@ func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
 			fixture.ancillaryArchive = []byte("not an archive")
 
 			result, err := Sync(context.Background(), SyncConfig{
-				Network:         "preprod",
-				DataDir:         t.TempDir(),
-				StorageMode:     "core",
-				Backend:         BackendV2,
-				AggregatorURL:   fixture.server.URL,
-				VerifyCertChain: false,
+				Network:       "preprod",
+				DataDir:       t.TempDir(),
+				StorageMode:   "core",
+				Backend:       BackendV2,
+				AggregatorURL: fixture.server.URL,
+				// The fixture serves over plain HTTP, so opt into the
+				// insecure-transport escape hatch the same way the other
+				// httptest-backed Sync tests do.
+				AllowInsecureHTTP: true,
+				VerifyCertChain:   false,
 			})
 			require.NoError(t, err)
 			assert.Equal(t, uint64(1000), result.LedgerSlot,

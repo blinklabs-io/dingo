@@ -2,6 +2,7 @@
 -- This file is immutable after release; changes are detected by its checksum.
 CREATE TABLE IF NOT EXISTS `commit_timestamp` (`id` integer PRIMARY KEY AUTOINCREMENT,`timestamp` integer);
 CREATE TABLE IF NOT EXISTS `node_settings` (`id` integer PRIMARY KEY AUTOINCREMENT,`storage_mode` text NOT NULL,`network` text NOT NULL);
+CREATE TABLE IF NOT EXISTS `node_settings_gate` (`name` text NOT NULL,`value` text NOT NULL,`recorded_epoch` integer NOT NULL,`recorded_slot` integer NOT NULL,PRIMARY KEY (`name`));
 CREATE TABLE IF NOT EXISTS `account` (`staking_key` blob,`credential_tag` integer NOT NULL DEFAULT 0,`pool` blob,`drep` blob,`id` integer PRIMARY KEY AUTOINCREMENT,`added_slot` integer,`created_slot` integer NOT NULL DEFAULT 0,`certificate_id` integer,`reward` text,`drep_type` integer DEFAULT 0,`active` numeric DEFAULT true,`expiration_epoch` integer DEFAULT 0);
 CREATE INDEX IF NOT EXISTS `idx_account_expiration_epoch` ON `account`(`expiration_epoch`);
 CREATE INDEX IF NOT EXISTS `idx_account_certificate_id` ON `account`(`certificate_id`);
@@ -180,6 +181,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS `idx_pool_pool_key_hash` ON `pool`(`pool_key_h
 CREATE TABLE IF NOT EXISTS `pool_opcert_sequence` (`pool_key_hash` blob,`id` integer PRIMARY KEY AUTOINCREMENT,`slot` integer,`sequence` integer);
 CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_slot` ON `pool_opcert_sequence`(`slot`);
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_slot` ON `pool_opcert_sequence`(`pool_key_hash`,`slot`);
+CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`);
 CREATE TABLE IF NOT EXISTS `pool_registration` (`margin` text,`metadata_url` text,`vrf_key_hash` blob,`pool_key_hash` blob,`reward_account` blob,`reward_account_credential_tag` integer NOT NULL DEFAULT 0,`metadata_hash` blob,`pledge` text,`cost` text,`certificate_id` integer,`id` integer PRIMARY KEY AUTOINCREMENT,`pool_id` integer,`added_slot` integer,`deposit_amount` text,CONSTRAINT `fk_pool_registration` FOREIGN KEY (`pool_id`) REFERENCES `pool`(`id`) ON DELETE CASCADE);
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_pool_reg_pool_slot` ON `pool_registration`(`pool_id`,`added_slot`);
 CREATE INDEX IF NOT EXISTS `idx_pool_registration_certificate_id` ON `pool_registration`(`certificate_id`);

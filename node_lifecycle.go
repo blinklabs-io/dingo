@@ -527,8 +527,8 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 			EndorserBlockFetcher:          n.ouroboros.FetchEndorserBlockByPoint,
 			EndorserBlockWaitSlots:        n.leiosPipelineTiming().CertifyByDeadlineSlots,
 			LeiosApplyEndorserBlockTxs:    !n.config.isMusashiNetwork(),
-			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
-			SkipDijkstraTxValidation:      n.config.isMusashiNetwork(),
+			SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
+			SkipDijkstraTxValidation:      n.config.prototypeTrustBypassesEnabled(),
 			// These six must mirror Run()'s construction exactly: they're
 			// operator-configured reward/pool-validation feature flags
 			// (CIP-23 min pool margin, CIP-50 pledge leverage, CIP-0163
@@ -712,6 +712,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 		Metadata:                    n.db.Metadata(),
 		SlotTimer:                   n.ledgerState,
 		Logger:                      n.config.logger,
+		PromRegistry:                n.config.promRegistry,
 		CNightPolicyID:              n.config.midnight.CNightPolicyID,
 		CNightAssetName:             n.config.midnight.CNightAssetName,
 		MappingValidatorAddress:     n.config.midnight.MappingValidatorAddress,
@@ -1077,6 +1078,7 @@ func (n *Node) reinitializeAPIServers() error {
 				ShutdownTimeout: n.config.shutdownTimeout,
 				Database:        midnightserver.NewDatabase(n.db),
 				SlotTimer:       n.ledgerState,
+				PromRegistry:    n.config.promRegistry,
 			},
 		)
 		if err != nil {
@@ -1235,7 +1237,13 @@ func (n *Node) databaseConfig() *database.Config {
 		PromRegistry:         n.config.promRegistry,
 		StorageMode:          string(n.config.storageMode),
 		Network:              n.config.network,
+		NetworkMagic:         n.config.networkMagic,
+		StartEra:             string(n.config.startEra),
 		StrictUtxoValidation: n.config.strictUtxoValidation,
+		BlobPlugin: n.config.pluginSelections[plugin.CapabilityStorageBlob].
+			Provider,
+		MetadataPlugin: n.config.pluginSelections[plugin.CapabilityStorageMetadata].
+			Provider,
 		CacheConfig: database.CborCacheConfig{
 			BlockLRUEntries: n.config.cacheBlockLRUEntries,
 			HotUtxoEntries:  n.config.cacheHotUtxoEntries,

@@ -120,6 +120,7 @@ type Querier interface {
 	GetMidnightEpochCandidatesByEpoch(ctx context.Context, epoch int64) (MidnightEpochCandidate, error)
 	GetMidnightRegistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightRegistration, error)
 	GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, error)
+	GetNodeSettingsGates(ctx context.Context) ([]GetNodeSettingsGatesRow, error)
 	GetOffchainMetadata(ctx context.Context, arg GetOffchainMetadataParams) (OffchainMetadatum, error)
 	GetOffchainMetadataFetchCandidates(ctx context.Context, arg GetOffchainMetadataFetchCandidatesParams) ([]OffchainMetadatum, error)
 	GetPParamUpdates(ctx context.Context, arg GetPParamUpdatesParams) ([]PparamUpdate, error)
@@ -155,6 +156,7 @@ type Querier interface {
 	InsertMidnightCommitteeCandidateRegistration(ctx context.Context, arg InsertMidnightCommitteeCandidateRegistrationParams) (int64, error)
 	InsertMidnightGovernanceDatum(ctx context.Context, arg InsertMidnightGovernanceDatumParams) (int64, error)
 	InsertNodeSettings(ctx context.Context, arg InsertNodeSettingsParams) (int64, error)
+	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
 	InsertOffchainMetadataPointer(ctx context.Context, arg InsertOffchainMetadataPointerParams) (int64, error)
 	InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error)
 	ReleaseFallbackRewardSnapshotGuard(ctx context.Context, id int64) (int64, error)
@@ -192,6 +194,7 @@ type Querier interface {
 	UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error)
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
+	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error
 }
 
 var _ Querier = (*Queries)(nil)

@@ -67,6 +67,15 @@ func resolveAggregatorURL(
 	return url, nil
 }
 
+// mithrilClientOptions builds the mithril.ClientOption set implied by
+// config, currently just the insecure-HTTP escape hatch.
+func mithrilClientOptions(cfg *config.Config) []mithril.ClientOption {
+	if cfg.Mithril.AllowInsecureHTTP {
+		return []mithril.ClientOption{mithril.WithAllowInsecureHTTP()}
+	}
+	return nil
+}
+
 // resolveMithrilBackend normalizes the configured Mithril artifact
 // backend, applying the node default (v2) when unset. The accepted set
 // comes from mithril.AcceptedBackends so a backend added there is
@@ -114,7 +123,9 @@ func mithrilListCommand() *cobra.Command {
 				return err
 			}
 
-			client := mithril.NewClient(aggregatorURL)
+			client := mithril.NewClient(
+				aggregatorURL, mithrilClientOptions(cfg)...,
+			)
 			if backend == mithril.BackendV2 {
 				return runMithrilListV2(cmd.Context(), client)
 			}
@@ -235,7 +246,9 @@ func mithrilShowCommand() *cobra.Command {
 				return err
 			}
 
-			client := mithril.NewClient(aggregatorURL)
+			client := mithril.NewClient(
+				aggregatorURL, mithrilClientOptions(cfg)...,
+			)
 			if backend == mithril.BackendV2 {
 				return runMithrilShowV2(
 					cmd.Context(), client, args[0],
@@ -559,6 +572,7 @@ func runMithrilSync(
 		CardanoConfigPath:      cfg.CardanoConfig,
 		Backend:                backend,
 		AggregatorURL:          cfg.Mithril.AggregatorURL,
+		AllowInsecureHTTP:      cfg.Mithril.AllowInsecureHTTP,
 		DownloadDir:            cfg.Mithril.DownloadDir,
 		DownloadIdleTimeout:    cfg.Mithril.DownloadIdleTimeout,
 		DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,

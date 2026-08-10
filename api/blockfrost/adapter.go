@@ -4595,6 +4595,11 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 				err,
 			)
 		}
+		// Unreachable against gouroboros v0.191.2, which returns an error on
+		// every path that yields no purpose. Kept deliberately: a nil purpose
+		// reaching the caller would be a silent wrong answer, and this
+		// package was already broken once by an upstream change to exactly
+		// this function's contract.
 		if purpose == nil {
 			return nil, fmt.Errorf(
 				"build script purpose for transaction %x tag=%d index=%d",

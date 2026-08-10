@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const midnightCheckpointPhase = "midnight"
@@ -58,6 +59,9 @@ type Config struct {
 	Metadata  metadata.MetadataStore
 	SlotTimer SlotTimer
 	Logger    *slog.Logger
+	// PromRegistry registers the indexer's block/event counters. Nil is
+	// safe -- the counters just never expose themselves to a registry.
+	PromRegistry prometheus.Registerer
 	// Midnight chain parameters
 	CNightPolicyID          string
 	CNightAssetName         string
@@ -121,6 +125,18 @@ type CandidateEntry struct {
 
 // DecodeEpochCandidatesCbor decodes a MidnightEpochCandidates.CandidatesCbor
 // blob back into its candidate entries.
+//
+// This (and DecodeCandidateInputsCbor below) uses fxamacker/cbor's
+// package-level Unmarshal directly (bare defaults: 131,072 max
+// array elements/map pairs, 32 max nested levels) rather than
+// gouroboros's raised-limit wrapper. That is intentional: the data
+// decoded here is never externally-supplied CBOR — it is the same
+// node's own MidnightEpochCandidates.CandidatesCbor/TxInputsCbor
+// blob, previously produced by EncodeCandidateInputsCbor/the
+// snapshot-writing code in this file from committee-candidate
+// registrations observed on-chain during a single epoch. That
+// naturally bounds the entry count far below fxamacker's defaults,
+// so no explicit larger limit is needed for this path.
 func DecodeEpochCandidatesCbor(data []byte) ([]CandidateEntry, error) {
 	var entries []CandidateEntry
 	if err := fxcbor.Unmarshal(data, &entries); err != nil {
@@ -172,8 +188,9 @@ func DecodeCandidateInputsCbor(data []byte) ([]CandidateInputRef, error) {
 // Indexer scans blocks for Midnight-relevant transactions and writes rows
 // to the midnight_* tables.
 type Indexer struct {
-	config Config
-	mu     sync.RWMutex
+	config  Config
+	mu      sync.RWMutex
+	metrics *indexerMetrics
 	// In-memory tracked UTxO sets; keyed by (tx_hash_hex, output_index).
 	cNightUTxOs map[utxoKey]cNightUTxO
 	regUTxOs    map[utxoKey]registrationUTxO
@@ -226,6 +243,7 @@ type Indexer struct {
 func New(cfg Config) (*Indexer, error) {
 	idx := &Indexer{
 		config:            cfg,
+		metrics:           newIndexerMetrics(cfg.PromRegistry),
 		cNightUTxOs:       make(map[utxoKey]cNightUTxO),
 		regUTxOs:          make(map[utxoKey]registrationUTxO),
 		candidates:        make(map[candidateKey][]byte),
@@ -641,6 +659,12 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 // Order: undo spends/deregistrations first (restore UTxOs), then undo
 // creates/registrations (remove UTxOs), so a UTxO created and spent within
 // the same block ends up correctly absent from memory after the rollback.
+//
+// This deletes rows a prior, already-committed call to processBlock counted
+// via recordBlockEvents. blocksIndexed/eventsTotal are intentionally not
+// decremented here -- see newIndexerMetrics -- so a chain reorg leaves both
+// counters ahead of the database's live row counts by however much this
+// rollback just removed.
 func (idx *Indexer) rollbackBlock(block models.Block) {
 	if idx.cnightEnabled {
 		spends, err := idx.config.Metadata.DeleteMidnightAssetSpendsByBlock(
@@ -1147,8 +1171,27 @@ func (idx *Indexer) processBlock(
 		idx.mu.RUnlock()
 	}
 
+	// counts tallies this block's written events by type, applied to the
+	// eventsTotal metric only after txn.Commit succeeds below -- a block
+	// that fails and rolls back must not have already-incremented counts
+	// for rows that never actually persisted.
+	//
+	// Each processTx/processOutput write site increments counts once per
+	// successful Create* call, regardless of whether that call actually
+	// inserted a new row or was a no-op against an existing one: the
+	// CreateMidnight* methods are idempotent (ON CONFLICT DO NOTHING, see
+	// DATABASE.md's Midnight Indexer section) so a crash-restart backfill
+	// replaying a block already indexed before the last persisted checkpoint
+	// returns success without inserting anything. counts (and so
+	// eventsTotal) does not distinguish that case from a genuine new row --
+	// doing so precisely would require CreateMidnight* to report whether it
+	// actually inserted, which the metadata.MetadataStore interface does not
+	// expose today. The overcount this can produce is bounded by how far
+	// backfill's replay window can lag the true last-processed block, not by
+	// total chain length.
+	counts := make(map[string]int, 4)
 	for i, tx := range txs {
-		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch, txn, journal); err != nil { //nolint:gosec
+		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch, txn, journal, counts); err != nil { //nolint:gosec
 			return err
 		}
 	}
@@ -1207,6 +1250,7 @@ func (idx *Indexer) processBlock(
 		)
 	}
 	committed = true
+	idx.metrics.recordBlockEvents(counts)
 	return nil
 }
 
@@ -1224,6 +1268,7 @@ func (idx *Indexer) processTx(
 	govEpoch uint64,
 	txn types.Txn,
 	journal *blockMutationJournal,
+	counts map[string]int,
 ) error {
 	txHashBytes := tx.Id().Bytes()
 
@@ -1260,6 +1305,7 @@ func (idx *Indexer) processTx(
 					hex.EncodeToString(txHashBytes), inpHashHex, inpIdx, err,
 				)
 			}
+			counts["spend"]++
 			idx.mu.Lock()
 			journal.cNightUTxOs.record(idx.cNightUTxOs, key)
 			delete(idx.cNightUTxOs, key)
@@ -1283,6 +1329,7 @@ func (idx *Indexer) processTx(
 					hex.EncodeToString(txHashBytes), inpHashHex, inpIdx, err,
 				)
 			}
+			counts["deregistration"]++
 			idx.mu.Lock()
 			journal.regUTxOs.record(idx.regUTxOs, key)
 			delete(idx.regUTxOs, key)
@@ -1339,6 +1386,7 @@ func (idx *Indexer) processTx(
 			txn,
 			journal,
 			txInputsCborOnce,
+			counts,
 		); err != nil {
 			return err
 		}
@@ -1361,6 +1409,7 @@ func (idx *Indexer) processOutput(
 	txn types.Txn,
 	journal *blockMutationJournal,
 	txInputsCborOnce func() ([]byte, error),
+	counts map[string]int,
 ) error {
 	txHashHex := hex.EncodeToString(txHashBytes)
 	key := utxoKey{TxHash: txHashHex, Index: outIdx}
@@ -1388,6 +1437,7 @@ func (idx *Indexer) processOutput(
 						txHashHex, outIdx, err,
 					)
 				}
+				counts["create"]++
 				idx.mu.Lock()
 				journal.cNightUTxOs.record(idx.cNightUTxOs, key)
 				idx.cNightUTxOs[key] = cNightUTxO{
@@ -1424,6 +1474,7 @@ func (idx *Indexer) processOutput(
 							txHashHex, outIdx, err,
 						)
 					}
+					counts["registration"]++
 					idx.mu.Lock()
 					journal.regUTxOs.record(idx.regUTxOs, key)
 					idx.regUTxOs[key] = registrationUTxO{FullDatum: datumCbor}

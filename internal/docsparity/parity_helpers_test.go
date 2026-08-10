@@ -45,7 +45,6 @@ var contributorDocs = []string{
 // the state of the tree at some earlier point, so present-tense parity rules
 // do not apply to them.
 var historicalDocs = map[string]bool{
-	"RELEASE_NOTES.md":                  true,
 	"benchmark_results.md":              true,
 	"benchmark_results_api_backfill.md": true,
 	"benchmark_results_bp_pi.md":        true,

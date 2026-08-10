@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -342,6 +343,15 @@ Network:
 
 Database Workers:
   --db-workers controls the worker pool size.`,
+		// This feature's fatal startup errors (node settings gate
+		// mismatches, restore rejections) are carefully worded to name the
+		// exact conflicting values and source; roughly 200 lines of flag
+		// help printed underneath buries that message even though the
+		// Error: line still prints first. SilenceUsage only affects the
+		// automatic usage dump on an error return from RunE/
+		// PersistentPreRunE, not explicit `--help` or `-h` output, so this
+		// does not touch the help text itself.
+		SilenceUsage: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -391,8 +401,22 @@ Database Workers:
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
+		// Provenance is deliberately not populated by LoadConfig: an
+		// in-package test DeepEquals the whole struct it returns.
+		if err := cfg.RecordSourceProvenance(configFile); err != nil {
+			return fmt.Errorf("recording config provenance: %w", err)
+		}
+
 		if err := config.ApplyFlags(cmd, cfg); err != nil {
 			return fmt.Errorf("applying CLI flags: %w", err)
+		}
+
+		// Gated settings persisted in the database supply defaults, so a
+		// bare `dingo` resumes the network and storage mode it was created
+		// with. This must precede ApplyDefaults, Validate, and topology
+		// loading, all of which derive from Network.
+		if err := settingsresolve.Apply(cfg); err != nil {
+			return fmt.Errorf("resolving persisted node settings: %w", err)
 		}
 
 		// `dingo load <path>`: the positional argument is the

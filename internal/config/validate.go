@@ -74,6 +74,68 @@ func FullPotRewardsStandardNetwork(
 	return "", false
 }
 
+// MusashiNetworkIdentityConflict reports whether network/networkMagic mixes the
+// experimental Musashi network (the IOG Leios prototype) with a *different*
+// predefined network, returning the name of the network it collides with.
+//
+// This matters because Musashi is identified by either half of its identity —
+// the name "musashi" or network magic 164 — and that identity switches on
+// consensus/ledger trust bypasses (SkipLeaderStakeThresholdCheck,
+// SkipDijkstraTxValidation). Either half alone is enough to enable them, so a
+// half-matching configuration is dangerous in both directions:
+//
+//   - network "preview" with magic 164 runs the prototype's non-validating
+//     rules on a node the operator configured as preview; and
+//   - network "musashi" with magic 2 is worse still, because the handshake
+//     uses the magic: the node actually joins preview while trusting the
+//     prototype's rules.
+//
+// A custom name or an unregistered magic is not a conflict — those are private
+// prototype deployments (e.g. a Musashi mirror). Devnet is excluded for the
+// same reason it is excluded from FullPotRewardsStandardNetwork: it is a local
+// test network, not a production-like profile.
+func MusashiNetworkIdentityConflict(
+	network string,
+	networkMagic uint32,
+) (string, bool) {
+	nameIsMusashi := network == ouroboros.NetworkCardanoMusashi.Name
+	magicIsMusashi := networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+	if nameIsMusashi && !magicIsMusashi && networkMagic != 0 {
+		if known, ok := ouroboros.NetworkByNetworkMagic(networkMagic); ok &&
+			known.Name != ouroboros.NetworkCardanoMusashi.Name &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	if magicIsMusashi && !nameIsMusashi && network != "" {
+		if known, ok := ouroboros.NetworkByName(network); ok &&
+			known.Name != ouroboros.NetworkCardanoMusashi.Name &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	return "", false
+}
+
+// MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
+// identifies the Musashi prototype network, and is therefore permitted to run
+// with the prototype's consensus/ledger trust bypasses.
+//
+// A conflicting identity (see MusashiNetworkIdentityConflict) is deliberately
+// *not* the prototype network. Startup validation rejects those configurations
+// outright, but returning false here keeps the bypasses off even for an
+// embedder that builds a Config directly and never calls Validate.
+func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
+	if _, conflict := MusashiNetworkIdentityConflict(
+		network,
+		networkMagic,
+	); conflict {
+		return false
+	}
+	return network == ouroboros.NetworkCardanoMusashi.Name ||
+		networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+}
+
 // Validate checks the fully merged configuration (defaults, YAML,
 // environment, CLI flags) for invalid values and nonsensical
 // combinations. Every problem found is returned, joined into a single
@@ -311,6 +373,37 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
+	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
+	// whenever bark is enabled with a snapshot directory configured —
+	// exactly node.go's Run() gating for lifecycleEnabled. Those RPCs must
+	// never be reachable without a way to authenticate callers, regardless
+	// of bind address (BarkHost/effectiveBarkHost is a network control, not
+	// an identity one), so a client CA is required upfront here rather than
+	// left to fail deep inside bark.Bark.Start at startup.
+	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
+		c.BarkClientCAFilePath == "" {
+		errs = append(errs, errors.New(
+			"barkClientCaFilePath is required when bark is enabled "+
+				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
+				"destructive DatabaseService RPCs must not be mounted "+
+				"without a way to authenticate callers",
+		))
+	}
+	// mTLS client verification also needs the server's own TLS pair --
+	// without it, bark.Bark.Start's own equivalent check (independent of
+	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
+	// deep inside node startup instead of here. Checked independently of
+	// the barkPort/snapshotDir gate above so a barkClientCaFilePath set by
+	// mistake without barkPort/snapshotDir still gets flagged.
+	if serving && c.BarkClientCAFilePath != "" &&
+		(c.TlsCertFilePath == "" || c.TlsKeyFilePath == "") {
+		errs = append(errs, errors.New(
+			"barkClientCaFilePath requires tlsCertFilePath and tlsKeyFilePath "+
+				"to also be set for mTLS client verification",
+		))
+	}
+
 	// Mempool
 	mempoolCapacity, evictionWatermark, rejectionWatermark := c.MempoolSettings()
 	if mempoolCapacity < 0 {
@@ -401,6 +494,29 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				network,
 			))
 		}
+	}
+
+	// The Musashi prototype network's identity switches on consensus/ledger
+	// trust bypasses, so it must never be half-claimed by a configuration
+	// that also names or addresses a standard network. Rejected outright
+	// rather than defused silently: the operator asked for two mutually
+	// exclusive networks and only one of them can be what they meant.
+	if network, ok := MusashiNetworkIdentityConflict(
+		c.Network,
+		c.NetworkMagic,
+	); ok {
+		errs = append(errs, fmt.Errorf(
+			"network identity conflict: network %q with networkMagic %d "+
+				"identifies both the %q network and the Musashi prototype "+
+				"network (name %q, magic %d); the Musashi prototype disables "+
+				"consensus and ledger validation and must not be reachable "+
+				"from a standard network configuration",
+			c.Network,
+			c.NetworkMagic,
+			network,
+			ouroboros.NetworkCardanoMusashi.Name,
+			ouroboros.NetworkCardanoMusashi.NetworkMagic,
+		))
 	}
 
 	// Network identity
@@ -498,6 +614,20 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"delegatorInactivity (%d) must be in [1, 10000] when delegatorInactivityEnabled",
 			c.DelegatorInactivity,
+		))
+	}
+
+	// The Midnight indexer needs the api-mode indexes to function, so
+	// midnight.enabled requires storageMode "api". Reject the contradiction
+	// up front rather than letting it start indexer-less/silently. Dev mode
+	// force-upgrades storage mode to api at startup (node.Run), so it is
+	// exempted here the same way apiListeners above is.
+	if c.Midnight.Enabled && c.StorageMode != storageModeAPI &&
+		effectiveMode != RunModeDev && !c.RunMode.IsDevMode() {
+		errs = append(errs, fmt.Errorf(
+			"midnight.enabled requires storageMode %q, got %q: "+
+				"set storageMode to %q or disable midnight.enabled",
+			storageModeAPI, c.StorageMode, storageModeAPI,
 		))
 	}
 
