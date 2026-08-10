@@ -77,6 +77,7 @@ type fakeLeiosKeyProvider struct {
 
 func (f *fakeLeiosKeyProvider) GetLeiosKeys(
 	_ uint64,
+	_ []string,
 ) (map[string]*lcommon.LeiosKey, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1191,6 +1192,52 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 	fixture.mgr.mu.Unlock()
 	require.True(t, ok)
 	assert.False(t, stored.verified)
+}
+
+// TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure proves a
+// transient key-provider failure does not get memoized as "every seat
+// keyless" for the epoch: committeeAndParamsForEpoch must fail outright
+// (not cache an empty onChainKeys map) so a later, successful call can
+// still resolve keys normally once the failure clears.
+func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(t *testing.T) {
+	key := testSigningKey(t, 126)
+	proof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	var member CommitteeMember
+	keyProvider := &fakeLeiosKeyProvider{
+		err: errors.New("store temporarily unavailable"),
+	}
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			emptyRegistry, regErr := NewVoterRegistry(nil)
+			require.NoError(t, regErr)
+			cfg.Registry = emptyRegistry
+			cfg.KeyProvider = keyProvider
+		},
+	)
+
+	_, err = fixture.mgr.CommitteeForEpoch(5)
+	require.Error(t, err, "a failing key provider must not be papered over")
+	fixture.mgr.mu.Lock()
+	_, cached := fixture.mgr.committees[5]
+	fixture.mgr.mu.Unlock()
+	assert.False(t, cached, "a failed resolution must not be memoized")
+
+	keyProvider.mu.Lock()
+	keyProvider.err = nil
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	keyProvider.mu.Unlock()
+
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err, "retrying after the store recovers must succeed")
+	require.Equal(t, member.PoolKeyHash, committee.Members[3].PoolKeyHash)
 }
 
 func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {

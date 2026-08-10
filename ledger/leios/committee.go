@@ -61,9 +61,9 @@ type poolStake struct {
 	stake uint64
 }
 
-// prepareCommitteePools parses and validates the stake distribution shared by
-// both committee constructors. Keeping this in one place ensures they accept
-// the same pool identifiers and exclude the same zero-stake entries.
+// prepareCommitteePools parses and validates the stake distribution passed
+// to ComputeCommittee, decoding pool key hashes and excluding zero-stake
+// entries.
 func prepareCommitteePools(
 	poolStakes map[string]uint64,
 	totalActiveStake uint64,
@@ -96,9 +96,8 @@ func prepareCommitteePools(
 	return pools, nil
 }
 
-// buildCommittee assigns the member indices and lookup map shared by both
-// constructors after they have applied their protocol-specific ordering and
-// selection rules.
+// buildCommittee assigns member indices and the lookup map after
+// ComputeCommittee has applied its stake-coverage ordering and selection.
 func buildCommittee(
 	epoch uint64,
 	snapshotEpoch uint64,

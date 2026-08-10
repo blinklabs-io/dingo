@@ -51,32 +51,26 @@ func (a *leiosStakeDistributionAdapter) GetStakeDistribution(
 }
 
 // leiosKeyProviderAdapter adapts ledger.LedgerState to leios.LeiosKeyProvider,
-// resolving registered Leios keys for exactly the pools active in the same
-// stake snapshot the committee is built from. It returns raw (unverified)
-// keys -- VoteManager itself checks proof of possession before trusting one.
+// resolving registered Leios keys for exactly the pools the caller names
+// (the same set VoteManager already fetched a stake distribution for). It
+// returns raw (unverified) keys -- VoteManager itself checks proof of
+// possession before trusting one.
 type leiosKeyProviderAdapter struct {
-	stakeAdapter *leiosStakeDistributionAdapter
-	ledgerState  *ledger.LedgerState
+	ledgerState *ledger.LedgerState
 }
 
 func (a *leiosKeyProviderAdapter) GetLeiosKeys(
-	epoch uint64,
+	_ uint64,
+	poolKeyHashesHex []string,
 ) (_ map[string]*lcommon.LeiosKey, err error) {
 	if a.ledgerState == nil {
 		return nil, errors.New("ledger state unavailable")
 	}
-	poolStakes, _, err := a.stakeAdapter.GetStakeDistribution(epoch)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"stake distribution for leios key resolution: %w",
-			err,
-		)
-	}
-	if len(poolStakes) == 0 {
+	if len(poolKeyHashesHex) == 0 {
 		return map[string]*lcommon.LeiosKey{}, nil
 	}
-	poolKeyHashes := make([]lcommon.PoolKeyHash, 0, len(poolStakes))
-	for poolHashHex := range poolStakes {
+	poolKeyHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashesHex))
+	for _, poolHashHex := range poolKeyHashesHex {
 		raw, decodeErr := hex.DecodeString(poolHashHex)
 		if decodeErr != nil || len(raw) != len(lcommon.PoolKeyHash{}) {
 			continue
@@ -208,8 +202,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		EventBus:      n.eventBus,
 		StakeProvider: stakeAdapter,
 		KeyProvider: &leiosKeyProviderAdapter{
-			stakeAdapter: stakeAdapter,
-			ledgerState:  n.ledgerState,
+			ledgerState: n.ledgerState,
 		},
 		EpochProvider: &epochInfoAdapter{
 			ledgerState: n.ledgerState,

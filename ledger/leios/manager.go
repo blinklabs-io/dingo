@@ -88,8 +88,17 @@ type StakeDistributionProvider interface {
 // pass, so a pool with no usable key is simply absent from the resolved
 // map (a "keyless" committee seat: it still occupies a stake-weighted
 // voter id, but can never contribute a verified signature).
+//
+// poolKeyHashes names exactly the pools committeeAndParamsForEpoch already
+// fetched from StakeDistributionProvider for this same snapshot epoch, so
+// implementations must look up keys for that set rather than re-fetching
+// the stake distribution themselves -- doing so would duplicate a DB round
+// trip on every new-epoch committee computation.
 type LeiosKeyProvider interface {
-	GetLeiosKeys(epoch uint64) (map[string]*lcommon.LeiosKey, error)
+	GetLeiosKeys(
+		epoch uint64,
+		poolKeyHashes []string,
+	) (map[string]*lcommon.LeiosKey, error)
 }
 
 // EpochProvider supplies epoch information from the ledger.
@@ -479,6 +488,12 @@ func (m *VoteManager) EnableVoting(
 
 // ValidateVotingKey verifies that an operator-supplied voting key matches the
 // static registry shared with peers. It does not add a key to the registry.
+// ValidateVotingKey verifies that an operator-supplied voting key matches a
+// resolvable public key for the pool: its PoP-verified on-chain registered
+// key takes precedence, falling back to the static leiosVoterPublicKeys
+// registry. A pool with a valid on-chain registration therefore needs no
+// registry entry to enable voting -- requiring one here would defeat the
+// on-chain key rollout for every operator who registered for real.
 func (m *VoteManager) ValidateVotingKey(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
@@ -486,16 +501,25 @@ func (m *VoteManager) ValidateVotingKey(
 	if key == nil {
 		return errors.New("nil leios vote signing key")
 	}
-	registered, ok := m.registry.PublicKeyFor(poolKeyHash[:])
+	epoch := m.epochProvider.CurrentEpoch()
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve committee for epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	registered, ok := m.resolveVoterKey(entry, poolKeyHash[:])
 	if !ok {
 		return fmt.Errorf(
-			"no registered leios voting public key for pool %x",
+			"no resolvable leios voting public key for pool %x (checked the on-chain registration and leios-voter-public-keys)",
 			poolKeyHash,
 		)
 	}
 	if !registered.Equal(key.PublicKey()) {
 		return fmt.Errorf(
-			"configured leios voting key does not match registered public key for pool %x",
+			"configured leios voting key does not match the resolved public key for pool %x",
 			poolKeyHash,
 		)
 	}
@@ -560,7 +584,23 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 			err,
 		)
 	}
-	onChainKeys := m.resolveOnChainKeys(snapshotEpoch)
+	// Reuse the pool set already fetched above rather than handing the key
+	// provider just the epoch and letting it re-fetch the stake
+	// distribution itself -- that would double the DB round trip on every
+	// new-epoch committee computation.
+	poolKeyHashes := make([]string, 0, len(poolStakes))
+	for poolHashHex := range poolStakes {
+		poolKeyHashes = append(poolKeyHashes, poolHashHex)
+	}
+	// A failure here must not be cached: caching an empty onChainKeys map
+	// for this epoch would make every seat keyless until the process
+	// restarts or a rollback clears the memo, even after the underlying
+	// store recovers from what may be a transient failure. Returning the
+	// error instead means the next call retries from scratch.
+	onChainKeys, err := m.resolveOnChainKeys(snapshotEpoch, poolKeyHashes)
+	if err != nil {
+		return nil, err
+	}
 
 	m.mu.Lock()
 	if entry, ok := m.committees[epoch]; ok {
@@ -593,25 +633,28 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 
 // resolveOnChainKeys fetches raw registered Leios keys from keyProvider for
 // a snapshot epoch and returns only those whose proof of possession
-// verifies. A nil keyProvider (no ledger wired, e.g. in tests) or a
-// provider error yields an empty map rather than failing committee
-// computation -- on-chain keys are an additive resolution source on top of
-// Registry, not a hard dependency of it.
+// verifies. A nil keyProvider (no ledger wired, e.g. in tests) yields an
+// empty map with no error -- on-chain keys are an additive resolution
+// source on top of Registry, not a hard dependency of it. A provider error
+// is returned rather than swallowed into an empty map: the caller must not
+// cache an empty result for a transient failure, since that would make
+// every seat keyless for the rest of the epoch even after the store
+// recovers (see committeeAndParamsForEpoch).
 func (m *VoteManager) resolveOnChainKeys(
 	snapshotEpoch uint64,
-) map[string]*bls12381.G2Affine {
+	poolKeyHashes []string,
+) (map[string]*bls12381.G2Affine, error) {
 	verified := make(map[string]*bls12381.G2Affine)
 	if m.keyProvider == nil {
-		return verified
+		return verified, nil
 	}
-	raw, err := m.keyProvider.GetLeiosKeys(snapshotEpoch)
+	raw, err := m.keyProvider.GetLeiosKeys(snapshotEpoch, poolKeyHashes)
 	if err != nil {
-		m.logger.Warn(
-			"resolve on-chain leios keys",
-			"snapshot_epoch", snapshotEpoch,
-			"error", err,
+		return nil, fmt.Errorf(
+			"resolve on-chain leios keys for snapshot epoch %d: %w",
+			snapshotEpoch,
+			err,
 		)
-		return verified
 	}
 	for poolHashHex, key := range raw {
 		if err := VerifyLeiosKeyProofOfPossession(key); err != nil {
@@ -633,7 +676,7 @@ func (m *VoteManager) resolveOnChainKeys(
 		}
 		verified[poolHashHex] = &pub
 	}
-	return verified
+	return verified, nil
 }
 
 // resolveVoterKey resolves a committee member's voting public key: the
@@ -1544,6 +1587,22 @@ func (m *VoteManager) emitPrototypeVote(
 	}
 	member, ok := committee.Member(voterId)
 	if !ok {
+		return
+	}
+	// A vote this node marks verified=true is trusted without a
+	// signature check by every local consumer (tallying, certificate
+	// aggregation). That trust is only sound if votingKey is what the
+	// rest of the network would actually resolve for this pool right
+	// now -- otherwise a stale local key (e.g. after an on-chain
+	// rotation) would let this node certify a vote no honest peer's
+	// signature check would accept.
+	resolved, resolvedOK := m.resolveVoterKey(entry, member.PoolKeyHash)
+	if !resolvedOK || !resolved.Equal(votingKey.PublicKey()) {
+		m.logger.Error(
+			"configured leios voting key no longer matches the resolved public key for this pool, not voting",
+			"slot", record.slot,
+			"voter_id", voterId,
+		)
 		return
 	}
 	msg := PrototypeVoteMessageBytes(rbHash)

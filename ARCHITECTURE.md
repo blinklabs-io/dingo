@@ -1445,13 +1445,18 @@ Prototype-2026w30 adds an optional Leios BLS key to Dijkstra stake-pool
 registration certificates, between the VRF key hash and pledge. The shared
 gouroboros certificate decoder accepts both the legacy 10-field registration
 and the new 11-field form, validates the 96-byte public key and 48-byte proof
-of possession, and preserves the original CBOR. Dingo does not yet import this
-on-chain key into its voting registry or pool metadata schema; operators must
-currently configure the matching public key in `leiosVoterPublicKeys`. The
-ledger-state snapshot importer nevertheless recognizes the matching Dijkstra
-`StakePoolState` field
+of possession length (not the proof itself), and preserves the original CBOR.
+As of prototype-2026w32 (issue #3148), Dingo persists this on-chain key into
+its pool metadata schema (`leios_key_public`/`leios_key_possession_proof` on
+`pool`/`pool_registration`, migration `v2`) from live registration certs,
+genesis import, and ledger-state snapshot restore alike, and resolves it
+automatically per epoch for committee/vote verification (see "Leios Voting")
+-- an operator only needs `leiosVoterPublicKeys` as a local override, not as
+the required mechanism. The ledger-state snapshot importer recognizes the
+matching Dijkstra `StakePoolState` field
 (both a valid key and explicit null) so it locates pledge and all later pool
-fields correctly; malformed key/proof lengths reject that pool state. The same
+fields correctly, and carries the key itself through to the same columns;
+malformed key/proof lengths reject that pool state. The same
 prototype release also changes `MsgLeiosBlockAnnouncement` from a null
 placeholder to the full ranking-block header. The LeiosNotify client accepts
 that header. In prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
