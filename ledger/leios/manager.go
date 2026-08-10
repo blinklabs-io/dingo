@@ -476,9 +476,33 @@ func (m *VoteManager) EnableVoting(
 	if key == nil {
 		return errors.New("nil leios vote signing key")
 	}
+	epoch := m.epochProvider.CurrentEpoch()
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve committee for epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	// Only fall through to registering in the static registry when the
+	// on-chain key doesn't already vouch for this one. Registering here
+	// unconditionally would make a rotated on-chain key that already
+	// passed ValidateVotingKey fail to enable voting anyway, on nothing
+	// more than a stale entry a peer or this operator never got around to
+	// updating in leiosVoterPublicKeys -- the on-chain key is already the
+	// stronger, PoP-verified trust source, so a conflict against a weaker
+	// one it has superseded is not a real problem.
+	onChain, ok := entry.onChainKeys[hex.EncodeToString(poolKeyHash[:])]
+	onChainMatch := ok && onChain.Equal(key.PublicKey())
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
+	if onChainMatch {
+		m.logger.Debug(
+			"leios voting key matches the on-chain registration, skipping static registry",
+			"pool", poolKeyHash.String(),
+		)
+	} else if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
 		return fmt.Errorf("register local leios voting key: %w", err)
 	}
 	m.votingPool = slices.Clone(poolKeyHash[:])
@@ -486,8 +510,6 @@ func (m *VoteManager) EnableVoting(
 	return nil
 }
 
-// ValidateVotingKey verifies that an operator-supplied voting key matches the
-// static registry shared with peers. It does not add a key to the registry.
 // ValidateVotingKey verifies that an operator-supplied voting key matches a
 // resolvable public key for the pool: its PoP-verified on-chain registered
 // key takes precedence, falling back to the static leiosVoterPublicKeys

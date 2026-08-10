@@ -1263,6 +1263,53 @@ func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
 	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
 }
 
+// TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches
+// proves a real on-chain key rotation is not blocked by a peer's or this
+// operator's own leios-voter-public-keys entry still holding the
+// pre-rotation key: EnableVoting must not fail just because
+// RegisterPublicKey's conflict check would, since the on-chain key is
+// already the stronger, PoP-verified trust source ValidateVotingKey
+// resolved against.
+func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
+	t *testing.T,
+) {
+	rotatedKey := testSigningKey(t, 200)
+	proof, err := SignVote(rotatedKey, rotatedKey.PublicKeyBytes())
+	require.NoError(t, err)
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       rotatedKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	// Sanity: the fixture's static registry still carries the
+	// pre-rotation key for this pool, which genuinely conflicts with the
+	// rotated on-chain key above -- this is the stale-peer-config scenario.
+	staleRegistered, ok := fixture.mgr.registry.PublicKeyFor(member.PoolKeyHash)
+	require.True(t, ok)
+	require.False(t, staleRegistered.Equal(rotatedKey.PublicKey()))
+
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	require.NoError(t, fixture.mgr.ValidateVotingKey(poolKeyHash, rotatedKey))
+	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, rotatedKey))
+
+	fixture.mgr.mu.Lock()
+	votingKey := fixture.mgr.votingKey
+	fixture.mgr.mu.Unlock()
+	require.NotNil(t, votingKey)
+	assert.True(t, votingKey.PublicKey().Equal(rotatedKey.PublicKey()))
+}
+
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
 	fixture := newManagerFixture(t)
 	var poolKeyHash lcommon.PoolKeyHash
@@ -2194,7 +2241,15 @@ func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	// EnableVoting itself now resolves the epoch's committee (to compare
+	// against the on-chain key), which would block forever on params here
+	// before the goroutine below ever reaches the code that releases it.
+	// This test is about rollback-vs-in-flight-emission, not EnableVoting,
+	// so set the voting state directly instead of through the public API.
+	fixture.mgr.mu.Lock()
+	fixture.mgr.votingPool = poolKeyHash[:]
+	fixture.mgr.votingKey = fixture.keys[3]
+	fixture.mgr.mu.Unlock()
 	rbHash := lcommon.NewBlake2b256([]byte("rolled-back-rb"))
 	ebHash := lcommon.NewBlake2b256([]byte("rolled-back-eb"))
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
