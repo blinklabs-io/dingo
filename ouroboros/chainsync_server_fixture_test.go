@@ -22,9 +22,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -43,18 +46,22 @@ import (
 // assertion, but fails here, because here the test only sees what actually
 // went onto the wire.
 //
-// # Coverage boundary
+// # Asynchronous paths
 //
-// Every path up to and including the *synchronous* RequestNext replies is
-// covered here. Paths that reach AwaitReply are not, and stay on the local
-// connmanager-backed harness in chainsync_test.go: immediately after sending
-// AwaitReply, chainsyncServerRequestNext looks the connection up with
-// o.ConnManager.GetConnectionById(ctx.ConnectionId) so it can monitor the peer
-// while the iterator blocks. The shared harness creates and owns the
-// server-under-test connection internally and does not expose it, so it can
-// never be registered with Dingo's ConnManager and that lookup necessarily
-// fails. Covering those paths here needs an accessor upstream in
-// ouroboros-mock; see the note on blinklabs-io/dingo#2820.
+// Immediately after sending AwaitReply, chainsyncServerRequestNext resolves the
+// peer with o.ConnManager.GetConnectionById(ctx.ConnectionId) so it can abandon
+// the blocked iterator read if the peer goes away. The fixture therefore
+// registers the harness's connection (ouroboros-mock v0.16.0's
+// Harness.ServerConnection) with Dingo's ConnManager before driving anything.
+// Without that registration the lookup fails and the callback tears the
+// connection down instead of serving, which is why these paths previously
+// needed a local harness.
+//
+// The only callbacks still invoked directly are the ones whose assertion *is*
+// the returned error: the protocol layer converts a callback error into
+// connection teardown rather than an observable message, so there is nothing
+// on the wire to assert. Those tests still run against the fixture's real
+// connection and server.
 
 // chainsyncServerFixture pairs a Dingo Ouroboros instance with a shared
 // ouroboros-mock ChainSync harness driving its server callbacks.
@@ -62,10 +69,45 @@ type chainsyncServerFixture struct {
 	o *Ouroboros
 	h *csmock.Harness
 
+	// conn is the harness's server-under-test connection, registered with
+	// Dingo's ConnManager so callbacks that resolve their peer through it
+	// (the post-AwaitReply async path) can run.
+	conn *ouroboros.Connection
+
+	// closedCh receives connmanager connection-closed events, so tests can
+	// assert that an async send failure reached normal lifecycle handling.
+	closedCh <-chan event.Event
+
 	// connIdMu guards connId, which the server callbacks record from the
 	// protocol goroutine while tests read it.
 	connIdMu sync.Mutex
 	connId   *ouroboros.ConnectionId
+}
+
+// callbackContext builds the callback context the protocol would deliver, for
+// the few tests that must call a server callback directly because what they
+// assert is the error it returns — something the protocol layer converts into
+// connection teardown rather than an observable message.
+func (f *chainsyncServerFixture) callbackContext() ochainsync.CallbackContext {
+	return ochainsync.CallbackContext{
+		ConnectionId: f.conn.Id(),
+		Server:       f.h.Server(),
+	}
+}
+
+// registerClientAtOrigin registers a downstream client that has already had
+// its initial rollback, so the next RequestNext consults the iterator.
+func (f *chainsyncServerFixture) registerClientAtOrigin(
+	t *testing.T,
+) *dchainsync.ChainsyncClientState {
+	t.Helper()
+	clientState, err := f.o.ChainsyncState.AddClient(
+		f.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
+	clientState.NeedsInitialRollback = false
+	return clientState
 }
 
 // recordConnId notes the connection ID the harness assigned, so tests can look
@@ -144,6 +186,9 @@ func newChainsyncServerFixture(
 		return requestNext(ctx)
 	}
 
+	_, closedCh := bus.Subscribe(connmanager.ConnectionClosedEventType)
+	f.closedCh = closedCh
+
 	h, err := csmock.New(csmock.Config{
 		Mode:      mode,
 		ChainSync: serverCfg,
@@ -152,6 +197,23 @@ func newChainsyncServerFixture(
 	t.Cleanup(func() { _ = h.Close() })
 
 	f.h = h
+
+	// Register the server-under-test connection the way a real peer connection
+	// would be. chainsyncServerRequestNext resolves the peer through
+	// ConnManager immediately after sending AwaitReply, so without this the
+	// async serving path cannot run at all. Requires ouroboros-mock v0.16.0's
+	// Harness.ServerConnection.
+	f.conn = h.ServerConnection()
+	require.NotNil(t, f.conn)
+	require.True(
+		t,
+		connManager.AddConnection(
+			f.conn,
+			false,
+			f.conn.Id().RemoteAddr.String(),
+		),
+	)
+
 	return f
 }
 
@@ -214,6 +276,21 @@ func (f *chainsyncServerFixture) registeredClient(
 		return nil, false
 	}
 	return f.o.ChainsyncState.LookupClient(connId)
+}
+
+// requireConnectionClosed asserts the connection was closed through normal
+// connmanager lifecycle handling. The event error is nil because the watcher
+// is woken by the connection closing, not by an error being pushed onto its
+// channel.
+func (f *chainsyncServerFixture) requireConnectionClosed(
+	t *testing.T,
+	msg string,
+) {
+	t.Helper()
+	evt := testutil.RequireReceive(t, f.closedCh, 5*time.Second, msg)
+	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	require.True(t, ok)
+	require.Equal(t, f.conn.Id(), closed.ConnectionId)
 }
 
 // drainInitialRollback performs the intersect-then-rollback handshake every
@@ -479,4 +556,213 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 		gotPoint,
 		"rollback must target the point the chain rolled back to",
 	)
+}
+
+// =============================================================================
+// RequestNext (AwaitReply and the asynchronous replies that follow)
+//
+// These paths require the peer connection to be resolvable through Dingo's
+// ConnManager: chainsyncServerRequestNext looks it up immediately after
+// sending AwaitReply so it can abandon the blocked iterator read if the peer
+// goes away. The fixture registers the harness connection for exactly that
+// reason.
+// =============================================================================
+
+// TestChainsyncServerRequestNextEmitsAwaitReplyThenAsyncRollForward verifies
+// that an iterator sitting at the chain tip parks the peer with AwaitReply,
+// and that a block appended afterwards is served asynchronously as a
+// RollForward carrying the exact block type, block CBOR and tip.
+//
+// The predecessor of the AwaitReply half asserted only that the callback
+// returned nil, which a callback that sent nothing at all would also satisfy.
+// The async RollForward half could not be covered before at all: the
+// post-AwaitReply ConnManager lookup failed, so the callback errored and tore
+// the connection down instead of serving.
+func TestChainsyncServerRequestNextEmitsAwaitReplyThenAsyncRollForward(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+
+	// Iterator is at the chain tip, so the server parks the peer.
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+
+	// A block arriving after the park must be served by the async goroutine.
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+
+	msg := f.observe(t)
+	require.True(t, msg.IsRollForward(), "expected async RollForward")
+	blockType, blockCbor, gotTip, ok := msg.RollForwardNtC()
+	require.True(t, ok)
+	require.Equal(t, uint(block.Type()), blockType)
+	require.Equal(t, block.Cbor(), blockCbor)
+	require.Equal(
+		t,
+		ochainsync.Tip{Point: point, BlockNumber: block.BlockNumber()},
+		gotTip,
+		"async RollForward tip must not lag the block being sent",
+	)
+}
+
+// TestChainsyncServerRequestNextEmitsAsyncRollBackward verifies a rollback
+// that happens while the peer is parked in AwaitReply is served
+// asynchronously as a RollBackward carrying the exact rollback point.
+func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+
+	// Serve one block so the iterator is past origin.
+	f.appendBlock(t, 1, 1, 0x01)
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward())
+
+	// Park the peer, then roll the chain back underneath it.
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+
+	require.NoError(
+		t,
+		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+	)
+
+	msg := f.observe(t)
+	require.True(t, msg.IsRollBackward(), "expected async RollBackward")
+	gotPoint, ok := msg.Point()
+	require.True(t, ok)
+	require.Equal(t, ocommon.NewPointOrigin(), gotPoint)
+}
+
+// TestChainsyncServerRequestNextAsyncRollForwardFailureClosesConnection
+// verifies that when the asynchronous RollForward send fails — after
+// chainsyncServerRequestNext has already returned, so the protocol layer can
+// no longer turn an error into teardown — the connection is still closed
+// through normal connmanager lifecycle handling rather than left silently
+// open with the peer parked in AwaitReply.
+func TestChainsyncServerRequestNextAsyncRollForwardFailureClosesConnection(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+
+	// Stop the protocol so the async send fails, then wake the iterator.
+	f.h.Server().Stop()
+	f.appendBlock(t, 1, 1, 0x01)
+
+	f.requireConnectionClosed(
+		t,
+		"async RollForward send failure should close the connection",
+	)
+}
+
+// TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection is
+// the rollback counterpart: a rollback send that fails after AwaitReply must
+// not leave the downstream peer connection silently open either.
+func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+
+	f.appendBlock(t, 1, 1, 0x01)
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward())
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+
+	// Stop the protocol so the async send fails, then roll back.
+	f.h.Server().Stop()
+	require.NoError(
+		t,
+		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+	)
+
+	f.requireConnectionClosed(
+		t,
+		"async RollBackward send failure should close the connection",
+	)
+}
+
+// TestChainsyncServerRequestNextIteratorCancelDoesNotCloseConnection verifies
+// that ordinary iterator cancellation — which is how the async wait unwinds
+// during normal connection teardown — is not mistaken for a failure worth
+// recycling the connection over.
+func TestChainsyncServerRequestNextIteratorCancelDoesNotCloseConnection(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	clientState := f.registerClientAtOrigin(t)
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+
+	clientState.ChainIter.Cancel()
+
+	testutil.RequireNoReceive(
+		t,
+		f.closedCh,
+		100*time.Millisecond,
+		"iterator cancellation should not close the connection",
+	)
+}
+
+// =============================================================================
+// RequestNext error paths
+//
+// These assert the error the callback returns. The protocol layer converts a
+// callback error into connection teardown rather than an observable message,
+// so the callback is invoked directly; the fixture still supplies the real
+// connection and server it runs against.
+// =============================================================================
+
+// TestChainsyncServerRequestNextSyncIteratorErrorPropagates verifies a real
+// iterator failure is returned rather than being mistaken for the chain-tip
+// sentinel (which would silently park the peer instead of surfacing the
+// fault).
+func TestChainsyncServerRequestNextSyncIteratorErrorPropagates(t *testing.T) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.registerClientAtOrigin(t)
+
+	// Break the backing store so the synchronous iterator returns a real
+	// lookup error.
+	require.NoError(t, dbtest.CloseDatabase(f.o.LedgerState.Database()))
+
+	err := f.o.chainsyncServerRequestNext(f.callbackContext())
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, chain.ErrIteratorChainTip)
+}
+
+// TestChainsyncServerRequestNextAwaitReplyErrorPropagates verifies an
+// AwaitReply send failure is returned from the callback, so the protocol layer
+// tears the connection down instead of arming an async wait on a dead peer.
+func TestChainsyncServerRequestNextAwaitReplyErrorPropagates(t *testing.T) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.registerClientAtOrigin(t)
+
+	// Stop the protocol so the AwaitReply send itself fails.
+	f.h.Server().Stop()
+
+	require.Error(t, f.o.chainsyncServerRequestNext(f.callbackContext()))
+}
+
+// TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply verifies the
+// post-AwaitReply connection lookup fails explicitly when the connection was
+// already recycled, rather than arming an async wait with no way to notice the
+// peer is gone.
+func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.registerClientAtOrigin(t)
+
+	require.True(t, f.o.ConnManager.RemoveConnection(f.conn.Id(), f.conn))
+
+	err := f.o.chainsyncServerRequestNext(f.callbackContext())
+
+	require.ErrorContains(t, err, "not found")
 }
