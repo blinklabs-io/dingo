@@ -52,7 +52,12 @@ const (
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
-	DefaultServerTimeout   = time.Hour
+	// DefaultMaxPoolFilter caps ReadState's pool_keyhashes filter. Matching
+	// the other key-list caps: a caller wanting every pool sends an empty
+	// filter, so a long explicit list is not the way to ask for the whole
+	// distribution.
+	DefaultMaxPoolFilter = 1000
+	DefaultServerTimeout = time.Hour
 	// DefaultShutdownTimeout bounds Stop's graceful http.Server.Shutdown
 	// before it escalates to a hard Close, matching midnight/server's
 	// identical ShutdownTimeout/defaultShutdownTimeout pattern.
@@ -82,6 +87,8 @@ type UtxorpcConfig struct {
 	// max_items uses this cap.
 	MaxHistoryItems int
 	MaxDataKeys     int
+	// MaxPoolFilter caps ReadState's pool_keyhashes filter length.
+	MaxPoolFilter int
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
 	// (0 = use default).
 	ServerTimeout time.Duration
@@ -117,6 +124,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	if cfg.MaxDataKeys <= 0 {
 		cfg.MaxDataKeys = DefaultMaxDataKeys
+	}
+	if cfg.MaxPoolFilter <= 0 {
+		cfg.MaxPoolFilter = DefaultMaxPoolFilter
 	}
 	if cfg.ServerTimeout <= 0 {
 		cfg.ServerTimeout = DefaultServerTimeout
@@ -282,6 +292,7 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 	// preserves streaming behavior without duplicating every service method.
 	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
 	betaQueryHandler := betaVersionedQueryHandler(
+		u,
 		queryPath,
 		queryHandler,
 		betaQueryPath,
@@ -373,6 +384,7 @@ func rewriteVersionHandler(
 // betaVersionedQueryHandler handles the v1beta-only ReadState method while
 // routing the methods implemented by Dingo through the alpha handler.
 func betaVersionedQueryHandler(
+	u *Utxorpc,
 	alphaPath string,
 	alphaHandler http.Handler,
 	betaPath string,
@@ -390,19 +402,10 @@ func betaVersionedQueryHandler(
 	if readStateMethod == nil {
 		panic("utxorpc: missing v1beta QueryService.ReadState descriptor")
 	}
+	betaQueryServer := &betaQueryServiceServer{utxorpc: u}
 	readStateHandler := connect.NewUnaryHandler(
 		betaqueryconnect.QueryServiceReadStateProcedure,
-		func(
-			context.Context,
-			*connect.Request[betaquery.ReadStateRequest],
-		) (*connect.Response[betaquery.ReadStateResponse], error) {
-			return nil, connect.NewError(
-				connect.CodeUnimplemented,
-				errors.New(
-					"utxorpc.v1beta.query.QueryService.ReadState is not implemented",
-				),
-			)
-		},
+		betaQueryServer.ReadState,
 		connect.WithSchema(readStateMethod),
 		connect.WithHandlerOptions(options),
 	)

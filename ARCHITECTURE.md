@@ -1800,7 +1800,20 @@ snapshot is published after the write that advances the chain, so the two can
 sit on opposite sides of an epoch boundary, and stake rows read for the wrong
 epoch still yield a well-formed distribution summing to one. Like
 `GetChainDepState`'s tip-and-epoch pairing, the fix is to take both from the
-same transaction. Each pool's VRF key hash is resolved through
+same transaction — and that tip is returned alongside the rows, so a caller
+reporting a "state as of" point names the point they were read at rather than
+sampling the tip again afterwards and reporting a point the chain has since
+moved to.
+
+The read itself lives in `ledger.LedgerState.PoolStakeDistribution`, which the
+UTxO RPC `v1beta QueryService.ReadState` handler also calls;
+`queryShelleyPoolDistr2` is only the adaptation of that result into the
+node-to-client reply shape. Sharing the read is what stops the two surfaces
+naming different VRF keys or different snapshots for the same chain. It returns
+pools ordered by pool key hash, which `GetPoolDistr2` does not need because its
+reply is a map, and UTxO RPC does because its reply is a repeated field.
+
+Each pool's VRF key hash is resolved through
 `registeredPoolVrfKeyHash`, the same function header validation uses, so the
 key the reply names is the key a block must carry to be accepted. A query
 carrying a pool filter reads only the snapshot rows for the pools it names,
@@ -3209,7 +3222,7 @@ Implements the Mesh (formerly Rosetta) API specification for wallet integration 
 
 ### UTxO RPC (`api/utxorpc/`)
 
-A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces; v1beta's additional `QueryService.ReadState` method currently returns `UNIMPLEMENTED`. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. Supports optional TLS.
+A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. Supports optional TLS.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
