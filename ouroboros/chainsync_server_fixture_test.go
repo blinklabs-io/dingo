@@ -291,6 +291,12 @@ func (f *chainsyncServerFixture) requireConnectionClosed(
 	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
 	require.True(t, ok)
 	require.Equal(t, f.conn.Id(), closed.ConnectionId)
+	require.NoError(
+		t,
+		closed.Error,
+		"close must be published as a graceful lifecycle event, not an "+
+			"error pushed onto the connection's error channel",
+	)
 }
 
 // drainInitialRollback performs the intersect-then-rollback handshake every
