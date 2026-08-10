@@ -37,6 +37,15 @@ type Pool struct {
 	// RewardAccount (AddrKeyHash), discarding the header. We decode the raw
 	// cert CBOR to preserve the credential type here.
 	RewardAccountCredentialTag uint8
+	// LeiosKeyPublic and LeiosKeyPossessionProof are the pool's registered
+	// Dijkstra/Leios BLS voting key (96-byte compressed G2 public key) and
+	// its proof of possession (48-byte compressed G1 signature). Both are
+	// nil when the pool has no leios_key, or when one was present on-chain
+	// but failed proof-of-possession verification -- an invalid key is
+	// treated as absent, not stored, matching upstream's committee
+	// construction rules.
+	LeiosKeyPublic          []byte
+	LeiosKeyPossessionProof []byte
 	// Owners and Relays are query-only associations (no CASCADE).
 	// The actual parent-child relationship is PoolRegistration -> Owners/Relays.
 	// When Pool is deleted, PoolRegistrations cascade, which then cascade to Owners/Relays.
@@ -85,6 +94,8 @@ type PoolRegistration struct {
 	RewardAccount              []byte
 	RewardAccountCredentialTag uint8
 	MetadataHash               []byte
+	LeiosKeyPublic             []byte
+	LeiosKeyPossessionProof    []byte
 	Owners                     []PoolRegistrationOwner
 	Relays                     []PoolRegistrationRelay
 	Pledge                     types.Uint64

@@ -117,45 +117,6 @@ func TestPrototypeVoteMusashiVector(t *testing.T) {
 	require.NoError(t, VerifyVoteSignature(publicKey, msg, expectedSig))
 }
 
-// TestPrototypeVoteOverflowPoolHashVector pins the whole prototype path for a
-// pool key hash whose padded scalar exceeds the scalar field modulus: the
-// public key and signature literals were produced by supranational/blst from
-// the same right-padded hash, so a derivation that stops reducing mod r, or a
-// signed message that stops being CBOR-wrapped, fails here.
-func TestPrototypeVoteOverflowPoolHashVector(t *testing.T) {
-	poolHash := make([]byte, voterPoolKeyHashSize)
-	poolHash[0] = 0xf3
-	poolHash[len(poolHash)-1] = 0x34
-	key, err := DerivePrototypeVoteSigningKey(poolHash)
-	require.NoError(t, err)
-	assert.Equal(
-		t,
-		"87a5168d5d859597a0effbac3e82e4ffda49f1e03177864f"+
-			"74639518558ad5b8184104cace19d1d8b4b96b02ab788620"+
-			"18def157c12d877a0771123aa4e2e803cadeaa17f485d417"+
-			"48fd4bbe69421e22f05df33a599db4232564d09ab3b42ed8",
-		hex.EncodeToString(key.PublicKeyBytes()),
-	)
-
-	rbHashBytes, err := hex.DecodeString(
-		"000102030405060708090a0b0c0d0e0f" +
-			"101112131415161718191a1b1c1d1e1f",
-	)
-	require.NoError(t, err)
-	var rbHash lcommon.Blake2b256
-	copy(rbHash[:], rbHashBytes)
-	msg := PrototypeVoteMessageBytes(rbHash)
-	sig, err := SignVote(key, msg)
-	require.NoError(t, err)
-	assert.Equal(
-		t,
-		"952e8248c3656b3e3b8d016787798fe094f010f62697814b"+
-			"7e52b91cbd2b38fca1e050c43e6bad37d09a7a2929b9fbce",
-		hex.EncodeToString(sig),
-	)
-	require.NoError(t, VerifyVoteSignature(key.PublicKey(), msg, sig))
-}
-
 func TestVerifyVoteSignatureWrongMessage(t *testing.T) {
 	key := testSigningKey(t, 42)
 	msg := VoteMessageBytes(1234, lcommon.NewBlake2b256([]byte("eb")))
@@ -260,4 +221,64 @@ func TestVerifyAggregateSignatureNoKeys(t *testing.T) {
 	sig, err := SignVote(key, msg)
 	require.NoError(t, err)
 	assert.Error(t, VerifyAggregateSignature(nil, msg, sig))
+}
+
+// testLeiosKey builds a LeiosKey whose possession proof is a genuine
+// signature over its own public key under LeiosVoteDST.
+func testLeiosKey(t *testing.T, scalar byte) *lcommon.LeiosKey {
+	t.Helper()
+	key := testSigningKey(t, scalar)
+	pub := key.PublicKeyBytes()
+	proof, err := SignVote(key, pub)
+	require.NoError(t, err)
+	return &lcommon.LeiosKey{PublicKey: pub, PossessionProof: proof}
+}
+
+func TestVerifyLeiosKeyProofOfPossession(t *testing.T) {
+	require.NoError(t, VerifyLeiosKeyProofOfPossession(testLeiosKey(t, 7)))
+}
+
+func TestVerifyLeiosKeyProofOfPossessionNil(t *testing.T) {
+	assert.Error(t, VerifyLeiosKeyProofOfPossession(nil))
+}
+
+func TestVerifyLeiosKeyProofOfPossessionWrongPublicKeyLength(t *testing.T) {
+	key := testLeiosKey(t, 7)
+	key.PublicKey = key.PublicKey[:len(key.PublicKey)-1]
+	assert.Error(t, VerifyLeiosKeyProofOfPossession(key))
+}
+
+// TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof covers a
+// possession proof genuinely produced by a different key: upstream's
+// "invalid proofs are treated as absent" rule depends on this failing.
+func TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof(t *testing.T) {
+	honest := testLeiosKey(t, 7)
+	other := testLeiosKey(t, 9)
+	tampered := &lcommon.LeiosKey{
+		PublicKey:       honest.PublicKey,
+		PossessionProof: other.PossessionProof,
+	}
+	assert.ErrorIs(
+		t,
+		VerifyLeiosKeyProofOfPossession(tampered),
+		ErrInvalidSignature,
+	)
+}
+
+// TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof guards
+// against reusing an ordinary vote signature (over an RB hash) as if it
+// were a possession proof (over the public key itself): the two messages
+// must never be confused.
+func TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof(
+	t *testing.T,
+) {
+	key := testSigningKey(t, 7)
+	pub := key.PublicKeyBytes()
+	rbHash := lcommon.NewBlake2b256([]byte("not-a-pubkey-message"))
+	voteSig, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+	assert.Error(t, VerifyLeiosKeyProofOfPossession(&lcommon.LeiosKey{
+		PublicKey:       pub,
+		PossessionProof: voteSig,
+	}))
 }

@@ -151,6 +151,57 @@ func VerifyVoteSignature(
 	return nil
 }
 
+// VerifyLeiosKeyProofOfPossession verifies that a registered Dijkstra pool
+// Leios key's possession proof is a valid signature, under LeiosVoteDST,
+// over the key's own serialized public key. gouroboros decodes LeiosKey and
+// checks only field lengths (LeiosKey.validate), not the proof itself --
+// callers must not treat an on-chain leios_key as usable until this passes.
+//
+// Reusing LeiosVoteDST (rather than a separate constant) is deliberate: the
+// ciphersuite's "_POP_" suffix (per the IETF BLS-signature draft's minimal-
+// pubkey-size proof-of-possession scheme, which cardano-crypto-leios'
+// minSigPoPDST follows) designates one ciphersuite shared by both ordinary
+// vote signing and PopProve/PopVerify, distinguished only by the signed
+// message.
+//
+// UNVERIFIED AGAINST REFERENCE: the PoP message below (the raw 96-byte
+// compressed public key) is the IETF draft's standard PopProve
+// construction, inferred from the DST naming convention -- it has not been
+// checked against a cardano-crypto-leios interop test vector. Getting this
+// wrong fails safe (a validly-registered key would be rejected and the pool
+// treated as keyless, per upstream's own "invalid proofs are treated as
+// absent" rule), but should be confirmed before this ships against a real
+// network.
+func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
+	if key == nil {
+		return errors.New("nil leios key")
+	}
+	if len(key.PublicKey) != VotePublicKeySize {
+		return fmt.Errorf(
+			"leios key public key must be %d bytes, got %d",
+			VotePublicKeySize,
+			len(key.PublicKey),
+		)
+	}
+	var pub bls12381.G2Affine
+	// SetBytes validates curve membership and subgroup order, matching
+	// ParseVoterPublicKey's checks.
+	if _, err := pub.SetBytes(key.PublicKey); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPublicKey, err)
+	}
+	if pub.IsInfinity() {
+		return fmt.Errorf("%w: point is infinity", ErrInvalidPublicKey)
+	}
+	if err := VerifyVoteSignature(
+		&pub,
+		key.PublicKey,
+		key.PossessionProof,
+	); err != nil {
+		return fmt.Errorf("leios key proof of possession: %w", err)
+	}
+	return nil
+}
+
 // AggregateSignatures sums the given 48-byte compressed G1 signatures into
 // one aggregate signature.
 func AggregateSignatures(sigs [][]byte) ([]byte, error) {

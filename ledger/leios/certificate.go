@@ -172,27 +172,31 @@ func ValidateEbCertificate(
 
 // ValidatePrototypeEbCertificate validates a Musashi prototype certificate.
 // Prototype vote signatures cover the announcing ranking-block hash rather
-// than the legacy slot-plus-EB-hash message, and their public keys are
-// deterministically derived from committee pool ids unless a registered key
-// is present in registry.
+// than the legacy slot-plus-EB-hash message. Like ValidateEbCertificate,
+// sigChecked reports whether the aggregate signature was verified; it is
+// false when one or more signers have no resolvable key (a keyless
+// committee seat, or a key registered on-chain that this call was not
+// given -- registry here is deliberately limited to locally configured
+// keys, not the on-chain resolution VoteManager performs).
 func ValidatePrototypeEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	announcingRbHash lcommon.Blake2b256,
 	committee *Committee,
 	quorumStakeThreshold *big.Rat,
 	registry *VoterRegistry,
-) error {
+) (sigChecked bool, err error) {
 	if cert == nil {
-		return errors.New("nil certificate")
+		return false, errors.New("nil certificate")
 	}
 	if committee == nil {
-		return errors.New("nil committee")
+		return false, errors.New("nil committee")
 	}
 	if err := cert.Validate(committee.Size()); err != nil {
-		return err
+		return false, err
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(committee.Members))
+	allKeysKnown := true
 	for _, member := range committee.Members {
 		if !cert.Signer(member.VoterId) {
 			continue
@@ -203,15 +207,8 @@ func ValidatePrototypeEbCertificate(
 			pub, _ = registry.PublicKeyFor(member.PoolKeyHash)
 		}
 		if pub == nil {
-			key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
-			if err != nil {
-				return fmt.Errorf(
-					"derive prototype voter %d key: %w",
-					member.VoterId,
-					err,
-				)
-			}
-			pub = key.PublicKey()
+			allKeysKnown = false
+			continue
 		}
 		signerPubs = append(signerPubs, pub)
 	}
@@ -221,10 +218,10 @@ func ValidatePrototypeEbCertificate(
 		quorumStakeThreshold,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !quorumMet {
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 			"%w: signer stake %d of total active stake %d below threshold %s",
 			ErrQuorumNotMet,
 			signerStake,
@@ -232,12 +229,15 @@ func ValidatePrototypeEbCertificate(
 			quorumStakeThreshold.String(),
 		)
 	}
+	if !allKeysKnown {
+		return false, nil
+	}
 	if err := VerifyAggregateSignature(
 		signerPubs,
 		PrototypeVoteMessageBytes(announcingRbHash),
 		cert.AggregatedSignature,
 	); err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }

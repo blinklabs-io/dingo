@@ -807,7 +807,7 @@ func parsePoolParams(
 		)
 	}
 
-	leiosOffset, err := optionalLeiosKeyOffset(params, 2)
+	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -818,6 +818,10 @@ func parsePoolParams(
 			len(params),
 			7+leiosOffset,
 		)
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = leiosKey.PublicKey
+		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
 	}
 
 	// Pledge (legacy index 2; Dijkstra index 3 when Leios key/null is present)
@@ -901,7 +905,7 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	leiosOffset, err := optionalLeiosKeyOffset(params, 1)
+	leiosOffset, leiosKey, err := optionalLeiosKeyOffset(params, 1)
 	if err != nil {
 		return nil, true, err
 	}
@@ -911,6 +915,10 @@ func parsePoolParamsWithoutOperator(
 			len(params),
 			7+leiosOffset,
 		)
+	}
+	if leiosKey != nil {
+		pool.LeiosKeyPublic = leiosKey.PublicKey
+		pool.LeiosKeyPossessionProof = leiosKey.PossessionProof
 	}
 
 	if _, err := cbor.Decode(
@@ -970,31 +978,34 @@ func parsePoolParamsWithoutOperator(
 }
 
 // optionalLeiosKeyOffset reports whether the given pool-parameter position is
-// occupied by Dijkstra's optional Leios key. The ledger's PV12 decoder accepts
-// both an omitted field and an explicit null, so snapshot import must preserve
-// the same distinction when locating all fields that follow it.
+// occupied by Dijkstra's optional Leios key, decoding it when present. The
+// ledger's PV12 decoder accepts both an omitted field and an explicit null,
+// so snapshot import must preserve the same distinction when locating all
+// fields that follow it. The returned key is nil unless a real (non-null)
+// Leios key was decoded; its proof of possession is not verified here (see
+// ParsedPool.LeiosKeyPublic).
 func optionalLeiosKeyOffset(
 	params []cbor.RawMessage,
 	index int,
-) (int, error) {
+) (int, *lcommon.LeiosKey, error) {
 	if len(params) <= index || len(params[index]) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	if len(params[index]) == 1 && params[index][0] == 0xf6 {
-		return 1, nil
+		return 1, nil, nil
 	}
 	// A legacy pledge/cost is an unsigned integer. Only an array at this
 	// position can be the new Leios key; if it is an array, validate its
 	// exact key/proof shape through gouroboros rather than shifting on a
 	// malformed value.
 	if params[index][0]>>5 != 4 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	var key lcommon.LeiosKey
 	if _, err := cbor.Decode(params[index], &key); err != nil {
-		return 0, fmt.Errorf("decoding Leios key: %w", err)
+		return 0, nil, fmt.Errorf("decoding Leios key: %w", err)
 	}
-	return 1, nil
+	return 1, &key, nil
 }
 
 func parseRewardAccount(data []byte) ([]byte, uint8, bool) {

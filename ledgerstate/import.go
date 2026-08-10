@@ -196,6 +196,14 @@ type ParsedPool struct {
 	MetadataUrl                string
 	MetadataHash               []byte // 32 bytes
 	Deposit                    uint64
+	// LeiosKeyPublic and LeiosKeyPossessionProof are the pool's registered
+	// Dijkstra/Leios BLS voting key and its proof of possession, or nil when
+	// the snapshot's pool params carry no leiosKey field. Proof-of-possession
+	// verification does not happen here (ledgerstate must not depend on
+	// ledger/leios's BLS primitives); it happens where these keys are read
+	// back out for committee construction.
+	LeiosKeyPublic          []byte // 96 bytes
+	LeiosKeyPossessionProof []byte // 48 bytes
 }
 
 // ParsedRelay represents a pool relay from the stake pool
@@ -1083,6 +1091,8 @@ func importPools(
 			Margin:                     margin,
 			RewardAccount:              pool.RewardAccount,
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
+			LeiosKeyPublic:             pool.LeiosKeyPublic,
+			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
 		}
 
 		var owners []models.PoolRegistrationOwner
@@ -1118,6 +1128,8 @@ func importPools(
 			Margin:                     margin,
 			RewardAccount:              pool.RewardAccount,
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
+			LeiosKeyPublic:             pool.LeiosKeyPublic,
+			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
 			AddedSlot:                  slot,
 			DepositAmount:              types.Uint64(pool.Deposit),
 			Owners:                     owners,

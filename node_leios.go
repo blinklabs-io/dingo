@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -47,6 +48,61 @@ func (a *leiosStakeDistributionAdapter) GetStakeDistribution(
 		return nil, 0, nil
 	}
 	return dist.PoolStakes, dist.TotalStake, nil
+}
+
+// leiosKeyProviderAdapter adapts ledger.LedgerState to leios.LeiosKeyProvider,
+// resolving registered Leios keys for exactly the pools active in the same
+// stake snapshot the committee is built from. It returns raw (unverified)
+// keys -- VoteManager itself checks proof of possession before trusting one.
+type leiosKeyProviderAdapter struct {
+	stakeAdapter *leiosStakeDistributionAdapter
+	ledgerState  *ledger.LedgerState
+}
+
+func (a *leiosKeyProviderAdapter) GetLeiosKeys(
+	epoch uint64,
+) (_ map[string]*lcommon.LeiosKey, err error) {
+	if a.ledgerState == nil {
+		return nil, errors.New("ledger state unavailable")
+	}
+	poolStakes, _, err := a.stakeAdapter.GetStakeDistribution(epoch)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"stake distribution for leios key resolution: %w",
+			err,
+		)
+	}
+	if len(poolStakes) == 0 {
+		return map[string]*lcommon.LeiosKey{}, nil
+	}
+	poolKeyHashes := make([]lcommon.PoolKeyHash, 0, len(poolStakes))
+	for poolHashHex := range poolStakes {
+		raw, decodeErr := hex.DecodeString(poolHashHex)
+		if decodeErr != nil || len(raw) != len(lcommon.PoolKeyHash{}) {
+			continue
+		}
+		poolKeyHashes = append(poolKeyHashes, lcommon.PoolKeyHash(raw))
+	}
+	db := a.ledgerState.Database()
+	if db == nil {
+		return nil, errors.New("database unavailable")
+	}
+	txn := db.MetadataTxn(false)
+	if txn == nil {
+		return nil, errors.New("metadata transaction unavailable")
+	}
+	defer func() {
+		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"release leios key transaction: %w",
+					rollbackErr,
+				),
+			)
+		}
+	}()
+	return a.ledgerState.NewView(txn).GetLeiosKeys(poolKeyHashes)
 }
 
 // leiosCommitteeParamsAdapter adapts ledger.LedgerState to
@@ -142,13 +198,18 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("invalid leios voter public keys: %w", err)
 	}
+	stakeAdapter := &leiosStakeDistributionAdapter{
+		inner: stakeDistributionAdapter{
+			ledgerState: n.ledgerState,
+		},
+	}
 	mgr, err := leios.NewVoteManager(leios.VoteManagerConfig{
-		Logger:   n.config.logger,
-		EventBus: n.eventBus,
-		StakeProvider: &leiosStakeDistributionAdapter{
-			inner: stakeDistributionAdapter{
-				ledgerState: n.ledgerState,
-			},
+		Logger:        n.config.logger,
+		EventBus:      n.eventBus,
+		StakeProvider: stakeAdapter,
+		KeyProvider: &leiosKeyProviderAdapter{
+			stakeAdapter: stakeAdapter,
+			ledgerState:  n.ledgerState,
 		},
 		EpochProvider: &epochInfoAdapter{
 			ledgerState: n.ledgerState,
@@ -156,7 +217,6 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		ParamsProvider: &leiosCommitteeParamsAdapter{
 			ledgerState: n.ledgerState,
 		},
-		PrototypeMode: true,
 		// LedgerState satisfies leios.SlotProvider directly; the slot
 		// window keeps fabricated far-past/future votes away from
 		// committee computation and the stake snapshot queries behind
@@ -241,9 +301,11 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 	return nil
 }
 
-// enableLeiosVoting enables vote emission for the block producer's pool. A
-// configured BLS signing key is preferred; the pool-derived key remains as a
-// temporary prototype fallback when no key file is configured.
+// enableLeiosVoting enables vote emission for the block producer's pool,
+// using the operator-configured BLS signing key. A pool started without one
+// runs as a non-voting relay: upstream removed the insecure pool-derived
+// key shortcut, so there is no fallback that lets a pool vote without a
+// real registered key.
 func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if n.leiosVoteManager == nil {
 		return nil
@@ -251,29 +313,28 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
+	if n.config.leiosVoteSigningKeyFile == "" {
+		n.config.logger.Warn(
+			"no leios vote signing key configured; running as a non-voting relay",
+			"component",
+			"node",
+		)
+		return nil
+	}
 	poolID := creds.GetPoolID()
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolID[:])
-	var key *leios.VoteSigningKey
-	var err error
-	if n.config.leiosVoteSigningKeyFile != "" {
-		key, err = leios.LoadVoteSigningKeyFile(
-			n.config.leiosVoteSigningKeyFile,
+	key, err := leios.LoadVoteSigningKeyFile(
+		n.config.leiosVoteSigningKeyFile,
+	)
+	if err != nil {
+		return fmt.Errorf("load leios vote signing key: %w", err)
+	}
+	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
+		return fmt.Errorf(
+			"validate configured leios vote signing key: %w; register the matching public key in leios-voter-public-keys on every peer",
+			err,
 		)
-		if err != nil {
-			return fmt.Errorf("load leios vote signing key: %w", err)
-		}
-		if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-			return fmt.Errorf(
-				"validate configured leios vote signing key: %w; register the matching public key in leios-voter-public-keys on every peer",
-				err,
-			)
-		}
-	} else {
-		key, err = leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
-		if err != nil {
-			return fmt.Errorf("derive prototype leios vote signing key: %w", err)
-		}
 	}
 	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
 		return fmt.Errorf("enable leios voting: %w", err)

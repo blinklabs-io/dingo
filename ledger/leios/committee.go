@@ -43,12 +43,10 @@ type CommitteeMember struct {
 	Stake       uint64 // active stake (lovelace) from the snapshot
 }
 
-// Committee is a deterministic voting committee for an epoch. Its membership
-// and ordering depend on the constructor: ComputeCommittee selects a
-// stake-coverage prefix ordered by stake descending, while
-// ComputePrototypeCommittee includes every non-zero-stake pool ordered by
-// stake ascending. Both constructors break equal-stake ties by pool key hash
-// ascending and assign VoterId from the member's index in the resulting order.
+// Committee is a deterministic voting committee for an epoch, computed by
+// ComputeCommittee: a stake-coverage prefix ordered by stake descending,
+// breaking equal-stake ties by pool key hash ascending, with VoterId
+// assigned from a member's index in that order.
 type Committee struct {
 	Epoch            uint64
 	SnapshotEpoch    uint64
@@ -202,32 +200,6 @@ func ComputeCommittee(
 		totalActiveStake,
 		pools[:selectedCount],
 	), nil
-}
-
-// ComputePrototypeCommittee reproduces the committee construction used by
-// the current interoperable Leios prototype: every non-zero-stake pool votes,
-// ordered by stake ascending with pool key hash ascending as the stable tie
-// break. VoterId is the index in that order.
-func ComputePrototypeCommittee(
-	epoch uint64,
-	snapshotEpoch uint64,
-	poolStakes map[string]uint64,
-	totalActiveStake uint64,
-) (*Committee, error) {
-	pools, err := prepareCommitteePools(poolStakes, totalActiveStake)
-	if err != nil {
-		return nil, err
-	}
-	slices.SortFunc(pools, func(a, b poolStake) int {
-		if a.stake != b.stake {
-			if a.stake < b.stake {
-				return -1
-			}
-			return 1
-		}
-		return bytes.Compare(a.hash, b.hash)
-	})
-	return buildCommittee(epoch, snapshotEpoch, totalActiveStake, pools), nil
 }
 
 // Size returns the number of committee members.
