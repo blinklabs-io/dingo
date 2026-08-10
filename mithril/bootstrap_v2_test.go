@@ -636,6 +636,7 @@ func (f *v2Fixture) bootstrapConfig(downloadDir string) BootstrapConfig {
 		Network:                  "preprod",
 		Backend:                  BackendV2,
 		AggregatorURL:            f.server.URL,
+		AllowInsecureHTTP:        true,
 		DownloadDir:              downloadDir,
 		VerifyCertificateChain:   true,
 		AncillaryVerificationKey: f.ancillaryVKey,
@@ -714,13 +715,14 @@ func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
 		fallbackLedgerState: true,
 	})
 	result, err := Sync(context.Background(), SyncConfig{
-		Network:          "preprod",
-		DataDir:          t.TempDir(),
-		StorageMode:      "core",
-		Backend:          BackendV2,
-		AggregatorURL:    fixture.server.URL,
-		VerifyCertChain:  false,
-		CleanupAfterLoad: false,
+		Network:           "preprod",
+		DataDir:           t.TempDir(),
+		StorageMode:       "core",
+		Backend:           BackendV2,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		VerifyCertChain:   false,
+		CleanupAfterLoad:  false,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000), result.LedgerSlot)
