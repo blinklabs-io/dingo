@@ -175,30 +175,223 @@ func TestAccountBalanceAggregatesAssets(t *testing.T) {
 	)
 }
 
-// TestAccountBalanceRejectsHistoricalLookup covers the Mesh contract
-// that an unsupported operation fails explicitly: /network/options
-// advertises historical_balance_lookup=false, so a request pinned to an
-// older block must be refused rather than silently answered with the
-// current tip balance.
-func TestAccountBalanceRejectsHistoricalLookup(t *testing.T) {
+// TestAccountBalanceHistoricalByIndex covers a balance pinned to an
+// earlier block: the ledger must be queried at that block's slot, and
+// the response must report the requested block rather than the tip, so
+// a client can tell which point the balance belongs to.
+func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 	deps := newTestDeps()
+	paymentKey := testKeyHash(0x30)
 	addr := testAddress(
-		t, lcommon.AddressTypeKeyNone, testKeyHash(0x06), nil,
+		t, lcommon.AddressTypeKeyNone, paymentKey, nil,
 	)
+	histHash := testHash(0x31)
+	deps.chain.tip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(9000, testHash(0x32)),
+		BlockNumber: 900,
+	}
+	deps.database.blockByIndex = func(
+		idx uint64,
+	) (models.Block, error) {
+		require.Equal(t, uint64(120), idx)
+		return models.Block{
+			Hash:   histHash,
+			Number: 120,
+			Slot:   1200,
+		}, nil
+	}
 	deps.ledger.utxos = func(
 		lcommon.Address,
 	) ([]models.Utxo, error) {
-		t.Fatal("ledger must not be queried for a historical point")
+		t.Fatal("historical request must not read the tip UTxO set")
+		return nil, nil
+	}
+	deps.ledger.utxosAtSlot = func(
+		got lcommon.Address,
+		slot uint64,
+	) ([]models.Utxo, error) {
+		require.Equal(t, addr, got.String())
+		require.Equal(t, uint64(1200), slot)
+		return []models.Utxo{
+			testUtxo(
+				testHash(0x33), 0, 7_000_000, paymentKey, nil,
+			),
+		}, nil
+	}
+	h := newTestHandler(t, deps)
+
+	req := balanceRequest(addr)
+	req.BlockIdentifier = byIndex(120)
+	rec := postJSON(t, h, "/account/balance", req)
+
+	resp := decodeResponse[AccountBalanceResponse](t, rec)
+	require.Equal(
+		t,
+		&BlockIdentifier{Index: 120, Hash: hexString(histHash)},
+		resp.BlockIdentifier,
+	)
+	require.Len(t, resp.Balances, 1)
+	require.Equal(t, "7000000", resp.Balances[0].Value)
+}
+
+// TestAccountBalanceHistoricalByHash covers pinning by block hash,
+// which is the identifier a client holds after reading a block.
+func TestAccountBalanceHistoricalByHash(t *testing.T) {
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x34), nil,
+	)
+	histHash := testHash(0x35)
+	deps.database.blockByHash = func(
+		hash []byte,
+	) (models.Block, error) {
+		require.Equal(t, histHash, hash)
+		return models.Block{
+			Hash:   histHash,
+			Number: 55,
+			Slot:   550,
+		}, nil
+	}
+	deps.ledger.utxosAtSlot = func(
+		_ lcommon.Address,
+		slot uint64,
+	) ([]models.Utxo, error) {
+		require.Equal(t, uint64(550), slot)
 		return nil, nil
 	}
 	h := newTestHandler(t, deps)
 
 	req := balanceRequest(addr)
-	req.BlockIdentifier = byIndex(10)
+	req.BlockIdentifier = byHash(hexString(histHash))
 	rec := postJSON(t, h, "/account/balance", req)
 
-	requireMeshError(
-		t, rec, ErrNotImplemented, http.StatusNotImplemented,
+	resp := decodeResponse[AccountBalanceResponse](t, rec)
+	require.Equal(
+		t,
+		&BlockIdentifier{Index: 55, Hash: hexString(histHash)},
+		resp.BlockIdentifier,
+	)
+	// An account with no UTxOs at that point still reports zero ADA.
+	require.Len(t, resp.Balances, 1)
+	require.Equal(t, "0", resp.Balances[0].Value)
+}
+
+// TestAccountBalanceHistoricalEmptyIdentifier asserts a block
+// identifier carrying neither hash nor index is treated as absent, so
+// clients that always send the field still get the tip balance.
+func TestAccountBalanceHistoricalEmptyIdentifier(t *testing.T) {
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x36), nil,
+	)
+	deps.chain.tip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(70, testHash(0x37)),
+		BlockNumber: 7,
+	}
+	called := false
+	deps.ledger.utxos = func(
+		lcommon.Address,
+	) ([]models.Utxo, error) {
+		called = true
+		return nil, nil
+	}
+	deps.ledger.utxosAtSlot = func(
+		lcommon.Address, uint64,
+	) ([]models.Utxo, error) {
+		t.Fatal("empty identifier must not take the historical path")
+		return nil, nil
+	}
+	h := newTestHandler(t, deps)
+
+	req := balanceRequest(addr)
+	req.BlockIdentifier = &PartialBlockIdentifier{}
+	rec := postJSON(t, h, "/account/balance", req)
+
+	resp := decodeResponse[AccountBalanceResponse](t, rec)
+	require.True(t, called)
+	require.Equal(t, int64(7), resp.BlockIdentifier.Index)
+}
+
+// TestAccountBalanceHistoricalBlockNotFound covers a point the node
+// cannot resolve, including the reorg case where the client holds the
+// hash of a block that was rolled back: the balance must not silently
+// fall back to another point.
+func TestAccountBalanceHistoricalBlockNotFound(t *testing.T) {
+	rolledBack := testHash(0x38)
+	tests := map[string]*PartialBlockIdentifier{
+		"unknown index":    byIndex(999999),
+		"rolled-back hash": byHash(hexString(rolledBack)),
+	}
+	for name, id := range tests {
+		t.Run(name, func(t *testing.T) {
+			deps := newTestDeps()
+			addr := testAddress(
+				t, lcommon.AddressTypeKeyNone,
+				testKeyHash(0x39), nil,
+			)
+			deps.database.blockByIndex = func(
+				uint64,
+			) (models.Block, error) {
+				return models.Block{},
+					models.ErrBlockNotFound
+			}
+			deps.database.blockByHash = func(
+				[]byte,
+			) (models.Block, error) {
+				return models.Block{},
+					models.ErrBlockNotFound
+			}
+			deps.ledger.utxosAtSlot = func(
+				lcommon.Address, uint64,
+			) ([]models.Utxo, error) {
+				t.Fatal("must not query an unresolved point")
+				return nil, nil
+			}
+			h := newTestHandler(t, deps)
+
+			req := balanceRequest(addr)
+			req.BlockIdentifier = id
+			rec := postJSON(t, h, "/account/balance", req)
+
+			requireMeshError(
+				t, rec, ErrBlockNotFound,
+				http.StatusNotFound,
+			)
+		})
+	}
+}
+
+// TestAccountBalanceHistoricalLedgerError asserts a failure reading the
+// historical UTxO set is reported rather than degraded to an empty
+// balance.
+func TestAccountBalanceHistoricalLedgerError(t *testing.T) {
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x3a), nil,
+	)
+	deps.database.blockByIndex = func(
+		uint64,
+	) (models.Block, error) {
+		return models.Block{
+			Hash: testHash(0x3b), Number: 4, Slot: 40,
+		}, nil
+	}
+	deps.ledger.utxosAtSlot = func(
+		lcommon.Address, uint64,
+	) ([]models.Utxo, error) {
+		return nil, errors.New("historical read failed")
+	}
+	h := newTestHandler(t, deps)
+
+	req := balanceRequest(addr)
+	req.BlockIdentifier = byIndex(4)
+	rec := postJSON(t, h, "/account/balance", req)
+
+	got := requireMeshError(
+		t, rec, ErrInternal, http.StatusInternalServerError,
+	)
+	require.Equal(
+		t, "historical read failed", got.Details["error"],
 	)
 }
 
@@ -338,5 +531,45 @@ func TestAccountCoinsLedgerError(t *testing.T) {
 
 	requireMeshError(
 		t, rec, ErrInternal, http.StatusInternalServerError,
+	)
+}
+
+// TestAccountBalanceHonorsAdvertisedCapability ties the capability
+// advertised by /network/options to what /account/balance actually
+// does. The two drifting apart is a client-visible contract break:
+// a client that trusts the flag would either skip historical queries
+// the node supports, or send ones it rejects.
+func TestAccountBalanceHonorsAdvertisedCapability(t *testing.T) {
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x3c), nil,
+	)
+	deps.database.blockByIndex = func(
+		uint64,
+	) (models.Block, error) {
+		return models.Block{
+			Hash: testHash(0x3d), Number: 2, Slot: 20,
+		}, nil
+	}
+	h := newTestHandler(t, deps)
+
+	optsRec := postJSON(t, h, "/network/options", NetworkRequest{
+		networkIdentifierField: networkIdentifierField{
+			NetworkIdentifier: testNetworkID(),
+		},
+	})
+	opts := decodeResponse[NetworkOptionsResponse](t, optsRec)
+
+	req := balanceRequest(addr)
+	req.BlockIdentifier = byIndex(2)
+	rec := postJSON(t, h, "/account/balance", req)
+
+	if opts.Allow.HistoricalBalanceLookup {
+		resp := decodeResponse[AccountBalanceResponse](t, rec)
+		require.Equal(t, int64(2), resp.BlockIdentifier.Index)
+		return
+	}
+	requireMeshError(
+		t, rec, ErrNotImplemented, http.StatusNotImplemented,
 	)
 }

@@ -17,7 +17,6 @@ package mesh
 import (
 	"cmp"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -40,14 +39,13 @@ func (s *Server) handleAccountBalance(
 		return
 	}
 
-	// /network/options advertises
-	// historical_balance_lookup=false, so a request pinned to an
-	// earlier block cannot be answered. Refuse it explicitly instead
-	// of returning the current tip balance under a historical block
-	// identifier, which would silently misreport the account.
-	if meshErr := rejectHistoricalLookup(
+	// Resolve the point before touching the ledger: a balance pinned
+	// to a block the node cannot resolve must fail rather than fall
+	// back to another point.
+	point, meshErr := s.resolveBalancePoint(
 		req.BlockIdentifier,
-	); meshErr != nil {
+	)
+	if meshErr != nil {
 		writeError(w, meshErr)
 		return
 	}
@@ -60,26 +58,34 @@ func (s *Server) handleAccountBalance(
 		return
 	}
 
-	utxos, err := s.config.LedgerState.UtxosByAddress(
-		addr,
+	var (
+		utxos []models.Utxo
+		err   error
 	)
+	if point.historical {
+		utxos, err = s.config.LedgerState.
+			UtxosByAddressAtSlot(addr, point.slot)
+	} else {
+		utxos, err = s.config.LedgerState.UtxosByAddress(
+			addr,
+		)
+	}
 	if err != nil {
 		s.logger.Error(
 			"failed to query UTxOs for account",
 			"address",
 			req.AccountIdentifier.Address,
+			"slot", point.slot,
+			"historical", point.historical,
 			"error", err,
 		)
 		writeError(w, wrapErr(ErrInternal, err))
 		return
 	}
 
-	balances := aggregateBalances(utxos)
-	tip := s.config.Chain.Tip()
-
 	writeJSON(w, http.StatusOK, &AccountBalanceResponse{
-		BlockIdentifier: s.tipBlockID(tip),
-		Balances:        balances,
+		BlockIdentifier: point.blockID,
+		Balances:        aggregateBalances(utxos),
 	})
 }
 
@@ -144,29 +150,46 @@ func (s *Server) parseAccountAddress(
 	return addr, nil
 }
 
-// rejectHistoricalLookup returns an error when the caller pinned a
-// request to a specific block. An identifier present but carrying
-// neither a hash nor an index is treated as absent, matching clients
-// that always send the field.
-func rejectHistoricalLookup(
+// balancePoint is the chain point a balance response is pinned to: the
+// identifier echoed back to the client, the slot the UTxO set is read
+// at, and whether that point is an earlier block rather than the tip.
+type balancePoint struct {
+	blockID    *BlockIdentifier
+	slot       uint64
+	historical bool
+}
+
+// resolveBalancePoint determines the point a balance request is pinned
+// to. A nil identifier, or one carrying neither a hash nor an index, is
+// treated as the current tip -- clients commonly send the field
+// unconditionally. Anything else is resolved through the same block
+// lookup /block uses, so an unknown or rolled-back point fails with
+// block-not-found instead of silently answering from the tip.
+func (s *Server) resolveBalancePoint(
 	id *PartialBlockIdentifier,
-) *Error {
-	if id == nil {
-		return nil
-	}
-	hasHash := id.Hash != nil && *id.Hash != ""
-	hasIndex := id.Index != nil
+) (balancePoint, *Error) {
+	hasHash := id != nil && id.Hash != nil && *id.Hash != ""
+	hasIndex := id != nil && id.Index != nil
 	if !hasHash && !hasIndex {
-		return nil
+		tip := s.config.Chain.Tip()
+		return balancePoint{
+			blockID: s.tipBlockID(tip),
+			slot:    tip.Point.Slot,
+		}, nil
 	}
-	return wrapErr(
-		ErrNotImplemented,
-		errors.New(
-			"historical balance lookup is not supported; "+
-				"omit block_identifier to query the "+
-				"current tip",
-		),
-	)
+
+	block, meshErr := s.lookupBlock(id)
+	if meshErr != nil {
+		return balancePoint{}, meshErr
+	}
+	return balancePoint{
+		blockID: &BlockIdentifier{
+			Index: int64(block.Number), // #nosec G115
+			Hash:  hex.EncodeToString(block.Hash),
+		},
+		slot:       block.Slot,
+		historical: true,
+	}, nil
 }
 
 // aggregateBalances sums ADA and native asset amounts

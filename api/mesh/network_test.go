@@ -73,9 +73,10 @@ func TestNetworkOptions(t *testing.T) {
 		t, OperationStatuses(), resp.Allow.OperationStatuses,
 	)
 	require.Len(t, resp.Allow.Errors, len(AllErrors()))
-	// Historical lookups and mempool coins are not implemented, and
-	// clients rely on these flags to skip those calls entirely.
-	require.False(t, resp.Allow.HistoricalBalanceLookup)
+	// Clients rely on these flags to decide which calls to make:
+	// /account/balance honors a block_identifier, while mempool coins
+	// are not implemented.
+	require.True(t, resp.Allow.HistoricalBalanceLookup)
 	require.False(t, resp.Allow.MempoolCoins)
 }
 

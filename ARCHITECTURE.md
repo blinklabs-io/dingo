@@ -3260,12 +3260,18 @@ Two contracts follow from that boundary:
   same translation `api/blockfrost`'s block-by-height lookup and
   `midnight/server`'s `databaseAdapter` perform. Handlers deal only in
   consensus block numbers.
-- **No historical balance lookup.** `/network/options` advertises
-  `historical_balance_lookup: false`, and `/account/balance` enforces it: a
-  request carrying a `block_identifier` is refused with the `not implemented`
-  error (code 7, HTTP 501) rather than being answered with the current tip
-  balance under a historical identifier. Balances and coins are always reported
-  against the tip returned in the response's `block_identifier`.
+- **Historical balances are pinned to the requested point.**
+  `/network/options` advertises `historical_balance_lookup: true`, and
+  `/account/balance` honors it. A request carrying a `block_identifier`
+  resolves that block through the same lookup `/block` uses, reads the UTxO set
+  at the block's slot via `MeshLedgerState.UtxosByAddressAtSlot` (UTxOs added
+  at or before the slot and not spent until after it), and echoes the resolved
+  block back as the response's `block_identifier` — never the tip. A point the
+  node cannot resolve, including the hash of a rolled-back block, fails with
+  `block not found` rather than falling back to another point. An identifier
+  carrying neither hash nor index is treated as absent, since clients commonly
+  send the field unconditionally. `/account/coins` has no block identifier in
+  the Rosetta schema and always reports the tip.
 
 ### UTxO RPC (`api/utxorpc/`)
 

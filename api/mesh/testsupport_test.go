@@ -113,9 +113,13 @@ func (f *fakeDatabase) GetTransactionsByBlockHash(
 
 // fakeLedgerState is a MeshLedgerState with per-test behavior.
 type fakeLedgerState struct {
-	pparams    lcommon.ProtocolParameters
-	slotToTime func(slot uint64) (time.Time, error)
-	utxos      func(addr lcommon.Address) ([]models.Utxo, error)
+	pparams     lcommon.ProtocolParameters
+	slotToTime  func(slot uint64) (time.Time, error)
+	utxos       func(addr lcommon.Address) ([]models.Utxo, error)
+	utxosAtSlot func(
+		addr lcommon.Address,
+		slot uint64,
+	) ([]models.Utxo, error)
 }
 
 func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
@@ -142,6 +146,16 @@ func (f *fakeLedgerState) UtxosByAddress(
 		return nil, nil
 	}
 	return f.utxos(addr)
+}
+
+func (f *fakeLedgerState) UtxosByAddressAtSlot(
+	addr lcommon.Address,
+	slot uint64,
+) ([]models.Utxo, error) {
+	if f.utxosAtSlot == nil {
+		return nil, nil
+	}
+	return f.utxosAtSlot(addr, slot)
 }
 
 // submittedTx records one accepted MeshMempool.AddTransaction call.
