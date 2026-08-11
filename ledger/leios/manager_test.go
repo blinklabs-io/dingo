@@ -1103,7 +1103,6 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 	assert.True(t, sigChecked)
 }
 
-// TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry proves the core
 // TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee proves a
 // pool with a real on-chain registered key, but zero stake in the current
 // epoch's snapshot (so it can never be a ComputeCommittee member this
@@ -1393,6 +1392,59 @@ func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
 	votingKey := fixture.mgr.votingKey
 	fixture.mgr.mu.Unlock()
 	assert.Nil(t, votingKey, "a rejected key must not be enabled")
+}
+
+// TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure proves a
+// transient key-provider error is a hard failure, not "no on-chain key
+// found": treating the two the same would make ValidateVotingKey silently
+// fall back to the static registry during exactly the kind of outage that
+// should instead block startup until it clears.
+func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(t *testing.T) {
+	member := CommitteeMember{}
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				err: errors.New("store temporarily unavailable"),
+			}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	err := fixture.mgr.ValidateVotingKey(poolKeyHash, fixture.keys[member.VoterId])
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "store temporarily unavailable")
+}
+
+// TestVoteManagerEnableVotingPropagatesKeyProviderFailure proves the same
+// for EnableVoting specifically: a transient failure must not let it fall
+// through to registering in the static registry and reporting success,
+// since that would leave a pool believing it is voting when the real
+// on-chain key (invisible only because of the outage) might disagree --
+// and every subsequent emission would then silently reject it once the
+// outage clears and the real key resolves.
+func TestVoteManagerEnableVotingPropagatesKeyProviderFailure(t *testing.T) {
+	member := CommitteeMember{}
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				err: errors.New("store temporarily unavailable"),
+			}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	err := fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[member.VoterId])
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "store temporarily unavailable")
+
+	fixture.mgr.mu.Lock()
+	votingKey := fixture.mgr.votingKey
+	fixture.mgr.mu.Unlock()
+	assert.Nil(t, votingKey, "a failed lookup must not enable voting")
 }
 
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {

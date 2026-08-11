@@ -511,7 +511,14 @@ func (m *VoteManager) EnableVoting(
 	// in leiosVoterPublicKeys -- the on-chain key is already the stronger,
 	// PoP-verified trust source, so a conflict against a weaker one it has
 	// superseded is not a real problem.
-	onChain, onChainKnown := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	onChain, onChainKnown, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	if err != nil {
+		return fmt.Errorf(
+			"resolve on-chain leios key for pool %s: %w",
+			poolKeyHash.String(),
+			err,
+		)
+	}
 	if onChainKnown && !onChain.Equal(key.PublicKey()) {
 		return fmt.Errorf(
 			"configured leios voting key does not match the on-chain registered key for pool %s",
@@ -553,7 +560,14 @@ func (m *VoteManager) ValidateVotingKey(
 	if key == nil {
 		return errors.New("nil leios vote signing key")
 	}
-	registered, ok := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	registered, ok, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	if err != nil {
+		return fmt.Errorf(
+			"resolve on-chain leios key for pool %x: %w",
+			poolKeyHash,
+			err,
+		)
+	}
 	if !ok {
 		registered, ok = m.registry.PublicKeyFor(poolKeyHash[:])
 	}
@@ -742,22 +756,27 @@ func (m *VoteManager) resolveOnChainKeys(
 // an operator must be able to enable voting in advance of that rather than
 // getting rejected today for a reason that has nothing to do with the
 // validity of their key.
+//
+// A key-provider error is returned, not swallowed into "no on-chain key
+// found": callers resolve that case to "fall back to the static registry,"
+// and a transient lookup failure is not the same as a genuine absence.
+// Treating them the same would let EnableVoting register a possibly-stale
+// or wrong local key while the real on-chain key is momentarily
+// unreachable -- EnableVoting would then report success, but every
+// subsequent emission would still resolve the real on-chain key once the
+// failure clears and silently reject that stale key, so the operator would
+// have no signal anything is wrong until their pool never actually votes.
 func (m *VoteManager) resolveOnChainKeyForPool(
 	poolKeyHash []byte,
-) (*bls12381.G2Affine, bool) {
+) (*bls12381.G2Affine, bool, error) {
 	poolHashHex := hex.EncodeToString(poolKeyHash)
 	snapshotEpoch := CommitteeSnapshotEpoch(m.epochProvider.CurrentEpoch())
 	keys, err := m.resolveOnChainKeys(snapshotEpoch, []string{poolHashHex})
 	if err != nil {
-		m.logger.Warn(
-			"resolve on-chain leios key for pool",
-			"pool", poolHashHex,
-			"error", err,
-		)
-		return nil, false
+		return nil, false, err
 	}
 	pub, ok := keys[poolHashHex]
-	return pub, ok
+	return pub, ok, nil
 }
 
 // resolveVoterKey resolves a committee member's voting public key: the
