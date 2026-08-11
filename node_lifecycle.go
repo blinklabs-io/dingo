@@ -1412,37 +1412,22 @@ func (n *Node) Restore(
 	}
 	defer restoreHost.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 
-	// This always restores into the same database this node is already
-	// configured for (Metadata below), not an independently-resolved one a
-	// misconfigured DSN could point elsewhere -- see
-	// metadata.AllowResetOfPopulatedTarget's doc comment for why that makes
-	// it safe to bypass a Resettable provider's own "target already has
-	// real data" guard here, unlike the offline `dingo database restore`
-	// CLI path, which must keep going through that guard.
-	manifest, err := lifecycle.Restore(
-		metadata.AllowResetOfPopulatedTarget(ctx),
-		restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
-		lifecycle.RestoreStorageConfig{
-			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
-			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
-		},
-	)
-	if err != nil {
-		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
-	}
-	if err := n.validateRestoredAgainstNodeConfig(ctx, stagingDir); err != nil {
-		_ = os.RemoveAll(stagingDir)
-		return lifecycle.Manifest{}, fmt.Errorf(
-			"validate restored snapshot against node configuration: %w",
-			err,
-		)
-	}
-
-	// Everything about the restored snapshot is now validated — both
-	// internally (lifecycle.Restore, against its own manifest) and against
-	// this node's actual configuration — while this node's real data
-	// directory was never touched and the node kept serving normally
-	// throughout. Only the brief directory swap below requires quiescing.
+	// Quiesce and close this node's own storage BEFORE any restore work
+	// touches either the staging directory or (for a client/server
+	// metadata backend) the live remote database, not after: unlike
+	// file-based blob/metadata storage, where lifecycle.Restore below only
+	// ever writes into the isolated stagingDir and the live data directory
+	// is untouched until swapInRestoredDataDir runs, a Resettable provider
+	// (postgres/mysql) has no such staging copy -- its connection config
+	// always points at the one real, already-configured database
+	// regardless of stagingDir, so Reset+RestoreFrom mutate that live
+	// database directly. Running that while this node's own,
+	// still-open connection pool could concurrently be reading or writing
+	// the same database (or, on a later validation failure, leaving the
+	// node running against a database a concurrent Reset already emptied
+	// or partially reloaded) is exactly the hazard quiescing first closes.
+	// This costs a little avoidable downtime on a restore that later turns
+	// out to fail validation, a strictly safer trade than the alternative.
 	//
 	// quiesceForLiveLifecycleOp attempts every one of its stop calls
 	// regardless of an earlier one failing (e.g. a Stop(ctx) call hitting
@@ -1451,13 +1436,13 @@ func (n *Node) Restore(
 	// attempting to resume would strand it running but silently
 	// unresponsive (no forging, no mempool, no APIs) with no indication
 	// to the caller that it needs a restart. The original data directory
-	// is still untouched at this point in both cases, so
+	// (and, for a client/server metadata backend, the live database) is
+	// still untouched at this point in both cases, so
 	// reinitializeAndResume can safely bring the node back up on it; only
 	// if that resume itself fails do we give up and bring the process
 	// down for a supervised restart, mirroring swapInRestoredDataDir's
 	// failure handling below.
 	if err := n.quiesceForLiveLifecycleOp(ctx); err != nil {
-		_ = os.RemoveAll(stagingDir)
 		if errors.Is(err, errStorageDrainUnconfirmed) {
 			// See errStorageDrainUnconfirmed's doc comment: reopening
 			// storage is not safe here either — reinitializeAndResume
@@ -1486,7 +1471,6 @@ func (n *Node) Restore(
 		n.bark.PauseDB()
 	}
 	if err := n.closeStorageForLiveLifecycleOp(ctx); err != nil {
-		_ = os.RemoveAll(stagingDir)
 		if errors.Is(err, errStorageDrainUnconfirmed) {
 			// See errStorageDrainUnconfirmed's doc comment: unlike every
 			// other quiesce/close-storage error, reinitializeAndResume is
@@ -1503,6 +1487,50 @@ func (n *Node) Restore(
 			)
 		}
 		return lifecycle.Manifest{}, fmt.Errorf("close storage: %w", err)
+	}
+
+	// This node's own storage handle is now closed: a Resettable
+	// provider's Reset+RestoreFrom below can only ever affect a database
+	// this node itself has stopped using, never one it is concurrently
+	// serving from. This always restores into the same database this node
+	// is already configured for (Metadata below), not an
+	// independently-resolved one a misconfigured DSN could point
+	// elsewhere -- see metadata.AllowResetOfPopulatedTarget's doc comment
+	// for why that makes it safe to bypass a Resettable provider's own
+	// "target already has real data" guard here, unlike the offline
+	// `dingo database restore` CLI path, which must keep going through
+	// that guard.
+	manifest, err := lifecycle.Restore(
+		metadata.AllowResetOfPopulatedTarget(ctx),
+		restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
+		lifecycle.RestoreStorageConfig{
+			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
+			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+		},
+	)
+	if err != nil {
+		_ = os.RemoveAll(stagingDir)
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"restore: %w (resume also failed: %w)", err, resumeErr,
+			)
+		}
+		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
+	}
+	if err := n.validateRestoredAgainstNodeConfig(ctx, stagingDir); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"validate restored snapshot against node configuration: %w (resume also failed: %w)",
+				err, resumeErr,
+			)
+		}
+		return lifecycle.Manifest{}, fmt.Errorf(
+			"validate restored snapshot against node configuration: %w",
+			err,
+		)
 	}
 
 	backupDir, err := n.swapInRestoredDataDir(stagingDir)
