@@ -1391,6 +1391,29 @@ func (n *Node) Restore(
 	n.snapshotMu.Lock()
 	defer n.snapshotMu.Unlock()
 
+	// Captured up front, before anything below can close n.db: a
+	// Resettable metadata plugin (postgres/mysql) has no isolated staging
+	// copy the way file-based storage does. Once lifecycle.Restore below
+	// actually calls that provider's Reset, it is mutating the one real,
+	// live database directly with no pre-restore backup retained (unlike
+	// backupDir for file-based storage further down) -- so any failure
+	// from that point on can no longer promise "the original data is
+	// still there, safe to resume on." Every failure branch below that
+	// point uses this to fail closed instead of calling
+	// reinitializeAndResume, which would otherwise risk the node coming
+	// back up serving a database Reset already emptied, or restored to a
+	// state that no longer matches this node's still-original blob store.
+	//
+	// Checked via HasDestructiveReset, not a plain metadata.Resettable type
+	// assertion: every backend's concrete *sqlstore.Store satisfies
+	// Resettable's Reset(ctx) error method regardless of backend (sqlite's
+	// is a harmless no-op internally), so the interface alone can't tell
+	// "genuinely destructive" (postgres/mysql) apart from "no-op" (sqlite).
+	metadataIsResettable := false
+	if dr, ok := n.db.Metadata().(interface{ HasDestructiveReset() bool }); ok {
+		metadataIsResettable = dr.HasDestructiveReset()
+	}
+
 	stagingDir := n.config.dataDir + restoreStagingSuffix
 	if err := os.RemoveAll(stagingDir); err != nil {
 		return lifecycle.Manifest{}, fmt.Errorf(
@@ -1510,6 +1533,23 @@ func (n *Node) Restore(
 	)
 	if err != nil {
 		_ = os.RemoveAll(stagingDir)
+		if metadataIsResettable {
+			// lifecycle.Restore may have already called Reset on the live
+			// remote database before failing at a later step (e.g. its own
+			// RestoreFrom, or the blob side) -- with no pre-restore backup
+			// for a Resettable provider, that database may now be emptied
+			// or reloaded to a state that no longer matches this node's
+			// still-original blob store. Resuming onto that risks serving
+			// mixed or invalid state; fail closed for a supervised restart
+			// instead.
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"restore: %w (node stopped: a Resettable metadata backend "+
+					"has no safe pre-restore state to resume on after a "+
+					"failed restore)",
+				err,
+			)
+		}
 		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, fmt.Errorf(
@@ -1520,11 +1560,30 @@ func (n *Node) Restore(
 	}
 	if err := n.validateRestoredAgainstNodeConfig(ctx, stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
+		if metadataIsResettable {
+			// lifecycle.Restore already succeeded by this point, so a
+			// Resettable provider's live database has already been fully
+			// reset and reloaded to the incoming snapshot's state -- this
+			// failure only means that state doesn't match this node's own
+			// configuration (e.g. the wrong network), not that anything
+			// is half-done. Resuming would bring the node back up
+			// serving that mismatched data as if it were normal. Fail
+			// closed instead.
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"validate restored snapshot against node configuration: %w "+
+					"(node stopped: a Resettable metadata backend has "+
+					"already been reset and reloaded to the rejected "+
+					"snapshot's data, with no safe state to resume on)",
+				err,
+			)
+		}
 		if resumeErr := n.reinitializeAndResume(context.WithoutCancel(ctx)); resumeErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, fmt.Errorf(
 				"validate restored snapshot against node configuration: %w (resume also failed: %w)",
-				err, resumeErr,
+				err,
+				resumeErr,
 			)
 		}
 		return lifecycle.Manifest{}, fmt.Errorf(
@@ -1535,7 +1594,18 @@ func (n *Node) Restore(
 
 	backupDir, err := n.swapInRestoredDataDir(stagingDir)
 	if err != nil {
-		if errors.Is(err, errRestoreSwapUnrecoverable) {
+		if errors.Is(err, errRestoreSwapUnrecoverable) || metadataIsResettable {
+			// For errRestoreSwapUnrecoverable, dataDir's own state is
+			// already unknown regardless of metadata backend. For a
+			// Resettable metadata backend specifically, the reasoning is
+			// the same as the two branches above: its live database was
+			// already fully reset and reloaded to the new snapshot's
+			// data before this blob-side swap ever ran, so "the original
+			// data directory is intact" (this branch's own next comment)
+			// is only ever true for the blob side -- resuming would pair
+			// the new metadata with the old (rolled-back) blob store,
+			// exactly the mixed state this must avoid. Fail closed either
+			// way.
 			n.cancel()
 			return lifecycle.Manifest{}, err
 		}
