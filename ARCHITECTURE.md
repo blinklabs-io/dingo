@@ -4900,16 +4900,14 @@ bound and is never pruned. `LedgerDelta.apply` sets
 `MetadataStore.SetTransaction`'s `skipWithdrawalWitness` argument
 (`database/plugin/metadata/sqlstore/transaction_write.go`).
 `internal/node.Backfill`'s batched historical-replay path derives it the same
-way, from its own `delegatorInactivityEnabled` field -- set explicitly by
-every caller (`mithril/sync.go`, `cmd/dingo/serve.go`'s `resumeBackfill`) from
-the real config value, not assumed off by default. In practice that value is
-always false today, because the only trigger for that path (a pending
-Mithril-originated backfill checkpoint) implies a Mithril-bootstrapped
-database, which can never run with the gate enabled (see
-`errMithrilInactivityIncompatible` below) and so could never read the rows
-either -- but the code derives this rather than hardcoding it, since
-`resumeBackfill` resumes any pending checkpoint and does not itself check the
-gate.
+way, from its own `delegatorInactivityEnabled` field. Neither caller relies on
+the field's zero-value default: `mithril/sync.go` hardcodes it false, since
+the gate can never be on for a Mithril bootstrap (see
+`errMithrilInactivityIncompatible` below); `cmd/dingo/serve.go`'s
+`resumeBackfill` instead passes the real `DelegatorInactivityEnabled` config
+value, which can genuinely be true there -- it resumes any pending API-mode
+backfill checkpoint, not only a Mithril-originated one, and does not itself
+check the gate.
 
 At the authoritative SNAP point, both reward and leader-election Mark snapshots
 consume `RewardLiveStake` instead of scanning certificate and UTxO history. The
