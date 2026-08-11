@@ -333,6 +333,25 @@ func (s *State) AddClient(
 	return s.clients[connId], nil
 }
 
+// LookupClient returns the registered server-side (N2C) chainsync client
+// state for a connection, or false if no client is registered for it.
+//
+// Unlike AddClient, this is a pure read: it never registers a client as a
+// side effect of being asked about one. Callers that need to assert whether
+// a connection was registered (rather than ensure it is) must use this, so
+// the question cannot create its own answer.
+func (s *State) LookupClient(
+	connId connection.ConnectionId,
+) (*ChainsyncClientState, bool) {
+	s.Lock()
+	defer s.Unlock()
+	clientState, ok := s.clients[connId]
+	if !ok || clientState == nil {
+		return nil, false
+	}
+	return clientState, true
+}
+
 // RemoveClient unregisters a server-side (N2C) chainsync
 // client.
 func (s *State) RemoveClient(connId connection.ConnectionId) {
