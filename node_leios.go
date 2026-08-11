@@ -324,10 +324,14 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
 	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-		return fmt.Errorf(
-			"validate configured leios vote signing key: %w; register the matching public key in leios-voter-public-keys on every peer",
-			err,
-		)
+		// ValidateVotingKey's own error already names which sources it
+		// checked (the on-chain registration and leiosVoterPublicKeys) and
+		// whether the problem was "not found" or "found but mismatched," so
+		// no remedy is added here: the on-chain key takes precedence over
+		// leiosVoterPublicKeys, so directing every failure at the static
+		// registry would be wrong advice whenever the real problem is a key
+		// that no longer matches the pool's on-chain registration.
+		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
 	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
 		return fmt.Errorf("enable leios voting: %w", err)
