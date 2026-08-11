@@ -841,15 +841,21 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 	))
 
 	oldCtx := n.ctx
-	oldDB := n.db
 	_, err = n.Restore(context.Background(), snapshotDir)
 	require.Error(t, err)
 
 	// The node must still be alive and usable: n.ctx untouched, no
-	// cancellation, same live db instance, unchanged tip and blocks.
+	// cancellation, unchanged tip and blocks. n.db is deliberately not
+	// asserted to be the same pointer: Restore now quiesces and closes
+	// storage before validating the incoming snapshot at all (a Resettable
+	// provider's Reset+RestoreFrom has no staging copy to validate against
+	// first the way file-based storage does, so it must never run before
+	// this node's own connection to a live client/server database is
+	// closed — see Restore's own doc comment), so even a rejected restore
+	// reaches reinitializeAndResume and ends up with a freshly reopened,
+	// but equally valid, *database.Database over the same untouched data.
 	require.Same(t, oldCtx, n.ctx)
 	require.NoError(t, n.ctx.Err())
-	require.Same(t, oldDB, n.db)
 
 	tip, tipErr := n.db.GetTip(nil)
 	require.NoError(t, tipErr)
@@ -910,14 +916,18 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(otherDB))
 
 	oldCtx := n.ctx
-	oldDB := n.db
 	_, err = n.Restore(context.Background(), snapshotDir)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "node settings mismatch")
 
+	// n.db is deliberately not asserted to be the same pointer here --
+	// see TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss's
+	// identical comment: Restore now quiesces and closes storage before
+	// validateRestoredAgainstNodeConfig runs at all, so a rejected restore
+	// still ends up with a freshly reopened *database.Database over the
+	// same untouched data, not the original pointer.
 	require.Same(t, oldCtx, n.ctx)
 	require.NoError(t, n.ctx.Err())
-	require.Same(t, oldDB, n.db)
 
 	tip, tipErr := n.db.GetTip(nil)
 	require.NoError(t, tipErr)

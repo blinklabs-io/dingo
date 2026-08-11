@@ -660,6 +660,15 @@ databaseLifecycle:
   # tlsCertFilePath/tlsKeyFilePath) above -- Dingo refuses to start
   # otherwise, since the DatabaseService's destructive RPCs must not be
   # mounted without a way to authenticate callers.
+  #
+  # Docker image note: the container always runs as a non-root user with a
+  # pinned UID:GID of 1000:1000 (see Dockerfile) and never chowns anything
+  # at startup. /data/db is chowned to 1000:1000 at image build time, so a
+  # snapshotDir left under /data/db works with no extra steps. A
+  # snapshotDir bind-mounted from a separate host directory must be
+  # pre-chowned to 1000:1000 on the host before mounting, or dingo will
+  # fail to start with a clear "not writable" error instead of a raw
+  # filesystem permission error surfacing later during a snapshot attempt.
   # CLI: --db-snapshot-dir
   snapshotDir: ""
   # Optional cloud destination to additionally mirror every snapshot to,

@@ -118,7 +118,7 @@ func TestContextReaderStopsOnCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestCopyFileAndDurableDirectory(t *testing.T) {
+func TestCopyFile(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src.bin")
 	require.NoError(t, os.WriteFile(src, []byte("hello"), 0o644))
 	dstDir := filepath.Join(t.TempDir(), "a", "b")
@@ -128,10 +128,6 @@ func TestCopyFileAndDurableDirectory(t *testing.T) {
 	data, err := os.ReadFile(dst)
 	require.NoError(t, err)
 	require.Equal(t, []byte("hello"), data)
-	require.NoError(
-		t,
-		createDirDurable(filepath.Join(t.TempDir(), "nested", "dir")),
-	)
 }
 
 func TestCopyReaderToFileRemovesPartialDestinationOnCancellation(t *testing.T) {

@@ -436,6 +436,12 @@ func (it *s3StreamIterator) advance(ctx context.Context) {
 			}
 			it.page = page.Contents
 			it.pageIdx = 0
+			// A freshly fetched page can itself be empty (e.g. a prefix
+			// with zero matching objects, observed against MinIO): loop
+			// back to the pageIdx/len(page) check above instead of
+			// falling through to index it.page[0] unconditionally, which
+			// panics with an out-of-range index on an empty page.
+			continue
 		}
 		objectKey := strings.TrimPrefix(
 			aws.ToString(it.page[it.pageIdx].Key),
@@ -1049,13 +1055,29 @@ func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
 	return data, nil
 }
 
+// isS3NotFound reports whether err is S3's "object does not exist" error --
+// checked as two distinct types/codes, not one, because GetObject and
+// HeadObject disagree on which they return for the identical missing-key
+// condition: GetObject returns NoSuchKey, but HeadObject (used by
+// objectExists, which both Delete and Commit's per-key existence probe
+// depend on) returns the differently-coded NotFound instead, since a HEAD
+// response has no body for the SDK to parse a specific key-vs-bucket
+// error out of. Missing the NotFound case here previously made every
+// existence probe against a genuinely-absent key fail with a hard error
+// instead of correctly reporting "false, nil" (caught via a live MinIO
+// run: committing a brand new key errored on its own pre-existence probe).
 func isS3NotFound(err error) bool {
 	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchKey" {
+	if errors.As(err, &apiErr) &&
+		(apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
 		return true
 	}
 	var noSuchKey *s3types.NoSuchKey
-	return errors.As(err, &noSuchKey)
+	if errors.As(err, &noSuchKey) {
+		return true
+	}
+	var notFound *s3types.NotFound
+	return errors.As(err, &notFound)
 }
 
 func (d *BlobStoreS3) listKeysToFile(
