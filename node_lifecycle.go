@@ -1023,8 +1023,9 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 // PauseDB put in place before storage was closed (see Restore/Truncate).
 //
 // Note: the chainsync stall recycler is deliberately NOT restarted here —
-// it was never stopped (see quiesceForLiveLifecycleOp's comment) and reads
-// n.ledgerState/n.chainSelector fresh each tick, so it picks up the
+// it was never stopped (see quiesceForLiveLifecycleOp's comment) and its
+// component provider (nodeRecyclerComponents) reads n.ledgerState/
+// n.chainsyncState/n.chainSelector fresh each tick, so it picks up the
 // rebuilt objects on its own next tick.
 func (n *Node) reinitializeAPIServers() error {
 	utxorpcSelection, utxorpcPort, err := n.apiPluginSelection(
