@@ -15,6 +15,9 @@
 package mesh
 
 import (
+	"fmt"
+	"math"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 )
@@ -39,10 +42,30 @@ func (a *meshDatabaseAdapter) BlockByHash(
 	return database.BlockByHash(a.db, hash)
 }
 
+// BlockByIndex resolves a Cardano block height, which is what the Mesh
+// API exposes as block_identifier.index. Cardano block numbers are
+// 0-based while the blob store's internal index is 1-based
+// (database.BlockInitialIndex), so translate here the same way
+// api/blockfrost's block-by-height lookup and midnight/server's
+// databaseAdapter do. Without the translation a client feeding back the
+// index from a /block response gets the block below the one it asked
+// for, and height 0 never resolves. Guard the addition first: no real
+// chain approaches math.MaxUint64, but without the check that value
+// would wrap to internal index 0 instead of failing.
 func (a *meshDatabaseAdapter) BlockByIndex(
-	idx uint64,
+	height uint64,
 ) (models.Block, error) {
-	return a.db.BlockByIndex(idx, nil)
+	if height > math.MaxUint64-database.BlockInitialIndex {
+		return models.Block{}, fmt.Errorf(
+			"block height %d overflows internal index: %w",
+			height,
+			models.ErrBlockNotFound,
+		)
+	}
+	return a.db.BlockByIndex(
+		height+database.BlockInitialIndex,
+		nil,
+	)
 }
 
 func (a *meshDatabaseAdapter) GetTransactionByHash(

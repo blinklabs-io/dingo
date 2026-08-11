@@ -32,7 +32,11 @@ type MeshChain interface {
 // All calls implicitly use a nil transaction (auto-transaction per method).
 type MeshDatabase interface {
 	BlockByHash(hash []byte) (models.Block, error)
-	BlockByIndex(idx uint64) (models.Block, error)
+	// BlockByIndex looks up a block by its Cardano block height, which is
+	// the numbering the Mesh API exposes as block_identifier.index.
+	// Translating that height to the storage layer's own block index is
+	// the implementation's responsibility -- see NewMeshDatabase.
+	BlockByIndex(height uint64) (models.Block, error)
 	GetTransactionByHash(hash []byte) (*models.Transaction, error)
 	GetTransactionsByBlockHash(hash []byte) ([]models.Transaction, error)
 }

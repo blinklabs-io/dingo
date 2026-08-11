@@ -17,6 +17,7 @@ package mesh
 import (
 	"cmp"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -34,6 +35,18 @@ func (s *Server) handleAccountBalance(
 	var req AccountBalanceRequest
 	if meshErr := s.decodeAndValidate(
 		w, r, &req,
+	); meshErr != nil {
+		writeError(w, meshErr)
+		return
+	}
+
+	// /network/options advertises
+	// historical_balance_lookup=false, so a request pinned to an
+	// earlier block cannot be answered. Refuse it explicitly instead
+	// of returning the current tip balance under a historical block
+	// identifier, which would silently misreport the account.
+	if meshErr := rejectHistoricalLookup(
+		req.BlockIdentifier,
 	); meshErr != nil {
 		writeError(w, meshErr)
 		return
@@ -129,6 +142,31 @@ func (s *Server) parseAccountAddress(
 			wrapErr(ErrInvalidRequest, err)
 	}
 	return addr, nil
+}
+
+// rejectHistoricalLookup returns an error when the caller pinned a
+// request to a specific block. An identifier present but carrying
+// neither a hash nor an index is treated as absent, matching clients
+// that always send the field.
+func rejectHistoricalLookup(
+	id *PartialBlockIdentifier,
+) *Error {
+	if id == nil {
+		return nil
+	}
+	hasHash := id.Hash != nil && *id.Hash != ""
+	hasIndex := id.Index != nil
+	if !hasHash && !hasIndex {
+		return nil
+	}
+	return wrapErr(
+		ErrNotImplemented,
+		errors.New(
+			"historical balance lookup is not supported; "+
+				"omit block_identifier to query the "+
+				"current tip",
+		),
+	)
 }
 
 // aggregateBalances sums ADA and native asset amounts
