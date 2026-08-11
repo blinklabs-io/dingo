@@ -104,6 +104,19 @@ type Backfill struct {
 	skippedBlocks   uint64
 	skippedUtxoRefs uint64
 
+	// delegatorInactivityEnabled mirrors the operator's CIP-0163
+	// DelegatorInactivityEnabled setting. It gates the CIP-0163
+	// account_withdrawal_witness write the same way the live-apply path does
+	// (ledger/delta.go): !delegatorInactivityEnabled skips the write. Defaults
+	// false (skip), which today is always correct -- this path only ever
+	// serves Mithril-sourced data, and a Mithril-bootstrapped database can
+	// never run with the gate enabled (see errMithrilInactivityIncompatible in
+	// cmd/dingo/mithril.go and checkMithrilInactivityCompat in
+	// cmd/dingo/serve.go). Callers should still set it from the real operator
+	// config via SetDelegatorInactivityEnabled so that invariant lives in one
+	// place instead of being silently assumed here too.
+	delegatorInactivityEnabled bool
+
 	onProgress func(BackfillProgress)
 }
 
@@ -120,6 +133,15 @@ func NewBackfill(
 		batchSize:     DefaultBackfillBatchSize,
 		computeNonces: nodeCfg != nil,
 	}
+}
+
+// SetDelegatorInactivityEnabled reports the operator's CIP-0163
+// DelegatorInactivityEnabled setting so the account_withdrawal_witness write
+// is gated identically to the live-apply path (ledger/delta.go). Callers
+// should pass the real config value rather than relying on the zero-value
+// default, even though that default is safe today (see the field doc).
+func (b *Backfill) SetDelegatorInactivityEnabled(enabled bool) {
+	b.delegatorInactivityEnabled = enabled
 }
 
 // SetBatchSize overrides the number of processed blocks accumulated before
@@ -1120,12 +1142,14 @@ func (b *Backfill) processBlockTxsBatched(
 				// that need repair via the recovery path.
 				SkipConsumedInputRecovery: isFreshStart,
 				Stats:                     stats,
-				// Backfill only serves Mithril-sourced historical data, which can
-				// never carry the delegator-inactivity gate enabled --
+				// Mirrors the live-apply path (ledger/delta.go): derived from
+				// the operator's real gate setting via
+				// SetDelegatorInactivityEnabled, not hardcoded, so a future
+				// caller of this path is correct by construction rather than
+				// relying on the Mithril-only invariant enforced separately by
 				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
-				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go) refuse
-				// that combination before this path ever runs.
-				SkipWithdrawalWitnessWrite: true,
+				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
+				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
 			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)

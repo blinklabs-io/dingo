@@ -276,6 +276,11 @@ func resumeBackfill(
 	}
 
 	bf := node.NewBackfill(db, nodeCfg, logger)
+	// checkMithrilInactivityCompat above already refuses to reach this point
+	// with the gate enabled on a Mithril-bootstrapped database, but report the
+	// real setting anyway so the CIP-0163 witness write is correct by
+	// construction rather than relying solely on that separate guard.
+	bf.SetDelegatorInactivityEnabled(cfg.DelegatorInactivityEnabled)
 	if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 		return fmt.Errorf(
 			"invalid BackfillBatchSize %d in SetBatchSize: %w",
