@@ -82,21 +82,37 @@ type StakeDistributionProvider interface {
 }
 
 // LeiosKeyProvider supplies each active pool's raw (unverified) registered
-// Dijkstra/Leios BLS key for a snapshot epoch, keyed by lowercase-hex pool
-// key hash. Implementations must not verify proof of possession themselves
-// -- VoteManager does that once per epoch and caches only the keys that
-// pass, so a pool with no usable key is simply absent from the resolved
-// map (a "keyless" committee seat: it still occupies a stake-weighted
-// voter id, but can never contribute a verified signature).
+// Dijkstra/Leios BLS key, keyed by lowercase-hex pool key hash.
+// Implementations must not verify proof of possession themselves --
+// VoteManager does that once per epoch and caches only the keys that pass,
+// so a pool with no usable key is simply absent from the resolved map (a
+// "keyless" committee seat: it still occupies a stake-weighted voter id,
+// but can never contribute a verified signature).
 //
-// poolKeyHashes names exactly the pools committeeAndParamsForEpoch already
-// fetched from StakeDistributionProvider for this same snapshot epoch, so
-// implementations must look up keys for that set rather than re-fetching
-// the stake distribution themselves -- doing so would duplicate a DB round
+// This is a current-state lookup, not frozen to a snapshot epoch: it reads
+// whatever is registered against poolKeyHashes right now, the same
+// simplification already made for VRF key hash in PoolDistr2 (see
+// poolVrfKeyHashes). A key registered or rotated between when the epoch's
+// stake snapshot was captured and when this is called becomes visible
+// immediately. On a live network with one canonical current state this
+// distinction rarely matters, but two nodes computing the same epoch's
+// committee at different wall-clock times around a key rotation could
+// still cache different resolved keys for that epoch (committeeAndParamsForEpoch
+// memoizes per epoch on first use) -- acceptable for the current prototype,
+// worth revisiting if this needs to reproduce a specific historical epoch's
+// resolution exactly.
+//
+// poolKeyHashes names exactly the epoch's committee members (the
+// stake-coverage prefix ComputeCommittee already selected from the
+// snapshot committeeAndParamsForEpoch fetched), not every pool in the
+// stake distribution: resolveVoterKey never looks up a non-member, so
+// verifying keys for pools that cannot make the committee only spends
+// pairing work on results that are never read. Implementations must look
+// up keys for exactly the given set rather than re-fetching the stake
+// distribution themselves -- doing so would duplicate a DB round
 // trip on every new-epoch committee computation.
 type LeiosKeyProvider interface {
 	GetLeiosKeys(
-		epoch uint64,
 		poolKeyHashes []string,
 	) (map[string]*lcommon.LeiosKey, error)
 }
@@ -619,13 +635,20 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 			err,
 		)
 	}
-	// Reuse the pool set already fetched above rather than handing the key
-	// provider just the epoch and letting it re-fetch the stake
-	// distribution itself -- that would double the DB round trip on every
-	// new-epoch committee computation.
-	poolKeyHashes := make([]string, 0, len(poolStakes))
-	for poolHashHex := range poolStakes {
-		poolKeyHashes = append(poolKeyHashes, poolHashHex)
+	// Resolve keys only for committee members, not every pool in the stake
+	// distribution: resolveVoterKey only ever looks up a member.PoolKeyHash,
+	// and ComputeCommittee already trimmed poolStakes down to the
+	// stake-coverage prefix that actually made the committee. Verifying a
+	// proof of possession is a pairing operation (measured ~0.75ms/key on
+	// this branch); at Cardano's pool counts, verifying every registered
+	// pool instead of just the committee would burn seconds of pairing
+	// work per epoch computation on results that could never be read back.
+	poolKeyHashes := make([]string, 0, len(committee.Members))
+	for _, member := range committee.Members {
+		poolKeyHashes = append(
+			poolKeyHashes,
+			hex.EncodeToString(member.PoolKeyHash),
+		)
 	}
 	// A failure here must not be cached: caching an empty onChainKeys map
 	// for this epoch would make every seat keyless until the process
@@ -683,7 +706,7 @@ func (m *VoteManager) resolveOnChainKeys(
 	if m.keyProvider == nil {
 		return verified, nil
 	}
-	raw, err := m.keyProvider.GetLeiosKeys(snapshotEpoch, poolKeyHashes)
+	raw, err := m.keyProvider.GetLeiosKeys(poolKeyHashes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve on-chain leios keys for snapshot epoch %d: %w",

@@ -103,6 +103,13 @@ func BuildEbCertificate(
 // signature. sigChecked reports whether the signature was verified; it is
 // false when one or more signer public keys are unknown (lenient mode,
 // pending CIP-0164 key registration).
+//
+// Callers: sigChecked=false means "quorum met, signature not confirmed,"
+// not "invalid" -- but nothing here enforces that a caller checks it. This
+// function has no production caller today, so getting that distinction
+// wrong currently costs nothing; the first one added should either use a
+// named result type or treat !sigChecked as a hard failure explicitly,
+// since a bool return is easy to drop on the floor.
 func ValidateEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	committee *Committee,
@@ -177,7 +184,9 @@ func ValidateEbCertificate(
 // false when one or more signers have no resolvable key (a keyless
 // committee seat, or a key registered on-chain that this call was not
 // given -- registry here is deliberately limited to locally configured
-// keys, not the on-chain resolution VoteManager performs).
+// keys, not the on-chain resolution VoteManager performs). See
+// ValidateEbCertificate's doc comment for the same caveat about callers
+// needing to check sigChecked -- nothing here enforces that they do.
 func ValidatePrototypeEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	announcingRbHash lcommon.Blake2b256,

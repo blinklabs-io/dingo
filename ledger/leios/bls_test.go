@@ -27,6 +27,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestLeiosPopDSTDiffersFromVoteDST pins both DST literals against the
+// IETF BLS-signature draft's values for this ciphersuite (hash_to_point vs
+// hash_pubkey_to_point), so reusing one for the other -- the bug this pair
+// of constants exists to prevent -- fails a test immediately rather than
+// only showing up as every real pool's PoP getting rejected.
+func TestLeiosPopDSTDiffersFromVoteDST(t *testing.T) {
+	assert.Equal(
+		t,
+		"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
+		LeiosVoteDST,
+	)
+	assert.Equal(
+		t,
+		"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
+		leiosPopDST,
+	)
+	assert.NotEqual(t, LeiosVoteDST, leiosPopDST)
+}
+
 // testSigningKey returns a signing key built from a small non-zero scalar.
 func testSigningKey(t *testing.T, scalar byte) *VoteSigningKey {
 	t.Helper()
@@ -224,12 +243,13 @@ func TestVerifyAggregateSignatureNoKeys(t *testing.T) {
 }
 
 // testLeiosKey builds a LeiosKey whose possession proof is a genuine
-// signature over its own public key under LeiosVoteDST.
+// PopProve signature over its own public key under leiosPopDST -- the same
+// DST VerifyLeiosKeyProofOfPossession checks against, not LeiosVoteDST.
 func testLeiosKey(t *testing.T, scalar byte) *lcommon.LeiosKey {
 	t.Helper()
 	key := testSigningKey(t, scalar)
 	pub := key.PublicKeyBytes()
-	proof, err := SignVote(key, pub)
+	proof, err := signWithDST(key, pub, leiosPopDST)
 	require.NoError(t, err)
 	return &lcommon.LeiosKey{PublicKey: pub, PossessionProof: proof}
 }
@@ -266,9 +286,11 @@ func TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof(t *testing.T) {
 }
 
 // TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof guards
-// against reusing an ordinary vote signature (over an RB hash) as if it
-// were a possession proof (over the public key itself): the two messages
-// must never be confused.
+// against reusing an ordinary vote signature (over an RB hash, under
+// LeiosVoteDST) as if it were a possession proof (over the public key
+// itself, under leiosPopDST): the two are now separated by both a
+// different DST and a different message, either of which alone would
+// already make this fail.
 func TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof(
 	t *testing.T,
 ) {

@@ -54,13 +54,13 @@ func (a *leiosStakeDistributionAdapter) GetStakeDistribution(
 // resolving registered Leios keys for exactly the pools the caller names
 // (the same set VoteManager already fetched a stake distribution for). It
 // returns raw (unverified) keys -- VoteManager itself checks proof of
-// possession before trusting one.
+// possession before trusting one. This is a current-state lookup (see
+// leios.LeiosKeyProvider's doc comment), not frozen to a snapshot epoch.
 type leiosKeyProviderAdapter struct {
 	ledgerState *ledger.LedgerState
 }
 
 func (a *leiosKeyProviderAdapter) GetLeiosKeys(
-	_ uint64,
 	poolKeyHashesHex []string,
 ) (_ map[string]*lcommon.LeiosKey, err error) {
 	if a.ledgerState == nil {

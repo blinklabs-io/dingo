@@ -76,7 +76,6 @@ type fakeLeiosKeyProvider struct {
 }
 
 func (f *fakeLeiosKeyProvider) GetLeiosKeys(
-	_ uint64,
 	_ []string,
 ) (map[string]*lcommon.LeiosKey, error) {
 	f.mu.Lock()
@@ -1110,7 +1109,7 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 // Registry entry and no derivation fallback involved.
 func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	key := testSigningKey(t, 123)
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), leiosPopDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1156,7 +1155,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 	key := testSigningKey(t, 124)
 	wrongKey := testSigningKey(t, 125)
-	badProof, err := SignVote(wrongKey, key.PublicKeyBytes())
+	badProof, err := signWithDST(wrongKey, key.PublicKeyBytes(), leiosPopDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1201,7 +1200,7 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 // still resolve keys normally once the failure clears.
 func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(t *testing.T) {
 	key := testSigningKey(t, 126)
-	proof, err := SignVote(key, key.PublicKeyBytes())
+	proof, err := signWithDST(key, key.PublicKeyBytes(), leiosPopDST)
 	require.NoError(t, err)
 	var member CommitteeMember
 	keyProvider := &fakeLeiosKeyProvider{
@@ -1274,7 +1273,11 @@ func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 	t *testing.T,
 ) {
 	rotatedKey := testSigningKey(t, 200)
-	proof, err := SignVote(rotatedKey, rotatedKey.PublicKeyBytes())
+	proof, err := signWithDST(
+		rotatedKey,
+		rotatedKey.PublicKeyBytes(),
+		leiosPopDST,
+	)
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1321,7 +1324,11 @@ func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
 	t *testing.T,
 ) {
 	onChainKey := testSigningKey(t, 201)
-	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	proof, err := signWithDST(
+		onChainKey,
+		onChainKey.PublicKeyBytes(),
+		leiosPopDST,
+	)
 	require.NoError(t, err)
 	wrongKey := testSigningKey(t, 202)
 	var member CommitteeMember
