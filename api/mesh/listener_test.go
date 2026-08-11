@@ -147,6 +147,15 @@ func freePort(t *testing.T) string {
 // startOnFreePort starts a server on a free loopback port, retrying on
 // a lost race for the port, and returns it with the address it bound.
 // The caller owns shutdown.
+//
+// Each attempt gets its own cancellable context. Start launches the
+// context-monitor goroutine before it binds, so a failed bind returns
+// an error while leaving that goroutine parked on the context; Stop
+// does not release it, because the goroutine waits on the context
+// rather than on server state. Cancelling the failed attempt's context
+// retires its goroutine immediately instead of holding one per retry
+// until the test ends. The surviving attempt's context stays a child of
+// the caller's, so cancelling that still shuts the server down.
 func startOnFreePort(
 	t *testing.T,
 	ctx context.Context,
@@ -164,10 +173,13 @@ func startOnFreePort(
 			func(c *ServerConfig) { c.ListenAddress = addr },
 		)
 		srv := newTestServer(t, deps, attemptOpts...)
-		if err := srv.Start(ctx); err != nil {
+		attemptCtx, cancel := context.WithCancel(ctx)
+		if err := srv.Start(attemptCtx); err != nil {
+			cancel()
 			lastErr = err
 			continue
 		}
+		t.Cleanup(cancel)
 		return srv, addr
 	}
 	t.Fatalf(
