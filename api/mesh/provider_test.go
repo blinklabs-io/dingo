@@ -139,30 +139,19 @@ func TestProviderBuildsListenAddress(t *testing.T) {
 	require.True(t, portAccepts(srv.config.ListenAddress))
 }
 
-// TestProviderDefaultPort pins the documented default so a deployment
-// that omits the port keeps the same listener address.
+// TestProviderDefaultPort pins the port a deployment gets when its
+// configuration omits one. Resolving with no port would exercise the
+// default end to end but would bind 8080 on the test host, so assert
+// the defaults the plugin host is handed instead -- RegisterProvider
+// passes providerDefaults itself, so a change to the default port is a
+// change to what this asserts.
 func TestProviderDefaultPort(t *testing.T) {
-	host := plugin.NewHost()
-	require.NoError(t, RegisterProvider(host))
-
-	// Construct through NewServer directly rather than resolving, so
-	// the default does not bind port 8080 during the test run.
-	deps := newTestDeps()
-	pd := providerDeps(deps)
-	srv, err := NewServer(ServerConfig{
-		LedgerState:         pd.LedgerState,
-		Database:            pd.Database,
-		Chain:               pd.Chain,
-		Mempool:             pd.Mempool,
-		ListenAddress:       net.JoinHostPort(pd.Host, "8080"),
-		Network:             pd.Network,
-		NetworkMagic:        pd.NetworkMagic,
-		GenesisHash:         pd.GenesisHash,
-		GenesisStartTimeSec: pd.GenesisStartTimeSec,
-	})
-
-	require.NoError(t, err)
-	require.Equal(t, "127.0.0.1:8080", srv.config.ListenAddress)
+	require.Equal(t, uint(8080), defaultProviderPort)
+	require.Equal(
+		t,
+		ProviderConfig{Port: defaultProviderPort},
+		providerDefaults(),
+	)
 }
 
 // TestProviderPropagatesDependencies asserts the node-supplied network
