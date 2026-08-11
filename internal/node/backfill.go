@@ -107,14 +107,19 @@ type Backfill struct {
 	// delegatorInactivityEnabled mirrors the operator's CIP-0163
 	// DelegatorInactivityEnabled setting. It gates the CIP-0163
 	// account_withdrawal_witness write the same way the live-apply path does
-	// (ledger/delta.go): !delegatorInactivityEnabled skips the write. Defaults
-	// false (skip), which today is always correct -- this path only ever
-	// serves Mithril-sourced data, and a Mithril-bootstrapped database can
-	// never run with the gate enabled (see errMithrilInactivityIncompatible in
-	// cmd/dingo/mithril.go and checkMithrilInactivityCompat in
-	// cmd/dingo/serve.go). Callers should still set it from the real operator
-	// config via SetDelegatorInactivityEnabled so that invariant lives in one
-	// place instead of being silently assumed here too.
+	// (ledger/delta.go): !delegatorInactivityEnabled skips the write.
+	//
+	// The zero value (false, skip) is NOT a safety guarantee about this
+	// path's callers -- it is just what "unset" happens to mean. Both current
+	// callers (mithril/sync.go and cmd/dingo/serve.go's resumeBackfill) always
+	// call SetDelegatorInactivityEnabled with the real config value, which can
+	// be true for resumeBackfill (it runs on any pending API-mode backfill
+	// checkpoint, not only a Mithril-originated one, and does not itself check
+	// DelegatorInactivityEnabled). A future caller that skips
+	// SetDelegatorInactivityEnabled and relies on this default would silently
+	// drop withdrawal-witness rows if the gate happens to be on for it --
+	// always call the setter explicitly rather than assuming the default is
+	// safe for a new call site.
 	delegatorInactivityEnabled bool
 
 	onProgress func(BackfillProgress)
@@ -137,9 +142,10 @@ func NewBackfill(
 
 // SetDelegatorInactivityEnabled reports the operator's CIP-0163
 // DelegatorInactivityEnabled setting so the account_withdrawal_witness write
-// is gated identically to the live-apply path (ledger/delta.go). Callers
-// should pass the real config value rather than relying on the zero-value
-// default, even though that default is safe today (see the field doc).
+// is gated identically to the live-apply path (ledger/delta.go). Every caller
+// of this path must call this with the real config value -- see the
+// delegatorInactivityEnabled field doc for why the zero-value default must
+// never be assumed safe for a new call site.
 func (b *Backfill) SetDelegatorInactivityEnabled(enabled bool) {
 	b.delegatorInactivityEnabled = enabled
 }

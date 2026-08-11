@@ -110,11 +110,12 @@ type BatchedTxIngestOpts struct {
 	// the gate off -- the default on every node not running CIP-0163 -- the
 	// insert is pure write amplification on a table nothing reads (issue
 	// #2919). The ledger sets this to !DelegatorInactivityEnabled on the live-
-	// apply path (ledger/delta.go). Mithril-sourced backfill always sets it
-	// true: a Mithril-bootstrapped database can never run with the gate
-	// enabled (see errMithrilInactivityIncompatible in cmd/dingo/mithril.go),
-	// so its witness rows could never be read either. Defaults to false,
-	// preserving the unconditional write for any caller that does not opt in.
+	// apply path (ledger/delta.go), and internal/node.Backfill derives it the
+	// same way from its own delegatorInactivityEnabled field for the batched
+	// historical-replay path -- see that field's doc comment for why the
+	// gate can genuinely be on there too and why the value must always be set
+	// explicitly rather than assumed. Defaults to false here, preserving the
+	// unconditional write for any caller that does not opt in.
 	SkipWithdrawalWitnessWrite bool
 }
 

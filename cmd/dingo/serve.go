@@ -276,10 +276,12 @@ func resumeBackfill(
 	}
 
 	bf := node.NewBackfill(db, nodeCfg, logger)
-	// checkMithrilInactivityCompat above already refuses to reach this point
-	// with the gate enabled on a Mithril-bootstrapped database, but report the
-	// real setting anyway so the CIP-0163 witness write is correct by
-	// construction rather than relying solely on that separate guard.
+	// This resumes whatever backfill checkpoint is pending, Mithril-originated
+	// or not, and checkMithrilInactivityCompat above only refuses to start when
+	// the gate is on AND the database was Mithril-bootstrapped -- it is a
+	// no-op otherwise. So cfg.DelegatorInactivityEnabled can genuinely be true
+	// here; this call is what makes the CIP-0163 witness write correct in that
+	// case, not a redundant belt-and-suspenders report.
 	bf.SetDelegatorInactivityEnabled(cfg.DelegatorInactivityEnabled)
 	if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 		return fmt.Errorf(
