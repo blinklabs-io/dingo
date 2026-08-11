@@ -182,17 +182,20 @@ func (r *Recycler) Start(ctx context.Context) error {
 // The wait is intentionally unbounded: advancing shutdown while the recycler is
 // still active races teardown of the ledger, chainsync, and connection state it
 // reads and publishes to.
+//
+// r.mu is held across the cancel and the Wait so a concurrent Start cannot
+// register its worker after this Wait has already observed an empty group and
+// returned -- that would report the recycler stopped while a live one keeps
+// ticking into components the caller is about to tear down. The loop goroutine
+// never takes r.mu, so holding it here cannot deadlock against the worker.
 func (r *Recycler) Stop() {
 	r.mu.Lock()
-	cancel := r.cancel
-	r.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	defer r.mu.Unlock()
+	if r.cancel != nil {
+		r.cancel()
 	}
 	r.wg.Wait()
-	r.mu.Lock()
 	r.started = false
-	r.mu.Unlock()
 }
 
 // run keeps the stall-check loop alive: a panic inside the loop is logged and

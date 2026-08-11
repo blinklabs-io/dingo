@@ -211,7 +211,10 @@ func TestStopWaitsForChainsyncStallRecycler(t *testing.T) {
 				message: "shutdown phase 1: stopping new work",
 				seen:    phaseStarted,
 			}),
-			shutdownTimeout: 5 * time.Second,
+			// No shutdown timeout is set: Config.cfg is nil here, so
+			// configuredShutdownTimeout falls back to its 30s default and any
+			// value set on the struct field would be inert. The test's own
+			// RequireReceive bounds are what fail it if Stop never returns.
 		},
 	}
 	n.chainsyncStallRecycler = chainsyncrecycler.New(chainsyncrecycler.Config{

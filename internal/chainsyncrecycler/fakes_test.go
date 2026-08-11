@@ -15,6 +15,7 @@
 package chainsyncrecycler
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -48,6 +49,52 @@ func testTip(slot uint64, blockNumber uint64) ochainsync.Tip {
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// logSignalHandler signals on a per-message channel each time a matching
+// record is logged, so tests can tell the tick-level panic recovery
+// ("panic in stall checker tick, continuing") from the loop-level one
+// ("panic in stall checker goroutine") instead of inferring it from the
+// side effects, which are identical for both.
+type logSignalHandler struct {
+	signals map[string]chan struct{}
+}
+
+func newLogSignalHandler(messages ...string) logSignalHandler {
+	signals := make(map[string]chan struct{}, len(messages))
+	for _, message := range messages {
+		signals[message] = make(chan struct{}, 1)
+	}
+	return logSignalHandler{signals: signals}
+}
+
+// signal returns the channel that fires when message is logged.
+func (h logSignalHandler) signal(message string) chan struct{} {
+	return h.signals[message]
+}
+
+func (h logSignalHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h logSignalHandler) Handle(_ context.Context, record slog.Record) error {
+	ch, ok := h.signals[record.Message]
+	if !ok {
+		return nil
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (h logSignalHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h logSignalHandler) WithGroup(string) slog.Handler {
+	return h
 }
 
 // fakeLedger is a LedgerSource that reports fixed tips and records reconcile

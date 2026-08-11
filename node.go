@@ -1629,19 +1629,6 @@ func taintValue(relaxed bool) string {
 	return nodesettings.LatchOff
 }
 
-// nodeSettingsGateValues assembles the phase 2 gate values -- the era
-// genesis hashes and the ledger-semantics gates -- from n.config, for
-// EnforceNodeSettings. It is called from two sites in Run: once for the
-// normal startup path, and once for the deferred pass that runs
-// immediately after RecoverCommitTimestampConflict when recovery was
-// needed. Factored out so both sites build the same map from a single
-// definition rather than two copies that could drift.
-// subscribeChainSelectorEvents wires the EventBus subscriptions that feed the
-// chain selector: peer tip/activity observations, chain switch and
-// selected-to-none transitions, fork monitoring, connection teardown, and the
-// peer-governance eligibility/priority forwarding. The peergov forwarding lives
-// here in the node composition layer so chainselection/ keeps no dependency on
-// peergov/.
 // subscribeConnectionEvents wires the connection-manager side of the EventBus:
 // recycle requests, connection-closed and inbound-connection delivery to
 // ouroboros, and the ledger<->connmanager event translation that keeps ledger/
@@ -1718,6 +1705,12 @@ func (n *Node) subscribeConnectionEvents() {
 	)
 }
 
+// subscribeChainSelectorEvents wires the EventBus subscriptions that feed the
+// chain selector: peer tip/activity observations, chain switch and
+// selected-to-none transitions, fork monitoring, connection teardown, and the
+// peer-governance eligibility/priority forwarding. The peergov forwarding lives
+// here in the node composition layer so chainselection/ keeps no dependency on
+// peergov/.
 func (n *Node) subscribeChainSelectorEvents() {
 	// Subscribe chain selector to peer tip update events
 	n.eventBus.SubscribeFunc(
@@ -1814,6 +1807,13 @@ func (n *Node) subscribeChainSelectorEvents() {
 	)
 }
 
+// nodeSettingsGateValues assembles the phase 2 gate values -- the era
+// genesis hashes and the ledger-semantics gates -- from n.config, for
+// EnforceNodeSettings. It is called from two sites in Run: once for the
+// normal startup path, and once for the deferred pass that runs
+// immediately after RecoverCommitTimestampConflict when recovery was
+// needed. Factored out so both sites build the same map from a single
+// definition rather than two copies that could drift.
 func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 	gateValues := nodesettings.Values{
 		// The two validation taints live here, not in phase 1. Only full

@@ -16,6 +16,7 @@ package chainsyncrecycler
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -216,24 +217,32 @@ func TestTicksAreSkippedWhileComponentsUnavailable(t *testing.T) {
 	)
 }
 
-// panickyLedger panics on the first n Tip() calls, then behaves normally, so
-// panic recovery inside a tick can be exercised deterministically.
+// panickyLedger lets the first skip Tip() calls through, then panics on the
+// next panics calls. The skip exists because loop() reads the ledger tip once
+// for the plateau baseline (initProgressBaseline) before the first tick: a
+// panic on call one lands in that read, which runLoop recovers, so it would
+// exercise loop restart rather than the per-tick recovery.
 type panickyLedger struct {
 	fakeLedger
+	skip      atomic.Int64
 	remaining atomic.Int64
 	panicked  chan struct{}
 	once      sync.Once
 }
 
-func newPanickyLedger(panics int64) *panickyLedger {
+func newPanickyLedger(skip int64, panics int64) *panickyLedger {
 	p := &panickyLedger{panicked: make(chan struct{}, 1)}
 	p.tip = testTip(100, 50)
 	p.atTip = true
+	p.skip.Store(skip)
 	p.remaining.Store(panics)
 	return p
 }
 
 func (p *panickyLedger) Tip() ochainsync.Tip {
+	if p.skip.Add(-1) >= 0 {
+		return p.fakeLedger.Tip()
+	}
 	if p.remaining.Add(-1) >= 0 {
 		p.once.Do(func() { close(p.panicked) })
 		panic("boom")
@@ -242,13 +251,28 @@ func (p *panickyLedger) Tip() ochainsync.Tip {
 }
 
 func TestTickPanicIsRecoveredAndTicksContinue(t *testing.T) {
-	ledger := newPanickyLedger(1)
+	// Skip one call so the panic lands inside a tick rather than in the
+	// startup baseline read.
+	ledger := newPanickyLedger(1, 1)
 	state := &fakeChainsyncState{}
 	components := newFakeComponents(LiveComponents{
 		Ledger:         ledger,
 		ChainsyncState: state,
 	})
-	r := newLifecycleRecycler(t, components)
+	const (
+		tickMsg = "panic in stall checker tick, continuing"
+		loopMsg = "panic in stall checker goroutine"
+	)
+	logs := newLogSignalHandler(tickMsg, loopMsg)
+	r := New(Config{
+		Components:   components,
+		EventBus:     newFakePublisher(),
+		Logger:       slog.New(logs),
+		StallTimeout: time.Minute,
+		Interval:     time.Millisecond,
+		Grace:        time.Second,
+		Cooldown:     time.Minute,
+	})
 
 	require.NoError(t, r.Start(t.Context()))
 	t.Cleanup(r.Stop)
@@ -259,6 +283,15 @@ func TestTickPanicIsRecoveredAndTicksContinue(t *testing.T) {
 		2*time.Second,
 		"tick should have panicked",
 	)
+	// The panic must be recovered by the per-tick guard, not by the loop
+	// guard: a loop restart would also resume ticking, so asserting only
+	// "ticks continue" cannot tell the two recovery paths apart.
+	testutil.RequireReceive(
+		t,
+		logs.signal(tickMsg),
+		2*time.Second,
+		"tick-level panic recovery",
+	)
 	testutil.WaitForCondition(
 		t,
 		func() bool {
@@ -267,6 +300,12 @@ func TestTickPanicIsRecoveredAndTicksContinue(t *testing.T) {
 		},
 		2*time.Second,
 		"a panicking tick must not stop later ticks",
+	)
+	testutil.RequireNoReceive(
+		t,
+		logs.signal(loopMsg),
+		50*time.Millisecond,
+		"a recovered tick panic must not restart the loop",
 	)
 }
 
