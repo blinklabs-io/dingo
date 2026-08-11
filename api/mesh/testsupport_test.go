@@ -511,6 +511,11 @@ func testKeyPair(
 	return pub, priv
 }
 
+// testSignerSeed is the key seed testSimpleSignedTx signs with. Tests
+// asserting on the resulting signer identity derive the key from this
+// constant rather than repeating the value.
+const testSignerSeed = byte(0x42)
+
 // testSimpleSignedTx builds a signed single-input, single-output
 // transaction and returns its CBOR alongside the decoded transaction.
 func testSimpleSignedTx(
@@ -518,7 +523,7 @@ func testSimpleSignedTx(
 	address string,
 ) ([]byte, gledger.Transaction) {
 	t.Helper()
-	pub, _ := testKeyPair(t, 0x42)
+	pub, _ := testKeyPair(t, testSignerSeed)
 	bodyCbor := testTxBody(
 		t,
 		[]shelley.ShelleyTransactionInput{

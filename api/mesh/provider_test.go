@@ -51,6 +51,8 @@ func providerDeps(deps *testDeps) ProviderDependencies {
 }
 
 // freeLoopbackPort reserves and releases a loopback port, returning it.
+// The port can be claimed before the provider binds it, so callers that
+// expect resolution to succeed go through resolveOnFreePort.
 func freeLoopbackPort(t *testing.T) uint {
 	t.Helper()
 	_, portStr, err := net.SplitHostPort(freePort(t))
@@ -58,6 +60,39 @@ func freeLoopbackPort(t *testing.T) uint {
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	require.NoError(t, err)
 	return uint(port)
+}
+
+// resolveOnFreePort resolves the Mesh provider on a free loopback port,
+// retrying on a lost race for the port. Resolve starts the instance, so
+// a port claimed between reservation and bind surfaces as a resolution
+// error rather than a test failure worth reporting.
+func resolveOnFreePort(
+	t *testing.T,
+	host *plugin.Host,
+	deps ProviderDependencies,
+) *Server {
+	t.Helper()
+	var lastErr error
+	for range bindAttempts {
+		srv, err := plugin.Resolve[*Server](
+			t.Context(),
+			host,
+			plugin.CapabilityAPIMesh,
+			"builtin",
+			map[string]any{"port": freeLoopbackPort(t)},
+			deps,
+		)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return srv
+	}
+	t.Fatalf(
+		"could not resolve the Mesh provider in %d attempts: %v",
+		bindAttempts, lastErr,
+	)
+	return nil
 }
 
 // TestRegisterProviderDescriptor asserts the provider is advertised
@@ -89,26 +124,17 @@ func TestRegisterProviderRejectsNilHost(t *testing.T) {
 func TestProviderBuildsListenAddress(t *testing.T) {
 	host := newProviderHost(t)
 	deps := newTestDeps()
-	port := freeLoopbackPort(t)
 
-	srv, err := plugin.Resolve[*Server](
-		t.Context(),
-		host,
-		plugin.CapabilityAPIMesh,
-		"builtin",
-		map[string]any{"port": port},
-		providerDeps(deps),
-	)
+	srv := resolveOnFreePort(t, host, providerDeps(deps))
 
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		net.JoinHostPort(
-			"127.0.0.1",
-			strconv.FormatUint(uint64(port), 10),
-		),
+	// The address is the configured host joined to the configured
+	// port, not a default or a bare port.
+	wantHost, wantPort, err := net.SplitHostPort(
 		srv.config.ListenAddress,
 	)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", wantHost)
+	require.NotEmpty(t, wantPort)
 	// Resolve starts the instance, so the port must be accepting.
 	require.True(t, portAccepts(srv.config.ListenAddress))
 }
@@ -148,16 +174,8 @@ func TestProviderPropagatesDependencies(t *testing.T) {
 	pd := providerDeps(deps)
 	pd.CORSAllowedOrigins = []string{"https://wallet.example"}
 
-	srv, err := plugin.Resolve[*Server](
-		t.Context(),
-		host,
-		plugin.CapabilityAPIMesh,
-		"builtin",
-		map[string]any{"port": freeLoopbackPort(t)},
-		pd,
-	)
+	srv := resolveOnFreePort(t, host, pd)
 
-	require.NoError(t, err)
 	require.Equal(t, testNetwork, srv.config.Network)
 	require.Equal(t, testNetworkMagic, srv.config.NetworkMagic)
 	require.Equal(t, testGenesisHash, srv.config.GenesisHash)
@@ -204,17 +222,8 @@ func TestProviderStopClosesListener(t *testing.T) {
 	host := plugin.NewHost()
 	require.NoError(t, RegisterProvider(host))
 	deps := newTestDeps()
-	port := freeLoopbackPort(t)
 
-	srv, err := plugin.Resolve[*Server](
-		t.Context(),
-		host,
-		plugin.CapabilityAPIMesh,
-		"builtin",
-		map[string]any{"port": port},
-		providerDeps(deps),
-	)
-	require.NoError(t, err)
+	srv := resolveOnFreePort(t, host, providerDeps(deps))
 	addr := srv.config.ListenAddress
 	require.True(t, portAccepts(addr))
 

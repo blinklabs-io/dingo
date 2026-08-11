@@ -203,18 +203,23 @@ func TestAccountBalanceRejectsHistoricalLookup(t *testing.T) {
 }
 
 func TestAccountBalanceInvalidAccount(t *testing.T) {
-	tests := map[string]string{
-		"missing account identifier": "",
-		"empty address":              "",
-		"malformed address":          "not-an-address",
+	// An absent identifier and one carrying an empty address are
+	// separate branches of parseAccountAddress, so the empty-address
+	// case sets a non-nil identifier rather than relying on
+	// balanceRequest("") leaving the field nil.
+	emptyAddress := balanceRequest("")
+	emptyAddress.AccountIdentifier = &AccountIdentifier{}
+
+	tests := map[string]AccountBalanceRequest{
+		"missing account identifier": balanceRequest(""),
+		"empty address":              emptyAddress,
+		"malformed address":          balanceRequest("not-an-address"),
 	}
-	for name, addr := range tests {
+	for name, req := range tests {
 		t.Run(name, func(t *testing.T) {
 			h := newTestHandler(t, newTestDeps())
 
-			rec := postJSON(
-				t, h, "/account/balance", balanceRequest(addr),
-			)
+			rec := postJSON(t, h, "/account/balance", req)
 
 			requireMeshError(
 				t, rec, ErrInvalidRequest,

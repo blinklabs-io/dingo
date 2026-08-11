@@ -124,8 +124,17 @@ func TestNewServerAddressNetworkFollowsMagic(t *testing.T) {
 
 // --- listener lifecycle -------------------------------------------------
 
+// bindAttempts bounds how many ports a test tries before giving up.
+// The server binds the address in its config and does not expose the
+// address it resolved, so a test cannot ask the kernel for a port with
+// :0 and read it back. Reserving a port and releasing it leaves a
+// window in which another process can claim it, so callers retry
+// instead of treating one bind failure as a test failure.
+const bindAttempts = 8
+
 // freePort reserves a loopback port and releases it, returning the
-// address. The server binds the same address immediately afterwards.
+// address. The port is not guaranteed to still be free when the caller
+// binds it -- see bindAttempts.
 func freePort(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -133,6 +142,39 @@ func freePort(t *testing.T) string {
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
 	return addr
+}
+
+// startOnFreePort starts a server on a free loopback port, retrying on
+// a lost race for the port, and returns it with the address it bound.
+// The caller owns shutdown.
+func startOnFreePort(
+	t *testing.T,
+	ctx context.Context,
+	deps *testDeps,
+	opts ...serverOption,
+) (*Server, string) {
+	t.Helper()
+	var lastErr error
+	for range bindAttempts {
+		addr := freePort(t)
+		attemptOpts := make([]serverOption, 0, len(opts)+1)
+		attemptOpts = append(attemptOpts, opts...)
+		attemptOpts = append(
+			attemptOpts,
+			func(c *ServerConfig) { c.ListenAddress = addr },
+		)
+		srv := newTestServer(t, deps, attemptOpts...)
+		if err := srv.Start(ctx); err != nil {
+			lastErr = err
+			continue
+		}
+		return srv, addr
+	}
+	t.Fatalf(
+		"could not bind a free loopback port in %d attempts: %v",
+		bindAttempts, lastErr,
+	)
+	return nil, ""
 }
 
 // startTestServer starts a server on a free port and stops it when the
@@ -143,16 +185,9 @@ func startTestServer(
 	opts ...serverOption,
 ) (*Server, string) {
 	t.Helper()
-	addr := freePort(t)
-	opts = append(
-		opts,
-		func(c *ServerConfig) { c.ListenAddress = addr },
-	)
-	srv := newTestServer(t, deps, opts...)
-
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	require.NoError(t, srv.Start(ctx))
+	srv, addr := startOnFreePort(t, ctx, deps, opts...)
 	t.Cleanup(func() {
 		stopCtx, stopCancel := context.WithTimeout(
 			context.Background(), 5*time.Second,
@@ -233,13 +268,9 @@ func TestServerStopIsIdempotent(t *testing.T) {
 // TestServerGracefulShutdown asserts Stop closes the listener so the
 // port stops accepting connections.
 func TestServerGracefulShutdown(t *testing.T) {
-	addr := freePort(t)
-	srv := newTestServer(
-		t,
-		newTestDeps(),
-		func(c *ServerConfig) { c.ListenAddress = addr },
+	srv, addr := startOnFreePort(
+		t, t.Context(), newTestDeps(),
 	)
-	require.NoError(t, srv.Start(t.Context()))
 
 	stopCtx, cancel := context.WithTimeout(
 		t.Context(), 5*time.Second,
@@ -259,14 +290,8 @@ func TestServerGracefulShutdown(t *testing.T) {
 // passed to Start shuts the listener down, which is how the node stops
 // the API during its own shutdown.
 func TestServerShutdownOnContextCancel(t *testing.T) {
-	addr := freePort(t)
-	srv := newTestServer(
-		t,
-		newTestDeps(),
-		func(c *ServerConfig) { c.ListenAddress = addr },
-	)
 	ctx, cancel := context.WithCancel(t.Context())
-	require.NoError(t, srv.Start(ctx))
+	_, addr := startOnFreePort(t, ctx, newTestDeps())
 
 	cancel()
 
@@ -379,13 +404,19 @@ func TestRequestBodyLimit(t *testing.T) {
 	)
 }
 
-// TestRequestBodyAtLimitIsAccepted asserts the cap is not so tight that
-// ordinary requests are rejected.
+// TestRequestBodyAtLimitIsAccepted pins the accepting side of the cap
+// at the exact boundary: a body of precisely maxRequestBody bytes must
+// still be served, so a regression that tightens the limit is caught
+// rather than hidden behind a comfortably small request.
 func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
 	h := newTestHandler(t, newTestDeps())
-	padded := `{"network_identifier":{"blockchain":"cardano",` +
-		`"network":"preview"},"metadata":{"pad":"` +
-		strings.Repeat("a", 1024) + `"}}`
+	const prefix = `{"network_identifier":{"blockchain":"cardano",` +
+		`"network":"preview"},"metadata":{"pad":"`
+	const suffix = `"}}`
+	padded := prefix +
+		strings.Repeat("a", maxRequestBody-len(prefix)-len(suffix)) +
+		suffix
+	require.Len(t, padded, maxRequestBody)
 
 	rec := postRaw(t, h, "/network/status", padded)
 

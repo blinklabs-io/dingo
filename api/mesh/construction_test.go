@@ -392,7 +392,6 @@ func TestConstructionPayloadsPerSignerPayloads(t *testing.T) {
 }
 
 func TestConstructionPayloadsTTL(t *testing.T) {
-	addr := ""
 	tests := map[string]struct {
 		ttl     any
 		wantTTL uint64
@@ -403,7 +402,7 @@ func TestConstructionPayloadsTTL(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			h := newTestHandler(t, newTestDeps())
-			addr = testAddress(
+			addr := testAddress(
 				t, lcommon.AddressTypeKeyNone,
 				testKeyHash(0x19), nil,
 			)
@@ -435,7 +434,6 @@ func TestConstructionPayloadsTTL(t *testing.T) {
 }
 
 func TestConstructionPayloadsInvalidRequest(t *testing.T) {
-	addr := "" // set per-case below
 	validCoin := hexString(testHash(0xb2)) + ":0"
 
 	tests := map[string]struct {
@@ -633,7 +631,7 @@ func TestConstructionPayloadsInvalidRequest(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			h := newTestHandler(t, newTestDeps())
-			addr = testAddress(
+			addr := testAddress(
 				t, lcommon.AddressTypeKeyNone,
 				testKeyHash(0x1a), nil,
 			)
@@ -752,26 +750,27 @@ func TestConstructionCombine(t *testing.T) {
 func TestConstructionCombineInvalidRequest(t *testing.T) {
 	pub, _ := testKeyPair(t, 0x1e)
 	validSig := hexString(make([]byte, 64))
-	validUnsigned := ""
 
+	// Each case receives the well-formed unsigned transaction built
+	// inside its own subtest, so nothing is shared between cases.
 	tests := map[string]struct {
-		unsigned func() string
+		unsigned func(valid string) string
 		sigs     []*Signature
 		wantErr  *Error
 	}{
 		"non-hex unsigned transaction": {
-			unsigned: func() string { return "zz" },
+			unsigned: func(string) string { return "zz" },
 			wantErr:  ErrInvalidTransaction,
 		},
 		"signature without public key": {
-			unsigned: func() string { return validUnsigned },
+			unsigned: func(valid string) string { return valid },
 			sigs: []*Signature{
 				{HexBytes: validSig},
 			},
 			wantErr: ErrInvalidPublicKey,
 		},
 		"non-hex public key": {
-			unsigned: func() string { return validUnsigned },
+			unsigned: func(valid string) string { return valid },
 			sigs: []*Signature{
 				{
 					PublicKey: &PublicKey{HexBytes: "zz"},
@@ -781,7 +780,7 @@ func TestConstructionCombineInvalidRequest(t *testing.T) {
 			wantErr: ErrInvalidPublicKey,
 		},
 		"short public key": {
-			unsigned: func() string { return validUnsigned },
+			unsigned: func(valid string) string { return valid },
 			sigs: []*Signature{
 				{
 					PublicKey: &PublicKey{
@@ -795,7 +794,7 @@ func TestConstructionCombineInvalidRequest(t *testing.T) {
 			wantErr: ErrInvalidPublicKey,
 		},
 		"non-hex signature": {
-			unsigned: func() string { return validUnsigned },
+			unsigned: func(valid string) string { return valid },
 			sigs: []*Signature{
 				{
 					PublicKey: &PublicKey{
@@ -807,7 +806,7 @@ func TestConstructionCombineInvalidRequest(t *testing.T) {
 			wantErr: ErrInvalidTransaction,
 		},
 		"short signature": {
-			unsigned: func() string { return validUnsigned },
+			unsigned: func(valid string) string { return valid },
 			sigs: []*Signature{
 				{
 					PublicKey: &PublicKey{
@@ -827,11 +826,13 @@ func TestConstructionCombineInvalidRequest(t *testing.T) {
 				t, lcommon.AddressTypeKeyNone,
 				testKeyHash(0x1f), nil,
 			)
-			validUnsigned = requestPayloads(t, h, addr)
+			validUnsigned := requestPayloads(t, h, addr)
 
 			rec := postJSON(
 				t, h, "/construction/combine",
-				combineRequest(tc.unsigned(), tc.sigs),
+				combineRequest(
+					tc.unsigned(validUnsigned), tc.sigs,
+				),
 			)
 
 			requireMeshError(
@@ -874,7 +875,7 @@ func TestConstructionParseSigned(t *testing.T) {
 	require.Equal(t, addr, resp.Operations[1].Account.Address)
 	// Signers are reported as the blake2b-224 hash of each witness key.
 	require.Len(t, resp.AccountIdentifierSigners, 1)
-	signerKey, _ := testKeyPair(t, 0x42)
+	signerKey, _ := testKeyPair(t, testSignerSeed)
 	keyHash := lcommon.Blake2b224Hash(signerKey)
 	require.Equal(
 		t,
@@ -931,6 +932,20 @@ func TestConstructionParseCertificates(t *testing.T) {
 				},
 			},
 			{
+				// No Mesh operation type: this one must be
+				// dropped without consuming an operation index.
+				Type: uint(
+					lcommon.CertificateTypeAuthCommitteeHot,
+				),
+				Certificate: &lcommon.AuthCommitteeHotCertificate{
+					CertType: uint(
+						lcommon.CertificateTypeAuthCommitteeHot,
+					),
+					ColdCredential: stakeCred,
+					HotCredential:  stakeCred,
+				},
+			},
+			{
 				Type: uint(
 					lcommon.CertificateTypeStakeDelegation,
 				),
@@ -947,6 +962,14 @@ func TestConstructionParseCertificates(t *testing.T) {
 		},
 	)
 	txCbor := testSignedTx(t, bodyCbor, nil)
+
+	// Guard the fixture: the dropped certificate must survive the
+	// encode/decode round trip and reach the converter, otherwise the
+	// assertion below would pass for the wrong reason.
+	decoded, meshErr := decodeTxCbor(hexString(txCbor))
+	require.Nil(t, meshErr)
+	require.NotNil(t, decoded)
+	require.Len(t, decoded.Certificates(), 3)
 
 	rec := postJSON(t, h, "/construction/parse", parseRequest(
 		hexString(txCbor), true,
