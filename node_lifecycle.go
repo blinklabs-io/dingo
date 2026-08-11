@@ -71,6 +71,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
@@ -1411,8 +1412,16 @@ func (n *Node) Restore(
 	}
 	defer restoreHost.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 
+	// This always restores into the same database this node is already
+	// configured for (Metadata below), not an independently-resolved one a
+	// misconfigured DSN could point elsewhere -- see
+	// metadata.AllowResetOfPopulatedTarget's doc comment for why that makes
+	// it safe to bypass a Resettable provider's own "target already has
+	// real data" guard here, unlike the offline `dingo database restore`
+	// CLI path, which must keep going through that guard.
 	manifest, err := lifecycle.Restore(
-		ctx, restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
+		metadata.AllowResetOfPopulatedTarget(ctx),
+		restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
 		lifecycle.RestoreStorageConfig{
 			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,

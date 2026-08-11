@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -539,11 +540,21 @@ const migrationsTableName = "schema_migrations"
 // same-named table an operator's own tooling created in some OTHER schema
 // is not dingo's bookkeeping table, and a name-only exemption would let a
 // populated one of those slip past this check and then get dropped anyway.
+//
+// Skipped entirely when metadata.ResetOfPopulatedTargetAllowed(ctx) --
+// see its doc comment: a live node restoring itself from its own earlier
+// snapshot always targets exactly the database it already owns, real
+// accumulated data and all, which is precisely what this guard would
+// otherwise (incorrectly) treat as the misconfigured-DSN case it exists
+// to catch.
 func refuseIfTargetHasData(
 	ctx context.Context,
 	db *sql.DB,
 	tables []qualifiedTable,
 ) error {
+	if metadata.ResetOfPopulatedTargetAllowed(ctx) {
+		return nil
+	}
 	var migrationsSchema string
 	if err := db.QueryRowContext(
 		ctx, "SELECT current_schema()",

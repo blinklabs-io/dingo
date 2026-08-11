@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
@@ -412,12 +413,22 @@ const migrationsTableName = "schema_migrations"
 // node's own database, pointed at by a reused or misconfigured DSN, whose
 // accumulated real data resetDatabase's unconditional DROP TABLE would
 // otherwise destroy with no way back.
+//
+// Skipped entirely when metadata.ResetOfPopulatedTargetAllowed(ctx) -- see
+// its doc comment: a live node restoring itself from its own earlier
+// snapshot always targets exactly the database it already owns, real
+// accumulated data and all, which is precisely what this guard would
+// otherwise (incorrectly) treat as the misconfigured-DSN case it exists to
+// catch.
 func refuseIfTargetHasData(
 	ctx context.Context,
 	db *sql.DB,
 	database string,
 	tables []string,
 ) error {
+	if metadata.ResetOfPopulatedTargetAllowed(ctx) {
+		return nil
+	}
 	for _, name := range tables {
 		if name == migrationsTableName {
 			continue

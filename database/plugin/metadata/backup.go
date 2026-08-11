@@ -58,6 +58,36 @@ type Resettable interface {
 	Reset(ctx context.Context) error
 }
 
+// resetPopulatedTargetContextKey is unexported: AllowResetOfPopulatedTarget
+// and ResetOfPopulatedTargetAllowed are the only supported way to set or
+// read it.
+type resetPopulatedTargetContextKey struct{}
+
+// AllowResetOfPopulatedTarget marks ctx so a Resettable implementation's own
+// "refuse to reset a target that already holds real data" guard (added to
+// stop Reset from silently destroying a live node's own database reached
+// via a reused or misconfigured DSN) does not apply. Restore is inherently
+// destructive to its target by design, and a live node restoring itself
+// from its own earlier snapshot -- Bark's DatabaseService.Restore RPC,
+// gated on its own explicit mTLS-authenticated caller plus dingoctl's own
+// "this will replace the node's current database" confirmation prompt --
+// always targets the exact database that node is already configured for,
+// never an independently-resolved one a misconfigured DSN could point
+// elsewhere. Call this only from that call path. The offline `dingo
+// database restore` CLI command has no equivalent guarantee (nothing ties
+// its target config to any specific already-running node) and must keep
+// going through the unmarked path so the guard still applies there.
+func AllowResetOfPopulatedTarget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, resetPopulatedTargetContextKey{}, true)
+}
+
+// ResetOfPopulatedTargetAllowed reports whether ctx was marked by
+// AllowResetOfPopulatedTarget.
+func ResetOfPopulatedTargetAllowed(ctx context.Context) bool {
+	allowed, _ := ctx.Value(resetPopulatedTargetContextKey{}).(bool)
+	return allowed
+}
+
 // BackupValidator is implemented by metadata store plugins that can check a
 // backup file's structural integrity before it's used to restore, without
 // touching any target database. RestoreFrom's own parsing eventually
