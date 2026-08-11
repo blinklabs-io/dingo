@@ -24,7 +24,7 @@ const (
 	allowMethods = "GET, HEAD, POST, OPTIONS"
 	allowHeaders = "Accept, Authorization, Content-Type, " +
 		"Connect-Protocol-Version, Connect-Timeout-Ms, Grpc-Timeout, " +
-		"X-Blockfrost-Project-Id, X-Grpc-Web, X-Requested-With"
+		"project_id, X-Blockfrost-Project-Id, X-Grpc-Web, X-Requested-With"
 	exposeHeaders = "Grpc-Message, Grpc-Status, Grpc-Status-Details-Bin"
 )
 

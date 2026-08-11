@@ -16,6 +16,7 @@ package mesh
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,7 +28,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
@@ -67,6 +70,17 @@ type ServerConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
+	// TLSCertFilePath and TLSKeyFilePath enable TLS on the listener when
+	// both are set; either one alone is treated as TLS disabled, matching
+	// the built-in UTxO RPC provider's existing convention. Resolved from
+	// the shared api: policy plus this provider's own overrides -- see
+	// internal/config.ResolveAPISecurity (dingo #2996/#2998).
+	TLSCertFilePath string
+	TLSKeyFilePath  string
+	// Auth configures in-process credential enforcement, shared with
+	// Blockfrost and UTxO RPC via internal/apiauth. The zero value is
+	// apiauth.ModeNone (no authentication).
+	Auth apiauth.Policy
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -163,28 +177,59 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}, nil
 }
 
+// handler builds the HTTP handler for the Mesh API, including route
+// registration and middleware. auth enforces the effective authentication
+// policy (nil or apiauth.ModeNone accepts every request); it wraps the
+// whole mux, so every route requires the configured credential when auth
+// mode is "token".
+func (s *Server) handler(auth *apiauth.Verifier) http.Handler {
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	// Authentication runs innermost (after CORS preflight, before request
+	// handling): a browser's CORS preflight OPTIONS request carries no
+	// credential and must not be rejected by auth, while every actual
+	// request is checked before it reaches a route handler.
+	return httpcors.Handler(
+		auth.Middleware(mux),
+		httpcors.Config{
+			AllowedOrigins: s.config.CORSAllowedOrigins,
+		},
+	)
+}
+
 // Start starts the HTTP server in a background goroutine.
 func (s *Server) Start(ctx context.Context) error {
+	auth, err := apiauth.NewVerifier(s.config.Auth)
+	if err != nil {
+		return fmt.Errorf("mesh: %w", err)
+	}
+
 	s.mu.Lock()
 	if s.httpServer != nil {
 		s.mu.Unlock()
 		return errors.New("server already started")
 	}
 
-	mux := http.NewServeMux()
-	s.registerRoutes(mux)
-
 	server := &http.Server{
-		Addr: s.config.ListenAddress,
-		Handler: httpcors.Handler(
-			mux,
-			httpcors.Config{
-				AllowedOrigins: s.config.CORSAllowedOrigins,
-			},
-		),
+		Addr:              s.config.ListenAddress,
+		Handler:           s.handler(auth),
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}
+	useTLS := s.config.TLSCertFilePath != "" && s.config.TLSKeyFilePath != ""
+	if useTLS {
+		cert, err := tls.LoadX509KeyPair(
+			s.config.TLSCertFilePath,
+			s.config.TLSKeyFilePath,
+		)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("mesh: loading TLS certificate/key: %w", err)
+		}
+		server.TLSConfig = tlsutil.ServerConfig(&tls.Config{
+			Certificates: []tls.Certificate{cert},
+		})
 	}
 	s.httpServer = server
 
@@ -232,9 +277,16 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
 	s.logger.Info(
-		"Mesh API listener started on " +
+		fmt.Sprintf(
+			"Mesh API listener started on %s (%s)",
 			s.config.ListenAddress,
+			scheme,
+		),
 	)
 
 	return nil
@@ -272,11 +324,18 @@ func (s *Server) startServer(
 		)
 	}
 	go func() {
-		if err := server.Serve(ln); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
+		var serveErr error
+		if server.TLSConfig != nil {
+			// Certificates are already loaded into TLSConfig, so no
+			// cert/key file paths are passed here.
+			serveErr = server.ServeTLS(ln, "", "")
+		} else {
+			serveErr = server.Serve(ln)
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			s.logger.Error(
 				"Mesh API server error",
-				"error", err,
+				"error", serveErr,
 			)
 		}
 	}()

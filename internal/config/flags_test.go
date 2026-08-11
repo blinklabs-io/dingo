@@ -330,6 +330,61 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	}
 }
 
+// TestApplyFlags_APISecurityCLIOverridesEnvAndYAML covers dingo #2998's
+// CLI > env > YAML > defaults precedence for the top-level api: fields.
+func TestApplyFlags_APISecurityCLIOverridesEnvAndYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_API_TLS_MODE", "server")
+	t.Setenv("DINGO_API_TLS_CERT_FILE_PATH", "/env/api.crt")
+	t.Setenv("DINGO_API_AUTH_MODE", "token")
+
+	yamlContent := "api:\n" +
+		"  tls:\n" +
+		"    keyFilePath: /yaml/api.key\n" +
+		"  auth:\n" +
+		"    tokenFilePath: /yaml/api-token\n"
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(yamlContent), 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+
+	// Env overrides the mode/cert fields; YAML supplies the key/token
+	// fields the env vars didn't set.
+	assert.Equal(t, "server", cfg.API.TLS.Mode)
+	assert.Equal(t, "/env/api.crt", cfg.API.TLS.CertFilePath)
+	assert.Equal(t, "/yaml/api.key", cfg.API.TLS.KeyFilePath)
+	assert.Equal(t, "token", cfg.API.Auth.Mode)
+	assert.Equal(t, "/yaml/api-token", cfg.API.Auth.TokenFilePath)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--api-tls-cert-file-path=/flag/api.crt",
+		"--api-auth-mode=none",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+
+	// CLI overrides only the two flags actually passed; every other field
+	// (env- or YAML-sourced) is left untouched.
+	assert.Equal(t, "server", cfg.API.TLS.Mode)
+	assert.Equal(
+		t,
+		"/flag/api.crt",
+		cfg.API.TLS.CertFilePath,
+		"CLI flag must win over env",
+	)
+	assert.Equal(t, "/yaml/api.key", cfg.API.TLS.KeyFilePath)
+	assert.Equal(
+		t,
+		"none",
+		cfg.API.Auth.Mode,
+		"CLI flag must win over env",
+	)
+	assert.Equal(t, "/yaml/api-token", cfg.API.Auth.TokenFilePath)
+}
+
 func TestMempoolProviderSourcePrecedence(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

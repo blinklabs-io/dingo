@@ -112,10 +112,22 @@ The following environment variables modify Dingo's behavior:
   - Log output format: `text` (default, human-readable) or `json` (machine-parseable, for ELK/Loki ingestion)
 - `DINGO_LOGGING_LEVEL`
   - Minimum log level: `debug`, `info` (default), `warn`, or `error` (the `--debug` flag overrides this to `debug`)
-- `TLS_CERT_FILE_PATH` - TLS certificate used by the built-in UTxO RPC
-  listener, requires `TLS_KEY_FILE_PATH` (default: empty)
-- `TLS_KEY_FILE_PATH` - TLS private key used by the built-in UTxO RPC listener
+- `TLS_CERT_FILE_PATH` - TLS certificate used directly by bark and Midnight;
+  deprecated as an API TLS source in favor of `DINGO_API_TLS_CERT_FILE_PATH`
+  below, kept only as its fallback default. Requires `TLS_KEY_FILE_PATH`
   (default: empty)
+- `TLS_KEY_FILE_PATH` - TLS private key used directly by bark and Midnight;
+  see `TLS_CERT_FILE_PATH` (default: empty)
+- `DINGO_API_TLS_MODE` - Shared TLS mode for every built-in API provider
+  (Blockfrost, Mesh, UTxO RPC): `off` (default) or `server`
+- `DINGO_API_TLS_CERT_FILE_PATH` / `DINGO_API_TLS_KEY_FILE_PATH` - Shared
+  API TLS certificate/key, required together when `DINGO_API_TLS_MODE` is
+  `server`
+- `DINGO_API_AUTH_MODE` - Shared in-process authentication mode for every
+  built-in API provider: `none` (default) or `token`
+- `DINGO_API_AUTH_TOKEN_FILE_PATH` - File containing the shared bearer
+  credential, required when `DINGO_API_AUTH_MODE` is `token`. See "API
+  Servers and Bark" below for the full `api:`/per-provider override shape.
 
 ### Block Production (SPO Mode)
 
@@ -213,9 +225,55 @@ interface.
 Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
 
-For public client access, place the API listeners behind a reverse proxy or API
-gateway. UTxO RPC currently supports the process TLS certificate/key pair;
-Blockfrost and Mesh do not, and the built-in APIs do not authenticate clients.
+All three providers share one TLS and authentication surface. A top-level
+`api:` section supplies TLS/auth defaults for every provider at once, and any
+field can be overridden per provider under `plugins.api.<name>.config.tls`/
+`.auth`:
+
+```yaml
+api:
+  tls:
+    mode: server
+    certFilePath: /run/secrets/api.crt
+    keyFilePath: /run/secrets/api.key
+  auth:
+    mode: token
+    tokenFilePath: /run/secrets/api-token
+
+plugins:
+  api:
+    mesh:
+      provider: builtin
+      config:
+        port: 8080
+        auth:
+          mode: none # explicitly disable the shared token policy for Mesh only
+    blockfrost:
+      provider: builtin
+      config:
+        port: 3000
+        tls:
+          certFilePath: /run/secrets/blockfrost.crt
+          keyFilePath: /run/secrets/blockfrost.key
+```
+
+`tls.mode` is `off` (default) or `server`; `server` requires both
+`certFilePath` and `keyFilePath` (from the top-level section, a provider
+override, or a mix of both -- resolution is field-by-field, not
+whole-object). `auth.mode` is `none` (default) or `token`; `token` requires
+`tokenFilePath`, whose trimmed contents clients present as
+`Authorization: Bearer <token>` or, for Blockfrost-compatible clients,
+`project_id: <token>`. A missing/incorrect credential gets a `401` (Connect
+clients see `Unauthenticated`). This is still not a substitute for placing
+public listeners behind a TLS-terminating reverse proxy or API gateway for
+rate limiting and defense in depth, but each of the three providers can now
+also enforce TLS and authentication itself.
+
+The deprecated root `tlsCertFilePath`/`tlsKeyFilePath` fields (used directly
+by bark and Midnight) remain a fallback default for `api.tls` when `api.tls`
+is entirely unset, so an existing deployment's API TLS listener keeps working
+unchanged after upgrading; prefer `api.tls.certFilePath`/`api.tls.keyFilePath`
+in new configuration.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
 `DINGO_MESH_PORT` names remain supported for compatibility. If both a

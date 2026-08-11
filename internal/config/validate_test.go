@@ -468,6 +468,67 @@ func TestValidate(t *testing.T) {
 			name:   "empty mithril backend",
 			modify: func(c *Config) { c.Mithril.Backend = "" },
 		},
+		{
+			name: "invalid top-level api.tls.mode",
+			modify: func(c *Config) {
+				c.API.TLS.Mode = "mutual"
+			},
+			wantErr: `invalid plugins.api.utxorpc.config.tls.mode "mutual"`,
+		},
+		{
+			name: "top-level api.tls.mode server without cert/key",
+			modify: func(c *Config) {
+				c.API.TLS.Mode = "server"
+			},
+			wantErr: `plugins.api.utxorpc.config.tls: mode is "server" but ` +
+				`certFilePath and keyFilePath must both be set`,
+		},
+		{
+			name: "top-level api.tls fully set is valid",
+			modify: func(c *Config) {
+				c.API.TLS = APITLSPolicy{
+					Mode:         "server",
+					CertFilePath: "/etc/dingo/api.crt",
+					KeyFilePath:  "/etc/dingo/api.key",
+				}
+			},
+		},
+		{
+			name: "invalid top-level api.auth.mode",
+			modify: func(c *Config) {
+				c.API.Auth.Mode = "basic"
+			},
+			wantErr: `invalid plugins.api.utxorpc.config.auth.mode "basic"`,
+		},
+		{
+			name: "top-level api.auth.mode token without tokenFilePath",
+			modify: func(c *Config) {
+				c.API.Auth.Mode = "token"
+			},
+			wantErr: `plugins.api.utxorpc.config.auth: mode is "token" but ` +
+				`tokenFilePath is not set`,
+		},
+		{
+			name: "provider auth explicitly disables inherited token mode",
+			modify: func(c *Config) {
+				c.API.Auth = APIAuthPolicy{
+					Mode:          "token",
+					TokenFilePath: "/run/secrets/api-token",
+				}
+				c.Plugins.API.Mesh.Config["auth"] = map[string]any{
+					"mode": "none",
+				}
+			},
+		},
+		{
+			name: "provider auth override with invalid mode",
+			modify: func(c *Config) {
+				c.Plugins.API.Blockfrost.Config["auth"] = map[string]any{
+					"mode": "basic",
+				}
+			},
+			wantErr: `invalid plugins.api.blockfrost.config.auth.mode "basic"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

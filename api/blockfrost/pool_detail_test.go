@@ -210,7 +210,7 @@ func TestPoolsRouteOrderingPoolDetailDoesNotSwallowSiblings(t *testing.T) {
 		poolDetail: PoolDetailInfo{PoolID: "pool1detail"},
 	}
 	b := newTestBlockfrost(mock)
-	handler := b.handler()
+	handler := b.handler(nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v0/pools/retiring", nil)
 	w := httptest.NewRecorder()

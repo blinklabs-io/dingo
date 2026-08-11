@@ -20,6 +20,7 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -27,6 +28,11 @@ type ProviderConfig struct {
 	Port uint `yaml:"port"`
 }
 
+// ProviderDependencies carries resolved, instance-owned settings from
+// composition (internal/config.ResolveAPISecurity merges the shared api:
+// policy with this provider's own plugins.api.mesh.config.tls/auth
+// overrides before Run passes the result here) -- this package does not
+// perform that merge itself.
 type ProviderDependencies struct {
 	Logger              *slog.Logger
 	LedgerState         MeshLedgerState
@@ -39,6 +45,10 @@ type ProviderDependencies struct {
 	GenesisHash         string
 	GenesisStartTimeSec int64
 	CORSAllowedOrigins  []string
+	TLSCertFilePath     string
+	TLSKeyFilePath      string
+	AuthMode            apiauth.Mode
+	AuthTokenFilePath   string
 }
 
 func RegisterProvider(host *plugin.Host) error {
@@ -61,6 +71,12 @@ func RegisterProvider(host *plugin.Host) error {
 				Network: deps.Network, NetworkMagic: deps.NetworkMagic,
 				GenesisHash: deps.GenesisHash, GenesisStartTimeSec: deps.GenesisStartTimeSec,
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
+				TLSCertFilePath:    deps.TLSCertFilePath,
+				TLSKeyFilePath:     deps.TLSKeyFilePath,
+				Auth: apiauth.Policy{
+					Mode:          deps.AuthMode,
+					TokenFilePath: deps.AuthTokenFilePath,
+				},
 			})
 			if err != nil {
 				return nil, nil, err

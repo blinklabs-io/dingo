@@ -441,24 +441,45 @@ func DefaultMidnightConfig() MidnightConfig {
 }
 
 type Config struct {
-	Plugins                PluginsConfig `yaml:"plugins"`
-	TlsKeyFilePath         string        `yaml:"tlsKeyFilePath"         envconfig:"TLS_KEY_FILE_PATH"`
-	Topology               string        `yaml:"topology"`
-	CardanoConfig          string        `yaml:"cardanoConfig"          envconfig:"config"`
-	DatabasePath           string        `yaml:"databasePath"                                                       split_words:"true"`
-	SocketPath             string        `yaml:"socketPath"                                                         split_words:"true"`
-	TlsCertFilePath        string        `yaml:"tlsCertFilePath"        envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr               string        `yaml:"bindAddr"                                                           split_words:"true"`
-	PrivateBindAddr        string        `yaml:"privateBindAddr"                                                    split_words:"true"`
-	ShutdownTimeout        string        `yaml:"shutdownTimeout"                                                    split_words:"true"`
-	LedgerCatchupTimeout   string        `yaml:"ledgerCatchupTimeout"   envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network                string        `yaml:"network"`
-	NetworkMagic           uint32        `yaml:"networkMagic"                                                       split_words:"true"`
-	PrivatePort            uint          `yaml:"privatePort"                                                        split_words:"true"`
-	RelayPort              uint          `yaml:"relayPort"              envconfig:"port"`
-	BarkBaseUrl            string        `yaml:"barkBaseUrl"            envconfig:"DINGO_BARK_BASE_URL"`
-	BarkBlockDownloadHosts []string      `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint          `yaml:"barkPort"               envconfig:"DINGO_BARK_PORT"`
+	Plugins PluginsConfig `yaml:"plugins"`
+	// API is the top-level `api:` section providing shared TLS and
+	// authentication defaults for the built-in API providers (Blockfrost,
+	// Mesh, UTxO RPC). See EffectiveAPIPolicy and ResolveAPISecurity
+	// (api_security.go).
+	API APIConfig `yaml:"api"`
+	// TlsKeyFilePath is the process-level TLS private key, used directly by
+	// bark and Midnight.
+	//
+	// For the built-in API providers (Blockfrost, Mesh, UTxO RPC), prefer
+	// api.tls.keyFilePath instead: this field is now only a fallback
+	// default for api.tls (see EffectiveAPIPolicy) when api.tls is
+	// entirely unset, kept so existing deployments keep working unchanged
+	// after upgrading.
+	TlsKeyFilePath string `yaml:"tlsKeyFilePath"         envconfig:"TLS_KEY_FILE_PATH"`
+	Topology       string `yaml:"topology"`
+	CardanoConfig  string `yaml:"cardanoConfig"          envconfig:"config"`
+	DatabasePath   string `yaml:"databasePath"                                                       split_words:"true"`
+	SocketPath     string `yaml:"socketPath"                                                         split_words:"true"`
+	// TlsCertFilePath is the process-level TLS certificate, used directly
+	// by bark and Midnight.
+	//
+	// For the built-in API providers (Blockfrost, Mesh, UTxO RPC), prefer
+	// api.tls.certFilePath instead: this field is now only a fallback
+	// default for api.tls (see EffectiveAPIPolicy) when api.tls is
+	// entirely unset, kept so existing deployments keep working unchanged
+	// after upgrading.
+	TlsCertFilePath        string   `yaml:"tlsCertFilePath"        envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string   `yaml:"bindAddr"                                                           split_words:"true"`
+	PrivateBindAddr        string   `yaml:"privateBindAddr"                                                    split_words:"true"`
+	ShutdownTimeout        string   `yaml:"shutdownTimeout"                                                    split_words:"true"`
+	LedgerCatchupTimeout   string   `yaml:"ledgerCatchupTimeout"   envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string   `yaml:"network"`
+	NetworkMagic           uint32   `yaml:"networkMagic"                                                       split_words:"true"`
+	PrivatePort            uint     `yaml:"privatePort"                                                        split_words:"true"`
+	RelayPort              uint     `yaml:"relayPort"              envconfig:"port"`
+	BarkBaseUrl            string   `yaml:"barkBaseUrl"            envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint     `yaml:"barkPort"               envconfig:"DINGO_BARK_PORT"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
@@ -474,11 +495,20 @@ type Config struct {
 	// refuse any caller whose connection didn't present a certificate
 	// verified against this CA — see bark.Bark.Start and bark/auth.go. Also
 	// requires TlsCertFilePath/TlsKeyFilePath to be set.
-	BarkClientCAFilePath string   `yaml:"barkClientCaFilePath"   envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
-	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins"     envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort          uint     `yaml:"metricsPort"                                                        split_words:"true"`
-	DebugPort            uint     `yaml:"debugPort"              envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool     `yaml:"intersectTip"                                                       split_words:"true"`
+	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"   envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	// CORSAllowedOrigins and BindAddr remain root-level fields rather than
+	// moving under the api: section (dingo #2998): BindAddr is a node-wide
+	// bind address shared by the relay, private, metrics, debug, and bark
+	// listeners as well as every API provider, not an API-specific setting,
+	// so nesting it under api: would misrepresent its scope. CORSAllowedOrigins
+	// is API-specific, but the api: section only carries security policy
+	// (TLS/auth) that a provider can override per-field; there is no
+	// per-provider CORS override requirement, so duplicating it under api:
+	// would just create a second source of truth for the same setting.
+	CORSAllowedOrigins []string `yaml:"corsAllowedOrigins"     envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort        uint     `yaml:"metricsPort"                                                        split_words:"true"`
+	DebugPort          uint     `yaml:"debugPort"              envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip       bool     `yaml:"intersectTip"                                                       split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.

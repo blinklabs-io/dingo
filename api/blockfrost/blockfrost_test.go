@@ -635,7 +635,7 @@ func TestHandleRoot(t *testing.T) {
 func TestRouterRootServesRootDocument(t *testing.T) {
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
-	handler := b.handler()
+	handler := b.handler(nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -652,7 +652,7 @@ func TestRouterRootServesRootDocument(t *testing.T) {
 func TestRouterUnimplementedRouteReturns404(t *testing.T) {
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
-	handler := b.handler()
+	handler := b.handler(nil)
 
 	// "/api/v0/pools" used to belong here as an unimplemented route. It is
 	// now registered (dingo #3011), so it no longer falls through to the
@@ -681,7 +681,7 @@ func TestRouterUnimplementedRouteReturns404(t *testing.T) {
 func TestRouterImplementedRouteStillWorks(t *testing.T) {
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
-	handler := b.handler()
+	handler := b.handler(nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -3272,8 +3272,11 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 		)
 		require.True(t, strings.HasPrefix(err.Error(), prefix),
 			"unexpected wrapper shape: %s", err)
-		assert.NotEmpty(t, strings.TrimSpace(strings.TrimPrefix(err.Error(), prefix)),
-			"the underlying parse error is retained, not discarded")
+		assert.NotEmpty(
+			t,
+			strings.TrimSpace(strings.TrimPrefix(err.Error(), prefix)),
+			"the underlying parse error is retained, not discarded",
+		)
 	})
 
 	t.Run("this network resolves to not found", func(t *testing.T) {

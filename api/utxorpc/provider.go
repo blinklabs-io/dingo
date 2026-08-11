@@ -18,6 +18,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -25,6 +26,11 @@ type ProviderConfig struct {
 	Port uint `yaml:"port"`
 }
 
+// ProviderDependencies carries resolved, instance-owned settings from
+// composition (internal/config.ResolveAPISecurity merges the shared api:
+// policy with this provider's own plugins.api.utxorpc.config.tls/auth
+// overrides before Run passes the result here) -- this package does not
+// perform that merge itself.
 type ProviderDependencies struct {
 	Logger             *slog.Logger
 	EventBus           UtxorpcEventBus
@@ -34,6 +40,8 @@ type ProviderDependencies struct {
 	TLSCertFilePath    string
 	TLSKeyFilePath     string
 	CORSAllowedOrigins []string
+	AuthMode           apiauth.Mode
+	AuthTokenFilePath  string
 }
 
 func RegisterProvider(host *plugin.Host) error {
@@ -53,6 +61,10 @@ func RegisterProvider(host *plugin.Host) error {
 				TlsCertFilePath:    deps.TLSCertFilePath,
 				TlsKeyFilePath:     deps.TLSKeyFilePath,
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
+				Auth: apiauth.Policy{
+					Mode:          deps.AuthMode,
+					TokenFilePath: deps.AuthTokenFilePath,
+				},
 			})
 			return server, server, nil
 		},

@@ -1276,6 +1276,148 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 	}
 }
 
+// TestLoad_APISecurityYAML covers dingo #2998's target YAML shape: a
+// top-level api: section supplying shared TLS/auth defaults, with a
+// provider (mesh) overriding one field of its own.
+func TestLoad_APISecurityYAML(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+api:
+  tls:
+    mode: server
+    certFilePath: /run/secrets/api.crt
+    keyFilePath: /run/secrets/api.key
+  auth:
+    mode: token
+    tokenFilePath: /run/secrets/api-token
+plugins:
+  api:
+    mesh:
+      provider: builtin
+      config:
+        port: 8080
+        auth:
+          mode: none
+    blockfrost:
+      provider: builtin
+      config:
+        tls:
+          certFilePath: /run/secrets/blockfrost.crt
+          keyFilePath: /run/secrets/blockfrost.key
+network: "preview"
+`
+	tmpFile := filepath.Join(t.TempDir(), "api-security.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(yamlContent), 0o600))
+
+	cfg, err := LoadConfig(tmpFile)
+	require.NoError(t, err)
+
+	assert.Equal(t, APIConfig{
+		TLS: APITLSPolicy{
+			Mode:         "server",
+			CertFilePath: "/run/secrets/api.crt",
+			KeyFilePath:  "/run/secrets/api.key",
+		},
+		Auth: APIAuthPolicy{
+			Mode:          "token",
+			TokenFilePath: "/run/secrets/api-token",
+		},
+	}, cfg.API)
+
+	policy := cfg.EffectiveAPIPolicy()
+
+	// Mesh explicitly disables the inherited token auth requirement, but
+	// keeps the top-level TLS default (no per-provider override).
+	meshSec := ResolveAPISecurity(policy, cfg.Plugins.API.Mesh)
+	assert.Equal(t, "server", meshSec.TLSMode)
+	assert.Equal(t, "/run/secrets/api.crt", meshSec.TLSCertFilePath)
+	assert.Equal(t, "none", meshSec.AuthMode)
+	assert.Empty(t, meshSec.AuthTokenFilePath)
+
+	// Blockfrost overrides only its TLS cert/key, inheriting the top-level
+	// token auth policy untouched.
+	blockfrostSec := ResolveAPISecurity(policy, cfg.Plugins.API.Blockfrost)
+	assert.Equal(t, "server", blockfrostSec.TLSMode)
+	assert.Equal(
+		t,
+		"/run/secrets/blockfrost.crt",
+		blockfrostSec.TLSCertFilePath,
+	)
+	assert.Equal(t, "/run/secrets/blockfrost.key", blockfrostSec.TLSKeyFilePath)
+	assert.Equal(t, "token", blockfrostSec.AuthMode)
+	assert.Equal(t, "/run/secrets/api-token", blockfrostSec.AuthTokenFilePath)
+
+	// UTxO RPC has no provider override at all, so it inherits every field.
+	utxorpcSec := ResolveAPISecurity(policy, cfg.Plugins.API.Utxorpc)
+	assert.Equal(t, "server", utxorpcSec.TLSMode)
+	assert.Equal(t, "/run/secrets/api.crt", utxorpcSec.TLSCertFilePath)
+	assert.Equal(t, "/run/secrets/api.key", utxorpcSec.TLSKeyFilePath)
+	assert.Equal(t, "token", utxorpcSec.AuthMode)
+	assert.Equal(t, "/run/secrets/api-token", utxorpcSec.AuthTokenFilePath)
+}
+
+// TestLoad_APISecurityEnvVars covers the top-level api: fields' explicit
+// envconfig-tagged environment variables (env is a plain, flat tier for
+// this section; per-provider plugins.api.<name>.config.tls/auth overrides
+// are YAML/CLI-composition-resolved only -- see ResolveAPISecurity's doc
+// comment).
+func TestLoad_APISecurityEnvVars(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_API_TLS_MODE", "server")
+	t.Setenv("DINGO_API_TLS_CERT_FILE_PATH", "/env/api.crt")
+	t.Setenv("DINGO_API_TLS_KEY_FILE_PATH", "/env/api.key")
+	t.Setenv("DINGO_API_AUTH_MODE", "token")
+	t.Setenv("DINGO_API_AUTH_TOKEN_FILE_PATH", "/env/api-token")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+
+	assert.Equal(t, APIConfig{
+		TLS: APITLSPolicy{
+			Mode:         "server",
+			CertFilePath: "/env/api.crt",
+			KeyFilePath:  "/env/api.key",
+		},
+		Auth: APIAuthPolicy{
+			Mode:          "token",
+			TokenFilePath: "/env/api-token",
+		},
+	}, cfg.API)
+}
+
+// TestLoad_APISecurityLegacyRootTLSFallback covers the deprecated root-field
+// compatibility path: an existing deployment's tlsCertFilePath/
+// tlsKeyFilePath, with no api: section at all, must still resolve into a
+// "server" mode TLS policy for every API provider after loading.
+func TestLoad_APISecurityLegacyRootTLSFallback(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+tlsCertFilePath: legacy.crt
+tlsKeyFilePath: legacy.key
+network: "preview"
+`
+	tmpFile := filepath.Join(t.TempDir(), "legacy-tls.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(yamlContent), 0o600))
+
+	cfg, err := LoadConfig(tmpFile)
+	require.NoError(t, err)
+
+	// The api: section itself was never set...
+	assert.Equal(t, APIConfig{}, cfg.API)
+	// ...but the effective policy used at composition time still enables
+	// TLS from the legacy fields.
+	policy := cfg.EffectiveAPIPolicy()
+	assert.Equal(t, APITLSPolicy{
+		Mode:         "server",
+		CertFilePath: "legacy.crt",
+		KeyFilePath:  "legacy.key",
+	}, policy.TLS)
+}
+
 func TestLoad_MidnightConfig(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `

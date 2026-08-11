@@ -32,6 +32,7 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
@@ -100,6 +101,10 @@ type UtxorpcConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
+	// Auth configures in-process credential enforcement, shared with
+	// Blockfrost and Mesh via internal/apiauth. The zero value is
+	// apiauth.ModeNone (no authentication).
+	Auth apiauth.Policy
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
@@ -169,13 +174,22 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if u.config.Mempool != nil && isNilInterface(u.config.Mempool) {
 		return errors.New("utxorpc: Mempool must not be a typed nil")
 	}
+	auth, err := apiauth.NewVerifier(u.config.Auth)
+	if err != nil {
+		return fmt.Errorf("utxorpc: %w", err)
+	}
 	u.mu.Lock()
 	if u.server != nil {
 		u.mu.Unlock()
 		return errors.New("server already started")
 	}
+	// Authentication runs innermost (after CORS preflight, before request
+	// handling): a browser/grpc-web CORS preflight OPTIONS request carries
+	// no credential and must not be rejected by auth, while every actual
+	// RPC call (Connect, gRPC-Web, or grpc-health/grpc-reflect) is checked
+	// before it reaches a handler.
 	handler := httpcors.Handler(
-		u.newServeMux(),
+		auth.Middleware(u.newServeMux()),
 		httpcors.Config{
 			AllowedOrigins: u.config.CORSAllowedOrigins,
 		},

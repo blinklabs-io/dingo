@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -365,12 +366,40 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, err)
 	}
 
-	// TLS cert and key only work as a pair
+	// TLS cert and key only work as a pair. This is the deprecated
+	// process-level pair still used directly by bark and Midnight; the
+	// built-in API providers' effective TLS/auth policy is validated
+	// separately below, against the merged api:/plugins.api.*.config.tls
+	// policy (which falls back to these same two fields -- see
+	// EffectiveAPIPolicy).
 	if (c.TlsCertFilePath == "") != (c.TlsKeyFilePath == "") {
 		errs = append(errs, errors.New(
 			"tlsCertFilePath and tlsKeyFilePath must both be set to enable TLS "+
 				"(only one is set)",
 		))
+	}
+
+	// Effective per-provider API TLS/auth policy (dingo #2996/#2998):
+	// top-level api: defaults merged field-by-field with each provider's
+	// own plugins.api.<name>.config.tls/auth overrides. Checked for every
+	// selection, active or not, the same way the top-level api: fields are
+	// checked unconditionally further down via the "api" path -- an
+	// operator can misconfigure TLS/auth before ever turning on API
+	// storage mode, and should find out at config-validation time rather
+	// than only after switching storageMode to "api".
+	for _, apiSelection := range []struct {
+		path      string
+		selection hostplugin.Selection
+	}{
+		{"plugins.api.utxorpc.config", c.Plugins.API.Utxorpc},
+		{"plugins.api.blockfrost.config", c.Plugins.API.Blockfrost},
+		{"plugins.api.mesh.config", c.Plugins.API.Mesh},
+	} {
+		sec := ResolveAPISecurity(
+			c.EffectiveAPIPolicy(),
+			apiSelection.selection,
+		)
+		errs = append(errs, ValidateAPISecurity(apiSelection.path, sec)...)
 	}
 
 	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/

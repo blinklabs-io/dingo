@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -268,6 +269,21 @@ func (n *Node) apiPluginSelection(
 		)
 	}
 	return selection, uint(port), nil
+}
+
+// resolveAPISecurity computes the effective TLS/authentication policy for
+// one API provider selection from the node's currently loaded
+// configuration (dingo #2996/#2998). Both Run()'s initial construction of
+// the utxorpc/blockfrost/mesh providers and reinitializeAPIServers()'s live
+// rebuild of them after a Restore/Truncate call this instead of resolving
+// TLS/auth themselves, so the two paths cannot drift apart.
+func (n *Node) resolveAPISecurity(
+	selection plugin.Selection,
+) internalconfig.ResolvedAPISecurity {
+	return internalconfig.ResolveAPISecurity(
+		n.config.cfg.EffectiveAPIPolicy(),
+		selection,
+	)
 }
 
 // effectiveBarkHost decides the interface Bark actually binds to.
@@ -1480,6 +1496,7 @@ func (n *Node) Run(ctx context.Context) error {
 		return err
 	}
 	if n.config.storageMode.IsAPI() && utxorpcPort > 0 {
+		utxorpcSecurity := n.resolveAPISecurity(utxorpcSelection)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
@@ -1487,9 +1504,11 @@ func (n *Node) Run(ctx context.Context) error {
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
 				Host:               n.config.bindAddr,
-				TLSCertFilePath:    n.config.tlsCertFilePath,
-				TLSKeyFilePath:     n.config.tlsKeyFilePath,
+				TLSCertFilePath:    utxorpcSecurity.TLSCertFilePath,
+				TLSKeyFilePath:     utxorpcSecurity.TLSKeyFilePath,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				AuthMode:           apiauth.Mode(utxorpcSecurity.AuthMode),
+				AuthTokenFilePath:  utxorpcSecurity.AuthTokenFilePath,
 			},
 		)
 		if err != nil {
@@ -1623,12 +1642,17 @@ func (n *Node) Run(ctx context.Context) error {
 				err,
 			)
 		}
+		blockfrostSecurity := n.resolveAPISecurity(blockfrostSelection)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
 				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				TLSCertFilePath:    blockfrostSecurity.TLSCertFilePath,
+				TLSKeyFilePath:     blockfrostSecurity.TLSKeyFilePath,
+				AuthMode:           apiauth.Mode(blockfrostSecurity.AuthMode),
+				AuthTokenFilePath:  blockfrostSecurity.AuthTokenFilePath,
 			},
 		)
 		if err != nil {
@@ -1661,6 +1685,7 @@ func (n *Node) Run(ctx context.Context) error {
 					"(Byron genesis hash and Shelley genesis)",
 			)
 		}
+		meshSecurity := n.resolveAPISecurity(meshSelection)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
 			meshSelection.Provider, meshSelection.Config,
@@ -1676,6 +1701,10 @@ func (n *Node) Run(ctx context.Context) error {
 				GenesisHash:         genesisHash,
 				GenesisStartTimeSec: genesisStartTimeSec,
 				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
+				TLSCertFilePath:     meshSecurity.TLSCertFilePath,
+				TLSKeyFilePath:      meshSecurity.TLSKeyFilePath,
+				AuthMode:            apiauth.Mode(meshSecurity.AuthMode),
+				AuthTokenFilePath:   meshSecurity.AuthTokenFilePath,
 			},
 		)
 		if err != nil {

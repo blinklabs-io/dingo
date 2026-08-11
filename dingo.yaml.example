@@ -51,10 +51,25 @@ plugins:
       provider: "builtin"
       config:
         port: 3000
+        # Per-provider overrides for the shared `api:` TLS/auth policy
+        # below (dingo #2996/#2998). Any field set here wins over the
+        # matching top-level api.tls/api.auth field for this provider only;
+        # an omitted field inherits the top-level value. Example: give
+        # Blockfrost its own certificate while every other API provider
+        # uses the shared one.
+        # tls:
+        #   certFilePath: /run/secrets/blockfrost.crt
+        #   keyFilePath: /run/secrets/blockfrost.key
     mesh:
       provider: "builtin"
       config:
         port: 8080
+        # Example: explicitly disable the shared token auth policy for
+        # this provider only ("none"/"off" are recognized disabling
+        # values; an empty/omitted field always means "inherit", never
+        # "disable", so this cannot happen by accident).
+        # auth:
+        #   mode: none
     utxorpc:
       provider: "builtin"
       config:
@@ -78,14 +93,45 @@ logging:
   format: text
   level: info
 
-# TLS certificate file path for the built-in UTxO RPC listener.
-# Blockfrost and Mesh do not currently consume this setting; place public API
-# listeners behind a TLS-terminating and authenticating reverse proxy.
+# Shared TLS and authentication defaults for every built-in API provider
+# (Blockfrost, Mesh, UTxO RPC -- dingo #2996/#2998). A provider overrides
+# any field for itself under its own plugins.api.<name>.config.tls/auth
+# (see the plugins.api section above); an omitted field here or there
+# means "off"/"none" (matching the pre-#2996 default of no TLS/no
+# in-process auth). CLI: --api-tls-mode, --api-tls-cert-file-path,
+# --api-tls-key-file-path, --api-auth-mode, --api-auth-token-file-path.
+# Env: DINGO_API_TLS_MODE, DINGO_API_TLS_CERT_FILE_PATH,
+# DINGO_API_TLS_KEY_FILE_PATH, DINGO_API_AUTH_MODE,
+# DINGO_API_AUTH_TOKEN_FILE_PATH.
+api:
+  tls:
+    # "off" (default) or "server". "server" requires both certFilePath and
+    # keyFilePath (here or via a provider override) to be set.
+    mode: ""
+    certFilePath: ""
+    keyFilePath: ""
+  auth:
+    # "none" (default) or "token". "token" requires tokenFilePath (here or
+    # via a provider override): its trimmed contents are the shared bearer
+    # credential clients present as "Authorization: Bearer <token>", or,
+    # for Blockfrost-compatible clients, "project_id: <token>".
+    mode: ""
+    tokenFilePath: ""
+
+# TLS certificate file path, used directly by bark and Midnight.
+#
+# Deprecated for the built-in API providers (Blockfrost, Mesh, UTxO RPC):
+# prefer api.tls.certFilePath above. This field is kept only as a fallback
+# default for api.tls when api.tls is entirely unset, so an existing
+# deployment's TLS listener keeps working unchanged after upgrading.
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
 tlsCertFilePath: ""
 
-# TLS private key file path for the built-in UTxO RPC listener.
+# TLS private key file path, used directly by bark and Midnight.
+#
+# Deprecated for the built-in API providers: prefer api.tls.keyFilePath
+# above. See tlsCertFilePath.
 #
 # Can be overridden with the TLS_KEY_FILE_PATH environment variable
 tlsKeyFilePath: ""

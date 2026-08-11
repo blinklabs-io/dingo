@@ -20,6 +20,7 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -27,11 +28,20 @@ type ProviderConfig struct {
 	Port uint `yaml:"port"`
 }
 
+// ProviderDependencies carries resolved, instance-owned settings from
+// composition (internal/config.ResolveAPISecurity merges the shared api:
+// policy with this provider's own plugins.api.blockfrost.config.tls/auth
+// overrides before Run passes the result here) -- this package does not
+// perform that merge itself.
 type ProviderDependencies struct {
 	Node               BlockfrostNode
 	Logger             *slog.Logger
 	Host               string
 	CORSAllowedOrigins []string
+	TLSCertFilePath    string
+	TLSKeyFilePath     string
+	AuthMode           apiauth.Mode
+	AuthTokenFilePath  string
 }
 
 func RegisterProvider(host *plugin.Host) error {
@@ -50,6 +60,12 @@ func RegisterProvider(host *plugin.Host) error {
 					strconv.FormatUint(uint64(cfg.Port), 10),
 				),
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
+				TLSCertFilePath:    deps.TLSCertFilePath,
+				TLSKeyFilePath:     deps.TLSKeyFilePath,
+				Auth: apiauth.Policy{
+					Mode:          deps.AuthMode,
+					TokenFilePath: deps.AuthTokenFilePath,
+				},
 			}, deps.Node, deps.Logger)
 			return server, server, nil
 		},

@@ -199,6 +199,36 @@ var flagSpecs = []flagSpec{
 		"cors-allowed-origins",
 		"CORS allowed origins for API servers",
 	),
+	stringFlag(
+		"API.TLS.Mode",
+		"api-tls-mode",
+		"",
+		`shared TLS default for API providers (Blockfrost, Mesh, UTxO RPC): "off" or "server"`,
+	),
+	stringFlag(
+		"API.TLS.CertFilePath",
+		"api-tls-cert-file-path",
+		"",
+		"shared TLS certificate default for API providers",
+	),
+	stringFlag(
+		"API.TLS.KeyFilePath",
+		"api-tls-key-file-path",
+		"",
+		"shared TLS private key default for API providers",
+	),
+	stringFlag(
+		"API.Auth.Mode",
+		"api-auth-mode",
+		"",
+		`shared authentication default for API providers: "none" or "token"`,
+	),
+	stringFlag(
+		"API.Auth.TokenFilePath",
+		"api-auth-token-file-path",
+		"",
+		"shared authentication token file default for API providers",
+	),
 	durationFlag(
 		"OffchainMetadata.Interval",
 		"offchain-metadata-interval",

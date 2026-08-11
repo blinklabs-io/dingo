@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +26,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiauth"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -60,8 +63,11 @@ func New(
 }
 
 // handler builds the HTTP handler for the Blockfrost API,
-// including route registration and middleware.
-func (b *Blockfrost) handler() http.Handler {
+// including route registration and middleware. auth enforces the
+// effective authentication policy (nil or apiauth.ModeNone accepts every
+// request); it wraps the whole mux, so every route -- including /health --
+// requires the configured credential when auth mode is "token".
+func (b *Blockfrost) handler(auth *apiauth.Verifier) http.Handler {
 	mux := http.NewServeMux()
 	// "GET /{$}" matches only the literal root path. Without
 	// "{$}" the pattern would act as a subtree match and
@@ -258,8 +264,14 @@ func (b *Blockfrost) handler() http.Handler {
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
+	// Authentication runs innermost (after CORS preflight, before request
+	// handling): a browser's CORS preflight OPTIONS request carries no
+	// credential and must not be rejected by auth, while every actual
+	// request is checked before it reaches a route handler.
 	return httpcors.Handler(
-		http.MaxBytesHandler(mux, maxRequestBodyBytes),
+		auth.Middleware(
+			http.MaxBytesHandler(mux, maxRequestBodyBytes),
+		),
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 		},
@@ -270,6 +282,11 @@ func (b *Blockfrost) handler() http.Handler {
 func (b *Blockfrost) Start(
 	ctx context.Context,
 ) error {
+	auth, err := apiauth.NewVerifier(b.config.Auth)
+	if err != nil {
+		return fmt.Errorf("blockfrost: %w", err)
+	}
+
 	b.mu.Lock()
 	if b.httpServer != nil {
 		b.mu.Unlock()
@@ -278,10 +295,27 @@ func (b *Blockfrost) Start(
 
 	server := &http.Server{
 		Addr:              b.config.ListenAddress,
-		Handler:           b.handler(),
+		Handler:           b.handler(auth),
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}
+	useTLS := b.config.TLSCertFilePath != "" && b.config.TLSKeyFilePath != ""
+	if useTLS {
+		cert, err := tls.LoadX509KeyPair(
+			b.config.TLSCertFilePath,
+			b.config.TLSKeyFilePath,
+		)
+		if err != nil {
+			b.mu.Unlock()
+			return fmt.Errorf(
+				"blockfrost: loading TLS certificate/key: %w",
+				err,
+			)
+		}
+		server.TLSConfig = tlsutil.ServerConfig(&tls.Config{
+			Certificates: []tls.Certificate{cert},
+		})
 	}
 	b.httpServer = server
 	b.mu.Unlock()
@@ -294,9 +328,16 @@ func (b *Blockfrost) Start(
 		return err
 	}
 
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
 	b.logger.Info(
-		"Blockfrost API listener started on " +
+		fmt.Sprintf(
+			"Blockfrost API listener started on %s (%s)",
 			b.config.ListenAddress,
+			scheme,
+		),
 	)
 
 	// Monitor context for cancellation
@@ -375,11 +416,18 @@ func (b *Blockfrost) startServer(
 		)
 	}
 	go func() {
-		if err := server.Serve(ln); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
+		var serveErr error
+		if server.TLSConfig != nil {
+			// Certificates are already loaded into TLSConfig, so no
+			// cert/key file paths are passed here.
+			serveErr = server.ServeTLS(ln, "", "")
+		} else {
+			serveErr = server.Serve(ln)
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			b.logger.Error(
 				"Blockfrost API server error",
-				"error", err,
+				"error", serveErr,
 			)
 		}
 	}()
