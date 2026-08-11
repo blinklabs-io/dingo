@@ -199,6 +199,19 @@ func (s *Store) Reset(ctx context.Context) error {
 	return s.reset(ctx)
 }
 
+// HasDestructiveReset reports whether Reset actually mutates a live target
+// (postgres/mysql, which wire a real Config.Reset callback) rather than
+// being a harmless no-op (sqlite, which never sets one). Every backend's
+// concrete *Store satisfies metadata.Resettable's Reset(ctx) error method
+// regardless, so a plain type assertion against that interface alone
+// cannot distinguish "genuinely destructive" from "no-op" -- callers that
+// need to know whether Reset already happening (or having failed partway)
+// means there is no safe pre-restore state left to resume on (see
+// node_lifecycle.go's Restore) must check this instead.
+func (s *Store) HasDestructiveReset() bool {
+	return s.reset != nil
+}
+
 // ValidateBackup checks a backup file's structural integrity, for
 // providers that supply the hook (see metadata.BackupValidator). A no-op
 // for providers that don't -- every backend built on this shared Store
