@@ -23,22 +23,26 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
-// LeiosVoteDST is the hash_to_point ciphersuite used by CoreSign/CoreVerify
-// for ordinary vote signatures, matching cardano-crypto-leios' minSigPoPDST.
-// Its "_POP_" suffix names the MinSig ciphersuite *variant* (the one that
-// supports a proof-of-possession scheme) -- it does not mean this DST is
-// shared with PopProve/PopVerify. See leiosPopDST.
+// LeiosVoteDST is the MinSig ciphersuite used for both ordinary vote
+// signatures and possession-proof verification (see
+// VerifyLeiosKeyProofOfPossession) -- deliberately one DST for both, not
+// two.
+//
+// The IETF BLS-signature draft's textbook PopProve/PopVerify construction
+// uses a second, "BLS_POP_"-prefixed DST for hash_pubkey_to_point, distinct
+// from CoreSign's hash_to_point DST. cardano-crypto-class does not
+// implement that: 'minSigPoPDST' in
+// Cardano.Crypto.DSIGN.BLS12381.Internal is defined identically to this
+// constant, and createPossessionProofDSIGN/verifyPossessionProofDSIGN take
+// their DST as a caller-supplied parameter and delegate straight to
+// ordinary signDSIGN/verifyDSIGN -- there is no separate
+// hash_pubkey_to_point step anywhere in that module. Its own documented
+// example uses one context for both a possession proof and an ordinary
+// signature. Matching that (rather than the generic IETF construction) is
+// what makes a real pool's on-chain proof of possession verify here;
+// diverging from it silently turns every correctly-registered pool into a
+// keyless seat.
 const LeiosVoteDST = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
-
-// leiosPopDST is the hash_pubkey_to_point ciphersuite for PopProve/
-// PopVerify. Per the IETF BLS-signature draft (section 4.1), this MUST
-// differ from the CoreSign DST (LeiosVoteDST) used for ordinary signing --
-// derived from the same ciphersuite ID with the "BLS_POP_" prefix in place
-// of "BLS_SIG_". Reusing LeiosVoteDST here was an earlier bug in this file:
-// it verified a possession proof under the signing DST, which a
-// spec-correct proof from a real pool would fail, silently turning every
-// correctly-registered pool into a keyless seat.
-const leiosPopDST = "BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
 
 // Vote signatures follow the BLS MinSig variant on BLS12-381: signatures
 // are compressed G1 points (48 bytes, matching gouroboros
@@ -94,25 +98,12 @@ func VoteMessageBytes(slotNo uint64, ebHash lcommon.Blake2b256) []byte {
 // SignVote signs a vote message with the MinSig scheme and returns the
 // 48-byte compressed G1 signature.
 func SignVote(key *VoteSigningKey, msg []byte) ([]byte, error) {
-	return signWithDST(key, msg, LeiosVoteDST)
-}
-
-// signWithDST signs msg under the given domain-separation tag. Shared by
-// SignVote (LeiosVoteDST) and, in tests, PoP construction (leiosPopDST) --
-// production code never needs to construct a proof of possession, only
-// verify one, since a pool's PoP is generated once by its own operator
-// tooling, not by dingo.
-func signWithDST(
-	key *VoteSigningKey,
-	msg []byte,
-	dst string,
-) ([]byte, error) {
 	if key == nil {
 		return nil, errors.New("nil vote signing key")
 	}
-	hashPoint, err := bls12381.HashToG1(msg, []byte(dst))
+	hashPoint, err := bls12381.HashToG1(msg, []byte(LeiosVoteDST))
 	if err != nil {
-		return nil, fmt.Errorf("hash message to G1: %w", err)
+		return nil, fmt.Errorf("hash vote message to G1: %w", err)
 	}
 	var sig bls12381.G1Affine
 	sig.ScalarMultiplication(&hashPoint, key.sk)
@@ -142,27 +133,11 @@ func decodeSignaturePoint(sig []byte) (*bls12381.G1Affine, error) {
 }
 
 // VerifyVoteSignature verifies a 48-byte compressed G1 signature over msg
-// against a G2 public key, under LeiosVoteDST.
+// against a G2 public key.
 func VerifyVoteSignature(
 	pub *bls12381.G2Affine,
 	msg []byte,
 	sig []byte,
-) error {
-	return verifyWithDST(pub, msg, sig, LeiosVoteDST)
-}
-
-// verifyWithDST verifies a 48-byte compressed G1 signature over msg against
-// a G2 public key, under the given domain-separation tag. Shared by
-// VerifyVoteSignature (LeiosVoteDST) and VerifyLeiosKeyProofOfPossession
-// (leiosPopDST) -- the two must never share a call site with the same DST
-// hardcoded, or a proof of possession and a vote signature become the same
-// primitive over the same domain, which is exactly the bug this was split
-// out to fix.
-func verifyWithDST(
-	pub *bls12381.G2Affine,
-	msg []byte,
-	sig []byte,
-	dst string,
 ) error {
 	if pub == nil || pub.IsInfinity() {
 		return errors.New("invalid public key")
@@ -176,9 +151,9 @@ func verifyWithDST(
 	if err != nil {
 		return err
 	}
-	hashPoint, err := bls12381.HashToG1(msg, []byte(dst))
+	hashPoint, err := bls12381.HashToG1(msg, []byte(LeiosVoteDST))
 	if err != nil {
-		return fmt.Errorf("hash message to G1: %w", err)
+		return fmt.Errorf("hash vote message to G1: %w", err)
 	}
 	ok, err := bls12381.PairingCheck(
 		[]bls12381.G1Affine{*sigPoint, hashPoint},
@@ -194,19 +169,21 @@ func verifyWithDST(
 }
 
 // VerifyLeiosKeyProofOfPossession verifies that a registered Dijkstra pool
-// Leios key's possession proof is a valid PopProve/PopVerify signature,
-// under leiosPopDST (distinct from LeiosVoteDST -- see that constant),
-// over the key's own serialized public key. gouroboros decodes LeiosKey and
+// Leios key's possession proof is a valid signature, under LeiosVoteDST
+// (see that constant's comment for why this is not a separate DST), over
+// the key's own serialized public key. gouroboros decodes LeiosKey and
 // checks only field lengths (LeiosKey.validate), not the proof itself --
 // callers must not treat an on-chain leios_key as usable until this passes.
 //
-// NOT YET CHECKED AGAINST A REAL INTEROP VECTOR: the DST direction (this
-// function's core correctness property) is now right per the IETF draft,
-// but no test here has verified a real key/proof pair produced by
-// cardano-crypto-leios -- every test in this package both signs and
-// verifies with the same code, so a shared, still-wrong assumption
-// (message encoding, HashToG1 parameters) would pass here undetected. Get
-// one real vector before relying on this against a live network.
+// NOT YET CHECKED AGAINST A REAL INTEROP VECTOR: this matches
+// cardano-crypto-class's documented usage (one DST, caller-supplied,
+// shared between signDSIGN and createPossessionProofDSIGN/
+// verifyPossessionProofDSIGN), but no test here has verified an actual
+// key/proof pair produced by cardano-crypto-leios itself -- every test in
+// this package both signs and verifies with the same code, so a shared,
+// still-wrong assumption (message encoding, HashToG1 parameters) would
+// pass here undetected. Get one real vector before relying on this
+// against a live network.
 func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
 	if key == nil {
 		return errors.New("nil leios key")
@@ -227,11 +204,10 @@ func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
 	if pub.IsInfinity() {
 		return fmt.Errorf("%w: point is infinity", ErrInvalidPublicKey)
 	}
-	if err := verifyWithDST(
+	if err := VerifyVoteSignature(
 		&pub,
 		key.PublicKey,
 		key.PossessionProof,
-		leiosPopDST,
 	); err != nil {
 		return fmt.Errorf("leios key proof of possession: %w", err)
 	}

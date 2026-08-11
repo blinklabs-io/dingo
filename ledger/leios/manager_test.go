@@ -1104,12 +1104,56 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 }
 
 // TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry proves the core
+// TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee proves a
+// pool with a real on-chain registered key, but zero stake in the current
+// epoch's snapshot (so it can never be a ComputeCommittee member this
+// epoch), can still ValidateVotingKey and EnableVoting: both must resolve
+// the on-chain key for that specific pool independent of committee
+// membership, since committee selection is re-evaluated every epoch and a
+// pool not selected today may be selected once stake shifts.
+func TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee(
+	t *testing.T,
+) {
+	key := testSigningKey(t, 210)
+	proof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	var poolKeyHash lcommon.PoolKeyHash
+	poolKeyHash[0] = 0xfa // not one of the fixture's 10 staked pools
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(poolKeyHash[:]): {
+						PublicKey:       key.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+	_, isMember := committee.VoterIdFor(poolKeyHash[:])
+	require.False(t, isMember, "test setup: pool must have no stake and no committee seat")
+
+	require.NoError(t, fixture.mgr.ValidateVotingKey(poolKeyHash, key))
+	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, key))
+
+	fixture.mgr.mu.Lock()
+	votingKey := fixture.mgr.votingKey
+	fixture.mgr.mu.Unlock()
+	require.NotNil(t, votingKey)
+	assert.True(t, votingKey.PublicKey().Equal(key.PublicKey()))
+}
+
+// TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry proves the core
 // behavior of the Musashi w32 cutover: a committee member with a
 // PoP-valid registered key verifies through KeyProvider alone, with no
 // Registry entry and no derivation fallback involved.
 func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	key := testSigningKey(t, 123)
-	proof, err := signWithDST(key, key.PublicKeyBytes(), leiosPopDST)
+	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1155,7 +1199,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 	key := testSigningKey(t, 124)
 	wrongKey := testSigningKey(t, 125)
-	badProof, err := signWithDST(wrongKey, key.PublicKeyBytes(), leiosPopDST)
+	badProof, err := SignVote(wrongKey, key.PublicKeyBytes())
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1200,7 +1244,7 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 // still resolve keys normally once the failure clears.
 func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(t *testing.T) {
 	key := testSigningKey(t, 126)
-	proof, err := signWithDST(key, key.PublicKeyBytes(), leiosPopDST)
+	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
 	var member CommitteeMember
 	keyProvider := &fakeLeiosKeyProvider{
@@ -1273,11 +1317,7 @@ func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 	t *testing.T,
 ) {
 	rotatedKey := testSigningKey(t, 200)
-	proof, err := signWithDST(
-		rotatedKey,
-		rotatedKey.PublicKeyBytes(),
-		leiosPopDST,
-	)
+	proof, err := SignVote(rotatedKey, rotatedKey.PublicKeyBytes())
 	require.NoError(t, err)
 	var member CommitteeMember
 	fixture := newManagerFixture(
@@ -1324,11 +1364,7 @@ func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
 	t *testing.T,
 ) {
 	onChainKey := testSigningKey(t, 201)
-	proof, err := signWithDST(
-		onChainKey,
-		onChainKey.PublicKeyBytes(),
-		leiosPopDST,
-	)
+	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
 	require.NoError(t, err)
 	wrongKey := testSigningKey(t, 202)
 	var member CommitteeMember
@@ -2290,15 +2326,10 @@ func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	// EnableVoting itself now resolves the epoch's committee (to compare
-	// against the on-chain key), which would block forever on params here
-	// before the goroutine below ever reaches the code that releases it.
-	// This test is about rollback-vs-in-flight-emission, not EnableVoting,
-	// so set the voting state directly instead of through the public API.
-	fixture.mgr.mu.Lock()
-	fixture.mgr.votingPool = poolKeyHash[:]
-	fixture.mgr.votingKey = fixture.keys[3]
-	fixture.mgr.mu.Unlock()
+	// EnableVoting no longer resolves the epoch's committee (see
+	// resolveOnChainKeyForPool), so it no longer risks blocking on the
+	// params provider here; safe to call through the real public API.
+	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3]))
 	rbHash := lcommon.NewBlake2b256([]byte("rolled-back-rb"))
 	ebHash := lcommon.NewBlake2b256([]byte("rolled-back-eb"))
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)

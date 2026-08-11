@@ -484,22 +484,16 @@ func (m *VoteManager) Stop() error {
 
 // EnableVoting enables local vote emission for the given pool using the
 // given signing key. Votes are emitted for endorser blocks observed while
-// the pool is a member of the epoch's committee.
+// the pool is a member of the epoch's committee; enabling voting itself,
+// however, does not require current committee membership (see
+// resolveOnChainKeyForPool) -- a pool not selected this epoch must still
+// be able to get ready for an epoch that does select it.
 func (m *VoteManager) EnableVoting(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
 ) error {
 	if key == nil {
 		return errors.New("nil leios vote signing key")
-	}
-	epoch := m.epochProvider.CurrentEpoch()
-	entry, err := m.committeeAndParamsForEpoch(epoch)
-	if err != nil {
-		return fmt.Errorf(
-			"resolve committee for epoch %d: %w",
-			epoch,
-			err,
-		)
 	}
 	// A resolvable on-chain key for this pool is authoritative: if it
 	// disagrees with key, enabling voting anyway would succeed here but
@@ -517,7 +511,7 @@ func (m *VoteManager) EnableVoting(
 	// in leiosVoterPublicKeys -- the on-chain key is already the stronger,
 	// PoP-verified trust source, so a conflict against a weaker one it has
 	// superseded is not a real problem.
-	onChain, onChainKnown := entry.onChainKeys[hex.EncodeToString(poolKeyHash[:])]
+	onChain, onChainKnown := m.resolveOnChainKeyForPool(poolKeyHash[:])
 	if onChainKnown && !onChain.Equal(key.PublicKey()) {
 		return fmt.Errorf(
 			"configured leios voting key does not match the on-chain registered key for pool %s",
@@ -545,6 +539,13 @@ func (m *VoteManager) EnableVoting(
 // registry. A pool with a valid on-chain registration therefore needs no
 // registry entry to enable voting -- requiring one here would defeat the
 // on-chain key rollout for every operator who registered for real.
+//
+// Deliberately not scoped to the current epoch's committee: resolution
+// goes through resolveOnChainKeyForPool, not the epoch-cached (and, since
+// this pool may not be a committee member today, potentially empty)
+// resolveVoterKey path -- a pool outside this epoch's stake-coverage
+// selection must still be able to validate and enable its key ahead of an
+// epoch that does select it.
 func (m *VoteManager) ValidateVotingKey(
 	poolKeyHash lcommon.PoolKeyHash,
 	key *VoteSigningKey,
@@ -552,16 +553,10 @@ func (m *VoteManager) ValidateVotingKey(
 	if key == nil {
 		return errors.New("nil leios vote signing key")
 	}
-	epoch := m.epochProvider.CurrentEpoch()
-	entry, err := m.committeeAndParamsForEpoch(epoch)
-	if err != nil {
-		return fmt.Errorf(
-			"resolve committee for epoch %d: %w",
-			epoch,
-			err,
-		)
+	registered, ok := m.resolveOnChainKeyForPool(poolKeyHash[:])
+	if !ok {
+		registered, ok = m.registry.PublicKeyFor(poolKeyHash[:])
 	}
-	registered, ok := m.resolveVoterKey(entry, poolKeyHash[:])
 	if !ok {
 		return fmt.Errorf(
 			"no resolvable leios voting public key for pool %x (checked the on-chain registration and leios-voter-public-keys)",
@@ -735,6 +730,34 @@ func (m *VoteManager) resolveOnChainKeys(
 		verified[poolHashHex] = &pub
 	}
 	return verified, nil
+}
+
+// resolveOnChainKeyForPool resolves and PoP-verifies a single pool's
+// on-chain key, independent of committee membership. This is deliberately
+// not committee-scoped like resolveOnChainKeys' epoch cache:
+// ValidateVotingKey/EnableVoting must work for a pool that isn't a member
+// of the *current* epoch's committee, since ComputeCommittee re-selects
+// every epoch from that epoch's stake snapshot -- a pool outside today's
+// selection can still be selected once its stake (or others') shifts, and
+// an operator must be able to enable voting in advance of that rather than
+// getting rejected today for a reason that has nothing to do with the
+// validity of their key.
+func (m *VoteManager) resolveOnChainKeyForPool(
+	poolKeyHash []byte,
+) (*bls12381.G2Affine, bool) {
+	poolHashHex := hex.EncodeToString(poolKeyHash)
+	snapshotEpoch := CommitteeSnapshotEpoch(m.epochProvider.CurrentEpoch())
+	keys, err := m.resolveOnChainKeys(snapshotEpoch, []string{poolHashHex})
+	if err != nil {
+		m.logger.Warn(
+			"resolve on-chain leios key for pool",
+			"pool", poolHashHex,
+			"error", err,
+		)
+		return nil, false
+	}
+	pub, ok := keys[poolHashHex]
+	return pub, ok
 }
 
 // resolveVoterKey resolves a committee member's voting public key: the

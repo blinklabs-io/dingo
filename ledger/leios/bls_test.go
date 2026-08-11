@@ -27,23 +27,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLeiosPopDSTDiffersFromVoteDST pins both DST literals against the
-// IETF BLS-signature draft's values for this ciphersuite (hash_to_point vs
-// hash_pubkey_to_point), so reusing one for the other -- the bug this pair
-// of constants exists to prevent -- fails a test immediately rather than
-// only showing up as every real pool's PoP getting rejected.
-func TestLeiosPopDSTDiffersFromVoteDST(t *testing.T) {
+// TestLeiosVoteDSTMatchesReferenceMinSigPoPDST pins LeiosVoteDST against
+// cardano-crypto-class's minSigPoPDST (Cardano.Crypto.DSIGN.BLS12381.
+// Internal), the identical string that module uses for both ordinary
+// signing and possession-proof verification. This is a deliberate
+// single-DST design, not an oversight -- see LeiosVoteDST's comment. A
+// PR once "fixed" this into a separate, IETF-textbook-style
+// "BLS_POP_"-prefixed DST, which is spec-plausible but does not match
+// what the reference implementation actually does, and would have made
+// every correctly-registered pool's on-chain proof of possession fail
+// verification here. This test exists so that regression doesn't happen
+// silently again.
+func TestLeiosVoteDSTMatchesReferenceMinSigPoPDST(t *testing.T) {
 	assert.Equal(
 		t,
 		"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
 		LeiosVoteDST,
 	)
-	assert.Equal(
-		t,
-		"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
-		leiosPopDST,
-	)
-	assert.NotEqual(t, LeiosVoteDST, leiosPopDST)
 }
 
 // testSigningKey returns a signing key built from a small non-zero scalar.
@@ -243,13 +243,14 @@ func TestVerifyAggregateSignatureNoKeys(t *testing.T) {
 }
 
 // testLeiosKey builds a LeiosKey whose possession proof is a genuine
-// PopProve signature over its own public key under leiosPopDST -- the same
-// DST VerifyLeiosKeyProofOfPossession checks against, not LeiosVoteDST.
+// signature over its own public key under LeiosVoteDST -- the same DST
+// VerifyLeiosKeyProofOfPossession checks against (see that DST's comment
+// for why this is one shared DST, not two).
 func testLeiosKey(t *testing.T, scalar byte) *lcommon.LeiosKey {
 	t.Helper()
 	key := testSigningKey(t, scalar)
 	pub := key.PublicKeyBytes()
-	proof, err := signWithDST(key, pub, leiosPopDST)
+	proof, err := SignVote(key, pub)
 	require.NoError(t, err)
 	return &lcommon.LeiosKey{PublicKey: pub, PossessionProof: proof}
 }
@@ -286,11 +287,12 @@ func TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof(t *testing.T) {
 }
 
 // TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof guards
-// against reusing an ordinary vote signature (over an RB hash, under
-// LeiosVoteDST) as if it were a possession proof (over the public key
-// itself, under leiosPopDST): the two are now separated by both a
-// different DST and a different message, either of which alone would
-// already make this fail.
+// against reusing an ordinary vote signature (over an RB hash) as if it
+// were a possession proof (over the public key itself): both are signed
+// under the same LeiosVoteDST (see that constant's comment), so the two
+// message spaces never colliding is the only thing that separates them --
+// this pins that a vote message can never coincidentally equal a
+// serialized public key.
 func TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof(
 	t *testing.T,
 ) {
