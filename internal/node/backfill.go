@@ -1120,6 +1120,12 @@ func (b *Backfill) processBlockTxsBatched(
 				// that need repair via the recovery path.
 				SkipConsumedInputRecovery: isFreshStart,
 				Stats:                     stats,
+				// Backfill only serves Mithril-sourced historical data, which can
+				// never carry the delegator-inactivity gate enabled --
+				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
+				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go) refuse
+				// that combination before this path ever runs.
+				SkipWithdrawalWitnessWrite: true,
 			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)

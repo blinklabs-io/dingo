@@ -186,6 +186,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			database.BatchedTxIngestOpts{
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
 				StrictAppliedInputConservation: d.strictConsumedInputs,
+				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
 			},
 		)
 		// Return the map to pool

@@ -4889,6 +4889,21 @@ includes zero-amount withdrawals: they move no rewards but still prove account
 activity under CIP-0163. Rollback affected-set and last-witness queries include
 this history, and rollback removes its orphaned rows.
 
+The insert is elided when the gate is off. `account_withdrawal_witness` is
+read only by the rollback/renewal queries above, so on a gate-off node — the
+default for any node not running CIP-0163 — the row would never be read;
+writing it anyway is pure write amplification on a table that grows without
+bound and is never pruned. `LedgerDelta.apply` sets
+`BatchedTxIngestOpts.SkipWithdrawalWitnessWrite` to
+`!LedgerStateConfig.DelegatorInactivityEnabled` on the live-apply path
+(`ledger/delta.go`), which `Database.SetTransactionWithOpts` threads down to
+`MetadataStore.SetTransaction`'s `skipWithdrawalWitness` argument
+(`database/plugin/metadata/sqlstore/transaction_write.go`). Mithril-sourced
+backfill (`internal/node/backfill.go`) always sets it, since a
+Mithril-bootstrapped database can never run with the gate enabled (see
+`errMithrilInactivityIncompatible` below) and so could never read the rows
+either.
+
 At the authoritative SNAP point, both reward and leader-election Mark snapshots
 consume `RewardLiveStake` instead of scanning certificate and UTxO history. The
 snapshot manager reads every registered, delegated row (including zero-stake

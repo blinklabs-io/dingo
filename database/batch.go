@@ -102,6 +102,20 @@ type BatchedTxIngestOpts struct {
 	// visibility during API-mode Mithril backfill. It is optional and is
 	// intentionally updated only at coarse stage boundaries.
 	Stats *types.BackfillHotPathStats
+
+	// SkipWithdrawalWitnessWrite elides the CIP-0163 account_withdrawal_witness
+	// insert for each reward withdrawal. That table is only ever read by the
+	// delegator-inactivity gate's rollback/renewal paths
+	// (MetadataStore.AccountsWitnessedAfterSlot, AccountLastWitnessSlots); with
+	// the gate off -- the default on every node not running CIP-0163 -- the
+	// insert is pure write amplification on a table nothing reads (issue
+	// #2919). The ledger sets this to !DelegatorInactivityEnabled on the live-
+	// apply path (ledger/delta.go). Mithril-sourced backfill always sets it
+	// true: a Mithril-bootstrapped database can never run with the gate
+	// enabled (see errMithrilInactivityIncompatible in cmd/dingo/mithril.go),
+	// so its witness rows could never be read either. Defaults to false,
+	// preserving the unconditional write for any caller that does not opt in.
+	SkipWithdrawalWitnessWrite bool
 }
 
 type batchStatsSetter interface {
@@ -280,7 +294,8 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		setter.SetBackfillStats(opts.Stats)
 	}
 	if err := d.metadata.SetTransactionBatched(
-		tx, point, idx, certDeposits, acc, metadataTxn,
+		tx, point, idx, certDeposits,
+		opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
 	); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata for tx %s (batch idx %d, slot %d): %w",
