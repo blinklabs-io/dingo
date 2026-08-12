@@ -4957,6 +4957,33 @@ sync from genesis.
 rows from live `account.expiration_epoch`, which may reflect a later renewal; the
 current-epoch N row is still captured.)
 
+Besides the Mithril gap above, expiry reconstruction (the stake-aggregation
+chokepoint's `historicalExpirationSQL` and the reward-crediting guard's
+`guardedExpiredRewardCredentials`) also requires two from-genesis nodes to
+retain the same witness history for the same slot -- the ten
+stake-witnessing certificate tables (`accountWitnessTables`:
+`stake_registration`, `stake_registration_delegation`,
+`stake_vote_registration_delegation`, `vote_registration_delegation`,
+`registration`, `stake_deregistration`, `deregistration`, `stake_delegation`,
+`stake_vote_delegation`, `vote_delegation`), `account_reward_delta`, and
+`account_withdrawal_witness` (issue #2920). None of these tables is ever
+pruned by age, storage mode, or any configurable retention -- the only
+statements that delete rows from them are `DeleteCertificatesAfterSlot` and
+the `account_reward_delta`/`account_withdrawal_witness` deletes in
+`database/plugin/metadata/sqlstore/account.go`, all of the form `added_slot >
+slot` for a rollback or lifecycle-truncate target slot (the same primitive
+both share, see "CIP-0163 Bookkeeping Shared Between Ledger Rollback and
+Lifecycle Truncate" below). That target slot is derived from consensus chain
+state, not wall-clock time or per-node configuration, so it produces
+byte-identical retained history on every node that rolls back or truncates to
+the same point; a node that has not rolled back retains every witness row
+back to genesis. `historicalExpirationSQL` scans this history with no bounded
+lookback window -- it takes the single latest `added_slot <= slot` across
+every table, however far back that is -- so as long as it is retained, which
+it always is short of a rollback past it, the reconstructed expiry is exact
+and identical on every node. There is therefore no retention-driven
+divergence to guard against beyond the Mithril case already refused above.
+
 ### Query Interface
 
 The `LedgerView` provides stake distribution queries:
