@@ -223,8 +223,10 @@ func TestAcceleratedScenarioTimeline(t *testing.T) {
 		fmt.Sprintf("every node agrees on a header above the epoch"+
 			" boundary at %d", boundary),
 		func(snaps []devnet.ChainSnapshot) bool {
-			h, ok := devnet.AgreedHeaderAbove(snaps, boundary)
-			return ok && h.Slot > boundary
+			// AgreedHeaderAbove only returns headers above its bound, so
+			// finding one is already proof of agreement past the boundary.
+			_, ok := devnet.AgreedHeaderAbove(snaps, boundary)
+			return ok
 		}))
 	cancel()
 	t.Logf("epoch transition: crossed the boundary at slot %d", boundary)
@@ -232,7 +234,7 @@ func TestAcceleratedScenarioTimeline(t *testing.T) {
 	// --- controlled peer interruption and recovery -------------------
 	// The last producer is deliberately not the one txpump submits to,
 	// so mempool traffic keeps flowing through the outage.
-	victim := lastProducer(t, endpoints)
+	victim := interruptionVictim(t, endpoints)
 	interruptCtx, cancel := phase(devnet.PhasePeerInterruption)
 	runOutage(t, interruptCtx, ctl, group, plan, victim, "peer interruption")
 	cancel()
@@ -380,22 +382,36 @@ func maxBlockExcluding(snaps []devnet.ChainSnapshot, node string) uint64 {
 	return maxBlock
 }
 
-// lastProducer returns the final producer in the endpoint list. Both
-// topologies put the node txpump submits to first, so this is always a
-// producer whose loss leaves the transaction path intact.
-func lastProducer(
+// interruptionVictim returns the producer to stop during the peer
+// interruption phase: the last one in the endpoint list.
+//
+// txpump submits to the first producer in both topologies, so choosing the
+// last one keeps transactions flowing through the outage. That ordering is
+// a property of LoadEndpoints and docker-compose rather than something the
+// types enforce, so it is asserted here instead of assumed: if the list is
+// ever reordered so that the victim is also the submission target, this
+// fails loudly rather than silently removing the mempool traffic the phase
+// depends on.
+func interruptionVictim(
 	t *testing.T,
 	endpoints []devnet.NodeEndpoint,
 ) devnet.NodeEndpoint {
 	t.Helper()
-	var found devnet.NodeEndpoint
+	var first, last devnet.NodeEndpoint
 	for _, ep := range endpoints {
-		if ep.Role == "producer" {
-			found = ep
+		if ep.Role != "producer" {
+			continue
 		}
+		if first.Name == "" {
+			first = ep
+		}
+		last = ep
 	}
-	require.NotEmpty(t, found.Name, "no producer endpoint configured")
-	return found
+	require.NotEmpty(t, last.Name, "no producer endpoint configured")
+	require.NotEqual(t, first.Name, last.Name,
+		"the interruption victim must not be the producer txpump submits"+
+			" to, or the outage also stops mempool traffic")
+	return last
 }
 
 func relayEndpoint(

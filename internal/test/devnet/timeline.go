@@ -114,8 +114,13 @@ func NewScenarioPlan(cfg *DevNetConfig) (*ScenarioPlan, error) {
 		InterruptionHold: hold,
 		RecoveryBudget:   recovery,
 		OutageBlocks:     outageBlocks,
-		// A quarter of an epoch past the boundary is comfortably more
-		// than the 4k/f freeze window's tail while staying cheap.
+		// A quarter of an epoch past the boundary. Any margin proves the
+		// transition: the assertion is that nodes agree on a header built
+		// under the new epoch nonce, and the first header after the
+		// boundary already qualifies. This is deliberately far shorter
+		// than the 4k/f freeze window (30 slots against 100 for the
+		// accelerated spec) because covering that window would cost most
+		// of an epoch for no extra signal.
 		EpochMargin: cfg.EpochLength / 4,
 	}
 

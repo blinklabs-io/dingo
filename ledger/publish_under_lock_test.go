@@ -51,6 +51,11 @@ var guardedMutexes = []string{"chainsyncMutex"}
 // minutes, the mempool component silent, and the node still forging but no
 // longer completing Node-to-Node handshakes.
 //
+// This covers Publish, PublishBlocking and PublishAsync alike. All three
+// wait for capacity rather than dropping, so all three can close the
+// cycle; PublishAsync merely does it through the shared async queue and
+// its worker pool instead of a single subscriber's buffer.
+//
 // Queue the event with pendingPublishes and flush it after the unlock
 // instead.
 func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
@@ -152,11 +157,15 @@ func violations(fn *ast.FuncDecl) []violation {
 			events = append(events, lockEvent{
 				pos: call.Pos(), kind: kind, mutex: inner.Sel.Name,
 			})
-		case "Publish", "PublishBlocking":
+		case "Publish", "PublishBlocking", "PublishAsync":
 			// Only EventBus publishes; other types have Publish methods.
-			// PublishAsync is deliberately excluded: it hands the event to
-			// the shared async queue rather than parking on a
-			// subscriber's buffer.
+			// PublishAsync is included: it does not park on a
+			// subscriber's buffer, but it does wait for room in the
+			// shared async queue rather than dropping the event, and that
+			// queue is drained by a worker pool whose workers run
+			// subscriber handlers. A handler that needs the publisher's
+			// mutex parks a worker, the queue fills, and the same cycle
+			// closes.
 			if inner.Sel.Name != "EventBus" {
 				return true
 			}

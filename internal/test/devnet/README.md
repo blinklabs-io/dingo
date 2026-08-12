@@ -198,8 +198,10 @@ standalone.
 ```bash
 ./start.sh               # dingo mode (default): 3 producers + relay
 ./start.sh --conformance # conformance mode: dingo + cardano-node
+./start.sh --accelerated # bring the network up on the accelerated spec
 ./stop.sh                 # tear down the default dingo network
 ./stop.sh --conformance   # tear down the conformance network
+./stop.sh --accelerated   # accepted and ignored; teardown is spec-independent
 ```
 
 Both scripts set `COMPOSE_PROFILES` for you (`dingo` or `conformance`), so
@@ -397,7 +399,7 @@ and queries delegations + reward balances via
 `GetFilteredDelegationsAndRewardAccounts`.
 
 This TCP-based approach replaced an earlier unix-socket host bind-mount
-design: the Dingo image runs as uid 100 and cannot bind a socket inside a
+design: the Dingo image runs as uid 1000 and cannot bind a socket inside a
 host-owned bind mount, so the in-container socket (used by `txpump` and the
 healthcheck) stays on a named Docker volume, and the host harness talks NtC
 over TCP instead. There is no host socket bind mount and no

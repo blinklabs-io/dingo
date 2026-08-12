@@ -928,11 +928,14 @@ All event types follow the `subsystem.snake_case_name` convention.
   worker pool means it also delays unrelated async event types. Consumers of
   `Subscribe` channels must drain for the life of the subscription and
   `Unsubscribe` when they stop
-- **Never `Publish` while holding a lock that a subscriber of that event
-  acquires.** Because delivery blocks rather than drops, this is a deadlock,
-  not merely a slow path: once the subscriber's buffer fills, the subscriber
-  waits for the lock the publisher holds while the publisher waits for the
-  capacity the subscriber would free. `ledger`'s `pendingPublishes`
+- **Never `Publish`, `PublishAsync`, or `PublishBlocking` while holding a lock
+  that a subscriber of that event acquires.** Because all three wait for
+  capacity rather than dropping, this is a deadlock, not merely a slow path:
+  once the subscriber's buffer fills, the subscriber waits for the lock the
+  publisher holds while the publisher waits for the capacity the subscriber
+  would free. `PublishAsync` is no exception — it waits for room in the shared
+  async queue, which is drained by a worker pool running subscriber handlers,
+  so a handler blocked on the publisher's lock closes the same cycle. `ledger`'s `pendingPublishes`
   (`ledger/pending_publish.go`) is the pattern for this — queue the event under
   the lock and flush after the unlock, registering the flush with `defer`
   *before* taking the lock so LIFO order runs it last. The invariant is

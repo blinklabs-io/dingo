@@ -133,7 +133,10 @@ func TestConfiguratorChownsUsingPassedIds(t *testing.T) {
 
 	require.Contains(t, string(script), `chown -R "${DINGO_UID}:${DINGO_GID}"`,
 		"configurator.sh must chown pool keys to the ids compose passes in")
-	require.NotRegexp(t, regexp.MustCompile(`chown -R \d+:\d+`),
+	// Scoped to the pool-key chown this contract covers, so an unrelated
+	// numeric chown elsewhere in the script does not fail the guard.
+	require.NotRegexp(t,
+		regexp.MustCompile(`chown -R \d+:\d+ "?/configs/`),
 		string(script),
 		"configurator.sh must not hardcode a uid:gid for the pool keys")
 }

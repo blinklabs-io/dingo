@@ -56,7 +56,7 @@ for arg in "$@"; do
     --keep-up)     KEEP_UP=true ;;
     --conformance) MODE="conformance" ;;
     --accelerated) ACCELERATED=true ;;
-    -run|-run=*|-test.run=*)
+    -run|-run=*|-test.run|-test.run=*)
                    USER_RUN_FILTER=true; TEST_ARGS+=("${arg}") ;;
     *)             TEST_ARGS+=("${arg}") ;;
   esac
@@ -91,6 +91,10 @@ if [[ "${ACCELERATED}" == "true" ]]; then
   export DEVNET_ACCELERATED=1
 else
   ACTIVE_SPEC="${CANONICAL_SPEC}"
+  # Only --accelerated enables the accelerated scenario. Inheriting a stale
+  # DEVNET_ACCELERATED=1 would run it against the canonical-timing network,
+  # whose budget it is designed not to meet, failing the whole suite.
+  unset DEVNET_ACCELERATED
 fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
@@ -98,8 +102,15 @@ export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
 # status on failure.
 export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"
 
-# Failure evidence goes here and is preserved when the run fails.
-DEVNET_ARTIFACT_DIR="${DEVNET_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-artifacts.XXXXXX")}"
+# Failure evidence goes here and is preserved when the run fails. A
+# caller-supplied directory is used as-is and never deleted; only one this
+# script created is cleaned up on success, so a passing run cannot destroy
+# a shared or pre-existing path.
+ARTIFACT_DIR_IS_OURS=false
+if [[ -z "${DEVNET_ARTIFACT_DIR:-}" ]]; then
+  DEVNET_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-artifacts.XXXXXX")"
+  ARTIFACT_DIR_IS_OURS=true
+fi
 export DEVNET_ARTIFACT_DIR
 
 # --------------------------------------------------------------------------- #
@@ -152,7 +163,7 @@ cleanup() {
     log "Collecting logs before teardown..."
     docker compose -f "${COMPOSE_FILE}" logs --tail=100 2>/dev/null || true
     collect_failure_artifacts
-  else
+  elif [[ "${ARTIFACT_DIR_IS_OURS}" == "true" ]]; then
     rm -rf "${DEVNET_ARTIFACT_DIR}"
   fi
   log "Tearing down DevNet..."

@@ -167,9 +167,6 @@ func NewObservedChain(node string) *ObservedChain {
 	return &ObservedChain{node: node, notify: newBroadcaster()}
 }
 
-// Node returns the node name this chain was observed from.
-func (c *ObservedChain) Node() string { return c.node }
-
 // RollForward records a header the node sent, extending the observed
 // chain. serverTip is the node's own reported tip from the same message.
 func (c *ObservedChain) RollForward(h ObservedHeader, serverTip ChainTip) {
@@ -567,16 +564,4 @@ func MaxServerTipSlot(snaps []ChainSnapshot) uint64 {
 		}
 	}
 	return maxSlot
-}
-
-// MaxBlockNumber returns the highest observed block height across
-// snapshots.
-func MaxBlockNumber(snaps []ChainSnapshot) uint64 {
-	var maxBlock uint64
-	for _, s := range snaps {
-		if s.Tip.BlockNumber > maxBlock {
-			maxBlock = s.Tip.BlockNumber
-		}
-	}
-	return maxBlock
 }

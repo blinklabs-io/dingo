@@ -15,6 +15,9 @@
 package devnet
 
 import (
+	"os"
+	"regexp"
+	"slices"
 	"testing"
 	"time"
 
@@ -81,6 +84,59 @@ func TestCanonicalSpecsKeepCanonicalTiming(t *testing.T) {
 			require.Equal(t, time.Second, cfg.SlotDuration())
 		})
 	}
+}
+
+// run-tests.sh and start.sh each map a mode to a network spec, and
+// docker-compose.yml supplies the defaults. Nothing makes them agree, so a
+// rename that updates one and not another would leave the Go harness
+// deriving its timings from a different spec than the configurator
+// generated genesis from — the scenario would still run, just against a
+// network whose parameters it has wrong.
+//
+// Rather than route all three through a shared resolver (indirection
+// across a shell/compose/Go boundary for two filenames), assert that every
+// spec they name exists and that the two scripts agree on the accelerated
+// pair.
+func TestScriptsAndComposeAgreeOnSpecFiles(t *testing.T) {
+	specRe := regexp.MustCompile(`testnet[a-z-]*\.yaml`)
+	acceleratedRe := regexp.MustCompile(`testnet[a-z-]*accelerated\.yaml`)
+
+	referenced := map[string][]string{}
+	for _, file := range []string{
+		"run-tests.sh", "start.sh", "docker-compose.yml",
+	} {
+		data, err := os.ReadFile(file)
+		require.NoError(t, err)
+		for _, name := range specRe.FindAllString(string(data), -1) {
+			referenced[file] = append(referenced[file], name)
+		}
+	}
+
+	for file, names := range referenced {
+		require.NotEmpty(t, names, "%s names no network spec", file)
+		for _, name := range names {
+			require.FileExists(t, name,
+				"%s references %s, which does not exist", file, name)
+		}
+	}
+
+	accelerated := func(file string) []string {
+		var out []string
+		for _, name := range referenced[file] {
+			if acceleratedRe.MatchString(name) && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	runTests := accelerated("run-tests.sh")
+	require.Len(t, runTests, 2,
+		"run-tests.sh should name both accelerated specs")
+	require.Equal(t, runTests, accelerated("start.sh"),
+		"start.sh and run-tests.sh must select the same accelerated specs;"+
+			" if they drift, the harness and the running network resolve"+
+			" different timings")
 }
 
 func TestLoadDevNetConfigFromMissingFile(t *testing.T) {
