@@ -124,26 +124,6 @@ func TestNewServerAddressNetworkFollowsMagic(t *testing.T) {
 
 // --- listener lifecycle -------------------------------------------------
 
-// bindAttempts bounds how many ports a test tries before giving up.
-// The server binds the address in its config and does not expose the
-// address it resolved, so a test cannot ask the kernel for a port with
-// :0 and read it back. Reserving a port and releasing it leaves a
-// window in which another process can claim it, so callers retry
-// instead of treating one bind failure as a test failure.
-const bindAttempts = 8
-
-// freePort reserves a loopback port and releases it, returning the
-// address. The port is not guaranteed to still be free when the caller
-// binds it -- see bindAttempts.
-func freePort(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
-}
-
 // startOnFreePort starts a server on a free loopback port, retrying on
 // a lost race for the port, and returns it with the address it bound.
 // The caller owns shutdown.
@@ -164,8 +144,8 @@ func startOnFreePort(
 ) (*Server, string) {
 	t.Helper()
 	var lastErr error
-	for range bindAttempts {
-		addr := freePort(t)
+	for range testutil.BindAttempts {
+		addr := testutil.FreePort(t)
 		attemptOpts := make([]serverOption, 0, len(opts)+1)
 		attemptOpts = append(attemptOpts, opts...)
 		attemptOpts = append(
@@ -184,7 +164,7 @@ func startOnFreePort(
 	}
 	t.Fatalf(
 		"could not bind a free loopback port in %d attempts: %v",
-		bindAttempts, lastErr,
+		testutil.BindAttempts, lastErr,
 	)
 	return nil, ""
 }

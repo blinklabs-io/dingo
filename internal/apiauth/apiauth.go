@@ -84,7 +84,10 @@ func (v *Verifier) Verify(presented string) bool {
 
 // bearerToken extracts the credential from a standard
 // "Authorization: Bearer <token>" header value, or "" if header does not
-// use the Bearer scheme.
+// use the Bearer scheme. The credential portion is trimmed of surrounding
+// whitespace, since some HTTP/Connect/gRPC client defaults insert extra
+// internal whitespace after "Bearer" that would otherwise reject an
+// otherwise-correct token.
 func bearerToken(header string) string {
 	const prefix = "Bearer "
 	if len(header) <= len(prefix) {
@@ -93,5 +96,5 @@ func bearerToken(header string) string {
 	if !strings.EqualFold(header[:len(prefix)], prefix) {
 		return ""
 	}
-	return header[len(prefix):]
+	return strings.TrimSpace(header[len(prefix):])
 }

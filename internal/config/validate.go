@@ -751,12 +751,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	return errors.Join(errs...)
 }
 
-// validatePort checks a configured TCP port. Ports are uints, so
-// values above 65535 are representable but unbindable; ports below
-// minBindable are privileged ports the process may not bind; and 0
-// either disables the component (required=false) or is nonsense for a
-// mandatory listener (required=true, binding port 0 picks a random
-// port).
 // validateAPIMode rejects a mode value that is neither unset (inherit/
 // default) nor one of the two accepted enum values.
 func validateAPIMode(
@@ -776,6 +770,12 @@ func validateAPIMode(
 	)
 }
 
+// validatePort checks a configured TCP port. Ports are uints, so
+// values above 65535 are representable but unbindable; ports below
+// minBindable are privileged ports the process may not bind; and 0
+// either disables the component (required=false) or is nonsense for a
+// mandatory listener (required=true, binding port 0 picks a random
+// port).
 func validatePort(
 	setting string,
 	port uint,

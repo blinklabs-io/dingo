@@ -17,7 +17,6 @@ package mesh
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -57,16 +56,6 @@ func startTestServerTLSAuth(
 		scheme = "https://"
 	}
 	return srv, scheme + addr
-}
-
-func insecureHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // test-only, throwaway self-signed server cert
-			},
-		},
-	}
 }
 
 func postNetworkList(
@@ -115,7 +104,7 @@ func TestServerTLSNoAuth(t *testing.T) {
 		},
 		apiconfig.EffectiveAuth{},
 	)
-	resp := postNetworkList(t, insecureHTTPClient(), baseURL, "")
+	resp := postNetworkList(t, testutil.InsecureHTTPClient(), baseURL, "")
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -132,7 +121,7 @@ func TestServerTLSAuth(t *testing.T) {
 		},
 		apiconfig.EffectiveAuth{Enabled: true, Token: "shared-secret"},
 	)
-	client := insecureHTTPClient()
+	client := testutil.InsecureHTTPClient()
 
 	t.Run("missing credential", func(t *testing.T) {
 		resp := postNetworkList(t, client, baseURL, "")

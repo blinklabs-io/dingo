@@ -18,11 +18,21 @@ orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
 API providers are resolved for lifecycle only because node composition has no
 in-process consumer of their concrete server values. Each API provider's
-TLS/authentication policy is resolved the same way: node composition merges
-the shared `api.tls`/`api.auth` default into that provider's own config
-before resolving it (see "API security" under External Interfaces), so a
-provider always receives an already-resolved, instance-owned policy and
-never has to know a shared, top-level default exists.
+TLS/authentication policy goes through a merged-config handoff, not a
+pre-resolved one: node composition merges the shared `api.tls`/`api.auth`
+default into that provider's own `config.tls`/`config.auth` fields, field by
+field, before the provider ever decodes its config (see "API security" under
+External Interfaces) — so from a provider's point of view an inherited
+field and an inline one are indistinguishable — but the merged result is
+still the raw, tri-state `TLSPolicy`/`AuthPolicy` shape. Each provider's own
+`RegisterProvider` factory decodes that merged config and calls
+`Resolve` itself during construction, producing the concrete
+`EffectiveTLS`/`EffectiveAuth` its listener acts on. `Node.New` separately
+runs the same merge-and-resolve as an early validation pass against every
+configured API capability, so an invalid effective policy is rejected at
+construction time rather than deferred to listener startup — but that pass
+exists for fail-fast validation, not to hand a provider an already-resolved
+policy in place of provider-side resolution.
 
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
@@ -3143,28 +3153,34 @@ without one.
   provider's own `plugins.api.<name>.config.tls`/`config.auth` — from a
   provider's point of view an inherited field and an inline one are
   indistinguishable.
-- **Scope resolution happens once, at composition, before a provider ever
-  sees its config** — never inside an API domain package. `node.go`'s
+- **Field-level merge happens once, at composition; final validation and
+  resolution happen provider-side** — never inside an API domain package
+  for the merge step, but always inside one for `Resolve`. `node.go`'s
   `apiPluginSelection`/`apiProviderConfig` merges, field by field
   (`apiconfig.MergeProviderConfig`/`MergeTLS`/`MergeAuth`), three layers
   from lowest to highest priority: the legacy UTxO RPC-only compatibility
   fields (below), the shared top-level `api.tls`/`api.auth` default, and
   the provider's own `config.tls`/`config.auth`. The merge is a plain
   struct-field fold, not a map walk, so the result never depends on map
-  iteration order. `Node.New` runs this same merge (see
-  `validateAPIProviderSecurityPolicy`) against every configured API
+  iteration order. The merge's output is still the raw, tri-state
+  `TLSPolicy`/`AuthPolicy` shape (a `ProviderConfig.TLS`/`ProviderConfig.Auth`
+  field, not an `EffectiveTLS`/`EffectiveAuth`) — composition hands a
+  provider a fully merged config, not a fully resolved policy. `Node.New`
+  runs this same merge, then calls `Resolve` on the result (see
+  `validateAPIProviderSecurityPolicy`), against every configured API
   capability before constructing anything, so an invalid effective policy
   — e.g. a partial certificate/key pair, or an unrecognized mode — is
   rejected at construction time, before any listener starts, with an
   error naming the full config path (`plugins.api.blockfrost.config.tls`,
   not just `tls`). Each provider's own `RegisterProvider` factory
   (`ProviderConfig.TLS.Resolve`/`ProviderConfig.Auth.Resolve`) repeats the
-  same validation immediately before constructing its server, so the
-  provider is self-contained and cannot be started with an unvalidated
-  policy through any other code path. What a provider receives after this
-  point is always a fully resolved, instance-owned `apiconfig.EffectiveTLS`/
-  `EffectiveAuth` — composition performs resolution, providers only act on
-  the result.
+  same validate-and-resolve step itself, immediately before constructing
+  its server — this is the one and only place a provider's `EffectiveTLS`/
+  `EffectiveAuth` is actually produced; `Node.New`'s earlier pass exists
+  for fail-fast validation, not to hand the provider a pre-resolved value in
+  its place. This makes each provider self-contained: it cannot be started
+  with an unresolved or unvalidated policy through any other code path, and
+  it never depends on `Node.New` having run first.
 - **Environment variable scope.** The shared top-level `api.tls`/`api.auth`
   fields participate in the normal `DINGO_API_TLS_*`/`DINGO_API_AUTH_*`
   environment variables and `--api-tls-*`/`--api-auth-*` CLI flags, layered
@@ -3190,8 +3206,20 @@ without one.
   `connect.Interceptor` (UTxO RPC's Connect/gRPC handlers, including
   health and reflection — there is no separate unauthenticated allowlist
   for those two), responding `connect.CodeUnauthenticated` (surfaced over
-  HTTP as `401` by the Connect protocol). Neither adapter re-implements
-  comparison logic; both read a `Authorization: Bearer <token>` header (or,
+  HTTP as `401` by the Connect protocol). This is a deliberate design
+  choice, applied uniformly across all three providers, not a
+  UTxO-RPC-specific gap: Blockfrost's own `GET /health` route sits behind
+  the identical `apiauth.Middleware` wrapping its whole mux, so no provider
+  carves out an unauthenticated allowlist for health/liveness checking once
+  `auth.mode: token` is set. The operator-facing consequence — a
+  container-orchestrator liveness/readiness probe against these routes
+  needs to present the shared credential once auth is enabled, or must be
+  redirected to a plain TCP check or a separate unauthenticated path — is
+  documented in the README's "Authentication" section rather than solved
+  in code, to keep every route on an authenticated listener behind the
+  single uniform policy an operator configured. Neither adapter
+  re-implements comparison logic; both read a `Authorization: Bearer
+  <token>` header (or,
   additionally, Blockfrost's own `project_id: <token>` header — see
   below) and delegate to the same `Verify` call.
 - **Ordering with CORS.** `httpcors.Handler` must wrap `apiauth.Middleware`

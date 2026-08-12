@@ -38,7 +38,7 @@ func newProviderHost(t *testing.T) *plugin.Host {
 
 func freeLoopbackPort(t *testing.T) uint {
 	t.Helper()
-	_, portStr, err := net.SplitHostPort(freePort(t))
+	_, portStr, err := net.SplitHostPort(testutil.FreePort(t))
 	require.NoError(t, err)
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	require.NoError(t, err)
@@ -55,7 +55,7 @@ func resolveOnFreePortWithConfig(
 ) *Blockfrost {
 	t.Helper()
 	var lastErr error
-	for range bindAttempts {
+	for range testutil.BindAttempts {
 		cfg := map[string]any{"port": freeLoopbackPort(t)}
 		maps.Copy(cfg, extra)
 		srv, err := plugin.Resolve[*Blockfrost](
@@ -74,7 +74,7 @@ func resolveOnFreePortWithConfig(
 	}
 	t.Fatalf(
 		"could not resolve the Blockfrost provider in %d attempts: %v",
-		bindAttempts, lastErr,
+		testutil.BindAttempts, lastErr,
 	)
 	return nil
 }

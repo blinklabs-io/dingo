@@ -23,9 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-//go:fix inline
-func ptr(s string) *string { return new(s) }
-
 func TestMergeTLSFieldByField(t *testing.T) {
 	base := TLSPolicy{
 		Mode:         new(string(TLSModeServer)),
@@ -82,6 +79,48 @@ func TestMergeAuthExplicitDisableOverridesInheritedToken(t *testing.T) {
 	effective, err := merged.Resolve("test")
 	require.NoError(t, err)
 	assert.False(t, effective.Enabled)
+}
+
+// TestMergeAuthOverrideSwitchesCredentialSource asserts that a provider
+// override which sets only TokenFilePath (switching credential source away
+// from a base policy's inline Token, not adding to it) fully replaces the
+// base's credential fields rather than leaving both Token and
+// TokenFilePath set -- which would make Resolve always fail with "mutually
+// exclusive" and make it impossible for a provider to ever switch
+// credential source away from an inherited one.
+func TestMergeAuthOverrideSwitchesCredentialSource(t *testing.T) {
+	base := AuthPolicy{
+		Mode:  new(string(AuthModeToken)),
+		Token: new("shared-secret"),
+	}
+	override := AuthPolicy{TokenFilePath: new("/override/token")}
+	merged := MergeAuth(base, override)
+	assert.Nil(t, merged.Token)
+	require.NotNil(t, merged.TokenFilePath)
+	assert.Equal(t, "/override/token", *merged.TokenFilePath)
+
+	effective, err := merged.Resolve("test")
+	require.NoError(t, err)
+	assert.True(t, effective.Enabled)
+	assert.Empty(t, effective.Token)
+	assert.Equal(t, "/override/token", effective.TokenFilePath)
+}
+
+// TestMergeAuthUnsetCredentialInheritsBaseUnchanged asserts that when the
+// override sets neither Token nor TokenFilePath, the base's credential
+// source passes through unchanged (mirroring MergeTLS's per-field
+// inheritance for every other field).
+func TestMergeAuthUnsetCredentialInheritsBaseUnchanged(t *testing.T) {
+	base := AuthPolicy{
+		Mode:  new(string(AuthModeToken)),
+		Token: new("shared-secret"),
+	}
+	merged := MergeAuth(base, AuthPolicy{})
+	effective, err := merged.Resolve("test")
+	require.NoError(t, err)
+	assert.True(t, effective.Enabled)
+	assert.Equal(t, "shared-secret", effective.Token)
+	assert.Empty(t, effective.TokenFilePath)
 }
 
 func TestTLSResolveDefaultsToDisabled(t *testing.T) {

@@ -87,6 +87,11 @@ func TestBearerToken(t *testing.T) {
 	assert.Equal(t, "", bearerToken(""))
 	assert.Equal(t, "", bearerToken("Basic abc123"))
 	assert.Equal(t, "", bearerToken("Bearer"))
+	// Extra internal whitespace after "Bearer " is trimmed rather than
+	// rejecting an otherwise-correct token.
+	assert.Equal(t, "abc123", bearerToken("Bearer  abc123"))
+	assert.Equal(t, "abc123", bearerToken("Bearer abc123 "))
+	assert.Equal(t, "abc123", bearerToken("Bearer   abc123   "))
 }
 
 func TestMiddlewareNilVerifierIsNoOp(t *testing.T) {

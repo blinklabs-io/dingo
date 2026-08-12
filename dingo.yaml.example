@@ -56,6 +56,7 @@ plugins:
         # corresponding api.tls/api.auth field; mode: disabled explicitly
         # turns off an inherited policy for this provider only.
         # tls:
+        #   mode: server
         #   certFilePath: "/run/secrets/blockfrost.crt"
         #   keyFilePath: "/run/secrets/blockfrost.key"
         # auth:

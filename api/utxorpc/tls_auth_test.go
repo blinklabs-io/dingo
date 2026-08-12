@@ -17,7 +17,6 @@ package utxorpc
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
@@ -32,19 +31,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// bindAttempts bounds how many ports a test tries before giving up,
-// matching api/mesh's and api/blockfrost's identical helper.
-const bindAttempts = 8
-
-func freePort(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
-}
-
 // startOnFreePort starts a Utxorpc server on a free loopback port, retrying
 // on a lost race for the port, and returns it with the address it bound.
 // The caller owns shutdown.
@@ -55,20 +41,36 @@ func startOnFreePort(
 	auth apiconfig.EffectiveAuth,
 ) (*Utxorpc, string) {
 	t.Helper()
+	return startOnFreePortWithCORS(t, ctx, tlsCfg, auth, nil)
+}
+
+// startOnFreePortWithCORS is startOnFreePort plus an optional
+// CORSAllowedOrigins list, so CORS-specific tests still get the same
+// retry-safe port acquisition as every other test in this file instead of
+// a bespoke bind that can flake on a lost port race.
+func startOnFreePortWithCORS(
+	t *testing.T,
+	ctx context.Context,
+	tlsCfg apiconfig.EffectiveTLS,
+	auth apiconfig.EffectiveAuth,
+	corsAllowedOrigins []string,
+) (*Utxorpc, string) {
+	t.Helper()
 	var lastErr error
-	for range bindAttempts {
-		addr := freePort(t)
+	for range testutil.BindAttempts {
+		addr := testutil.FreePort(t)
 		host, port, err := net.SplitHostPort(addr)
 		require.NoError(t, err)
 		portNum, err := strconv.ParseUint(port, 10, 16)
 		require.NoError(t, err)
 		u := NewUtxorpc(UtxorpcConfig{
-			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			EventBus: event.NewEventBus(nil, nil),
-			Host:     host,
-			Port:     uint(portNum),
-			TLS:      tlsCfg,
-			Auth:     auth,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus:           event.NewEventBus(nil, nil),
+			Host:               host,
+			Port:               uint(portNum),
+			TLS:                tlsCfg,
+			Auth:               auth,
+			CORSAllowedOrigins: corsAllowedOrigins,
 		})
 		attemptCtx, cancel := context.WithCancel(ctx)
 		if err := u.Start(attemptCtx); err != nil {
@@ -81,7 +83,7 @@ func startOnFreePort(
 	}
 	t.Fatalf(
 		"could not bind a free loopback port in %d attempts: %v",
-		bindAttempts, lastErr,
+		testutil.BindAttempts, lastErr,
 	)
 	return nil, ""
 }
@@ -91,16 +93,6 @@ func stopUtxorpc(t *testing.T, u *Utxorpc) {
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, u.Stop(stopCtx))
-}
-
-func insecureHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // test-only, throwaway self-signed server cert
-			},
-		},
-	}
 }
 
 // healthCheck issues a Connect-protocol unary health check (works over
@@ -152,7 +144,7 @@ func TestUtxorpcTLSNoAuth(t *testing.T) {
 	)
 	t.Cleanup(func() { stopUtxorpc(t, u) })
 
-	resp := healthCheck(t, insecureHTTPClient(), "https://"+addr, "")
+	resp := healthCheck(t, testutil.InsecureHTTPClient(), "https://"+addr, "")
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -171,7 +163,7 @@ func TestUtxorpcTLSAuth(t *testing.T) {
 		apiconfig.EffectiveAuth{Enabled: true, Token: "shared-secret"},
 	)
 	t.Cleanup(func() { stopUtxorpc(t, u) })
-	client := insecureHTTPClient()
+	client := testutil.InsecureHTTPClient()
 	baseURL := "https://" + addr
 
 	t.Run("missing credential", func(t *testing.T) {
@@ -198,23 +190,12 @@ func TestUtxorpcTLSAuth(t *testing.T) {
 // that an OPTIONS CORS preflight never needs a credential.
 func TestUtxorpcCORSPreflightBypassesAuth(t *testing.T) {
 	const allowed = "https://wallet.example"
-	addr := freePort(t)
-	host, port, err := net.SplitHostPort(addr)
-	require.NoError(t, err)
-	portNum, err := strconv.ParseUint(port, 10, 16)
-	require.NoError(t, err)
-	u := NewUtxorpc(UtxorpcConfig{
-		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus: event.NewEventBus(nil, nil),
-		Host:     host,
-		Port:     uint(portNum),
-		Auth: apiconfig.EffectiveAuth{
-			Enabled: true,
-			Token:   "shared-secret",
-		},
-		CORSAllowedOrigins: []string{allowed},
-	})
-	require.NoError(t, u.Start(t.Context()))
+	u, addr := startOnFreePortWithCORS(
+		t, t.Context(),
+		apiconfig.EffectiveTLS{},
+		apiconfig.EffectiveAuth{Enabled: true, Token: "shared-secret"},
+		[]string{allowed},
+	)
 	t.Cleanup(func() { stopUtxorpc(t, u) })
 	baseURL := "http://" + addr
 

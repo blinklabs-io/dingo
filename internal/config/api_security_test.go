@@ -92,6 +92,27 @@ func TestLoad_APITLSEnvironmentOverridesYAML(t *testing.T) {
 	assert.Equal(t, "/env/cert.pem", *cfg.API.TLS.CertFilePath)
 }
 
+// TestLoad_APIAuthTokenHasNoEnvironmentBinding pins
+// apiconfig.AuthPolicy.Token's documented security property: an inline
+// secret is settable only via YAML, never via an environment variable
+// (unlike every other api.auth/api.tls field). Without the `ignored:"true"`
+// struct tag, envconfig.Process would still auto-derive and honor
+// CARDANO_API_AUTH_TOKEN even with no explicit `envconfig` tag present --
+// omitting the tag alone does not suppress the binding.
+func TestLoad_APIAuthTokenHasNoEnvironmentBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CARDANO_API_AUTH_TOKEN", "leaked-secret")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+
+	assert.Nil(
+		t, cfg.API.Auth.Token,
+		"api.auth.token must never be settable via environment variable",
+	)
+}
+
 // TestApplyFlags_APITLSCLIOverridesEnvironment covers the top of the
 // source precedence chain: a CLI flag beats both environment and YAML.
 func TestApplyFlags_APITLSCLIOverridesEnvironment(t *testing.T) {

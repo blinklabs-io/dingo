@@ -306,6 +306,20 @@ Credential locations:
   `Authorization: Bearer <token>` request header; every Connect/gRPC
   handler UTxO RPC serves, including health checking and reflection,
   requires it once auth is enabled.
+- **Liveness/readiness probes.** This is deliberate, not an oversight: once
+  `auth.mode: token` is set for a provider, *every* route it serves requires
+  the credential, with no separate unauthenticated allowlist for health
+  checking — Blockfrost's `GET /health` and UTxO RPC's
+  `grpc.health.v1.Health/Check` are no exception, matching how every other
+  route on that listener behaves. A container-orchestrator probe (e.g. a
+  Kubernetes liveness/readiness check) that cannot attach the shared
+  credential will therefore fail once auth is enabled. Configure the probe
+  to send the same `Authorization: Bearer <token>` header the rest of your
+  clients use (most probe mechanisms support a custom header/exec command),
+  or point liveness/readiness checks at a plain TCP connect to the listener
+  port instead of the HTTP/gRPC health route, or run the probe against an
+  unauthenticated in-cluster path (e.g. a `mode: disabled` provider carrying
+  only observability traffic) rather than the public listener.
 - A missing or invalid credential fails closed: `401` over HTTP,
   `Unauthenticated` over Connect/gRPC. A browser's CORS preflight
   (`OPTIONS`) never needs a credential — browsers never attach
@@ -319,13 +333,17 @@ Credential locations:
   names are.
 
 The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a
-supported, **UTxO RPC-only** compatibility default (unaffected by anything
-above unless UTxO RPC's own `tls` config and the shared `api.tls` are both
-unset) — they are not promoted onto Blockfrost or Mesh, since doing so would
-silently switch a previously plaintext listener to TLS on upgrade. `bindAddr`
-and `corsAllowedOrigins` are unrelated to this policy and remain root-level
-settings shared by all listeners (`bindAddr` is also used by the relay/NtN
-listener, not just the APIs).
+supported, **UTxO RPC-only** compatibility default. They merge in as the
+lowest-priority input, field by field, alongside the shared `api.tls`
+default and UTxO RPC's own `tls` config — not as an all-or-nothing fallback
+that only applies when both of those are completely unset. For example, if
+the shared `api.tls` sets only `mode: server` with no `certFilePath`/
+`keyFilePath` of its own, UTxO RPC still inherits those two fields from the
+legacy root settings. They are not promoted onto Blockfrost or Mesh, since
+doing so would silently switch a previously plaintext listener to TLS on
+upgrade. `bindAddr` and `corsAllowedOrigins` are unrelated to this policy
+and remain root-level settings shared by all listeners (`bindAddr` is also
+used by the relay/NtN listener, not just the APIs).
 
 ### Archive And History Expiry Nodes
 

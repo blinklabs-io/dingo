@@ -18,11 +18,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,6 +32,38 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// BindAttempts bounds how many ports a test tries before giving up when
+// racing another process for a loopback port (see FreePort). Shared by
+// every built-in API provider's TLS/auth test suite (Blockfrost, Mesh,
+// UTxO RPC).
+const BindAttempts = 8
+
+// FreePort reserves a loopback port and releases it, returning the bound
+// address ("host:port"). The port is not guaranteed to still be free when
+// the caller binds it -- retry up to BindAttempts times instead of treating
+// one bind failure as a test failure.
+func FreePort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
+}
+
+// InsecureHTTPClient returns an *http.Client that skips TLS certificate
+// verification, for exercising a listener's throwaway self-signed test
+// certificate (see GenerateTestTLSCertKey).
+func InsecureHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // test-only, throwaway self-signed server cert
+			},
+		},
+	}
+}
 
 // GenerateTestTLSCertKey generates a throwaway self-signed certificate/key
 // pair valid for 127.0.0.1 and writes them as PEM files under a fresh

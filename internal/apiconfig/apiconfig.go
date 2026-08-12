@@ -102,7 +102,13 @@ type AuthPolicy struct {
 	// secret ends up duplicated into process-inspection-visible places
 	// such as a container's env dump. Use TokenFilePath for anything but
 	// local testing.
-	Token *string `yaml:"token,omitempty"`
+	//
+	// The `ignored:"true"` tag is load-bearing, not decorative: envconfig
+	// auto-derives an environment variable name for every exported struct
+	// field it walks even without an explicit `envconfig` tag (here,
+	// CARDANO_API_AUTH_TOKEN), so omitting envconfig alone does not
+	// actually suppress a binding -- only `ignored:"true"` does.
+	Token *string `yaml:"token,omitempty"                                                    ignored:"true"`
 	// TokenFilePath names a file whose trimmed contents are the shared
 	// secret, read at listener startup (not at Resolve time, matching
 	// TLSPolicy's own deferral of certificate loading to listener
@@ -158,13 +164,27 @@ func MergeTLS(base, override TLSPolicy) TLSPolicy {
 	}
 }
 
-// MergeAuth is MergeTLS's authentication counterpart.
+// MergeAuth is MergeTLS's authentication counterpart, except that Token and
+// TokenFilePath are merged as a single credential-source unit rather than
+// independently per field like Mode: Resolve rejects a policy with both
+// fields set (they are mutually exclusive), so if override explicitly sets
+// either one, it is switching the credential source and override's values
+// for both fields replace base's wholesale -- base's Token/TokenFilePath
+// are not carried forward to mix with override's. Only when override sets
+// neither field does base's credential source (Token and TokenFilePath
+// together) pass through unchanged.
 func MergeAuth(base, override AuthPolicy) AuthPolicy {
-	return AuthPolicy{
-		Mode:          firstSet(override.Mode, base.Mode),
-		Token:         firstSet(override.Token, base.Token),
-		TokenFilePath: firstSet(override.TokenFilePath, base.TokenFilePath),
+	merged := AuthPolicy{
+		Mode: firstSet(override.Mode, base.Mode),
 	}
+	if override.Token != nil || override.TokenFilePath != nil {
+		merged.Token = override.Token
+		merged.TokenFilePath = override.TokenFilePath
+	} else {
+		merged.Token = base.Token
+		merged.TokenFilePath = base.TokenFilePath
+	}
+	return merged
 }
 
 // Resolve validates p and returns the concrete TLS behavior it selects.

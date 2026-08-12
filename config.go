@@ -1674,6 +1674,13 @@ func (c *Config) TlsKeyFilePath() string {
 	return c.cfg.TlsKeyFilePath
 }
 
+// APIConfig returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider unless overridden. See
+// WithAPIConfig and ARCHITECTURE.md's "API security" section.
+func (c *Config) APIConfig() internalconfig.APIConfig {
+	return c.cfg.API
+}
+
 // IntersectTip returns whether to start chainsync at the current chain tip.
 func (c *Config) IntersectTip() bool {
 	return c.cfg.IntersectTip

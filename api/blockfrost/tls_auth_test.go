@@ -16,8 +16,6 @@ package blockfrost
 
 import (
 	"context"
-	"crypto/tls"
-	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -26,21 +24,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
-
-// bindAttempts bounds how many ports a test tries before giving up,
-// matching api/mesh's identical helper.
-const bindAttempts = 8
-
-// freePort reserves a loopback port and releases it. Not guaranteed to
-// still be free when the caller binds it -- see bindAttempts.
-func freePort(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
-}
 
 // startOnFreePort starts a Blockfrost server with cfg (ListenAddress
 // overwritten to a free loopback port) and returns it with the address it
@@ -52,8 +35,8 @@ func startOnFreePort(
 ) (*Blockfrost, string) {
 	t.Helper()
 	var lastErr error
-	for range bindAttempts {
-		addr := freePort(t)
+	for range testutil.BindAttempts {
+		addr := testutil.FreePort(t)
 		attemptCfg := cfg
 		attemptCfg.ListenAddress = addr
 		srv := New(attemptCfg, &mockNode{}, nil)
@@ -68,7 +51,7 @@ func startOnFreePort(
 	}
 	t.Fatalf(
 		"could not bind a free loopback port in %d attempts: %v",
-		bindAttempts, lastErr,
+		testutil.BindAttempts, lastErr,
 	)
 	return nil, ""
 }
@@ -96,16 +79,6 @@ func startTestServerTLSAuth(
 		scheme = "https://"
 	}
 	return srv, scheme + addr
-}
-
-func insecureHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // test-only, throwaway self-signed server cert
-			},
-		},
-	}
 }
 
 func getHealth(
@@ -146,7 +119,7 @@ func TestBlockfrostTLSNoAuth(t *testing.T) {
 		},
 		apiconfig.EffectiveAuth{},
 	)
-	resp := getHealth(t, insecureHTTPClient(), baseURL, "", "")
+	resp := getHealth(t, testutil.InsecureHTTPClient(), baseURL, "", "")
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -163,7 +136,7 @@ func TestBlockfrostTLSAuth(t *testing.T) {
 		},
 		apiconfig.EffectiveAuth{Enabled: true, Token: "shared-secret"},
 	)
-	client := insecureHTTPClient()
+	client := testutil.InsecureHTTPClient()
 
 	t.Run("missing credential", func(t *testing.T) {
 		resp := getHealth(t, client, baseURL, "", "")

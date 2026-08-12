@@ -57,7 +57,7 @@ func providerDeps(deps *testDeps) ProviderDependencies {
 // expect resolution to succeed go through resolveOnFreePort.
 func freeLoopbackPort(t *testing.T) uint {
 	t.Helper()
-	_, portStr, err := net.SplitHostPort(freePort(t))
+	_, portStr, err := net.SplitHostPort(testutil.FreePort(t))
 	require.NoError(t, err)
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	require.NoError(t, err)
@@ -67,34 +67,15 @@ func freeLoopbackPort(t *testing.T) uint {
 // resolveOnFreePort resolves the Mesh provider on a free loopback port,
 // retrying on a lost race for the port. Resolve starts the instance, so
 // a port claimed between reservation and bind surfaces as a resolution
-// error rather than a test failure worth reporting.
+// error rather than a test failure worth reporting. It is
+// resolveOnFreePortWithConfig with no extra config fields.
 func resolveOnFreePort(
 	t *testing.T,
 	host *plugin.Host,
 	deps ProviderDependencies,
 ) *Server {
 	t.Helper()
-	var lastErr error
-	for range bindAttempts {
-		srv, err := plugin.Resolve[*Server](
-			t.Context(),
-			host,
-			plugin.CapabilityAPIMesh,
-			"builtin",
-			map[string]any{"port": freeLoopbackPort(t)},
-			deps,
-		)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return srv
-	}
-	t.Fatalf(
-		"could not resolve the Mesh provider in %d attempts: %v",
-		bindAttempts, lastErr,
-	)
-	return nil
+	return resolveOnFreePortWithConfig(t, host, deps, nil)
 }
 
 // resolveOnFreePortWithConfig is resolveOnFreePort with additional
@@ -107,7 +88,7 @@ func resolveOnFreePortWithConfig(
 ) *Server {
 	t.Helper()
 	var lastErr error
-	for range bindAttempts {
+	for range testutil.BindAttempts {
 		cfg := map[string]any{"port": freeLoopbackPort(t)}
 		maps.Copy(cfg, extra)
 		srv, err := plugin.Resolve[*Server](
@@ -126,7 +107,7 @@ func resolveOnFreePortWithConfig(
 	}
 	t.Fatalf(
 		"could not resolve the Mesh provider in %d attempts: %v",
-		bindAttempts, lastErr,
+		testutil.BindAttempts, lastErr,
 	)
 	return nil
 }

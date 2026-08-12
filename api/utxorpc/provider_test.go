@@ -40,32 +40,43 @@ func newProviderHost(t *testing.T) *plugin.Host {
 
 func freeLoopbackPort(t *testing.T) uint {
 	t.Helper()
-	_, portStr, err := net.SplitHostPort(freePort(t))
+	_, portStr, err := net.SplitHostPort(testutil.FreePort(t))
 	require.NoError(t, err)
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	require.NoError(t, err)
 	return uint(port)
 }
 
-func providerDeps() ProviderDependencies {
+// providerDeps builds provider dependencies over a test-owned EventBus.
+// The bus is permanently shut down via t.Cleanup(bus.Close) rather than
+// bus.Stop -- Stop leaves the worker pool restartable (for a component
+// that reuses one EventBus across a stop/start cycle), which would leak
+// its four workers for the rest of the test run instead of releasing them.
+func providerDeps(t *testing.T) ProviderDependencies {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
 	return ProviderDependencies{
 		Logger:   slog.Default(),
-		EventBus: event.NewEventBus(nil, nil),
+		EventBus: bus,
 		Host:     "127.0.0.1",
 	}
 }
 
 // resolveOnFreePortWithConfig resolves the built-in UTxO RPC provider on a
 // free loopback port with extra config fields (e.g. "tls"/"auth") merged
-// alongside "port", retrying on a lost race for the port.
+// alongside "port", retrying on a lost race for the port. The provider
+// dependencies (including the EventBus) are built once and reused across
+// every attempt, rather than one per attempt.
 func resolveOnFreePortWithConfig(
 	t *testing.T,
 	host *plugin.Host,
 	extra map[string]any,
 ) *Utxorpc {
 	t.Helper()
+	deps := providerDeps(t)
 	var lastErr error
-	for range bindAttempts {
+	for range testutil.BindAttempts {
 		cfg := map[string]any{"port": freeLoopbackPort(t)}
 		maps.Copy(cfg, extra)
 		srv, err := plugin.Resolve[*Utxorpc](
@@ -74,7 +85,7 @@ func resolveOnFreePortWithConfig(
 			plugin.CapabilityAPIUtxorpc,
 			"builtin",
 			cfg,
-			providerDeps(),
+			deps,
 		)
 		if err != nil {
 			lastErr = err
@@ -84,7 +95,7 @@ func resolveOnFreePortWithConfig(
 	}
 	t.Fatalf(
 		"could not resolve the UTxO RPC provider in %d attempts: %v",
-		bindAttempts, lastErr,
+		testutil.BindAttempts, lastErr,
 	)
 	return nil
 }
@@ -120,7 +131,7 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 				"certFilePath": "/only/cert.pem",
 			},
 		},
-		providerDeps(),
+		providerDeps(t),
 	)
 
 	require.Error(t, err)
@@ -140,7 +151,7 @@ func TestProviderRejectsInvalidAuthMode(t *testing.T) {
 			"port": freeLoopbackPort(t),
 			"auth": map[string]any{"mode": "bogus"},
 		},
-		providerDeps(),
+		providerDeps(t),
 	)
 
 	require.Error(t, err)

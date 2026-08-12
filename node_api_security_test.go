@@ -26,9 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-//go:fix inline
-func strPtr(s string) *string { return new(s) }
-
 // TestAPIProviderConfigMergesTopLevelDefault asserts a provider selection
 // with no tls/auth of its own inherits the shared api.tls/api.auth
 // policy.

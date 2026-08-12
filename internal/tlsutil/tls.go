@@ -82,10 +82,13 @@ func ConfigureServerTLS(
 		return fmt.Errorf("loading TLS keypair: %w", err)
 	}
 	server.TLSConfig = ServerConfig(server.TLSConfig)
-	server.TLSConfig.Certificates = append(
-		server.TLSConfig.Certificates,
-		cert,
-	)
+	// Assign a fresh single-element slice rather than appending: every
+	// caller loads exactly one keypair, and appending to whatever
+	// Certificates already held could silently accumulate a stale entry
+	// (from a reused/reinitialized *http.Server or a pre-populated
+	// TLSConfig) alongside the new one, letting Go's SNI cert selection
+	// pick the wrong certificate.
+	server.TLSConfig.Certificates = []tls.Certificate{cert}
 	return nil
 }
 
