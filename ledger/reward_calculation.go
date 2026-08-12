@@ -460,7 +460,11 @@ func (ls *LedgerState) applyStakeRewardApplication(
 // credentials that are expired as of the reward snapshot, keyed by
 // StakeCredentialRef.MapKey(). Expiry is reconstructed from witness history at
 // the snapshot's captured slot, rather than read from the mutable account row:
-// a later witness may already have renewed that row by application time.
+// a later witness may already have renewed that row by application time. This
+// is only exact if two from-genesis nodes retain the same witness history --
+// see historicalExpirationSQL's doc comment
+// (database/plugin/metadata/sqlstore/historical_stake.go) and ARCHITECTURE.md's
+// CIP-0163 section (issue #2920) for why that holds today.
 func (ls *LedgerState) guardedExpiredRewardCredentials(
 	txn *database.Txn,
 	app *stakeRewardApplication,

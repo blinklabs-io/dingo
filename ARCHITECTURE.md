@@ -4986,6 +4986,46 @@ sync from genesis.
 rows from live `account.expiration_epoch`, which may reflect a later renewal; the
 current-epoch N row is still captured.)
 
+Besides the Mithril gap above, expiry reconstruction (the stake-aggregation
+chokepoint's `historicalExpirationSQL` and the reward-crediting guard's
+`guardedExpiredRewardCredentials`) also requires two from-genesis nodes to
+retain the same witness history for the same slot -- the ten
+stake-witnessing certificate tables (`accountWitnessTables`:
+`stake_registration`, `stake_registration_delegation`,
+`stake_vote_registration_delegation`, `vote_registration_delegation`,
+`registration`, `stake_deregistration`, `deregistration`, `stake_delegation`,
+`stake_vote_delegation`, `vote_delegation`), `account_reward_delta`, and
+`account_withdrawal_witness` (issue #2920). This is a question about
+*retention* of rows already written, separate from whether a row gets
+written in the first place: `account_withdrawal_witness` writes are
+themselves gated by `BatchedTxIngestOpts.SkipWithdrawalWitnessWrite` (issue
+#2919, see above) and skipped whenever `DelegatorInactivityEnabled` is off, so
+a node only ever has *complete* `account_withdrawal_witness` coverage while
+that setting is on. That write-side gate is the same network-wide,
+must-match setting the gate itself already requires, so it cannot differ
+between two honestly-configured nodes; any pre-activation gap it leaves is
+what the one-time activation stamp above exists to paper over uniformly, not
+a new divergence source.
+Retention itself is never configurable or age-based for any of these tables
+-- the only statements that delete rows from them are
+`DeleteCertificatesAfterSlot` and the `account_reward_delta`/
+`account_withdrawal_witness` deletes in
+`database/plugin/metadata/sqlstore/account.go`, all of the form `added_slot >
+slot` for a rollback or lifecycle-truncate target slot (the same primitive
+both share, see "CIP-0163 Bookkeeping Shared Between Ledger Rollback and
+Lifecycle Truncate" below). That target slot is derived from consensus chain
+state, not wall-clock time or per-node configuration, so it produces
+byte-identical retained history on every node that rolls back or truncates to
+the same point; a node that has not rolled back or lifecycle-truncated past a
+row retains it indefinitely, all the way back to genesis.
+`historicalExpirationSQL` scans this history with no bounded lookback window
+-- it takes the single latest `added_slot <= slot` across every table,
+however far back that is -- so as long as a row is retained, which it always
+is short of a rollback or truncate past it, the reconstructed expiry is exact
+and identical on every node running the same write-side configuration. There
+is therefore no retention-driven divergence to guard against beyond the
+Mithril case already refused above.
+
 ### Query Interface
 
 The `LedgerView` provides stake distribution queries:
