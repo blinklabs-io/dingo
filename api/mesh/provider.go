@@ -23,8 +23,20 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
+// defaultProviderPort is the TCP port the Mesh listener uses when the
+// node's configuration does not set one.
+const defaultProviderPort uint = 8080
+
 type ProviderConfig struct {
 	Port uint `yaml:"port"`
+}
+
+// providerDefaults returns the configuration the plugin host applies
+// before decoding the node's own settings over it. RegisterProvider
+// hands this to plugin.Register, so it is the single definition of the
+// Mesh provider's defaults.
+func providerDefaults() ProviderConfig {
+	return ProviderConfig{Port: defaultProviderPort}
 }
 
 type ProviderDependencies struct {
@@ -49,7 +61,7 @@ func RegisterProvider(host *plugin.Host) error {
 			Name:        "builtin",
 			Description: "built-in Mesh-compatible Rosetta HTTP API",
 		},
-		func() ProviderConfig { return ProviderConfig{Port: 8080} },
+		providerDefaults,
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Server, plugin.Instance, error) {
 			server, err := NewServer(ServerConfig{
 				Logger: deps.Logger, LedgerState: deps.LedgerState,

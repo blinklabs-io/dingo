@@ -32,7 +32,11 @@ type MeshChain interface {
 // All calls implicitly use a nil transaction (auto-transaction per method).
 type MeshDatabase interface {
 	BlockByHash(hash []byte) (models.Block, error)
-	BlockByIndex(idx uint64) (models.Block, error)
+	// BlockByIndex looks up a block by its Cardano block height, which is
+	// the numbering the Mesh API exposes as block_identifier.index.
+	// Translating that height to the storage layer's own block index is
+	// the implementation's responsibility -- see NewMeshDatabase.
+	BlockByIndex(height uint64) (models.Block, error)
 	GetTransactionByHash(hash []byte) (*models.Transaction, error)
 	GetTransactionsByBlockHash(hash []byte) ([]models.Transaction, error)
 }
@@ -42,6 +46,13 @@ type MeshLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
 	UtxosByAddress(addr lcommon.Address) ([]models.Utxo, error)
+	// UtxosByAddressAtSlot returns the UTxOs the address held at the
+	// given slot -- those added at or before it and not spent until
+	// after it. It backs historical /account/balance queries.
+	UtxosByAddressAtSlot(
+		addr lcommon.Address,
+		slot uint64,
+	) ([]models.Utxo, error)
 }
 
 // MeshMempool is the subset of mempool.Mempool needed by the Mesh server.
