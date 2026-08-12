@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -371,6 +372,30 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"tlsCertFilePath and tlsKeyFilePath must both be set to enable TLS "+
 				"(only one is set)",
 		))
+	}
+
+	// The shared api.tls/api.auth mode enums are checked here so a typo is
+	// caught once, with a single clear message, rather than surfacing
+	// identically from every one of the three API providers that inherit
+	// it. Certificate/key (and token) presence is deliberately NOT
+	// checked here: a provider legitimately may supply only its own
+	// certFilePath/keyFilePath while inheriting just `mode: server` from
+	// this shared default (see internal/apiconfig.MergeTLS), so
+	// completeness can only be judged after node.go merges this default
+	// into each provider's own plugins.api.<name>.config.tls/auth --
+	// which is where the full pair-completeness check runs, before that
+	// provider's listener starts.
+	if err := validateAPIMode(
+		"api.tls.mode", c.API.TLS.Mode,
+		string(apiconfig.TLSModeDisabled), string(apiconfig.TLSModeServer),
+	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAPIMode(
+		"api.auth.mode", c.API.Auth.Mode,
+		string(apiconfig.AuthModeDisabled), string(apiconfig.AuthModeToken),
+	); err != nil {
+		errs = append(errs, err)
 	}
 
 	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
@@ -732,6 +757,25 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 // either disables the component (required=false) or is nonsense for a
 // mandatory listener (required=true, binding port 0 picks a random
 // port).
+// validateAPIMode rejects a mode value that is neither unset (inherit/
+// default) nor one of the two accepted enum values.
+func validateAPIMode(
+	setting string,
+	mode *string,
+	disabled, enabled string,
+) error {
+	if mode == nil || *mode == "" {
+		return nil
+	}
+	if *mode == disabled || *mode == enabled {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s: invalid mode %q (must be %q or %q)",
+		setting, *mode, disabled, enabled,
+	)
+}
+
 func validatePort(
 	setting string,
 	port uint,

@@ -168,11 +168,16 @@ type Config struct {
 	chainsyncStallTimeout time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
-	dataDir                                                                             string
-	bindAddr                                                                            string
-	pluginSelections                                                                    map[hostplugin.Capability]hostplugin.Selection
-	network                                                                             string
-	tlsCertFilePath, tlsKeyFilePath                                                     string
+	dataDir                         string
+	bindAddr                        string
+	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
+	network                         string
+	tlsCertFilePath, tlsKeyFilePath string
+	// apiConfig mirrors cfg.API -- the shared api.tls/api.auth policy
+	// defaults merged into every selected plugins.api.* provider's own
+	// config by node.go before that provider resolves. See
+	// ARCHITECTURE.md's "API security" section.
+	apiConfig                                                                           internalconfig.APIConfig
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
@@ -635,6 +640,7 @@ func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
+	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
@@ -967,6 +973,16 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Utxorpc.Config["port"] = port
+	}
+}
+
+// WithAPIConfig sets the shared api.tls/api.auth policy applied to every
+// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
+// provider's own plugins.api.<name>.config.tls/auth overrides a field.
+// See internal/apiconfig and ARCHITECTURE.md's "API security" section.
+func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.API = cfg
 	}
 }
 
@@ -1948,6 +1964,12 @@ func (c *Config) Midnight() internalconfig.MidnightConfig {
 // CORSAllowedOrigins returns the CORS allowed origins list.
 func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
+}
+
+// API returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider. See WithAPIConfig.
+func (c *Config) API() internalconfig.APIConfig {
+	return c.cfg.API
 }
 
 // SlotsPerKESPeriod returns the number of slots per KES period.

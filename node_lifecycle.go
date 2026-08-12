@@ -1043,8 +1043,6 @@ func (n *Node) reinitializeAPIServers() error {
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
 				Host:               n.config.bindAddr,
-				TLSCertFilePath:    n.config.tlsCertFilePath,
-				TLSKeyFilePath:     n.config.tlsKeyFilePath,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)

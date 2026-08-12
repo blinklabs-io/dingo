@@ -214,8 +214,9 @@ Bark is Dingo's own Dingo-to-Dingo archive protocol rather than an application
 API. It is configured separately with `barkPort` and `barkBaseUrl`.
 
 For public client access, place the API listeners behind a reverse proxy or API
-gateway. UTxO RPC currently supports the process TLS certificate/key pair;
-Blockfrost and Mesh do not, and the built-in APIs do not authenticate clients.
+gateway — that remains fully supported. In addition, UTxO RPC, Blockfrost, and
+Mesh share one in-process TLS/authentication surface, so an operator can also
+secure any subset of them without a proxy in front.
 
 The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
 `DINGO_MESH_PORT` names remain supported for compatibility. If both a
@@ -246,6 +247,85 @@ plugins:
     blockfrost: {provider: builtin, config: {port: 3100}}
     utxorpc: {provider: builtin, config: {port: 9090}}
 ```
+
+### API TLS and Authentication
+
+`api.tls`/`api.auth` set a shared default TLS and authentication policy for
+every selected `plugins.api.*` provider (Blockfrost, Mesh, UTxO RPC). Each
+field resolves independently: `plugins.api.<name>.config.tls`/`config.auth`
+overrides any field for that provider only, and an explicit
+`mode: disabled` at the provider level turns off an inherited policy rather
+than merely leaving it unset. The default everywhere is `disabled`, so an
+existing reverse-proxy/no-auth deployment is unaffected on upgrade.
+
+```yaml
+api:
+  tls:
+    mode: server
+    certFilePath: /run/secrets/api.crt
+    keyFilePath: /run/secrets/api.key
+  auth:
+    mode: token
+    tokenFilePath: /run/secrets/api-token
+
+plugins:
+  api:
+    # Inherits TLS and auth from api.tls/api.auth above unchanged.
+    utxorpc:
+      provider: builtin
+      config:
+        port: 9090
+    # Explicitly opts out of the inherited token auth (e.g. this listener
+    # sits behind its own gateway that already authenticates callers).
+    mesh:
+      provider: builtin
+      config:
+        port: 8080
+        auth:
+          mode: disabled
+    # Overrides just the certificate/key for this provider; the inherited
+    # api.tls.mode ("server") still applies.
+    blockfrost:
+      provider: builtin
+      config:
+        port: 3000
+        tls:
+          certFilePath: /run/secrets/blockfrost.crt
+          keyFilePath: /run/secrets/blockfrost.key
+```
+
+Credential locations:
+
+- **HTTP** (Blockfrost, Mesh, UTxO RPC's own REST/JSON access): send
+  `Authorization: Bearer <token>`. Blockfrost also accepts its own
+  `project_id: <token>` header as an alias for the same shared token — real
+  Blockfrost clients already send their API key that way, so
+  `auth.mode: token` secures Blockfrost against both header styles from one
+  configured token.
+- **Connect/gRPC** (UTxO RPC): send the identical
+  `Authorization: Bearer <token>` request header; every Connect/gRPC
+  handler UTxO RPC serves, including health checking and reflection,
+  requires it once auth is enabled.
+- A missing or invalid credential fails closed: `401` over HTTP,
+  `Unauthenticated` over Connect/gRPC. A browser's CORS preflight
+  (`OPTIONS`) never needs a credential — browsers never attach
+  `Authorization` to one — but every other request, including a
+  non-preflight `OPTIONS`, still authenticates normally.
+- A partial `certFilePath`/`keyFilePath` pair (only one set) fails
+  validation at startup, before any listener binds, with an error naming
+  the full config path (e.g. `plugins.api.blockfrost.config.tls`).
+- Tokens and certificate/key file *contents* are never written to logs,
+  error messages, or effective-config output — only file paths and mode
+  names are.
+
+The pre-existing root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a
+supported, **UTxO RPC-only** compatibility default (unaffected by anything
+above unless UTxO RPC's own `tls` config and the shared `api.tls` are both
+unset) — they are not promoted onto Blockfrost or Mesh, since doing so would
+silently switch a previously plaintext listener to TLS on upgrade. `bindAddr`
+and `corsAllowedOrigins` are unrelated to this policy and remain root-level
+settings shared by all listeners (`bindAddr` is also used by the relay/NtN
+listener, not just the APIs).
 
 ### Archive And History Expiry Nodes
 
