@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // guardedMutexes are the LedgerState locks that an EventBus subscriber
@@ -58,6 +60,11 @@ var guardedMutexes = []string{"chainsyncMutex"}
 //
 // Queue the event with pendingPublishes and flush it after the unlock
 // instead.
+//
+// The check is intra-procedural, which is not the whole story: a lock
+// holder can also reach a publish through a helper. Those paths are
+// enumerated by TestChainsyncResyncPublishPathsUnderLock rather than left
+// to be assumed safe.
 func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -203,4 +210,159 @@ func violations(fn *ast.FuncDecl) []violation {
 		}
 	}
 	return found
+}
+
+// knownResyncPublishPathsUnderLock records every helper that can publish
+// ChainsyncResyncEventType while ls.chainsyncMutex is held.
+//
+// That event is the dangerous one: its subscriber calls
+// RecoverAfterLocalRollback, which takes the same mutex, so a publish
+// reaching it from under the lock is the deadlock pendingPublishes
+// exists to break. handleChainSwitchEvent was converted because a review
+// demonstrated it concretely; the rest are pre-existing paths that
+// predate this change.
+//
+// Converting them means threading a queue through roughly ten functions
+// in the hottest consensus path, which belongs in its own change with its
+// own DevNet and soak validation rather than riding along here. This list
+// is the honest alternative to silence: the guard above is
+// intra-procedural, so without it the remaining exposure would look like
+// it had been handled.
+var knownResyncPublishPathsUnderLock = []string{
+	"handleEventChainsyncBlockHeader",
+	"handleEventChainsyncRollback",
+	"handoffPipelineOnSwitchLocked",
+	"replayBufferedHeaderEvents",
+	"startQueuedBlockfetchLocked",
+}
+
+// TestChainsyncResyncPublishPathsUnderLock pins the set of helpers that
+// can publish ChainsyncResyncEventType while the mutex is held.
+//
+// It fails in both directions on purpose. A new such path is a new
+// deadlock and must be converted rather than appended here; a path that
+// disappears should be removed, so the list cannot rot into overstating
+// the problem.
+func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(
+		fset, filepath.Join(".", "chainsync.go"), nil, parser.ParseComments,
+	)
+	if err != nil {
+		t.Fatalf("parse chainsync.go: %v", err)
+	}
+
+	publishesResync := map[string]bool{}
+	callees := map[string]map[string]bool{}
+	holdsLock := map[string]bool{}
+	var order []string
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		name := fn.Name.Name
+		order = append(order, name)
+		callees[name] = map[string]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.SelectorExpr:
+				if node.Sel.Name == "ChainsyncResyncEventType" {
+					// Only counts as a publish when it is not queued.
+					publishesResync[name] = publishesResync[name] ||
+						usesInlinePublish(fn)
+				}
+			case *ast.CallExpr:
+				sel, ok := node.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if inner, ok := sel.X.(*ast.SelectorExpr); ok &&
+					inner.Sel.Name == "chainsyncMutex" &&
+					sel.Sel.Name == "Lock" {
+					holdsLock[name] = true
+				}
+				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "ls" {
+					callees[name][sel.Sel.Name] = true
+				}
+			}
+			return true
+		})
+	}
+
+	// Transitive closure: anything reaching an inline resync publish.
+	reaches := map[string]bool{}
+	for name, ok := range publishesResync {
+		if ok {
+			reaches[name] = true
+		}
+	}
+	for range order {
+		for name, cs := range callees {
+			if reaches[name] {
+				continue
+			}
+			for c := range cs {
+				if reaches[c] {
+					reaches[name] = true
+					break
+				}
+			}
+		}
+	}
+
+	var found []string
+	for _, name := range order {
+		if holdsLock[name] || !reaches[name] {
+			continue
+		}
+		// Only helpers a lock holder can actually reach.
+		reachedFromLockHolder := false
+		for holder, cs := range callees {
+			if holdsLock[holder] && cs[name] {
+				reachedFromLockHolder = true
+				break
+			}
+		}
+		if reachedFromLockHolder && !slices.Contains(found, name) {
+			found = append(found, name)
+		}
+	}
+	slices.Sort(found)
+
+	expected := slices.Clone(knownResyncPublishPathsUnderLock)
+	slices.Sort(expected)
+	require.Equal(t, expected, found,
+		"the set of helpers publishing ChainsyncResyncEventType under"+
+			" chainsyncMutex changed. A new entry is a new deadlock: thread"+
+			" a pendingPublishes queue through it instead of adding it"+
+			" here. A missing entry means it was fixed -- drop it from"+
+			" knownResyncPublishPathsUnderLock.")
+}
+
+// usesInlinePublish reports whether a function publishes directly rather
+// than queueing through pendingPublishes.
+func usesInlinePublish(fn *ast.FuncDecl) bool {
+	inline := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if sel.Sel.Name != "Publish" && sel.Sel.Name != "PublishBlocking" &&
+			sel.Sel.Name != "PublishAsync" {
+			return true
+		}
+		if inner, ok := sel.X.(*ast.SelectorExpr); ok &&
+			inner.Sel.Name == "EventBus" {
+			inline = true
+		}
+		return true
+	})
+	return inline
 }

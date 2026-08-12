@@ -530,6 +530,10 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	// Registered before the mutex is taken so defer's LIFO order runs it
+	// after the unlock. See pendingPublishes.
+	var pending pendingPublishes
+	defer pending.flush()
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
 	var requestFreshCursor bool
@@ -608,6 +612,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		ls.requestChainsyncResync(
 			effectiveConnId,
 			event.ChainsyncResyncReasonChainSwitchCursorAhead,
+			&pending,
 		)
 		return
 	}
@@ -1225,17 +1230,23 @@ func desiredBlockfetchBatchHeaders(
 	return min(minHeaders, maxHeaders)
 }
 
+// requestChainsyncResync asks the chainsync layer to renegotiate an
+// intersection with a peer.
+//
+// pending must be the caller's queue when ls.chainsyncMutex is held, and
+// may be nil otherwise. This event's subscriber calls
+// RecoverAfterLocalRollback, which takes that mutex, so publishing inline
+// from under the lock is the deadlock pendingPublishes exists to break.
 func (ls *LedgerState) requestChainsyncResync(
 	connId ouroboros.ConnectionId,
 	reason string,
+	pending *pendingPublishes,
 ) {
 	ls.headerMismatchCount = 0
 	ls.rollbackHistory = nil
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
-	if ls.config.EventBus == nil {
-		return
-	}
-	ls.config.EventBus.Publish(
+	pending.add(
+		ls.config.EventBus,
 		event.ChainsyncResyncEventType,
 		event.NewEvent(
 			event.ChainsyncResyncEventType,
@@ -2417,6 +2428,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				ls.requestChainsyncResync(
 					e.ConnectionId,
 					event.ChainsyncResyncReasonPersistentFork,
+					nil,
 				)
 			}
 			return nil
@@ -2546,6 +2558,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		ls.requestChainsyncResync(
 			initialConnId,
 			fmt.Sprintf("blockfetch start failed: %v", err),
+			nil,
 		)
 		return nil
 	}
@@ -2642,6 +2655,7 @@ func (ls *LedgerState) tryResolveFork(
 		ls.requestChainsyncResync(
 			e.ConnectionId,
 			event.ChainsyncResyncReasonRollbackNotFound,
+			nil,
 		)
 		return true, nil
 	}
@@ -2768,6 +2782,7 @@ func (ls *LedgerState) tryResolveFork(
 			ls.requestChainsyncResync(
 				e.ConnectionId,
 				event.ChainsyncResyncReasonRollbackNotFound,
+				nil,
 			)
 			return true, nil
 		}
@@ -3144,6 +3159,7 @@ func (ls *LedgerState) noteBlockfetchRangeUnavailable(
 	ls.requestChainsyncResync(
 		connId,
 		event.ChainsyncResyncReasonBlockfetchRangeUnavailable,
+		nil,
 	)
 	return true
 }
@@ -5069,6 +5085,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 						"empty blockfetch batch alternate retry failed: %v",
 						err,
 					),
+					nil,
 				)
 				return nil
 			}
@@ -5085,6 +5102,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.requestChainsyncResync(
 			e.ConnectionId,
 			"empty blockfetch batch",
+			nil,
 		)
 		return nil
 	}
@@ -5142,6 +5160,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(e BlockfetchEvent) error {
 		ls.requestChainsyncResync(
 			nextConnId,
 			fmt.Sprintf("blockfetch continuation failed: %v", err),
+			nil,
 		)
 		return nil
 	}

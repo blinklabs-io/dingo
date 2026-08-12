@@ -69,12 +69,21 @@ type pendingPublish struct {
 // add queues an event to be published after the caller's lock is
 // released. A nil bus is ignored, matching the nil checks at the call
 // sites.
+//
+// A nil receiver publishes immediately. That is what lets a helper be
+// called from both locked and unlocked paths without duplicating it: the
+// locked caller threads its own queue down, and an unlocked caller passes
+// nil to get the original behaviour.
 func (p *pendingPublishes) add(
 	bus *event.EventBus,
 	eventType event.EventType,
 	evt event.Event,
 ) {
 	if bus == nil {
+		return
+	}
+	if p == nil {
+		bus.Publish(eventType, evt)
 		return
 	}
 	p.events = append(p.events, pendingPublish{
