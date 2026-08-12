@@ -42,6 +42,23 @@ var guardedMutexes = []string{
 	"chainsyncBlockfetchMutex",
 }
 
+// knownNilQueuePublishersUnderLock are lock holders that still hand nil to
+// a queue-taking helper, publishing inline while they hold a guarded
+// mutex.
+//
+// These cannot be converted in isolation. Giving one its own queue and
+// flushing on its own return does not help, because a parent frame still
+// holds a guarded mutex when it runs -- handleEventChainsyncBlockHeader is
+// called from handleEventChainsync, which holds chainsyncMutex. Fixing
+// them is the same threading described in
+// knownResyncPublishPathsUnderLock and tracked for one atomic change.
+//
+// Listed rather than silently tolerated, and checked in both directions
+// below so the list cannot rot.
+var knownNilQueuePublishersUnderLock = []string{
+	"handleEventChainsyncBlockHeader",
+}
+
 // TestNoEventBusPublishWhileHoldingChainsyncMutex enforces that nothing in
 // this package publishes to the EventBus while holding a mutex that an
 // EventBus subscriber needs.
@@ -82,7 +99,7 @@ func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	checked := 0
+	var files []*ast.File
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") ||
@@ -95,13 +112,30 @@ func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
+		files = append(files, file)
+	}
+
+	queueParam := queueParamPositions(files)
+	require.NotEmpty(t, queueParam,
+		"no *pendingPublishes parameter found anywhere in the package;"+
+			" the nil-queue check would silently pass on everything")
+
+	checked := 0
+	seenKnown := map[string]bool{}
+	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			fn, ok := n.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				return true
 			}
 			checked++
-			for _, v := range violations(fn) {
+			for _, v := range violations(fn, queueParam) {
+				if slices.Contains(
+					knownNilQueuePublishersUnderLock, fn.Name.Name,
+				) {
+					seenKnown[fn.Name.Name] = true
+					continue
+				}
 				t.Errorf(
 					"%s: %s publishes to the EventBus while holding %s;"+
 						" queue it with pendingPublishes and flush after"+
@@ -115,6 +149,69 @@ func TestNoEventBusPublishWhileHoldingChainsyncMutex(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no functions inspected; the scan is not working")
 	}
+	// Bidirectional, like the transitive guard: an entry that no longer
+	// violates has been fixed and must be removed, or the list quietly
+	// starts excusing something that is already clean.
+	for _, name := range knownNilQueuePublishersUnderLock {
+		require.True(t, seenKnown[name],
+			"%s no longer publishes under a guarded mutex; remove it from"+
+				" knownNilQueuePublishersUnderLock", name)
+	}
+}
+
+// queueParamPositions maps each function to the argument position of its
+// *pendingPublishes parameter, if it has one.
+//
+// Collected across every file before any body is walked: a call can name a
+// helper declared later, or in another file, and a lookup that missed
+// would silently stop treating a nil queue as a publish.
+func queueParamPositions(files []*ast.File) map[string]int {
+	out := map[string]int{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Type.Params == nil {
+				continue
+			}
+			idx := 0
+			for _, field := range fn.Type.Params.List {
+				isQueue := false
+				if star, ok := field.Type.(*ast.StarExpr); ok {
+					if id, ok := star.X.(*ast.Ident); ok &&
+						id.Name == "pendingPublishes" {
+						isQueue = true
+					}
+				}
+				names := max(len(field.Names), 1)
+				if isQueue {
+					out[fn.Name.Name] = idx
+					break
+				}
+				idx += names
+			}
+		}
+	}
+	return out
+}
+
+// nilQueueCall reports whether a call hands nil to a queue-taking
+// helper's queue parameter, which makes that helper publish immediately
+// rather than queueing -- so the caller owns the publish.
+func nilQueueCall(
+	call *ast.CallExpr,
+	sel *ast.SelectorExpr,
+	queueParam map[string]int,
+) bool {
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok || ident.Name != "ls" {
+		return false
+	}
+	pos, isQueued := queueParam[sel.Sel.Name]
+	if !isQueued || pos >= len(call.Args) {
+		return false
+	}
+	id, ok := call.Args[pos].(*ast.Ident)
+	return ok && id.Name == "nil"
 }
 
 type violation struct {
@@ -136,7 +233,7 @@ type lockEvent struct {
 // release it around a specific region. A deferred unlock keeps the mutex
 // held to the end of the function, which is what makes a publish anywhere
 // after the Lock unsafe.
-func violations(fn *ast.FuncDecl) []violation {
+func violations(fn *ast.FuncDecl, queueParam map[string]int) []violation {
 	deferred := map[token.Pos]bool{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if d, ok := n.(*ast.DeferStmt); ok && d.Call != nil {
@@ -153,6 +250,15 @@ func violations(fn *ast.FuncDecl) []violation {
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
+			return true
+		}
+		// Checked before the two-level assertion below: a nil-queue call
+		// is ls.method(...), whose receiver is a plain identifier, not a
+		// selector like ls.config.EventBus.
+		if nilQueueCall(call, sel, queueParam) {
+			events = append(events, lockEvent{
+				pos: call.Pos(), kind: "publish",
+			})
 			return true
 		}
 		inner, ok := sel.X.(*ast.SelectorExpr)
