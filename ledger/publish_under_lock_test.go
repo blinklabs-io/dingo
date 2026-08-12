@@ -265,7 +265,9 @@ func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
 	}
 
 	publishesResync := map[string]bool{}
+	queuedResync := map[string]bool{}
 	callees := map[string]map[string]bool{}
+	nilQueueCalls := map[string]map[string]bool{}
 	holdsLock := map[string]bool{}
 	var order []string
 
@@ -277,18 +279,34 @@ func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
 		name := fn.Name.Name
 		order = append(order, name)
 		callees[name] = map[string]bool{}
+		nilQueueCalls[name] = map[string]bool{}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.SelectorExpr:
 				if node.Sel.Name == "ChainsyncResyncEventType" {
-					// Only counts as a publish when it is not queued.
-					publishesResync[name] = publishesResync[name] ||
-						usesInlinePublish(fn)
+					if usesInlinePublish(fn) {
+						publishesResync[name] = true
+					} else {
+						// Queues instead. Safe only for callers that
+						// hand it a queue -- see nilQueueCalls.
+						queuedResync[name] = true
+					}
 				}
 			case *ast.CallExpr:
 				sel, ok := node.Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
+				}
+				// A queue-taking helper called with a nil queue
+				// publishes immediately, so the caller is the publisher.
+				if ident, ok := sel.X.(*ast.Ident); ok &&
+					ident.Name == "ls" {
+					for _, arg := range node.Args {
+						if id, ok := arg.(*ast.Ident); ok &&
+							id.Name == "nil" {
+							nilQueueCalls[name][sel.Sel.Name] = true
+						}
+					}
 				}
 				if inner, ok := sel.X.(*ast.SelectorExpr); ok &&
 					slices.Contains(guardedMutexes, inner.Sel.Name) &&
@@ -301,6 +319,18 @@ func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
 			}
 			return true
 		})
+	}
+
+	// A caller that hands nil to a queue-taking resync helper makes that
+	// helper publish inline, so the caller owns the publish. Without this
+	// the guard silently stopped reporting every requestChainsyncResync
+	// route the moment that helper was converted to take a queue.
+	for caller, targets := range nilQueueCalls {
+		for target := range targets {
+			if queuedResync[target] {
+				publishesResync[caller] = true
+			}
+		}
 	}
 
 	// Transitive closure: anything reaching an inline resync publish.
