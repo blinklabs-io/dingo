@@ -547,6 +547,20 @@ func MaxTipSlot(snaps []ChainSnapshot) uint64 {
 	return maxSlot
 }
 
+// MaxBlockNumber returns the highest observed block height across
+// snapshots. The scenario uses it to require forward progress between
+// disruption phases, so that each outage starts from a network that is
+// demonstrably still producing rather than merely converged.
+func MaxBlockNumber(snaps []ChainSnapshot) uint64 {
+	var maxBlock uint64
+	for _, s := range snaps {
+		if s.Tip.BlockNumber > maxBlock {
+			maxBlock = s.Tip.BlockNumber
+		}
+	}
+	return maxBlock
+}
+
 // MaxServerTipSlot returns the highest slot any node reported as its own
 // tip.
 //

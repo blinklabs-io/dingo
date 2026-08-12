@@ -472,6 +472,19 @@ func TestAgreedHeaderAboveNeedsEveryNode(t *testing.T) {
 	require.False(t, ok, "a header only one node saw has not propagated")
 }
 
+func TestMaxBlockNumber(t *testing.T) {
+	a := NewObservedChain("dingo-1")
+	b := NewObservedChain("dingo-2")
+	ha := hdr(40, 7, 'a')
+	a.RollForward(ha, tipOf(ha))
+	hb := hdr(25, 3, 'a')
+	b.RollForward(hb, tipOf(hb))
+
+	snaps := []ChainSnapshot{a.Snapshot(), b.Snapshot()}
+	require.Equal(t, uint64(7), MaxBlockNumber(snaps))
+	require.Equal(t, uint64(0), MaxBlockNumber(nil))
+}
+
 func TestMinAndMaxTipSlot(t *testing.T) {
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-2")

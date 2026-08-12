@@ -319,6 +319,20 @@ func runOutage(
 
 	requireAgreement(t, ctx, group, label+": after recovery")
 
+	// Agreement alone only says the nodes converged; it does not say the
+	// network resumed producing. Without this the next phase can stack a
+	// second outage onto a network that has converged but stalled, and
+	// then blame the second outage for the stall. Requiring forward
+	// progress first means each disruption starts from a healthy
+	// baseline.
+	resumed := devnet.MaxBlockNumber(group.Snapshots())
+	require.NoError(t, group.Await(ctx,
+		fmt.Sprintf("%s: block production resumed after recovery"+
+			" (past block %d)", label, resumed),
+		func(snaps []devnet.ChainSnapshot) bool {
+			return devnet.MaxBlockNumber(snaps) > resumed
+		}))
+
 	after := chain.Snapshot()
 	t.Logf(
 		"%s: %s recovered (connects %d->%d, tip slot %d, block %d)",

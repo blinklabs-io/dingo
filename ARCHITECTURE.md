@@ -935,7 +935,18 @@ All event types follow the `subsystem.snake_case_name` convention.
   publisher holds while the publisher waits for the capacity the subscriber
   would free. `PublishAsync` is no exception — it waits for room in the shared
   async queue, which is drained by a worker pool running subscriber handlers,
-  so a handler blocked on the publisher's lock closes the same cycle. `ledger`'s `pendingPublishes`
+  so a handler blocked on the publisher's lock closes the same cycle. Both
+  `LedgerState.chainsyncMutex` and `chainsyncBlockfetchMutex` count:
+  `RecoverAfterLocalRollback` takes the first and nests the second inside it,
+  so holding either while publishing is enough to deadlock.
+- The rule is not yet fully enforced in `ledger`. Several helpers reachable
+  from a lock holder still publish `ChainsyncResyncEventType` inline; they are
+  pinned in `knownResyncPublishPathsUnderLock`
+  (`ledger/publish_under_lock_test.go`) and tracked for conversion, which has
+  to happen as one change because a helper flushing on its own return still
+  publishes while a parent frame holds the lock. Read the rule as the target
+  state plus an explicit exception list, not as an invariant already holding
+  everywhere in that package. `ledger`'s `pendingPublishes`
   (`ledger/pending_publish.go`) is the pattern for this — queue the event under
   the lock and flush after the unlock, registering the flush with `defer`
   *before* taking the lock so LIFO order runs it last. The invariant is

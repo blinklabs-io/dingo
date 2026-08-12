@@ -30,7 +30,17 @@ import (
 // guardedMutexes are the LedgerState locks that an EventBus subscriber
 // handler acquires. Publishing while holding one of these can deadlock the
 // node, so no function may do both.
-var guardedMutexes = []string{"chainsyncMutex"}
+//
+// Both are listed because RecoverAfterLocalRollback -- the subscriber that
+// closes the cycle -- takes chainsyncMutex and then nests
+// chainsyncBlockfetchMutex inside it via startQueuedBlockfetchLocked.
+// Holding either one while publishing is therefore enough to deadlock;
+// guarding only the outer mutex would miss every path that runs under the
+// blockfetch lock alone, such as handleEventBlockfetch's.
+var guardedMutexes = []string{
+	"chainsyncMutex",
+	"chainsyncBlockfetchMutex",
+}
 
 // TestNoEventBusPublishWhileHoldingChainsyncMutex enforces that nothing in
 // this package publishes to the EventBus while holding a mutex that an
@@ -213,7 +223,7 @@ func violations(fn *ast.FuncDecl) []violation {
 }
 
 // knownResyncPublishPathsUnderLock records every helper that can publish
-// ChainsyncResyncEventType while ls.chainsyncMutex is held.
+// ChainsyncResyncEventType while one of guardedMutexes is held.
 //
 // That event is the dangerous one: its subscriber calls
 // RecoverAfterLocalRollback, which takes the same mutex, so a publish
@@ -229,10 +239,12 @@ func violations(fn *ast.FuncDecl) []violation {
 // intra-procedural, so without it the remaining exposure would look like
 // it had been handled.
 var knownResyncPublishPathsUnderLock = []string{
-	"handleEventChainsyncBlockHeader",
+	"handleBlockfetchTimeoutLocked",
+	"handleEventBlockfetchBatchDone",
 	"handleEventChainsyncRollback",
 	"handoffPipelineOnSwitchLocked",
 	"replayBufferedHeaderEvents",
+	"restartQueuedBlockfetchAfterForkLocked",
 	"startQueuedBlockfetchLocked",
 }
 
@@ -279,7 +291,7 @@ func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
 					return true
 				}
 				if inner, ok := sel.X.(*ast.SelectorExpr); ok &&
-					inner.Sel.Name == "chainsyncMutex" &&
+					slices.Contains(guardedMutexes, inner.Sel.Name) &&
 					sel.Sel.Name == "Lock" {
 					holdsLock[name] = true
 				}

@@ -435,6 +435,12 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
+	// Registered before the mutex is taken so defer's LIFO order runs it
+	// after the unlock. RecoverAfterLocalRollback nests this mutex inside
+	// chainsyncMutex, so publishing while holding it deadlocks the same
+	// way. See pendingPublishes.
+	var pending pendingPublishes
+	defer pending.flush()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	e, ok := evt.Data.(BlockfetchEvent)
@@ -449,18 +455,17 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 				"component", "ledger",
 				"error", err,
 			)
-			if ls.config.EventBus != nil {
-				ls.config.EventBus.Publish(
+			pending.add(
+				ls.config.EventBus,
+				LedgerErrorEventType,
+				event.NewEvent(
 					LedgerErrorEventType,
-					event.NewEvent(
-						LedgerErrorEventType,
-						LedgerErrorEvent{
-							Error:     err,
-							Operation: "blockfetch_batch_done",
-						},
-					),
-				)
-			}
+					LedgerErrorEvent{
+						Error:     err,
+						Operation: "blockfetch_batch_done",
+					},
+				),
+			)
 		}
 	} else if e.Block != nil {
 		if err := ls.handleEventBlockfetchBlock(e); err != nil {
@@ -475,7 +480,8 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 					"slot", e.Point.Slot,
 					"hash", hex.EncodeToString(e.Point.Hash),
 				)
-				ls.config.EventBus.Publish(
+				pending.add(
+					ls.config.EventBus,
 					ConnectionRecycleRequestedEventType,
 					event.NewEvent(
 						ConnectionRecycleRequestedEventType,
@@ -493,19 +499,18 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 				"slot", e.Point.Slot,
 				"hash", hex.EncodeToString(e.Point.Hash),
 			)
-			if ls.config.EventBus != nil {
-				ls.config.EventBus.Publish(
+			pending.add(
+				ls.config.EventBus,
+				LedgerErrorEventType,
+				event.NewEvent(
 					LedgerErrorEventType,
-					event.NewEvent(
-						LedgerErrorEventType,
-						LedgerErrorEvent{
-							Error:     err,
-							Operation: "blockfetch_block",
-							Point:     e.Point,
-						},
-					),
-				)
-			}
+					LedgerErrorEvent{
+						Error:     err,
+						Operation: "blockfetch_block",
+						Point:     e.Point,
+					},
+				),
+			)
 		}
 	}
 }
