@@ -345,12 +345,16 @@ func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
 
 	expected := slices.Clone(knownResyncPublishPathsUnderLock)
 	slices.Sort(expected)
+	// Built from guardedMutexes so the message cannot drift as that list
+	// grows -- it named only chainsyncMutex after the blockfetch mutex was
+	// added, which would misdirect anyone hitting the failure.
 	require.Equal(t, expected, found,
-		"the set of helpers publishing ChainsyncResyncEventType under"+
-			" chainsyncMutex changed. A new entry is a new deadlock: thread"+
-			" a pendingPublishes queue through it instead of adding it"+
-			" here. A missing entry means it was fixed -- drop it from"+
-			" knownResyncPublishPathsUnderLock.")
+		"the set of helpers publishing ChainsyncResyncEventType while"+
+			" holding one of %v changed. A new entry is a new deadlock:"+
+			" thread a pendingPublishes queue through it instead of adding"+
+			" it here. A missing entry means it was fixed -- drop it from"+
+			" knownResyncPublishPathsUnderLock.",
+		guardedMutexes)
 }
 
 // usesInlinePublish reports whether a function publishes directly rather
