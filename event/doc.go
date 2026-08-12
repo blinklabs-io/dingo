@@ -43,7 +43,12 @@
 // backpressure never trades event loss for unbounded memory.
 //
 // The practical consequence is that a subscriber which stops draining
-// stalls its publishers. Subscribers that take a channel from Subscribe
+// stalls its publishers. It also means a publisher must not hold a lock
+// that a subscriber of the same event acquires: once the buffer fills,
+// the subscriber waits for the lock and the publisher waits for the
+// capacity the subscriber would free, and neither proceeds. Queue such
+// events and publish them after releasing the lock (see ledger's
+// pendingPublishes). Subscribers that take a channel from Subscribe
 // must drain it for as long as they hold the subscription and must
 // Unsubscribe when they stop. A delivery parked for a long time is
 // reported by the event_delivery_blocked_total metric and an "event

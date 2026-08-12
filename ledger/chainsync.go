@@ -171,6 +171,11 @@ type peerHeaderChain struct {
 }
 
 func (ls *LedgerState) handleEventChainsync(evt event.Event) {
+	// Registered before the mutex is taken so defer's LIFO order runs it
+	// after the unlock: publishing under ls.chainsyncMutex deadlocks the
+	// node. See pendingPublishes.
+	var pending pendingPublishes
+	defer pending.flush()
 	e, ok := evt.Data.(ChainsyncEvent)
 	if !ok {
 		ls.chainsyncMutex.Lock()
@@ -201,18 +206,20 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 				// continuing to send the same rollback point.
 				ls.resetChainsyncResyncState()
 				ls.setChainsyncState(SyncingChainsyncState)
-				if ls.config.EventBus != nil {
-					ls.config.EventBus.Publish(
+				// Queued rather than published here: this runs with
+				// ls.chainsyncMutex held, and this event's subscriber
+				// takes that same mutex via RecoverAfterLocalRollback.
+				pending.add(
+					ls.config.EventBus,
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
 						event.ChainsyncResyncEventType,
-						event.NewEvent(
-							event.ChainsyncResyncEventType,
-							event.ChainsyncResyncEvent{
-								ConnectionId: e.ConnectionId,
-								Reason:       event.ChainsyncResyncReasonRollbackLoop,
-							},
-						),
-					)
-				}
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       event.ChainsyncResyncReasonRollbackLoop,
+						},
+					),
+				)
 				return
 			}
 			ls.config.Logger.Error(
@@ -249,19 +256,18 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 				"slot", e.Point.Slot,
 				"hash", hex.EncodeToString(e.Point.Hash),
 			)
-			if ls.config.EventBus != nil {
-				ls.config.EventBus.Publish(
+			pending.add(
+				ls.config.EventBus,
+				LedgerErrorEventType,
+				event.NewEvent(
 					LedgerErrorEventType,
-					event.NewEvent(
-						LedgerErrorEventType,
-						LedgerErrorEvent{
-							Error:     err,
-							Operation: "block_header",
-							Point:     e.Point,
-						},
-					),
-				)
-			}
+					LedgerErrorEvent{
+						Error:     err,
+						Operation: "block_header",
+						Point:     e.Point,
+					},
+				),
+			)
 			return
 		}
 	}
@@ -654,6 +660,10 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 }
 
 func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
+	// See pendingPublishes: nothing may be published while
+	// ls.chainsyncMutex is held.
+	var pending pendingPublishes
+	defer pending.flush()
 	e, ok := evt.Data.(ChainsyncAwaitReplyEvent)
 	if !ok {
 		ls.logUnexpectedChainsyncEventData(
@@ -705,18 +715,17 @@ func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
 			"connection_id", e.ConnectionId.String(),
 			"error", err,
 		)
-		if ls.config.EventBus != nil {
-			ls.config.EventBus.Publish(
+		pending.add(
+			ls.config.EventBus,
+			LedgerErrorEventType,
+			event.NewEvent(
 				LedgerErrorEventType,
-				event.NewEvent(
-					LedgerErrorEventType,
-					LedgerErrorEvent{
-						Error:     err,
-						Operation: "await_reply_blockfetch",
-					},
-				),
-			)
-		}
+				LedgerErrorEvent{
+					Error:     err,
+					Operation: "await_reply_blockfetch",
+				},
+			),
+		)
 	}
 }
 

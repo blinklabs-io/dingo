@@ -928,6 +928,22 @@ All event types follow the `subsystem.snake_case_name` convention.
   worker pool means it also delays unrelated async event types. Consumers of
   `Subscribe` channels must drain for the life of the subscription and
   `Unsubscribe` when they stop
+- **Never `Publish` while holding a lock that a subscriber of that event
+  acquires.** Because delivery blocks rather than drops, this is a deadlock,
+  not merely a slow path: once the subscriber's buffer fills, the subscriber
+  waits for the lock the publisher holds while the publisher waits for the
+  capacity the subscriber would free. `ledger`'s `pendingPublishes`
+  (`ledger/pending_publish.go`) is the pattern for this — queue the event under
+  the lock and flush after the unlock, registering the flush with `defer`
+  *before* taking the lock so LIFO order runs it last. The invariant is
+  enforced for `chainsyncMutex` by `TestNoEventBusPublishWhileHoldingChainsyncMutex`
+- The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
+  takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
+  the `node.go` handler translating `connmanager.conn_closed` into
+  `ledger.conn_closed` then blocks inside its own callback, which stops
+  `connmanager.conn_closed` draining, and every subsequent connection close
+  parks another publisher goroutine. Handlers that re-publish are therefore
+  coupling two topics' backpressure and must not block
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure
