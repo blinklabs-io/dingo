@@ -943,6 +943,36 @@ All event types follow the `subsystem.snake_case_name` convention.
   worker pool means it also delays unrelated async event types. Consumers of
   `Subscribe` channels must drain for the life of the subscription and
   `Unsubscribe` when they stop
+- **Never `Publish`, `PublishAsync`, or `PublishBlocking` while holding a lock
+  that a subscriber of that event acquires.** Because all three wait for
+  capacity rather than dropping, this is a deadlock, not merely a slow path:
+  once the subscriber's buffer fills, the subscriber waits for the lock the
+  publisher holds while the publisher waits for the capacity the subscriber
+  would free. `PublishAsync` is no exception — it waits for room in the shared
+  async queue, which is drained by a worker pool running subscriber handlers,
+  so a handler blocked on the publisher's lock closes the same cycle. Both
+  `LedgerState.chainsyncMutex` and `chainsyncBlockfetchMutex` count:
+  `RecoverAfterLocalRollback` takes the first and nests the second inside it,
+  so holding either while publishing is enough to deadlock.
+- The rule is not yet fully enforced in `ledger`. Several helpers reachable
+  from a lock holder still publish `ChainsyncResyncEventType` inline; they are
+  pinned in `knownResyncPublishPathsUnderLock`
+  (`ledger/publish_under_lock_test.go`) and tracked for conversion, which has
+  to happen as one change because a helper flushing on its own return still
+  publishes while a parent frame holds the lock. Read the rule as the target
+  state plus an explicit exception list, not as an invariant already holding
+  everywhere in that package. `ledger`'s `pendingPublishes`
+  (`ledger/pending_publish.go`) is the pattern for this — queue the event under
+  the lock and flush after the unlock, registering the flush with `defer`
+  *before* taking the lock so LIFO order runs it last. The invariant is
+  enforced for `chainsyncMutex` by `TestNoEventBusPublishWhileHoldingChainsyncMutex`
+- The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
+  takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
+  the `node.go` handler translating `connmanager.conn_closed` into
+  `ledger.conn_closed` then blocks inside its own callback, which stops
+  `connmanager.conn_closed` draining, and every subsequent connection close
+  parks another publisher goroutine. Handlers that re-publish are therefore
+  coupling two topics' backpressure and must not block
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure
