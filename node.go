@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -175,6 +176,24 @@ func New(cfg Config) (*Node, error) {
 		destinationRegistry: destinationRegistry,
 	}
 	for capability, selection := range cfg.pluginSelections {
+		// API capabilities are validated against their *merged* config
+		// (shared api.tls/api.auth defaults folded in) so an invalid
+		// effective TLS/auth policy -- e.g. a partial certificate/key
+		// pair -- is rejected here, before any listener starts, using
+		// the exact same merge apiPluginSelection applies at Start()/
+		// reinitializeAPIServers time. See apiProviderConfig.
+		if configPath, ok := apiProviderConfigPath[capability]; ok {
+			var err error
+			selection, err = cfg.apiProviderConfig(capability, selection)
+			if err != nil {
+				return nil, fmt.Errorf("invalid plugin selection: %w", err)
+			}
+			if err := validateAPIProviderSecurityPolicy(
+				configPath, selection.Config,
+			); err != nil {
+				return nil, fmt.Errorf("invalid plugin selection: %w", err)
+			}
+		}
 		if err := pluginHost.ValidateSelection(
 			capability, selection.Provider, selection.Config,
 		); err != nil {
@@ -212,6 +231,98 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
+// legacyUtxorpcTLSPolicy expresses the pre-#2996 root tlsCertFilePath/
+// tlsKeyFilePath fields as an apiconfig.TLSPolicy, for UTxORPC only. It
+// deliberately does not feed cfg.apiConfig.TLS (the shared api.tls default
+// every provider inherits from): UTxORPC was the only provider these root
+// fields ever configured TLS for, and promoting them to a shared default
+// would silently switch Blockfrost/Mesh from plaintext to TLS on upgrade
+// for any deployment that set them, breaking existing plaintext clients.
+// See ARCHITECTURE.md's "API security" section for this compatibility
+// decision. Returns the zero TLSPolicy (no effect on the merge) unless
+// both root fields are set.
+func legacyUtxorpcTLSPolicy(cfg *Config) apiconfig.TLSPolicy {
+	if cfg.tlsCertFilePath == "" || cfg.tlsKeyFilePath == "" {
+		return apiconfig.TLSPolicy{}
+	}
+	mode := string(apiconfig.TLSModeServer)
+	return apiconfig.TLSPolicy{
+		Mode:         &mode,
+		CertFilePath: &cfg.tlsCertFilePath,
+		KeyFilePath:  &cfg.tlsKeyFilePath,
+	}
+}
+
+// apiProviderConfig merges the shared api.tls/api.auth policy (and, for
+// UTxORPC only, the legacy root TLS compatibility fields) into selection's
+// own "tls"/"auth" config sections, field by field, and returns the result.
+// It is the single place this merge happens, called both by the early
+// plugin-selection validation in New() and by apiPluginSelection, so a
+// provider config validated at startup and the one actually resolved at
+// Start()/reinitializeAPIServers time can never diverge.
+func (c *Config) apiProviderConfig(
+	capability plugin.Capability,
+	selection plugin.Selection,
+) (plugin.Selection, error) {
+	var legacyTLS apiconfig.TLSPolicy
+	if capability == plugin.CapabilityAPIUtxorpc {
+		legacyTLS = legacyUtxorpcTLSPolicy(c)
+	}
+	merged, err := apiconfig.MergeProviderConfig(
+		selection.Config,
+		legacyTLS,
+		c.apiConfig.TLS,
+		c.apiConfig.Auth,
+	)
+	if err != nil {
+		return selection, fmt.Errorf(
+			"merge api security policy for capability %s: %w",
+			capability, err,
+		)
+	}
+	selection.Config = merged
+	return selection, nil
+}
+
+// apiProviderConfigPath maps each API capability to the dotted config path
+// its provider config lives at, for error messages -- see
+// validateAPIProviderSecurityPolicy and each provider's own
+// cfg.TLS.Resolve/cfg.Auth.Resolve call, which use the identical path.
+var apiProviderConfigPath = map[plugin.Capability]string{
+	plugin.CapabilityAPIBlockfrost: "plugins.api.blockfrost.config",
+	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
+	plugin.CapabilityAPIUtxorpc:    "plugins.api.utxorpc.config",
+}
+
+// validateAPIProviderSecurityPolicy resolves and validates the merged
+// tls/auth sections of an API provider's config (already merged with the
+// shared api.tls/api.auth defaults by apiProviderConfig), surfacing a
+// partial certificate/key pair or an invalid mode before any listener
+// starts -- the same validation each provider's own RegisterProvider
+// factory performs at Resolve()/Start() time, run here again so New()
+// itself rejects it at construction, before Run() ever attempts to start
+// a listener.
+func validateAPIProviderSecurityPolicy(
+	configPath string,
+	rawConfig map[string]any,
+) error {
+	tlsPolicy, err := apiconfig.DecodeTLSPolicy(rawConfig)
+	if err != nil {
+		return fmt.Errorf("%s.tls: %w", configPath, err)
+	}
+	if _, err := tlsPolicy.Resolve(configPath + ".tls"); err != nil {
+		return err
+	}
+	authPolicy, err := apiconfig.DecodeAuthPolicy(rawConfig)
+	if err != nil {
+		return fmt.Errorf("%s.auth: %w", configPath, err)
+	}
+	if _, err := authPolicy.Resolve(configPath + ".auth"); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (n *Node) apiPluginSelection(
 	capability plugin.Capability,
 ) (plugin.Selection, uint, error) {
@@ -227,6 +338,13 @@ func (n *Node) apiPluginSelection(
 			"plugin provider is empty for capability %s",
 			capability,
 		)
+	}
+	if _, ok := apiProviderConfigPath[capability]; ok {
+		var err error
+		selection, err = n.config.apiProviderConfig(capability, selection)
+		if err != nil {
+			return selection, 0, err
+		}
 	}
 	portValue, ok := selection.Config["port"]
 	if !ok {
@@ -1317,8 +1435,6 @@ func (n *Node) Run(ctx context.Context) error {
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
 				Host:               n.config.bindAddr,
-				TLSCertFilePath:    n.config.tlsCertFilePath,
-				TLSKeyFilePath:     n.config.tlsKeyFilePath,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)

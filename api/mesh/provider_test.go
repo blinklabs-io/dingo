@@ -16,10 +16,12 @@ package mesh
 
 import (
 	"context"
+	"maps"
 	"net"
 	"strconv"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -55,7 +57,7 @@ func providerDeps(deps *testDeps) ProviderDependencies {
 // expect resolution to succeed go through resolveOnFreePort.
 func freeLoopbackPort(t *testing.T) uint {
 	t.Helper()
-	_, portStr, err := net.SplitHostPort(freePort(t))
+	_, portStr, err := net.SplitHostPort(testutil.FreePort(t))
 	require.NoError(t, err)
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	require.NoError(t, err)
@@ -65,21 +67,36 @@ func freeLoopbackPort(t *testing.T) uint {
 // resolveOnFreePort resolves the Mesh provider on a free loopback port,
 // retrying on a lost race for the port. Resolve starts the instance, so
 // a port claimed between reservation and bind surfaces as a resolution
-// error rather than a test failure worth reporting.
+// error rather than a test failure worth reporting. It is
+// resolveOnFreePortWithConfig with no extra config fields.
 func resolveOnFreePort(
 	t *testing.T,
 	host *plugin.Host,
 	deps ProviderDependencies,
 ) *Server {
 	t.Helper()
+	return resolveOnFreePortWithConfig(t, host, deps, nil)
+}
+
+// resolveOnFreePortWithConfig is resolveOnFreePort with additional
+// provider config fields (e.g. "tls"/"auth") merged alongside "port".
+func resolveOnFreePortWithConfig(
+	t *testing.T,
+	host *plugin.Host,
+	deps ProviderDependencies,
+	extra map[string]any,
+) *Server {
+	t.Helper()
 	var lastErr error
-	for range bindAttempts {
+	for range testutil.BindAttempts {
+		cfg := map[string]any{"port": freeLoopbackPort(t)}
+		maps.Copy(cfg, extra)
 		srv, err := plugin.Resolve[*Server](
 			t.Context(),
 			host,
 			plugin.CapabilityAPIMesh,
 			"builtin",
-			map[string]any{"port": freeLoopbackPort(t)},
+			cfg,
 			deps,
 		)
 		if err != nil {
@@ -90,7 +107,7 @@ func resolveOnFreePort(
 	}
 	t.Fatalf(
 		"could not resolve the Mesh provider in %d attempts: %v",
-		bindAttempts, lastErr,
+		testutil.BindAttempts, lastErr,
 	)
 	return nil
 }
@@ -219,4 +236,83 @@ func TestProviderStopClosesListener(t *testing.T) {
 	require.NoError(t, host.Stop(t.Context()))
 
 	require.False(t, portAccepts(addr))
+}
+
+// TestProviderRejectsPartialTLSPair asserts a provider config with tls
+// mode "server" and only one of certFilePath/keyFilePath set fails
+// resolution -- before any listener is opened -- with an error naming
+// the full provider config path, not just "tls".
+func TestProviderRejectsPartialTLSPair(t *testing.T) {
+	host := newProviderHost(t)
+
+	_, err := plugin.Resolve[*Server](
+		t.Context(),
+		host,
+		plugin.CapabilityAPIMesh,
+		"builtin",
+		map[string]any{
+			"port": freeLoopbackPort(t),
+			"tls": map[string]any{
+				"mode":         "server",
+				"certFilePath": "/only/cert.pem",
+			},
+		},
+		providerDeps(newTestDeps()),
+	)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "plugins.api.mesh.config.tls")
+	require.ErrorContains(t, err, "must both be set")
+}
+
+// TestProviderRejectsInvalidAuthMode asserts an unrecognized auth.mode is
+// rejected at resolution, with an error naming the full provider config
+// path.
+func TestProviderRejectsInvalidAuthMode(t *testing.T) {
+	host := newProviderHost(t)
+
+	_, err := plugin.Resolve[*Server](
+		t.Context(),
+		host,
+		plugin.CapabilityAPIMesh,
+		"builtin",
+		map[string]any{
+			"port": freeLoopbackPort(t),
+			"auth": map[string]any{"mode": "bogus"},
+		},
+		providerDeps(newTestDeps()),
+	)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "plugins.api.mesh.config.auth")
+	require.ErrorContains(t, err, "invalid mode")
+}
+
+// TestProviderPropagatesTLSAndAuth asserts a valid provider tls/auth
+// config reaches the server's resolved (EffectiveTLS/EffectiveAuth)
+// settings.
+func TestProviderPropagatesTLSAndAuth(t *testing.T) {
+	host := newProviderHost(t)
+	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
+
+	srv := resolveOnFreePortWithConfig(
+		t, host, providerDeps(newTestDeps()),
+		map[string]any{
+			"tls": map[string]any{
+				"mode":         "server",
+				"certFilePath": certPath,
+				"keyFilePath":  keyPath,
+			},
+			"auth": map[string]any{
+				"mode":  "token",
+				"token": "shared-secret",
+			},
+		},
+	)
+
+	require.True(t, srv.config.TLS.Enabled)
+	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
+	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
+	require.True(t, srv.config.Auth.Enabled)
+	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }
