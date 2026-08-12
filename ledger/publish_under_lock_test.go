@@ -377,37 +377,13 @@ func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
 	holdsLock := map[string]bool{}
 	var order []string
 
-	// Which argument position, if any, is each function's queue. Collected
-	// in its own pass because a call can appear before the declaration it
-	// targets. Matching "any nil argument" instead would misfire the
-	// moment a queue-taking helper gains an unrelated nilable parameter.
-	queueParam := map[string]int{}
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Type.Params == nil {
-			continue
-		}
-		idx := 0
-		for _, field := range fn.Type.Params.List {
-			star, isStar := field.Type.(*ast.StarExpr)
-			isQueue := false
-			if isStar {
-				if id, ok := star.X.(*ast.Ident); ok &&
-					id.Name == "pendingPublishes" {
-					isQueue = true
-				}
-			}
-			names := len(field.Names)
-			if names == 0 {
-				names = 1
-			}
-			if isQueue {
-				queueParam[fn.Name.Name] = idx
-				break
-			}
-			idx += names
-		}
-	}
+	// Shared with the intra-procedural guard so the two cannot drift: if
+	// one learned to recognise a differently spelled nil or receiver and
+	// the other did not, a publish path would stop being guarded silently.
+	queueParam := queueParamPositions([]*ast.File{file})
+	require.NotEmpty(t, queueParam,
+		"no *pendingPublishes parameter found; the nil-queue check would"+
+			" silently pass on everything")
 
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -437,17 +413,8 @@ func TestChainsyncResyncPublishPathsUnderLock(t *testing.T) {
 				}
 				// A queue-taking helper called with a nil queue
 				// publishes immediately, so the caller is the publisher.
-				// Only the queue argument counts: an unrelated nil
-				// elsewhere in the call says nothing about publishing.
-				if ident, ok := sel.X.(*ast.Ident); ok &&
-					ident.Name == "ls" {
-					if pos, isQueued := queueParam[sel.Sel.Name]; isQueued &&
-						pos < len(node.Args) {
-						if id, ok := node.Args[pos].(*ast.Ident); ok &&
-							id.Name == "nil" {
-							nilQueueCalls[name][sel.Sel.Name] = true
-						}
-					}
+				if nilQueueCall(node, sel, queueParam) {
+					nilQueueCalls[name][sel.Sel.Name] = true
 				}
 				if inner, ok := sel.X.(*ast.SelectorExpr); ok &&
 					slices.Contains(guardedMutexes, inner.Sel.Name) &&
