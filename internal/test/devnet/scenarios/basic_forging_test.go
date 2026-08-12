@@ -128,8 +128,12 @@ func TestDingoChainAdvances(t *testing.T) {
 
 	dingoEndpoint := h.DingoNode()
 
-	// Wait for Dingo to be reachable
-	h.WaitForNodeSlot(dingoEndpoint, 0, 60*time.Second)
+	// Wait for the chain to actually start. Waiting for "slot >= 0" was
+	// a no-op — every tip satisfies it, including the slot 0 / block 0 a
+	// node reports for ~30s before genesis — so the slot-derived budget
+	// below was charged against the pre-genesis wait and this test only
+	// passed when an earlier test in the package had already absorbed it.
+	h.WaitForChainStart(devnet.ChainStartTimeout)
 
 	// Get initial tip
 	initialTip, err := h.GetChainTip(dingoEndpoint)

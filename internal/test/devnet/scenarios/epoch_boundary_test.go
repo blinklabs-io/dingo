@@ -53,6 +53,11 @@ func TestEpochBoundaryConsensus(t *testing.T) {
 	)
 
 	h.WaitForAllNodesReady(60 * time.Second)
+	// The budget below covers 1.4 epochs of chain time and nothing more.
+	// Without this gate it is also charged the ~30s spent waiting for
+	// genesis, which leaves under a second of margin: an isolated run
+	// measured 724.04s against its own 725s timeout.
+	h.WaitForChainStart(devnet.ChainStartTimeout)
 
 	// Target a slot well past the first epoch boundary so we have
 	// blocks on both sides of the rollover. 1.4 * epochLength puts

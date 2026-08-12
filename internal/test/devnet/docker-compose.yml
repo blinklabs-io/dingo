@@ -34,6 +34,10 @@
 #   docker compose up -d       # Start all services in the selected profile
 #   docker compose down -v     # Stop and remove volumes
 #
+# Network spec overrides (set by the scripts' --accelerated flag):
+#   DEVNET_DINGO_SPEC       - dingo profile spec      (default: ./testnet-dingo.yaml)
+#   DEVNET_CONFORMANCE_SPEC - conformance profile spec (default: ./testnet.yaml)
+#
 # Host port overrides (set in environment or .env file, conformance profile):
 #   DEVNET_DINGO_PORT     - Dingo producer host port    (default: 3010)
 #   DEVNET_CARDANO_PORT   - Cardano producer host port  (default: 3011)
@@ -55,7 +59,9 @@ services:
       DINGO_UID: "${DEVNET_DINGO_UID:-1000}"
       DINGO_GID: "${DEVNET_DINGO_GID:-1000}"
     volumes:
-      - ./testnet.yaml:/testnet.yaml
+      # Network spec: canonical by default, accelerated when the scripts'
+      # --accelerated flag exports DEVNET_CONFORMANCE_SPEC.
+      - ${DEVNET_CONFORMANCE_SPEC:-./testnet.yaml}:/testnet.yaml
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - utxo-keys:/configs/utxo-keys
@@ -73,7 +79,9 @@ services:
       DINGO_UID: "${DEVNET_DINGO_UID:-1000}"
       DINGO_GID: "${DEVNET_DINGO_GID:-1000}"
     volumes:
-      - ./testnet-dingo.yaml:/testnet.yaml
+      # Network spec: canonical by default, accelerated when the scripts'
+      # --accelerated flag exports DEVNET_DINGO_SPEC.
+      - ${DEVNET_DINGO_SPEC:-./testnet-dingo.yaml}:/testnet.yaml
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - p3-configs:/configs/3

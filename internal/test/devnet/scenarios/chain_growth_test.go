@@ -59,8 +59,11 @@ func TestChainGrowthRate(t *testing.T) {
 	dingoEndpoint := h.DingoNode()
 
 	// Wait for the chain to stabilize at slot 50.
-	// Timeout: 50 slots + 5 expected block times for margin.
+	// Timeout: 50 slots + 5 expected block times for margin, measured
+	// from chain start — readiness alone is reached before genesis, and
+	// the budget below only counts chain time.
 	h.WaitForAllNodesReady(60 * time.Second)
+	h.WaitForChainStart(devnet.ChainStartTimeout)
 	const stabilizeSlot = 50
 	stabilizeTimeout := time.Duration(stabilizeSlot)*cfg.SlotDuration() +
 		cfg.ExpectedBlockTime()*5
@@ -152,8 +155,11 @@ func TestRelayPropagation(t *testing.T) {
 
 	relayEndpoint := h.Relay()
 
-	// Wait for all nodes including relay
+	// Wait for all nodes including relay, then for the chain to start:
+	// the slot-derived timeout below only counts chain time and must not
+	// be charged against the pre-genesis wait.
 	h.WaitForAllNodesReady(60 * time.Second)
+	h.WaitForChainStart(devnet.ChainStartTimeout)
 
 	// Wait for the relay to advance to slot 30.
 	// Timeout: 30 slots + 5 expected block times for margin.
@@ -189,6 +195,9 @@ func TestSustainedConsensus(t *testing.T) {
 	)
 
 	h.WaitForAllNodesReady(60 * time.Second)
+	// The checkpoints below are relative to this baseline but their
+	// timeouts are not, so the chain has to be live before it is taken.
+	h.WaitForChainStart(devnet.ChainStartTimeout)
 
 	// Get the current tip to compute relative checkpoints.
 	// The chain may already be well past genesis when the tests run.
