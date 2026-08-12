@@ -49,6 +49,11 @@ services:
       dockerfile: Dockerfile.configurator
     container_name: devnet-configurator
     profiles: ["conformance"]
+    environment:
+      # Must match the dingo user pinned in the repo root Dockerfile;
+      # configurator.sh chowns the pool key directories to it.
+      DINGO_UID: "${DEVNET_DINGO_UID:-1000}"
+      DINGO_GID: "${DEVNET_DINGO_GID:-1000}"
     volumes:
       - ./testnet.yaml:/testnet.yaml
       - p1-configs:/configs/1
@@ -63,6 +68,10 @@ services:
     profiles: ["dingo"]
     environment:
       DINGO_POOL_IDS: "1 2 3"
+      # Must match the dingo user pinned in the repo root Dockerfile;
+      # configurator.sh chowns the pool key directories to it.
+      DINGO_UID: "${DEVNET_DINGO_UID:-1000}"
+      DINGO_GID: "${DEVNET_DINGO_GID:-1000}"
     volumes:
       - ./testnet-dingo.yaml:/testnet.yaml
       - p1-configs:/configs/1
@@ -95,7 +104,7 @@ services:
       DINGO_PLUGINS_MEMPOOL_PROVIDER: "${DEVNET_MEMPOOL_PROVIDER:-fifo}"
       # Expose node-to-client over TCP (private port 3002) so the host test
       # harness can run LocalStateQuery. Avoids a cross-uid host socket mount:
-      # the dingo image runs as uid 100 and cannot bind a socket in a
+      # the dingo image runs as uid 1000 and cannot bind a socket in a
       # host-owned bind mount. The in-container unix socket lives on a named
       # volume (like conformance mode) for txpump and the healthcheck.
       DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
@@ -260,7 +269,7 @@ services:
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
       # Expose node-to-client over TCP (private port 3002) on all interfaces
       # so the in-network txpump can submit transactions without a cross-uid
-      # unix-socket mount (the socket is owned by uid 100; txpump is uid 1000).
+      # unix-socket mount (the socket is owned by the dingo uid).
       DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
       CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
     volumes:

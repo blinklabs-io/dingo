@@ -374,7 +374,7 @@ harness and the compose port mappings always agree.
 |------------------------------|---------|
 | `docker-compose.yml`         | Service, volume, and network definitions for both the `dingo` and `conformance` profiles |
 | `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.1.0) |
-| `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers |
+| `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers and chowns each Dingo pool's keys to `DINGO_UID`/`DINGO_GID` (passed in by compose, defaulting to the `1000:1000` pinned in the repo root `Dockerfile`) |
 | `testnet-dingo.yaml`         | Network spec for dingo mode: 3 pools, `poolPledge: 0` |
 | `testnet.yaml`               | Network spec for conformance mode: 2 pools |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
