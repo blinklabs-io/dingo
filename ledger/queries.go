@@ -467,13 +467,15 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		return ls.queryShelleyDebugChainDepState()
 	case *olocalstatequery.ShelleyPoolDistr2Query:
 		return ls.queryShelleyPoolDistr2(q)
+	case *olocalstatequery.ShelleyStakeDistributionQuery:
+		return ls.queryShelleyStakeDistribution()
+	case *olocalstatequery.ShelleyUtxoWholeQuery:
+		return ls.queryShelleyUtxoWhole()
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
 		case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
-		case *olocalstatequery.ShelleyStakeDistributionQuery:
-		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:

@@ -1788,10 +1788,12 @@ from the database; proposal results reconstruct the on-wire proposal procedure
 from the persisted action CBOR, return address, deposit, anchor, and votes.
 Supported query leaves also include epoch number, current protocol parameters,
 Shelley genesis configuration, UTxO-by-address/transaction-input lookups,
-stake-delegation deposits, the ledger peer snapshot, stake pools, DRep state,
-and account state. `GetCBOR` is a query combinator: it re-runs the wrapped
-inner query through the same dispatch path and returns the result as a tag-24
-CBOR-in-CBOR `Serialised` value, matching cardano-node. `GetStakeSnapshots`
+the whole live UTxO set (`GetUTxOWhole`), stake-delegation deposits, the
+ledger peer snapshot, stake pools, DRep state, account state, and the
+unfiltered stake distribution (`GetStakeDistribution`). `GetCBOR` is a query
+combinator: it re-runs the wrapped inner query through the same dispatch path
+and returns the result as a tag-24 CBOR-in-CBOR `Serialised` value, matching
+cardano-node. `GetStakeSnapshots`
 returns the mark/set/go stake for each requested pool and the corresponding
 totals. For protocol version 11 and later, requested pools whose mark, set,
 and go stake are all zero are omitted; without a pool filter, the result
@@ -1864,6 +1866,24 @@ counter whose issuer key is not a pool key hash. Omitting a pool leaves the
 reported fractions summing to slightly under one, since its stake stays in
 `TotalActiveStake`; a caller checking its own leadership is unaffected, because
 its own fraction is its stake over that same unchanged total.
+
+`GetStakeDistribution` (`ledger/queries_stakedistribution.go`) and
+`GetUTxOWhole` (`ledger/queries_utxowhole.go`) close out two entries of the
+`// TODO (#394)` block in `ledger/queries.go`'s query dispatcher; the rest of
+that block remains unimplemented. `GetStakeDistribution` reads the same
+`PoolStakeDistribution` helper as `GetPoolDistr2` with no pool filter (this
+query has none on the wire, unlike `GetPoolDistr2`), so it cannot report a
+different snapshot or VRF key for the same chain than `GetPoolDistr2` or the
+UTxO RPC `ReadState` handler. `GetUTxOWhole` iterates every live row via
+`database.IterateLiveUtxos` and decodes each one's stored CBOR into the
+node-to-client reply shape; each row's CBOR buffer is defensively cloned
+before decoding, since `IterateLiveUtxos` documents that the buffer backing
+a row may be reused by the next callback invocation. Both queries exist to
+support cross-node ledger-state comparison in the devnet conformance
+harness (`internal/test/devnet`, see its README's "LocalStateQuery in
+conformance mode" section) rather than as an operator-facing query aimed at
+a mainnet-scale chain — a whole-UTxO dump is, as with `cardano-cli query
+utxo --whole-utxo`, only practical against a small network.
 
 ## Chain Management
 

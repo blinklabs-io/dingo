@@ -44,18 +44,23 @@ producer-to-producer sync. Network spec: `testnet-dingo.yaml` (3 pools,
 
 ## Topology — conformance mode (`--conformance`)
 
-| Service            | Role                                | Host port | Container IP  |
-|--------------------|-------------------------------------|-----------|----------------|
-| `configurator`     | One-shot: generates keys + genesis  | —         | —              |
-| `dingo-producer`   | Dingo, forging with pool 1 keys     | `3010`    | `172.20.0.10`  |
-| `cardano-producer` | `cardano-node`, forging with pool 2 | `3011`    | `172.20.0.11`  |
-| `cardano-relay`    | `cardano-node` relay (no forging)   | `3012`    | `172.20.0.12`  |
-| `txpump`           | Submits payment txs into Dingo      | —         | `172.20.0.20`  |
+| Service            | Role                                | Container IP  | NtN host port | NtC (LocalStateQuery) host port |
+|--------------------|--------------------------------------|---------------|---------------|----------------------------------|
+| `configurator`     | One-shot: generates keys + genesis  | —             | —             | —                                 |
+| `dingo-producer`   | Dingo, forging with pool 1 keys     | `172.20.0.10` | `3010`        | `3020`                            |
+| `cardano-producer` | `cardano-node`, forging with pool 2 | `172.20.0.11` | `3011`        | `3021`                            |
+| `cardano-relay`    | `cardano-node` relay (no forging)   | `172.20.0.12` | `3012`        | —                                 |
+| `txpump`           | Submits payment txs into Dingo      | `172.20.0.20` | —             | —                                 |
 
 This is unchanged from the original two-pool network: pool 1 and pool 2 are
-wired into a ring topology, the relay peers with both producers, and
-`cardano-producer`/`cardano-relay` have no NtC host port mapped (conformance
-scenarios do not run LocalStateQuery). Network spec: `testnet.yaml`.
+wired into a ring topology, and the relay peers with both producers. Network
+spec: `testnet.yaml`.
+
+`dingo-producer` and `cardano-producer` — the two nodes that actually forge
+blocks — both have an NtC host port mapped, so the host test harness can run
+LocalStateQuery against each and compare ledger state (see
+`TestLedgerStateConsensus` under Test scenarios below). `cardano-relay` has no
+NtC host port mapped; it isn't part of that comparison.
 
 In both modes, `txpump` is a load generator: it talks Ouroboros NtC over a
 Dingo node's UNIX socket (on a named IPC volume, container-internal only) and
@@ -258,8 +263,53 @@ healthcheck) stays on a named Docker volume, and the host harness talks NtC
 over TCP instead. There is no host socket bind mount and no
 `DEVNET_IPC_DIR` environment variable.
 
-Conformance mode does not expose an NtC host port and has no LocalStateQuery
-helper — conformance scenarios only check chain tip/growth, not ledger state.
+### LocalStateQuery in conformance mode
+
+Conformance mode exposes NtC for both producers, so ledger state (not just
+chain tip/growth) can be compared against the reference implementation
+(`TestLedgerStateConsensus`, blinklabs-io/dingo#1900):
+
+- `dingo-producer` (in `--conformance` mode) exposes NtC the same way dingo
+  mode's nodes do (`DINGO_PRIVATE_BIND_ADDR=0.0.0.0` on private port 3002),
+  mapped to host port `3020` unless overridden with `DEVNET_DINGO_NTC_ADDR`
+  or `DEVNET_DINGO_NTC_PORT`.
+- `cardano-producer` (in `--conformance` mode) has no built-in TCP NtC
+  support — cardano-node only serves LocalStateQuery over its unix socket.
+  The `ghcr.io/blinklabs-io/cardano-node` image's `run-node` entrypoint
+  bridges this: setting `SOCAT_PORT` spawns a background `socat
+  TCP-LISTEN:<port>,fork UNIX-CLIENT:<socket-path>` inside the container.
+  `docker-compose.yml` sets `SOCAT_PORT: "3002"` on `cardano-producer` (the
+  same private-port number Dingo uses, purely by convention — it has no
+  special meaning to cardano-node), mapped to host port `3021` unless
+  overridden with `DEVNET_CARDANO_NTC_ADDR` or `DEVNET_CARDANO_NTC_PORT`.
+
+`internal/test/devnet/endpoints_conformance.go`'s `DingoProducerNtcAddr()`
+and `CardanoProducerNtcAddr()` return these host addresses, and
+`internal/test/devnet/ledger_state.go`'s `LedgerStateAtTip(addr, magic)`
+queries one node's current protocol parameters, stake distribution, and
+whole UTxO set (normalized into a comparable form) via a single acquired
+LocalStateQuery session; `DiffLedgerStates(a, b)` reports every divergence
+between two such snapshots.
+
+`GetStakeDistribution` and `GetUTxOWhole` (the two queries `LedgerStateAtTip`
+needs beyond the ones already used elsewhere in this harness) did not have
+server-side support in Dingo before this scenario — they were part of the
+`// TODO (#394)` block in `ledger/queries.go`'s query dispatcher. They are
+implemented in `ledger/queries_stakedistribution.go` and
+`ledger/queries_utxowhole.go`, closing out #394 for those two query types
+specifically (the rest of that TODO block is unrelated to this scenario and
+remains open).
+
+Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) does not yet
+implement point-specific ledger views: every `Acquire` — even
+`Acquire(point)` for a specific historical block — is answered against the
+node's live tip (tracked upstream as blinklabs-io/dingo#382). Until that
+lands, `LedgerStateAtTip` only supports "acquire the current volatile tip",
+and comparing two nodes at the same point requires confirming via NtN
+chain-tip polling that both report an identical tip immediately before and
+after the LocalStateQuery round trip — see `TestLedgerStateConsensus` for
+the retry loop this requires. This is why the scenario samples ledger state
+periodically at settled common tips rather than replaying every block.
 
 ### Running the CIP-50 pledge-leverage scenario
 
@@ -323,6 +373,7 @@ runs only with `--conformance`:
 | Test | What it verifies |
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
+| `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at several settled common-tip samples over the run; fails with a diagnostic naming every divergence found |
 
 Dingo-only feature scenario (`//go:build devnet && !devnet_conformance`),
 runs only in the default dingo mode — no `cardano-node` reference exists for
@@ -356,11 +407,15 @@ Dingo mode:
 
 Conformance mode:
 
-| Variable              | Default | Used by                                |
-|-----------------------|---------|------------------------------------------|
-| `DEVNET_DINGO_PORT`   | `3010`  | docker-compose host port for Dingo     |
-| `DEVNET_CARDANO_PORT` | `3011`  | docker-compose host port for cardano  |
-| `DEVNET_RELAY_PORT`   | `3012`  | docker-compose host port for relay    |
+| Variable                 | Default | Used by                                     |
+|--------------------------|---------|-----------------------------------------------|
+| `DEVNET_DINGO_PORT`      | `3010`  | docker-compose host port for Dingo NtN      |
+| `DEVNET_CARDANO_PORT`    | `3011`  | docker-compose host port for cardano NtN   |
+| `DEVNET_RELAY_PORT`      | `3012`  | docker-compose host port for relay NtN     |
+| `DEVNET_DINGO_NTC_PORT`  | `3020`  | docker-compose host port for `dingo-producer` NtC |
+| `DEVNET_CARDANO_NTC_PORT`| `3021`  | docker-compose host port for `cardano-producer` NtC (bridged by socat) |
+| `DEVNET_DINGO_NTC_ADDR`  | `localhost:<port above>` | `DingoProducerNtcAddr()` override |
+| `DEVNET_CARDANO_NTC_ADDR`| `localhost:<port above>` | `CardanoProducerNtcAddr()` override |
 | `DINGO_PORT`          | falls back to `DEVNET_DINGO_PORT`   | `run-tests.sh` only |
 | `CARDANO_PORT`        | falls back to `DEVNET_CARDANO_PORT` | `run-tests.sh` only |
 | `RELAY_PORT`          | falls back to `DEVNET_RELAY_PORT`   | `run-tests.sh` only |
@@ -385,8 +440,9 @@ harness and the compose port mappings always agree.
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
 | `harness.go`, `config.go`    | Go test harness package: Ouroboros NtN client, tip queries, consensus checks, `testnet*.yaml` loader (build tag `devnet`) |
 | `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |
-| `endpoints_conformance.go`   | Conformance-mode node endpoints (`//go:build devnet && devnet_conformance`) |
+| `endpoints_conformance.go`   | Conformance-mode node endpoints, plus `DingoProducerNtcAddr()` / `CardanoProducerNtcAddr()` (`//go:build devnet && devnet_conformance`) |
 | `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (build tag `devnet`) |
+| `ledger_state.go`            | `LedgerStateAtTip` / `DiffLedgerStates`: normalized protocol-params/stake-distribution/whole-UTxO snapshot and diff for cross-node ledger-state comparison (build tag `devnet`) |
 | `credentials.go`             | Loads genesis stake credentials for the CIP-50 scenario (build tag `devnet`) |
 | `harness_test.go`, `credentials_test.go` | Tests for the harness/credential helpers themselves (build tag `devnet`) |
 | `scenarios/`                 | Devnet test scenarios (one or more `Test*` per file, gated per the Test scenarios table above) |
