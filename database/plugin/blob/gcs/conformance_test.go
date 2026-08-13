@@ -108,17 +108,21 @@ func cleanupTestGCSStore(t *testing.T, store *BlobStoreGCS) {
 	txn := store.NewTransaction(true)
 	defer txn.Rollback() //nolint:errcheck
 	it := store.NewIterator(txn, types.BlobIteratorOptions{})
-	if it == nil {
-		return
-	}
+	require.NotNil(t, it)
 	defer it.Close()
 	for it.Valid() {
 		if item := it.Item(); item != nil {
-			_ = store.Delete(txn, item.Key())
+			// Unlike the S3 equivalent this is mirrored from (scoped to
+			// one test's own unique prefix), GCS has no prefix option at
+			// all, so the whole bucket is the shared scope every test in
+			// this package depends on staying empty: a silently-ignored
+			// Delete failure here would poison every later run against
+			// the same dedicated bucket rather than just this one test.
+			require.NoError(t, store.Delete(txn, item.Key()))
 		}
 		it.Next()
 	}
-	_ = txn.Commit()
+	require.NoError(t, txn.Commit())
 }
 
 // TestBlobStoreGetBlockURLSignsCommittedBlock exercises the happy path no
