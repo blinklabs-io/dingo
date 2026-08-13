@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1899,4 +1900,69 @@ func TestLoad_ExampleConfigParses(t *testing.T) {
 		"dingo.yaml.example must parse cleanly as shipped",
 	)
 	require.NotNil(t, cfg)
+}
+
+// TestLoad_ParseErrorIncludesConfigFilePath guards the error-message
+// behavior introduced alongside TestLoad_ExampleConfigParses: every parse
+// failure path in LoadConfig must name the resolved config file so a
+// regression that drops configFile from one of the error wraps is caught.
+func TestLoad_ParseErrorIncludesConfigFilePath(t *testing.T) {
+	t.Run("invalid YAML syntax", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-syntax.yaml")
+		yamlContent := "network: mainnet\n  badIndent: true\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section decode error", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-wrapped-decode.yaml")
+		yamlContent := `
+config:
+  network: mainnet
+  unknownField: true
+`
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section is nil", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "nil-config-section.yaml")
+		yamlContent := "config:\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		expected := fmt.Sprintf(
+			"config section in %s must be a mapping",
+			tmpFile,
+		)
+		assert.Equal(t, expected, err.Error())
+	})
 }

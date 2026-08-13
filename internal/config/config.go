@@ -1196,7 +1196,10 @@ func LoadConfig(configFile string) (*Config, error) {
 				)
 			}
 			if tempCfg.Config == nil {
-				return nil, errors.New("config section must be a mapping")
+				return nil, fmt.Errorf(
+					"config section in %s must be a mapping",
+					configFile,
+				)
 			}
 		} else {
 			decoder := yaml.NewDecoder(bytes.NewReader(buf))
