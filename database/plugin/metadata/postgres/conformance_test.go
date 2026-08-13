@@ -20,7 +20,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,8 +82,40 @@ func postgresAdminDSN() string {
 // and internal/test/conformance's Postgres variant, both of which connect to
 // the same dingo_test database concurrently as separate `go test ./...`
 // processes.
+//
+// postgresAdminDSN returns a libpq keyword/value string when it builds the
+// DSN itself, but returns POSTGRES_DSN verbatim when that is set, and an
+// operator may legitimately set it to a URL (postgres://user:pass@host/db)
+// rather than keyword/value form -- appending " options='...'" text to a
+// URL produces a malformed DSN, so the two forms need different injection.
 func postgresConformanceDSN(schema string) string {
-	return postgresAdminDSN() + " options='-csearch_path=" + schema + "'"
+	dsn := postgresAdminDSN()
+	if strings.HasPrefix(dsn, "postgres://") ||
+		strings.HasPrefix(dsn, "postgresql://") {
+		parsed, err := url.Parse(dsn)
+		if err == nil {
+			query := parsed.Query()
+			query.Set("options", "-csearch_path="+schema)
+			parsed.RawQuery = query.Encode()
+			return parsed.String()
+		}
+	}
+	return dsn + " options='-csearch_path=" + schema + "'"
+}
+
+// postgresSchemaExists reports whether schema already exists, checked
+// before this suite's own CREATE SCHEMA IF NOT EXISTS so cleanup can drop
+// only what it created -- a fixed, predictable schema name shared by every
+// run against the same server must never destroy a schema this test run
+// did not create itself.
+func postgresSchemaExists(t *testing.T, admin *sql.DB, schema string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, admin.QueryRow(
+		"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)",
+		schema,
+	).Scan(&exists))
+	return exists
 }
 
 func TestMetadataStoreConformance(t *testing.T) {
@@ -96,10 +130,13 @@ func TestMetadataStoreConformance(t *testing.T) {
 	admin, err := sql.Open("pgx", postgresAdminDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
+	preexisting := postgresSchemaExists(t, admin, schema)
 	_, err = admin.Exec(`CREATE SCHEMA IF NOT EXISTS "` + schema + `"`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
+		if !preexisting {
+			_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
+		}
 		_ = admin.Close()
 	})
 
@@ -133,10 +170,13 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 	admin, err := sql.Open("pgx", postgresAdminDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
+	preexisting := postgresSchemaExists(t, admin, schema)
 	_, err = admin.Exec(`CREATE SCHEMA IF NOT EXISTS "` + schema + `"`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
+		if !preexisting {
+			_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
+		}
 		_ = admin.Close()
 	})
 

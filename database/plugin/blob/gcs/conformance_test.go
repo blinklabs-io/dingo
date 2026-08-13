@@ -63,6 +63,15 @@ func TestBlobStoreResourceCleanup(t *testing.T) {
 		txn := store.NewTransaction(true)
 		require.NoError(t, store.Set(txn, []byte("k"), []byte("v")))
 		require.NoError(t, txn.Commit())
+		// GCS has no prefix option to isolate this key the way aws's
+		// equivalent test does (see newTestS3Store's WithPrefix in
+		// database/plugin/blob/aws/backup_test.go): delete it explicitly
+		// so 5 cycles against a real, persistent bucket don't leave 5
+		// copies of the same key behind, and so it can never collide with
+		// another test/run sharing the bucket.
+		deleteTxn := store.NewTransaction(true)
+		require.NoError(t, store.Delete(deleteTxn, []byte("k")))
+		require.NoError(t, deleteTxn.Commit())
 		require.NoError(t, store.Stop())
 	})
 }
@@ -87,6 +96,31 @@ func TestBlobStoreBadCredentialsFailsCleanly(t *testing.T) {
 // newTestGCSStore is defined in backup_test.go and shared across this
 // package's test files.
 
+// cleanupTestGCSStore deletes every key currently in store. GCS has no
+// prefix option to scope a test run the way aws.WithPrefix does (see
+// newTestGCSStore's own doc comment in backup_test.go), so the whole
+// bucket is the shared scope every test in this package must leave empty
+// when it's done: newTestGCSStore requires an empty bucket up front and
+// skips otherwise, so a committed key a test never removes poisons every
+// subsequent run against the same dedicated bucket.
+func cleanupTestGCSStore(t *testing.T, store *BlobStoreGCS) {
+	t.Helper()
+	txn := store.NewTransaction(true)
+	defer txn.Rollback() //nolint:errcheck
+	it := store.NewIterator(txn, types.BlobIteratorOptions{})
+	if it == nil {
+		return
+	}
+	defer it.Close()
+	for it.Valid() {
+		if item := it.Item(); item != nil {
+			_ = store.Delete(txn, item.Key())
+		}
+		it.Next()
+	}
+	_ = txn.Commit()
+}
+
 // TestBlobStoreGetBlockURLSignsCommittedBlock exercises the happy path no
 // existing test in this package covers: a committed block's GetBlockURL
 // returns a usable, parseable, non-expired presigned URL and the block's
@@ -100,6 +134,12 @@ func TestBlobStoreGetBlockURLSignsCommittedBlock(t *testing.T) {
 		t.Skip("GCS credentials not found, skipping test")
 	}
 	store := newTestGCSStore(t)
+	// Registered after (so it runs before, via t.Cleanup's LIFO order,
+	// while the store is still started) newTestGCSStore's own Stop
+	// cleanup -- this test commits a block, unlike
+	// TestBlobStoreGetBlockURLRejectsStagedUncommittedBlock below, which
+	// only stages and rolls back and so never touches the bucket.
+	t.Cleanup(func() { cleanupTestGCSStore(t, store) })
 	slot := uint64(500)
 	hash := []byte("block-url-committed")
 

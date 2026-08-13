@@ -39,6 +39,16 @@ import (
 // running yet" is true. A leak check needs exactly that point, so callers
 // construct a store dedicated to this check inside run and stop it before
 // returning.
+//
+// This polls with a plain for/time.Sleep loop rather than
+// testutil.WaitForCondition/require.Eventually: Eventually runs its
+// condition function via a new goroutine per tick ("go checkCond()" in
+// testify's implementation), and the condition here is
+// runtime.NumGoroutine() itself -- polling it from inside a goroutine
+// Eventually spawns just to run that one check would count that checker
+// goroutine in the very measurement it is taking, which could mask a real
+// one-goroutine leak. Checking in the polling loop's own goroutine avoids
+// that self-measurement problem.
 func AssertNoGoroutineLeak(t *testing.T, run func(t *testing.T)) {
 	t.Helper()
 	run(t)

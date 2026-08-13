@@ -64,6 +64,12 @@ func TestBlobStoreConformance(t *testing.T) {
 		t.Cleanup(func() {
 			require.NoError(t, store.Stop())
 		})
+		// Registered after (so it runs before, via t.Cleanup's LIFO order,
+		// while the store is still started) Stop's own cleanup, matching
+		// newTestS3Store's convention in backup_test.go: this suite commits
+		// real data under the prefix above and would otherwise accumulate
+		// every run's objects in a real, persistent bucket.
+		t.Cleanup(func() { cleanupTestS3Store(t, store) })
 		return store
 	})
 }
@@ -91,6 +97,10 @@ func TestBlobStoreResourceCleanup(t *testing.T) {
 		txn := store.NewTransaction(true)
 		require.NoError(t, store.Set(txn, []byte("k"), []byte("v")))
 		require.NoError(t, txn.Commit())
+		// Delete what this cycle committed while the store is still
+		// started, so 5 cycles against a real, persistent bucket don't
+		// accumulate 5 copies of the same key under 5 different prefixes.
+		cleanupTestS3Store(t, store)
 		require.NoError(t, store.Stop())
 	})
 }

@@ -18,9 +18,11 @@ package integration
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -37,17 +39,23 @@ import (
 // blobMigrationDataset is a small, fixed set of blob-store rows written
 // through the public blob.BlobStore API and replayed from one backend into
 // another, proving a migration transfers data without loss rather than just
-// that both backends independently pass conformance.
+// that both backends independently pass conformance. blockCbor is a real
+// block loaded from database/immutable/testdata/ (see loadBlockData in
+// benchmark_test.go) rather than a synthetic placeholder, so the migration
+// actually moves realistic-sized, realistic-shaped bytes.
 type blobMigrationDataset struct {
-	blockSlot uint64
-	blockHash []byte
-	blockCbor []byte
-	blockID   uint64
-	txID      []byte
-	outputIdx uint32
-	utxoCbor  []byte
-	txHash    []byte
-	txData    []byte
+	blockSlot     uint64
+	blockHash     []byte
+	blockCbor     []byte
+	blockID       uint64
+	blockType     uint
+	blockHeight   uint64
+	blockPrevHash []byte
+	txID          []byte
+	outputIdx     uint32
+	utxoCbor      []byte
+	txHash        []byte
+	txData        []byte
 }
 
 func seedBlobMigrationDataset(
@@ -55,16 +63,22 @@ func seedBlobMigrationDataset(
 	store blob.BlobStore,
 ) blobMigrationDataset {
 	t.Helper()
+	blocks, err := loadBlockData(1)
+	require.NoError(t, err)
+
 	dataset := blobMigrationDataset{
-		blockSlot: 4200,
-		blockHash: []byte("storagetest-migration-block-hash"),
-		blockCbor: []byte{0x82, 0x01, 0x02},
-		blockID:   99,
-		txID:      []byte("storagetest-migration-tx-id"),
-		outputIdx: 2,
-		utxoCbor:  []byte{0x81, 0x03},
-		txHash:    []byte("storagetest-migration-tx-hash"),
-		txData:    []byte{0x04, 0x05, 0x06},
+		blockSlot:     4200,
+		blockHash:     []byte("storagetest-migration-block-hash"),
+		blockCbor:     blocks[0],
+		blockID:       99,
+		blockType:     6,
+		blockHeight:   4_200_000,
+		blockPrevHash: []byte("storagetest-migration-prev-hash"),
+		txID:          []byte("storagetest-migration-tx-id"),
+		outputIdx:     2,
+		utxoCbor:      []byte{0x81, 0x03},
+		txHash:        []byte("storagetest-migration-tx-hash"),
+		txData:        []byte{0x04, 0x05, 0x06},
 	}
 	txn := store.NewTransaction(true)
 	require.NoError(t, store.SetBlock(
@@ -73,9 +87,9 @@ func seedBlobMigrationDataset(
 		dataset.blockHash,
 		dataset.blockCbor,
 		dataset.blockID,
-		0,
-		10,
-		nil,
+		dataset.blockType,
+		dataset.blockHeight,
+		dataset.blockPrevHash,
 	))
 	require.NoError(
 		t,
@@ -143,6 +157,9 @@ func requireBlobDatasetMatches(
 	require.NoError(t, err)
 	require.Equal(t, dataset.blockCbor, gotBlockCbor)
 	require.Equal(t, dataset.blockID, gotBlockMeta.ID)
+	require.Equal(t, dataset.blockType, gotBlockMeta.Type)
+	require.Equal(t, dataset.blockHeight, gotBlockMeta.Height)
+	require.Equal(t, dataset.blockPrevHash, gotBlockMeta.PrevHash)
 
 	gotUtxoCbor, err := store.GetUtxo(txn, dataset.txID, dataset.outputIdx)
 	require.NoError(t, err)
@@ -151,6 +168,27 @@ func requireBlobDatasetMatches(
 	gotTxData, err := store.GetTx(txn, dataset.txHash)
 	require.NoError(t, err)
 	require.Equal(t, dataset.txData, gotTxData)
+}
+
+// cleanupBlobMigrationDataset deletes exactly the rows
+// seedBlobMigrationDataset/migrateBlobDataset write, so a migration test run
+// against a real, persistent bucket does not leave them behind.
+func cleanupBlobMigrationDataset(
+	t *testing.T,
+	store blob.BlobStore,
+	dataset blobMigrationDataset,
+) {
+	t.Helper()
+	txn := store.NewTransaction(true)
+	_ = store.DeleteBlock(
+		txn,
+		dataset.blockSlot,
+		dataset.blockHash,
+		dataset.blockID,
+	)
+	_ = store.DeleteUtxo(txn, dataset.txID, dataset.outputIdx)
+	_ = store.DeleteTx(txn, dataset.txHash)
+	_ = txn.Commit()
 }
 
 // TestBlobStoreMigration migrates a small dataset from the always-available
@@ -181,6 +219,21 @@ func TestBlobStoreMigration(t *testing.T) {
 			require.NoError(t, err)
 
 			dataset := seedBlobMigrationDataset(t, srcDB.Blob())
+			// Registered before dbtest's own Close cleanup runs (t.Cleanup
+			// is LIFO, and dbtest.NewDatabaseWithOptions already registered
+			// its Close via t.Cleanup above), so the delete happens while
+			// destDB is still open. The S3 destination is isolated by its
+			// own unique-per-run prefix (see cloudStorageBenchmarkBackends)
+			// so this is defense in depth there, but GCS has no prefix
+			// option at all: every migration run without this would leave
+			// this dataset's keys at the bucket root, where they would
+			// then fail every other GCS test's "bucket must be empty"
+			// precondition (see gcs.newTestGCSStore) until an operator
+			// noticed and emptied the bucket by hand.
+			t.Cleanup(func() {
+				cleanupBlobMigrationDataset(t, destDB.Blob(), dataset)
+			})
+
 			migrateBlobDataset(t, srcDB.Blob(), destDB.Blob(), dataset)
 			requireBlobDatasetMatches(t, destDB.Blob(), dataset)
 		})
@@ -260,6 +313,7 @@ func requireMetadataDatasetMatches(
 	settings, err := store.GetNodeSettings()
 	require.NoError(t, err)
 	require.Equal(t, dataset.network, settings.Network)
+	require.Equal(t, types.StorageModeCore, settings.StorageMode)
 
 	gates, err := store.GetNodeSettingsGates()
 	require.NoError(t, err)
@@ -279,12 +333,18 @@ func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
 		)
 	}
 	dsn := postgresMigrationDSN()
-	const schema = "storage_migration"
+	// Unique per run (rather than a fixed, predictable name): two runs
+	// against the same server at the same time -- a real possibility for
+	// `go test ./...`, which runs different packages as separate concurrent
+	// processes -- must not race on CREATE/DROP of the same schema, and a
+	// schema that can never have existed before this run needs no
+	// preexistence check before an unconditional drop in cleanup.
+	schema := fmt.Sprintf("storage_migration_%d", time.Now().UnixNano())
 
 	admin, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
-	_, err = admin.Exec(`CREATE SCHEMA IF NOT EXISTS "` + schema + `"`)
+	_, err = admin.Exec(`CREATE SCHEMA "` + schema + `"`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
@@ -356,13 +416,19 @@ func TestMetadataStoreMigrationSQLiteToMySQL(t *testing.T) {
 				"(set MYSQL_ROOT_PASSWORD or MYSQL_DSN)",
 		)
 	}
-	const dbName = "storage_migration_test"
+	// Unique per run (rather than a fixed, predictable name): two runs
+	// against the same server at the same time -- a real possibility for
+	// `go test ./...`, which runs different packages as separate concurrent
+	// processes -- must not race on CREATE/DROP of the same database, and a
+	// database that can never have existed before this run needs no
+	// preexistence check before an unconditional drop in cleanup.
+	dbName := fmt.Sprintf("storage_migration_test_%d", time.Now().UnixNano())
 	rootDSN := mysqlMigrationRootDSN()
 
 	admin, err := sql.Open("mysql", rootDSN)
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
-	_, err = admin.Exec("CREATE DATABASE IF NOT EXISTS `" + dbName + "`")
+	_, err = admin.Exec("CREATE DATABASE `" + dbName + "`")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = admin.Exec("DROP DATABASE `" + dbName + "`")

@@ -82,6 +82,22 @@ func mysqlConformanceDSN(t *testing.T, database string) string {
 	return parsed.FormatDSN()
 }
 
+// mysqlDatabaseExists reports whether database already exists, checked
+// before this suite's own CREATE DATABASE IF NOT EXISTS so cleanup can drop
+// only what it created -- a fixed, predictable database name shared by
+// every run against the same server must never destroy a database this
+// test run did not create itself.
+func mysqlDatabaseExists(t *testing.T, admin *sql.DB, database string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, admin.QueryRow(
+		"SELECT COUNT(*) > 0 FROM information_schema.SCHEMATA "+
+			"WHERE SCHEMA_NAME = ?",
+		database,
+	).Scan(&exists))
+	return exists
+}
+
 func TestMetadataStoreConformance(t *testing.T) {
 	if !isMysqlConformanceConfigured() {
 		t.Skip(
@@ -94,10 +110,13 @@ func TestMetadataStoreConformance(t *testing.T) {
 	admin, err := sql.Open("mysql", mysqlConformanceRootDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
+	preexisting := mysqlDatabaseExists(t, admin, database)
 	_, err = admin.Exec("CREATE DATABASE IF NOT EXISTS `" + database + "`")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
+		if !preexisting {
+			_, _ = admin.Exec("DROP DATABASE `" + database + "`")
+		}
 		_ = admin.Close()
 	})
 
@@ -132,10 +151,13 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 	admin, err := sql.Open("mysql", mysqlConformanceRootDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
+	preexisting := mysqlDatabaseExists(t, admin, database)
 	_, err = admin.Exec("CREATE DATABASE IF NOT EXISTS `" + database + "`")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
+		if !preexisting {
+			_, _ = admin.Exec("DROP DATABASE `" + database + "`")
+		}
 		_ = admin.Close()
 	})
 

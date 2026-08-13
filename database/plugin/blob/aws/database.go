@@ -1071,11 +1071,6 @@ func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
 // instead of correctly reporting "false, nil" (caught via a live MinIO
 // run: committing a brand new key errored on its own pre-existence probe).
 func isS3NotFound(err error) bool {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) &&
-		(apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
-		return true
-	}
 	var noSuchKey *s3types.NoSuchKey
 	if errors.As(err, &noSuchKey) {
 		return true
@@ -1084,11 +1079,24 @@ func isS3NotFound(err error) bool {
 	if errors.As(err, &notFound) {
 		return true
 	}
-	// HeadObject can also fail with a bare HTTP 404 wrapped in a
-	// smithy-go ResponseError and no structured API error code at all
-	// (observed against a real MinIO instance): a HEAD response has no
-	// body for the SDK to parse a specific error out of, so depending on
-	// the endpoint this is the only signal left.
+	// A structured API error means the SDK parsed a response body (every
+	// operation except HeadObject always has one, including a 404 for a
+	// misconfigured/nonexistent bucket -- NoSuchBucket, not NoSuchKey).
+	// Once any such error is present, its specific code is authoritative:
+	// only NoSuchKey/NotFound mean "the object doesn't exist," and every
+	// other code must surface as a real error rather than fall through to
+	// the bare-status check below just because it also happens to carry a
+	// 404.
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "NoSuchKey" ||
+			apiErr.ErrorCode() == "NotFound"
+	}
+	// No structured error was parseable at all: this only happens for a
+	// bodyless response (HeadObject, used by objectExists and
+	// GetBlockURL), where the bare HTTP 404 wrapped in a smithy-go
+	// ResponseError is the only signal left (observed against a real
+	// MinIO instance).
 	var respErr *smithyhttp.ResponseError
 	return errors.As(err, &respErr) &&
 		respErr.HTTPStatusCode() == http.StatusNotFound
