@@ -17,12 +17,14 @@
 package gcs
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -37,7 +39,14 @@ func TestBlobStoreConformance(t *testing.T) {
 		t.Skip("GCS credentials not found, skipping test")
 	}
 	storagetest.RunBlobStoreConformance(t, func(t *testing.T) blob.BlobStore {
-		return newTestGCSStore(t)
+		store := newTestGCSStore(t)
+		// RunBlobStoreConformance's subtests (KVRoundTrip, BlockRoundTrip,
+		// ...) commit real, persistent keys; newTestGCSStore only
+		// registers Stop, which does not touch bucket contents, so without
+		// this the first successful run would poison the bucket for every
+		// later run's "must start empty" check.
+		t.Cleanup(func() { cleanupTestGCSStore(t, store) })
+		return store
 	})
 }
 
@@ -47,15 +56,34 @@ func TestBlobStoreResourceCleanup(t *testing.T) {
 	}
 	bucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
 	if bucket == "" {
-		bucket = "dingo-test-bucket"
+		t.Skip("DINGO_TEST_GCS_BUCKET not set")
 	}
 
-	// Deliberately not newTestGCSStore: that defers Stop via t.Cleanup,
-	// which only fires once at the end of the whole test, but this check's
-	// entire point is that each of the 5 cycles fully stops before the next
-	// one starts (see AssertRepeatedLifecycleIsSafe's doc comment) --
-	// t.Cleanup timing would silently turn that into "construct 5, then
-	// stop all 5," never exercising Stop-then-reopen at all.
+	// The same guards newTestGCSStore applies (backup_test.go), checked
+	// once up front rather than via newTestGCSStore itself: GCS has no
+	// prefix option, so this test's "k" key would otherwise silently
+	// coexist with (or collide with) whatever an arbitrary, unconfigured
+	// bucket already has in it.
+	probe, err := NewWithOptions(WithBucket(bucket))
+	require.NoError(t, err)
+	require.NoError(t, probe.Start())
+	empty, err := blobbackup.IsEmpty(context.Background(), probe)
+	require.NoError(t, err)
+	require.NoError(t, probe.Stop())
+	if !empty {
+		t.Skip(
+			"DINGO_TEST_GCS_BUCKET is not empty -- use a bucket dedicated " +
+				"to this test",
+		)
+	}
+
+	// Deliberately not newTestGCSStore for the cycles below: that defers
+	// Stop via t.Cleanup, which only fires once at the end of the whole
+	// test, but this check's entire point is that each of the 5 cycles
+	// fully stops before the next one starts (see
+	// AssertRepeatedLifecycleIsSafe's doc comment) -- t.Cleanup timing
+	// would silently turn that into "construct 5, then stop all 5," never
+	// exercising Stop-then-reopen at all.
 	storagetest.AssertRepeatedLifecycleIsSafe(t, 5, func(t *testing.T) {
 		store, err := NewWithOptions(WithBucket(bucket))
 		require.NoError(t, err)

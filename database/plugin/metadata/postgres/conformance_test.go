@@ -41,6 +41,19 @@ func isPostgresConfigured() bool {
 		os.Getenv("POSTGRES_DSN") != ""
 }
 
+// escapeLibpqValue quotes and backslash-escapes a value for a libpq
+// keyword/value connection string. A Postgres password may legally contain
+// a space, single quote, or backslash, any of which would otherwise either
+// truncate the value at the first space or break the conninfo parse
+// entirely -- go-sql-driver/mysql's Config.FormatDSN handles this
+// automatically for the mysql package's equivalent helpers; pgx's DSN form
+// has no such helper, so this does it by hand.
+func escapeLibpqValue(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+	return "'" + escaped + "'"
+}
+
 // postgresAdminDSN builds a libpq keyword/value DSN from the same
 // POSTGRES_HOST/PORT/USER/PASSWORD/DATABASE/SSLMODE environment variables
 // this plugin's own provider and internal/test/conformance read. POSTGRES_DSN,
@@ -72,7 +85,12 @@ func postgresAdminDSN() string {
 	}
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		host, port, user, os.Getenv("POSTGRES_PASSWORD"), database, sslMode,
+		escapeLibpqValue(host),
+		escapeLibpqValue(port),
+		escapeLibpqValue(user),
+		escapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")),
+		escapeLibpqValue(database),
+		escapeLibpqValue(sslMode),
 	)
 }
 
@@ -103,21 +121,6 @@ func postgresConformanceDSN(schema string) string {
 	return dsn + " options='-csearch_path=" + schema + "'"
 }
 
-// postgresSchemaExists reports whether schema already exists, checked
-// before this suite's own CREATE SCHEMA IF NOT EXISTS so cleanup can drop
-// only what it created -- a fixed, predictable schema name shared by every
-// run against the same server must never destroy a schema this test run
-// did not create itself.
-func postgresSchemaExists(t *testing.T, admin *sql.DB, schema string) bool {
-	t.Helper()
-	var exists bool
-	require.NoError(t, admin.QueryRow(
-		"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)",
-		schema,
-	).Scan(&exists))
-	return exists
-}
-
 func TestMetadataStoreConformance(t *testing.T) {
 	if !isPostgresConfigured() {
 		t.Skip(
@@ -125,18 +128,23 @@ func TestMetadataStoreConformance(t *testing.T) {
 				"(set POSTGRES_PASSWORD or POSTGRES_DSN)",
 		)
 	}
-	const schema = "storage_conformance"
+	// Unique per run (not a fixed, predictable name): two go test
+	// invocations against the same server can overlap in time, and a fixed
+	// name's "does it already exist" check cannot tell "another run is
+	// still using this" apart from "an unrelated schema happens to have
+	// this name" -- either an unconditional drop can destroy an in-flight
+	// sibling run, or a conditional one can skip dropping and leak. A name
+	// that cannot have existed before this run needs neither: it is always
+	// safe to drop unconditionally.
+	schema := fmt.Sprintf("storage_conformance_%d", time.Now().UnixNano())
 
 	admin, err := sql.Open("pgx", postgresAdminDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
-	preexisting := postgresSchemaExists(t, admin, schema)
-	_, err = admin.Exec(`CREATE SCHEMA IF NOT EXISTS "` + schema + `"`)
+	_, err = admin.Exec(`CREATE SCHEMA "` + schema + `"`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		if !preexisting {
-			_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
-		}
+		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
 		_ = admin.Close()
 	})
 
@@ -165,18 +173,20 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 				"configured (set POSTGRES_PASSWORD or POSTGRES_DSN)",
 		)
 	}
-	const schema = "storage_resource_cleanup"
+	// Unique per run -- see TestMetadataStoreConformance's comment on the
+	// same pattern.
+	schema := fmt.Sprintf(
+		"storage_resource_cleanup_%d",
+		time.Now().UnixNano(),
+	)
 
 	admin, err := sql.Open("pgx", postgresAdminDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
-	preexisting := postgresSchemaExists(t, admin, schema)
-	_, err = admin.Exec(`CREATE SCHEMA IF NOT EXISTS "` + schema + `"`)
+	_, err = admin.Exec(`CREATE SCHEMA "` + schema + `"`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		if !preexisting {
-			_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
-		}
+		_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
 		_ = admin.Close()
 	})
 
@@ -265,7 +275,10 @@ func TestMetadataStoreBadCredentialsFailsCleanly(t *testing.T) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=storagetest-wrong-password "+
 			"dbname=%s sslmode=disable",
-		host, port, user, database,
+		escapeLibpqValue(host),
+		escapeLibpqValue(port),
+		escapeLibpqValue(user),
+		escapeLibpqValue(database),
 	)
 
 	store, err := openStore(

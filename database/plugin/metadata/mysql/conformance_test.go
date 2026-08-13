@@ -19,6 +19,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -82,22 +83,6 @@ func mysqlConformanceDSN(t *testing.T, database string) string {
 	return parsed.FormatDSN()
 }
 
-// mysqlDatabaseExists reports whether database already exists, checked
-// before this suite's own CREATE DATABASE IF NOT EXISTS so cleanup can drop
-// only what it created -- a fixed, predictable database name shared by
-// every run against the same server must never destroy a database this
-// test run did not create itself.
-func mysqlDatabaseExists(t *testing.T, admin *sql.DB, database string) bool {
-	t.Helper()
-	var exists bool
-	require.NoError(t, admin.QueryRow(
-		"SELECT COUNT(*) > 0 FROM information_schema.SCHEMATA "+
-			"WHERE SCHEMA_NAME = ?",
-		database,
-	).Scan(&exists))
-	return exists
-}
-
 func TestMetadataStoreConformance(t *testing.T) {
 	if !isMysqlConformanceConfigured() {
 		t.Skip(
@@ -105,18 +90,26 @@ func TestMetadataStoreConformance(t *testing.T) {
 				"(set MYSQL_ROOT_PASSWORD or MYSQL_DSN)",
 		)
 	}
-	const database = "storage_conformance_test"
+	// Unique per run (not a fixed, predictable name): two go test
+	// invocations against the same server can overlap in time, and a fixed
+	// name's "does it already exist" check cannot tell "another run is
+	// still using this" apart from "an unrelated database happens to have
+	// this name" -- either an unconditional drop can destroy an in-flight
+	// sibling run, or a conditional one can skip dropping and leak. A name
+	// that cannot have existed before this run needs neither: it is always
+	// safe to drop unconditionally.
+	database := fmt.Sprintf(
+		"storage_conformance_%d",
+		time.Now().UnixNano(),
+	)
 
 	admin, err := sql.Open("mysql", mysqlConformanceRootDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
-	preexisting := mysqlDatabaseExists(t, admin, database)
-	_, err = admin.Exec("CREATE DATABASE IF NOT EXISTS `" + database + "`")
+	_, err = admin.Exec("CREATE DATABASE `" + database + "`")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		if !preexisting {
-			_, _ = admin.Exec("DROP DATABASE `" + database + "`")
-		}
+		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
 		_ = admin.Close()
 	})
 
@@ -146,18 +139,20 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 				"(set MYSQL_ROOT_PASSWORD or MYSQL_DSN)",
 		)
 	}
-	const database = "storage_resource_cleanup_test"
+	// Unique per run -- see TestMetadataStoreConformance's comment on the
+	// same pattern.
+	database := fmt.Sprintf(
+		"storage_resource_cleanup_%d",
+		time.Now().UnixNano(),
+	)
 
 	admin, err := sql.Open("mysql", mysqlConformanceRootDSN())
 	require.NoError(t, err)
 	require.NoError(t, admin.PingContext(t.Context()))
-	preexisting := mysqlDatabaseExists(t, admin, database)
-	_, err = admin.Exec("CREATE DATABASE IF NOT EXISTS `" + database + "`")
+	_, err = admin.Exec("CREATE DATABASE `" + database + "`")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		if !preexisting {
-			_, _ = admin.Exec("DROP DATABASE `" + database + "`")
-		}
+		_, _ = admin.Exec("DROP DATABASE `" + database + "`")
 		_ = admin.Close()
 	})
 

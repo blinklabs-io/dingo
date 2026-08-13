@@ -50,10 +50,21 @@ func TestBlobStoreConformance(t *testing.T) {
 		opts := []BlobStoreS3OptionFunc{
 			WithBucket(bucket),
 			WithRegion(region),
-			// Isolate this run's keys from any other test/CI run sharing the
-			// bucket, matching internal/integration/benchmark_test.go's
-			// per-run prefixing convention.
-			WithPrefix("storagetest-conformance-" + t.Name() + "/"),
+			// Isolate this run's keys from any other test/CI run sharing
+			// the bucket. t.Name() alone is not enough here -- it is
+			// always "TestBlobStoreConformance" on this shared outer test,
+			// so every invocation would otherwise write and delete under
+			// the exact same prefix; a run interrupted before its own
+			// cleanup runs (a killed CI job, a panic, a machine restart)
+			// would leave objects the next run then reads, corrupting
+			// assertions that expect to start from an empty prefix (e.g.
+			// IteratorEnumeratesWrittenKeys). time.Now().UnixNano()
+			// matches the per-run suffix already used for the
+			// GetBlockURL tests below and benchmark_test.go.
+			WithPrefix(fmt.Sprintf(
+				"storagetest-conformance-%d/",
+				time.Now().UnixNano(),
+			)),
 		}
 		if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
 			opts = append(opts, WithEndpoint(endpoint))
@@ -84,9 +95,16 @@ func TestBlobStoreResourceCleanup(t *testing.T) {
 	}
 
 	storagetest.AssertRepeatedLifecycleIsSafe(t, 5, func(t *testing.T) {
+		// t.Name() is always "TestBlobStoreResourceCleanup" on this shared
+		// outer test, not a per-cycle or per-run value -- see the identical
+		// fix's comment on TestBlobStoreConformance's prefix above for why
+		// that fails to isolate concurrent/interrupted runs.
 		opts := []BlobStoreS3OptionFunc{
 			WithBucket(bucket),
-			WithPrefix("storagetest-resource-cleanup-" + t.Name() + "/"),
+			WithPrefix(fmt.Sprintf(
+				"storagetest-resource-cleanup-%d/",
+				time.Now().UnixNano(),
+			)),
 		}
 		if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
 			opts = append(opts, WithEndpoint(endpoint))
