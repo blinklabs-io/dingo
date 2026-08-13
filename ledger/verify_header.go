@@ -956,7 +956,16 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 			err,
 		)
 	}
+	// Record how close the decision was, for every decision rather than only
+	// the failures. See leaderThresholdMargin for why the distribution is the
+	// thing worth having.
+	margin := leaderThresholdMargin(
+		leaderValueForMode(vrfResult.Output, mode),
+		threshold,
+	)
+	ls.metrics.observeLeaderThresholdMargin(margin)
 	if !belowThreshold {
+		ls.metrics.incLeaderThresholdRejections()
 		// dingo's leadership stake is delegated UTxO only; staking rewards are
 		// not yet computed, so reward-account balances are missing from the
 		// stake distribution. On the prototype network the dominant pool's
@@ -987,10 +996,15 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 			)
 			return nil
 		}
+		// margin is carried in the message because it is the number that
+		// says whether this was a genuinely ineligible producer or a stake
+		// discrepancy: a rejection sitting a fraction of a percent under
+		// zero means the local stake distribution, not the block, is what
+		// disagreed with the network.
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
 				"producer pool %x VRF leader value exceeds stake-derived threshold "+
-				"(pool stake: %d, total stake: %d, epoch: %d, snapshot_epoch: %d, snapshot_type: %s)",
+				"(pool stake: %d, total stake: %d, epoch: %d, snapshot_epoch: %d, snapshot_type: %s, threshold_margin: %.9f)",
 			block.SlotNumber(),
 			poolKeyHash[:],
 			poolStake,
@@ -998,6 +1012,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 			epochId,
 			snapshotEpoch,
 			snapshotType,
+			margin,
 		)
 	}
 

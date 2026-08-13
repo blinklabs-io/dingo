@@ -3149,7 +3149,45 @@ func (ls *LedgerState) ledgerReadChainIterator(
 const (
 	noProgressBackoffBase = 10 * time.Millisecond
 	noProgressBackoffMax  = 2 * time.Second
+	// noProgressStuckThreshold is the number of consecutive no-progress
+	// restarts after which the failure is treated as deterministic rather
+	// than transient. A transient cause clears within a few restarts; a
+	// deterministic one -- a canonical block this node rejects and will
+	// reject identically on every replay -- never does, and capping its
+	// retry at noProgressBackoffMax means hammering it at that rate for as
+	// long as the process runs.
+	noProgressStuckThreshold = 50
+	// noProgressStuckBackoffMax bounds the wait once stuck. The pipeline
+	// keeps retrying, because the condition can still be cleared from
+	// outside (a peer serving a different chain, an operator repairing
+	// state), but at a rate that neither burns CPU nor buries the logs.
+	noProgressStuckBackoffMax = 30 * time.Second
 )
+
+// ledgerPipelineBackoff returns how long to wait before the next pipeline
+// restart, and whether the pipeline should be treated as stuck on a
+// deterministic failure.
+//
+// This changes only the retry rate and the operator signal, never whether a
+// block is accepted: a node wedged on a rejected block is equally stuck
+// before and after, but it now says so once, loudly, and stops spinning.
+func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
+	if consecutiveNoProgress <= 0 {
+		return 0, false
+	}
+	if consecutiveNoProgress < noProgressStuckThreshold {
+		shift := min(consecutiveNoProgress-1, 8)
+		return min(
+			noProgressBackoffBase*(time.Duration(1)<<uint(shift)),
+			noProgressBackoffMax,
+		), false
+	}
+	shift := min(consecutiveNoProgress-noProgressStuckThreshold, 8)
+	return min(
+		noProgressBackoffMax*(time.Duration(1)<<uint(shift)),
+		noProgressStuckBackoffMax,
+	), true
+}
 
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 	var (
@@ -3196,12 +3234,28 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		lastTipHash = tipHash
 		haveLastTip = true
 
+		backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
+		ls.metrics.setPipelineNoProgress(consecutiveNoProgress, stuck)
 		if consecutiveNoProgress > 0 {
-			shift := min(consecutiveNoProgress-1, 8)
-			backoff := min(
-				noProgressBackoffBase*(time.Duration(1)<<uint(shift)),
-				noProgressBackoffMax,
-			)
+			// Announce the transition into stuck exactly once, at ERROR: a
+			// deterministic failure is not going to clear on its own, so it
+			// is an operator-actionable condition rather than another line
+			// in a repeating WARN.
+			if stuck && consecutiveNoProgress == noProgressStuckThreshold {
+				ls.config.Logger.Error(
+					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
+					"component",
+					"ledger",
+					"consecutive_no_progress",
+					consecutiveNoProgress,
+					"tip_slot",
+					tipSlot,
+					"backoff",
+					backoff,
+					"error",
+					err,
+				)
+			}
 			if consecutiveNoProgress == 10 ||
 				consecutiveNoProgress%100 == 0 {
 				ls.config.Logger.Warn(
@@ -3210,6 +3264,8 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 					"ledger",
 					"consecutive_no_progress",
 					consecutiveNoProgress,
+					"stuck",
+					stuck,
 					"backoff",
 					backoff,
 					"tip_slot",
