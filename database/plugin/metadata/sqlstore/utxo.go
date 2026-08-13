@@ -873,30 +873,77 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 	return utxosFromSQLite(rows)
 }
 
+// GetUtxosByAddress runs one OR-joined query per parameter-limit-sized chunk
+// of patterns -- a single statement covering every pattern can exceed the
+// dialect's bound-parameter limit (e.g. SQLite's 999) or its OR-expression
+// tree depth limit once enough base (payment + staking) addresses are
+// requested. Candidates are deduplicated by (tx id, output index) across
+// chunks before returning, since a UTxO can only satisfy one address
+// pattern but coarse credential-only branches from different chunks could
+// otherwise resurface the same row.
 func (s *Store) GetUtxosByAddress(
 	patterns []models.UtxoAddressPattern,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
+	if len(patterns) == 0 {
+		return nil, models.ErrEmptyUtxoAddressPattern
+	}
+	limit := s.dialect.ParameterLimit()
+	type utxoKey struct {
+		txId string
+		idx  uint32
+	}
+	seen := make(map[utxoKey]struct{})
+	var ret []models.Utxo
 	var branches []string
 	var args []any
+	runQuery := func() error {
+		if len(branches) == 0 {
+			return nil
+		}
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return err
+		}
+		for i := range utxos {
+			key := utxoKey{string(utxos[i].TxId), utxos[i].OutputIdx}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			ret = append(ret, utxos[i])
+		}
+		branches = nil
+		args = nil
+		return nil
+	}
 	for _, pattern := range patterns {
+		var branchOrs []string
+		var branchArgs []any
 		if err := models.AppendUtxoAddressPatternOrBranch(
-			&branches,
-			&args,
+			&branchOrs,
+			&branchArgs,
 			pattern,
 		); err != nil {
 			return nil, err
 		}
+		if len(args) > 0 && len(args)+len(branchArgs) > limit {
+			if err := runQuery(); err != nil {
+				return nil, err
+			}
+		}
+		branches = append(branches, branchOrs...)
+		args = append(args, branchArgs...)
 	}
-	if len(branches) == 0 {
-		return nil, models.ErrEmptyUtxoAddressPattern
+	if err := runQuery(); err != nil {
+		return nil, err
 	}
-	return s.queryUtxosWithAssets(
-		txn,
-		"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
-		args,
-		"",
-	)
+	return ret, nil
 }
 
 func (s *Store) GetUtxosByAddressWithOrdering(

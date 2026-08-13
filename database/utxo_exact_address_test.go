@@ -17,6 +17,7 @@ package database
 import (
 	"bytes"
 	"database/sql"
+	"encoding/binary"
 	"strconv"
 	"testing"
 
@@ -305,4 +306,77 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	hasEnterpriseTx, err := db.HasTransactionsByAddress(enterprise, nil)
 	require.NoError(t, err)
 	assert.True(t, hasEnterpriseTx)
+}
+
+// TestUtxosByAddressExceedsSQLiteParameterLimit proves GetUtxosByAddress
+// chunks patterns instead of building one statement that can overflow
+// SQLite's limits as the address count grows: without chunking, this test's
+// address count fails with "SQL logic error: Expression tree is too large
+// (maximum depth 1000)" (a single WHERE built from that many OR-branches),
+// and a larger count fails on the 999 bound-parameter limit instead. Every
+// address's UTxO must still come back exactly once from the chunked query.
+func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	const numAddrs = 2000
+	addrs := make([]lcommon.Address, numAddrs)
+	txIds := make([][]byte, numAddrs)
+	for i := range addrs {
+		payment := make([]byte, lcommon.AddressHashSize)
+		binary.BigEndian.PutUint32(payment, uint32(i)+1)
+		stake := make([]byte, lcommon.AddressHashSize)
+		binary.BigEndian.PutUint32(stake, uint32(i)+1_000_000)
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			lcommon.AddressNetworkTestnet,
+			payment,
+			stake,
+		)
+		require.NoError(t, err)
+		addrs[i] = addr
+
+		txID := uint(i + 1)
+		txHash := make([]byte, 32)
+		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+		txIds[i] = txHash
+		amount := uint64(i+1) * 1_000_000
+
+		_, err = raw.Exec(`
+INSERT INTO "transaction" (
+    id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
+) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
+			txID, txHash, uint64(i+1),
+		)
+		require.NoError(t, err)
+		_, err = raw.Exec(`
+INSERT INTO utxo (
+    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (?, ?, ?, ?, 0, ?, 0, ?, 0, FALSE)`,
+			txID, txHash, addr.PaymentKeyHash().Bytes(),
+			addr.StakeKeyHash().Bytes(), uint64(i+1),
+			strconv.FormatUint(amount, 10),
+		)
+		require.NoError(t, err)
+
+		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  amount,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+		}))
+	}
+
+	got, err := db.UtxosByAddress(addrs, nil)
+	require.NoError(t, err)
+	require.Len(t, got, numAddrs)
+
+	gotIDs := make([][]byte, len(got))
+	for i := range got {
+		gotIDs[i] = got[i].TxId
+	}
+	assert.ElementsMatch(t, txIds, gotIDs)
 }
