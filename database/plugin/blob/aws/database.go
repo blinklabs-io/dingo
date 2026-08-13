@@ -438,11 +438,13 @@ func (it *s3StreamIterator) advance(ctx context.Context) {
 			}
 			it.page = page.Contents
 			it.pageIdx = 0
-			// The page just fetched may itself be empty (for example, no
+			// A freshly fetched page can itself be empty (for example, no
 			// object in the bucket matches the prefix yet because the only
 			// write for it is still staged in this transaction, not
-			// committed). Loop back to re-check rather than falling through
-			// to index it.page[0] unconditionally.
+			// committed -- observed against a real MinIO instance). Loop
+			// back to the pageIdx/len(page) check above instead of falling
+			// through to index it.page[0] unconditionally, which panics
+			// with an out-of-range index on an empty page.
 			continue
 		}
 		objectKey := strings.TrimPrefix(
@@ -1057,20 +1059,36 @@ func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
 	return data, nil
 }
 
+// isS3NotFound reports whether err is S3's "object does not exist" error --
+// checked as two distinct types/codes, not one, because GetObject and
+// HeadObject disagree on which they return for the identical missing-key
+// condition: GetObject returns NoSuchKey, but HeadObject (used by
+// objectExists, which both Delete and Commit's per-key existence probe
+// depend on) returns the differently-coded NotFound instead, since a HEAD
+// response has no body for the SDK to parse a specific key-vs-bucket
+// error out of. Missing the NotFound case here previously made every
+// existence probe against a genuinely-absent key fail with a hard error
+// instead of correctly reporting "false, nil" (caught via a live MinIO
+// run: committing a brand new key errored on its own pre-existence probe).
 func isS3NotFound(err error) bool {
 	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchKey" {
+	if errors.As(err, &apiErr) &&
+		(apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
 		return true
 	}
 	var noSuchKey *s3types.NoSuchKey
 	if errors.As(err, &noSuchKey) {
 		return true
 	}
-	// HeadObject (used by objectExists and GetBlockURL) returns an empty
-	// response body on a miss, so the SDK cannot parse a structured
-	// "NoSuchKey" API error out of it the way GetObject's XML error body
-	// allows. The only signal left is the plain HTTP 404 wrapped in a
-	// smithy-go ResponseError.
+	var notFound *s3types.NotFound
+	if errors.As(err, &notFound) {
+		return true
+	}
+	// HeadObject can also fail with a bare HTTP 404 wrapped in a
+	// smithy-go ResponseError and no structured API error code at all
+	// (observed against a real MinIO instance): a HEAD response has no
+	// body for the SDK to parse a specific error out of, so depending on
+	// the endpoint this is the only signal left.
 	var respErr *smithyhttp.ResponseError
 	return errors.As(err, &respErr) &&
 		respErr.HTTPStatusCode() == http.StatusNotFound

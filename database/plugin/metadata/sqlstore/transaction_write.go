@@ -53,6 +53,7 @@ func (s *Store) SetTransactionBatched(
 	point ocommon.Point,
 	index uint32,
 	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
@@ -67,6 +68,7 @@ func (s *Store) SetTransactionBatched(
 		point,
 		index,
 		certDeposits,
+		skipWithdrawalWitness,
 		txn,
 	)
 }
@@ -76,6 +78,7 @@ func (s *Store) SetTransaction(
 	point ocommon.Point,
 	index uint32,
 	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
 	txn types.Txn,
 ) error {
 	if transaction == nil {
@@ -155,6 +158,7 @@ RETURNING id`,
 					transaction,
 					point.Slot,
 					hash,
+					skipWithdrawalWitness,
 				); err != nil {
 					return err
 				}
@@ -729,6 +733,7 @@ func (s *Store) applyTransactionWithdrawals(
 	transaction lcommon.Transaction,
 	slot uint64,
 	txHash []byte,
+	skipWithdrawalWitness bool,
 ) error {
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
@@ -748,17 +753,24 @@ func (s *Store) applyTransactionWithdrawals(
 		if !ok {
 			return errors.New("derive reward withdrawal credential tag")
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if !skipWithdrawalWitness {
+			// CIP-0163: only the delegator-inactivity gate's rollback/renewal
+			// paths read this table (see BatchedTxIngestOpts.
+			// SkipWithdrawalWitnessWrite), so gate-off callers elide the
+			// insert rather than growing an unbounded, never-pruned table
+			// nothing reads (issue #2919).
+			if _, err := db.ExecContext(context.Background(), `
 INSERT INTO account_withdrawal_witness (
     staking_key, credential_tag, tx_hash, added_slot
 ) VALUES (?, ?, ?, ?)
 ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`,
-			stakeKey.Bytes(),
-			tag,
-			txHash,
-			slot,
-		); err != nil {
-			return err
+				stakeKey.Bytes(),
+				tag,
+				txHash,
+				slot,
+			); err != nil {
+				return err
+			}
 		}
 		if amount.Sign() == 0 {
 			continue

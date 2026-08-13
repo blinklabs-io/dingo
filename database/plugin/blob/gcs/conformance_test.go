@@ -29,29 +29,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hasGCSCredentials mirrors internal/integration/cloud_test.go's check of the
-// same name so this suite skips/runs under the same conditions. No GCS
-// emulator exists in this repo (unlike S3's MinIO), so this test never runs
-// in CI today -- it skips cleanly and is exercised manually against a real
-// bucket with Application Default Credentials configured.
-func hasGCSCredentials() bool {
-	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
-		return true
-	}
-	home := os.Getenv("HOME")
-	if home != "" {
-		adcPath := filepath.Join(
-			home,
-			".config",
-			"gcloud",
-			"application_default_credentials.json",
-		)
-		if _, err := os.Stat(adcPath); err == nil {
-			return true
-		}
-	}
-	return false
-}
+// hasGCSCredentials is defined in backup_test.go and shared across this
+// package's test files.
 
 func TestBlobStoreConformance(t *testing.T) {
 	if !hasGCSCredentials() {
@@ -105,22 +84,8 @@ func TestBlobStoreBadCredentialsFailsCleanly(t *testing.T) {
 	require.Error(t, store.Start())
 }
 
-// newTestGCSStore constructs a store against the same bucket every other
-// test in this file uses.
-func newTestGCSStore(t *testing.T) *BlobStoreGCS {
-	t.Helper()
-	bucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
-	if bucket == "" {
-		bucket = "dingo-test-bucket"
-	}
-	store, err := NewWithOptions(WithBucket(bucket))
-	require.NoError(t, err)
-	require.NoError(t, store.Start())
-	t.Cleanup(func() {
-		require.NoError(t, store.Stop())
-	})
-	return store
-}
+// newTestGCSStore is defined in backup_test.go and shared across this
+// package's test files.
 
 // TestBlobStoreGetBlockURLSignsCommittedBlock exercises the happy path no
 // existing test in this package covers: a committed block's GetBlockURL

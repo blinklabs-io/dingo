@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    # Pinned to 16, matching the Dockerfile's own pinned postgresql-client-16
+    # (see its comment): pg_dump refuses outright to dump from a NEWER major
+    # version, so a snapshot/backup attempt against a v17 server here would
+    # fail even though the rest of the stack works fine against it.
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dingo_metadata}

@@ -22,6 +22,7 @@
 # Usage:
 #   ./start.sh               # all-dingo network (default)
 #   ./start.sh --conformance # dingo + cardano-node reference network
+#   ./start.sh --accelerated # bring the network up on the accelerated spec
 
 set -euo pipefail
 
@@ -29,9 +30,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Mode selection precedence: CLI, COMPOSE_PROFILES, then dingo.
 MODE=""
+ACCELERATED=false
 for arg in "$@"; do
   case "${arg}" in
     --conformance) MODE="conformance" ;;
+    --accelerated) ACCELERATED=true ;;
     *)
       echo "Unknown argument: ${arg}" >&2
       exit 1
@@ -47,6 +50,27 @@ case "${MODE}" in
     exit 1
     ;;
 esac
+
+# Pick the network spec the configurator generates genesis from. The
+# accelerated spec compresses slot, epoch and security-parameter timing so
+# a full scenario fits the reference-runner budget; the canonical spec is
+# what soak and canary runs use.
+if [[ "${ACCELERATED}" == "true" ]]; then
+  if [[ "${MODE}" == "conformance" ]]; then
+    export DEVNET_CONFORMANCE_SPEC="./testnet-accelerated.yaml"
+    ACTIVE_SPEC="${DEVNET_CONFORMANCE_SPEC}"
+  else
+    export DEVNET_DINGO_SPEC="./testnet-dingo-accelerated.yaml"
+    ACTIVE_SPEC="${DEVNET_DINGO_SPEC}"
+  fi
+  echo "Using accelerated network spec: ${ACTIVE_SPEC}"
+  echo "Run the scenario with:"
+  echo "  DEVNET_ACCELERATED=1 \\"
+  echo "  DEVNET_TESTNET_YAML=${SCRIPT_DIR}/${ACTIVE_SPEC#./} \\"
+  echo "  DEVNET_COMPOSE_FILE=${SCRIPT_DIR}/docker-compose.yml \\"
+  echo "  go test -tags devnet -run TestAcceleratedScenarioTimeline \\"
+  echo "    -timeout 8m ./internal/test/devnet/scenarios/"
+fi
 
 echo "Starting DevNet containers (mode: ${MODE})..."
 docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d

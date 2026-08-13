@@ -1089,6 +1089,14 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
+		// point with the delegator-inactivity gate enabled
+		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
+		// always elided here. SyncConfig has no gate field to thread through
+		// (Mithril bootstrap and the gate are mutually exclusive by
+		// construction), so this is explicit rather than the zero-value
+		// default.
+		bf.SetDelegatorInactivityEnabled(false)
 		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(

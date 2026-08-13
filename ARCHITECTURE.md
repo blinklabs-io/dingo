@@ -17,7 +17,22 @@ none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
 API providers are resolved for lifecycle only because node composition has no
-in-process consumer of their concrete server values.
+in-process consumer of their concrete server values. Each API provider's
+TLS/authentication policy goes through a merged-config handoff, not a
+pre-resolved one: node composition merges the shared `api.tls`/`api.auth`
+default into that provider's own `config.tls`/`config.auth` fields, field by
+field, before the provider ever decodes its config (see "API security" under
+External Interfaces) — so from a provider's point of view an inherited
+field and an inline one are indistinguishable — but the merged result is
+still the raw, tri-state `TLSPolicy`/`AuthPolicy` shape. Each provider's own
+`RegisterProvider` factory decodes that merged config and calls
+`Resolve` itself during construction, producing the concrete
+`EffectiveTLS`/`EffectiveAuth` its listener acts on. `Node.New` separately
+runs the same merge-and-resolve as an early validation pass against every
+configured API capability, so an invalid effective policy is rejected at
+construction time rather than deferred to listener startup — but that pass
+exists for fail-fast validation, not to hand a provider an already-resolved
+policy in place of provider-side resolution.
 
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
@@ -237,6 +252,7 @@ graph LR
     intplugins["internal/plugins"]
     intnode["internal/node"]
     intnode_ledgerpeers["internal/node/ledgerpeers"]
+    intrecycler["internal/chainsyncrecycler"]
     utxorpc["api/utxorpc"]
     blockfrost["api/blockfrost"]
     mesh["api/mesh"]
@@ -247,7 +263,7 @@ graph LR
     root --> chain & chainsync & chainsel & connmgr & db & ev
     root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology & plugin & intplugins
-    root --> intnode_ledgerpeers
+    root --> intnode_ledgerpeers & intrecycler
     root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
 
     cmd --> root & cardano_cfg & db & db_models & plugin & intplugins
@@ -260,6 +276,7 @@ graph LR
     connmgr --> ev
     peergov --> connmgr & ev & topology
     intnode_ledgerpeers --> ledger & peergov
+    intrecycler --> chainsel & chainsync & connmgr & ev
 
     ouroboros --> chain & chainsel & chainsync & connmgr
     ouroboros --> ev & ledger & mempool & peergov
@@ -686,6 +703,8 @@ dingo/
 │   └── evolution.go     # KES key evolution
 ├── config/cardano/      # Embedded Cardano network configurations
 ├── internal/
+│   ├── chainsyncrecycler/ # Chainsync stall/plateau recycler component
+│   │   └── recycler.go  # Start/Stop loop, tick decision logic
 │   ├── config/          # Configuration parsing
 │   ├── integration/     # Integration tests
 │   ├── node/            # Node orchestration (CLI wiring)
@@ -803,7 +822,7 @@ When `Node.Run()` is called, components are initialized in this order:
 15. ConnectionManager creation and event wiring
 16. PeerGovernor creation/start (topology + churn + ledger peers)
 17. ConnectionManager listener start
-18. Chainsync stall recycler (background goroutine)
+18. Chainsync stall recycler (`internal/chainsyncrecycler.Recycler.Start`)
 19. UTxO RPC server (if API storage mode and port configured)
 20. Bark C2/archive server (if port configured)
 21. Midnight gRPC server (if API storage mode and midnight port configured)
@@ -826,7 +845,7 @@ Graceful shutdown proceeds in phases:
 
 ```
 Phase 1: Stop accepting new work
-  Chainsync stall recycler (WaitGroup-tracked; shutdown blocks until
+  Chainsync stall recycler (`Recycler.Stop`; shutdown blocks until
   the recycler goroutine exits, so it cannot still be running once
   ledger/database teardown begins),
   Midnight indexer (unsubscribes from BlockEventType),
@@ -924,6 +943,36 @@ All event types follow the `subsystem.snake_case_name` convention.
   worker pool means it also delays unrelated async event types. Consumers of
   `Subscribe` channels must drain for the life of the subscription and
   `Unsubscribe` when they stop
+- **Never `Publish`, `PublishAsync`, or `PublishBlocking` while holding a lock
+  that a subscriber of that event acquires.** Because all three wait for
+  capacity rather than dropping, this is a deadlock, not merely a slow path:
+  once the subscriber's buffer fills, the subscriber waits for the lock the
+  publisher holds while the publisher waits for the capacity the subscriber
+  would free. `PublishAsync` is no exception — it waits for room in the shared
+  async queue, which is drained by a worker pool running subscriber handlers,
+  so a handler blocked on the publisher's lock closes the same cycle. Both
+  `LedgerState.chainsyncMutex` and `chainsyncBlockfetchMutex` count:
+  `RecoverAfterLocalRollback` takes the first and nests the second inside it,
+  so holding either while publishing is enough to deadlock.
+- The rule is not yet fully enforced in `ledger`. Several helpers reachable
+  from a lock holder still publish `ChainsyncResyncEventType` inline; they are
+  pinned in `knownResyncPublishPathsUnderLock`
+  (`ledger/publish_under_lock_test.go`) and tracked for conversion, which has
+  to happen as one change because a helper flushing on its own return still
+  publishes while a parent frame holds the lock. Read the rule as the target
+  state plus an explicit exception list, not as an invariant already holding
+  everywhere in that package. `ledger`'s `pendingPublishes`
+  (`ledger/pending_publish.go`) is the pattern for this — queue the event under
+  the lock and flush after the unlock, registering the flush with `defer`
+  *before* taking the lock so LIFO order runs it last. The invariant is
+  enforced for `chainsyncMutex` by `TestNoEventBusPublishWhileHoldingChainsyncMutex`
+- The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
+  takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
+  the `node.go` handler translating `connmanager.conn_closed` into
+  `ledger.conn_closed` then blocks inside its own callback, which stops
+  `connmanager.conn_closed` draining, and every subsequent connection close
+  parks another publisher goroutine. Handlers that re-publish are therefore
+  coupling two topics' backpressure and must not block
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure
@@ -1286,10 +1335,11 @@ reported as a successful stop. `handleChainSwitchEvent` is one of the
 doc comment describes as needing no tracked subscription — correct, since
 it reads `n.chainsyncState` fresh each call rather than a bound method
 value captured at subscribe time — but it was still missing the same
-`n.liveLifecycleMu.TryLock`-and-nil-check guard `runStallCheckerTick` uses
-for the identical field, so `chainSelector`'s evaluation loop (never paused
-during quiesce) firing this event mid-operation could call a method on a
-nil `n.chainsyncState`; it now takes that guard, matching the recycler, and
+`n.liveLifecycleMu.TryLock`-and-nil-check guard
+`nodeRecyclerComponents` uses for the identical field, so
+`chainSelector`'s evaluation loop (never paused during quiesce) firing
+this event mid-operation could call a method on a nil
+`n.chainsyncState`; it now takes that guard, matching the recycler, and
 drops the event exactly the same way (chain selection re-evaluates and
 emits again once connections reattach after reinit, so this is safe to
 lose). `ledger.PoolRelayProvider` — reconstructed fresh on every cycle by
@@ -2263,8 +2313,9 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Stall detection with configurable timeout
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
-- Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `node_chainsync_recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
-- Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
+- Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
+- The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
+- Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Peer-governance connection-close lookup uses stable endpoint identity so reconnect and eligibility cleanup still run for equivalent connection IDs; when no active chainsync client remains, ledger clears its cached upstream tip so slot-clock epoch work does not run against a disconnected tip
 
 #### Header-Sync Strategy
@@ -3111,14 +3162,145 @@ those indexes in place while deferring the remaining manifest entries.
 
 Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
 
-The current client-facing API security configuration is asymmetric. UTxO RPC
-receives the process-level TLS certificate/key pair; Blockfrost and Mesh do not,
-and none of the three authenticates clients in-process. Public deployments
-therefore require a reverse proxy or API gateway for uniform TLS,
-authentication, and rate limiting. Composition must not imply that the root TLS
-fields protect every API listener.
+### API security (TLS and authentication)
+
+Blockfrost, Mesh, and UTxO RPC share one TLS/authentication contract
+(dingo#2996/#2998), rather than each exposing its own ad hoc surface. A
+reverse proxy or API gateway in front of these listeners remains fully
+supported — TLS/auth here is additive, not a replacement requirement — but
+an operator can now also secure any subset of the three in-process,
+without one.
+
+- **Policy types (`internal/apiconfig`).** `TLSPolicy` (`mode`,
+  `certFilePath`, `keyFilePath`) and `AuthPolicy` (`mode`, `token`,
+  `tokenFilePath`) are YAML-decodable, tri-state structs: every field is a
+  pointer, so "not set at this scope" (nil) is distinguishable from an
+  explicit value such as `mode: disabled`. `mode` is `"disabled"` or
+  `"server"` for TLS, `"disabled"` or `"token"` for auth; an unset mode at
+  every scope resolves to `"disabled"`, so an upgraded deployment that
+  never configured either gets no behavior change. The same two types back
+  both the top-level `api:` policy (`internal/config.APIConfig`) and every
+  provider's own `plugins.api.<name>.config.tls`/`config.auth` — from a
+  provider's point of view an inherited field and an inline one are
+  indistinguishable.
+- **Field-level merge happens once, at composition; final validation and
+  resolution happen provider-side** — never inside an API domain package
+  for the merge step, but always inside one for `Resolve`. `node.go`'s
+  `apiPluginSelection`/`apiProviderConfig` merges, field by field
+  (`apiconfig.MergeProviderConfig`/`MergeTLS`/`MergeAuth`), three layers
+  from lowest to highest priority: the legacy UTxO RPC-only compatibility
+  fields (below), the shared top-level `api.tls`/`api.auth` default, and
+  the provider's own `config.tls`/`config.auth`. The merge is a plain
+  struct-field fold, not a map walk, so the result never depends on map
+  iteration order. The merge's output is still the raw, tri-state
+  `TLSPolicy`/`AuthPolicy` shape (a `ProviderConfig.TLS`/`ProviderConfig.Auth`
+  field, not an `EffectiveTLS`/`EffectiveAuth`) — composition hands a
+  provider a fully merged config, not a fully resolved policy. `Node.New`
+  runs this same merge, then calls `Resolve` on the result (see
+  `validateAPIProviderSecurityPolicy`), against every configured API
+  capability before constructing anything, so an invalid effective policy
+  — e.g. a partial certificate/key pair, or an unrecognized mode — is
+  rejected at construction time, before any listener starts, with an
+  error naming the full config path (`plugins.api.blockfrost.config.tls`,
+  not just `tls`). Each provider's own `RegisterProvider` factory
+  (`ProviderConfig.TLS.Resolve`/`ProviderConfig.Auth.Resolve`) repeats the
+  same validate-and-resolve step itself, immediately before constructing
+  its server — this is the one and only place a provider's `EffectiveTLS`/
+  `EffectiveAuth` is actually produced; `Node.New`'s earlier pass exists
+  for fail-fast validation, not to hand the provider a pre-resolved value in
+  its place. This makes each provider self-contained: it cannot be started
+  with an unresolved or unvalidated policy through any other code path, and
+  it never depends on `Node.New` having run first.
+- **Environment variable scope.** The shared top-level `api.tls`/`api.auth`
+  fields participate in the normal `DINGO_API_TLS_*`/`DINGO_API_AUTH_*`
+  environment variables and `--api-tls-*`/`--api-auth-*` CLI flags, layered
+  through the same CLI > environment > YAML > defaults precedence as any
+  other `Config` field. A per-provider override
+  (`plugins.api.<name>.config.tls`/`config.auth`) is YAML-only: the generic
+  `DINGO_PLUGINS_API_<NAME>_CONFIG_*` environment mechanism
+  (`plugin.ApplyEnvironment`) flattens its suffix to one field name and has
+  no way to address a nested `tls`/`auth` sub-object, by design (see
+  `setEnvironmentPath`'s own doc comment) — an operator who needs an
+  environment-driven per-provider override sets the whole provider config
+  through other means, or uses YAML for that provider's override alongside
+  environment variables for the shared default.
+- **Credential verification is one implementation (`internal/apiauth`),
+  adapted per transport.** `apiauth.Verifier.Verify` does a constant-time
+  comparison against the configured shared-secret token (inline `token` or
+  read once from `tokenFilePath` at listener startup, matching
+  `EffectiveTLS`'s own deferral of certificate loading to listener
+  startup rather than config-resolution time). `apiauth.Middleware` adapts
+  it to `net/http` (Blockfrost, Mesh, UTxO RPC's own HTTP mux), responding
+  `401` and never calling the wrapped handler on a missing/invalid
+  credential. `apiauth.Interceptor` adapts the identical `Verifier` to a
+  `connect.Interceptor` (UTxO RPC's Connect/gRPC handlers, including
+  health and reflection — there is no separate unauthenticated allowlist
+  for those two), responding `connect.CodeUnauthenticated` (surfaced over
+  HTTP as `401` by the Connect protocol). This is a deliberate design
+  choice, applied uniformly across all three providers, not a
+  UTxO-RPC-specific gap: Blockfrost's own `GET /health` route sits behind
+  the identical `apiauth.Middleware` wrapping its whole mux, so no provider
+  carves out an unauthenticated allowlist for health/liveness checking once
+  `auth.mode: token` is set. The operator-facing consequence — a
+  container-orchestrator liveness/readiness probe against these routes
+  needs to present the shared credential once auth is enabled, or must be
+  redirected to a plain TCP check or a separate unauthenticated path — is
+  documented in the README's "Authentication" section rather than solved
+  in code, to keep every route on an authenticated listener behind the
+  single uniform policy an operator configured. Neither adapter
+  re-implements comparison logic; both read a `Authorization: Bearer
+  <token>` header (or,
+  additionally, Blockfrost's own `project_id: <token>` header — see
+  below) and delegate to the same `Verify` call.
+- **Ordering with CORS.** `httpcors.Handler` must wrap `apiauth.Middleware`
+  (CORS outer, auth inner), not the reverse: it fully answers an `OPTIONS`
+  preflight itself and never invokes the wrapped handler for one, and
+  browsers never attach `Authorization` to a preflight request — requiring
+  a credential there would make cross-origin browser access impossible
+  regardless of what the real request later sends. Every other request,
+  including a non-preflight `OPTIONS`, still authenticates normally. All
+  three providers wire the chain in this order; `*_test.go`'s
+  `TestServerCORSPreflightBypassesAuth`/`TestBlockfrostCORSPreflightBypassesAuth`/
+  `TestUtxorpcCORSPreflightBypassesAuth` pin it down.
+- **Blockfrost's `project_id` header is an alias for the same shared
+  token**, not a separate credential mechanism: real Blockfrost clients
+  send their API key as `project_id: <value>` rather than a bearer
+  token, so `apiauth.Middleware(verifier, apiauth.WithAliasHeader("project_id"))`
+  accepts that header's raw value as equivalent to
+  `Authorization: Bearer <value>`. Configuring `auth.mode: token` secures
+  Blockfrost against both header styles from the one configured
+  `token`/`tokenFilePath` — there is no separate `project_id` setting.
+- **Redaction.** `AuthPolicy`/`EffectiveAuth` implement `slog.LogValuer`
+  (`LogValue`), replacing `token` with `"***redacted***"` in any
+  structured log call; `tokenFilePath` (a filesystem path, not a secret)
+  and `mode` are logged as-is. Error messages from `Resolve` never embed
+  the token or certificate/key file contents, only paths and mode names.
+- **Compatibility.** The pre-#2996 root `tlsCertFilePath`/`tlsKeyFilePath`
+  fields (and the `--utxorpc-tls-cert-file-path`/`--utxorpc-tls-key-file-path`
+  flags and `WithUtxorpcTlsCertFilePath`/`WithUtxorpcTlsKeyFilePath`
+  options that set them) remain exactly what they were: a **UTxO
+  RPC-only** default TLS policy, expressed as the lowest-priority input to
+  the merge above (`node.go`'s `legacyUtxorpcTLSPolicy`). They are
+  deliberately **not** promoted into the shared `api.tls` default: doing
+  so would silently switch Blockfrost/Mesh from plaintext to TLS on
+  upgrade for any deployment that had set them only for UTxO RPC, which
+  they never protected. An operator opting Blockfrost/Mesh into TLS does so
+  explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
+  `bindAddr` and `corsAllowedOrigins` are unaffected by any of this and
+  stay at the `Config` root exactly as before: `bindAddr` is not
+  API-specific (the relay/NtN and metrics/debug listeners use it too), and
+  `corsAllowedOrigins`'s single shared value already applies uniformly to
+  all three API providers today, so duplicating either field under `api:`
+  would only add a second source of truth with no behavioral gain.
+  Authentication has no legacy root field at all — its default is simply
+  `"disabled"` everywhere, so existing reverse-proxy/no-auth deployments
+  are unaffected regardless.
 
 ### Blockfrost API (`api/blockfrost/`)
+
+TLS and token authentication (including the `project_id` header alias) are
+configured through `plugins.api.blockfrost.config.tls`/`config.auth`; see
+"API security" above.
 
 A Blockfrost-compatible REST API that provides read access to chain data and
 transaction submission. The current router includes health/root, blocks,
@@ -3242,11 +3424,43 @@ datum metadata are not yet sourced and return `null`.
 
 ### Mesh API (`api/mesh/`)
 
+TLS and token authentication are configured through
+`plugins.api.mesh.config.tls`/`config.auth`; see "API security" above.
+
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
+
+The server depends on four narrow interfaces (`api/mesh/node_interface.go`) —
+`MeshChain`, `MeshDatabase`, `MeshLedgerState`, and `MeshMempool` — rather than
+on the concrete chain, database, ledger, and mempool types, so the handlers stay
+free of storage-layer concerns and are testable without a node.
+`meshDatabaseAdapter` (`api/mesh/adapter.go`) is the only binding between those
+interfaces and real storage.
+
+Two contracts follow from that boundary:
+
+- **Block numbering.** `block_identifier.index` is the Cardano block height in
+  both directions: `/block` reports it, and `/block` accepts it. The blob
+  store's own block index is 1-based (`database.BlockInitialIndex`), so
+  `meshDatabaseAdapter.BlockByIndex` translates height to internal index, the
+  same translation `api/blockfrost`'s block-by-height lookup and
+  `midnight/server`'s `databaseAdapter` perform. Handlers deal only in
+  consensus block numbers.
+- **Historical balances are pinned to the requested point.**
+  `/network/options` advertises `historical_balance_lookup: true`, and
+  `/account/balance` honors it. A request carrying a `block_identifier`
+  resolves that block through the same lookup `/block` uses, reads the UTxO set
+  at the block's slot via `MeshLedgerState.UtxosByAddressAtSlot` (UTxOs added
+  at or before the slot and not spent until after it), and echoes the resolved
+  block back as the response's `block_identifier` — never the tip. A point the
+  node cannot resolve, including the hash of a rolled-back block, fails with
+  `block not found` rather than falling back to another point. An identifier
+  carrying neither hash nor index is treated as absent, since clients commonly
+  send the field unconditionally. `/account/coins` has no block identifier in
+  the Rosetta schema and always reports the tip.
 
 ### UTxO RPC (`api/utxorpc/`)
 
-A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. Supports optional TLS.
+A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. TLS and token authentication are configured through the shared `plugins.api.utxorpc.config.tls`/`config.auth` surface described in "API security" above (applied to every Connect/gRPC handler this listener serves, including health and reflection), not a UTxO RPC-specific mechanism; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that same `tls` policy.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
@@ -4209,6 +4423,19 @@ The pre-plugin API port names `DINGO_UTXORPC_PORT`,
 their `DINGO_PLUGINS_API_*_CONFIG_PORT` counterparts. Within the environment
 tier, the plugin-form name takes precedence when both forms are set.
 
+The `api.tls`/`api.auth` shared defaults (`--api-tls-mode`/`DINGO_API_TLS_MODE`/
+`api.tls.mode` and their `certFilePath`/`keyFilePath`/auth counterparts;
+see "API security" under External Interfaces) participate in this same
+CLI > environment > YAML > defaults source precedence like any other
+`Config` field. That is a separate, orthogonal axis from *scope*
+inheritance — explicit provider field (`plugins.api.<name>.config.tls`) >
+shared top-level default (`api.tls`) > disabled — which is resolved once at
+node composition (`node.go`'s `apiProviderConfig`), after every
+configuration source has already been merged into a single `Config`. A CLI
+flag can override which *value* the top-level default carries; it cannot
+skip the scope-resolution step that decides whether a given provider
+actually uses that value, an override of its own, or neither.
+
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
@@ -4889,6 +5116,26 @@ includes zero-amount withdrawals: they move no rewards but still prove account
 activity under CIP-0163. Rollback affected-set and last-witness queries include
 this history, and rollback removes its orphaned rows.
 
+The insert is elided when the gate is off. `account_withdrawal_witness` is
+read only by the rollback/renewal queries above, so on a gate-off node — the
+default for any node not running CIP-0163 — the row would never be read;
+writing it anyway is pure write amplification on a table that grows without
+bound and is never pruned. `LedgerDelta.apply` sets
+`BatchedTxIngestOpts.SkipWithdrawalWitnessWrite` to
+`!LedgerStateConfig.DelegatorInactivityEnabled` on the live-apply path
+(`ledger/delta.go`), which `Database.SetTransactionWithOpts` threads down to
+`MetadataStore.SetTransaction`'s `skipWithdrawalWitness` argument
+(`database/plugin/metadata/sqlstore/transaction_write.go`).
+`internal/node.Backfill`'s batched historical-replay path derives it the same
+way, from its own `delegatorInactivityEnabled` field. Neither caller relies on
+the field's zero-value default: `mithril/sync.go` hardcodes it false, since
+the gate can never be on for a Mithril bootstrap (see
+`errMithrilInactivityIncompatible` below); `cmd/dingo/serve.go`'s
+`resumeBackfill` instead passes the real `DelegatorInactivityEnabled` config
+value, which can genuinely be true there -- it resumes any pending API-mode
+backfill checkpoint, not only a Mithril-originated one, and does not itself
+check the gate.
+
 At the authoritative SNAP point, both reward and leader-election Mark snapshots
 consume `RewardLiveStake` instead of scanning certificate and UTxO history. The
 snapshot manager reads every registered, delegated row (including zero-stake
@@ -4930,6 +5177,46 @@ sync from genesis.
 (Independently, the snapshot manager also does not synthesize the N-1/N-2 Mark
 rows from live `account.expiration_epoch`, which may reflect a later renewal; the
 current-epoch N row is still captured.)
+
+Besides the Mithril gap above, expiry reconstruction (the stake-aggregation
+chokepoint's `historicalExpirationSQL` and the reward-crediting guard's
+`guardedExpiredRewardCredentials`) also requires two from-genesis nodes to
+retain the same witness history for the same slot -- the ten
+stake-witnessing certificate tables (`accountWitnessTables`:
+`stake_registration`, `stake_registration_delegation`,
+`stake_vote_registration_delegation`, `vote_registration_delegation`,
+`registration`, `stake_deregistration`, `deregistration`, `stake_delegation`,
+`stake_vote_delegation`, `vote_delegation`), `account_reward_delta`, and
+`account_withdrawal_witness` (issue #2920). This is a question about
+*retention* of rows already written, separate from whether a row gets
+written in the first place: `account_withdrawal_witness` writes are
+themselves gated by `BatchedTxIngestOpts.SkipWithdrawalWitnessWrite` (issue
+#2919, see above) and skipped whenever `DelegatorInactivityEnabled` is off, so
+a node only ever has *complete* `account_withdrawal_witness` coverage while
+that setting is on. That write-side gate is the same network-wide,
+must-match setting the gate itself already requires, so it cannot differ
+between two honestly-configured nodes; any pre-activation gap it leaves is
+what the one-time activation stamp above exists to paper over uniformly, not
+a new divergence source.
+Retention itself is never configurable or age-based for any of these tables
+-- the only statements that delete rows from them are
+`DeleteCertificatesAfterSlot` and the `account_reward_delta`/
+`account_withdrawal_witness` deletes in
+`database/plugin/metadata/sqlstore/account.go`, all of the form `added_slot >
+slot` for a rollback or lifecycle-truncate target slot (the same primitive
+both share, see "CIP-0163 Bookkeeping Shared Between Ledger Rollback and
+Lifecycle Truncate" below). That target slot is derived from consensus chain
+state, not wall-clock time or per-node configuration, so it produces
+byte-identical retained history on every node that rolls back or truncates to
+the same point; a node that has not rolled back or lifecycle-truncated past a
+row retains it indefinitely, all the way back to genesis.
+`historicalExpirationSQL` scans this history with no bounded lookback window
+-- it takes the single latest `added_slot <= slot` across every table,
+however far back that is -- so as long as a row is retained, which it always
+is short of a rollback or truncate past it, the reconstructed expiry is exact
+and identical on every node running the same write-side configuration. There
+is therefore no retention-driven divergence to guard against beyond the
+Mithril case already refused above.
 
 ### Query Interface
 

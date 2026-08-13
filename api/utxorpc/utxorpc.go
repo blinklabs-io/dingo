@@ -16,7 +16,6 @@ package utxorpc
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +31,8 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
+	"github.com/blinklabs-io/dingo/internal/apiauth"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
@@ -65,20 +66,25 @@ const (
 )
 
 type Utxorpc struct {
-	server *http.Server
-	config UtxorpcConfig
-	mu     sync.Mutex
+	server   *http.Server
+	config   UtxorpcConfig
+	verifier *apiauth.Verifier
+	mu       sync.Mutex
 }
 
 type UtxorpcConfig struct {
-	Logger          *slog.Logger
-	EventBus        UtxorpcEventBus
-	LedgerState     UtxorpcLedgerState
-	Mempool         UtxorpcMempool
-	TlsCertFilePath string
-	TlsKeyFilePath  string
-	Host            string
-	Port            uint
+	Logger      *slog.Logger
+	EventBus    UtxorpcEventBus
+	LedgerState UtxorpcLedgerState
+	Mempool     UtxorpcMempool
+	// TLS and Auth are the resolved (merged, validated) equivalents of
+	// what was previously TlsCertFilePath/TlsKeyFilePath fields here --
+	// see ProviderConfig's doc comment and ARCHITECTURE.md's "API
+	// security" section.
+	TLS  apiconfig.EffectiveTLS
+	Auth apiconfig.EffectiveAuth
+	Host string
+	Port uint
 
 	// Request size limits (0 = use default)
 	MaxBlockRefs int
@@ -169,11 +175,28 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	if u.config.Mempool != nil && isNilInterface(u.config.Mempool) {
 		return errors.New("utxorpc: Mempool must not be a typed nil")
 	}
+	// Built before the mux so newServeMux can install the shared
+	// credential-verification interceptor (internal/apiauth) on every
+	// Connect/gRPC handler it registers, including health and reflection.
+	verifier, err := apiauth.NewVerifier(u.config.Auth)
+	if err != nil {
+		return fmt.Errorf("utxorpc: %w", err)
+	}
 	u.mu.Lock()
 	if u.server != nil {
 		u.mu.Unlock()
 		return errors.New("server already started")
 	}
+	u.verifier = verifier
+	// CORS must wrap authentication, not the reverse: httpcors.Handler
+	// fully answers an OPTIONS preflight itself and never calls the
+	// handler it wraps for one, so browsers -- which never attach
+	// Authorization to a preflight request -- never need a credential to
+	// pass CORS negotiation. Every other request, including a
+	// non-preflight OPTIONS, still reaches the mux (and so the
+	// per-procedure auth interceptor) normally. See internal/apiauth's
+	// Middleware doc comment for the HTTP-side statement of the same
+	// ordering rule.
 	handler := httpcors.Handler(
 		u.newServeMux(),
 		httpcors.Config{
@@ -181,7 +204,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 		},
 	)
 	var server *http.Server
-	if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
+	if u.config.TLS.Enabled {
 		u.config.Logger.Info(
 			fmt.Sprintf(
 				"starting utxorpc gRPC TLS listener on %s:%d",
@@ -270,6 +293,16 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 func (u *Utxorpc) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	compress1KB := connect.WithCompressMinBytes(1024)
+	// When authentication is enabled, every Connect/gRPC handler this mux
+	// registers -- including health and reflection -- requires a valid
+	// credential; there is no separate unauthenticated allowlist for
+	// those two, unlike CORS preflight (see Start's doc comment).
+	if u.verifier != nil {
+		compress1KB = connect.WithOptions(
+			compress1KB,
+			connect.WithInterceptors(apiauth.Interceptor(u.verifier)),
+		)
+	}
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
 		&queryServiceServer{utxorpc: u},
 		compress1KB,
@@ -519,30 +552,20 @@ func forceCloseUtxorpc(server *http.Server, shutdownErr <-chan error) error {
 // keypair synchronously so port and certificate errors surface before
 // returning, then serves in a background goroutine.
 func (u *Utxorpc) startServer(server *http.Server) error {
-	if (u.config.TlsCertFilePath != "") != (u.config.TlsKeyFilePath != "") {
-		return errors.New(
-			"failed to start utxorpc gRPC server: both tls cert and key must be specified",
-		)
-	}
-	useTLS := u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != ""
+	useTLS := u.config.TLS.Enabled
 	serverType := "non-TLS"
 	if useTLS {
 		serverType = "TLS"
-		cert, err := tls.LoadX509KeyPair(
-			u.config.TlsCertFilePath,
-			u.config.TlsKeyFilePath,
-		)
-		if err != nil {
+		if err := tlsutil.ConfigureServerTLS(
+			server,
+			u.config.TLS.CertFilePath,
+			u.config.TLS.KeyFilePath,
+		); err != nil {
 			return fmt.Errorf(
 				"failed to load TLS keypair for utxorpc gRPC %s server: %w",
 				serverType, err,
 			)
 		}
-		server.TLSConfig = tlsutil.ServerConfig(server.TLSConfig)
-		server.TLSConfig.Certificates = append(
-			server.TLSConfig.Certificates,
-			cert,
-		)
 	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {

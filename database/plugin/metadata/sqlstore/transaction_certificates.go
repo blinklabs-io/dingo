@@ -578,7 +578,10 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     pool = excluded.pool,
     drep = excluded.drep,
     added_slot = excluded.added_slot,
-    created_slot = MIN(account.created_slot, excluded.created_slot),
+    created_slot = CASE
+        WHEN account.created_slot <= excluded.created_slot THEN account.created_slot
+        ELSE excluded.created_slot
+    END,
     drep_type = excluded.drep_type,
     active = excluded.active`,
 		key,

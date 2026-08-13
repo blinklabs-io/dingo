@@ -37,6 +37,12 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
+		// Deliberately has no CLI flag (unlike every sibling api.auth/
+		// api.tls field): a raw inline secret should not be encouraged
+		// onto a command line, where it is visible via `ps` and shell
+		// history. Use --api-auth-token-file-path (API.Auth.TokenFilePath)
+		// or YAML instead. See AuthPolicy.Token's own doc comment.
+		"API.Auth.Token":                       {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Mempool.Config":               {},

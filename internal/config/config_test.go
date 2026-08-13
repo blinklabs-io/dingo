@@ -15,9 +15,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1863,4 +1865,104 @@ func TestGetConfigSnapshotDoesNotShareNestedPluginConfig(t *testing.T) {
 		globalConfig.Plugins.Mempool.Config["nested"].(map[string]any)["inner"],
 		"mutating a snapshot must not reach globalConfig",
 	)
+}
+
+// exampleConfigPath returns the path to the repo's bundled
+// dingo.yaml.example, independent of the working directory the test binary
+// runs from.
+func exampleConfigPath() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(
+		filepath.Dir(thisFile),
+		"..",
+		"..",
+		"dingo.yaml.example",
+	)
+}
+
+// TestLoad_ExampleConfigParses guards against regressions like #3169, where
+// a single mis-indented line in dingo.yaml.example (the default config
+// shipped to operators) produced a YAML syntax error on startup with no
+// indication of which field was affected. Any change to dingo.yaml.example
+// must keep it loadable as-is.
+func TestLoad_ExampleConfigParses(t *testing.T) {
+	resetGlobalConfig()
+
+	path := exampleConfigPath()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("dingo.yaml.example not found at %s: %v", path, err)
+	}
+
+	cfg, err := LoadConfig(path)
+	require.NoError(
+		t,
+		err,
+		"dingo.yaml.example must parse cleanly as shipped",
+	)
+	require.NotNil(t, cfg)
+}
+
+// TestLoad_ParseErrorIncludesConfigFilePath guards the error-message
+// behavior introduced alongside TestLoad_ExampleConfigParses: every parse
+// failure path in LoadConfig must name the resolved config file so a
+// regression that drops configFile from one of the error wraps is caught.
+func TestLoad_ParseErrorIncludesConfigFilePath(t *testing.T) {
+	t.Run("invalid YAML syntax", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-syntax.yaml")
+		yamlContent := "network: mainnet\n  badIndent: true\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section decode error", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-wrapped-decode.yaml")
+		yamlContent := `
+config:
+  network: mainnet
+  unknownField: true
+`
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section is nil", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "nil-config-section.yaml")
+		yamlContent := "config:\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		expected := fmt.Sprintf(
+			"config section in %s must be a mapping",
+			tmpFile,
+		)
+		assert.Equal(t, expected, err.Error())
+	})
 }

@@ -17,8 +17,8 @@
 package aws
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -29,24 +29,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hasS3Credentials mirrors internal/integration/cloud_test.go's check of the
-// same name so this suite skips/runs under the same conditions: CI's MinIO
-// service always sets AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, so this runs
-// automatically in CI; a bare local `go test -tags dingo_extra_plugins ./...`
-// with no S3-compatible endpoint configured skips cleanly instead of failing.
-func hasS3Credentials() bool {
-	if os.Getenv("AWS_ACCESS_KEY_ID") != "" &&
-		os.Getenv("AWS_SECRET_ACCESS_KEY") != "" {
-		return true
-	}
-	home := os.Getenv("HOME")
-	if home != "" {
-		if _, err := os.Stat(filepath.Join(home, ".aws", "credentials")); err == nil {
-			return true
-		}
-	}
-	return false
-}
+// hasS3Credentials is defined in backup_test.go and shared across this
+// package's test files.
 
 func TestBlobStoreConformance(t *testing.T) {
 	if !hasS3Credentials() {
@@ -184,40 +168,18 @@ func TestBlobStoreBadCredentialsFailsCleanly(t *testing.T) {
 	require.NoError(t, txn.Rollback())
 }
 
-// newTestS3Store constructs a store against the same bucket/endpoint every
-// other test in this file uses, isolated by a per-test key prefix.
-func newTestS3Store(t *testing.T) *BlobStoreS3 {
-	t.Helper()
-	bucket := os.Getenv("DINGO_TEST_S3_BUCKET")
-	if bucket == "" {
-		bucket = "dingo-test-bucket"
-	}
-	opts := []BlobStoreS3OptionFunc{
-		WithBucket(bucket),
-		WithRegion("us-east-1"),
-		WithPrefix("storagetest-block-url-" + t.Name() + "/"),
-	}
-	if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
-		opts = append(opts, WithEndpoint(endpoint))
-	}
-	store, err := NewWithOptions(opts...)
-	require.NoError(t, err)
-	require.NoError(t, store.Start())
-	t.Cleanup(func() {
-		require.NoError(t, store.Stop())
-	})
-	return store
-}
+// newTestS3Store is defined in backup_test.go and shared across this
+// package's test files.
 
 // TestBlobStoreGetBlockURLSignsCommittedBlock exercises the happy path no
 // existing test in this package covers: a committed block's GetBlockURL
 // returns a usable, parseable, non-expired presigned URL and the block's
 // metadata.
 func TestBlobStoreGetBlockURLSignsCommittedBlock(t *testing.T) {
-	if !hasS3Credentials() {
-		t.Skip("S3 credentials not found, skipping test")
-	}
-	store := newTestS3Store(t)
+	store := newTestS3Store(
+		t,
+		fmt.Sprintf("block-url-signs-%d/", time.Now().UnixNano()),
+	)
 	slot := uint64(500)
 	hash := []byte("block-url-committed")
 
@@ -247,10 +209,10 @@ func TestBlobStoreGetBlockURLSignsCommittedBlock(t *testing.T) {
 // any network call, but constructing a real S3 client still needs a
 // reachable endpoint, so this is gated the same as every other test here.
 func TestBlobStoreGetBlockURLRejectsStagedUncommittedBlock(t *testing.T) {
-	if !hasS3Credentials() {
-		t.Skip("S3 credentials not found, skipping test")
-	}
-	store := newTestS3Store(t)
+	store := newTestS3Store(
+		t,
+		fmt.Sprintf("block-url-staged-%d/", time.Now().UnixNano()),
+	)
 	slot := uint64(600)
 	hash := []byte("block-url-staged")
 

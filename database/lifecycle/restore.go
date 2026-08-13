@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -441,13 +442,72 @@ func requireEmptyOrAbsent(dir string) error {
 	return nil
 }
 
+// blobBackupMagic/blobBackupVersion mirror blobbackup.Magic/blobbackup.
+// Version (database/plugin/blob/internal/blobbackup) exactly, duplicated
+// here rather than imported: that package is internal to
+// database/plugin/blob, and Go's internal-package visibility rules block
+// importing it from this package's own, separate tree. Kept in sync by
+// hand -- if blobbackup's header format ever changes, this must change
+// with it.
+var blobBackupMagic = [4]byte{'D', 'B', 'L', 'B'}
+
+const blobBackupVersion = 2
+
+// validateBlobBackupHeader confirms path's first 5 bytes are a recognized
+// blobbackup magic+version header, without needing a real blob store (or
+// resolving the blob plugin at all) to check it. A corrupted, truncated,
+// or simply wrong file at this path would otherwise only be discovered by
+// restoreBlobStore, which runs after restoreMetadataStore's Resettable.
+// Reset has already destroyed a live remote metadata target's real
+// tables -- see metadata.BackupValidator's doc comment for the same
+// concern on the metadata side. This is necessarily shallow (only the
+// fixed 5-byte header, not the full stream's per-record framing or its
+// terminator checksum) since this package cannot reach blobbackup's own
+// deeper validation logic across that internal-package boundary. Callers
+// must only use this for a snapshotDir whose manifest actually recorded a
+// blobbackup-format blob plugin (s3 or gcs) -- badger's native format
+// starts with different bytes entirely.
+func validateBlobBackupHeader(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %q: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck
+	var header [5]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return fmt.Errorf("read %q header: %w", path, err)
+	}
+	if [4]byte(header[:4]) != blobBackupMagic {
+		return fmt.Errorf("%q is not a recognized blob backup stream", path)
+	}
+	if header[4] != blobBackupVersion {
+		return fmt.Errorf(
+			"%q has unsupported blob backup version %d", path, header[4],
+		)
+	}
+	return nil
+}
+
 // restoreMetadataStore resolves the manifest-recorded metadata plugin
 // against targetDataDir just long enough to construct it (plugin.Resolve
 // always constructs and starts a provider together — there is no
 // construct-only step), then stops it immediately and undoes whatever it
-// created on disk, since metadata.Restorer's contract requires
-// RestoreFrom to run before the store has ever been started, or after
-// Close() — which StopCapability guarantees here.
+// created, since metadata.Restorer's contract requires RestoreFrom to run
+// before the store has ever been started, or after Close() — which
+// StopCapability guarantees here.
+//
+// "Undo" is two different operations depending on the backend. For a
+// file-based store (sqlite/badger), deleting targetDataDir is enough: that
+// directory is the entirety of what the brief resolve-and-start touched.
+// For a live client/server store (postgres/mysql), that brief start
+// instead ran real migrations against the actual configured remote
+// database — a directory wipe does nothing to that (confirmed via a live
+// end-to-end restore attempt against a real Postgres server, which failed
+// because the migrated-but-otherwise-empty database no longer looked
+// "empty" to RestoreFrom's own precondition check). Resettable-implementing
+// stores get an explicit Reset call for this, and it must happen before
+// StopCapability: Reset needs the still-open connection pool, which
+// StopCapability closes.
 func restoreMetadataStore(
 	ctx context.Context,
 	host *plugin.Host,
@@ -482,12 +542,82 @@ func restoreMetadataStore(
 			manifest.MetadataPlugin,
 		)
 	}
+	backupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
+	if resettable, ok := store.(metadata.Resettable); ok {
+		// Resettable.Reset destroys a live client/server target's actual
+		// tables directly, with no staging copy and no rollback -- unlike
+		// the file-based (sqlite/badger) path, which only ever mutates a
+		// disposable stagingDir that RestoreValidated's caller-side defer
+		// discards on any later failure. Confirm both backups this restore
+		// intends to load actually exist before paying that cost -- not
+		// just the metadata one: restoreBlobStore opens BlobBackupFileName
+		// later, after this Reset has already run, so a missing blob
+		// backup would otherwise still leave a live remote metadata target
+		// reset with no way back, even though the overall restore is
+		// guaranteed to fail moments later. Existence only, deliberately
+		// not also requiring a regular file: TestRestoreInterruptedByProcess
+		// KillLeavesTargetUntouched (database/lifecycle/restore_interrupt_
+		// test.go) legitimately replaces the metadata backup with a FIFO to
+		// get a deterministic, timing-guess-free synchronization point for
+		// its own real-SIGKILL test, and os.Stat (unlike os.Open) never
+		// blocks on a FIFO either way, so this check doesn't interfere with
+		// that regardless.
+		for _, name := range []string{MetadataBackupFileName, BlobBackupFileName} {
+			path := filepath.Join(snapshotDir, name)
+			if _, err := os.Stat(path); err != nil {
+				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+				return fmt.Errorf("backup %q: %w", path, err)
+			}
+		}
+		// Existence alone doesn't catch a corrupt or truncated backup --
+		// RestoreFrom's own parsing eventually would, but only after this
+		// Reset has already destroyed the live target's real tables. Where
+		// a plugin can check its own backup's structural integrity cheaply
+		// without touching any database (see metadata.BackupValidator's doc
+		// comment), do that first.
+		if validator, ok := store.(metadata.BackupValidator); ok {
+			if err := validator.ValidateBackup(ctx, backupPath); err != nil {
+				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+				return fmt.Errorf(
+					"validate metadata backup %q: %w", backupPath, err,
+				)
+			}
+		}
+		// The blob backup gets the same treatment, shallower: this package
+		// cannot import database/plugin/blob/internal/blobbackup (Go's
+		// internal-package visibility blocks it from outside that tree), so
+		// this only confirms the blobbackup-format header (magic + version)
+		// that s3/gcs both use, not the full per-record framing or its
+		// terminator checksum blobbackup.Restore itself verifies. badger
+		// uses an entirely different native format, not blobbackup's, so
+		// this only applies when the manifest actually recorded one of the
+		// plugins that writes it.
+		if manifest.BlobPlugin == "s3" || manifest.BlobPlugin == "gcs" {
+			blobBackupPath := filepath.Join(snapshotDir, BlobBackupFileName)
+			if err := validateBlobBackupHeader(blobBackupPath); err != nil {
+				_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+				return fmt.Errorf(
+					"validate blob backup %q: %w", blobBackupPath, err,
+				)
+			}
+		}
+		if err := resettable.Reset(ctx); err != nil {
+			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
+			return fmt.Errorf(
+				"reset metadata plugin %q before restore: %w",
+				manifest.MetadataPlugin,
+				err,
+			)
+		}
+	}
 	if err := host.StopCapability(ctx, plugin.CapabilityStorageMetadata); err != nil {
 		return fmt.Errorf("stop metadata plugin before restore: %w", err)
 	}
 	// RestoreFrom refuses to overwrite an existing destination -- undo
 	// whatever the brief resolve-and-start above wrote to targetDataDir so
-	// it looks exactly as empty as before that call.
+	// it looks exactly as empty as before that call. Harmless no-op for a
+	// live client/server store, which never wrote real data under
+	// targetDataDir in the first place.
 	if err := os.RemoveAll(targetDataDir); err != nil {
 		return fmt.Errorf(
 			"reset target data directory %q: %w", targetDataDir, err,
@@ -498,7 +628,6 @@ func restoreMetadataStore(
 			"recreate target data directory %q: %w", targetDataDir, err,
 		)
 	}
-	backupPath := filepath.Join(snapshotDir, MetadataBackupFileName)
 	if err := restorer.RestoreFrom(ctx, backupPath); err != nil {
 		return fmt.Errorf("restore metadata store: %w", err)
 	}

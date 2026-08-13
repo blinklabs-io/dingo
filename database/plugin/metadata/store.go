@@ -1278,6 +1278,7 @@ type MetadataStore interface {
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
+		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
 		types.Txn,
 	) error
 
@@ -1298,6 +1299,7 @@ type MetadataStore interface {
 		ocommon.Point,
 		uint32, // idx
 		map[int]uint64, // certDeposits
+		bool, // skipWithdrawalWitness: see SetTransaction
 		types.MetadataBatchAccumulator,
 		types.Txn,
 	) error

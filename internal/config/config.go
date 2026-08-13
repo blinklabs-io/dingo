@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -441,24 +442,27 @@ func DefaultMidnightConfig() MidnightConfig {
 }
 
 type Config struct {
-	Plugins                PluginsConfig `yaml:"plugins"`
-	TlsKeyFilePath         string        `yaml:"tlsKeyFilePath"         envconfig:"TLS_KEY_FILE_PATH"`
-	Topology               string        `yaml:"topology"`
-	CardanoConfig          string        `yaml:"cardanoConfig"          envconfig:"config"`
-	DatabasePath           string        `yaml:"databasePath"                                                       split_words:"true"`
-	SocketPath             string        `yaml:"socketPath"                                                         split_words:"true"`
-	TlsCertFilePath        string        `yaml:"tlsCertFilePath"        envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr               string        `yaml:"bindAddr"                                                           split_words:"true"`
-	PrivateBindAddr        string        `yaml:"privateBindAddr"                                                    split_words:"true"`
-	ShutdownTimeout        string        `yaml:"shutdownTimeout"                                                    split_words:"true"`
-	LedgerCatchupTimeout   string        `yaml:"ledgerCatchupTimeout"   envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network                string        `yaml:"network"`
-	NetworkMagic           uint32        `yaml:"networkMagic"                                                       split_words:"true"`
-	PrivatePort            uint          `yaml:"privatePort"                                                        split_words:"true"`
-	RelayPort              uint          `yaml:"relayPort"              envconfig:"port"`
-	BarkBaseUrl            string        `yaml:"barkBaseUrl"            envconfig:"DINGO_BARK_BASE_URL"`
-	BarkBlockDownloadHosts []string      `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint          `yaml:"barkPort"               envconfig:"DINGO_BARK_PORT"`
+	Plugins PluginsConfig `yaml:"plugins"`
+	// API holds shared TLS/auth policy defaults for every selected
+	// plugins.api.* provider. See APIConfig's own doc comment.
+	API                    APIConfig `yaml:"api"`
+	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"         envconfig:"TLS_KEY_FILE_PATH"`
+	Topology               string    `yaml:"topology"`
+	CardanoConfig          string    `yaml:"cardanoConfig"          envconfig:"config"`
+	DatabasePath           string    `yaml:"databasePath"                                                       split_words:"true"`
+	SocketPath             string    `yaml:"socketPath"                                                         split_words:"true"`
+	TlsCertFilePath        string    `yaml:"tlsCertFilePath"        envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string    `yaml:"bindAddr"                                                           split_words:"true"`
+	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                    split_words:"true"`
+	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                    split_words:"true"`
+	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"   envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string    `yaml:"network"`
+	NetworkMagic           uint32    `yaml:"networkMagic"                                                       split_words:"true"`
+	PrivatePort            uint      `yaml:"privatePort"                                                        split_words:"true"`
+	RelayPort              uint      `yaml:"relayPort"              envconfig:"port"`
+	BarkBaseUrl            string    `yaml:"barkBaseUrl"            envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint      `yaml:"barkPort"               envconfig:"DINGO_BARK_PORT"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
@@ -664,6 +668,25 @@ type APIPluginsConfig struct {
 	Blockfrost hostplugin.Selection `yaml:"blockfrost"`
 	Mesh       hostplugin.Selection `yaml:"mesh"`
 	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
+}
+
+// APIConfig holds the shared TLS and authentication policy defaults
+// applied to every selected plugins.api.* provider (Blockfrost, Mesh,
+// UTxORPC) unless that provider's own plugins.api.<name>.config.tls/auth
+// overrides a field. See ARCHITECTURE.md's "API security" section and
+// internal/apiconfig for the merge/validation rules; composition (node.go)
+// performs the actual per-provider merge, not this package.
+//
+// bindAddr and corsAllowedOrigins deliberately stay at the Config root
+// rather than moving under this section: bindAddr is not API-specific
+// (the relay/NtN and metrics/debug listeners use it too), and
+// corsAllowedOrigins already applies uniformly to all three API providers
+// today with no override need identified by dingo#2996/#2998, so
+// duplicating either here would only add a second source of truth for no
+// behavioral gain.
+type APIConfig struct {
+	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
+	Auth apiconfig.AuthPolicy `yaml:"auth"`
 }
 
 func defaultPluginsConfig() PluginsConfig {
@@ -1044,6 +1067,35 @@ func clonePluginSelection(selection hostplugin.Selection) hostplugin.Selection {
 	return clone
 }
 
+func cloneStringPtr(p *string) *string {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// cloneTLSPolicy and cloneAuthPolicy deep-copy every pointer field so a
+// clone never shares a *string with the Config it was cloned from --
+// matching PeerSharing's own defensive-copy discipline just above, even
+// though every pointer in practice is replaced wholesale (never mutated
+// in place) once set.
+func cloneTLSPolicy(p apiconfig.TLSPolicy) apiconfig.TLSPolicy {
+	return apiconfig.TLSPolicy{
+		Mode:         cloneStringPtr(p.Mode),
+		CertFilePath: cloneStringPtr(p.CertFilePath),
+		KeyFilePath:  cloneStringPtr(p.KeyFilePath),
+	}
+}
+
+func cloneAuthPolicy(p apiconfig.AuthPolicy) apiconfig.AuthPolicy {
+	return apiconfig.AuthPolicy{
+		Mode:          cloneStringPtr(p.Mode),
+		Token:         cloneStringPtr(p.Token),
+		TokenFilePath: cloneStringPtr(p.TokenFilePath),
+	}
+}
+
 func cloneConfig(cfg *Config) *Config {
 	if cfg == nil {
 		return nil
@@ -1058,6 +1110,8 @@ func cloneConfig(cfg *Config) *Config {
 		peerSharing := *cfg.PeerSharing
 		clone.PeerSharing = &peerSharing
 	}
+	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
+	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
 	if cfg.LeiosVoterPublicKeys != nil {
 		clone.LeiosVoterPublicKeys = make(
 			map[string]string,
@@ -1123,7 +1177,11 @@ func LoadConfig(configFile string) (*Config, error) {
 
 		var root map[string]yaml.Node
 		if err := yaml.Unmarshal(buf, &root); err != nil {
-			return nil, fmt.Errorf("error parsing config file: %w", err)
+			return nil, fmt.Errorf(
+				"error parsing config file %s: %w",
+				configFile,
+				err,
+			)
 		}
 		if _, wrapped := root["config"]; wrapped {
 			tempCfg := tempConfig{Config: cfg}
@@ -1131,16 +1189,27 @@ func LoadConfig(configFile string) (*Config, error) {
 			decoder.KnownFields(true)
 			if err := decoder.Decode(&tempCfg); err != nil &&
 				!errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("error parsing config section: %w", err)
+				return nil, fmt.Errorf(
+					"error parsing config section in %s: %w",
+					configFile,
+					err,
+				)
 			}
 			if tempCfg.Config == nil {
-				return nil, errors.New("config section must be a mapping")
+				return nil, fmt.Errorf(
+					"config section in %s must be a mapping",
+					configFile,
+				)
 			}
 		} else {
 			decoder := yaml.NewDecoder(bytes.NewReader(buf))
 			decoder.KnownFields(true)
 			if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("error parsing config file: %w", err)
+				return nil, fmt.Errorf(
+					"error parsing config file %s: %w",
+					configFile,
+					err,
+				)
 			}
 		}
 	}

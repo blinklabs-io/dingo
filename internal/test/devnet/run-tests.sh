@@ -25,8 +25,17 @@
 # Usage:
 #   ./run-tests.sh                    # Run all devnet tests (default: all-dingo network)
 #   ./run-tests.sh --conformance      # Run against the dingo + cardano-node reference network
+#   ./run-tests.sh --accelerated      # Run the fast event-driven scenario timeline
 #   ./run-tests.sh -run TestBasic     # Run specific test pattern
 #   ./run-tests.sh --keep-up          # Don't tear down on success (for debugging)
+#
+# --accelerated brings the network up on the accelerated spec (shorter
+# slots, epochs and security parameter) and runs the single scenario
+# timeline in scenarios/accelerated_timeline_test.go, which is bounded by
+# a hard timeout. It composes with --conformance to run the same timeline
+# against the dingo + cardano-node topology. Without it the canonical
+# timing network and the full suite run as before, which is what soak and
+# canary runs use.
 
 set -euo pipefail
 
@@ -36,14 +45,19 @@ COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 
 # Parse arguments
 KEEP_UP=false
+ACCELERATED=false
 # Mode selection: default dingo (all-dingo network), --conformance for the
 # dingo + cardano-node reference network.
 MODE="${MODE:-dingo}"
 TEST_ARGS=()
+USER_RUN_FILTER=false
 for arg in "$@"; do
   case "${arg}" in
     --keep-up)     KEEP_UP=true ;;
     --conformance) MODE="conformance" ;;
+    --accelerated) ACCELERATED=true ;;
+    -run|-run=*|-test.run|-test.run=*)
+                   USER_RUN_FILTER=true; TEST_ARGS+=("${arg}") ;;
     *)             TEST_ARGS+=("${arg}") ;;
   esac
 done
@@ -56,12 +70,48 @@ if [[ "${MODE}" == "conformance" ]]; then
   GO_TAGS="devnet devnet_conformance"
   HEALTH_SERVICES=(dingo-producer cardano-producer cardano-relay)
   TXPUMP_SERVICE="txpump"
+  SPEC_VAR="DEVNET_CONFORMANCE_SPEC"
+  CANONICAL_SPEC="./testnet.yaml"
+  ACCELERATED_SPEC="./testnet-accelerated.yaml"
 else
   export COMPOSE_PROFILES="dingo"
   GO_TAGS="devnet"
   HEALTH_SERVICES=(dingo-1 dingo-2 dingo-3 dingo-relay)
   TXPUMP_SERVICE="txpump-dingo"
+  SPEC_VAR="DEVNET_DINGO_SPEC"
+  CANONICAL_SPEC="./testnet-dingo.yaml"
+  ACCELERATED_SPEC="./testnet-dingo-accelerated.yaml"
 fi
+
+# Select the network spec the configurator generates genesis from, and
+# point the Go harness at the same file so its derived timings match the
+# network that is actually running.
+if [[ "${ACCELERATED}" == "true" ]]; then
+  ACTIVE_SPEC="${ACCELERATED_SPEC}"
+  export DEVNET_ACCELERATED=1
+else
+  ACTIVE_SPEC="${CANONICAL_SPEC}"
+  # Only --accelerated enables the accelerated scenario. Inheriting a stale
+  # DEVNET_ACCELERATED=1 would run it against the canonical-timing network,
+  # whose budget it is designed not to meet, failing the whole suite.
+  unset DEVNET_ACCELERATED
+fi
+export "${SPEC_VAR}=${ACTIVE_SPEC}"
+export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
+# The scenario stops and starts containers, and captures compose logs and
+# status on failure.
+export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"
+
+# Failure evidence goes here and is preserved when the run fails. A
+# caller-supplied directory is used as-is and never deleted; only one this
+# script created is cleaned up on success, so a passing run cannot destroy
+# a shared or pre-existing path.
+ARTIFACT_DIR_IS_OURS=false
+if [[ -z "${DEVNET_ARTIFACT_DIR:-}" ]]; then
+  DEVNET_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-artifacts.XXXXXX")"
+  ARTIFACT_DIR_IS_OURS=true
+fi
+export DEVNET_ARTIFACT_DIR
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -75,6 +125,33 @@ die()  { echo "[run-tests] ERROR: $*" >&2; exit 1; }
 # Cleanup on exit
 # --------------------------------------------------------------------------- #
 
+# collect_failure_artifacts preserves everything a post-mortem needs
+# before the network (and its volumes) are removed: container status, full
+# node logs, and the genesis/configuration the configurator generated.
+collect_failure_artifacts() {
+  local dest="${DEVNET_ARTIFACT_DIR}/network"
+  mkdir -p "${dest}" 2>/dev/null || return 0
+  docker compose -f "${COMPOSE_FILE}" ps --all \
+    >"${dest}/container-status.txt" 2>&1 || true
+  docker compose -f "${COMPOSE_FILE}" logs --no-color \
+    >"${dest}/compose.log" 2>&1 || true
+  cp "${SCRIPT_DIR}/${ACTIVE_SPEC#./}" "${dest}/" 2>/dev/null || true
+  # The generated genesis and node config live on the pool-1 config
+  # volume; copy them out while the volume still exists.
+  local configs_volume
+  configs_volume="$(docker volume ls \
+    --filter label=com.docker.compose.volume=p1-configs \
+    --format '{{.Name}}' | head -n1)"
+  if [[ -n "${configs_volume}" ]]; then
+    docker run --rm \
+      -v "${configs_volume}:/c:ro" \
+      -v "${dest}:/out" \
+      alpine sh -c 'cp -r /c/configs /out/generated-configs' \
+      2>/dev/null || true
+  fi
+  log "Failure artifacts preserved in ${DEVNET_ARTIFACT_DIR}"
+}
+
 cleanup() {
   local exit_code=$?
   if [[ "${KEEP_UP}" == "true" ]] && [[ ${exit_code} -eq 0 ]]; then
@@ -85,6 +162,9 @@ cleanup() {
   if [[ ${exit_code} -ne 0 ]]; then
     log "Collecting logs before teardown..."
     docker compose -f "${COMPOSE_FILE}" logs --tail=100 2>/dev/null || true
+    collect_failure_artifacts
+  elif [[ "${ARTIFACT_DIR_IS_OURS}" == "true" ]]; then
+    rm -rf "${DEVNET_ARTIFACT_DIR}"
   fi
   log "Tearing down DevNet..."
   docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
@@ -109,6 +189,9 @@ fi
 # --------------------------------------------------------------------------- #
 # Start DevNet
 # --------------------------------------------------------------------------- #
+
+log "Mode: ${MODE}$([[ "${ACCELERATED}" == "true" ]] && echo ' (accelerated)')"
+log "Network spec: ${ACTIVE_SPEC}"
 
 log "Building DevNet Docker images..."
 # No service names: compose only builds services in the active
@@ -232,8 +315,19 @@ else
 fi
 
 # Run tests with the mode's build tags.
-# The -count=1 flag disables test caching
-TEST_TIMEOUT="${TEST_TIMEOUT:-20m}"
+# The -count=1 flag disables test caching.
+#
+# The accelerated run is a single scenario timeline, so it selects that
+# test and takes a much tighter timeout: the scenario enforces its own
+# hard timeout internally, and this is the outer backstop.
+if [[ "${ACCELERATED}" == "true" ]]; then
+  TEST_TIMEOUT="${TEST_TIMEOUT:-8m}"
+  if [[ "${USER_RUN_FILTER}" == "false" ]]; then
+    TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline')
+  fi
+else
+  TEST_TIMEOUT="${TEST_TIMEOUT:-20m}"
+fi
 set +e
 go test \
   -tags "${GO_TAGS}" \
