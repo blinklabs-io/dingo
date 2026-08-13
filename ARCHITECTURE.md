@@ -903,7 +903,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainsync.client_remove_requested` | Node | Stalled client removal |
 | `chainsync.resync` | LedgerState | Chainsync resync request |
 | `connmanager.inbound_conn` | ConnManager | Inbound connection |
-| `connmanager.conn_closed` | ConnManager | Connection closed |
+| `connmanager.conn_closed` | ConnManager | Node-to-node connection closed |
 | `connmanager.connection_recycle_requested` | ConnManager | Connection recycling |
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
@@ -942,7 +942,10 @@ All event types follow the `subsystem.snake_case_name` convention.
 - A subscriber that stops draining stalls its publishers, and the shared async
   worker pool means it also delays unrelated async event types. Consumers of
   `Subscribe` channels must drain for the life of the subscription and
-  `Unsubscribe` when they stop
+  `Unsubscribe` when they stop. The stalled-subscriber warning is rate-limited
+  per subscriber, not per delivery, and reports how many publishers are parked
+  on it — every parked publisher observes the same stall, so a per-delivery
+  limit made the log volume scale with publisher count rather than with time
 - **Never `Publish`, `PublishAsync`, or `PublishBlocking` while holding a lock
   that a subscriber of that event acquires.** Because all three wait for
   capacity rather than dropping, this is a deadlock, not merely a slow path:
@@ -973,6 +976,14 @@ All event types follow the `subsystem.snake_case_name` convention.
   `connmanager.conn_closed` draining, and every subsequent connection close
   parks another publisher goroutine. Handlers that re-publish are therefore
   coupling two topics' backpressure and must not block
+- `connmanager.conn_closed` is published for node-to-node connections only.
+  Every subscriber uses it for NtN peer management (chain selection, peer
+  governance, chainsync client state, the mempool consumer set) and the payload
+  carries no way to recognise a node-to-client connection and skip it. A local
+  client reconnecting in a tight loop would otherwise park publishers faster
+  than they drain and wedge the subscriber permanently — via exactly the
+  two-topic coupling above — which silently stops the node from following the
+  chain while it continues to forge
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure
