@@ -104,6 +104,27 @@ Use the Go APIs when code runs inside Dingo:
 
 Direct SQL users should treat this document as a map of the metadata store. The blob store remains the source of block CBOR, UTxO CBOR, and transaction CBOR/offset bytes.
 
+### Testing storage plugins
+
+`internal/test/storagetest` is a shared conformance suite that every blob and
+metadata plugin runs against, so `badger`/`aws`/`gcs` (blob) and
+`sqlite`/`mysql`/`postgres` (metadata) are all checked against the same
+`BlobStore`/`MetadataStore` contract instead of each plugin inventing its own
+CRUD test shape -- including a large-payload round-trip, an operation-timeout
+bound, and (as standalone per-plugin tests) unreachable-endpoint,
+bad-credential, and Stop/Close resource-cleanup checks.
+`internal/integration/storage_migration_test.go` separately covers migrating
+a dataset from one plugin to another. See
+[`internal/test/storagetest/README.md`](internal/test/storagetest/README.md)
+and "Conformance tests" in `database/plugin/PLUGIN_DEVELOPMENT.md` for how to
+wire a new plugin's conformance test and which environment variables each
+cloud/database backend needs. Cloud- and database-backed plugins skip their
+credential-requiring tests cleanly (never fail `go test ./...`) when
+unconfigured; note that no GCS emulator exists in this repository (unlike
+S3's MinIO in CI), so the `gcs` plugin's conformance, migration, and
+resource-cleanup coverage only run manually against a real bucket, never in
+CI.
+
 ## Database Lifecycle (Snapshot, Restore, Truncate)
 
 `database/lifecycle/` (package `lifecycle`) implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point, shared by the offline `dingo database` CLI commands and, for truncate, the live ledger rollback path. It is a pure library over `*database.Database` — no CLI, config, or node-composition knowledge — with node-facing orchestration in `internal/dblifecycle` (`Service` for the CLI, `Manager` for automatic epoch-boundary snapshots).
@@ -769,8 +790,14 @@ values still resolve through the transaction, so a value read after the listing
 observes staged changes regardless of when the key was enumerated.
 
 A staged zero-length write is a value, not a deletion: `Set` with an empty slice
-reads back as an empty blob inside the transaction and the key is still listed by
-iterators.
+reads back as an empty blob inside the transaction. This matters most for a key
+that already exists in the bucket: staging it to an empty value must not make an
+iterator's staged-delete filtering mistake it for a deletion and skip it, the way
+collapsing "staged empty value" and "staged delete" onto the same nil-value
+sentinel would. It does not override the "not listed until commit" rule above for
+a key with no committed existence at all — enumerating a brand-new key the bucket
+does not have yet would require the iterator to merge the transaction's staged
+writes into the bucket listing, which it does not do.
 
 Commit applies changes in a stable key order. Before applying anything it builds
 a compensation log recording each key's prior state, probing existence with

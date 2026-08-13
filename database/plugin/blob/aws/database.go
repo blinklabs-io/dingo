@@ -26,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"sort"
@@ -37,6 +38,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -436,6 +438,12 @@ func (it *s3StreamIterator) advance(ctx context.Context) {
 			}
 			it.page = page.Contents
 			it.pageIdx = 0
+			// The page just fetched may itself be empty (for example, no
+			// object in the bucket matches the prefix yet because the only
+			// write for it is still staged in this transaction, not
+			// committed). Loop back to re-check rather than falling through
+			// to index it.page[0] unconditionally.
+			continue
 		}
 		objectKey := strings.TrimPrefix(
 			aws.ToString(it.page[it.pageIdx].Key),
@@ -1055,7 +1063,17 @@ func isS3NotFound(err error) bool {
 		return true
 	}
 	var noSuchKey *s3types.NoSuchKey
-	return errors.As(err, &noSuchKey)
+	if errors.As(err, &noSuchKey) {
+		return true
+	}
+	// HeadObject (used by objectExists and GetBlockURL) returns an empty
+	// response body on a miss, so the SDK cannot parse a structured
+	// "NoSuchKey" API error out of it the way GetObject's XML error body
+	// allows. The only signal left is the plain HTTP 404 wrapped in a
+	// smithy-go ResponseError.
+	var respErr *smithyhttp.ResponseError
+	return errors.As(err, &respErr) &&
+		respErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 func (d *BlobStoreS3) listKeysToFile(
