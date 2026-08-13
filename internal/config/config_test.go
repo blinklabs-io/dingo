@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1863,4 +1864,39 @@ func TestGetConfigSnapshotDoesNotShareNestedPluginConfig(t *testing.T) {
 		globalConfig.Plugins.Mempool.Config["nested"].(map[string]any)["inner"],
 		"mutating a snapshot must not reach globalConfig",
 	)
+}
+
+// exampleConfigPath returns the path to the repo's bundled
+// dingo.yaml.example, independent of the working directory the test binary
+// runs from.
+func exampleConfigPath() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(
+		filepath.Dir(thisFile),
+		"..",
+		"..",
+		"dingo.yaml.example",
+	)
+}
+
+// TestLoad_ExampleConfigParses guards against regressions like #3169, where
+// a single mis-indented line in dingo.yaml.example (the default config
+// shipped to operators) produced a YAML syntax error on startup with no
+// indication of which field was affected. Any change to dingo.yaml.example
+// must keep it loadable as-is.
+func TestLoad_ExampleConfigParses(t *testing.T) {
+	resetGlobalConfig()
+
+	path := exampleConfigPath()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("dingo.yaml.example not found at %s: %v", path, err)
+	}
+
+	cfg, err := LoadConfig(path)
+	require.NoError(
+		t,
+		err,
+		"dingo.yaml.example must parse cleanly as shipped",
+	)
+	require.NotNil(t, cfg)
 }

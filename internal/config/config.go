@@ -1177,7 +1177,11 @@ func LoadConfig(configFile string) (*Config, error) {
 
 		var root map[string]yaml.Node
 		if err := yaml.Unmarshal(buf, &root); err != nil {
-			return nil, fmt.Errorf("error parsing config file: %w", err)
+			return nil, fmt.Errorf(
+				"error parsing config file %s: %w",
+				configFile,
+				err,
+			)
 		}
 		if _, wrapped := root["config"]; wrapped {
 			tempCfg := tempConfig{Config: cfg}
@@ -1185,7 +1189,11 @@ func LoadConfig(configFile string) (*Config, error) {
 			decoder.KnownFields(true)
 			if err := decoder.Decode(&tempCfg); err != nil &&
 				!errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("error parsing config section: %w", err)
+				return nil, fmt.Errorf(
+					"error parsing config section in %s: %w",
+					configFile,
+					err,
+				)
 			}
 			if tempCfg.Config == nil {
 				return nil, errors.New("config section must be a mapping")
@@ -1194,7 +1202,11 @@ func LoadConfig(configFile string) (*Config, error) {
 			decoder := yaml.NewDecoder(bytes.NewReader(buf))
 			decoder.KnownFields(true)
 			if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("error parsing config file: %w", err)
+				return nil, fmt.Errorf(
+					"error parsing config file %s: %w",
+					configFile,
+					err,
+				)
 			}
 		}
 	}
