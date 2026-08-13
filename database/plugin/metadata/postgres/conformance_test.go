@@ -20,13 +20,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/test/conformance"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	"github.com/stretchr/testify/require"
 )
@@ -39,19 +38,6 @@ import (
 func isPostgresConfigured() bool {
 	return os.Getenv("POSTGRES_PASSWORD") != "" ||
 		os.Getenv("POSTGRES_DSN") != ""
-}
-
-// escapeLibpqValue quotes and backslash-escapes a value for a libpq
-// keyword/value connection string. A Postgres password may legally contain
-// a space, single quote, or backslash, any of which would otherwise either
-// truncate the value at the first space or break the conninfo parse
-// entirely -- go-sql-driver/mysql's Config.FormatDSN handles this
-// automatically for the mysql package's equivalent helpers; pgx's DSN form
-// has no such helper, so this does it by hand.
-func escapeLibpqValue(value string) string {
-	escaped := strings.ReplaceAll(value, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
-	return "'" + escaped + "'"
 }
 
 // postgresAdminDSN builds a libpq keyword/value DSN from the same
@@ -85,12 +71,12 @@ func postgresAdminDSN() string {
 	}
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		escapeLibpqValue(host),
-		escapeLibpqValue(port),
-		escapeLibpqValue(user),
-		escapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")),
-		escapeLibpqValue(database),
-		escapeLibpqValue(sslMode),
+		conformance.EscapeLibpqValue(host),
+		conformance.EscapeLibpqValue(port),
+		conformance.EscapeLibpqValue(user),
+		conformance.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")),
+		conformance.EscapeLibpqValue(database),
+		conformance.EscapeLibpqValue(sslMode),
 	)
 }
 
@@ -100,25 +86,8 @@ func postgresAdminDSN() string {
 // and internal/test/conformance's Postgres variant, both of which connect to
 // the same dingo_test database concurrently as separate `go test ./...`
 // processes.
-//
-// postgresAdminDSN returns a libpq keyword/value string when it builds the
-// DSN itself, but returns POSTGRES_DSN verbatim when that is set, and an
-// operator may legitimately set it to a URL (postgres://user:pass@host/db)
-// rather than keyword/value form -- appending " options='...'" text to a
-// URL produces a malformed DSN, so the two forms need different injection.
 func postgresConformanceDSN(schema string) string {
-	dsn := postgresAdminDSN()
-	if strings.HasPrefix(dsn, "postgres://") ||
-		strings.HasPrefix(dsn, "postgresql://") {
-		parsed, err := url.Parse(dsn)
-		if err == nil {
-			query := parsed.Query()
-			query.Set("options", "-csearch_path="+schema)
-			parsed.RawQuery = query.Encode()
-			return parsed.String()
-		}
-	}
-	return dsn + " options='-csearch_path=" + schema + "'"
+	return conformance.PostgresDSNWithSearchPath(postgresAdminDSN(), schema)
 }
 
 func TestMetadataStoreConformance(t *testing.T) {
@@ -275,10 +244,10 @@ func TestMetadataStoreBadCredentialsFailsCleanly(t *testing.T) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=storagetest-wrong-password "+
 			"dbname=%s sslmode=disable",
-		escapeLibpqValue(host),
-		escapeLibpqValue(port),
-		escapeLibpqValue(user),
-		escapeLibpqValue(database),
+		conformance.EscapeLibpqValue(host),
+		conformance.EscapeLibpqValue(port),
+		conformance.EscapeLibpqValue(user),
+		conformance.EscapeLibpqValue(database),
 	)
 
 	store, err := openStore(

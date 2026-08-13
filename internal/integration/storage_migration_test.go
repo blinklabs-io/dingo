@@ -19,10 +19,8 @@ package integration
 import (
 	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/conformance"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
@@ -365,7 +364,7 @@ func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
 		Metadata: dbtest.StorageProvider{
 			Name: "postgres",
 			Config: map[string]any{
-				"dsn": postgresMigrationDSNWithSearchPath(dsn, schema),
+				"dsn": conformance.PostgresDSNWithSearchPath(dsn, schema),
 			},
 			Register: postgres.RegisterProvider,
 		},
@@ -375,16 +374,6 @@ func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
 	dataset := seedMetadataMigrationDataset(t, srcDB.Metadata())
 	migrateMetadataDataset(t, srcDB.Metadata(), destDB.Metadata())
 	requireMetadataDatasetMatches(t, destDB.Metadata(), dataset)
-}
-
-// escapeLibpqValue quotes and backslash-escapes a value for a libpq
-// keyword/value connection string, so a password containing a space,
-// single quote, or backslash -- all legal in a Postgres password --
-// produces a well-formed DSN instead of breaking the conninfo parse.
-func escapeLibpqValue(value string) string {
-	escaped := strings.ReplaceAll(value, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
-	return "'" + escaped + "'"
 }
 
 func postgresMigrationDSN() string {
@@ -411,33 +400,12 @@ func postgresMigrationDSN() string {
 	if v := os.Getenv("POSTGRES_SSLMODE"); v != "" {
 		sslMode = v
 	}
-	return "host=" + escapeLibpqValue(host) +
-		" port=" + escapeLibpqValue(port) +
-		" user=" + escapeLibpqValue(user) +
-		" password=" + escapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")) +
-		" dbname=" + escapeLibpqValue(dbName) +
-		" sslmode=" + escapeLibpqValue(sslMode)
-}
-
-// postgresMigrationDSNWithSearchPath is dsn with the connection's
-// search_path pinned to schema, the same URL-vs-keyword/value handling
-// database/plugin/metadata/postgres/conformance_test.go's
-// postgresConformanceDSN uses: postgresMigrationDSN returns POSTGRES_DSN
-// verbatim when that is set, and an operator may legitimately set it to a
-// URL (postgres://user:pass@host/db) rather than keyword/value form --
-// appending " options='...'" text to a URL produces a malformed DSN.
-func postgresMigrationDSNWithSearchPath(dsn, schema string) string {
-	if strings.HasPrefix(dsn, "postgres://") ||
-		strings.HasPrefix(dsn, "postgresql://") {
-		parsed, err := url.Parse(dsn)
-		if err == nil {
-			query := parsed.Query()
-			query.Set("options", "-csearch_path="+schema)
-			parsed.RawQuery = query.Encode()
-			return parsed.String()
-		}
-	}
-	return dsn + " options='-csearch_path=" + schema + "'"
+	return "host=" + conformance.EscapeLibpqValue(host) +
+		" port=" + conformance.EscapeLibpqValue(port) +
+		" user=" + conformance.EscapeLibpqValue(user) +
+		" password=" + conformance.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")) +
+		" dbname=" + conformance.EscapeLibpqValue(dbName) +
+		" sslmode=" + conformance.EscapeLibpqValue(sslMode)
 }
 
 // TestMetadataStoreMigrationSQLiteToMySQL migrates a small dataset from the
