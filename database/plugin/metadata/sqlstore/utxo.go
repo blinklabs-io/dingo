@@ -873,14 +873,19 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 	return utxosFromSQLite(rows)
 }
 
-// GetUtxosByAddress runs one OR-joined query per parameter-limit-sized chunk
-// of patterns -- a single statement covering every pattern can exceed the
-// dialect's bound-parameter limit (e.g. SQLite's 999) or its OR-expression
-// tree depth limit once enough base (payment + staking) addresses are
-// requested. Candidates are deduplicated by (tx id, output index) across
-// chunks before returning, since a UTxO can only satisfy one address
-// pattern but coarse credential-only branches from different chunks could
-// otherwise resurface the same row.
+// GetUtxosByAddress runs one OR-joined query per chunk of patterns -- a
+// single statement covering every pattern can exceed the dialect's
+// bound-parameter limit (e.g. SQLite's 999) or its OR-expression tree depth
+// limit once enough addresses are requested. Chunking is bounded by both
+// accumulated bind-argument count and branch count: a pattern whose
+// exact-address hash decodes as the zero hash for both payment and staking
+// (e.g. a Byron address with an all-zero payment hash) falls back to a
+// zero-argument branch in AppendUtxoAddressPatternOrBranch, so
+// argument-count alone would never chunk a run of such patterns before the
+// expression tree overflowed. Candidates are deduplicated by (tx id, output
+// index) across chunks before returning, since a UTxO can only satisfy one
+// address pattern but coarse credential-only branches from different
+// chunks could otherwise resurface the same row.
 func (s *Store) GetUtxosByAddress(
 	patterns []models.UtxoAddressPattern,
 	txn types.Txn,
@@ -932,7 +937,9 @@ func (s *Store) GetUtxosByAddress(
 		); err != nil {
 			return nil, err
 		}
-		if len(args) > 0 && len(args)+len(branchArgs) > limit {
+		if len(branches) > 0 &&
+			(len(args)+len(branchArgs) > limit ||
+				len(branches)+len(branchOrs) >= max(1, limit/2)) {
 			if err := runQuery(); err != nil {
 				return nil, err
 			}

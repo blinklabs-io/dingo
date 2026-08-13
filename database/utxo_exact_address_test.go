@@ -380,3 +380,84 @@ INSERT INTO utxo (
 	}
 	assert.ElementsMatch(t, txIds, gotIDs)
 }
+
+// TestUtxosByAddressManyZeroArgBranches covers patterns whose coarse SQL
+// branch carries no bind arguments at all: a Byron address whose payment
+// hash bytes happen to be all-zero decodes with both PaymentKeyHash and
+// StakeKeyHash reading as the zero hash, so AppendUtxoAddressPatternOrBranch
+// falls back to a fixed "(payment_key IS NULL...) AND (staking_key IS
+// NULL...)" branch with zero args (see AppendUtxoAddressOrBranchMode).
+// GetUtxosByAddress's chunking must not rely on bind-argument count alone
+// to decide when to flush a chunk, or a long run of these zero-arg branches
+// would never trigger a flush and would overflow SQLite's OR-expression
+// tree depth. Every address's UTxO must still come back exactly once.
+func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	zeroPayment := bytes.Repeat([]byte{0x00}, lcommon.AddressHashSize)
+	const numAddrs = 2000
+	addrs := make([]lcommon.Address, numAddrs)
+	txIds := make([][]byte, numAddrs)
+	for i := range addrs {
+		payload := make([]byte, 4)
+		binary.BigEndian.PutUint32(payload, uint32(i)+1)
+		addr, err := lcommon.NewByronAddressFromParts(
+			0,
+			zeroPayment,
+			lcommon.ByronAddressAttributes{Payload: payload},
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t, lcommon.NewBlake2b224(nil), addr.PaymentKeyHash(),
+			"fixture invariant: payment hash must be zero",
+		)
+		require.Equal(
+			t, lcommon.NewBlake2b224(nil), addr.StakeKeyHash(),
+			"fixture invariant: staking hash must be zero",
+		)
+		addrs[i] = addr
+
+		txID := uint(i + 1)
+		txHash := make([]byte, 32)
+		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+		txIds[i] = txHash
+		amount := uint64(i+1) * 1_000_000
+
+		_, err = raw.Exec(`
+INSERT INTO "transaction" (
+    id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
+) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
+			txID, txHash, uint64(i+1),
+		)
+		require.NoError(t, err)
+		_, err = raw.Exec(`
+INSERT INTO utxo (
+    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (?, ?, NULL, NULL, 0, ?, 0, ?, 0, FALSE)`,
+			txID, txHash, uint64(i+1),
+			strconv.FormatUint(amount, 10),
+		)
+		require.NoError(t, err)
+
+		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  amount,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+		}))
+	}
+
+	got, err := db.UtxosByAddress(addrs, nil)
+	require.NoError(t, err)
+	require.Len(t, got, numAddrs)
+
+	gotIDs := make([][]byte, len(got))
+	for i := range got {
+		gotIDs[i] = got[i].TxId
+	}
+	assert.ElementsMatch(t, txIds, gotIDs)
+}
