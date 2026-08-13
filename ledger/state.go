@@ -4117,6 +4117,25 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					completeReadResult()
 					return errRestartLedgerPipeline
 				}
+				// A deferred header check that rejects an already-persisted
+				// block is deterministic: restarting the pipeline re-reads
+				// the same block and fails identically. Rewind past it so
+				// chain selection can offer another candidate. The block is
+				// still rejected.
+				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError(
+					err,
+				)
+				if recoverErr != nil {
+					completeReadResult()
+					return fmt.Errorf(
+						"process block batch: %w",
+						recoverErr,
+					)
+				}
+				if recovered {
+					completeReadResult()
+					return errRestartLedgerPipeline
+				}
 				// A stale chain iterator delivers a fork block whose prev-hash
 				// doesn't match our current tip. This happens when a concurrent
 				// rollback moved the chain behind the iterator's position: the

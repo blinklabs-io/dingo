@@ -5668,10 +5668,29 @@ doesn't — and is deliberately generic rather than classifying specific
 error types, since the failure modes this guards against are exactly the
 ones not yet fully understood well enough to special-case safely.
 
+One error class is deterministic rather than transient and needs more than
+backoff. A block whose *deferred* stateful header checks (registered VRF
+key, Praos leader eligibility) fail is already persisted in the chain
+store, so a bare pipeline restart re-reads that same block and fails
+identically, forever. Transaction validation failures already carried a
+type (`txValidationError`) that routes them into rewind-based recovery;
+header validation carried a bare error and so had nowhere to go.
+`headerValidationError` closes that gap: the block is still rejected — the
+validity predicate is unchanged and stays identical to the reference
+node's — but the rejection now rewinds the primary chain and the ledger to
+the last good tip and asks chainsync to re-deliver, so chain selection can
+offer a different candidate instead of the pipeline spinning on a chain it
+has already refused. If the network genuinely offers no other chain the
+node still cannot advance, which is the correct outcome for a node that
+believes the block is invalid and the same one the reference node reaches;
+the difference is that it surfaces through the stuck-pipeline signal below
+rather than an unbounded retry loop.
+
 A 2s cap still means retrying forever at that rate, which is what a
-*deterministic* failure produces: a canonical block this node rejects will
-be rejected identically on every replay, so the pipeline neither recovers
-nor stops. After `noProgressStuckThreshold` consecutive no-progress
+*deterministic* failure produces when no rewind resolves it: a canonical
+block this node rejects will be rejected identically on every replay, so
+the pipeline neither recovers nor stops. After `noProgressStuckThreshold`
+consecutive no-progress
 restarts the loop treats the failure as deterministic rather than
 transient, escalating the wait beyond the transient ceiling (bounded by
 `noProgressStuckBackoffMax`), logging the transition once at ERROR, and

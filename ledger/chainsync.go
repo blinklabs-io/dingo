@@ -422,11 +422,18 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 		return nil
 	}
 	if err := ls.verifyBlockHeaderStateWithEpochAdvance(block, true, false); err != nil {
-		return fmt.Errorf(
-			"deferred block header verification failed at slot %d: %w",
-			point.Slot,
-			err,
-		)
+		// Typed so the pipeline can rewind past this block instead of
+		// restarting onto it forever: the block is already persisted, so
+		// this failure is deterministic rather than transient. The block is
+		// still rejected — see headerValidationError.
+		return &headerValidationError{
+			BlockPoint: point,
+			Cause: fmt.Errorf(
+				"deferred block header verification failed at slot %d: %w",
+				point.Slot,
+				err,
+			),
+		}
 	}
 	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
 		return err
