@@ -183,7 +183,7 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.UtxosByAddress(testAddr, nil)
+		_, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -223,7 +223,7 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for b.Loop() {
-		_, err := db.UtxosByAddress(testAddr, nil)
+		_, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -2829,7 +2829,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				res, err := db.UtxosByAddress(testAddr, nil)
+				res, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
 				_ = res
 				_ = err // Ignore errors for benchmark
 

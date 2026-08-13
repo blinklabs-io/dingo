@@ -984,8 +984,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
-	// TODO: support multiple addresses (#391)
-	utxos, err := ls.db.UtxosByAddress(addrs[0], nil)
+	utxos, err := ls.db.UtxosByAddress(addrs, nil)
 	if err != nil {
 		return nil, err
 	}

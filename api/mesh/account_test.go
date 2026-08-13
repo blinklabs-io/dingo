@@ -64,9 +64,10 @@ func TestAccountBalance(t *testing.T) {
 		BlockNumber: 25,
 	}
 	deps.ledger.utxos = func(
-		got lcommon.Address,
+		got []lcommon.Address,
 	) ([]models.Utxo, error) {
-		require.Equal(t, addr, got.String())
+		require.Len(t, got, 1)
+		require.Equal(t, addr, got[0].String())
 		return []models.Utxo{
 			testUtxo(
 				testHash(0x01), 0, 2_000_000, paymentKey, nil,
@@ -121,7 +122,7 @@ func TestAccountBalanceAggregatesAssets(t *testing.T) {
 	policyB := testKeyHash(0xbb)
 	policyA := testKeyHash(0xaa)
 	deps.ledger.utxos = func(
-		lcommon.Address,
+		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return []models.Utxo{
 			testUtxo(
@@ -201,7 +202,7 @@ func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 		}, nil
 	}
 	deps.ledger.utxos = func(
-		lcommon.Address,
+		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		t.Fatal("historical request must not read the tip UTxO set")
 		return nil, nil
@@ -290,7 +291,7 @@ func TestAccountBalanceHistoricalEmptyIdentifier(t *testing.T) {
 	}
 	called := false
 	deps.ledger.utxos = func(
-		lcommon.Address,
+		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		called = true
 		return nil, nil
@@ -428,7 +429,7 @@ func TestAccountBalanceLedgerError(t *testing.T) {
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x07), nil,
 	)
 	deps.ledger.utxos = func(
-		lcommon.Address,
+		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return nil, errors.New("ledger unavailable")
 	}
@@ -455,7 +456,7 @@ func TestAccountCoins(t *testing.T) {
 		BlockNumber: 3,
 	}
 	deps.ledger.utxos = func(
-		lcommon.Address,
+		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return []models.Utxo{
 			testUtxo(
@@ -521,7 +522,7 @@ func TestAccountCoinsLedgerError(t *testing.T) {
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x0c), nil,
 	)
 	deps.ledger.utxos = func(
-		lcommon.Address,
+		[]lcommon.Address,
 	) ([]models.Utxo, error) {
 		return nil, errors.New("ledger unavailable")
 	}

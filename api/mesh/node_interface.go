@@ -45,7 +45,7 @@ type MeshDatabase interface {
 type MeshLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
-	UtxosByAddress(addr lcommon.Address) ([]models.Utxo, error)
+	UtxosByAddress(addrs []lcommon.Address) ([]models.Utxo, error)
 	// UtxosByAddressAtSlot returns the UTxOs the address held at the
 	// given slot -- those added at or before it and not spent until
 	// after it. It backs historical /account/balance queries.

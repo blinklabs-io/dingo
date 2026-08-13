@@ -67,7 +67,7 @@ func (s *Server) handleAccountBalance(
 			UtxosByAddressAtSlot(addr, point.slot)
 	} else {
 		utxos, err = s.config.LedgerState.UtxosByAddress(
-			addr,
+			[]ledger.Address{addr},
 		)
 	}
 	if err != nil {
@@ -111,7 +111,7 @@ func (s *Server) handleAccountCoins(
 	}
 
 	utxos, err := s.config.LedgerState.UtxosByAddress(
-		addr,
+		[]ledger.Address{addr},
 	)
 	if err != nil {
 		s.logger.Error(

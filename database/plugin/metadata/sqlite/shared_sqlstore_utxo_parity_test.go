@@ -36,7 +36,7 @@ type utxoReadStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 	GetUtxosByAddress(
-		models.UtxoAddressPattern,
+		[]models.UtxoAddressPattern,
 		types.Txn,
 	) ([]models.Utxo, error)
 	GetUtxosByAddressAtSlot(
@@ -135,7 +135,10 @@ func exerciseUtxoReadStore(t *testing.T, store utxoReadStore) utxoReadState {
 	ret.deleted, err = store.GetUtxosDeletedBeforeSlot(25, 1, nil)
 	require.NoError(t, err)
 	pattern := models.UtxoAddressPattern{PaymentPart: paymentKey}
-	ret.byAddress, err = store.GetUtxosByAddress(pattern, nil)
+	ret.byAddress, err = store.GetUtxosByAddress(
+		[]models.UtxoAddressPattern{pattern},
+		nil,
+	)
 	require.NoError(t, err)
 	ret.byAddressAtSlot, err = store.GetUtxosByAddressAtSlot(
 		pattern,

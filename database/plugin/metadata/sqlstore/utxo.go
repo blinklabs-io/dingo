@@ -874,24 +874,26 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 }
 
 func (s *Store) GetUtxosByAddress(
-	pattern models.UtxoAddressPattern,
+	patterns []models.UtxoAddressPattern,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	var predicates []string
+	var branches []string
 	var args []any
-	if err := models.AppendUtxoAddressPatternOrBranch(
-		&predicates,
-		&args,
-		pattern,
-	); err != nil {
-		return nil, err
+	for _, pattern := range patterns {
+		if err := models.AppendUtxoAddressPatternOrBranch(
+			&branches,
+			&args,
+			pattern,
+		); err != nil {
+			return nil, err
+		}
 	}
-	if len(predicates) == 0 {
+	if len(branches) == 0 {
 		return nil, models.ErrEmptyUtxoAddressPattern
 	}
 	return s.queryUtxosWithAssets(
 		txn,
-		"utxo.deleted_slot = 0 AND "+predicates[0],
+		"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
 		args,
 		"",
 	)

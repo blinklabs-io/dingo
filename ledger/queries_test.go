@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -34,6 +35,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -166,6 +168,66 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
 	require.Empty(t, m)
+}
+
+// TestQueryShelleyUtxoByAddress_MultipleAddresses proves the local-state-query
+// handler resolves UTxOs for every address in the request, not just the
+// first (#391) -- the wire query already carries the full set via q.Addrs.
+func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
+	db := newTestDB(t)
+
+	seedAddressUtxo := func(
+		addr lcommon.Address,
+		txId []byte,
+		amount uint64,
+	) {
+		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+			TxId:       txId,
+			OutputIdx:  0,
+			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			AddedSlot:  1,
+			Amount:     types.Uint64(amount),
+		}))
+		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  amount,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded)
+		}))
+	}
+
+	addr1, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	addr2, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+
+	txId1 := bytes.Repeat([]byte{0x01}, 32)
+	txId2 := bytes.Repeat([]byte{0x02}, 32)
+	seedAddressUtxo(addr1, txId1, 1_000_000)
+	seedAddressUtxo(addr2, txId2, 2_000_000)
+
+	ls := &LedgerState{db: db}
+	result, err := ls.queryShelleyUtxoByAddress([]ledger.Address{addr1, addr2})
+	require.NoError(t, err)
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any result")
+	require.Len(t, arr, 1)
+	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	require.True(t, ok, "expected UtxoId map")
+	require.Len(t, m, 2, "must include UTxOs for both addresses, not just addrs[0]")
 }
 
 func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {

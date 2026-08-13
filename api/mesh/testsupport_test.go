@@ -115,7 +115,7 @@ func (f *fakeDatabase) GetTransactionsByBlockHash(
 type fakeLedgerState struct {
 	pparams     lcommon.ProtocolParameters
 	slotToTime  func(slot uint64) (time.Time, error)
-	utxos       func(addr lcommon.Address) ([]models.Utxo, error)
+	utxos       func(addrs []lcommon.Address) ([]models.Utxo, error)
 	utxosAtSlot func(
 		addr lcommon.Address,
 		slot uint64,
@@ -140,12 +140,12 @@ func (f *fakeLedgerState) SlotToTime(
 }
 
 func (f *fakeLedgerState) UtxosByAddress(
-	addr lcommon.Address,
+	addrs []lcommon.Address,
 ) ([]models.Utxo, error) {
 	if f.utxos == nil {
 		return nil, nil
 	}
-	return f.utxos(addr)
+	return f.utxos(addrs)
 }
 
 func (f *fakeLedgerState) UtxosByAddressAtSlot(

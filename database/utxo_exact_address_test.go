@@ -181,7 +181,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		{name: "pointer two", addr: pointerTwo, want: [][]byte{seeded[2].TxId}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := db.UtxosByAddress(tc.addr, nil)
+			got, err := db.UtxosByAddress([]lcommon.Address{tc.addr}, nil)
 			require.NoError(t, err)
 			gotIDs := make([][]byte, len(got))
 			for i := range got {
@@ -190,6 +190,26 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 			assert.ElementsMatch(t, tc.want, gotIDs)
 		})
 	}
+
+	t.Run("multiple addresses", func(t *testing.T) {
+		got, err := db.UtxosByAddress(
+			[]lcommon.Address{enterprise, base},
+			nil,
+		)
+		require.NoError(t, err)
+		gotIDs := make([][]byte, len(got))
+		for i := range got {
+			gotIDs[i] = got[i].TxId
+		}
+		assert.ElementsMatch(
+			t,
+			[][]byte{
+				seeded[1].TxId, seeded[3].TxId, seeded[5].TxId,
+				seeded[4].TxId,
+			},
+			gotIDs,
+		)
+	})
 
 	pattern, err := models.ExactUtxoAddressPattern(enterprise)
 	require.NoError(t, err)

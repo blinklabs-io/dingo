@@ -519,19 +519,27 @@ func (d *Database) UtxoByRefIncludingSpent(
 	return utxo, nil
 }
 
+// UtxosByAddress returns all UTxOs belonging to any of the given addresses.
 func (d *Database) UtxosByAddress(
-	addr ledger.Address,
+	addrs []ledger.Address,
 	txn *Txn,
 ) ([]models.Utxo, error) {
+	if len(addrs) == 0 {
+		return nil, nil
+	}
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	pattern, err := models.ExactUtxoAddressPattern(addr)
-	if err != nil {
-		return nil, err
+	patterns := make([]models.UtxoAddressPattern, len(addrs))
+	for i, addr := range addrs {
+		pattern, err := models.ExactUtxoAddressPattern(addr)
+		if err != nil {
+			return nil, err
+		}
+		patterns[i] = pattern
 	}
-	utxos, err := d.metadata.GetUtxosByAddress(pattern, txn.Metadata())
+	utxos, err := d.metadata.GetUtxosByAddress(patterns, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}
@@ -540,9 +548,7 @@ func (d *Database) UtxosByAddress(
 			return nil, err
 		}
 	}
-	return filterUtxosByAddressPatterns(utxos, []models.UtxoAddressPattern{
-		pattern,
-	})
+	return filterUtxosByAddressPatterns(utxos, patterns)
 }
 
 // GetControlledAmountByCredential returns the sum of live UTxO amounts

@@ -1420,11 +1420,12 @@ type MetadataStore interface {
 	// window for historical transaction queries.
 	GetUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
 
-	// GetUtxosByAddress retrieves coarse SQL candidates for an explicit
-	// address pattern. The database layer performs full exact-address CBOR
-	// filtering when ExactAddress is set.
+	// GetUtxosByAddress retrieves coarse SQL candidates matching any of the
+	// given address patterns (OR-joined, mirroring
+	// GetUtxosByAddressWithOrdering). The database layer performs full
+	// exact-address CBOR filtering when ExactAddress is set.
 	GetUtxosByAddress(
-		models.UtxoAddressPattern,
+		[]models.UtxoAddressPattern,
 		types.Txn,
 	) ([]models.Utxo, error)
 
