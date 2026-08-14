@@ -15,12 +15,14 @@
 package event
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,6 +41,44 @@ func TestDeliverStallWarningIsRateLimitedPerSubscriber(t *testing.T) {
 	deliveryStallWarnInterval = 20 * time.Millisecond
 	t.Cleanup(func() { deliveryStallWarnInterval = origInterval })
 
+	// Compare warning volume at two very different publisher counts over the
+	// same observation condition. This is a ratio rather than an absolute
+	// count on purpose: any assertion that samples "how many warnings by
+	// now" races the burst, because a per-delivery limiter emits all of its
+	// warnings within a single interval and the sample can land part-way
+	// through. What cannot be faked by timing is the *scaling* -- a
+	// per-subscriber bound is independent of publisher count, a per-delivery
+	// bound is proportional to it.
+	const fewPublishers = 4
+	const manyPublishers = 40
+	const observedRepeats = 3
+
+	few := stallWarningsForPublishers(t, fewPublishers, observedRepeats)
+	many := stallWarningsForPublishers(t, manyPublishers, observedRepeats)
+	t.Logf("stall warnings: %d publishers -> %d, %d publishers -> %d",
+		fewPublishers, few, manyPublishers, many)
+
+	// A per-delivery limit multiplies the volume by the publisher ratio
+	// (10x here). A per-subscriber limit leaves it flat, so a generous 3x
+	// allowance still separates them decisively.
+	require.LessOrEqual(t, many, few*3,
+		"stall warnings scaled with the number of blocked publishers "+
+			"(%d publishers -> %d warnings, %d -> %d): the rate limit must "+
+			"be per subscriber, not per delivery",
+		fewPublishers, few, manyPublishers, many,
+	)
+}
+
+// stallWarningsForPublishers parks publishers on a subscriber that never
+// drains, waits until the stall warning has repeated observedRepeats times,
+// and reports how many warnings were emitted by that point.
+func stallWarningsForPublishers(
+	t *testing.T,
+	publishers int,
+	observedRepeats int,
+) int {
+	t.Helper()
+
 	var buf lockedBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
@@ -46,56 +86,31 @@ func TestDeliverStallWarningIsRateLimitedPerSubscriber(t *testing.T) {
 	sub := newChannelSubscriber("test", 1, logger)
 	require.NoError(t, sub.Deliver(NewEvent("test.stalled", "fill")))
 
-	// Park many publishers on the subscriber at once.
-	const blockedPublishers = 40
 	var wg sync.WaitGroup
-	for i := range blockedPublishers {
+	for i := range publishers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			_ = sub.Deliver(NewEvent("test.stalled", i))
 		}()
 	}
-
+	// Park everyone before the first interval elapses, so both runs are
+	// measured from the same starting condition.
 	require.Eventually(t, func() bool {
-		return strings.Contains(buf.String(), "event delivery stalled")
-	}, 2*time.Second, 5*time.Millisecond,
-		"a stalled subscriber should still be reported",
+		return sub.stallWaiters.Load() == int64(publishers)
+	}, 2*time.Second, time.Millisecond,
+		"every publisher should park on the stalled subscriber",
 	)
-
-	// Wait until the warning has repeated a few times, which means several
-	// intervals have elapsed. A per-subscriber limit yields one line per
-	// interval, so the count here tracks intervals. A per-delivery limit
-	// yields one line per interval *per parked publisher*, so the count
-	// tracks publishers instead and overshoots immediately.
-	const observedRepeats = 3
 	require.Eventually(t, func() bool {
 		return countStallWarnings(buf.String()) >= observedRepeats
-	}, 2*time.Second, time.Millisecond,
+	}, 5*time.Second, time.Millisecond,
 		"the warning should repeat while the stall continues",
 	)
-
 	got := countStallWarnings(buf.String())
-	t.Logf("stall warnings after %d repeats: %d (publishers=%d)",
-		observedRepeats, got, blockedPublishers)
-	require.Less(t, got, blockedPublishers,
-		"stall warnings scaled with the number of blocked publishers "+
-			"(%d warnings, %d publishers): the rate limit must be per "+
-			"subscriber, not per delivery", got, blockedPublishers,
-	)
 
-	// Release the parked publishers so the test does not leak goroutines.
 	sub.Close()
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		wg.Wait()
-	}()
-	select {
-	case <-drained:
-	case <-time.After(5 * time.Second):
-		t.Fatal("blocked publishers did not unpark after Close")
-	}
+	requirePublishersUnpark(t, &wg)
+	return got
 }
 
 // A stalled subscriber must still be reported often enough to be actionable,
@@ -113,8 +128,9 @@ func TestDeliverStallWarningReportsBlockedPublishers(t *testing.T) {
 	sub := newChannelSubscriber("test", 1, logger)
 	require.NoError(t, sub.Deliver(NewEvent("test.stalled", "fill")))
 
+	const blockedPublishers = 3
 	var wg sync.WaitGroup
-	for i := range 3 {
+	for i := range blockedPublishers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -122,23 +138,41 @@ func TestDeliverStallWarningReportsBlockedPublishers(t *testing.T) {
 		}()
 	}
 
+	// Every warning carries the field, so asserting the key is present
+	// proves nothing about the number. Wait for all publishers to park, then
+	// require the reported count to be the number actually parked.
 	require.Eventually(t, func() bool {
-		return strings.Contains(buf.String(), "blocked_publishers")
+		return sub.stallWaiters.Load() == blockedPublishers
+	}, 2*time.Second, time.Millisecond,
+		"every publisher should park on the stalled subscriber",
+	)
+	want := fmt.Sprintf("blocked_publishers=%d", blockedPublishers)
+	require.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), want)
 	}, 2*time.Second, 5*time.Millisecond,
-		"the warning should report how many publishers are parked",
+		"the warning should report the number of publishers actually parked",
 	)
 
 	sub.Close()
+	requirePublishersUnpark(t, &wg)
+}
+
+// requirePublishersUnpark fails unless every parked publisher returns, using
+// the repository channel helper rather than a hand-rolled select so the
+// timeout contract is the shared one.
+func requirePublishersUnpark(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
 		wg.Wait()
 	}()
-	select {
-	case <-drained:
-	case <-time.After(5 * time.Second):
-		t.Fatal("blocked publishers did not unpark after Close")
-	}
+	testutil.RequireReceive(
+		t,
+		drained,
+		5*time.Second,
+		"blocked publishers did not unpark after Close",
+	)
 }
 
 func countStallWarnings(logs string) int {

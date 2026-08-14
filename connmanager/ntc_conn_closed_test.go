@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,16 +65,12 @@ func TestNtCConnectionCloseDoesNotPublishPeerEvent(t *testing.T) {
 	conn.ErrorChan() <- errors.New("ntc connection closed")
 	waitForConnectionManagerWatchers(t, cm)
 
-	select {
-	case evt := <-closeEvents:
-		data, ok := evt.Data.(ConnectionClosedEvent)
-		require.True(t, ok)
-		t.Fatalf(
-			"NtC close published a peer connection-closed event: %v",
-			data.Error,
-		)
-	case <-time.After(200 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		closeEvents,
+		200*time.Millisecond,
+		"NtC close must not publish a peer connection-closed event",
+	)
 }
 
 // The control for the test above: the same harness must still observe the
@@ -87,14 +84,15 @@ func TestNtNConnectionClosePublishesPeerEvent(t *testing.T) {
 	connErr := errors.New("ntn connection closed")
 	conn.ErrorChan() <- connErr
 
-	select {
-	case evt := <-closeEvents:
-		data, ok := evt.Data.(ConnectionClosedEvent)
-		require.True(t, ok)
-		require.ErrorIs(t, data.Error, connErr)
-	case <-time.After(time.Second):
-		t.Fatal("expected close event for the NtN connection")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		closeEvents,
+		time.Second,
+		"expected close event for the NtN connection",
+	)
+	data, ok := evt.Data.(ConnectionClosedEvent)
+	require.True(t, ok)
+	require.ErrorIs(t, data.Error, connErr)
 
 	waitForConnectionManagerWatchers(t, cm)
 }

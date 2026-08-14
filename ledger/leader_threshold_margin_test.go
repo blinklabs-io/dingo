@@ -57,7 +57,7 @@ func TestLeaderThresholdMarginAtRealMagnitudes(t *testing.T) {
 		big.NewInt(100000000000000),
 	)
 
-	// A leader value 0.12% under the threshold -- the size of the stake
+	// A leader value 0.1% under the threshold, the order of the stake
 	// discrepancy reported from preview. It must read as a small positive
 	// margin, not as zero.
 	overshoot := new(big.Int).Div(threshold, big.NewInt(1000))
@@ -66,7 +66,7 @@ func TestLeaderThresholdMarginAtRealMagnitudes(t *testing.T) {
 	require.InDelta(t, 0.001, got, 1e-9)
 	require.Greater(t, got, 0.0, "a value under the threshold is eligible")
 
-	// And 0.12% over reads as the mirror-image negative.
+	// And 0.1% over reads as the mirror-image negative.
 	justOver := new(big.Int).Add(threshold, overshoot)
 	got = leaderThresholdMargin(justOver, threshold)
 	require.InDelta(t, -0.001, got, 1e-9)

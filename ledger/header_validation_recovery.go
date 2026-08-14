@@ -91,10 +91,36 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
 
-	// The ledger tip is the last block that applied cleanly, so it is
-	// already before the failing block. Rewinding to it drops the rejected
-	// block from the primary chain without undoing any valid history.
+	// The ledger tip is normally the last block that applied cleanly, so it
+	// already precedes the failing block and rewinding to it drops the
+	// rejected block without undoing valid history.
+	//
+	// That has to be checked rather than assumed. If the tip is not strictly
+	// before the failing block — the deferred marker replayed for a block
+	// already applied, say — then both the chain rewind and the ledger
+	// rollback are no-ops against their own current position, nothing is
+	// dropped, and returning "recovered" would send the pipeline back into
+	// the identical block while reporting that it had been handled. That is
+	// strictly worse than declining: the loop continues *and* the
+	// stuck-pipeline signal is suppressed, because every restart looks like
+	// a successful recovery. Decline instead and let the failure surface.
 	rewindPoint := ledgerTip.Point
+	if rewindPoint.Slot >= validationErr.BlockPoint.Slot {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"header validation rejected a block at or behind the ledger tip; no rewind target precedes it, so recovery cannot drop it",
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"ledger_tip_slot",
+				rewindPoint.Slot,
+				"error",
+				validationErr.Cause,
+			)
+		}
+		return false, nil
+	}
 	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
 		return false, nil
 	}

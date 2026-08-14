@@ -3189,6 +3189,34 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 	), true
 }
 
+// trackPipelineNoProgress folds one pipeline restart into the no-progress
+// accounting, returning the updated counter and last-seen tip. Shared by every
+// failure path so none of them can quietly opt out of stuck detection: an
+// error class that retries on its own schedule is still a failure to advance,
+// and skipping the counter is what let a permanently unavailable endorser
+// block wedge the pipeline without ever raising the signal.
+//
+// The counter resets as soon as the tip moves, so a pipeline that is making
+// progress between restarts never accumulates toward stuck.
+func (ls *LedgerState) trackPipelineNoProgress(
+	consecutiveNoProgress int,
+	haveLastTip bool,
+	lastTipSlot uint64,
+	lastTipHash []byte,
+) (int, bool, uint64, []byte) {
+	ls.RLock()
+	tipSlot := ls.currentTip.Point.Slot
+	tipHash := ls.currentTip.Point.Hash
+	ls.RUnlock()
+	if haveLastTip && tipSlot == lastTipSlot &&
+		bytes.Equal(tipHash, lastTipHash) {
+		consecutiveNoProgress++
+	} else {
+		consecutiveNoProgress = 0
+	}
+	return consecutiveNoProgress, true, tipSlot, tipHash
+}
+
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 	var (
 		consecutiveNoProgress int
@@ -3206,10 +3234,45 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		)
 		cancel()
 		if err == nil || ctx.Err() != nil {
+			// Leaving the loop with the gauges still set would strand a
+			// stale "stuck" reading in monitoring for the life of the
+			// process, long after the pipeline stopped or recovered.
+			ls.metrics.setPipelineNoProgress(0, false)
 			return
 		}
 		ls.handleLedgerProcessBlocksError(err)
 		if errors.Is(err, errCertifiedEndorserBlockUnavailable) {
+			// This retry has its own delay and used to skip the no-progress
+			// accounting entirely, so an endorser block that never becomes
+			// available wedged the pipeline without ever raising the stuck
+			// signal. Count it like any other failure to advance; the
+			// bespoke delay below still governs its pacing.
+			consecutiveNoProgress, haveLastTip, lastTipSlot, lastTipHash =
+				ls.trackPipelineNoProgress(
+					consecutiveNoProgress,
+					haveLastTip,
+					lastTipSlot,
+					lastTipHash,
+				)
+			_, endorserStuck := ledgerPipelineBackoff(consecutiveNoProgress)
+			ls.metrics.setPipelineNoProgress(
+				consecutiveNoProgress,
+				endorserStuck,
+			)
+			if endorserStuck &&
+				consecutiveNoProgress == noProgressStuckThreshold {
+				ls.config.Logger.Error(
+					"ledger pipeline stuck: a certified endorser block has stayed unavailable across repeated restarts without advancing the tip; the node is no longer following the chain",
+					"component",
+					"ledger",
+					"consecutive_no_progress",
+					consecutiveNoProgress,
+					"tip_slot",
+					lastTipSlot,
+					"error",
+					err,
+				)
+			}
 			timer := time.NewTimer(certifiedEndorserBlockRetryDelay)
 			select {
 			case <-ctx.Done():
@@ -3220,19 +3283,14 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			continue
 		}
 
-		ls.RLock()
-		tipSlot := ls.currentTip.Point.Slot
-		tipHash := ls.currentTip.Point.Hash
-		ls.RUnlock()
-		if haveLastTip && tipSlot == lastTipSlot &&
-			bytes.Equal(tipHash, lastTipHash) {
-			consecutiveNoProgress++
-		} else {
-			consecutiveNoProgress = 0
-		}
-		lastTipSlot = tipSlot
-		lastTipHash = tipHash
-		haveLastTip = true
+		consecutiveNoProgress, haveLastTip, lastTipSlot, lastTipHash =
+			ls.trackPipelineNoProgress(
+				consecutiveNoProgress,
+				haveLastTip,
+				lastTipSlot,
+				lastTipHash,
+			)
+		tipSlot := lastTipSlot
 
 		backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
 		ls.metrics.setPipelineNoProgress(consecutiveNoProgress, stuck)

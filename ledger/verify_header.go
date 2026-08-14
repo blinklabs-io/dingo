@@ -965,7 +965,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	)
 	ls.metrics.observeLeaderThresholdMargin(margin)
 	if !belowThreshold {
-		ls.metrics.incLeaderThresholdRejections()
 		// dingo's leadership stake is delegated UTxO only; staking rewards are
 		// not yet computed, so reward-account balances are missing from the
 		// stake distribution. On the prototype network the dominant pool's
@@ -996,6 +995,10 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 			)
 			return nil
 		}
+		// Counted here rather than at the top of the branch: the bypass
+		// above trusts the block, so counting before it would report
+		// rejections that never happened.
+		ls.metrics.incLeaderThresholdRejections()
 		// margin is carried in the message because it is the number that
 		// says whether this was a genuinely ineligible producer or a stake
 		// discrepancy: a rejection sitting a fraction of a percent under
