@@ -1344,13 +1344,13 @@ func importSnapShots(
 				keys = append(keys, key)
 			}
 		}
-		pools, poolErr := cfg.Database.Metadata().GetPools(keys, txn)
+		pools, poolErr := cfg.Database.Metadata().GetPools(keys, txn.Metadata())
 		if poolErr != nil {
 			return fmt.Errorf("loading pools for reward inputs: %w", poolErr)
 		}
 		if err := seedImportedRewardInputs(
 			cfg.Database.Metadata(),
-			txn,
+			txn.Metadata(),
 			snapshots,
 			rewardPoolParamsFromRegistrations(pools),
 			epoch,
