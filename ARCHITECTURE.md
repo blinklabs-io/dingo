@@ -4952,7 +4952,16 @@ threshold and the reference's.
 
 The inputs are absent chiefly after a Mithril bootstrap, whose preceding
 epochs the node never saw, so the first rounds after import have nothing to
-compute from. Both skips are logged at WARN and counted by
+compute from. The ledger-state import closes the pots half of that gap: it
+seeds a `RewardAdaPots` row for the snapshot's own epoch from the state it
+already decodes -- treasury and reserves from `AccountState`, the fee pot
+from `UTxOState` -- so the round at the first boundary after import is not
+skipped for want of pots. The fee pot is decoded specifically for this,
+because it is an addend of the reward pot and a row seeded with zero fees
+would credit the round at the wrong amount rather than visibly not running
+it. The per-credential reward *basis* for pre-import epochs is not
+reconstructible from local state, so a `RewardSnapshot` gap remains and is
+still reported by the counter above. Both skips are logged at WARN and counted by
 `dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
 Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
 node is a live divergence from the network. They were Debug until #3165,

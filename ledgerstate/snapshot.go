@@ -592,12 +592,26 @@ func parseCurrentEra(
 		)
 	}
 
+	// UTxOState[2] is the fee pot accumulated so far this epoch. It is one
+	// of the three addends of the reward pot (see ledger/rewards: the pot is
+	// incentives + fees), so a reward round computed without it understates
+	// every pool's reward. Decoding it is what lets a Mithril bootstrap seed
+	// a complete RewardAdaPots row rather than a partial one. Older eras may
+	// carry a shorter array, so its absence is tolerated and left at zero.
+	var fees uint64
+	if len(utxoState) > 2 {
+		if _, err := cbor.Decode(utxoState[2], &fees); err != nil {
+			return nil, fmt.Errorf("decoding UTxOState fees: %w", err)
+		}
+	}
+
 	result := &RawLedgerState{
 		EraIndex:      eraIndex,
 		Epoch:         epoch,
 		Tip:           tip,
 		Treasury:      treasury,
 		Reserves:      reserves,
+		Fees:          fees,
 		EraBoundSlot:  eraBoundSlot,
 		EraBoundEpoch: eraBoundEpoch,
 		UTxOData:      utxoState[0], // The UTxO map

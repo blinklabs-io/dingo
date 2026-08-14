@@ -58,6 +58,10 @@ type RawLedgerState struct {
 	Treasury uint64
 	// Reserves is the reserves balance in lovelace.
 	Reserves uint64
+	// Fees is the fee pot accumulated so far in the snapshot's epoch, taken
+	// from UTxOState. It is an addend of the reward pot, so it is carried
+	// here to let the import seed a complete RewardAdaPots row.
+	Fees uint64
 	// UTxOData is the deferred CBOR for the UTxO map.
 	UTxOData cbor.RawMessage
 	// CertStateData is the deferred CBOR for [VState, PState, DState].
@@ -1993,6 +1997,36 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf("setting network state: %w", err)
+	}
+
+	// Seed the ADA pots for the imported epoch.
+	//
+	// Applying a reward round at the boundary into N reads this node's
+	// RewardAdaPots row for N-1. A node that bootstraps here never saw that
+	// boundary, so without this the first round after import finds no pots
+	// and is skipped -- and a skipped round is never made up, leaving reward
+	// balances, and the leadership stake distribution derived from them,
+	// permanently short by an epoch's rewards. That shortfall is what makes
+	// a node reject canonical blocks whose VRF value sits near the
+	// stake-derived threshold (issue #3165).
+	//
+	// The snapshot carries every field the row needs -- treasury and
+	// reserves from AccountState, fees from UTxOState -- so this is a
+	// complete capture rather than a partial one. Seeding it with a zero fee
+	// pot would be worse than skipping: fees are an addend of the reward
+	// pot, so the round would be computed and credited at the wrong amount
+	// instead of visibly not happening.
+	if err := store.SaveRewardAdaPots(
+		&models.RewardAdaPots{
+			Epoch:        cfg.State.Epoch,
+			Treasury:     types.Uint64(cfg.State.Treasury),
+			Reserves:     types.Uint64(cfg.State.Reserves),
+			Fees:         types.Uint64(cfg.State.Fees),
+			CapturedSlot: tip.Slot,
+		},
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
 	}
 
 	// Generate epoch history from era bounds
