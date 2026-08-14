@@ -81,6 +81,14 @@ type stateMetrics struct {
 	// wedged node is visible only as a repeating WARN. See issue #3165.
 	pipelineNoProgressRestarts prometheus.Gauge
 	pipelineStuck              prometheus.Gauge
+	// Incremented for each epoch-boundary reward round that could not be
+	// applied because one of its inputs was absent. Every increment leaves
+	// reward balances -- and the leadership stake derived from them --
+	// permanently short by that epoch's rewards, which is what makes a node
+	// reject canonical blocks near the eligibility threshold. A nonzero
+	// value on a Mithril-bootstrapped node explains a stake shortfall; a
+	// rising value on any node is a live divergence from the network.
+	skippedStakeRewardRounds prometheus.Counter
 }
 
 // The accessors below tolerate an uninitialised stateMetrics. A LedgerState
@@ -100,6 +108,13 @@ func (m *stateMetrics) incLeaderThresholdRejections() {
 		return
 	}
 	m.leaderThresholdRejections.Inc()
+}
+
+func (m *stateMetrics) incSkippedStakeRewardRounds() {
+	if m == nil || m.skippedStakeRewardRounds == nil {
+		return
+	}
+	m.skippedStakeRewardRounds.Inc()
 }
 
 func (m *stateMetrics) setPipelineNoProgress(restarts int, stuck bool) {
@@ -257,6 +272,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_pipeline_no_progress_restarts",
 			Help: "consecutive ledger-pipeline restarts that made no tip progress; resets to zero as soon as the tip advances",
+		},
+	)
+	m.skippedStakeRewardRounds = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
+			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
 		},
 	)
 	m.pipelineStuck = promautoFactory.NewGauge(

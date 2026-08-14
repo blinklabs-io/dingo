@@ -165,11 +165,11 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 	if pots == nil {
-		ls.config.Logger.Debug(
-			"skipping stake rewards: missing ADA pots",
-			"component", "ledger",
-			"new_epoch", newEpoch,
-			"pots_epoch", potsEpoch,
+		ls.reportSkippedStakeRewards(
+			newEpoch,
+			"missing ADA pots",
+			"pots_epoch",
+			potsEpoch,
 		)
 		return nil, false, nil
 	}
@@ -184,11 +184,11 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 	if rewardSnapshot == nil {
-		ls.config.Logger.Debug(
-			"skipping stake rewards: missing reward snapshot",
-			"component", "ledger",
-			"new_epoch", newEpoch,
-			"reward_snapshot_epoch", rewardSnapshotEpoch,
+		ls.reportSkippedStakeRewards(
+			newEpoch,
+			"missing reward snapshot",
+			"reward_snapshot_epoch",
+			rewardSnapshotEpoch,
 		)
 		return nil, false, nil
 	}
@@ -2336,6 +2336,53 @@ func stakeRewardEpochsForApplication(
 		}, true
 	}
 	return stakeRewardEpochsForNewEpoch(newEpoch)
+}
+
+// reportSkippedStakeRewards records a reward round that could not be applied
+// because one of its inputs is absent.
+//
+// This is not a benign "nothing to do". The reference node credits that round
+// regardless, so every skipped round leaves this node's reward balances --
+// and therefore the leadership stake distribution derived from them --
+// permanently short by that epoch's rewards. Nothing backfills it later: the
+// credit is simply never made.
+//
+// A short stake distribution is not a cosmetic difference. Leader eligibility
+// compares a VRF value against a threshold derived from relative stake, so a
+// stake shortfall of eps flips a decision with probability about eps per
+// block, and the flipped decision rejects a canonical block. That was
+// diagnosed on preview (issue #3165): a node whose stake was 0.042% short in
+// sigma rejected a block whose leader value sat between its own threshold and
+// the reference's, and wedged.
+//
+// Both skips used to log at Debug, which is why three separate field reports
+// were investigated without anyone seeing the cause. They are Warn now, and
+// counted, because a node in this state is silently diverging from the
+// network and only says so when it eventually rejects a block.
+//
+// The inputs are absent chiefly after a Mithril bootstrap: applying the round
+// at the boundary into N needs this node's own reward snapshot for N-3 and
+// ADA pots for N-1, and those epochs predate the import.
+func (ls *LedgerState) reportSkippedStakeRewards(
+	newEpoch uint64,
+	reason string,
+	epochKey string,
+	epochValue uint64,
+) {
+	ls.metrics.incSkippedStakeRewardRounds()
+	if ls.config.Logger == nil {
+		return
+	}
+	ls.config.Logger.Warn(
+		"skipping stake rewards: "+reason+
+			"; this epoch's rewards will never be credited, leaving reward"+
+			" balances and the leadership stake distribution permanently"+
+			" short (expected after a Mithril bootstrap, whose preceding"+
+			" epochs this node never saw)",
+		"component", "ledger",
+		"new_epoch", newEpoch,
+		epochKey, epochValue,
+	)
 }
 
 func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {

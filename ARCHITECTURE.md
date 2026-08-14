@@ -4936,6 +4936,28 @@ captured. Because a retained snapshot can outlive its per-credential rows,
 empty `RewardStakeInput` set rather than failing the rollover. See the
 retention section in `DATABASE.md` for the per-table detail.
 
+A skipped reward round is never made up later, and that has consequences
+well beyond the reward figures. Applying the round at the boundary into N
+requires this node's own `RewardSnapshot` for N-3 and `RewardAdaPots` for
+N-1; when either is absent the round is skipped, while the reference node
+credits it regardless. Reward balances — and the leadership stake
+distribution derived from them, since `reward_live_stake` sums UTxO plus
+reward — are then permanently short by that epoch's rewards. Leader
+eligibility compares a VRF value against a stake-derived threshold, so a
+sigma shortfall of eps flips a decision with probability about eps per
+block, and a flipped decision rejects a canonical block. Measured on preview
+for issue #3165: a node three reward rounds short ran 0.042% low in sigma
+and rejected a canonical block whose leader value sat between its own
+threshold and the reference's.
+
+The inputs are absent chiefly after a Mithril bootstrap, whose preceding
+epochs the node never saw, so the first rounds after import have nothing to
+compute from. Both skips are logged at WARN and counted by
+`dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
+Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
+node is a live divergence from the network. They were Debug until #3165,
+which is why the condition survived three field investigations unseen.
+
 Since dingo #1875, `cleanupOldSnapshots` reads `Database.StorageMode()` and
 diverges for `RewardAccountOutput` only: in `api` storage mode it is exempted
 from the epoch-window prune and retained for the life of the database instead,
