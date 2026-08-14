@@ -883,15 +883,21 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 // zero-argument branch in AppendUtxoAddressPatternOrBranch, so
 // argument-count alone would never chunk a run of such patterns before the
 // expression tree overflowed. Candidates are deduplicated by (tx id, output
-// index) across chunks before returning, since a UTxO can only satisfy one
-// address pattern but coarse credential-only branches from different
-// chunks could otherwise resurface the same row.
+// index) across chunks -- a coarse, non-selective branch (e.g. the
+// zero-argument fallback above) can return the same candidate rows from
+// every chunk it appears in -- before assets are loaded once on the final
+// deduplicated set, so asset-loading cost is bounded by the result size
+// rather than chunk count times candidate-set size.
 func (s *Store) GetUtxosByAddress(
 	patterns []models.UtxoAddressPattern,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
 		return nil, models.ErrEmptyUtxoAddressPattern
+	}
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
 	}
 	limit := s.dialect.ParameterLimit()
 	type utxoKey struct {
@@ -906,7 +912,7 @@ func (s *Store) GetUtxosByAddress(
 		if len(branches) == 0 {
 			return nil
 		}
-		utxos, err := s.queryUtxosWithAssets(
+		utxos, err := s.queryUtxos(
 			txn,
 			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
 			args,
@@ -948,6 +954,13 @@ func (s *Store) GetUtxosByAddress(
 		args = append(args, branchArgs...)
 	}
 	if err := runQuery(); err != nil {
+		return nil, err
+	}
+	pointers := make([]*models.Utxo, len(ret))
+	for i := range ret {
+		pointers[i] = &ret[i]
+	}
+	if err := s.loadUtxoAssets(db, pointers); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -1280,7 +1293,12 @@ func (s *Store) IterateLiveUtxos(
 	return rows.Err()
 }
 
-func (s *Store) queryUtxosWithAssets(
+// queryUtxos runs predicate/args against the utxo table and returns the
+// matching rows without loading assets -- callers that need to deduplicate
+// candidates across multiple queries (e.g. chunked GetUtxosByAddress) should
+// use this and load assets once on the final deduplicated set, rather than
+// paying the asset-load cost once per query.
+func (s *Store) queryUtxos(
 	txn types.Txn,
 	predicate string,
 	args []any,
@@ -1316,6 +1334,23 @@ func (s *Store) queryUtxosWithAssets(
 		ret = append(ret, *model)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+func (s *Store) queryUtxosWithAssets(
+	txn types.Txn,
+	predicate string,
+	args []any,
+	order string,
+) ([]models.Utxo, error) {
+	db, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	ret, err := s.queryUtxos(txn, predicate, args, order)
+	if err != nil {
 		return nil, err
 	}
 	pointers := make([]*models.Utxo, len(ret))

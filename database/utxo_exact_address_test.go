@@ -308,6 +308,58 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	assert.True(t, hasEnterpriseTx)
 }
 
+// TestUtxosByAddressLoadsAssets proves GetUtxosByAddress still attaches
+// native assets to its results after candidate selection was split from
+// asset loading (assets are now loaded once on the deduplicated result set
+// instead of once per chunk -- see GetUtxosByAddress).
+func TestUtxosByAddressLoadsAssets(t *testing.T) {
+	db := openTestDB(t)
+
+	payment := bytes.Repeat([]byte{0x55}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	txHash := bytes.Repeat([]byte{0x99}, 32)
+	policyID := bytes.Repeat([]byte{0x33}, 28)
+	assetName := []byte("asset")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId:       txHash,
+		OutputIdx:  0,
+		PaymentKey: addr.PaymentKeyHash().Bytes(),
+		AddedSlot:  1,
+		Amount:     types.Uint64(1_000_000),
+		Assets: []models.Asset{{
+			Name:        assetName,
+			NameHex:     []byte("6173736574"),
+			PolicyId:    policyID,
+			Fingerprint: []byte("fingerprint"),
+			Amount:      5,
+		}},
+	}))
+
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+	}))
+
+	got, err := db.UtxosByAddress([]lcommon.Address{addr}, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Len(t, got[0].Assets, 1)
+	assert.Equal(t, assetName, got[0].Assets[0].Name)
+	assert.Equal(t, policyID, got[0].Assets[0].PolicyId)
+	assert.Equal(t, types.Uint64(5), got[0].Assets[0].Amount)
+}
+
 // seedManyUtxoAddressesAndAssertRoundTrip builds numAddrs addresses via
 // newAddr, seeds a distinct transaction, UTxO row, and blob CBOR for each,
 // then queries GetUtxosByAddress with the full address set in one call and
