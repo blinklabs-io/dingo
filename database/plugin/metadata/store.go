@@ -976,6 +976,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Utxo, error)
 
+	// GetUtxosByRefs retrieves multiple live unspent transaction outputs
+	// by their (transaction ID, index) references in a single batch.
+	// Refs with no matching live UTxO are simply absent from the result.
+	GetUtxosByRefs(
+		[]models.UtxoId, // refs
+		types.Txn,
+	) ([]models.Utxo, error)
+
 	// GetTransactionByHash retrieves a transaction by its hash.
 	GetTransactionByHash(
 		[]byte, // hash

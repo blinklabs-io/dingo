@@ -7106,6 +7106,15 @@ func (ls *LedgerState) UtxoByRef(
 	return ls.db.UtxoByRef(txId, outputIdx, nil)
 }
 
+// UtxosByRefs returns the live UTxOs matching the given references in a
+// single batch. Refs with no matching live UTxO are simply absent from the
+// result.
+func (ls *LedgerState) UtxosByRefs(
+	refs []models.UtxoId,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByRefs(refs, nil)
+}
+
 // UtxosByAddress returns all UTxOs that belong to any of the specified addresses
 func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,

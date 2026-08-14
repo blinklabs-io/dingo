@@ -477,6 +477,29 @@ func (d *Database) UtxoByRef(
 	return utxo, nil
 }
 
+// UtxosByRefs returns the live UTxOs matching the given references in a
+// single batch. Refs with no matching live UTxO are simply absent from the
+// result.
+func (d *Database) UtxosByRefs(
+	refs []models.UtxoId,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxos, err := d.metadata.GetUtxosByRefs(refs, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
+		}
+	}
+	return utxos, nil
+}
+
 // CreateUtxo inserts a Utxo row directly. The normal block-application
 // path uses AddUtxos with UtxoSlot inputs; this is the simple-insert
 // variant for callers that already have a populated model. When txn
