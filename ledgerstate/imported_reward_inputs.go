@@ -137,8 +137,9 @@ func deriveRewardInputs(
 		}
 		// The credential type travels alongside the stake map, because that
 		// map is keyed by hash alone and a script credential can share a hash
-		// with a key one. Defaulting to a key hash is only correct when the
-		// snapshot shape does not encode the type at all.
+		// with a key one. Both parsed shapes carry it, the compact UTxO-HD
+		// one included, so the key-hash default below is for an entry that is
+		// missing rather than for a shape that omits them.
 		credentialTag := uint8(0)
 		if snap.StakeTags != nil {
 			if tag, ok := snap.StakeTags[credHex]; ok {
