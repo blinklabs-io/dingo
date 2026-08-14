@@ -55,10 +55,11 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 	require.NotNil(t, state.SnapShotsData)
 	require.NotNil(t, state.CertStateData)
 
+	// Not tolerated: ParseSnapShots returns a non-nil error even when it
+	// parses with entries skipped, so accepting that case lets a partial
+	// decode through and the test then runs on incomplete data.
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
-	if err != nil {
-		require.NotNil(t, snapshots, "parsing stake snapshots: %v", err)
-	}
+	require.NoError(t, err, "stake snapshots must parse completely")
 	certState, err := ParseCertState(state.CertStateData)
 	require.NoError(t, err)
 	require.NotEmpty(t, certState.Pools,
@@ -137,9 +138,7 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 	state, err := ParseSnapshot(testdataLedgerSnapshot)
 	require.NoError(t, err)
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
-	if err != nil {
-		require.NotNil(t, snapshots)
-	}
+	require.NoError(t, err, "stake snapshots must parse completely")
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	txn := db.MetadataTxn(true)

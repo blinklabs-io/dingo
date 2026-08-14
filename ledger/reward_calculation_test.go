@@ -851,6 +851,7 @@ WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
 		4,
 		1_200,
 		1_200,
+		true,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reward stake input total mismatch")
@@ -881,6 +882,7 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 		4,
 		1_200,
 		1_200,
+		true,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reward owner stake input total mismatch")
@@ -911,6 +913,7 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 		4,
 		1_200,
 		1_200,
+		true,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "total delegator count")
@@ -938,6 +941,7 @@ WHERE epoch = ? AND snapshot_type = ?`,
 		4,
 		1_200,
 		1_200,
+		true,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not match snapshot pool count")
@@ -968,6 +972,7 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 		4,
 		1_200,
 		1_200,
+		true,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reward pool input captured slot")
@@ -1000,6 +1005,7 @@ WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
 		4,
 		1_200,
 		1_200,
+		true,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reward stake input boundary slot")
@@ -1132,6 +1138,7 @@ INSERT INTO reward_stake_input (
 		4,
 		1_200,
 		1_200,
+		true,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reward stake input for unknown pool")

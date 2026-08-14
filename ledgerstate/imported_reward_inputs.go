@@ -35,6 +35,16 @@ type rewardInputBundle struct {
 	snapshot    *models.RewardSnapshot
 	poolInputs  []*models.RewardPoolInput
 	stakeInputs []*models.RewardStakeInput
+	// unattributedStake is stake delegated to a pool the parameter map does
+	// not describe, and unattributedPools how many distinct such pools were
+	// seen. Recorded rather than discarded: dropping the stake leaves a
+	// basis that still reconciles against itself -- the totals are summed
+	// from what remained -- while understating every surviving pool's share
+	// of the reward pot. A pool that retired or re-registered between the
+	// snapshot's epoch and the import, or a registration set only partially
+	// populated when the seeding runs, produces exactly that.
+	unattributedStake uint64
+	unattributedPools int
 }
 
 // deriveRewardInputs turns one imported stake snapshot into the reward basis
@@ -96,6 +106,8 @@ func deriveRewardInputs(
 		owners[poolHex] = set
 	}
 
+	unattributed := make(map[string]struct{})
+	var unattributedStake uint64
 	stakeInputs := make([]*models.RewardStakeInput, 0, len(snap.Stake))
 	for credHex, stake := range snap.Stake {
 		// The validator rejects a zero-stake input, and a credential
@@ -110,18 +122,29 @@ func deriveRewardInputs(
 		poolHex := hex.EncodeToString(poolKey)
 		agg, ok := aggs[poolHex]
 		if !ok {
-			// Delegated to a pool the snapshot carries no parameters for.
-			// It cannot be paid, and including it would break the
-			// pool-count reconciliation.
+			// Delegated to a pool the parameter map does not describe. It
+			// cannot be paid, and it cannot be silently dropped either: see
+			// unattributedStake.
+			if _, seen := unattributed[poolHex]; !seen {
+				unattributed[poolHex] = struct{}{}
+			}
+			unattributedStake += stake
 			continue
 		}
 		cred, err := hex.DecodeString(credHex)
 		if err != nil || len(cred) == 0 {
 			continue
 		}
-		// Snapshot stake credentials are key hashes; the script-credential
-		// tag is not represented in this map.
-		const credentialTagKeyHash = 0
+		// The credential type travels alongside the stake map, because that
+		// map is keyed by hash alone and a script credential can share a hash
+		// with a key one. Defaulting to a key hash is only correct when the
+		// snapshot shape does not encode the type at all.
+		credentialTag := uint8(0)
+		if snap.StakeTags != nil {
+			if tag, ok := snap.StakeTags[credHex]; ok {
+				credentialTag = tag
+			}
+		}
 		isOwner := false
 		if set, ok := owners[poolHex]; ok {
 			_, isOwner = set[credHex]
@@ -131,7 +154,7 @@ func deriveRewardInputs(
 			Epoch:         epoch,
 			PoolKeyHash:   append([]byte(nil), poolKey...),
 			StakingKey:    cred,
-			CredentialTag: credentialTagKeyHash,
+			CredentialTag: credentialTag,
 			Stake:         types.Uint64(stake),
 			Owner:         isOwner,
 			Registered:    true,
@@ -196,8 +219,10 @@ func deriveRewardInputs(
 			// to supersede it.
 			Authoritative: false,
 		},
-		poolInputs:  poolInputs,
-		stakeInputs: stakeInputs,
+		poolInputs:        poolInputs,
+		stakeInputs:       stakeInputs,
+		unattributedStake: unattributedStake,
+		unattributedPools: len(unattributed),
 	}
 }
 
@@ -223,6 +248,14 @@ func deriveRewardInputs(
 func (b *rewardInputBundle) validate() error {
 	if b == nil || b.snapshot == nil {
 		return errors.New("missing derived reward snapshot")
+	}
+	if b.unattributedPools > 0 {
+		return fmt.Errorf(
+			"%d pools in this epoch's delegations have no parameters "+
+				"(%d lovelace of stake unattributed); seeding the remainder "+
+				"would understate every other pool's share",
+			b.unattributedPools, b.unattributedStake,
+		)
 	}
 	if uint64(len(b.poolInputs)) != b.snapshot.TotalPoolCount {
 		return fmt.Errorf(

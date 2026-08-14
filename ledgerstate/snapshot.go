@@ -1112,6 +1112,7 @@ func parseSnapShot(
 
 	var warnings []error
 	var stake map[string]uint64
+	var stakeTags map[string]uint8
 	var delegations map[string][]byte
 	var poolParams map[string]*ParsedPool
 
@@ -1140,7 +1141,7 @@ func parseSnapShot(
 		// Parse Stake: map[Credential]Coin
 		// Warnings from these parsers indicate skipped entries,
 		// not fatal errors, so we collect them.
-		stake, err = parseStakeMap(snap[0])
+		stake, stakeTags, err = parseStakeMap(snap[0])
 		if err != nil {
 			if stake == nil {
 				return nil, fmt.Errorf(
@@ -1175,6 +1176,7 @@ func parseSnapShot(
 
 	return &ParsedSnapShot{
 		Stake:       stake,
+		StakeTags:   stakeTags,
 		Delegations: delegations,
 		PoolParams:  poolParams,
 	}, errors.Join(warnings...)
@@ -1347,17 +1349,23 @@ func activePoolDistributionMapData(
 // parseStakeMap decodes a credential -> coin map. Handles both
 // definite and indefinite-length maps. Returns a warning if any
 // entries were skipped due to decode errors.
+// parseStakeMap decodes a credential->coin map. The returned tag map carries
+// each credential's type alongside, because the result is keyed by hash alone
+// and a script credential can share a hash with a key credential; attributing
+// a script delegator's stake to a key credential would misdirect both its
+// reward and its contribution to leadership stake.
 func parseStakeMap(
 	data cbor.RawMessage,
-) (map[string]uint64, error) {
+) (map[string]uint64, map[string]uint8, error) {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding stake map: %w", err,
 		)
 	}
 
 	result := make(map[string]uint64, len(entries))
+	tags := make(map[string]uint8, len(entries))
 	var skipped int
 	for _, entry := range entries {
 		cred, err := parseCredential(entry.KeyRaw)
@@ -1378,7 +1386,14 @@ func parseStakeMap(
 			skipped++
 			continue
 		}
-		result[hex.EncodeToString(cred.Hash)] = amount
+		key := hex.EncodeToString(cred.Hash)
+		result[key] = amount
+		// The credential type is discarded by the map key, which is the
+		// hash alone. Reward and leadership stake are attributed per
+		// credential, and a script credential and a key credential can share
+		// a hash, so the type has to travel alongside or a script
+		// delegator's stake is credited to a key credential.
+		tags[key] = uint8(cred.Type) // #nosec G115 -- 0 or 1
 	}
 
 	var warning error
@@ -1388,7 +1403,7 @@ func parseStakeMap(
 			skipped, len(entries),
 		)
 	}
-	return result, warning
+	return result, tags, warning
 }
 
 // parseStakeWithPoolMap decodes the UTxO-HD compact snapshot map:

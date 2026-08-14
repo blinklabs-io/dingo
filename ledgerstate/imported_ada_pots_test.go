@@ -36,47 +36,40 @@ func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
-	const (
-		epoch    = uint64(1385)
-		treasury = uint64(87_920_693_660_807)
-		reserves = uint64(14_914_270_613_432_674)
-		fees     = uint64(2_589_957_376)
-		slot     = uint64(119_750_400)
-	)
-	require.NoError(t, importTip(context.Background(), ImportConfig{
-		Database: db,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		State: &RawLedgerState{
-			Epoch:    epoch,
-			Treasury: treasury,
-			Reserves: reserves,
-			Fees:     fees,
-			EraIndex: 6,
-			Tip: &SnapshotTip{
-				Slot:      slot,
-				BlockHash: make([]byte, 32),
-			},
-		},
-		EpochLength: func(uint) (uint, uint, error) {
-			return 1, 100, nil
-		},
-	}))
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	require.NotNil(t, state.Tip)
 
-	pots, err := db.Metadata().GetRewardAdaPots(epoch, nil)
+	cfg := ImportConfig{
+		Database: db,
+		State:    state,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	noProgress := func(ImportProgress) {}
+	ctx := context.Background()
+	_, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
+	require.NoError(t, err)
+	require.NoError(t, importSnapShots(
+		ctx, cfg, state.Tip.Slot, noProgress, false,
+	))
+
+	pots, err := db.Metadata().GetRewardAdaPots(state.Epoch, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pots,
 		"the imported epoch needs an ADA pots row, or the first reward "+
 			"round after bootstrap is skipped and never made up")
+	require.Equal(t, state.Epoch, pots.Epoch)
+	require.Equal(t, state.Treasury, uint64(pots.Treasury))
+	require.Equal(t, state.Reserves, uint64(pots.Reserves))
 
-	require.Equal(t, epoch, pots.Epoch)
-	require.Equal(t, treasury, uint64(pots.Treasury))
-	require.Equal(t, reserves, uint64(pots.Reserves))
-	// Fees matter as much as the other two: the reward pot is incentives
-	// plus fees, so seeding a zero fee pot would compute and credit the
-	// round at the wrong amount rather than visibly not running it — a
-	// silently wrong reward is worse than an absent one.
-	require.Equal(t, fees, uint64(pots.Fees),
-		"the fee pot is an addend of the reward pot and must be carried "+
-			"through from the snapshot")
-	require.Equal(t, slot, pots.CapturedSlot)
+	// The fee pot must be the one SnapShots captured at the boundary, not
+	// UTxOState's running total for the current epoch: the reward pot is
+	// incentives plus fees, and the row is read as the pots for a boundary.
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err)
+	require.Equal(t, snapshots.Fee, uint64(pots.Fees),
+		"the seeded fee pot must come from SnapShots' ssFee")
 }

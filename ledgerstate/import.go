@@ -243,6 +243,13 @@ type ParsedSnapShots struct {
 type ParsedSnapShot struct {
 	// Stake maps credential-hex to staked lovelace.
 	Stake map[string]uint64
+	// StakeTags maps the same credential-hex to the credential type
+	// (0 = key hash, 1 = script hash). The Stake key is the hash alone, and
+	// a script credential can share a hash with a key credential, so the
+	// type has to be carried separately or per-credential reward and
+	// leadership stake attach to the wrong one. Absent for the compact
+	// UTxO-HD map shape, which does not encode it.
+	StakeTags map[string]uint8
 	// Delegations maps credential-hex to pool key hash.
 	Delegations map[string][]byte
 	// PoolParams maps pool-hex to pool parameters.
@@ -1344,6 +1351,32 @@ func importSnapShots(
 				keys = append(keys, key)
 			}
 		}
+		// Seed the ADA pots for the imported epoch alongside the reward
+		// basis: a reward round at the boundary into N reads this node's
+		// pots row for N-1, and a node bootstrapping here never saw that
+		// boundary, so without it the first round is skipped and never made
+		// up.
+		//
+		// The fee pot comes from SnapShots' own ssFee, not from UTxOState.
+		// UTxOState carries the fees accumulated so far in the current
+		// epoch, which is a partial figure unless the snapshot happens to
+		// sit exactly on a boundary; ssFee is the value captured at the
+		// boundary, which is what the reward pot's fee addend means. Seeding
+		// the live figure would compute the round at the wrong amount rather
+		// than visibly not running it.
+		if err := cfg.Database.Metadata().SaveRewardAdaPots(
+			&models.RewardAdaPots{
+				Epoch:        epoch,
+				Treasury:     types.Uint64(cfg.State.Treasury),
+				Reserves:     types.Uint64(cfg.State.Reserves),
+				Fees:         types.Uint64(snapshots.Fee),
+				CapturedSlot: slot,
+			},
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
+		}
+
 		pools, poolErr := cfg.Database.Metadata().GetPools(keys, txn.Metadata())
 		if poolErr != nil {
 			return fmt.Errorf("loading pools for reward inputs: %w", poolErr)
@@ -1359,9 +1392,9 @@ func importSnapShots(
 		); err != nil {
 			return err
 		}
-		err := txn.Commit()
-		txn = nil
-		return err
+		// Release stays with the defer for both outcomes: nilling the handle
+		// here to signal "committed" would skip it on the success path.
+		return txn.Commit()
 	}(); err != nil {
 		return fmt.Errorf("seeding imported reward inputs: %w", err)
 	}
@@ -2054,36 +2087,6 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf("setting network state: %w", err)
-	}
-
-	// Seed the ADA pots for the imported epoch.
-	//
-	// Applying a reward round at the boundary into N reads this node's
-	// RewardAdaPots row for N-1. A node that bootstraps here never saw that
-	// boundary, so without this the first round after import finds no pots
-	// and is skipped -- and a skipped round is never made up, leaving reward
-	// balances, and the leadership stake distribution derived from them,
-	// permanently short by an epoch's rewards. That shortfall is what makes
-	// a node reject canonical blocks whose VRF value sits near the
-	// stake-derived threshold (issue #3165).
-	//
-	// The snapshot carries every field the row needs -- treasury and
-	// reserves from AccountState, fees from UTxOState -- so this is a
-	// complete capture rather than a partial one. Seeding it with a zero fee
-	// pot would be worse than skipping: fees are an addend of the reward
-	// pot, so the round would be computed and credited at the wrong amount
-	// instead of visibly not happening.
-	if err := store.SaveRewardAdaPots(
-		&models.RewardAdaPots{
-			Epoch:        cfg.State.Epoch,
-			Treasury:     types.Uint64(cfg.State.Treasury),
-			Reserves:     types.Uint64(cfg.State.Reserves),
-			Fees:         types.Uint64(cfg.State.Fees),
-			CapturedSlot: tip.Slot,
-		},
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
 	}
 
 	// Generate epoch history from era bounds

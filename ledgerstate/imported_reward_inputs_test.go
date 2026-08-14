@@ -109,21 +109,26 @@ func TestDeriveRewardInputsReconciles(t *testing.T) {
 	require.Equal(t, uint64(1), b.delegators)
 }
 
-// A credential delegated to a pool the snapshot carries no parameters for
-// cannot be paid, and counting it would break the reconciliation the ledger
-// enforces.
-func TestDeriveRewardInputsDropsUnknownPoolDelegations(t *testing.T) {
+// A credential delegated to a pool the parameter map does not describe must
+// fail the epoch, not be quietly dropped.
+//
+// Dropping it leaves a basis that still reconciles -- the totals are summed
+// from whatever remained -- while understating every surviving pool's share of
+// the reward pot. A pool that retired or re-registered between the snapshot's
+// epoch and the import produces exactly this, as does a registration set only
+// partially populated when the seeding runs, and neither is visible in the
+// result.
+func TestDeriveRewardInputsRejectsUnattributableStake(t *testing.T) {
 	snap := twoPoolSnapshot()
 	orphan := hex28(0x31)
 	snap.Stake[orphan] = 9_000
-	snap.Delegations[orphan] = hash28(0xCC) // no PoolParams entry
+	snap.Delegations[orphan] = hash28(0xCC) // no parameters for this pool
 
 	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
-	require.NoError(t, bundle.validate())
-	require.Equal(t, uint64(12_000), uint64(bundle.snapshot.TotalActiveStake),
-		"the orphaned delegation must not inflate the active stake")
-	require.Len(t, bundle.stakeInputs, 3)
+	require.ErrorContains(t, bundle.validate(), "have no parameters")
+	require.ErrorContains(t, bundle.validate(), "9000",
+		"the error should say how much stake could not be attributed")
 }
 
 // Zero-stake credentials are rejected by the ledger's validator, so they must

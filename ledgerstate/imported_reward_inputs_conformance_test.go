@@ -109,11 +109,11 @@ func TestDerivedRewardInputsMatchReferenceStakeSnapshot(t *testing.T) {
 	require.NotNil(t, state.SnapShotsData,
 		"the snapshot carries no stake snapshots")
 
+	// Not tolerated: ParseSnapShots returns a non-nil error even when it
+	// parses with entries skipped, so accepting that case lets a partial
+	// decode through and the comparison then runs on incomplete data.
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
-	if err != nil {
-		require.NotNil(t, snapshots, "parsing stake snapshots: %v", err)
-		t.Logf("stake snapshot parse warnings: %v", err)
-	}
+	require.NoError(t, err, "stake snapshots must parse completely")
 
 	// Pool parameters come from cert state, the same place the import takes
 	// them: current snapshots carry only the compact pool-distr shape inside
@@ -168,7 +168,7 @@ func TestDerivedRewardInputsMatchReferenceStakeSnapshot(t *testing.T) {
 		}
 	}
 
-	for _, c := range []struct {
+	for i, c := range []struct {
 		name string
 		snap *ParsedSnapShot
 		want func(poolHex string) (uint64, bool)
@@ -217,8 +217,29 @@ func TestDerivedRewardInputsMatchReferenceStakeSnapshot(t *testing.T) {
 					"pool %s: derived delegated stake disagrees with "+
 						"cardano-node's %s snapshot", pool, c.name)
 			}
-			t.Logf("%s: %d pools compared against cardano-node, all equal",
-				c.name, compared)
+			// The sweep above only visits pools present in the derived
+			// set, so a pool the reference holds stake for that the
+			// derivation dropped entirely would never be examined -- and a
+			// dropped pool is precisely the failure a missing or stale
+			// registration produces. Sweep the other direction too.
+			var referenced int
+			for pool, v := range reference.Pools {
+				want := columns[min(i+int(offset), len(columns)-1)](v)
+				if i+int(offset) >= len(columns) || want == 0 {
+					continue
+				}
+				referenced++
+				got, ok := derived[pool]
+				require.True(t, ok,
+					"pool %s holds %d stake in cardano-node's %s snapshot "+
+						"but is absent from the derived basis", pool, want,
+					c.name)
+				require.Equal(t, want, got,
+					"pool %s: derived stake disagrees with cardano-node's "+
+						"%s snapshot", pool, c.name)
+			}
+			t.Logf("%s: %d pools compared derived->reference, %d "+
+				"reference->derived, all equal", c.name, compared, referenced)
 		})
 	}
 }

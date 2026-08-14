@@ -64,6 +64,7 @@ func (ls *LedgerState) applyStakeRewards(
 			newEpoch,
 			boundarySlot,
 			boundarySlot,
+			true,
 		)
 		if err != nil {
 			return err
@@ -138,11 +139,19 @@ type stakeRewardPrecomputeRetry struct {
 	cutoffSlot uint64
 }
 
+// reportSkips distinguishes the authoritative application from the
+// opportunistic precompute that runs the same calculation ahead of it. Only
+// the authoritative caller passes true: a precompute that finds an input
+// missing has not skipped a reward round -- the round has not been applied
+// yet, and the same inputs are read again at the boundary -- so reporting
+// there would count one eventually-successful round as skipped, and count a
+// genuinely skipped one twice.
 func (ls *LedgerState) calculateStakeRewardApplication(
 	txn *database.Txn,
 	newEpoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
+	reportSkips bool,
 ) (*stakeRewardApplication, bool, error) {
 	rewardInputGeneration := ls.rewardInputGeneration.Load()
 	epochs, ok := stakeRewardEpochsForApplication(newEpoch)
@@ -165,12 +174,14 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 	if pots == nil {
-		ls.reportSkippedStakeRewards(
-			newEpoch,
-			"missing ADA pots",
-			"pots_epoch",
-			potsEpoch,
-		)
+		if reportSkips {
+			ls.reportSkippedStakeRewards(
+				newEpoch,
+				"missing ADA pots",
+				"pots_epoch",
+				potsEpoch,
+			)
+		}
 		return nil, false, nil
 	}
 
@@ -184,12 +195,14 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 	if rewardSnapshot == nil {
-		ls.reportSkippedStakeRewards(
-			newEpoch,
-			"missing reward snapshot",
-			"reward_snapshot_epoch",
-			rewardSnapshotEpoch,
-		)
+		if reportSkips {
+			ls.reportSkippedStakeRewards(
+				newEpoch,
+				"missing reward snapshot",
+				"reward_snapshot_epoch",
+				rewardSnapshotEpoch,
+			)
+		}
 		return nil, false, nil
 	}
 
@@ -2067,6 +2080,7 @@ func (ls *LedgerState) precomputeStakeRewardsCalculate(
 		newEpoch,
 		capturedSlot,
 		boundarySlot,
+		false,
 	)
 	if err != nil || !ok {
 		return nil, false, err
