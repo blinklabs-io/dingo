@@ -26,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"sort"
@@ -37,6 +38,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -436,11 +438,13 @@ func (it *s3StreamIterator) advance(ctx context.Context) {
 			}
 			it.page = page.Contents
 			it.pageIdx = 0
-			// A freshly fetched page can itself be empty (e.g. a prefix
-			// with zero matching objects, observed against MinIO): loop
-			// back to the pageIdx/len(page) check above instead of
-			// falling through to index it.page[0] unconditionally, which
-			// panics with an out-of-range index on an empty page.
+			// A freshly fetched page can itself be empty (for example, no
+			// object in the bucket matches the prefix yet because the only
+			// write for it is still staged in this transaction, not
+			// committed -- observed against a real MinIO instance). Loop
+			// back to the pageIdx/len(page) check above instead of falling
+			// through to index it.page[0] unconditionally, which panics
+			// with an out-of-range index on an empty page.
 			continue
 		}
 		objectKey := strings.TrimPrefix(
@@ -1067,17 +1071,35 @@ func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
 // instead of correctly reporting "false, nil" (caught via a live MinIO
 // run: committing a brand new key errored on its own pre-existence probe).
 func isS3NotFound(err error) bool {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) &&
-		(apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
-		return true
-	}
 	var noSuchKey *s3types.NoSuchKey
 	if errors.As(err, &noSuchKey) {
 		return true
 	}
 	var notFound *s3types.NotFound
-	return errors.As(err, &notFound)
+	if errors.As(err, &notFound) {
+		return true
+	}
+	// A structured API error means the SDK parsed a response body (every
+	// operation except HeadObject always has one, including a 404 for a
+	// misconfigured/nonexistent bucket -- NoSuchBucket, not NoSuchKey).
+	// Once any such error is present, its specific code is authoritative:
+	// only NoSuchKey/NotFound mean "the object doesn't exist," and every
+	// other code must surface as a real error rather than fall through to
+	// the bare-status check below just because it also happens to carry a
+	// 404.
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() == "NoSuchKey" ||
+			apiErr.ErrorCode() == "NotFound"
+	}
+	// No structured error was parseable at all: this only happens for a
+	// bodyless response (HeadObject, used by objectExists and
+	// GetBlockURL), where the bare HTTP 404 wrapped in a smithy-go
+	// ResponseError is the only signal left (observed against a real
+	// MinIO instance).
+	var respErr *smithyhttp.ResponseError
+	return errors.As(err, &respErr) &&
+		respErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 func (d *BlobStoreS3) listKeysToFile(

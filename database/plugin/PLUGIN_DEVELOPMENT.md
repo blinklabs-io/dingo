@@ -108,3 +108,41 @@ semantics. Run both:
 go test ./...
 go test -tags dingo_extra_plugins ./...
 ```
+
+## Conformance tests
+
+`internal/test/storagetest` is a shared conformance suite that checks every
+storage plugin against the same behavioral contract instead of each plugin
+inventing its own CRUD test shape -- CRUD and large-payload round-trips,
+transaction/rollback/iteration semantics, concurrent access, an
+operation-timeout bound, and (as standalone per-plugin tests alongside it)
+unreachable-endpoint, bad-credential, and resource-cleanup checks. See
+[`internal/test/storagetest/README.md`](../../internal/test/storagetest/README.md)
+for what each check covers, the environment variables each cloud/database
+backend reads, and CI availability.
+
+Add a new plugin's conformance test as a thin `conformance_test.go` in its
+own package, in-package so it can use the plugin's real constructor:
+
+```go
+func TestBlobStoreConformance(t *testing.T) {
+    storagetest.RunBlobStoreConformance(t, func(t *testing.T) blob.BlobStore {
+        store, err := New(WithBucket(bucket))
+        require.NoError(t, err)
+        require.NoError(t, store.Start())
+        t.Cleanup(func() { require.NoError(t, store.Stop()) })
+        return store
+    })
+}
+```
+
+`newStore` is called once; the harness reuses that store across every
+subtest, so construction against a real bucket or database stays cheap.
+Cloud- or database-backed plugins skip cleanly (never fail) when their
+backend is not configured, following the same convention this repository
+already uses for cloud credentials and CI database services.
+
+`internal/integration/storage_migration_test.go` covers a distinct
+concern -- migrating data between two different plugins, not just each
+plugin in isolation -- by writing a small dataset through one backend's
+typed API and replaying the exact retrieved values into a second backend.
