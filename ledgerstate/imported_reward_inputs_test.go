@@ -193,9 +193,12 @@ func TestDeriveRewardInputsPreservesScriptCredentialType(t *testing.T) {
 	scriptCred := hex28(0x51)
 	snap.Stake[scriptCred] = 3_000
 	snap.Delegations[scriptCred] = hash28(0xAA)
+	// 0x12 is deliberately left out: the derivation's default branch only
+	// runs for a credential absent from the map, so listing every credential
+	// would leave that branch untested and the assertion below would be
+	// reading back a stored zero rather than the default.
 	snap.StakeTags = map[string]uint8{
 		hex28(0x11): 0,
-		hex28(0x12): 0,
 		hex28(0x21): 0,
 		scriptCred:  1, // script hash
 	}
@@ -217,9 +220,19 @@ func TestDeriveRewardInputsPreservesScriptCredentialType(t *testing.T) {
 
 	// And a credential with no recorded type still reads as a key hash, which
 	// is the only safe default for a snapshot shape that does not encode it.
+	untagged := hex28(0x12)
+	require.NotContains(t, snap.StakeTags, untagged,
+		"this credential must stay out of StakeTags or the default branch "+
+			"below is never reached")
+	found = false
 	for _, input := range bundle.stakeInputs {
-		if hex.EncodeToString(input.StakingKey) == hex28(0x12) {
-			require.Equal(t, uint8(0), input.CredentialTag)
+		if hex.EncodeToString(input.StakingKey) != untagged {
+			continue
 		}
+		found = true
+		require.Equal(t, uint8(0), input.CredentialTag)
 	}
+	require.True(t, found,
+		"the untagged credential should be in the basis, or the default "+
+			"is untested")
 }

@@ -247,8 +247,13 @@ type ParsedSnapShot struct {
 	// (0 = key hash, 1 = script hash). The Stake key is the hash alone, and
 	// a script credential can share a hash with a key credential, so the
 	// type has to be carried separately or per-credential reward and
-	// leadership stake attach to the wrong one. Absent for the compact
-	// UTxO-HD map shape, which does not encode it.
+	// leadership stake attach to the wrong one.
+	//
+	// Both parsed shapes populate it, the compact UTxO-HD map included --
+	// that shape does encode the type, and dropping it there was the defect
+	// this field exists to prevent. An entry can still be missing, though,
+	// so a credential absent from this map is treated as a key hash; that
+	// default is a fallback, not a statement about any particular shape.
 	StakeTags map[string]uint8
 	// Delegations maps credential-hex to pool key hash.
 	Delegations map[string][]byte
@@ -2181,6 +2186,16 @@ func importedEpochStartSlot(cfg ImportConfig, epoch uint64) uint64 {
 	// The last bound at or before the target epoch is its era. Taking the
 	// last rather than the first also skips eras with no epochs, which is
 	// how preview encodes several eras all starting at epoch 0.
+	// An epoch before the first bound has no era to measure from. Falling
+	// through to the current era's boundary would be actively wrong -- that
+	// slot is after the epoch, so every registration made during it would
+	// count as pre-epoch and the most recent would win -- so widen the
+	// window to the whole chain instead and let the lookup take the earliest
+	// registration at or before the snapshot. Reaching this means era-bound
+	// extraction did not go back to genesis.
+	if len(bounds) > 0 && epoch < bounds[0].Epoch {
+		return 0
+	}
 	era := -1
 	for i := range bounds {
 		if bounds[i].Epoch <= epoch {

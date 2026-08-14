@@ -97,3 +97,29 @@ func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
 	require.Equal(t, uint64(1000), importedEpochStartSlot(cfg, 9),
 		"without bounds there is nothing better than the era boundary")
 }
+
+// Bounds that do not reach back to genesis leave an epoch with no era to
+// measure from. The current era's boundary is not a usable stand-in there:
+// it sits after the epoch, so every registration made during that epoch
+// would count as pre-epoch and the most recent would win -- the same
+// one-epoch-early error, arrived at from the other side.
+func TestImportedEpochStartSlotWidensBelowTheFirstEraBound(t *testing.T) {
+	cfg := ImportConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			EraBounds:     []EraBound{{Slot: 1000, Epoch: 10}},
+			EraIndex:      0,
+			EraBoundEpoch: 10,
+			EraBoundSlot:  1000,
+			Epoch:         11,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	require.Equal(t, uint64(0), importedEpochStartSlot(cfg, 9),
+		"an epoch before every known era bound must widen the window, not "+
+			"borrow a boundary that follows it")
+	require.Equal(t, uint64(1500), importedEpochStartSlot(cfg, 11),
+		"epochs the bounds do cover are unaffected")
+}
