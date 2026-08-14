@@ -211,25 +211,15 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	var candidates []models.UtxoId
 	var live []models.UtxoId
 	for len(live) < 2 {
-		block, blockCbor := nextProducingBlock(t, iter)
+		block, blockCbor := nextProducingBlock(t, db, iter)
 		txn := db.Transaction(true)
 		var produced lcommon.Utxo
 		err := txn.Do(func(txn *database.Txn) error {
-			tx, err := tryStoreBlockFirstTx(db, txn, block, blockCbor)
-			if err != nil {
-				return err
-			}
+			tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
 			produced = tx.Produced()[0]
 			return nil
 		})
-		if err != nil {
-			// Some fixture transactions need additional context this
-			// minimal setup doesn't provide (e.g. a deposit-bearing
-			// certificate needs certDeposits, passed as nil here); skip
-			// them and try the next producing block instead of failing
-			// the whole test.
-			continue
-		}
+		require.NoError(t, err)
 		candidates = append(candidates, models.UtxoId{
 			Hash: produced.Id.Id().Bytes(),
 			Idx:  produced.Id.Index(),

@@ -385,13 +385,27 @@ func newUtxoStorageTestIterator(t *testing.T) *immutable.BlockIterator {
 	return iter
 }
 
+// errNextProducingBlockValidated is returned from the scratch transaction
+// nextProducingBlock uses to check storability, forcing a rollback so the
+// caller's own (real) store starts from a clean slate regardless of
+// whether that check succeeded or failed.
+var errNextProducingBlockValidated = errors.New(
+	"nextProducingBlock: storability validated, rolling back",
+)
+
 // nextProducingBlock advances iter to the next block whose first
-// transaction produces at least one UTxO, decodes it, and returns the
-// decoded block along with its raw CBOR. It skips the test if the fixture
-// is exhausted before finding one, so callers never need to separately
-// assert that a produced-UTxO set is non-empty.
+// transaction produces at least one UTxO and can actually be stored with
+// this package's minimal SetTransaction call (nil pparamUpdates and
+// certDeposits) — some fixture transactions carry a deposit-bearing
+// certificate that needs certDeposits this helper doesn't supply, and
+// those are skipped too, in a scratch transaction that is always rolled
+// back. It decodes the block and returns it along with its raw CBOR. It
+// skips the test if the fixture is exhausted before finding one, so
+// callers never need to separately handle a non-producing or un-storable
+// first transaction.
 func nextProducingBlock(
 	t *testing.T,
+	db *database.Database,
 	iter *immutable.BlockIterator,
 ) (lcommon.Block, []byte) {
 	t.Helper()
@@ -400,7 +414,7 @@ func nextProducingBlock(
 		require.NoError(t, err)
 		if immBlock == nil {
 			t.Skip(
-				"no block with a producing first transaction found in testdata",
+				"no storable block with a producing first transaction found in testdata",
 			)
 		}
 
@@ -409,6 +423,20 @@ func nextProducingBlock(
 
 		if len(block.Transactions()) == 0 ||
 			len(block.Transactions()[0].Produced()) == 0 {
+			continue
+		}
+
+		txn := db.Transaction(true)
+		err = txn.Do(func(txn *database.Txn) error {
+			if _, err := tryStoreBlockFirstTx(db, txn, block, immBlock.Cbor); err != nil {
+				return err
+			}
+			return errNextProducingBlockValidated
+		})
+		if !errors.Is(err, errNextProducingBlockValidated) {
+			// A real storage error (e.g. a deposit-bearing certificate
+			// needing certDeposits this helper doesn't supply); try the
+			// next producing block instead.
 			continue
 		}
 		return block, immBlock.Cbor
@@ -492,7 +520,7 @@ func tryStoreBlockFirstTx(
 func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 	db := newUtxoStorageTestDB(t)
 	iter := newUtxoStorageTestIterator(t)
-	block, blockCbor := nextProducingBlock(t, iter)
+	block, blockCbor := nextProducingBlock(t, db, iter)
 
 	// Store block and verify UTxO retrieval in same transaction
 	txn := db.Transaction(true)
@@ -531,7 +559,7 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
 	db := newUtxoStorageTestDB(t)
 	iter := newUtxoStorageTestIterator(t)
-	block, blockCbor := nextProducingBlock(t, iter)
+	block, blockCbor := nextProducingBlock(t, db, iter)
 
 	txn := db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
