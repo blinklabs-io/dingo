@@ -178,3 +178,48 @@ func TestDerivedRewardInputsGateRejectsTotalsMismatch(t *testing.T) {
 	bundle.snapshot.TotalActiveStake++
 	require.ErrorContains(t, bundle.validate(), "does not match snapshot")
 }
+
+// A script stake credential must reach the reward basis as a script
+// credential. The stake maps are keyed by hash alone, so the type travels
+// beside them; losing it attributes a script delegator's reward and its share
+// of leadership stake to a key credential, or to whichever credential happens
+// to share the hash.
+//
+// This is synthetic because it has to be: the DevNet fixture contains only
+// key-hash credentials, so a real-snapshot test cannot distinguish a preserved
+// tag from a hardcoded zero.
+func TestDeriveRewardInputsPreservesScriptCredentialType(t *testing.T) {
+	snap := twoPoolSnapshot()
+	scriptCred := hex28(0x51)
+	snap.Stake[scriptCred] = 3_000
+	snap.Delegations[scriptCred] = hash28(0xAA)
+	snap.StakeTags = map[string]uint8{
+		hex28(0x11): 0,
+		hex28(0x12): 0,
+		hex28(0x21): 0,
+		scriptCred:  1, // script hash
+	}
+
+	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
+	require.NotNil(t, bundle)
+	require.NoError(t, bundle.validate())
+
+	var found bool
+	for _, input := range bundle.stakeInputs {
+		if hex.EncodeToString(input.StakingKey) != scriptCred {
+			continue
+		}
+		found = true
+		require.Equal(t, uint8(1), input.CredentialTag,
+			"a script credential must not be persisted as a key hash")
+	}
+	require.True(t, found, "the script credential should be in the basis")
+
+	// And a credential with no recorded type still reads as a key hash, which
+	// is the only safe default for a snapshot shape that does not encode it.
+	for _, input := range bundle.stakeInputs {
+		if hex.EncodeToString(input.StakingKey) == hex28(0x12) {
+			require.Equal(t, uint8(0), input.CredentialTag)
+		}
+	}
+}

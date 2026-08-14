@@ -222,10 +222,17 @@ func TestDerivedRewardInputsMatchReferenceStakeSnapshot(t *testing.T) {
 			// derivation dropped entirely would never be examined -- and a
 			// dropped pool is precisely the failure a missing or stale
 			// registration produces. Sweep the other direction too.
+			// Bounds first, then index: clamping the index and discarding
+			// the result afterwards evaluates a column this subtest is not
+			// comparing against, which reads as if it were.
+			idx := i + int(offset)
+			if idx >= len(columns) {
+				return
+			}
 			var referenced int
 			for pool, v := range reference.Pools {
-				want := columns[min(i+int(offset), len(columns)-1)](v)
-				if i+int(offset) >= len(columns) || want == 0 {
+				want := columns[idx](v)
+				if want == 0 {
 					continue
 				}
 				referenced++

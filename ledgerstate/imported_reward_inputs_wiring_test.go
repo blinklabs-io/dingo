@@ -60,6 +60,14 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 	// decode through and the test then runs on incomplete data.
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
 	require.NoError(t, err, "stake snapshots must parse completely")
+	// The credential type has to survive parsing, and on the compact UTxO-HD
+	// shape -- which is what current snapshots use -- it was being dropped,
+	// so every credential defaulted to a key hash. A script credential can
+	// share a hash with a key one, so that misdirects both the reward and the
+	// share of leadership stake.
+	require.Len(t, snapshots.Mark.StakeTags, len(snapshots.Mark.Stake),
+		"every credential in the stake map needs its type carried alongside")
+
 	certState, err := ParseCertState(state.CertStateData)
 	require.NoError(t, err)
 	require.NotEmpty(t, certState.Pools,

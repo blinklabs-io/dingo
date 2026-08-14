@@ -1117,7 +1117,7 @@ func parseSnapShot(
 	var poolParams map[string]*ParsedPool
 
 	if len(snap) == 2 {
-		stake, delegations, err = parseStakeWithPoolMap(snap[0])
+		stake, stakeTags, delegations, err = parseStakeWithPoolMap(snap[0])
 		if err != nil {
 			if stake == nil || delegations == nil {
 				return nil, fmt.Errorf(
@@ -1408,17 +1408,25 @@ func parseStakeMap(
 
 // parseStakeWithPoolMap decodes the UTxO-HD compact snapshot map:
 // map[Credential][Coin, PoolKeyHash].
+// parseStakeWithPoolMap decodes the compact UTxO-HD shape. It returns the
+// credential types alongside for the same reason parseStakeMap does: the maps
+// are keyed by credential hash alone, and a script credential can share a hash
+// with a key credential, so attributing a script delegator's stake to a key
+// credential would misdirect both its reward and its share of leadership
+// stake. This is the shape current snapshots use, so it is the path that
+// decides whether that attribution is right in practice.
 func parseStakeWithPoolMap(
 	data cbor.RawMessage,
-) (map[string]uint64, map[string][]byte, error) {
+) (map[string]uint64, map[string]uint8, map[string][]byte, error) {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, nil, nil, fmt.Errorf(
 			"decoding stake-with-pool map: %w", err,
 		)
 	}
 
 	stake := make(map[string]uint64, len(entries))
+	tags := make(map[string]uint8, len(entries))
 	delegations := make(map[string][]byte, len(entries))
 	var skipped int
 	for _, entry := range entries {
@@ -1450,6 +1458,7 @@ func parseStakeWithPoolMap(
 
 		credKey := hex.EncodeToString(cred.Hash)
 		stake[credKey] = amount
+		tags[credKey] = uint8(cred.Type) // #nosec G115 -- 0 or 1
 		delegations[credKey] = poolHash
 	}
 
@@ -1460,7 +1469,7 @@ func parseStakeWithPoolMap(
 			skipped, len(entries),
 		)
 	}
-	return stake, delegations, warning
+	return stake, tags, delegations, warning
 }
 
 // parseDelegationMap decodes a credential -> pool key hash map.
