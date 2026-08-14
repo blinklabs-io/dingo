@@ -72,6 +72,18 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 	_ = exerciseUtxoReadStore(t, store)
 }
 
+// TestGetUtxosByAddressEmptyPatterns proves an empty patterns slice returns
+// (nil, nil) rather than models.ErrEmptyUtxoAddressPattern, matching the
+// coordinated Database.UtxosByAddress's empty-input handling for the same
+// slice-based API.
+func TestGetUtxosByAddressEmptyPatterns(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+	got, err := store.GetUtxosByAddress(nil, nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
 func exerciseUtxoReadStore(t *testing.T, store utxoReadStore) utxoReadState {
 	t.Helper()
 	paymentKey := bytes.Repeat([]byte{0x11}, 28)

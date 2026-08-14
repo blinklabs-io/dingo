@@ -379,50 +379,57 @@ func seedManyUtxoAddressesAndAssertRoundTrip(
 	zeroHash := lcommon.NewBlake2b224(nil)
 	addrs := make([]lcommon.Address, numAddrs)
 	txIds := make([][]byte, numAddrs)
-	for i := range addrs {
-		addr := newAddr(i)
-		addrs[i] = addr
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		for i := range addrs {
+			addr := newAddr(i)
+			addrs[i] = addr
 
-		txID := uint(i + 1)
-		txHash := make([]byte, 32)
-		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
-		txIds[i] = txHash
-		amount := uint64(i+1) * 1_000_000
+			txID := uint(i + 1)
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			txIds[i] = txHash
+			amount := uint64(i+1) * 1_000_000
 
-		_, err := raw.Exec(`
+			if _, err := raw.Exec(`
 INSERT INTO "transaction" (
     id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
 ) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
-			txID, txHash, uint64(i+1),
-		)
-		require.NoError(t, err)
+				txID, txHash, uint64(i+1),
+			); err != nil {
+				return err
+			}
 
-		var paymentKey, stakingKey any
-		if pk := addr.PaymentKeyHash(); pk != zeroHash {
-			paymentKey = pk.Bytes()
-		}
-		if sk := addr.StakeKeyHash(); sk != zeroHash {
-			stakingKey = sk.Bytes()
-		}
-		_, err = raw.Exec(`
+			var paymentKey, stakingKey any
+			if pk := addr.PaymentKeyHash(); pk != zeroHash {
+				paymentKey = pk.Bytes()
+			}
+			if sk := addr.StakeKeyHash(); sk != zeroHash {
+				stakingKey = sk.Bytes()
+			}
+			if _, err := raw.Exec(`
 INSERT INTO utxo (
     transaction_id, tx_id, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
 ) VALUES (?, ?, ?, ?, 0, ?, 0, ?, 0, FALSE)`,
-			txID, txHash, paymentKey, stakingKey, uint64(i+1),
-			strconv.FormatUint(amount, 10),
-		)
-		require.NoError(t, err)
+				txID, txHash, paymentKey, stakingKey, uint64(i+1),
+				strconv.FormatUint(amount, 10),
+			); err != nil {
+				return err
+			}
 
-		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-			OutputAddress: addr,
-			OutputAmount:  amount,
-		})
-		require.NoError(t, err)
-		require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
-			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
-		}))
-	}
+			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr,
+				OutputAmount:  amount,
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
 
 	got, err := db.UtxosByAddress(addrs, nil)
 	require.NoError(t, err)

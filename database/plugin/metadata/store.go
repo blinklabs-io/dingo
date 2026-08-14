@@ -1423,7 +1423,9 @@ type MetadataStore interface {
 	// GetUtxosByAddress retrieves coarse SQL candidates matching any of the
 	// given address patterns (OR-joined, mirroring
 	// GetUtxosByAddressWithOrdering). The database layer performs full
-	// exact-address CBOR filtering when ExactAddress is set.
+	// exact-address CBOR filtering when ExactAddress is set. An empty
+	// patterns slice returns (nil, nil), matching the coordinated
+	// Database.UtxosByAddress's empty-input handling.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
 		types.Txn,

@@ -893,7 +893,7 @@ func (s *Store) GetUtxosByAddress(
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
-		return nil, models.ErrEmptyUtxoAddressPattern
+		return nil, nil
 	}
 	db, err := s.readDBFromTxn(txn)
 	if err != nil {
