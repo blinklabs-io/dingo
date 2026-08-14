@@ -54,6 +54,39 @@ type refPool struct {
 //	                            --all-stake-pools --output-json`
 //	DINGO_REF_EPOCH            the epoch the node was in when that query ran
 //
+// Running this against preview rather than DevNet is what would settle issue
+// #3165, because DevNet has two pools and preview has several hundred. The
+// artifacts can be had without a full bootstrap:
+//
+//  1. The ledger state lives in the Mithril *ancillary* files, which are not
+//     downloaded by default since mithril-client 0.12.1. Fetch them with the
+//     v2 backend, bounding the immutable range so the 15 GB preview database
+//     is not pulled for a 10 KB file:
+//
+//     export AGGREGATOR_ENDPOINT=https://aggregator.pre-release-preview.api.mithril.network/aggregator
+//     export GENESIS_VERIFICATION_KEY=$(curl -s https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/pre-release-preview/genesis.vkey)
+//     export ANCILLARY_VERIFICATION_KEY=$(curl -s https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/pre-release-preview/ancillary.vkey)
+//     mithril-client cardano-database download latest \
+//     --include-ancillary --start <n> --end <n>
+//
+//     Note the network is "pre-release-preview", not "release-preview";
+//     the latter does not resolve. dingo's own endpoints are in
+//     mithril/client.go's defaultNetworkConfigs.
+//
+//  2. The reference for preview is koios rather than a local cardano-cli.
+//     /pool_history?_epoch_no=E gives active_stake and delegator_cnt per pool
+//     for epoch E; build the reference JSON from three queries, for the
+//     snapshot's own epoch and the two before it, which is what mark, set and
+//     go hold. Epoch offset still applies: koios reports the active stake for
+//     epoch E, which is the distribution as of the end of E-2.
+//
+// A full `dingo mithril sync` is the other half of the validation, and a
+// different question: it shows whether a bootstrapped node then computes
+// rewards that keep its stake in line, which is visible as
+// dingo_ledger_skipped_stake_reward_rounds_total staying at zero and the
+// leader-threshold margin histogram showing no near-zero clustering. That
+// needs the full download and several epochs of running.
+//
 // The epoch matters because the two artifacts are rarely from the same point:
 // a ledger snapshot is written at the node's immutable tip, which lags the
 // tip the CLI query sees, so the snapshot is often an epoch behind. Snapshots
