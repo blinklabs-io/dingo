@@ -508,6 +508,13 @@ type Config struct {
 	DatabaseWorkers   int `yaml:"databaseWorkers"        envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"      envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
 	BackfillBatchSize int `yaml:"backfillBatchSize"      envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
+	// BlockPipelineEnabled turns on parallel block decode in the chainsync
+	// replay loop that reads blocks back from the primary chain and applies
+	// them to the ledger. Not consensus-affecting -- it only changes how
+	// CBOR decode work is scheduled, not validation or apply behavior -- but
+	// defaults off until throughput and stability are proven (issue #1894
+	// phase 1). See ARCHITECTURE.md ("Block Processing Pipeline").
+	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"   envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`

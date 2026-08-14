@@ -401,6 +401,15 @@ immutableDbPath: ""
 # whose source does not provide the complete historical state.
 validateHistorical: true
 
+# Decode blocks in the chainsync replay loop with a small parallel worker
+# pool instead of one at a time (default: false). Not consensus-affecting --
+# only changes how CBOR decode work is scheduled, not validation or apply
+# behavior. See ARCHITECTURE.md ("Block Processing Pipeline").
+#
+# Can be overridden with the DINGO_BLOCK_PIPELINE_ENABLED environment variable
+# CLI: --block-pipeline-enabled
+blockPipelineEnabled: false
+
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # A non-genesis chainsync intersection without a Mithril snapshot may set this

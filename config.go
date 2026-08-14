@@ -211,6 +211,7 @@ type Config struct {
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
+	blockPipelineEnabled                                                                bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -519,6 +520,28 @@ func (n *Node) configValidate() error {
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}
+	// The block-decode pipeline's vendored decode stage
+	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
+	// directly and has no hook for dingo's Leios-extended-header Conway
+	// fallback (database/models.DecodeConwayBlock), which the Musashi
+	// prototype network's blocks require. Enabling the pipeline there would
+	// not error loudly: a Leios-extended block would fail strict decode,
+	// decodeReadChainBatch would log and return ok=false,
+	// ledgerReadChainIterator would return (closing resultCh), and
+	// ledgerProcessBlocksFromSource treats a closed result channel as a
+	// clean, non-error exit -- so chain replay would silently and
+	// permanently stall until a full process restart, with no diagnostic.
+	// Refuse the combination outright rather than let an operator hit that.
+	if n.config.cfg.BlockPipelineEnabled && n.config.isMusashiNetwork() {
+		return errors.New(
+			"block pipeline is not supported on the Musashi prototype " +
+				"network: its decode stage does not apply dingo's " +
+				"Leios-extended Conway header fallback, so a Leios-extended " +
+				"block would fail to decode and silently stall chain replay; " +
+				"disable --block-pipeline-enabled (blockPipelineEnabled) to " +
+				"sync Musashi",
+		)
+	}
 	if n.config.cfg.FullPotRewardsEnabled &&
 		!n.config.cfg.UnsafeFullPotRewardsOnStandardNetworks {
 		if network, ok := internalconfig.FullPotRewardsStandardNetwork(n.config.cfg.Network, n.config.cfg.NetworkMagic); ok {
@@ -710,6 +733,7 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity

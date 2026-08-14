@@ -149,6 +149,26 @@ func TestFullPotRewardsEnvBinding(t *testing.T) {
 	}
 }
 
+func TestBlockPipelineEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCK_PIPELINE_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockPipelineEnabled {
+		t.Fatal("expected env var to enable the block-decode pipeline")
+	}
+}
+
 func TestDatabasePathEnvironmentShortcut(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

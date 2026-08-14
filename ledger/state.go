@@ -52,6 +52,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/pipeline"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -65,6 +66,10 @@ const (
 	firstBlockIndex              = 1
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
+	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
+	// of the block-processing pipeline (issue #1894). Validation workers stay
+	// at 0 (disabled) until a later phase wires an Eta0Provider.
+	blockPipelineDecodeWorkers = 2
 )
 
 // DatabaseOperation represents an asynchronous database operation
@@ -496,6 +501,16 @@ type LedgerStateConfig struct {
 	ManualBlockProcessing    bool
 	ForgeBlocks              bool
 	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	// BlockPipelineEnabled turns on parallel block decode in the chainsync
+	// replay loop (ledgerReadChainIterator): blocks read back from the
+	// primary chain are decoded by a small worker pool (gouroboros'
+	// pipeline package) instead of one at a time inline, then re-sequenced
+	// before being handed to ledgerProcessBlocksFromSource exactly as
+	// today. Validation and apply are untouched -- this only changes how
+	// CBOR decode work is scheduled. Off by default: throughput and
+	// stability are still being proven (issue #1894 phase 1). See
+	// ARCHITECTURE.md ("Block Processing Pipeline").
+	BlockPipelineEnabled bool
 }
 
 // EndorserBlockProviderFunc returns the slot and the complete set of standalone
@@ -734,6 +749,15 @@ type LedgerState struct {
 	// rewardPrecomputeWG already do for the others.
 	processBlocksWG sync.WaitGroup
 
+	// blockPipeline, when non-nil (LedgerStateConfig.BlockPipelineEnabled),
+	// decodes blocks read back from the primary chain in parallel during
+	// ledgerReadChainIterator. It is started in Start (before
+	// processBlocksWG's goroutine, which is its only submitter) and stopped
+	// in Close (after that goroutine has drained), so its own worker
+	// goroutines never outlive the LedgerState. Nil means decode stays
+	// fully serial, matching pre-pipeline behavior exactly.
+	blockPipeline *pipeline.BlockPipeline
+
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
 	// to prevent Add-after-Wait panics from the TOCTOU race between
 	// closed.Load() and Add(1) in handleEventChainUpdate.
@@ -870,6 +894,17 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
 	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
+	if cfg.BlockPipelineEnabled {
+		// Validation stays disabled (ValidateWorkers defaults to 0) for
+		// phase 1: only decode is parallelized. ApplyFunc is left nil --
+		// actual ledger apply continues to happen downstream in
+		// ledgerProcessBlocksFromSource exactly as it does today; the
+		// pipeline's apply stage here only re-sequences decoded results
+		// back into submission order.
+		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
+		)
+	}
 	return ls, nil
 }
 
@@ -1135,6 +1170,22 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if ls.slotClock != nil {
 		ls.slotClock.Start(ctx)
 		go ls.handleSlotTicks()
+	}
+	// Start the block-decode pipeline, if configured, before the goroutine
+	// below that is its only submitter (ledgerReadChainIterator, reached via
+	// ledgerProcessBlocks). Close stops it explicitly after that goroutine
+	// drains -- like processBlocksCancel, this does not rely on ctx itself
+	// being cancelled, since ctx is the node's long-lived context that a
+	// live database restore/truncate never cancels. Skipped entirely under
+	// ManualBlockProcessing: that mode feeds already-decoded batches
+	// directly into ledgerProcessBlocksFromSource via
+	// ProcessTrustedBlockBatches, bypassing ledgerReadChainIterator (the
+	// pipeline's only submitter) altogether, so starting it here would just
+	// leave its workers idle until Close.
+	if ls.blockPipeline != nil && !ls.config.ManualBlockProcessing {
+		if err := ls.blockPipeline.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start block-decode pipeline: %w", err)
+		}
 	}
 	// Start goroutine to process new blocks unless the caller will feed trusted
 	// batches directly into the replay loop. Uses its own child context
@@ -1475,6 +1526,7 @@ var (
 	CloseRollbackDrainTimeout        = 10 * time.Second
 	CloseDBWorkerPoolShutdownTimeout = 15 * time.Second
 	CloseProcessBlocksDrainTimeout   = 10 * time.Second
+	CloseBlockPipelineDrainTimeout   = 10 * time.Second
 )
 
 func (ls *LedgerState) Close() error {
@@ -1547,6 +1599,31 @@ func (ls *LedgerState) Close() error {
 				fmt.Errorf(
 					"timed out after %s waiting for block-processing pipeline to stop",
 					CloseProcessBlocksDrainTimeout,
+				),
+			)
+		}
+	}
+
+	// Stop the block-decode pipeline (if configured), now that its only
+	// submitter -- the goroutine just drained above -- has exited. Bounded
+	// for the same reason as the wait above: a stuck pipeline must not hang
+	// Close forever, but a timeout here is not silently treated as success,
+	// since it means pipeline worker goroutines may still be running when
+	// Close returns.
+	if ls.blockPipeline != nil {
+		pipelineStopDone := make(chan struct{})
+		go func() {
+			_ = ls.blockPipeline.Stop()
+			close(pipelineStopDone)
+		}()
+		select {
+		case <-pipelineStopDone:
+		case <-time.After(CloseBlockPipelineDrainTimeout):
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"timed out after %s waiting for block-decode pipeline to stop",
+					CloseBlockPipelineDrainTimeout,
 				),
 			)
 		}
@@ -3038,9 +3115,10 @@ func (ls *LedgerState) ledgerReadChainIterator(
 	iter ledgerReadIterator,
 	resultCh chan readChainResult,
 ) {
-	// Read blocks from chain iterator and decode
+	// Read raw blocks from the chain iterator, then decode them (optionally
+	// via the block-decode pipeline for parallelism -- see blockPipeline's
+	// doc comment on the LedgerState struct).
 	var next, cachedNext *chain.ChainIteratorResult
-	var tmpBlock ledger.Block
 	var err error
 	var shouldBlock bool
 	var result readChainResult
@@ -3050,9 +3128,13 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			return
 		default:
 		}
-		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
-		nextBatch := make([]ledger.Block, 0, 500)
-		// Gather up next batch of blocks
+		// We chose 500 as an arbitrary max batch size. A "chain extended"
+		// message will be logged after each batch. This is comfortably
+		// under the block-decode pipeline's default prefetch buffer (1000),
+		// so submitting a full batch below never blocks mid-batch.
+		rawBatch := make([]models.Block, 0, 500)
+		var rollbackNext *chain.ChainIteratorResult
+		// Gather up next batch of raw blocks
 		for {
 			if cachedNext != nil {
 				next = cachedNext
@@ -3077,42 +3159,38 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				return
 			}
 			if next.Rollback {
-				if len(nextBatch) > 0 {
-					trimmedBatch, emitRollback := trimReadBatchForRollback(
-						nextBatch,
-						next.Point,
-					)
-					if len(trimmedBatch) > 0 {
-						nextBatch = trimmedBatch
-						if emitRollback {
-							cachedNext = next
-						}
-						break
-					}
+				rollbackNext = next
+				break
+			}
+			// Add the raw block to the batch; decoding happens once
+			// gathering for this pass finishes (see decodeReadChainBatch),
+			// potentially in parallel across the whole batch.
+			rawBatch = append(rawBatch, next.Block)
+			// Don't exceed our pre-allocated capacity
+			if len(rawBatch) == cap(rawBatch) {
+				break
+			}
+		}
+		nextBatch, ok := ls.decodeReadChainBatch(ctx, rawBatch)
+		if !ok {
+			return
+		}
+		if rollbackNext != nil {
+			trimmedBatch, emitRollback := trimReadBatchForRollback(
+				nextBatch,
+				rollbackNext.Point,
+			)
+			if len(trimmedBatch) > 0 {
+				nextBatch = trimmedBatch
+				if emitRollback {
+					cachedNext = rollbackNext
 				}
+			} else {
 				result = readChainResult{
 					rollback:      true,
-					rollbackPoint: next.Point,
+					rollbackPoint: rollbackNext.Point,
 					done:          make(chan struct{}),
 				}
-				break
-			}
-			// Decode block
-			tmpBlock, err = next.Block.Decode()
-			if err != nil {
-				ls.config.Logger.Error(
-					"failed to decode block: " + err.Error(),
-				)
-				return
-			}
-			// Add to batch
-			nextBatch = append(
-				nextBatch,
-				tmpBlock,
-			)
-			// Don't exceed our pre-allocated capacity
-			if len(nextBatch) == cap(nextBatch) {
-				break
 			}
 		}
 		if !result.rollback {
@@ -3133,6 +3211,78 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		}
 		result = readChainResult{}
 	}
+}
+
+// decodeReadChainBatch decodes a batch of raw blocks gathered from the chain
+// iterator into ledger.Block values, preserving input order. When
+// ls.blockPipeline is configured (LedgerStateConfig.BlockPipelineEnabled) it
+// submits the whole batch to the pipeline's decode worker pool up front, so
+// multiple blocks decode concurrently, then drains the results back in
+// submission order (the pipeline's apply stage guarantees this ordering
+// regardless of which worker finishes first). Otherwise it decodes serially,
+// exactly as ledgerReadChainIterator did before the pipeline existed.
+//
+// Either way, a single decode failure anywhere in the batch discards the
+// whole batch and returns ok=false, matching pre-pipeline behavior of never
+// handing a partially-decoded batch downstream; the caller should return
+// immediately in that case. All errors are logged here so callers don't need
+// to log again.
+func (ls *LedgerState) decodeReadChainBatch(
+	ctx context.Context,
+	rawBatch []models.Block,
+) (decoded []ledger.Block, ok bool) {
+	if len(rawBatch) == 0 {
+		return nil, true
+	}
+	if ls.blockPipeline == nil {
+		decoded = make([]ledger.Block, 0, len(rawBatch))
+		for _, raw := range rawBatch {
+			block, err := raw.Decode()
+			if err != nil {
+				ls.config.Logger.Error(
+					"failed to decode block: " + err.Error(),
+				)
+				return nil, false
+			}
+			decoded = append(decoded, block)
+		}
+		return decoded, true
+	}
+	for _, raw := range rawBatch {
+		tip := ocommon.Tip{
+			Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
+			BlockNumber: raw.Number,
+		}
+		if err := ls.blockPipeline.Submit(ctx, raw.Type, raw.Cbor, tip); err != nil {
+			ls.config.Logger.Error(
+				"failed to submit block to decode pipeline: " + err.Error(),
+			)
+			return nil, false
+		}
+	}
+	results := ls.blockPipeline.Results()
+	decoded = make([]ledger.Block, 0, len(rawBatch))
+	for range rawBatch {
+		select {
+		case item, chOk := <-results:
+			if !chOk {
+				ls.config.Logger.Error(
+					"decode pipeline results channel closed unexpectedly",
+				)
+				return nil, false
+			}
+			if decodeErr := item.DecodeError(); decodeErr != nil {
+				ls.config.Logger.Error(
+					"failed to decode block: " + decodeErr.Error(),
+				)
+				return nil, false
+			}
+			decoded = append(decoded, item.Block())
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
+	return decoded, true
 }
 
 // noProgressBackoffBase/Max bound the delay applied when consecutive
