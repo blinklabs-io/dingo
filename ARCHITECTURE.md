@@ -4962,7 +4962,13 @@ would credit the round at the wrong amount rather than visibly not running
 it. The per-credential reward basis is seeded from the same import: mark, set and
 go each carry one epoch's per-credential stake and its credential-to-pool
 delegations, and the three of them line up with the three epochs a freshly
-bootstrapped node cannot otherwise compute. Pool parameters are not taken from
+bootstrapped node cannot otherwise compute. The seeding is the last step of `importSnapShots`, after every stage
+that can create a pool registration -- cert state, the fallback pool import,
+and the retired-but-scheduled synthesis. It derives from those registrations,
+so running ahead of any of them would describe a pool set the import had not
+finished building; on the fallback path, which exists for a resume where cert
+state completed in an earlier run, that meant deriving against an empty pool
+table. Pool parameters are not taken from
 the snapshots -- current UTxO-HD snapshots carry pool entries in the compact
 pool-distr shape, which holds the pool and VRF keys and nothing else -- but
 resolved per epoch from the imported registration history through

@@ -1316,115 +1316,6 @@ func importSnapShots(
 
 	epoch := cfg.State.Epoch
 
-	// Seed the reward basis for the epochs these snapshots cover. Without it
-	// the first reward rounds after a bootstrap find no RewardSnapshot and
-	// are skipped, and a skipped round is never made up -- reward balances,
-	// and the leadership stake derived from them, stay short for the life of
-	// the database. See seedImportedRewardInputs; a basis that does not
-	// reconcile is dropped rather than written.
-	if err := func() error {
-		txn := cfg.Database.MetadataTxn(true)
-		defer func() {
-			if txn != nil {
-				txn.Release()
-			}
-		}()
-		// Pool parameters come from the registrations decoded out of cert
-		// state, not from the snapshot: current snapshots carry only the
-		// compact pool-distr shape inside SnapShots, with no margin, cost,
-		// pledge, reward account or owners.
-		keys := make([]lcommon.PoolKeyHash, 0, len(snapshots.Mark.PoolParams))
-		seen := make(map[string]struct{}, len(snapshots.Mark.PoolParams))
-		for _, snap := range []*ParsedSnapShot{
-			&snapshots.Mark, &snapshots.Set, &snapshots.Go,
-		} {
-			for _, poolKey := range snap.Delegations {
-				if len(poolKey) != credentialHashSize {
-					continue
-				}
-				if _, dup := seen[string(poolKey)]; dup {
-					continue
-				}
-				seen[string(poolKey)] = struct{}{}
-				var key lcommon.PoolKeyHash
-				copy(key[:], poolKey)
-				keys = append(keys, key)
-			}
-		}
-		// Seed the ADA pots for the imported epoch alongside the reward
-		// basis: a reward round at the boundary into N reads this node's
-		// pots row for N-1, and a node bootstrapping here never saw that
-		// boundary, so without it the first round is skipped and never made
-		// up.
-		//
-		// The fee pot comes from SnapShots' own ssFee, not from UTxOState.
-		// UTxOState carries the fees accumulated so far in the current
-		// epoch, which is a partial figure unless the snapshot happens to
-		// sit exactly on a boundary; ssFee is the value captured at the
-		// boundary, which is what the reward pot's fee addend means. Seeding
-		// the live figure would compute the round at the wrong amount rather
-		// than visibly not running it.
-		if err := cfg.Database.Metadata().SaveRewardAdaPots(
-			&models.RewardAdaPots{
-				Epoch:        epoch,
-				Treasury:     types.Uint64(cfg.State.Treasury),
-				Reserves:     types.Uint64(cfg.State.Reserves),
-				Fees:         types.Uint64(snapshots.Fee),
-				CapturedSlot: slot,
-			},
-			txn.Metadata(),
-		); err != nil {
-			return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
-		}
-
-		// Resolved per epoch rather than once, and from the registration
-		// history rather than the pool rows. mark, set and go are three
-		// different epochs, and a pool that changed its margin, cost or
-		// pledge between them had different parameters in each; the pool row
-		// only remembers the latest, so seeding all three from it credits two
-		// of them against parameters that were not in force. This is the same
-		// lookup the live reward path uses at an epoch boundary, so a
-		// bootstrapped node and a synced one derive the same basis.
-		//
-		// On a fresh bootstrap every registration lands at the import slot,
-		// so all three epochs resolve to the same row and this matches what
-		// reading the pool rows would have given. It diverges -- correctly --
-		// when the import runs against a database that already holds
-		// registration history.
-		resolveParams := func(
-			target uint64,
-		) (map[string]*ParsedPool, error) {
-			registrations, err := cfg.Database.Metadata().
-				GetPoolRegistrationsEffectiveForEpoch(
-					keys,
-					importedEpochStartSlot(cfg, target),
-					target,
-					slot,
-					txn.Metadata(),
-				)
-			if err != nil {
-				return nil, err
-			}
-			return rewardPoolParamsFromRegistrations(registrations), nil
-		}
-		if err := seedImportedRewardInputs(
-			cfg.Database.Metadata(),
-			txn.Metadata(),
-			snapshots,
-			resolveParams,
-			epoch,
-			slot,
-			cfg.Logger,
-		); err != nil {
-			return err
-		}
-		// Release stays with the defer for both outcomes: nilling the handle
-		// here to signal "committed" would skip it on the success path.
-		return txn.Commit()
-	}(); err != nil {
-		return fmt.Errorf("seeding imported reward inputs: %w", err)
-	}
-
 	if allowPoolFallback {
 		// Fallback pool import path runs BEFORE snapshot processing so
 		// that pool rows exist in the DB when ResolvePoolRewardAccountAutoVotes
@@ -1588,7 +1479,134 @@ func importSnapShots(
 		}
 	}
 
+	if err := seedImportedRewardBasis(
+		cfg, snapshots, epoch, slot,
+	); err != nil {
+		return fmt.Errorf("seeding imported reward inputs: %w", err)
+	}
+
 	return nil
+}
+
+// seedImportedRewardBasis writes the ADA pots and reward inputs for the
+// epochs an imported snapshot covers. Without them the first reward rounds
+// after a bootstrap find no RewardSnapshot and are skipped, and a skipped
+// round is never made up -- reward balances, and the leadership stake derived
+// from them, stay short for the life of the database. A basis that does not
+// reconcile is dropped rather than written; see seedImportedRewardInputs.
+//
+// It runs last in importSnapShots, after every stage that can create a pool
+// registration: cert state before it, then the fallback pool import and the
+// retired-but-scheduled synthesis. The basis is derived from those
+// registrations, so seeding ahead of any of them describes a pool set the
+// import had not finished building -- on the fallback path, which exists for
+// a resume where cert state completed in an earlier run, that meant deriving
+// against an empty pool table.
+func seedImportedRewardBasis(
+	cfg ImportConfig,
+	snapshots *ParsedSnapShots,
+	epoch uint64,
+	slot uint64,
+) error {
+	txn := cfg.Database.MetadataTxn(true)
+	defer func() {
+		if txn != nil {
+			txn.Release()
+		}
+	}()
+	// Every pool any of the three snapshots delegates to. Parameters are
+	// looked up for these, and come from the registration history rather
+	// than the snapshot: current snapshots carry only the compact pool-distr
+	// shape inside SnapShots, with no margin, cost, pledge, reward account
+	// or owners.
+	keys := make([]lcommon.PoolKeyHash, 0, len(snapshots.Mark.PoolParams))
+	seen := make(map[string]struct{}, len(snapshots.Mark.PoolParams))
+	for _, snap := range []*ParsedSnapShot{
+		&snapshots.Mark, &snapshots.Set, &snapshots.Go,
+	} {
+		for _, poolKey := range snap.Delegations {
+			if len(poolKey) != credentialHashSize {
+				continue
+			}
+			if _, dup := seen[string(poolKey)]; dup {
+				continue
+			}
+			seen[string(poolKey)] = struct{}{}
+			var key lcommon.PoolKeyHash
+			copy(key[:], poolKey)
+			keys = append(keys, key)
+		}
+	}
+	// Seed the ADA pots for the imported epoch alongside the reward
+	// basis: a reward round at the boundary into N reads this node's
+	// pots row for N-1, and a node bootstrapping here never saw that
+	// boundary, so without it the first round is skipped and never made
+	// up.
+	//
+	// The fee pot comes from SnapShots' own ssFee, not from UTxOState.
+	// UTxOState carries the fees accumulated so far in the current
+	// epoch, which is a partial figure unless the snapshot happens to
+	// sit exactly on a boundary; ssFee is the value captured at the
+	// boundary, which is what the reward pot's fee addend means. Seeding
+	// the live figure would compute the round at the wrong amount rather
+	// than visibly not running it.
+	if err := cfg.Database.Metadata().SaveRewardAdaPots(
+		&models.RewardAdaPots{
+			Epoch:        epoch,
+			Treasury:     types.Uint64(cfg.State.Treasury),
+			Reserves:     types.Uint64(cfg.State.Reserves),
+			Fees:         types.Uint64(snapshots.Fee),
+			CapturedSlot: slot,
+		},
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
+	}
+
+	// Resolved per epoch rather than once, and from the registration
+	// history rather than the pool rows. mark, set and go are three
+	// different epochs, and a pool that changed its margin, cost or
+	// pledge between them had different parameters in each; the pool row
+	// only remembers the latest, so seeding all three from it credits two
+	// of them against parameters that were not in force. This is the same
+	// lookup the live reward path uses at an epoch boundary, so a
+	// bootstrapped node and a synced one derive the same basis.
+	//
+	// On a fresh bootstrap every registration lands at the import slot,
+	// so all three epochs resolve to the same row and this matches what
+	// reading the pool rows would have given. It diverges -- correctly --
+	// when the import runs against a database that already holds
+	// registration history.
+	resolveParams := func(
+		target uint64,
+	) (map[string]*ParsedPool, error) {
+		registrations, err := cfg.Database.Metadata().
+			GetPoolRegistrationsEffectiveForEpoch(
+				keys,
+				importedEpochStartSlot(cfg, target),
+				target,
+				slot,
+				txn.Metadata(),
+			)
+		if err != nil {
+			return nil, err
+		}
+		return rewardPoolParamsFromRegistrations(registrations), nil
+	}
+	if err := seedImportedRewardInputs(
+		cfg.Database.Metadata(),
+		txn.Metadata(),
+		snapshots,
+		resolveParams,
+		epoch,
+		slot,
+		cfg.Logger,
+	); err != nil {
+		return err
+	}
+	// Release stays with the defer for both outcomes: nilling the handle
+	// here to signal "committed" would skip it on the success path.
+	return txn.Commit()
 }
 
 func persistImportedSnapshot(
