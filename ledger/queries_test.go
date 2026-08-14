@@ -17,21 +17,17 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"math/big"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -190,97 +186,47 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 // resolves every requested TxIn in one call (#392), not just the first, and
 // silently omits a requested TxIn that has no matching live UTxO instead of
 // failing the whole query.
+//
+// The two real TxIns are deliberately drawn from two distinct blocks'
+// (rather than a single transaction's) produced outputs so the test does
+// not depend on any one fixture transaction producing more than one UTxO:
+// with only one genuinely resolvable input, a regression back to resolving
+// just txIns[0] would still pass a count-based assertion.
 func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "query_utxo_by_txin_test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	db := newUtxoStorageTestDB(t)
+	iter := newUtxoStorageTestIterator(t)
 
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: tmpDir,
-		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	defer dbtest.CloseDatabase(db)
-
-	imm, err := immutable.New("../database/immutable/testdata")
-	require.NoError(t, err)
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: nil})
-	require.NoError(t, err)
-	defer iter.Close()
-
-	var block lcommon.Block
-	var blockCbor []byte
-	for {
-		immBlock, err := iter.Next()
-		require.NoError(t, err)
-		if immBlock == nil {
-			t.Skip("No blocks with transactions found")
-		}
-		block, err = ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		require.NoError(t, err)
-		if len(block.Transactions()) > 0 {
-			blockCbor = immBlock.Cbor
-			break
-		}
-	}
-
-	point := ocommon.Point{
-		Slot: block.SlotNumber(),
-		Hash: block.Hash().Bytes(),
-	}
-
-	txn := db.Transaction(true)
-	err = txn.Do(func(txn *database.Txn) error {
-		blockRecord := models.Block{
-			Slot:     point.Slot,
-			Hash:     point.Hash,
-			Number:   block.BlockNumber(),
-			Type:     uint(block.Type()),
-			PrevHash: block.PrevHash().Bytes(),
-			Cbor:     blockCbor,
-		}
-		if err := db.BlockCreate(blockRecord, txn); err != nil {
-			return err
-		}
-		indexer := database.NewBlockIndexer(point.Slot, point.Hash)
-		offsets, err := indexer.ComputeOffsets(blockCbor, block)
+	var realTxIns []ledger.ShelleyTransactionInput
+	for len(realTxIns) < 2 {
+		block, blockCbor := nextProducingBlock(t, iter)
+		txn := db.Transaction(true)
+		var produced lcommon.Utxo
+		err := txn.Do(func(txn *database.Txn) error {
+			tx, err := tryStoreBlockFirstTx(db, txn, block, blockCbor)
+			if err != nil {
+				return err
+			}
+			produced = tx.Produced()[0]
+			return nil
+		})
 		if err != nil {
-			return fmt.Errorf("compute offsets: %w", err)
+			// Some fixture transactions need additional context this
+			// minimal setup doesn't provide (e.g. a deposit-bearing
+			// certificate needs certDeposits, passed as nil here); skip
+			// them and try the next producing block instead of failing
+			// the whole test.
+			continue
 		}
-		tx := block.Transactions()[0]
-		return db.SetTransaction(
-			tx,
-			point,
-			0,
-			0,
-			nil,
-			nil,
-			&database.BlockIngestionResult{
-				TxOffsets:   offsets.TxOffsets,
-				UtxoOffsets: offsets.UtxoOffsets,
-			},
-			txn,
-		)
-	})
-	require.NoError(t, err)
-
-	produced := block.Transactions()[0].Produced()
-	require.NotEmpty(t, produced, "test transaction should produce UTxOs")
-
-	txIns := make([]ledger.ShelleyTransactionInput, 0, len(produced)+1)
-	for _, utxo := range produced {
-		txIns = append(
-			txIns,
-			ledger.NewShelleyTransactionInput(
-				utxo.Id.Id().String(),
-				int(utxo.Id.Index()),
-			),
-		)
+		realTxIns = append(realTxIns, ledger.NewShelleyTransactionInput(
+			produced.Id.Id().String(),
+			int(produced.Id.Index()),
+		))
 	}
+
 	// A TxIn with no matching live UTxO must be silently omitted from the
 	// result, not fail the whole batch.
-	txIns = append(
-		txIns,
+	txIns := append(
+		realTxIns,
 		ledger.NewShelleyTransactionInput(strings.Repeat("00", 32), 9999),
 	)
 
@@ -293,20 +239,25 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	require.Len(t, arr, 1)
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
-	require.Len(t, m, len(produced), "bogus TxIn should be silently omitted")
+	require.Len(
+		t,
+		m,
+		len(realTxIns),
+		"exactly the real TxIns should resolve; bogus TxIn should be silently omitted",
+	)
 
-	for _, utxo := range produced {
+	for _, txIn := range realTxIns {
 		utxoId := olocalstatequery.UtxoId{
-			Hash: ledger.NewBlake2b256(utxo.Id.Id().Bytes()),
-			Idx:  int(utxo.Id.Index()),
+			Hash: ledger.NewBlake2b256(txIn.Id().Bytes()),
+			Idx:  int(txIn.Index()),
 		}
 		_, ok := m[utxoId]
 		require.True(
 			t,
 			ok,
 			"missing result for %s#%d",
-			utxo.Id.Id().String(),
-			utxo.Id.Index(),
+			txIn.Id().String(),
+			txIn.Index(),
 		)
 	}
 }

@@ -644,10 +644,14 @@ func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
 		"fixture should expose at least two live UTxOs",
 	)
 	keys := make([]*query.TxoRef, 0, len(searchOut.Msg.GetItems()))
+	wantNativeBytes := make([][]byte, 0, len(searchOut.Msg.GetItems()))
 	for _, item := range searchOut.Msg.GetItems() {
 		ref := item.GetTxoRef()
 		require.NotNil(t, ref)
+		nativeBytes := item.GetNativeBytes()
+		require.NotNil(t, nativeBytes)
 		keys = append(keys, ref)
+		wantNativeBytes = append(wantNativeBytes, nativeBytes)
 	}
 	out, err := cli.ReadUtxos(
 		ctx,
@@ -660,6 +664,18 @@ func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
 		require.NotNil(t, gotRef)
 		require.Equal(t, keys[i].GetHash(), gotRef.GetHash())
 		require.Equal(t, keys[i].GetIndex(), gotRef.GetIndex())
+		// ReadUtxos echoes the requested TxoRef regardless of which UTxO
+		// it resolved, so also compare the resolved content itself
+		// (NativeBytes) against what SearchUtxos independently found for
+		// this same key: a mis-correlated batch lookup would still pass
+		// the ref-only checks above but fail this one.
+		require.NotEmpty(t, item.GetNativeBytes())
+		require.Equal(
+			t,
+			wantNativeBytes[i],
+			item.GetNativeBytes(),
+			"ReadUtxos should return the same UTxO content SearchUtxos found for this key",
+		)
 	}
 }
 
