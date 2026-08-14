@@ -1309,6 +1309,36 @@ func importSnapShots(
 
 	epoch := cfg.State.Epoch
 
+	// Seed the reward basis for the epochs these snapshots cover. Without it
+	// the first reward rounds after a bootstrap find no RewardSnapshot and
+	// are skipped, and a skipped round is never made up -- reward balances,
+	// and the leadership stake derived from them, stay short for the life of
+	// the database. See seedImportedRewardInputs; a basis that does not
+	// reconcile is dropped rather than written.
+	if err := func() error {
+		txn := cfg.Database.MetadataTxn(true)
+		defer func() {
+			if txn != nil {
+				txn.Release()
+			}
+		}()
+		if err := seedImportedRewardInputs(
+			cfg.Database.Metadata(),
+			txn,
+			snapshots,
+			epoch,
+			slot,
+			cfg.Logger,
+		); err != nil {
+			return err
+		}
+		err := txn.Commit()
+		txn = nil
+		return err
+	}(); err != nil {
+		return fmt.Errorf("seeding imported reward inputs: %w", err)
+	}
+
 	if allowPoolFallback {
 		// Fallback pool import path runs BEFORE snapshot processing so
 		// that pool rows exist in the DB when ResolvePoolRewardAccountAutoVotes

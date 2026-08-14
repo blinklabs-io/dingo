@@ -4959,9 +4959,22 @@ from `UTxOState` -- so the round at the first boundary after import is not
 skipped for want of pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
-it. The per-credential reward *basis* for pre-import epochs is not
-reconstructible from local state, so a `RewardSnapshot` gap remains and is
-still reported by the counter above. Both skips are logged at WARN and counted by
+it. The per-credential reward basis is seeded from the same import: mark, set and
+go each carry one epoch's per-credential stake, its credential-to-pool
+delegations, and its pool parameters, which is exactly what a reward round
+needs, and the three of them line up with the three epochs a freshly
+bootstrapped node cannot otherwise compute. Block counts are not seeded and
+do not need to be — `rewardBlockCounts` derives them by scanning the imported
+chain for the performance epoch.
+
+Each epoch's derived basis is gated before it is written
+(`rewardInputBundle.validate`), and a basis that does not reconcile is dropped
+with a warning rather than persisted. The gate is mandatory, not defensive:
+the ledger validates the same invariants when it reads the basis, and on that
+path a failure returns an error rather than skipping the round, so an unusable
+row would turn a missing reward round into a node that cannot cross an epoch
+boundary at all. Dropping leaves the round to be skipped and counted as
+before, which is the conservative direction. Both skips are logged at WARN and counted by
 `dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
 Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
 node is a live divergence from the network. They were Debug until #3165,
