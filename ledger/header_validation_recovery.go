@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -123,6 +124,49 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	}
 	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
 		return false, nil
+	}
+
+	// Chain selection runs concurrently with this pipeline and can move the
+	// primary chain off the ledger tip between reading it above and rewinding
+	// to it below. The chain then refuses the rollback rather than splicing
+	// across forks, and it is right to.
+	//
+	// That is not a recovery failure. The rejected block is already gone from
+	// the primary chain -- removed by the very move that abandoned this point,
+	// which is the outcome this recovery exists to produce -- so there is
+	// nothing left to drop. Returning an error would send a deterministic
+	// header failure back through the pipeline as though it were unhandled,
+	// and it would be retried rather than recovered. Report it handled and
+	// let the pipeline restart against the chain selection actually chose.
+	//
+	// Neither the rewind nor the resync runs, because both would act on a
+	// point the chain no longer holds: the move that abandoned it published
+	// its own rollback, and pointing chainsync back at a dead branch would
+	// undo that. Stuck detection is unaffected -- it counts restarts that
+	// fail to advance the tip, not recoveries that report success -- so a
+	// chain that never moves back still raises the signal.
+	//
+	// Checked with ValidateRollback rather than by interpreting the rewind's
+	// error, so nothing has been mutated by the time the decision is made.
+	// The chain can still move in the gap between this check and the rewind;
+	// that narrow case keeps the pre-existing behaviour of surfacing the
+	// error.
+	if err := ls.chain.ValidateRollback(rewindPoint); err != nil &&
+		errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"chain selection moved the primary chain off the ledger tip before header-validation recovery could rewind to it; the rejected block is already gone, so the pipeline restarts instead",
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"rewind_target_slot",
+				rewindPoint.Slot,
+				"error",
+				err,
+			)
+		}
+		return true, nil
 	}
 
 	if ls.config.Logger != nil {

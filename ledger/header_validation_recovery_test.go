@@ -253,3 +253,102 @@ func TestHeaderValidationRecoveryDeclinesAtOrBehindLedgerTip(t *testing.T) {
 		})
 	}
 }
+
+// Chain selection runs concurrently with the ledger pipeline, and it can move
+// the primary chain off the ledger tip between the moment this recovery reads
+// that tip and the moment it tries to rewind to it. The chain then refuses the
+// rollback with ErrRollbackPointNotOnChain rather than splicing across forks.
+//
+// Reporting that as a failure is the wrong answer twice over. The rejected
+// block is already gone from the primary chain -- chain selection removed it,
+// which is the outcome this recovery exists to produce -- so there is nothing
+// left to drop; and returning an error sends the deterministic header failure
+// back through the pipeline as if it were unhandled. Treat it as handled and
+// let the pipeline restart against the chain selection actually chose.
+//
+// Nothing is rewound and no resync is published, because both would act on a
+// point the chain no longer holds. The move that abandoned it published its
+// own rollback already, and pointing chainsync back at a dead branch would
+// undo that.
+func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	blocks := make([]models.Block, 0, 5)
+	for slot := uint64(1); slot <= 5; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	// K=3 so the setup rollback below (tip slot 5 back to slot 2) is
+	// allowed; the recovery under test never reaches a depth check.
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 3}))
+
+	// Ledger applied through slot 3; the deferred check rejects slot 4.
+	ledgerTipBlock := blocks[2]
+	ledgerTip := ochainsync.Tip{
+		Point:       makeTestPoint(ledgerTipBlock),
+		BlockNumber: ledgerTipBlock.Number,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
+
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			EventBus:     bus,
+			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.currentTip = ledgerTip
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	// Chain selection abandons the ledger tip: the primary chain drops back
+	// past slot 3, so slot 3's block index now sits ahead of the chain tip
+	// and the chain no longer holds it.
+	require.NoError(t, cm.PrimaryChain().Rollback(makeTestPoint(blocks[1])))
+	require.ErrorIs(t,
+		cm.PrimaryChain().ValidateRollback(makeTestPoint(ledgerTipBlock)),
+		chain.ErrRollbackPointNotOnChain,
+		"the setup must leave the ledger tip off the primary chain, or this "+
+			"test is not exercising the race it exists for")
+	tipBeforeRecovery := cm.PrimaryChain().Tip().Point.Slot
+
+	recovered, recoverErr := ls.tryRecoverFromHeaderValidationError(
+		&headerValidationError{
+			BlockPoint: makeTestPoint(blocks[3]),
+			Cause:      errors.New("VRF leader value exceeds threshold"),
+		},
+	)
+	require.NoError(t, recoverErr,
+		"a chain that moved on is not a recovery failure; returning an "+
+			"error here retries the deterministic header failure instead")
+	require.True(t, recovered,
+		"the rejected block is already off the primary chain, so the "+
+			"pipeline should restart rather than report the failure")
+
+	require.Equal(t, tipBeforeRecovery, cm.PrimaryChain().Tip().Point.Slot,
+		"recovery must not rewind a chain it does not hold the point on")
+
+	select {
+	case evt := <-resyncEvents:
+		t.Fatalf(
+			"no resync may be published for a point the chain no longer "+
+				"holds; got one for slot %d",
+			evt.Data.(event.ChainsyncResyncEvent).Point.Slot,
+		)
+	default:
+	}
+}
