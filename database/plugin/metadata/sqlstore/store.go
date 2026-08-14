@@ -53,6 +53,14 @@ type Config struct {
 	// them unset until a native snapshot mechanism is available.
 	BackupTo    func(context.Context, string) error
 	RestoreFrom func(context.Context, string) error
+	// Prepare is an optional provider-owned hook run once at the start of
+	// Start, before anything touches the pools. It is where a provider does
+	// setup that has to happen on a connection of its own and must not
+	// happen at construction time: SQLite uses it to put a new database into
+	// WAL mode, which materialises the file, and constructing a store is not
+	// allowed to do that -- RestoreFrom runs against a constructed but
+	// unstarted store and requires the destination not to exist.
+	Prepare func(context.Context) error
 	// Reset is an optional provider-owned hook clearing all data this store
 	// owns, using the still-open pool (it must run before the store is
 	// closed). See metadata.Resettable's doc comment for why this exists:
@@ -87,6 +95,7 @@ type Store struct {
 	maintenanceEvery  time.Duration
 	backupTo          func(context.Context, string) error
 	restoreFrom       func(context.Context, string) error
+	prepare           func(context.Context) error
 	reset             func(context.Context) error
 	validateBackup    func(context.Context, string) error
 	maintenanceCancel context.CancelFunc
@@ -146,6 +155,7 @@ func New(config Config) (*Store, error) {
 		maintenanceEvery: config.MaintenanceInterval,
 		backupTo:         config.BackupTo,
 		restoreFrom:      config.RestoreFrom,
+		prepare:          config.Prepare,
 		reset:            config.Reset,
 		validateBackup:   config.ValidateBackup,
 	}, nil
@@ -243,6 +253,11 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 	if s.ready.Load() {
 		return nil
+	}
+	if s.prepare != nil {
+		if err := s.prepare(ctx); err != nil {
+			return fmt.Errorf("sqlstore: prepare database: %w", err)
+		}
 	}
 	if err := s.writeDB.PingContext(ctx); err != nil {
 		return fmt.Errorf("sqlstore: ping write database: %w", err)
