@@ -153,7 +153,10 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// the pre-check would leave the race this gate exists for still able to
 	// send the rejected header back round the pipeline.
 	if ls.yieldedToChainSelection(
-		ls.chain.ValidateRollback(rewindPoint), validationErr, rewindPoint,
+		ls.chain.ValidateRollback(rewindPoint),
+		validationErr,
+		rewindPoint,
+		"pre-check",
 	) {
 		return true, nil
 	}
@@ -175,7 +178,9 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	if err := ls.rollbackPrimaryChainInSecurityParamWindows(
 		rewindPoint,
 	); err != nil {
-		if ls.yieldedToChainSelection(err, validationErr, rewindPoint) {
+		if ls.yieldedToChainSelection(
+			err, validationErr, rewindPoint, "rewind",
+		) {
 			return true, nil
 		}
 		return false, fmt.Errorf(
@@ -220,19 +225,30 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 //
 // A nil error, or any other error, is not a yield: the caller reports those
 // as it did before.
+//
+// stage names which of the two raised it, and the message stays deliberately
+// vague about *which* point the chain let go of. At the pre-check it is
+// always the rewind target, but the rewind walks back in security-parameter
+// windows, so there it can be an intermediate point while the rewind target
+// itself is still held. Naming the ledger tip in both cases would report the
+// wrong thing half the time. The point the chain actually rejected is in the
+// chain's own error, which is logged alongside.
 func (ls *LedgerState) yieldedToChainSelection(
 	err error,
 	validationErr *headerValidationError,
 	rewindPoint ocommon.Point,
+	stage string,
 ) bool {
 	if err == nil || !errors.Is(err, chain.ErrRollbackPointNotOnChain) {
 		return false
 	}
 	if ls.config.Logger != nil {
 		ls.config.Logger.Warn(
-			"chain selection moved the primary chain off the ledger tip before header-validation recovery could rewind to it; the rejected block is already gone, so the pipeline restarts instead",
+			"chain selection moved the primary chain off a point header-validation recovery needed to roll back through; the rejected block is already gone, so the pipeline restarts instead",
 			"component",
 			"ledger",
+			"rollback_stage",
+			stage,
 			"failing_block_slot",
 			validationErr.BlockPoint.Slot,
 			"rewind_target_slot",

@@ -408,7 +408,7 @@ func TestYieldedToChainSelectionClassifiesOnlyNotOnChain(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			require.Equal(t, c.want, ls.yieldedToChainSelection(
-				c.err, validationErr, rewindPoint,
+				c.err, validationErr, rewindPoint, "rewind",
 			))
 		})
 	}
