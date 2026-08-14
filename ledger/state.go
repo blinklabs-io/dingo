@@ -3189,32 +3189,51 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 	), true
 }
 
-// trackPipelineNoProgress folds one pipeline restart into the no-progress
-// accounting, returning the updated counter and last-seen tip. Shared by every
-// failure path so none of them can quietly opt out of stuck detection: an
-// error class that retries on its own schedule is still a failure to advance,
-// and skipping the counter is what let a permanently unavailable endorser
-// block wedge the pipeline without ever raising the signal.
+// pipelineProgress is the ledger pipeline's view of whether restarts are
+// getting anywhere: how many consecutive ones have failed to move the tip,
+// and the tip they last saw. Kept as one value because the fields are only
+// meaningful together -- threading them separately is what let one failure
+// path update some and not others.
+type pipelineProgress struct {
+	consecutiveNoProgress int
+	haveLastTip           bool
+	lastTipSlot           uint64
+	lastTipHash           []byte
+}
+
+// stuck reports whether the pipeline has restarted without progress often
+// enough that the failure should be treated as deterministic.
+func (p pipelineProgress) stuck() bool {
+	_, stuck := ledgerPipelineBackoff(p.consecutiveNoProgress)
+	return stuck
+}
+
+// trackPipelineProgress folds one pipeline restart into the no-progress
+// accounting. Shared by every failure path so none of them can quietly opt
+// out of stuck detection: an error class that retries on its own schedule is
+// still a failure to advance, and skipping the counter is what let a
+// permanently unavailable endorser block wedge the pipeline without ever
+// raising the signal.
 //
 // The counter resets as soon as the tip moves, so a pipeline that is making
 // progress between restarts never accumulates toward stuck.
-func (ls *LedgerState) trackPipelineNoProgress(
-	consecutiveNoProgress int,
-	haveLastTip bool,
-	lastTipSlot uint64,
-	lastTipHash []byte,
-) (int, bool, uint64, []byte) {
+func (ls *LedgerState) trackPipelineProgress(
+	p pipelineProgress,
+) pipelineProgress {
 	ls.RLock()
 	tipSlot := ls.currentTip.Point.Slot
 	tipHash := ls.currentTip.Point.Hash
 	ls.RUnlock()
-	if haveLastTip && tipSlot == lastTipSlot &&
-		bytes.Equal(tipHash, lastTipHash) {
-		consecutiveNoProgress++
+	if p.haveLastTip && tipSlot == p.lastTipSlot &&
+		bytes.Equal(tipHash, p.lastTipHash) {
+		p.consecutiveNoProgress++
 	} else {
-		consecutiveNoProgress = 0
+		p.consecutiveNoProgress = 0
 	}
-	return consecutiveNoProgress, true, tipSlot, tipHash
+	p.haveLastTip = true
+	p.lastTipSlot = tipSlot
+	p.lastTipHash = tipHash
+	return p
 }
 
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
@@ -3223,12 +3242,7 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 	// cleared at each return so a path added later cannot strand a stale
 	// "stuck" reading in monitoring for the life of the process.
 	defer ls.metrics.setPipelineNoProgress(0, false)
-	var (
-		consecutiveNoProgress int
-		haveLastTip           bool
-		lastTipSlot           uint64
-		lastTipHash           []byte
-	)
+	var progress pipelineProgress
 	for {
 		attemptCtx, cancel := context.WithCancel(ctx)
 		readChainResultCh := make(chan readChainResult)
@@ -3248,28 +3262,22 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			// available wedged the pipeline without ever raising the stuck
 			// signal. Count it like any other failure to advance; the
 			// bespoke delay below still governs its pacing.
-			consecutiveNoProgress, haveLastTip, lastTipSlot, lastTipHash =
-				ls.trackPipelineNoProgress(
-					consecutiveNoProgress,
-					haveLastTip,
-					lastTipSlot,
-					lastTipHash,
-				)
-			_, endorserStuck := ledgerPipelineBackoff(consecutiveNoProgress)
+			progress = ls.trackPipelineProgress(progress)
+			endorserStuck := progress.stuck()
 			ls.metrics.setPipelineNoProgress(
-				consecutiveNoProgress,
+				progress.consecutiveNoProgress,
 				endorserStuck,
 			)
 			if endorserStuck &&
-				consecutiveNoProgress == noProgressStuckThreshold {
+				progress.consecutiveNoProgress == noProgressStuckThreshold {
 				ls.config.Logger.Error(
 					"ledger pipeline stuck: a certified endorser block has stayed unavailable across repeated restarts without advancing the tip; the node is no longer following the chain",
 					"component",
 					"ledger",
 					"consecutive_no_progress",
-					consecutiveNoProgress,
+					progress.consecutiveNoProgress,
 					"tip_slot",
-					lastTipSlot,
+					progress.lastTipSlot,
 					"error",
 					err,
 				)
@@ -3284,29 +3292,28 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			continue
 		}
 
-		consecutiveNoProgress, haveLastTip, lastTipSlot, lastTipHash =
-			ls.trackPipelineNoProgress(
-				consecutiveNoProgress,
-				haveLastTip,
-				lastTipSlot,
-				lastTipHash,
-			)
-		tipSlot := lastTipSlot
+		progress = ls.trackPipelineProgress(progress)
+		tipSlot := progress.lastTipSlot
 
-		backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
-		ls.metrics.setPipelineNoProgress(consecutiveNoProgress, stuck)
-		if consecutiveNoProgress > 0 {
+		backoff, stuck := ledgerPipelineBackoff(
+			progress.consecutiveNoProgress,
+		)
+		ls.metrics.setPipelineNoProgress(
+			progress.consecutiveNoProgress,
+			stuck,
+		)
+		if progress.consecutiveNoProgress > 0 {
 			// Announce the transition into stuck exactly once, at ERROR: a
 			// deterministic failure is not going to clear on its own, so it
 			// is an operator-actionable condition rather than another line
 			// in a repeating WARN.
-			if stuck && consecutiveNoProgress == noProgressStuckThreshold {
+			if stuck && progress.consecutiveNoProgress == noProgressStuckThreshold {
 				ls.config.Logger.Error(
 					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
 					"component",
 					"ledger",
 					"consecutive_no_progress",
-					consecutiveNoProgress,
+					progress.consecutiveNoProgress,
 					"tip_slot",
 					tipSlot,
 					"backoff",
@@ -3315,14 +3322,14 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 					err,
 				)
 			}
-			if consecutiveNoProgress == 10 ||
-				consecutiveNoProgress%100 == 0 {
+			if progress.consecutiveNoProgress == 10 ||
+				progress.consecutiveNoProgress%100 == 0 {
 				ls.config.Logger.Warn(
 					"ledger pipeline making no progress across repeated restarts, backing off",
 					"component",
 					"ledger",
 					"consecutive_no_progress",
-					consecutiveNoProgress,
+					progress.consecutiveNoProgress,
 					"stuck",
 					stuck,
 					"backoff",
