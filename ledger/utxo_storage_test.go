@@ -480,6 +480,142 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestUtxosByRefsAfterSetTransaction verifies the batched UTxO lookup
+// returns every produced UTxO for a transaction in one call, and silently
+// omits a ref that doesn't correspond to any live UTxO rather than erroring
+// the whole batch (see #392).
+func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
+	// Create temp directory for database
+	tmpDir, err := os.MkdirTemp("", "utxos_byrefs_test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := slog.New(
+		slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	// Create database
+	dbConfig := &database.Config{
+		DataDir: tmpDir,
+		Logger:  logger,
+	}
+	db, err := dbtest.NewDatabase(t, dbConfig)
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	// Load blocks from immutable testdata
+	imm, err := immutable.New("../database/immutable/testdata")
+	require.NoError(t, err)
+
+	// Start from genesis
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: nil})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	// Find a block with transactions
+	var block lcommon.Block
+	var blockCbor []byte
+	for {
+		immBlock, err := iter.Next()
+		require.NoError(t, err)
+		if immBlock == nil {
+			t.Skip("No blocks with transactions found")
+		}
+
+		block, err = ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+
+		if len(block.Transactions()) > 0 {
+			blockCbor = immBlock.Cbor
+			break
+		}
+	}
+
+	point := ocommon.Point{
+		Slot: block.SlotNumber(),
+		Hash: block.Hash().Bytes(),
+	}
+
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		blockRecord := models.Block{
+			Slot:     point.Slot,
+			Hash:     point.Hash,
+			Number:   block.BlockNumber(),
+			Type:     uint(block.Type()),
+			PrevHash: block.PrevHash().Bytes(),
+			Cbor:     blockCbor,
+		}
+		if err := db.BlockCreate(blockRecord, txn); err != nil {
+			return err
+		}
+
+		indexer := database.NewBlockIndexer(point.Slot, point.Hash)
+		offsets, err := indexer.ComputeOffsets(blockCbor, block)
+		if err != nil {
+			return fmt.Errorf("compute offsets: %w", err)
+		}
+
+		tx := block.Transactions()[0]
+		err = db.SetTransaction(
+			tx,
+			point,
+			0,
+			0,
+			nil,
+			nil,
+			&database.BlockIngestionResult{
+				TxOffsets:   offsets.TxOffsets,
+				UtxoOffsets: offsets.UtxoOffsets,
+			},
+			txn,
+		)
+		if err != nil {
+			return err
+		}
+
+		produced := tx.Produced()
+		require.NotEmpty(t, produced, "test transaction should produce UTxOs")
+
+		refs := make([]models.UtxoId, 0, len(produced)+1)
+		for _, utxo := range produced {
+			refs = append(refs, models.UtxoId{
+				Hash: utxo.Id.Id().Bytes(),
+				Idx:  utxo.Id.Index(),
+			})
+		}
+		// A ref with no matching live UTxO should be silently omitted,
+		// not cause the whole batch to fail.
+		bogusHash := make([]byte, 32)
+		refs = append(refs, models.UtxoId{Hash: bogusHash, Idx: 9999})
+
+		results, err := db.UtxosByRefs(refs, txn)
+		require.NoError(t, err)
+		require.Len(t, results, len(produced))
+
+		byRef := make(map[string]models.Utxo, len(results))
+		for _, utxo := range results {
+			key := hex.EncodeToString(utxo.TxId) + ":" +
+				fmt.Sprint(utxo.OutputIdx)
+			byRef[key] = utxo
+		}
+		for _, utxo := range produced {
+			txId := utxo.Id.Id().Bytes()
+			key := hex.EncodeToString(txId) + ":" +
+				fmt.Sprint(utxo.Id.Index())
+			got, ok := byRef[key]
+			require.True(t, ok, "missing UTxO %s", key)
+			require.NotEmpty(t, got.Cbor)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 	for _, deleteTxBlob := range []bool{false, true} {
 		t.Run(

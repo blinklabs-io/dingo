@@ -766,6 +766,33 @@ func (s *Store) getUtxo(
 	return ret, nil
 }
 
+// GetUtxosByRefs retrieves multiple live UTxOs by their (tx_id, output_idx)
+// references in a single batch. Refs with no matching live UTxO are simply
+// absent from the result.
+func (s *Store) GetUtxosByRefs(
+	refs []models.UtxoId,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	ret := []models.Utxo{}
+	// Two bind variables per reference; 400 keeps this portable to
+	// SQLite's conservative 999-parameter configuration.
+	for start := 0; start < len(refs); start += 400 {
+		end := min(start+400, len(refs))
+		predicate, args := utxoIDPredicate(refs[start:end])
+		utxos, err := s.queryUtxosWithAssets(
+			txn,
+			"deleted_slot = 0 AND ("+predicate+")",
+			args,
+			"",
+		)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, utxos...)
+	}
+	return ret, nil
+}
+
 func (s *Store) GetUtxosAddedAfterSlot(
 	slot uint64,
 	txn types.Txn,

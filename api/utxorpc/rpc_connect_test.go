@@ -620,6 +620,86 @@ func TestConnect_ReadUtxos(t *testing.T) {
 	require.NotNil(t, out.Msg.GetLedgerTip())
 }
 
+// TestConnect_ReadUtxos_MultipleKeys proves ReadUtxos resolves several keys
+// in a single request via the batched UTxO lookup (#392), returning exactly
+// one item per requested key.
+func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	searchOut, err := cli.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 5}),
+	)
+	require.NoError(t, err)
+	require.GreaterOrEqual(
+		t,
+		len(searchOut.Msg.GetItems()),
+		2,
+		"fixture should expose at least two live UTxOs",
+	)
+	keys := make([]*query.TxoRef, 0, len(searchOut.Msg.GetItems()))
+	for _, item := range searchOut.Msg.GetItems() {
+		ref := item.GetTxoRef()
+		require.NotNil(t, ref)
+		keys = append(keys, ref)
+	}
+	out, err := cli.ReadUtxos(
+		ctx,
+		connect.NewRequest(&query.ReadUtxosRequest{Keys: keys}),
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetItems(), len(keys))
+	for i, item := range out.Msg.GetItems() {
+		gotRef := item.GetTxoRef()
+		require.NotNil(t, gotRef)
+		require.Equal(t, keys[i].GetHash(), gotRef.GetHash())
+		require.Equal(t, keys[i].GetIndex(), gotRef.GetIndex())
+	}
+}
+
+// TestConnect_ReadUtxos_MissingKey proves a request that includes a ref
+// with no matching live UTxO still errors the whole call, preserving the
+// pre-existing ReadUtxos error-on-miss contract (unlike the ledger-level
+// GetUTxOByTxIn query, which silently omits misses for batch lookups).
+func TestConnect_ReadUtxos_MissingKey(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	searchOut, err := cli.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(
+		t,
+		searchOut.Msg.GetItems(),
+		"fixture should expose at least one live UTxO",
+	)
+	ref := searchOut.Msg.GetItems()[0].GetTxoRef()
+	bogusRef := &query.TxoRef{
+		Hash:  bytes.Repeat([]byte{0}, 32),
+		Index: 9999,
+	}
+	_, err = cli.ReadUtxos(
+		ctx,
+		connect.NewRequest(&query.ReadUtxosRequest{
+			Keys: []*query.TxoRef{ref, bogusRef},
+		}),
+	)
+	require.Error(t, err)
+}
+
 func TestConnect_ReadData_EmptyKeys(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
 	cli := queryconnect.NewQueryServiceClient(

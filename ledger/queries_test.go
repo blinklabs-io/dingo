@@ -17,16 +17,21 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -179,6 +184,131 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
 	require.Empty(t, m)
+}
+
+// TestQueryShelleyUtxoByTxIn_MultipleInputs proves the GetUTxOByTxIn query
+// resolves every requested TxIn in one call (#392), not just the first, and
+// silently omits a requested TxIn that has no matching live UTxO instead of
+// failing the whole query.
+func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "query_utxo_by_txin_test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: tmpDir,
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	imm, err := immutable.New("../database/immutable/testdata")
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: nil})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var block lcommon.Block
+	var blockCbor []byte
+	for {
+		immBlock, err := iter.Next()
+		require.NoError(t, err)
+		if immBlock == nil {
+			t.Skip("No blocks with transactions found")
+		}
+		block, err = ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		if len(block.Transactions()) > 0 {
+			blockCbor = immBlock.Cbor
+			break
+		}
+	}
+
+	point := ocommon.Point{
+		Slot: block.SlotNumber(),
+		Hash: block.Hash().Bytes(),
+	}
+
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		blockRecord := models.Block{
+			Slot:     point.Slot,
+			Hash:     point.Hash,
+			Number:   block.BlockNumber(),
+			Type:     uint(block.Type()),
+			PrevHash: block.PrevHash().Bytes(),
+			Cbor:     blockCbor,
+		}
+		if err := db.BlockCreate(blockRecord, txn); err != nil {
+			return err
+		}
+		indexer := database.NewBlockIndexer(point.Slot, point.Hash)
+		offsets, err := indexer.ComputeOffsets(blockCbor, block)
+		if err != nil {
+			return fmt.Errorf("compute offsets: %w", err)
+		}
+		tx := block.Transactions()[0]
+		return db.SetTransaction(
+			tx,
+			point,
+			0,
+			0,
+			nil,
+			nil,
+			&database.BlockIngestionResult{
+				TxOffsets:   offsets.TxOffsets,
+				UtxoOffsets: offsets.UtxoOffsets,
+			},
+			txn,
+		)
+	})
+	require.NoError(t, err)
+
+	produced := block.Transactions()[0].Produced()
+	require.NotEmpty(t, produced, "test transaction should produce UTxOs")
+
+	txIns := make([]ledger.ShelleyTransactionInput, 0, len(produced)+1)
+	for _, utxo := range produced {
+		txIns = append(
+			txIns,
+			ledger.NewShelleyTransactionInput(
+				utxo.Id.Id().String(),
+				int(utxo.Id.Index()),
+			),
+		)
+	}
+	// A TxIn with no matching live UTxO must be silently omitted from the
+	// result, not fail the whole batch.
+	txIns = append(
+		txIns,
+		ledger.NewShelleyTransactionInput(strings.Repeat("00", 32), 9999),
+	)
+
+	ls := &LedgerState{db: db}
+	result, err := ls.queryShelleyUtxoByTxIn(txIns)
+	require.NoError(t, err)
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any result")
+	require.Len(t, arr, 1)
+	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	require.True(t, ok, "expected UtxoId map")
+	require.Len(t, m, len(produced), "bogus TxIn should be silently omitted")
+
+	for _, utxo := range produced {
+		utxoId := olocalstatequery.UtxoId{
+			Hash: ledger.NewBlake2b256(utxo.Id.Id().Bytes()),
+			Idx:  int(utxo.Id.Index()),
+		}
+		_, ok := m[utxoId]
+		require.True(
+			t,
+			ok,
+			"missing result for %s#%d",
+			utxo.Id.Id().String(),
+			utxo.Id.Index(),
+		)
+	}
 }
 
 // --- GetStakePools (ShelleyStakePoolsQuery) ---------------------------------

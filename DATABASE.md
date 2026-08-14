@@ -1193,6 +1193,30 @@ WHERE u.tx_id = decode($1, 'hex')
   AND u.output_idx = $2;
 ```
 
+### `GetUtxosByRefs`
+
+Batched live-UTxO lookup by a list of (tx hash, output index) references —
+used by the `GetUTxOByTxIn` n2c query and the `utxorpc` `ReadUtxos` RPC to
+resolve multiple TxIns/keys in one round trip instead of one query per input
+(#392). Refs with no matching live UTxO are simply absent from the result;
+callers must not treat a partial result as an error. Builds an OR-chain of
+`(tx_id = ? AND output_idx = ?)` predicates — the same portable pattern used
+by `MarkUtxosDeletedAtSlot`/`utxoIDPredicate` elsewhere in this file — chunked
+at 400 refs (800 bind variables) to stay within SQLite's conservative
+999-parameter limit:
+
+```sql
+SELECT u.*, a.*
+FROM utxo u
+LEFT JOIN asset a ON a.utxo_id = u.id
+WHERE u.deleted_slot = 0
+  AND (
+    (u.tx_id = decode($1, 'hex') AND u.output_idx = $2)
+    OR (u.tx_id = decode($3, 'hex') AND u.output_idx = $4)
+    -- ... one pair of bind variables per requested ref
+  );
+```
+
 ### `GetTransactionsByAddress` and `CountTransactionsByAddress`
 
 Recent transactions for an address key pair:
