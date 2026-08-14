@@ -386,7 +386,7 @@ func seedImportedRewardInputs(
 	store rewardInputStore,
 	txn types.Txn,
 	snapshots *ParsedSnapShots,
-	params map[string]*ParsedPool,
+	resolveParams rewardPoolParamsResolver,
 	epoch uint64,
 	capturedSlot uint64,
 	logger rewardSeedLogger,
@@ -412,6 +412,17 @@ func seedImportedRewardInputs(
 	}
 
 	for _, c := range candidates {
+		var params map[string]*ParsedPool
+		if resolveParams != nil {
+			var err error
+			params, err = resolveParams(c.epoch)
+			if err != nil {
+				return fmt.Errorf(
+					"resolving pool parameters for epoch %d: %w",
+					c.epoch, err,
+				)
+			}
+		}
 		bundle := deriveRewardInputs(
 			c.snap, params, c.epoch, capturedSlot, 0,
 		)
@@ -463,6 +474,17 @@ func seedImportedRewardInputs(
 	return nil
 }
 
+// rewardPoolParamsResolver returns the pool parameters in force during the
+// given epoch. It is a function rather than a prepared map because the
+// seeding covers three epochs and a pool's parameters are not constant
+// across them: margin, cost and pledge changes take effect at a boundary, so
+// the epoch being seeded decides which registration applies. A nil resolver
+// means no parameters are available, which the derivation handles by falling
+// back to whatever the snapshot itself carries.
+type rewardPoolParamsResolver func(
+	epoch uint64,
+) (map[string]*ParsedPool, error)
+
 // rewardSeedLogger is the logging surface this seeding uses.
 type rewardSeedLogger interface {
 	Info(msg string, args ...any)
@@ -478,14 +500,13 @@ type rewardSeedLogger interface {
 // account or owners. A basis built from those cannot reconcile, and would be
 // dropped by the gate, leaving the seeding silently ineffective.
 //
-// One caveat this cannot avoid: registrations are current, while the epochs
-// being seeded are up to two behind. A pool that changed its margin, cost or
-// pledge inside that window is seeded with its newer parameters. That shifts
-// how its reward is split between operator and delegators, not the size of
-// the pot, and it is bounded by how many pools re-register in two epochs --
-// far smaller than the whole reward rounds that are otherwise skipped.
+// It takes registrations, not the denormalized pool rows, because the pool
+// row holds only a pool's current parameters while the registration history
+// holds what each epoch actually saw. Which registration applies to which
+// epoch is the caller's decision -- see rewardPoolParamsResolver -- and this
+// only converts whichever set it is handed.
 func rewardPoolParamsFromRegistrations(
-	pools []models.Pool,
+	pools []models.PoolRegistration,
 ) map[string]*ParsedPool {
 	params := make(map[string]*ParsedPool, len(pools))
 	for i := range pools {

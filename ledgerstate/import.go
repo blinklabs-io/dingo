@@ -1377,15 +1377,41 @@ func importSnapShots(
 			return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
 		}
 
-		pools, poolErr := cfg.Database.Metadata().GetPools(keys, txn.Metadata())
-		if poolErr != nil {
-			return fmt.Errorf("loading pools for reward inputs: %w", poolErr)
+		// Resolved per epoch rather than once, and from the registration
+		// history rather than the pool rows. mark, set and go are three
+		// different epochs, and a pool that changed its margin, cost or
+		// pledge between them had different parameters in each; the pool row
+		// only remembers the latest, so seeding all three from it credits two
+		// of them against parameters that were not in force. This is the same
+		// lookup the live reward path uses at an epoch boundary, so a
+		// bootstrapped node and a synced one derive the same basis.
+		//
+		// On a fresh bootstrap every registration lands at the import slot,
+		// so all three epochs resolve to the same row and this matches what
+		// reading the pool rows would have given. It diverges -- correctly --
+		// when the import runs against a database that already holds
+		// registration history.
+		resolveParams := func(
+			target uint64,
+		) (map[string]*ParsedPool, error) {
+			registrations, err := cfg.Database.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					keys,
+					importedEpochStartSlot(cfg, target),
+					target,
+					slot,
+					txn.Metadata(),
+				)
+			if err != nil {
+				return nil, err
+			}
+			return rewardPoolParamsFromRegistrations(registrations), nil
 		}
 		if err := seedImportedRewardInputs(
 			cfg.Database.Metadata(),
 			txn.Metadata(),
 			snapshots,
-			rewardPoolParamsFromRegistrations(pools),
+			resolveParams,
 			epoch,
 			slot,
 			cfg.Logger,
@@ -2108,6 +2134,37 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		)
 	}
 	return nil
+}
+
+// importedEpochStartSlot reports the first slot of the given epoch, which is
+// the lower bound of the window the per-epoch registration lookup uses.
+//
+// It cannot come from the epoch table. importTip generates epoch history and
+// runs after the snapshots are imported, so on a fresh bootstrap there are no
+// epoch rows to read at the point the reward basis is seeded. The era bounds
+// on the parsed state are available, and are the same source
+// generateAndSaveEpochs derives its epoch start slots from.
+//
+// For an epoch that predates the current era bound the bound itself is
+// returned. That is not the epoch's real start, but it is the right window
+// edge for the lookup: it puts every registration made before the era change
+// on the pre-epoch side, where the most recent one wins, which is the answer
+// wanted for an epoch on the far side of that change.
+func importedEpochStartSlot(cfg ImportConfig, epoch uint64) uint64 {
+	var lengthInSlots uint
+	if cfg.EpochLength != nil {
+		// #nosec G115 -- era index is small and non-negative
+		if _, length, err := cfg.EpochLength(
+			uint(cfg.State.EraIndex),
+		); err == nil {
+			lengthInSlots = length
+		}
+	}
+	if lengthInSlots == 0 || epoch < cfg.State.EraBoundEpoch {
+		return cfg.State.EraBoundSlot
+	}
+	return cfg.State.EraBoundSlot +
+		(epoch-cfg.State.EraBoundEpoch)*uint64(lengthInSlots)
 }
 
 // generateAndSaveEpochs creates epoch records for every epoch from

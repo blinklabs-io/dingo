@@ -88,7 +88,7 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 		db.Metadata(),
 		txn.Metadata(),
 		snapshots,
-		params,
+		func(uint64) (map[string]*ParsedPool, error) { return params, nil },
 		state.Epoch,
 		state.Tip.Slot,
 		logger,
@@ -150,7 +150,7 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	txn := db.MetadataTxn(true)
-	// nil params falls back to the snapshot's own PoolParams, which on this
+	// A nil resolver falls back to the snapshot's own PoolParams, which on this
 	// real fixture are the compact pool-distr shape.
 	require.NoError(t, seedImportedRewardInputs(
 		db.Metadata(), txn.Metadata(), snapshots, nil,
