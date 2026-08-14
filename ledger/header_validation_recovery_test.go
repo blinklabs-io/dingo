@@ -112,8 +112,14 @@ func TestHeaderValidationRecoveryRewindsPastRejectedBlock(t *testing.T) {
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
-	// The rewind goes through rollbackPrimaryChainInSecurityParamWindows,
-	// which needs K configured.
+	// Required because the underlying chain rollback refuses to run without
+	// the chain manager's K. Note this is not the same K the windowing loop
+	// in rollbackPrimaryChainInSecurityParamWindows uses — that reads
+	// ls.SecurityParam(), which falls back to a large default with no
+	// CardanoNodeConfig — so this two-block rewind takes the single-step
+	// path. The multi-window branch is not exercised here; this test covers
+	// tryRecoverFromHeaderValidationError's own behaviour, not the shared
+	// rollback helper's windowing.
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
 	// Ledger applied through slot 3; slots 4 and 5 are on the chain but not

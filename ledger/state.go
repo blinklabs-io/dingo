@@ -3218,6 +3218,11 @@ func (ls *LedgerState) trackPipelineNoProgress(
 }
 
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
+	// Clear the no-progress gauges however this loop exits — normal return,
+	// or a shutdown cancelling one of the retry timers. Deferred rather than
+	// cleared at each return so a path added later cannot strand a stale
+	// "stuck" reading in monitoring for the life of the process.
+	defer ls.metrics.setPipelineNoProgress(0, false)
 	var (
 		consecutiveNoProgress int
 		haveLastTip           bool
@@ -3234,10 +3239,6 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		)
 		cancel()
 		if err == nil || ctx.Err() != nil {
-			// Leaving the loop with the gauges still set would strand a
-			// stale "stuck" reading in monitoring for the life of the
-			// process, long after the pipeline stopped or recovered.
-			ls.metrics.setPipelineNoProgress(0, false)
 			return
 		}
 		ls.handleLedgerProcessBlocksError(err)
