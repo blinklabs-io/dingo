@@ -408,6 +408,13 @@ func (s *queryServiceServer) ReadEraSummary(
 	return connect.NewResponse(resp), nil
 }
 
+// utxoRefKey builds a comparable map key for a (tx hash, output index) UTxO
+// reference; models.UtxoId embeds a []byte and so cannot be used as a map
+// key directly.
+func utxoRefKey(hash []byte, idx uint32) string {
+	return string(hash) + ":" + strconv.FormatUint(uint64(idx), 10)
+}
+
 // ReadUtxos
 func (s *queryServiceServer) ReadUtxos(
 	ctx context.Context,
@@ -433,14 +440,26 @@ func (s *queryServiceServer) ReadUtxos(
 
 	resp := &query.ReadUtxosResponse{}
 
+	// Resolve all requested refs in a single batch, then correlate results
+	// back to each requested key below.
+	refs := make([]models.UtxoId, len(keys))
+	for i, txo := range keys {
+		refs[i] = models.UtxoId{Hash: txo.GetHash(), Idx: txo.GetIndex()}
+	}
+	utxos, err := s.utxorpc.config.LedgerState.UtxosByRefs(refs)
+	if err != nil {
+		return nil, err
+	}
+	utxoByRef := make(map[string]*models.Utxo, len(utxos))
+	for i := range utxos {
+		utxoByRef[utxoRefKey(utxos[i].TxId, utxos[i].OutputIdx)] = &utxos[i]
+	}
+
 	// Get UTxOs from ledger
 	for _, txo := range keys {
-		utxo, err := s.utxorpc.config.LedgerState.UtxoByRef(
-			txo.GetHash(),
-			txo.GetIndex(),
-		)
-		if err != nil {
-			return nil, err
+		utxo, ok := utxoByRef[utxoRefKey(txo.GetHash(), txo.GetIndex())]
+		if !ok {
+			return nil, database.ErrUtxoNotFound
 		}
 		var aud query.AnyUtxoData
 		ret, err := utxo.Decode()
