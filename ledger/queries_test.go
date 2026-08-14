@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -192,12 +193,24 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 // not depend on any one fixture transaction producing more than one UTxO:
 // with only one genuinely resolvable input, a regression back to resolving
 // just txIns[0] would still pass a count-based assertion.
+//
+// Blocks are stored in chain order, so a later block's transaction could
+// spend an earlier block's collected candidate output before the test gets
+// to use it. Liveness of every collected candidate is re-checked after each
+// new block is stored, and only candidates still live at that point are
+// kept; the loop stops as soon as two remain, so no further block storage
+// (and thus no further spends) can happen before they're used below.
 func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	db := newUtxoStorageTestDB(t)
 	iter := newUtxoStorageTestIterator(t)
 
-	var realTxIns []ledger.ShelleyTransactionInput
-	for len(realTxIns) < 2 {
+	utxoIdKey := func(id models.UtxoId) string {
+		return fmt.Sprintf("%x:%d", id.Hash, id.Idx)
+	}
+
+	var candidates []models.UtxoId
+	var live []models.UtxoId
+	for len(live) < 2 {
 		block, blockCbor := nextProducingBlock(t, iter)
 		txn := db.Transaction(true)
 		var produced lcommon.Utxo
@@ -217,10 +230,32 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 			// the whole test.
 			continue
 		}
-		realTxIns = append(realTxIns, ledger.NewShelleyTransactionInput(
-			produced.Id.Id().String(),
-			int(produced.Id.Index()),
-		))
+		candidates = append(candidates, models.UtxoId{
+			Hash: produced.Id.Id().Bytes(),
+			Idx:  produced.Id.Index(),
+		})
+
+		results, err := db.UtxosByRefs(candidates, nil)
+		require.NoError(t, err)
+		liveSet := make(map[string]struct{}, len(results))
+		for _, u := range results {
+			liveSet[utxoIdKey(models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})] = struct{}{}
+		}
+		live = live[:0]
+		for _, c := range candidates {
+			if _, ok := liveSet[utxoIdKey(c)]; ok {
+				live = append(live, c)
+			}
+		}
+	}
+	live = live[:2]
+
+	realTxIns := make([]ledger.ShelleyTransactionInput, len(live))
+	for i, ref := range live {
+		realTxIns[i] = ledger.NewShelleyTransactionInput(
+			hex.EncodeToString(ref.Hash),
+			int(ref.Idx),
+		)
 	}
 
 	// A TxIn with no matching live UTxO must be silently omitted from the
