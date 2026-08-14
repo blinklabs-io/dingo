@@ -57,6 +57,7 @@ type rewardInputBundle struct {
 // an absent one.
 func deriveRewardInputs(
 	snap *ParsedSnapShot,
+	params map[string]*ParsedPool,
 	epoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
@@ -64,21 +65,32 @@ func deriveRewardInputs(
 	if snap == nil {
 		return nil
 	}
+	// Pool parameters come from the caller rather than from the snapshot.
+	// Current (UTxO-HD) snapshots carry pool entries inside SnapShots in the
+	// compact PoolDistr shape -- pool key and VRF key only, with no margin,
+	// cost, pledge, reward account or owners (see parsePoolDistrEntry). A
+	// basis built from those is missing everything a reward round needs, so
+	// the parameters are taken from the registrations the import decodes out
+	// of cert state, and only the stake and delegations -- which SnapShots
+	// does hold exactly, per epoch -- come from the snapshot.
+	if len(params) == 0 {
+		params = snap.PoolParams
+	}
 
 	type poolAgg struct {
 		delegated  uint64
 		ownerStake uint64
 		delegators uint64
 	}
-	aggs := make(map[string]*poolAgg, len(snap.PoolParams))
-	owners := make(map[string]map[string]struct{}, len(snap.PoolParams))
-	for poolHex, params := range snap.PoolParams {
-		if params == nil {
+	aggs := make(map[string]*poolAgg, len(params))
+	owners := make(map[string]map[string]struct{}, len(params))
+	for poolHex, pool := range params {
+		if pool == nil {
 			continue
 		}
 		aggs[poolHex] = &poolAgg{}
-		set := make(map[string]struct{}, len(params.Owners))
-		for _, owner := range params.Owners {
+		set := make(map[string]struct{}, len(pool.Owners))
+		for _, owner := range pool.Owners {
 			set[hex.EncodeToString(owner)] = struct{}{}
 		}
 		owners[poolHex] = set
@@ -136,31 +148,31 @@ func deriveRewardInputs(
 
 	poolInputs := make([]*models.RewardPoolInput, 0, len(aggs))
 	var totalStake, totalDelegators uint64
-	for poolHex, params := range snap.PoolParams {
-		if params == nil {
+	for poolHex, pool := range params {
+		if pool == nil {
 			continue
 		}
 		agg := aggs[poolHex]
-		den := params.MarginDen
+		den := pool.MarginDen
 		if den == 0 {
 			den = 1
 		}
 		poolInputs = append(poolInputs, &models.RewardPoolInput{
 			Epoch:       epoch,
-			PoolKeyHash: append([]byte(nil), params.PoolKeyHash...),
+			PoolKeyHash: append([]byte(nil), pool.PoolKeyHash...),
 			Margin: &types.Rat{
 				Rat: new(big.Rat).SetFrac64(
-					int64(params.MarginNum), // #nosec G115 -- CBOR-bounded
-					int64(den),              // #nosec G115 -- CBOR-bounded
+					int64(pool.MarginNum), // #nosec G115 -- bounded
+					int64(den),            // #nosec G115 -- bounded
 				),
 			},
-			Pledge:                     types.Uint64(params.Pledge),
-			Cost:                       types.Uint64(params.Cost),
+			Pledge:                     types.Uint64(pool.Pledge),
+			Cost:                       types.Uint64(pool.Cost),
 			DelegatedStake:             types.Uint64(agg.delegated),
 			OwnerStake:                 types.Uint64(agg.ownerStake),
 			DelegatorCount:             agg.delegators,
-			RewardAccount:              append([]byte(nil), params.RewardAccount...),
-			RewardAccountCredentialTag: params.RewardAccountCredentialTag,
+			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			CapturedSlot:               capturedSlot,
 			BoundarySlot:               boundarySlot,
 		})
@@ -341,6 +353,7 @@ func seedImportedRewardInputs(
 	store rewardInputStore,
 	txn types.Txn,
 	snapshots *ParsedSnapShots,
+	params map[string]*ParsedPool,
 	epoch uint64,
 	capturedSlot uint64,
 	logger rewardSeedLogger,
@@ -366,7 +379,9 @@ func seedImportedRewardInputs(
 	}
 
 	for _, c := range candidates {
-		bundle := deriveRewardInputs(c.snap, c.epoch, capturedSlot, 0)
+		bundle := deriveRewardInputs(
+			c.snap, params, c.epoch, capturedSlot, 0,
+		)
 		if bundle == nil || len(bundle.poolInputs) == 0 {
 			continue
 		}
@@ -419,4 +434,60 @@ func seedImportedRewardInputs(
 type rewardSeedLogger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
+}
+
+// rewardPoolParamsFromRegistrations turns the pool registrations the import
+// decoded out of cert state into the parameter source the derivation needs.
+//
+// This is where the parameters have to come from. Current snapshots carry
+// pool entries inside SnapShots in the compact PoolDistr shape, which holds
+// the pool and VRF keys and nothing else -- no margin, cost, pledge, reward
+// account or owners. A basis built from those cannot reconcile, and would be
+// dropped by the gate, leaving the seeding silently ineffective.
+//
+// One caveat this cannot avoid: registrations are current, while the epochs
+// being seeded are up to two behind. A pool that changed its margin, cost or
+// pledge inside that window is seeded with its newer parameters. That shifts
+// how its reward is split between operator and delegators, not the size of
+// the pot, and it is bounded by how many pools re-register in two epochs --
+// far smaller than the whole reward rounds that are otherwise skipped.
+func rewardPoolParamsFromRegistrations(
+	pools []models.Pool,
+) map[string]*ParsedPool {
+	params := make(map[string]*ParsedPool, len(pools))
+	for i := range pools {
+		pool := &pools[i]
+		if len(pool.PoolKeyHash) == 0 {
+			continue
+		}
+		num, den := uint64(0), uint64(1)
+		if pool.Margin != nil && pool.Margin.Rat != nil {
+			if n := pool.Margin.Num(); n != nil && n.IsUint64() {
+				num = n.Uint64()
+			}
+			if d := pool.Margin.Denom(); d != nil && d.IsUint64() &&
+				d.Uint64() != 0 {
+				den = d.Uint64()
+			}
+		}
+		owners := make([][]byte, 0, len(pool.Owners))
+		for _, owner := range pool.Owners {
+			if len(owner.KeyHash) == 0 {
+				continue
+			}
+			owners = append(owners, append([]byte(nil), owner.KeyHash...))
+		}
+		params[hex.EncodeToString(pool.PoolKeyHash)] = &ParsedPool{
+			PoolKeyHash:                append([]byte(nil), pool.PoolKeyHash...),
+			VrfKeyHash:                 append([]byte(nil), pool.VrfKeyHash...),
+			Pledge:                     uint64(pool.Pledge),
+			Cost:                       uint64(pool.Cost),
+			MarginNum:                  num,
+			MarginDen:                  den,
+			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
+			Owners:                     owners,
+		}
+	}
+	return params
 }

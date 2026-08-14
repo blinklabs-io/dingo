@@ -74,7 +74,7 @@ func twoPoolSnapshot() *ParsedSnapShot {
 // a path that returns an error rather than skipping when it does not — which
 // would fail the epoch rollover outright.
 func TestDeriveRewardInputsReconciles(t *testing.T) {
-	bundle := deriveRewardInputs(twoPoolSnapshot(), 1385, 119_750_400, 0)
+	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 1385, 119_750_400, 0)
 	require.NotNil(t, bundle)
 	require.NoError(t, bundle.validate())
 
@@ -118,7 +118,7 @@ func TestDeriveRewardInputsDropsUnknownPoolDelegations(t *testing.T) {
 	snap.Stake[orphan] = 9_000
 	snap.Delegations[orphan] = hash28(0xCC) // no PoolParams entry
 
-	bundle := deriveRewardInputs(snap, 1385, 1, 0)
+	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
 	require.NoError(t, bundle.validate())
 	require.Equal(t, uint64(12_000), uint64(bundle.snapshot.TotalActiveStake),
@@ -134,7 +134,7 @@ func TestDeriveRewardInputsDropsZeroStake(t *testing.T) {
 	snap.Stake[idle] = 0
 	snap.Delegations[idle] = hash28(0xAA)
 
-	bundle := deriveRewardInputs(snap, 1385, 1, 0)
+	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
 	require.NoError(t, bundle.validate())
 	require.Len(t, bundle.stakeInputs, 3)
@@ -148,7 +148,7 @@ func TestDerivedRewardInputsGateRejectsBadMargin(t *testing.T) {
 	snap.PoolParams[hex28(0xAA)].MarginNum = 3
 	snap.PoolParams[hex28(0xAA)].MarginDen = 2
 
-	bundle := deriveRewardInputs(snap, 1385, 1, 0)
+	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
 	require.ErrorContains(t, bundle.validate(), "margin outside [0,1]")
 }
@@ -158,7 +158,7 @@ func TestDerivedRewardInputsGateRejectsBadPoolKey(t *testing.T) {
 	snap := twoPoolSnapshot()
 	snap.PoolParams[hex28(0xAA)].PoolKeyHash = []byte{0x01, 0x02}
 
-	bundle := deriveRewardInputs(snap, 1385, 1, 0)
+	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
 	require.ErrorContains(t, bundle.validate(), "pool key hash")
 }
@@ -166,7 +166,7 @@ func TestDerivedRewardInputsGateRejectsBadPoolKey(t *testing.T) {
 // The gate must catch a totals mismatch, which is the failure mode a future
 // edit to the derivation is most likely to introduce.
 func TestDerivedRewardInputsGateRejectsTotalsMismatch(t *testing.T) {
-	bundle := deriveRewardInputs(twoPoolSnapshot(), 1385, 1, 0)
+	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
 	require.NoError(t, bundle.validate())
 

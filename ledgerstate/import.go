@@ -1322,10 +1322,37 @@ func importSnapShots(
 				txn.Release()
 			}
 		}()
+		// Pool parameters come from the registrations decoded out of cert
+		// state, not from the snapshot: current snapshots carry only the
+		// compact pool-distr shape inside SnapShots, with no margin, cost,
+		// pledge, reward account or owners.
+		keys := make([]lcommon.PoolKeyHash, 0, len(snapshots.Mark.PoolParams))
+		seen := make(map[string]struct{}, len(snapshots.Mark.PoolParams))
+		for _, snap := range []*ParsedSnapShot{
+			&snapshots.Mark, &snapshots.Set, &snapshots.Go,
+		} {
+			for _, poolKey := range snap.Delegations {
+				if len(poolKey) != credentialHashSize {
+					continue
+				}
+				if _, dup := seen[string(poolKey)]; dup {
+					continue
+				}
+				seen[string(poolKey)] = struct{}{}
+				var key lcommon.PoolKeyHash
+				copy(key[:], poolKey)
+				keys = append(keys, key)
+			}
+		}
+		pools, poolErr := cfg.Database.Metadata().GetPools(keys, txn)
+		if poolErr != nil {
+			return fmt.Errorf("loading pools for reward inputs: %w", poolErr)
+		}
 		if err := seedImportedRewardInputs(
 			cfg.Database.Metadata(),
 			txn,
 			snapshots,
+			rewardPoolParamsFromRegistrations(pools),
 			epoch,
 			slot,
 			cfg.Logger,
