@@ -352,3 +352,64 @@ func TestHeaderValidationRecoveryYieldsWhenChainSelectionMovedOn(t *testing.T) {
 	default:
 	}
 }
+
+// The rewind can raise the same not-on-chain sentinel the pre-check does,
+// when chain selection moves in the gap between them. Both call sites decide
+// through this one classifier so they cannot diverge -- if only the pre-check
+// treated the condition as benign, the race would still be able to send the
+// rejected header back round the pipeline as an unhandled error.
+//
+// Asserted on the classifier rather than end-to-end because that gap cannot
+// be opened deterministically from a test: it needs chain selection to move
+// between two adjacent calls. What is testable is that the classification is
+// the same wherever the error comes from, and that it stays narrow.
+func TestYieldedToChainSelectionClassifiesOnlyNotOnChain(t *testing.T) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	validationErr := &headerValidationError{
+		BlockPoint: ocommon.Point{Slot: 42},
+		Cause:      errors.New("VRF leader value exceeds threshold"),
+	}
+	rewindPoint := ocommon.Point{Slot: 41}
+
+	for _, c := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"no error is not a yield", nil, false},
+		{
+			"the sentinel itself",
+			chain.ErrRollbackPointNotOnChain,
+			true,
+		},
+		{
+			// The rewind wraps it twice over before the caller sees it, so
+			// matching has to be on the sentinel and not on the message.
+			"the sentinel wrapped by the rewind path",
+			fmt.Errorf(
+				"lookup rollback point: %w",
+				fmt.Errorf("%w: slot 41", chain.ErrRollbackPointNotOnChain),
+			),
+			true,
+		},
+		{
+			// Rolling back further than K is a real refusal to act on, not a
+			// chain that moved: yielding would report a rewind that never
+			// happened as a successful recovery.
+			"a different chain refusal",
+			chain.ErrRollbackExceedsSecurityParam,
+			false,
+		},
+		{"an unrelated failure", errors.New("disk full"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, ls.yieldedToChainSelection(
+				c.err, validationErr, rewindPoint,
+			))
+		})
+	}
+}

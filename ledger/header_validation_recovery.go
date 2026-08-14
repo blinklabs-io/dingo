@@ -146,26 +146,15 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// fail to advance the tip, not recoveries that report success -- so a
 	// chain that never moves back still raises the signal.
 	//
-	// Checked with ValidateRollback rather than by interpreting the rewind's
-	// error, so nothing has been mutated by the time the decision is made.
-	// The chain can still move in the gap between this check and the rewind;
-	// that narrow case keeps the pre-existing behaviour of surfacing the
-	// error.
-	if err := ls.chain.ValidateRollback(rewindPoint); err != nil &&
-		errors.Is(err, chain.ErrRollbackPointNotOnChain) {
-		if ls.config.Logger != nil {
-			ls.config.Logger.Warn(
-				"chain selection moved the primary chain off the ledger tip before header-validation recovery could rewind to it; the rejected block is already gone, so the pipeline restarts instead",
-				"component",
-				"ledger",
-				"failing_block_slot",
-				validationErr.BlockPoint.Slot,
-				"rewind_target_slot",
-				rewindPoint.Slot,
-				"error",
-				err,
-			)
-		}
+	// ValidateRollback comes first so the common case is decided before
+	// anything is mutated, but the chain can move again in the gap between
+	// that check and the rewind -- and then the rewind raises the same
+	// sentinel. Both are the same condition, so both yield; deciding only on
+	// the pre-check would leave the race this gate exists for still able to
+	// send the rejected header back round the pipeline.
+	if ls.yieldedToChainSelection(
+		ls.chain.ValidateRollback(rewindPoint), validationErr, rewindPoint,
+	) {
 		return true, nil
 	}
 
@@ -186,6 +175,9 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	if err := ls.rollbackPrimaryChainInSecurityParamWindows(
 		rewindPoint,
 	); err != nil {
+		if ls.yieldedToChainSelection(err, validationErr, rewindPoint) {
+			return true, nil
+		}
 		return false, fmt.Errorf(
 			"rewind primary chain after header validation failure: %w",
 			err,
@@ -214,4 +206,40 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		)
 	}
 	return true, nil
+}
+
+// yieldedToChainSelection reports whether err says the primary chain no
+// longer holds the rewind point, and logs the yield when it does.
+//
+// Shared by the pre-check and the rewind because they are the same condition
+// caught at two moments: chain selection moved the chain off the ledger tip,
+// either before this recovery looked or in the gap after it did. Treating
+// only one of them as benign would leave the other returning an error, and a
+// deterministic header failure returned as unhandled goes straight back
+// through the pipeline to be retried rather than recovered.
+//
+// A nil error, or any other error, is not a yield: the caller reports those
+// as it did before.
+func (ls *LedgerState) yieldedToChainSelection(
+	err error,
+	validationErr *headerValidationError,
+	rewindPoint ocommon.Point,
+) bool {
+	if err == nil || !errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+		return false
+	}
+	if ls.config.Logger != nil {
+		ls.config.Logger.Warn(
+			"chain selection moved the primary chain off the ledger tip before header-validation recovery could rewind to it; the rejected block is already gone, so the pipeline restarts instead",
+			"component",
+			"ledger",
+			"failing_block_slot",
+			validationErr.BlockPoint.Slot,
+			"rewind_target_slot",
+			rewindPoint.Slot,
+			"error",
+			err,
+		)
+	}
+	return true
 }
