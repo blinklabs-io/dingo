@@ -2163,12 +2163,45 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 // on the parsed state are available, and are the same source
 // generateAndSaveEpochs derives its epoch start slots from.
 //
-// For an epoch that predates the current era bound the bound itself is
-// returned. That is not the epoch's real start, but it is the right window
-// edge for the lookup: it puts every registration made before the era change
-// on the pre-epoch side, where the most recent one wins, which is the answer
-// wanted for an epoch on the far side of that change.
+// The epoch is resolved against its own era, not the current one. mark, set
+// and go span three epochs, so an import landing in the first two epochs of a
+// new era has set or go in the era before it, with a different boundary slot
+// and a different epoch length. Measuring from the current era's bound would
+// put the window edge past those epochs entirely, and every registration made
+// during one would then count as pre-epoch -- so the most recent would win and
+// the epoch would be seeded with parameters that only took effect afterwards,
+// which is the one-epoch-early error the lookup exists to avoid.
+//
+// Only when there are no era bounds to consult does the current era's
+// boundary stand in. It is still a usable window edge -- registrations before
+// it fall on the pre-epoch side, where the most recent wins -- but it is not
+// the epoch's real start.
 func importedEpochStartSlot(cfg ImportConfig, epoch uint64) uint64 {
+	bounds := cfg.State.EraBounds
+	// The last bound at or before the target epoch is its era. Taking the
+	// last rather than the first also skips eras with no epochs, which is
+	// how preview encodes several eras all starting at epoch 0.
+	era := -1
+	for i := range bounds {
+		if bounds[i].Epoch <= epoch {
+			era = i
+		}
+	}
+	if era >= 0 {
+		var endBound EraBound
+		if era+1 < len(bounds) {
+			endBound = bounds[era+1]
+		}
+		// #nosec G115 -- era index is bounded by the era count
+		_, epochLength := resolveEraParams(
+			cfg, uint(era), bounds[era], endBound,
+		)
+		if epochLength > 0 {
+			return bounds[era].Slot +
+				(epoch-bounds[era].Epoch)*uint64(epochLength)
+		}
+	}
+
 	var lengthInSlots uint
 	if cfg.EpochLength != nil {
 		// #nosec G115 -- era index is small and non-negative

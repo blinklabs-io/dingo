@@ -75,13 +75,28 @@ func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 		true,
 	))
 
-	messages := recorder.snapshot()
-	seedIdx := firstIndexContaining(messages,
-		"seeding reward inputs for an imported epoch",
-		"seeded reward inputs for an imported epoch",
+	// Matched against the two messages seedImportedRewardInputs emits, in
+	// full, rather than a shared fragment of them: "not seeding ..."
+	// contains "seeding ...", so a fragment would match both by accident and
+	// leave it unclear which one the fixture actually produces.
+	const (
+		seededMsg  = "seeded reward inputs for an imported epoch"
+		droppedMsg = "not seeding reward inputs for an imported epoch: " +
+			"the derived basis does not reconcile, so that epoch's reward " +
+			"round will be skipped and its rewards never credited"
 	)
+	messages := recorder.snapshot()
+	seedIdx := firstIndexContaining(messages, seededMsg, droppedMsg)
 	require.GreaterOrEqual(t, seedIdx, 0,
 		"the seeding did not run at all, so this test proves nothing")
+	// Which one fires is the claim the comment above rests on. Pin it, so
+	// that if a future fixture does carry reward accounts this test says so
+	// instead of quietly resting on a stale rationale.
+	require.Equal(t, droppedMsg, messages[seedIdx],
+		"the fixture's compact snapshots carry no reward accounts, so the "+
+			"gate must drop the basis; a seeded basis here means the "+
+			"reason this test asserts ordering rather than rows no longer "+
+			"holds")
 
 	for _, stage := range []string{
 		// The fallback pool import, which writes the registrations the

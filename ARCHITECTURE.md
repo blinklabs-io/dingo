@@ -4976,7 +4976,10 @@ resolved per epoch from the imported registration history through
 path uses, so a bootstrapped node and a synced one derive the same basis. The
 window's lower edge comes from `importedEpochStartSlot`, which derives epoch
 start slots from the parsed state's era bounds because `importTip` generates
-the epoch rows only after the snapshots are imported. On a fresh bootstrap
+the epoch rows only after the snapshots are imported. It resolves each epoch
+against its own era rather than the current one: mark, set and go span three
+epochs, so an import landing in the first two epochs of a new era has set or
+go in the era before it, with a different boundary slot and epoch length. On a fresh bootstrap
 every registration lands at the import slot and all three epochs resolve to
 the same row; the lookup diverges, correctly, when the import runs against a
 database that already holds registration history. Block counts are not seeded and
