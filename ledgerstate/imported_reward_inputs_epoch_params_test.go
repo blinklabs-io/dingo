@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -200,9 +201,12 @@ func TestImportSnapShotsUsesEpochEffectivePoolParams(t *testing.T) {
 	// Window edges come from the production helper: this test is about which
 	// registration each epoch selects, not about the slot arithmetic, which
 	// importedEpochStartSlot defines.
-	goStart := importedEpochStartSlot(cfg, state.Epoch-2)
-	setStart := importedEpochStartSlot(cfg, state.Epoch-1)
-	markStart := importedEpochStartSlot(cfg, state.Epoch)
+	goStart, goOK := importedEpochStartSlot(cfg, state.Epoch-2)
+	setStart, setOK := importedEpochStartSlot(cfg, state.Epoch-1)
+	markStart, markOK := importedEpochStartSlot(cfg, state.Epoch)
+	require.True(t, goOK && setOK && markOK,
+		"the fixture's era bounds must cover all three seeded epochs, or "+
+			"the seeding skips them and this test proves nothing")
 	require.Positive(t, goStart,
 		"the fixture leaves no room before the go epoch to place a "+
 			"registration, so this test cannot distinguish the epochs")
@@ -293,5 +297,66 @@ func importTestPoolRegistration(
 		Cost:      types.Uint64(cost),
 		Owners:    owners,
 		AddedSlot: addedSlot,
+	}
+}
+
+// An epoch whose parameter window cannot be placed is skipped, not guessed
+// at and not fatal. Guessing seeds the round against parameters that were not
+// in force, which credits rewards at the wrong split rather than visibly not
+// crediting them; failing the import would throw away the epochs that *can*
+// be placed along with it. Skipping leaves that one round uncredited and
+// counted, which is the direction the rest of this seeding already takes.
+func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err)
+	certState, err := ParseCertState(state.CertStateData)
+	require.NoError(t, err)
+
+	params := make(map[string]*ParsedPool, len(certState.Pools))
+	for i := range certState.Pools {
+		pool := certState.Pools[i]
+		params[hexPoolKey(pool.PoolKeyHash)] = &pool
+	}
+
+	// The oldest of the three is the one an era bound is most likely to fall
+	// short of, so it stands in for the real case here.
+	unplaceable := state.Epoch - 2
+	txn := db.MetadataTxn(true)
+	require.NoError(t, seedImportedRewardInputs(
+		db.Metadata(),
+		txn.Metadata(),
+		snapshots,
+		func(epoch uint64) (map[string]*ParsedPool, error) {
+			if epoch == unplaceable {
+				return nil, fmt.Errorf(
+					"%w: epoch %d", errRewardParamsWindowUnknown, epoch,
+				)
+			}
+			return params, nil
+		},
+		state.Epoch,
+		state.Tip.Slot,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	require.NoError(t, txn.Commit())
+
+	skipped, err := db.Metadata().GetRewardSnapshot(unplaceable, "mark", nil)
+	require.NoError(t, err)
+	require.Nil(t, skipped,
+		"an epoch with no parameter window must be skipped, not seeded from "+
+			"a guessed one")
+
+	// The epochs that can be placed are unaffected: one unplaceable epoch
+	// must not cost the others their reward rounds.
+	for _, epoch := range []uint64{state.Epoch, state.Epoch - 1} {
+		seeded, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		require.NoError(t, err)
+		require.NotNil(t, seeded,
+			"epoch %d has a usable window and must still be seeded", epoch)
 	}
 }

@@ -417,6 +417,23 @@ func seedImportedRewardInputs(
 			var err error
 			params, err = resolveParams(c.epoch)
 			if err != nil {
+				// A window that cannot be placed skips this epoch, the same
+				// way a basis that does not reconcile does. Seeding it from
+				// a guessed window would credit the round against parameters
+				// that were not in force, which is silently wrong; skipping
+				// leaves it visibly uncredited.
+				if errors.Is(err, errRewardParamsWindowUnknown) {
+					if logger != nil {
+						logger.Warn(
+							"not seeding reward inputs for an imported epoch: its pool parameter window cannot be determined, so that epoch's reward round will be skipped and its rewards never credited",
+							"component", "ledgerstate",
+							"epoch", c.epoch,
+							"snapshot", c.name,
+							"error", err.Error(),
+						)
+					}
+					continue
+				}
 				return fmt.Errorf(
 					"resolving pool parameters for epoch %d: %w",
 					c.epoch, err,
@@ -473,6 +490,15 @@ func seedImportedRewardInputs(
 	}
 	return nil
 }
+
+// errRewardParamsWindowUnknown marks an epoch whose parameter lookup window
+// could not be placed. It is distinct from a lookup that failed: the database
+// answered fine, there is simply no defensible window to ask about, so the
+// epoch is skipped rather than seeded from a guess and rather than failing
+// the whole import.
+var errRewardParamsWindowUnknown = errors.New(
+	"pool parameter window cannot be determined",
+)
 
 // rewardPoolParamsResolver returns the pool parameters in force during the
 // given epoch. It is a function rather than a prepared map because the

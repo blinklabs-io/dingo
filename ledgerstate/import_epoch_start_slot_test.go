@@ -70,7 +70,9 @@ func TestImportedEpochStartSlotUsesTheEpochsOwnEra(t *testing.T) {
 		{"an earlier epoch of the previous era", 3, 300},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, importedEpochStartSlot(cfg, c.epoch))
+			got, ok := importedEpochStartSlot(cfg, c.epoch)
+			require.True(t, ok, "this epoch is covered by the era bounds")
+			require.Equal(t, c.want, got)
 		})
 	}
 }
@@ -92,18 +94,33 @@ func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
-	require.Equal(t, uint64(1500), importedEpochStartSlot(cfg, 11))
-	require.Equal(t, uint64(1000), importedEpochStartSlot(cfg, 10))
-	require.Equal(t, uint64(1000), importedEpochStartSlot(cfg, 9),
-		"without bounds there is nothing better than the era boundary")
+	for _, c := range []struct {
+		epoch uint64
+		want  uint64
+	}{
+		{11, 1500},
+		{10, 1000},
+	} {
+		got, ok := importedEpochStartSlot(cfg, c.epoch)
+		require.True(t, ok)
+		require.Equal(t, c.want, got)
+	}
+	// Epoch 9 began before this era did, and without bounds there is nothing
+	// describing where. The era boundary is not a stand-in: it follows the
+	// epoch, so every registration made during it would count as pre-epoch.
+	_, ok := importedEpochStartSlot(cfg, 9)
+	require.False(t, ok,
+		"an epoch the current era's arithmetic cannot reach has no window")
 }
 
 // Bounds that do not reach back to genesis leave an epoch with no era to
-// measure from. The current era's boundary is not a usable stand-in there:
-// it sits after the epoch, so every registration made during that epoch
-// would count as pre-epoch and the most recent would win -- the same
-// one-epoch-early error, arrived at from the other side.
-func TestImportedEpochStartSlotWidensBelowTheFirstEraBound(t *testing.T) {
+// measure from, and neither available guess is safe. The current era's
+// boundary sits after the epoch, so every registration made during it counts
+// as pre-epoch and the newest wins. Widening to zero is the mirror image:
+// they all look in-epoch, so the pool's earliest registration wins and a
+// re-registration made before the target epoch is ignored. Both seed rewards
+// from parameters that were not in force, so neither is offered.
+func TestImportedEpochStartSlotHasNoWindowBelowTheFirstEraBound(t *testing.T) {
 	cfg := ImportConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		State: &RawLedgerState{
@@ -117,9 +134,11 @@ func TestImportedEpochStartSlotWidensBelowTheFirstEraBound(t *testing.T) {
 			return 1, 500, nil
 		},
 	}
-	require.Equal(t, uint64(0), importedEpochStartSlot(cfg, 9),
-		"an epoch before every known era bound must widen the window, not "+
-			"borrow a boundary that follows it")
-	require.Equal(t, uint64(1500), importedEpochStartSlot(cfg, 11),
-		"epochs the bounds do cover are unaffected")
+	_, ok := importedEpochStartSlot(cfg, 9)
+	require.False(t, ok,
+		"an epoch before every known era bound has no window: the boundary "+
+			"that follows it is too late, and widening to zero is too early")
+	got, ok := importedEpochStartSlot(cfg, 11)
+	require.True(t, ok, "epochs the bounds do cover are unaffected")
+	require.Equal(t, uint64(1500), got)
 }

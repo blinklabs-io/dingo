@@ -1585,10 +1585,18 @@ func seedImportedRewardBasis(
 	resolveParams := func(
 		target uint64,
 	) (map[string]*ParsedPool, error) {
+		epochStartSlot, ok := importedEpochStartSlot(cfg, target)
+		if !ok {
+			return nil, fmt.Errorf(
+				"%w: epoch %d is not covered by the imported era bounds",
+				errRewardParamsWindowUnknown,
+				target,
+			)
+		}
 		registrations, err := cfg.Database.Metadata().
 			GetPoolRegistrationsEffectiveForEpoch(
 				keys,
-				importedEpochStartSlot(cfg, target),
+				epochStartSlot,
 				target,
 				slot,
 				txn.Metadata(),
@@ -2168,6 +2176,15 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 // on the parsed state are available, and are the same source
 // generateAndSaveEpochs derives its epoch start slots from.
 //
+// The bool reports whether a window could be placed at all. Neither
+// available guess is safe when it cannot: the current era's boundary sits
+// after such an epoch, so every registration made during it counts as
+// pre-epoch and the newest wins, while widening to zero makes them all look
+// in-epoch, so the pool's earliest registration wins and a re-registration
+// before the target epoch is ignored. Both seed rewards from parameters that
+// were not in force, in opposite directions, so the caller skips the epoch
+// instead -- the same conservative direction the rest of this seeding takes.
+//
 // The epoch is resolved against its own era, not the current one. mark, set
 // and go span three epochs, so an import landing in the first two epochs of a
 // new era has set or go in the era before it, with a different boundary slot
@@ -2181,20 +2198,18 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 // boundary stand in. It is still a usable window edge -- registrations before
 // it fall on the pre-epoch side, where the most recent wins -- but it is not
 // the epoch's real start.
-func importedEpochStartSlot(cfg ImportConfig, epoch uint64) uint64 {
+func importedEpochStartSlot(
+	cfg ImportConfig,
+	epoch uint64,
+) (uint64, bool) {
 	bounds := cfg.State.EraBounds
 	// The last bound at or before the target epoch is its era. Taking the
 	// last rather than the first also skips eras with no epochs, which is
 	// how preview encodes several eras all starting at epoch 0.
-	// An epoch before the first bound has no era to measure from. Falling
-	// through to the current era's boundary would be actively wrong -- that
-	// slot is after the epoch, so every registration made during it would
-	// count as pre-epoch and the most recent would win -- so widen the
-	// window to the whole chain instead and let the lookup take the earliest
-	// registration at or before the snapshot. Reaching this means era-bound
-	// extraction did not go back to genesis.
+	// An epoch before the first bound has no era to measure from. Reaching
+	// this means era-bound extraction did not go back to genesis.
 	if len(bounds) > 0 && epoch < bounds[0].Epoch {
-		return 0
+		return 0, false
 	}
 	era := -1
 	for i := range bounds {
@@ -2213,7 +2228,7 @@ func importedEpochStartSlot(cfg ImportConfig, epoch uint64) uint64 {
 		)
 		if epochLength > 0 {
 			return bounds[era].Slot +
-				(epoch-bounds[era].Epoch)*uint64(epochLength)
+				(epoch-bounds[era].Epoch)*uint64(epochLength), true
 		}
 	}
 
@@ -2226,11 +2241,13 @@ func importedEpochStartSlot(cfg ImportConfig, epoch uint64) uint64 {
 			lengthInSlots = length
 		}
 	}
+	// Without bounds the current era's own arithmetic is all there is, and
+	// it only reaches epochs at or after that era began.
 	if lengthInSlots == 0 || epoch < cfg.State.EraBoundEpoch {
-		return cfg.State.EraBoundSlot
+		return 0, false
 	}
 	return cfg.State.EraBoundSlot +
-		(epoch-cfg.State.EraBoundEpoch)*uint64(lengthInSlots)
+		(epoch-cfg.State.EraBoundEpoch)*uint64(lengthInSlots), true
 }
 
 // generateAndSaveEpochs creates epoch records for every epoch from
