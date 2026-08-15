@@ -757,7 +757,14 @@ own barriers, and `Sync` is a store-wide flush, so the next combined commit also
 makes those earlier batches durable.
 
 The ordering exists because the two stores fail asymmetrically. SQLite runs
-`journal_mode=WAL` with `synchronous=NORMAL`, so committed metadata reaches disk
+`journal_mode=WAL` with `synchronous=NORMAL` (WAL is set once at open by
+`ensureWALJournalMode` rather than as a per-connection `_pragma`: SQLite takes
+the rollback-to-WAL transition's exclusive lock without consulting the busy
+handler, so running it on every connection makes a concurrent open fail
+outright with `SQLITE_BUSY` instead of waiting, and journal mode is persistent
+in the database header so once is enough; `busy_timeout` leads the remaining
+pragma list, because the driver applies `_pragma` directives in DSN order and
+anything ahead of it would run with no busy handler installed), so committed metadata reaches disk
 at WAL checkpoints (every 1000 pages by default). Badger is opened with its
 default `SyncWrites=false` and a 128MiB memtable, so committed blob writes can
 sit unflushed far longer — at chain tip dingo writes only a few MiB of blocks per

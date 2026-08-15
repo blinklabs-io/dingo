@@ -3149,15 +3149,100 @@ func (ls *LedgerState) ledgerReadChainIterator(
 const (
 	noProgressBackoffBase = 10 * time.Millisecond
 	noProgressBackoffMax  = 2 * time.Second
+	// noProgressStuckThreshold is the number of consecutive no-progress
+	// restarts after which the failure is treated as deterministic rather
+	// than transient. A transient cause clears within a few restarts; a
+	// deterministic one -- a canonical block this node rejects and will
+	// reject identically on every replay -- never does, and capping its
+	// retry at noProgressBackoffMax means hammering it at that rate for as
+	// long as the process runs.
+	noProgressStuckThreshold = 50
+	// noProgressStuckBackoffMax bounds the wait once stuck. The pipeline
+	// keeps retrying, because the condition can still be cleared from
+	// outside (a peer serving a different chain, an operator repairing
+	// state), but at a rate that neither burns CPU nor buries the logs.
+	noProgressStuckBackoffMax = 30 * time.Second
 )
 
+// ledgerPipelineBackoff returns how long to wait before the next pipeline
+// restart, and whether the pipeline should be treated as stuck on a
+// deterministic failure.
+//
+// This changes only the retry rate and the operator signal, never whether a
+// block is accepted: a node wedged on a rejected block is equally stuck
+// before and after, but it now says so once, loudly, and stops spinning.
+func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
+	if consecutiveNoProgress <= 0 {
+		return 0, false
+	}
+	if consecutiveNoProgress < noProgressStuckThreshold {
+		shift := min(consecutiveNoProgress-1, 8)
+		return min(
+			noProgressBackoffBase*(time.Duration(1)<<uint(shift)),
+			noProgressBackoffMax,
+		), false
+	}
+	shift := min(consecutiveNoProgress-noProgressStuckThreshold, 8)
+	return min(
+		noProgressBackoffMax*(time.Duration(1)<<uint(shift)),
+		noProgressStuckBackoffMax,
+	), true
+}
+
+// pipelineProgress is the ledger pipeline's view of whether restarts are
+// getting anywhere: how many consecutive ones have failed to move the tip,
+// and the tip they last saw. Kept as one value because the fields are only
+// meaningful together -- threading them separately is what let one failure
+// path update some and not others.
+type pipelineProgress struct {
+	consecutiveNoProgress int
+	haveLastTip           bool
+	lastTipSlot           uint64
+	lastTipHash           []byte
+}
+
+// stuck reports whether the pipeline has restarted without progress often
+// enough that the failure should be treated as deterministic.
+func (p pipelineProgress) stuck() bool {
+	_, stuck := ledgerPipelineBackoff(p.consecutiveNoProgress)
+	return stuck
+}
+
+// trackPipelineProgress folds one pipeline restart into the no-progress
+// accounting. Shared by every failure path so none of them can quietly opt
+// out of stuck detection: an error class that retries on its own schedule is
+// still a failure to advance, and skipping the counter is what let a
+// permanently unavailable endorser block wedge the pipeline without ever
+// raising the signal.
+//
+// The counter resets as soon as the tip moves, so a pipeline that is making
+// progress between restarts never accumulates toward stuck.
+func (ls *LedgerState) trackPipelineProgress(
+	p pipelineProgress,
+) pipelineProgress {
+	ls.RLock()
+	tipSlot := ls.currentTip.Point.Slot
+	tipHash := ls.currentTip.Point.Hash
+	ls.RUnlock()
+	if p.haveLastTip && tipSlot == p.lastTipSlot &&
+		bytes.Equal(tipHash, p.lastTipHash) {
+		p.consecutiveNoProgress++
+	} else {
+		p.consecutiveNoProgress = 0
+	}
+	p.haveLastTip = true
+	p.lastTipSlot = tipSlot
+	p.lastTipHash = tipHash
+	return p
+}
+
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
-	var (
-		consecutiveNoProgress int
-		haveLastTip           bool
-		lastTipSlot           uint64
-		lastTipHash           []byte
-	)
+	// Clear the no-progress gauges however this loop exits — normal return,
+	// or a shutdown cancelling one of the retry timers. Deferred rather than
+	// cleared at each return so a path added later cannot strand a stale
+	// "stuck" reading in monitoring for the life of the process.
+	defer ls.metrics.setPipelineNoProgress(0, false)
+	var progress pipelineProgress
 	for {
 		attemptCtx, cancel := context.WithCancel(ctx)
 		readChainResultCh := make(chan readChainResult)
@@ -3172,6 +3257,31 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		}
 		ls.handleLedgerProcessBlocksError(err)
 		if errors.Is(err, errCertifiedEndorserBlockUnavailable) {
+			// This retry has its own delay and used to skip the no-progress
+			// accounting entirely, so an endorser block that never becomes
+			// available wedged the pipeline without ever raising the stuck
+			// signal. Count it like any other failure to advance; the
+			// bespoke delay below still governs its pacing.
+			progress = ls.trackPipelineProgress(progress)
+			endorserStuck := progress.stuck()
+			ls.metrics.setPipelineNoProgress(
+				progress.consecutiveNoProgress,
+				endorserStuck,
+			)
+			if endorserStuck &&
+				progress.consecutiveNoProgress == noProgressStuckThreshold {
+				ls.config.Logger.Error(
+					"ledger pipeline stuck: a certified endorser block has stayed unavailable across repeated restarts without advancing the tip; the node is no longer following the chain",
+					"component",
+					"ledger",
+					"consecutive_no_progress",
+					progress.consecutiveNoProgress,
+					"tip_slot",
+					progress.lastTipSlot,
+					"error",
+					err,
+				)
+			}
 			timer := time.NewTimer(certifiedEndorserBlockRetryDelay)
 			select {
 			case <-ctx.Done():
@@ -3182,34 +3292,46 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			continue
 		}
 
-		ls.RLock()
-		tipSlot := ls.currentTip.Point.Slot
-		tipHash := ls.currentTip.Point.Hash
-		ls.RUnlock()
-		if haveLastTip && tipSlot == lastTipSlot &&
-			bytes.Equal(tipHash, lastTipHash) {
-			consecutiveNoProgress++
-		} else {
-			consecutiveNoProgress = 0
-		}
-		lastTipSlot = tipSlot
-		lastTipHash = tipHash
-		haveLastTip = true
+		progress = ls.trackPipelineProgress(progress)
+		tipSlot := progress.lastTipSlot
 
-		if consecutiveNoProgress > 0 {
-			shift := min(consecutiveNoProgress-1, 8)
-			backoff := min(
-				noProgressBackoffBase*(time.Duration(1)<<uint(shift)),
-				noProgressBackoffMax,
-			)
-			if consecutiveNoProgress == 10 ||
-				consecutiveNoProgress%100 == 0 {
+		backoff, stuck := ledgerPipelineBackoff(
+			progress.consecutiveNoProgress,
+		)
+		ls.metrics.setPipelineNoProgress(
+			progress.consecutiveNoProgress,
+			stuck,
+		)
+		if progress.consecutiveNoProgress > 0 {
+			// Announce the transition into stuck exactly once, at ERROR: a
+			// deterministic failure is not going to clear on its own, so it
+			// is an operator-actionable condition rather than another line
+			// in a repeating WARN.
+			if stuck && progress.consecutiveNoProgress == noProgressStuckThreshold {
+				ls.config.Logger.Error(
+					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
+					"component",
+					"ledger",
+					"consecutive_no_progress",
+					progress.consecutiveNoProgress,
+					"tip_slot",
+					tipSlot,
+					"backoff",
+					backoff,
+					"error",
+					err,
+				)
+			}
+			if progress.consecutiveNoProgress == 10 ||
+				progress.consecutiveNoProgress%100 == 0 {
 				ls.config.Logger.Warn(
 					"ledger pipeline making no progress across repeated restarts, backing off",
 					"component",
 					"ledger",
 					"consecutive_no_progress",
-					consecutiveNoProgress,
+					progress.consecutiveNoProgress,
+					"stuck",
+					stuck,
 					"backoff",
 					backoff,
 					"tip_slot",
@@ -4048,6 +4170,25 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			}, true)
 			if err != nil {
 				recovered, recoverErr := ls.tryRecoverFromTxValidationError(
+					err,
+				)
+				if recoverErr != nil {
+					completeReadResult()
+					return fmt.Errorf(
+						"process block batch: %w",
+						recoverErr,
+					)
+				}
+				if recovered {
+					completeReadResult()
+					return errRestartLedgerPipeline
+				}
+				// A deferred header check that rejects an already-persisted
+				// block is deterministic: restarting the pipeline re-reads
+				// the same block and fails identically. Rewind past it so
+				// chain selection can offer another candidate. The block is
+				// still rejected.
+				recovered, recoverErr = ls.tryRecoverFromHeaderValidationError(
 					err,
 				)
 				if recoverErr != nil {

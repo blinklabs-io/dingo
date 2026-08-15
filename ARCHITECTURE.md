@@ -903,7 +903,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainsync.client_remove_requested` | Node | Stalled client removal |
 | `chainsync.resync` | LedgerState | Chainsync resync request |
 | `connmanager.inbound_conn` | ConnManager | Inbound connection |
-| `connmanager.conn_closed` | ConnManager | Connection closed |
+| `connmanager.conn_closed` | ConnManager | Node-to-node connection closed |
 | `connmanager.connection_recycle_requested` | ConnManager | Connection recycling |
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
@@ -942,7 +942,10 @@ All event types follow the `subsystem.snake_case_name` convention.
 - A subscriber that stops draining stalls its publishers, and the shared async
   worker pool means it also delays unrelated async event types. Consumers of
   `Subscribe` channels must drain for the life of the subscription and
-  `Unsubscribe` when they stop
+  `Unsubscribe` when they stop. The stalled-subscriber warning is rate-limited
+  per subscriber, not per delivery, and reports how many publishers are parked
+  on it — every parked publisher observes the same stall, so a per-delivery
+  limit made the log volume scale with publisher count rather than with time
 - **Never `Publish`, `PublishAsync`, or `PublishBlocking` while holding a lock
   that a subscriber of that event acquires.** Because all three wait for
   capacity rather than dropping, this is a deadlock, not merely a slow path:
@@ -973,6 +976,14 @@ All event types follow the `subsystem.snake_case_name` convention.
   `connmanager.conn_closed` draining, and every subsequent connection close
   parks another publisher goroutine. Handlers that re-publish are therefore
   coupling two topics' backpressure and must not block
+- `connmanager.conn_closed` is published for node-to-node connections only.
+  Every subscriber uses it for NtN peer management (chain selection, peer
+  governance, chainsync client state, the mempool consumer set) and the payload
+  carries no way to recognise a node-to-client connection and skip it. A local
+  client reconnecting in a tight loop would otherwise park publishers faster
+  than they drain and wedge the subscriber permanently — via exactly the
+  two-topic coupling above — which silently stops the node from following the
+  chain while it continues to forge
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure
@@ -2793,7 +2804,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 
 ### Leader Election (`ledger/leader/`)
 
-`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. The epoch provider supplies the era-aware absolute slot range for the epoch from `LedgerState.EpochInfo`, which is backed by the hard-fork summary; leader schedules must not derive the range as `epoch * slotsPerEpoch`, because Byron-era prefixes make that value wrong on preprod and mainnet. For each slot in the resolved range, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures are hard validation rejects once the decentralization parameter is inactive, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. While TPraos decentralization is still active (`d > 0`), header validation resolves the overlay schedule from Shelley genesis, checks that a genesis-delegate header is assigned to that overlay slot, and uses the latest on-chain genesis-key delegation row before the block slot before falling back to Shelley genesis. Normal pool headers still bind the header VRF key to the registered pool; local stake-threshold checks remain skipped until `d` is inactive. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
+`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. The epoch provider supplies the era-aware absolute slot range for the epoch from `LedgerState.EpochInfo`, which is backed by the hard-fork summary; leader schedules must not derive the range as `epoch * slotsPerEpoch`, because Byron-era prefixes make that value wrong on preprod and mainnet. For each slot in the resolved range, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures are hard validation rejects once the decentralization parameter is inactive, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. Because that reject is hard while the stake feeding it is reconstructed locally rather than taken from the reference node, every eligibility decision — not only the failures — records `(threshold - leaderValue) / threshold` in the `dingo_ledger_leader_threshold_margin` histogram, and rejections also carry that margin in the error message and increment `dingo_ledger_leader_threshold_rejections_total`. A threshold comparison turns a relative stake error of eps into a flipped decision with probability about eps per block, so the margin distribution is what makes that error measurable: decisions clustering just above zero mean the local stake distribution is close enough to the boundary for a small discrepancy to reject a canonical block, whereas a rejection whose margin is not marginal indicates a genuinely ineligible producer or a derivation bug rather than a stake gap. While TPraos decentralization is still active (`d > 0`), header validation resolves the overlay schedule from Shelley genesis, checks that a genesis-delegate header is assigned to that overlay slot, and uses the latest on-chain genesis-key delegation row before the block slot before falling back to Shelley genesis. Normal pool headers still bind the header VRF key to the registered pool; local stake-threshold checks remain skipped until `d` is inactive. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
 
 Both halves of sigma come from the same Mark row set for the same snapshot epoch, and the active slot coefficient `f` comes from the exact Shelley genesis rational (`LedgerState.ActiveSlotCoeffRat`), never from `ActiveSlotCoeff()`'s float64 form. `epochInfoAdapter` supplies it through the optional `leader.ActiveSlotCoeffRatProvider` interface, which `computeSchedule` prefers over the float64 accessor; header validation already used the exact rational, so the two paths now derive identical thresholds. The float64 round trip is one-sided: the nearest binary64 value to a genesis `0.05` is strictly greater than 1/20, so a threshold derived from it strictly contains the reference node's acceptance region and can only over-claim leader slots. `ScheduleFormatVersion` is bumped whenever the compute path changes, because `validatePersistedSchedule` re-checks the epoch nonce and both sigma inputs but not `f`. Each computed schedule logs one `leader schedule calculated` record carrying every leader-check input — snapshot epoch and type, epoch slot range, epoch nonce, pool and total stake, `f`, consensus mode, and the certified-natural threshold — so a schedule that disagrees with `cardano-cli query leadership-schedule` can be diffed against the reference node's `query stake-snapshot` and `query protocol-state` from logs alone.
 
@@ -4925,6 +4936,85 @@ captured. Because a retained snapshot can outlive its per-credential rows,
 empty `RewardStakeInput` set rather than failing the rollover. See the
 retention section in `DATABASE.md` for the per-table detail.
 
+A skipped reward round is never made up later, and that has consequences
+well beyond the reward figures. Applying the round at the boundary into N
+requires this node's own `RewardSnapshot` for N-3 and `RewardAdaPots` for
+N-1; when either is absent the round is skipped, while the reference node
+credits it regardless. Reward balances — and the leadership stake
+distribution derived from them, since `reward_live_stake` sums UTxO plus
+reward — are then permanently short by that epoch's rewards. Leader
+eligibility compares a VRF value against a stake-derived threshold, so a
+sigma shortfall of eps flips a decision with probability about eps per
+block, and a flipped decision rejects a canonical block. Measured on preview
+for issue #3165: a node three reward rounds short ran 0.042% low in sigma
+and rejected a canonical block whose leader value sat between its own
+threshold and the reference's.
+
+The inputs are absent chiefly after a Mithril bootstrap, whose preceding
+epochs the node never saw, so the first rounds after import have nothing to
+compute from. The ledger-state import closes the pots half of that gap: it
+seeds a `RewardAdaPots` row for the snapshot's own epoch from the state it
+already decodes -- treasury and reserves from `AccountState`, the fee pot
+from `UTxOState` -- so the round at the first boundary after import is not
+skipped for want of pots. The fee pot is decoded specifically for this,
+because it is an addend of the reward pot and a row seeded with zero fees
+would credit the round at the wrong amount rather than visibly not running
+it. The per-credential reward basis is seeded from the same import: mark, set and
+go each carry one epoch's per-credential stake and its credential-to-pool
+delegations, and the three of them line up with the three epochs a freshly
+bootstrapped node cannot otherwise compute. The seeding is the last step of `importSnapShots`, after every stage
+that can create a pool registration -- cert state, the fallback pool import,
+and the retired-but-scheduled synthesis. It derives from those registrations,
+so running ahead of any of them would describe a pool set the import had not
+finished building; on the fallback path, which exists for a resume where cert
+state completed in an earlier run, that meant deriving against an empty pool
+table. Pool parameters come from the snapshots themselves. Each snapshot's pool
+records carry the registration parameters -- VRF key, pledge, cost, margin,
+reward account and the owners holding stake -- alongside the pool's stake, and
+`parseSnapshotPoolParams` reads them. That is what makes the seeding complete:
+the snapshot describes the pool set as it stood in the epoch it captured,
+retired pools included, and a pool that held stake in the go or set snapshot
+but retired before the snapshot's own epoch cannot be described by anything
+else in an imported database. Its delegators' stake was then unattributable,
+and the gate dropped that whole epoch's basis rather than understate every
+other pool's share, which is why a bootstrapped node skipped all three reward
+rounds (issue #3165).
+
+The layout is not in any published CDDL -- the on-chain `pool_params` is a
+different, 9-field shape led by the operator -- so every field is validated on
+read and a record that does not match degrades to the VRF-only reading rather
+than mapping a field onto the wrong parameter. Note that a snapshot's owner
+set lists only the owners holding stake in it, not every owner the
+registration names; the omitted ones contribute nothing to owner stake, so the
+reward basis is unaffected.
+
+Registration history is the fallback, for a snapshot whose pool entries are
+the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
+through `GetPoolRegistrationsEffectiveForEpoch`, the same lookup the live
+boundary path uses. The window's lower edge comes from
+`importedEpochStartSlot`, which derives epoch start slots from the parsed
+state's era bounds because `importTip` generates the epoch rows only after the
+snapshots are imported. It resolves each epoch against its own era rather than
+the current one: mark, set and go span three epochs, so an import landing in
+the first two epochs of a new era has set or go in the era before it, with a
+different boundary slot and epoch length. An epoch it cannot place at all is
+skipped rather than seeded from a guessed window. Block counts are not seeded and
+do not need to be — `rewardBlockCounts` derives them by scanning the imported
+chain for the performance epoch.
+
+Each epoch's derived basis is gated before it is written
+(`rewardInputBundle.validate`), and a basis that does not reconcile is dropped
+with a warning rather than persisted. The gate is mandatory, not defensive:
+the ledger validates the same invariants when it reads the basis, and on that
+path a failure returns an error rather than skipping the round, so an unusable
+row would turn a missing reward round into a node that cannot cross an epoch
+boundary at all. Dropping leaves the round to be skipped and counted as
+before, which is the conservative direction. Both skips are logged at WARN and counted by
+`dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
+Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
+node is a live divergence from the network. They were Debug until #3165,
+which is why the condition survived three field investigations unseen.
+
 Since dingo #1875, `cleanupOldSnapshots` reads `Database.StorageMode()` and
 diverges for `RewardAccountOutput` only: in `api` storage mode it is exempted
 from the epoch-window prune and retained for the life of the database instead,
@@ -5656,6 +5746,40 @@ resolves — only how fast the pipeline hammers against it while it
 doesn't — and is deliberately generic rather than classifying specific
 error types, since the failure modes this guards against are exactly the
 ones not yet fully understood well enough to special-case safely.
+
+One error class is deterministic rather than transient and needs more than
+backoff. A block whose *deferred* stateful header checks (registered VRF
+key, Praos leader eligibility) fail is already persisted in the chain
+store, so a bare pipeline restart re-reads that same block and fails
+identically, forever. Transaction validation failures already carried a
+type (`txValidationError`) that routes them into rewind-based recovery;
+header validation carried a bare error and so had nowhere to go.
+`headerValidationError` closes that gap: the block is still rejected — the
+validity predicate is unchanged and stays identical to the reference
+node's — but the rejection now rewinds the primary chain and the ledger to
+the last good tip and asks chainsync to re-deliver, so chain selection can
+offer a different candidate instead of the pipeline spinning on a chain it
+has already refused. If the network genuinely offers no other chain the
+node still cannot advance, which is the correct outcome for a node that
+believes the block is invalid and the same one the reference node reaches;
+the difference is that it surfaces through the stuck-pipeline signal below
+rather than an unbounded retry loop.
+
+A 2s cap still means retrying forever at that rate, which is what a
+*deterministic* failure produces when no rewind resolves it: a canonical
+block this node rejects will be rejected identically on every replay, so
+the pipeline neither recovers nor stops. After `noProgressStuckThreshold`
+consecutive no-progress
+restarts the loop treats the failure as deterministic rather than
+transient, escalating the wait beyond the transient ceiling (bounded by
+`noProgressStuckBackoffMax`), logging the transition once at ERROR, and
+exporting `dingo_ledger_pipeline_stuck` alongside
+`dingo_ledger_pipeline_no_progress_restarts` so a node that has silently
+stopped following the chain is visible to monitoring instead of only to
+whoever reads a repeating WARN. Both reset as soon as the tip advances.
+This still changes only the retry rate and the operator signal, never
+whether a block is accepted — a node wedged on a rejected block is equally
+wedged either way, but it now says so once, loudly, and stops spinning.
 
 ### CIP-0163 Bookkeeping Shared Between Ledger Rollback and Lifecycle Truncate
 
