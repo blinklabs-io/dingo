@@ -42,11 +42,11 @@ import (
 // an empty pool table.
 //
 // Ordering is the assertion because it is the invariant -- the seeding must be
-// downstream of every stage that writes a pool. Asserting on the resulting
-// rows instead would tie this test to the fixture's snapshot format: these are
-// compact UTxO-HD snapshots carrying no reward accounts, so the basis is
-// dropped by the gate either way, and a row-level assertion would pass for
-// reasons that have nothing to do with the ordering.
+// downstream of every stage that writes a pool. The rows are checked too, but
+// they cannot carry the ordering on their own: the snapshots describe their
+// own pools, so a basis seeds here whether or not the fallback import ran
+// first, and a row-level assertion alone would pass for reasons that have
+// nothing to do with the sequence.
 func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -89,14 +89,14 @@ func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 	seedIdx := firstIndexContaining(messages, seededMsg, droppedMsg)
 	require.GreaterOrEqual(t, seedIdx, 0,
 		"the seeding did not run at all, so this test proves nothing")
-	// Which one fires is the claim the comment above rests on. Pin it, so
-	// that if a future fixture does carry reward accounts this test says so
-	// instead of quietly resting on a stale rationale.
-	require.Equal(t, droppedMsg, messages[seedIdx],
-		"the fixture's compact snapshots carry no reward accounts, so the "+
-			"gate must drop the basis; a seeded basis here means the "+
-			"reason this test asserts ordering rather than rows no longer "+
-			"holds")
+	// Which one fires is a claim worth pinning: the snapshots carry their own
+	// pool parameters, so the basis must actually be seeded here. If that
+	// ever regresses to a drop, this says so rather than leaving the
+	// ordering assertions below to pass over an epoch nothing was written
+	// for.
+	require.Equal(t, seededMsg, messages[seedIdx],
+		"the snapshots carry pool parameters, so the basis must be seeded; "+
+			"a dropped basis means the parameters stopped being read")
 
 	for _, stage := range []string{
 		// The fallback pool import, which writes the registrations the
@@ -114,6 +114,14 @@ func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
 			"the reward basis was seeded before %q, so any pool that stage "+
 				"created was invisible to it", stage)
 	}
+
+	// And the seeding actually produced a basis, so the ordering above is
+	// ordering of work that happened rather than of a no-op.
+	snapshot, err := db.Metadata().GetRewardSnapshot(state.Epoch, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot,
+		"the epoch the snapshots describe must be seeded")
+	require.Positive(t, snapshot.TotalPoolCount)
 }
 
 func firstIndexContaining(messages []string, needles ...string) int {

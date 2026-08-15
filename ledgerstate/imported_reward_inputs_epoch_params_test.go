@@ -17,7 +17,6 @@ package ledgerstate
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -42,6 +41,11 @@ import (
 // that it asks for every epoch it seeds, and that what comes back is what
 // gets written for that epoch specifically -- vary the cost by epoch and each
 // epoch's rows must carry its own.
+//
+// This is the fallback path. A snapshot that carries its own parameters is
+// answered from those instead, which is both per-epoch and able to describe
+// retired pools; the lookup here covers snapshots in the compact shape, which
+// carry only a VRF key.
 func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -50,6 +54,10 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 	require.NoError(t, err, "parsing the fixture snapshot")
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
 	require.NoError(t, err, "stake snapshots must parse completely")
+	// The snapshot's own parameters take precedence wherever it has them, so
+	// reduce them to the compact shape: the registration fallback this test
+	// is about only drives for a snapshot that cannot describe its pools.
+	stripPoolParamsToVrfOnly(snapshots)
 	certState, err := ParseCertState(state.CertStateData)
 	require.NoError(t, err)
 	require.NotEmpty(t, certState.Pools)
@@ -140,20 +148,18 @@ func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
 	require.ErrorIs(t, err, wantErr)
 }
 
-// The resolver above is only worth wiring if the lookup behind it actually
-// distinguishes epochs. On a fresh bootstrap it cannot: every registration
-// the import writes lands at the import slot, so all three epochs resolve to
-// the same row and reading the pool rows would have given the same answer.
-// The difference shows when the import runs against a database that already
-// holds registration history, which is a supported path -- a re-import, or a
-// resume after a partial one.
+// Registration history loses to the snapshot, and it should.
 //
-// So give the database that history and check each epoch picks its own
-// registration: one made before the go snapshot's epoch, and a later one made
-// while the set snapshot's epoch was running. mark must see the later
-// parameters, set and go the earlier ones. Cost is the marker because it
-// rides through the derivation into the persisted row unchanged.
-func TestImportSnapShotsUsesEpochEffectivePoolParams(t *testing.T) {
+// The snapshot records what was in force during the epoch it captured. A
+// registration lookup reconstructs that from certificates, and it cannot
+// reconstruct a pool that has since retired at all -- which is what left
+// whole epochs unseedable before. So where the two disagree the snapshot
+// wins, and this pins that end to end: give the database registrations whose
+// cost differs from the snapshot's, run the import, and the seeded rows must
+// carry the snapshot's.
+func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
+	t *testing.T,
+) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -198,50 +204,34 @@ func TestImportSnapShotsUsesEpochEffectivePoolParams(t *testing.T) {
 		"no cert-state pool is delegated to in the mark snapshot")
 	targetKey := hexPoolKey(target.PoolKeyHash)
 
-	// Window edges come from the production helper: this test is about which
-	// registration each epoch selects, not about the slot arithmetic, which
-	// importedEpochStartSlot defines.
-	goStart, goOK := importedEpochStartSlot(cfg, state.Epoch-2)
-	setStart, setOK := importedEpochStartSlot(cfg, state.Epoch-1)
-	markStart, markOK := importedEpochStartSlot(cfg, state.Epoch)
-	require.True(t, goOK && setOK && markOK,
-		"the fixture's era bounds must cover all three seeded epochs, or "+
-			"the seeding skips them and this test proves nothing")
+	// Registrations are placed before the oldest seeded epoch so the
+	// effective-for-epoch lookup would select them if it were consulted.
+	goStart, ok := importedEpochStartSlot(cfg, state.Epoch-2)
+	require.True(t, ok)
 	require.Positive(t, goStart,
 		"the fixture leaves no room before the go epoch to place a "+
-			"registration, so this test cannot distinguish the epochs")
-	require.Less(t, setStart, markStart)
-	require.LessOrEqual(t, markStart, slot)
+			"registration, so this test cannot distinguish the sources")
 
-	const earlierCost = 111_000_000
-	const laterCost = 222_000_000
-	for _, reg := range []struct {
-		addedSlot uint64
-		cost      uint64
-	}{
-		{goStart - 1, earlierCost},
-		{setStart, laterCost},
-	} {
-		txn := db.MetadataTxn(true)
-		require.NoError(t, db.Metadata().ImportPool(
-			importTestPoolModel(target),
-			importTestPoolRegistration(target, reg.addedSlot, reg.cost),
-			txn.Metadata(),
-		))
-		require.NoError(t, txn.Commit())
-	}
+	const registrationCost = 111_000_000
+	txn := db.MetadataTxn(true)
+	require.NoError(t, db.Metadata().ImportPool(
+		importTestPoolModel(target),
+		importTestPoolRegistration(target, goStart-1, registrationCost),
+		txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+
+	wantCost := snapshots.Mark.PoolParams[targetKey].Cost
+	require.NotEqual(t, uint64(registrationCost), wantCost,
+		"the two sources must disagree, or this test cannot tell which one "+
+			"was used")
 
 	require.NoError(t, importSnapShots(ctx, cfg, slot, noProgress, false))
 
-	for _, c := range []struct {
-		epoch uint64
-		want  uint64
-	}{
-		{state.Epoch, laterCost},
-		{state.Epoch - 1, earlierCost},
-		{state.Epoch - 2, earlierCost},
+	for _, epoch := range []uint64{
+		state.Epoch, state.Epoch - 1, state.Epoch - 2,
 	} {
-		poolInputs, err := db.Metadata().GetRewardPoolInputs(c.epoch, nil)
+		poolInputs, err := db.Metadata().GetRewardPoolInputs(epoch, nil)
 		require.NoError(t, err)
 		var found bool
 		for _, pool := range poolInputs {
@@ -249,12 +239,12 @@ func TestImportSnapShotsUsesEpochEffectivePoolParams(t *testing.T) {
 				continue
 			}
 			found = true
-			require.Equal(t, c.want, uint64(pool.Cost),
-				"epoch %d was seeded from a registration that was not in "+
-					"force during it", c.epoch)
+			require.Equal(t, wantCost, uint64(pool.Cost),
+				"epoch %d was seeded from the registration rather than "+
+					"from the snapshot that recorded the epoch", epoch)
 		}
 		require.True(t, found,
-			"epoch %d seeded no input for the target pool", c.epoch)
+			"epoch %d seeded no input for the target pool", epoch)
 	}
 }
 
@@ -297,66 +287,5 @@ func importTestPoolRegistration(
 		Cost:      types.Uint64(cost),
 		Owners:    owners,
 		AddedSlot: addedSlot,
-	}
-}
-
-// An epoch whose parameter window cannot be placed is skipped, not guessed
-// at and not fatal. Guessing seeds the round against parameters that were not
-// in force, which credits rewards at the wrong split rather than visibly not
-// crediting them; failing the import would throw away the epochs that *can*
-// be placed along with it. Skipping leaves that one round uncredited and
-// counted, which is the direction the rest of this seeding already takes.
-func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-
-	state, err := ParseSnapshot(testdataLedgerSnapshot)
-	require.NoError(t, err)
-	snapshots, err := ParseSnapShots(state.SnapShotsData)
-	require.NoError(t, err)
-	certState, err := ParseCertState(state.CertStateData)
-	require.NoError(t, err)
-
-	params := make(map[string]*ParsedPool, len(certState.Pools))
-	for i := range certState.Pools {
-		pool := certState.Pools[i]
-		params[hexPoolKey(pool.PoolKeyHash)] = &pool
-	}
-
-	// The oldest of the three is the one an era bound is most likely to fall
-	// short of, so it stands in for the real case here.
-	unplaceable := state.Epoch - 2
-	txn := db.MetadataTxn(true)
-	require.NoError(t, seedImportedRewardInputs(
-		db.Metadata(),
-		txn.Metadata(),
-		snapshots,
-		func(epoch uint64) (map[string]*ParsedPool, error) {
-			if epoch == unplaceable {
-				return nil, fmt.Errorf(
-					"%w: epoch %d", errRewardParamsWindowUnknown, epoch,
-				)
-			}
-			return params, nil
-		},
-		state.Epoch,
-		state.Tip.Slot,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	))
-	require.NoError(t, txn.Commit())
-
-	skipped, err := db.Metadata().GetRewardSnapshot(unplaceable, "mark", nil)
-	require.NoError(t, err)
-	require.Nil(t, skipped,
-		"an epoch with no parameter window must be skipped, not seeded from "+
-			"a guessed one")
-
-	// The epochs that can be placed are unaffected: one unplaceable epoch
-	// must not cost the others their reward rounds.
-	for _, epoch := range []uint64{state.Epoch, state.Epoch - 1} {
-		seeded, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
-		require.NoError(t, err)
-		require.NotNil(t, seeded,
-			"epoch %d has a usable window and must still be seeded", epoch)
 	}
 }

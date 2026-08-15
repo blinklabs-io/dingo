@@ -4968,21 +4968,37 @@ and the retired-but-scheduled synthesis. It derives from those registrations,
 so running ahead of any of them would describe a pool set the import had not
 finished building; on the fallback path, which exists for a resume where cert
 state completed in an earlier run, that meant deriving against an empty pool
-table. Pool parameters are not taken from
-the snapshots -- current UTxO-HD snapshots carry pool entries in the compact
-pool-distr shape, which holds the pool and VRF keys and nothing else -- but
-resolved per epoch from the imported registration history through
-`GetPoolRegistrationsEffectiveForEpoch`, the same lookup the live boundary
-path uses, so a bootstrapped node and a synced one derive the same basis. The
-window's lower edge comes from `importedEpochStartSlot`, which derives epoch
-start slots from the parsed state's era bounds because `importTip` generates
-the epoch rows only after the snapshots are imported. It resolves each epoch
-against its own era rather than the current one: mark, set and go span three
-epochs, so an import landing in the first two epochs of a new era has set or
-go in the era before it, with a different boundary slot and epoch length. On a fresh bootstrap
-every registration lands at the import slot and all three epochs resolve to
-the same row; the lookup diverges, correctly, when the import runs against a
-database that already holds registration history. Block counts are not seeded and
+table. Pool parameters come from the snapshots themselves. Each snapshot's pool
+records carry the registration parameters -- VRF key, pledge, cost, margin,
+reward account and the owners holding stake -- alongside the pool's stake, and
+`parseSnapshotPoolParams` reads them. That is what makes the seeding complete:
+the snapshot describes the pool set as it stood in the epoch it captured,
+retired pools included, and a pool that held stake in the go or set snapshot
+but retired before the snapshot's own epoch cannot be described by anything
+else in an imported database. Its delegators' stake was then unattributable,
+and the gate dropped that whole epoch's basis rather than understate every
+other pool's share, which is why a bootstrapped node skipped all three reward
+rounds (issue #3165).
+
+The layout is not in any published CDDL -- the on-chain `pool_params` is a
+different, 9-field shape led by the operator -- so every field is validated on
+read and a record that does not match degrades to the VRF-only reading rather
+than mapping a field onto the wrong parameter. Note that a snapshot's owner
+set lists only the owners holding stake in it, not every owner the
+registration names; the omitted ones contribute nothing to owner stake, so the
+reward basis is unaffected.
+
+Registration history is the fallback, for a snapshot whose pool entries are
+the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
+through `GetPoolRegistrationsEffectiveForEpoch`, the same lookup the live
+boundary path uses. The window's lower edge comes from
+`importedEpochStartSlot`, which derives epoch start slots from the parsed
+state's era bounds because `importTip` generates the epoch rows only after the
+snapshots are imported. It resolves each epoch against its own era rather than
+the current one: mark, set and go span three epochs, so an import landing in
+the first two epochs of a new era has set or go in the era before it, with a
+different boundary slot and epoch length. An epoch it cannot place at all is
+skipped rather than seeded from a guessed window. Block counts are not seeded and
 do not need to be — `rewardBlockCounts` derives them by scanning the imported
 chain for the performance epoch.
 

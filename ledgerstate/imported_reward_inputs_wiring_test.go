@@ -136,10 +136,11 @@ func TestSeedImportedRewardInputsWritesRows(t *testing.T) {
 	}
 }
 
-// A basis derived without usable pool parameters must write nothing at all,
-// rather than write rows the ledger will later refuse. This is the pool-distr
-// case: it is what a snapshot's own PoolParams give on current formats.
-func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
+// A snapshot describes its own epoch's pool parameters, so a nil resolver is
+// enough on its own: no registration lookup is needed for a pool the snapshot
+// already carries. This is the case issue #3165 turned on -- it is also how a
+// pool that has since retired gets described at all.
+func TestSeedImportedRewardInputsUsesSnapshotPoolParams(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -150,8 +151,44 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	txn := db.MetadataTxn(true)
-	// A nil resolver falls back to the snapshot's own PoolParams, which on this
-	// real fixture are the compact pool-distr shape.
+	require.NoError(t, seedImportedRewardInputs(
+		db.Metadata(), txn.Metadata(), snapshots, nil,
+		state.Epoch, state.Tip.Slot, logger,
+	))
+	require.NoError(t, txn.Commit())
+
+	snapshot, err := db.Metadata().GetRewardSnapshot(state.Epoch, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot,
+		"the snapshot carries its own pool parameters, so this epoch must "+
+			"be seeded without any registration lookup at all")
+	poolInputs, err := db.Metadata().GetRewardPoolInputs(state.Epoch, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, poolInputs)
+	for _, pool := range poolInputs {
+		require.NotEmpty(t, pool.RewardAccount,
+			"a pool input seeded from the snapshot must carry the reward "+
+				"account the snapshot records for it")
+	}
+}
+
+// Parameters that are genuinely unusable must still write nothing, rather
+// than rows the ledger will later refuse. A snapshot carrying only the
+// compact pool-distr shape -- a VRF key and nothing else -- is what that
+// looks like, and stripping the parsed parameters reproduces it without
+// needing a fixture in that format.
+func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err, "stake snapshots must parse completely")
+	stripPoolParamsToVrfOnly(snapshots)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	txn := db.MetadataTxn(true)
 	require.NoError(t, seedImportedRewardInputs(
 		db.Metadata(), txn.Metadata(), snapshots, nil,
 		state.Epoch, state.Tip.Slot, logger,
@@ -164,6 +201,22 @@ func TestSeedImportedRewardInputsWritesNothingWithoutPoolParams(t *testing.T) {
 		"an unusable basis must be dropped, not written: the ledger reads "+
 			"these rows through a path that errors rather than skips, so a "+
 			"bad row fails the epoch rollover instead of one reward round")
+}
+
+// stripPoolParamsToVrfOnly reduces every parsed pool entry to what the
+// compact pool-distr shape carries, so a test can exercise the paths that
+// exist for snapshots in that format using a fixture that is not.
+func stripPoolParamsToVrfOnly(snapshots *ParsedSnapShots) {
+	for _, snap := range []*ParsedSnapShot{
+		&snapshots.Mark, &snapshots.Set, &snapshots.Go,
+	} {
+		for key, pool := range snap.PoolParams {
+			snap.PoolParams[key] = &ParsedPool{
+				PoolKeyHash: pool.PoolKeyHash,
+				VrfKeyHash:  pool.VrfKeyHash,
+			}
+		}
+	}
 }
 
 // hexPoolKey is a local helper so the wiring test does not depend on the

@@ -1097,6 +1097,15 @@ func parsePoolParamsOrDistr(
 	if !errors.Is(err, ErrNotPoolParams) {
 		return nil, err
 	}
+	// The snapshot layout carries the full parameters; try it before
+	// degrading to the VRF-only reading, which discards them.
+	if fields, arrErr := decodeRawArray(data); arrErr == nil {
+		if pool, snapErr := parseSnapshotPoolParams(
+			poolKeyHash, fields,
+		); snapErr == nil {
+			return pool, nil
+		}
+	}
 	pool, distrErr := parsePoolDistrEntry(poolKeyHash, data)
 	if distrErr == nil {
 		return pool, nil
@@ -1106,6 +1115,154 @@ func parsePoolParamsOrDistr(
 		err,
 		distrErr,
 	)
+}
+
+// snapshotPoolParamsFields is the field count of the UTxO-HD snapshot pool
+// record. The layout is the stake pair this record adds -- the pool's stake
+// and its share of the total -- followed by the registration parameters:
+//
+//	0  stake (coin)
+//	1  stake share (unit interval)
+//	2  owners (set of addr_keyhash)
+//	3  reserved: a second stake-shaped figure, unused here
+//	4  vrf_keyhash
+//	5  pledge (coin)
+//	6  cost (coin)
+//	7  margin (unit interval)
+//	8  reserved: a small counter, unused here
+//	9  reward account credential
+const snapshotPoolParamsFields = 10
+
+const (
+	snapshotPoolOwnersIdx        = 2
+	snapshotPoolVrfIdx           = 4
+	snapshotPoolPledgeIdx        = 5
+	snapshotPoolCostIdx          = 6
+	snapshotPoolMarginIdx        = 7
+	snapshotPoolRewardAccountIdx = 9
+)
+
+// parseSnapshotPoolParams decodes the registration parameters a UTxO-HD
+// snapshot keeps alongside each pool's stake.
+//
+// This is what makes a bootstrapped node able to seed the reward rounds for
+// the epochs its snapshots cover. Those epochs' parameters cannot be
+// recovered from cert state, which holds only pools registered *now*: a pool
+// that held stake in the go or set snapshot and retired before the snapshot's
+// own epoch is absent there, so its delegators' stake could not be
+// attributed and the whole epoch's basis was dropped. The snapshot describes
+// the pool set as it stood in that epoch, retired pools included, which is
+// exactly the set the reward round for that epoch needs.
+//
+// Every field read is checked rather than assumed. The layout is not part of
+// any published CDDL -- the on-chain pool_params is a different, 9-field
+// shape led by the operator -- so it was established by decoding real
+// snapshots, and a future format change must degrade to the VRF-only
+// fallback rather than quietly mapping a field onto the wrong parameter.
+// Pledge, cost and margin feed reward arithmetic directly, so a wrong value
+// there would be credited rather than visibly refused.
+func parseSnapshotPoolParams(
+	poolKeyHash []byte,
+	fields [][]byte,
+) (*ParsedPool, error) {
+	if len(fields) != snapshotPoolParamsFields {
+		return nil, fmt.Errorf(
+			"%w: snapshot pool params has %d fields, expected %d",
+			ErrNotPoolParams, len(fields), snapshotPoolParamsFields,
+		)
+	}
+
+	var vrfKeyHash []byte
+	if _, err := cbor.Decode(
+		fields[snapshotPoolVrfIdx], &vrfKeyHash,
+	); err != nil || len(vrfKeyHash) != 32 {
+		return nil, fmt.Errorf(
+			"%w: no 32-byte VRF key hash at field %d",
+			ErrNotPoolParams, snapshotPoolVrfIdx,
+		)
+	}
+
+	var pledge, cost uint64
+	if _, err := cbor.Decode(
+		fields[snapshotPoolPledgeIdx], &pledge,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding pledge: %w", ErrNotPoolParams, err,
+		)
+	}
+	if _, err := cbor.Decode(fields[snapshotPoolCostIdx], &cost); err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding cost: %w", ErrNotPoolParams, err,
+		)
+	}
+
+	marginNum, marginDen, ok := parseRational(
+		fields[snapshotPoolMarginIdx],
+	)
+	// A margin outside [0,1] means this field is not a margin. The gate
+	// downstream rejects such a basis anyway; failing here instead keeps a
+	// misread from being presented as a pool parameter at all.
+	if !ok || marginDen == 0 || marginNum > marginDen {
+		return nil, fmt.Errorf(
+			"%w: field %d is not a unit interval",
+			ErrNotPoolParams, snapshotPoolMarginIdx,
+		)
+	}
+
+	rewardAccount, err := parseCredential(
+		fields[snapshotPoolRewardAccountIdx],
+	)
+	if err != nil || len(rewardAccount.Hash) != credentialHashSize {
+		return nil, fmt.Errorf(
+			"%w: field %d is not a credential",
+			ErrNotPoolParams, snapshotPoolRewardAccountIdx,
+		)
+	}
+
+	owners, err := parseSnapshotPoolOwners(fields[snapshotPoolOwnersIdx])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: decoding owners: %w", ErrNotPoolParams, err,
+		)
+	}
+
+	return &ParsedPool{
+		PoolKeyHash:   slices.Clone(poolKeyHash),
+		VrfKeyHash:    vrfKeyHash,
+		Pledge:        pledge,
+		Cost:          cost,
+		MarginNum:     marginNum,
+		MarginDen:     marginDen,
+		RewardAccount: slices.Clone(rewardAccount.Hash),
+		// #nosec G115 -- credential type is 0 or 1
+		RewardAccountCredentialTag: uint8(rewardAccount.Type),
+		Owners:                     owners,
+	}, nil
+}
+
+// parseSnapshotPoolOwners decodes the owner set, which is a CBOR set (tag
+// 258) or a plain array of 28-byte key hashes. An empty set is normal and is
+// not an error; anything that is not a list of key hashes is.
+func parseSnapshotPoolOwners(data []byte) ([][]byte, error) {
+	raw, err := decodeRawArray(data)
+	if err != nil {
+		return nil, err
+	}
+	owners := make([][]byte, 0, len(raw))
+	for _, entry := range raw {
+		var hash []byte
+		if _, err := cbor.Decode(entry, &hash); err != nil {
+			return nil, err
+		}
+		if len(hash) != credentialHashSize {
+			return nil, fmt.Errorf(
+				"owner hash is %d bytes, expected %d",
+				len(hash), credentialHashSize,
+			)
+		}
+		owners = append(owners, hash)
+	}
+	return owners, nil
 }
 
 // parsePoolDistrEntry decodes the compact PoolDistr/UTxO-HD pool

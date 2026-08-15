@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -442,7 +443,11 @@ func seedImportedRewardInputs(
 			}
 		}
 		bundle := deriveRewardInputs(
-			c.snap, params, c.epoch, capturedSlot, 0,
+			c.snap,
+			effectiveRewardPoolParams(c.snap, params),
+			c.epoch,
+			capturedSlot,
+			0,
 		)
 		if bundle == nil || len(bundle.poolInputs) == 0 {
 			continue
@@ -571,4 +576,38 @@ func rewardPoolParamsFromRegistrations(
 		}
 	}
 	return params
+}
+
+// effectiveRewardPoolParams picks, per pool, the parameters the reward round
+// for this epoch should be computed from.
+//
+// The snapshot's own parameters win wherever it has them. They are the ones
+// that were in force during the epoch it captured, which is what the round
+// needs, and -- the reason issue #3165 stayed open -- the snapshot describes
+// every pool that held stake then, including pools that have since retired.
+// A retired pool is gone from cert state and from the current pool
+// distribution, so nothing else in an imported database can describe it; its
+// delegators' stake could not be attributed, and the gate dropped that whole
+// epoch's basis rather than seed a partial one.
+//
+// Registration parameters remain the fallback, for a snapshot whose pool
+// entries are the compact shape carrying only a VRF key. Usability is decided
+// on the reward account: it is the field the gate rejects a basis for, so a
+// pool without one cannot be seeded from the snapshot no matter what else it
+// carries.
+func effectiveRewardPoolParams(
+	snap *ParsedSnapShot,
+	registered map[string]*ParsedPool,
+) map[string]*ParsedPool {
+	effective := make(
+		map[string]*ParsedPool, len(registered)+len(snap.PoolParams),
+	)
+	maps.Copy(effective, registered)
+	for key, pool := range snap.PoolParams {
+		if pool == nil || len(pool.RewardAccount) == 0 {
+			continue
+		}
+		effective[key] = pool
+	}
+	return effective
 }
