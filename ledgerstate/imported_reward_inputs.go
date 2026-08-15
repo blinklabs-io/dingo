@@ -416,26 +416,33 @@ func seedImportedRewardInputs(
 	for _, c := range candidates {
 		var params map[string]*ParsedPool
 		if resolveParams != nil {
-			var err error
-			params, err = resolveParams(c.epoch)
-			if err != nil {
-				// A window that cannot be placed skips this epoch, the same
-				// way a basis that does not reconcile does. Seeding it from
-				// a guessed window would credit the round against parameters
-				// that were not in force, which is silently wrong; skipping
-				// leaves it visibly uncredited.
-				if errors.Is(err, errRewardParamsWindowUnknown) {
-					if logger != nil {
-						logger.Warn(
-							"not seeding reward inputs for an imported epoch: its pool parameter window cannot be determined, so that epoch's reward round will be skipped and its rewards never credited",
-							"component", "ledgerstate",
-							"epoch", c.epoch,
-							"snapshot", c.name,
-							"error", err.Error(),
-						)
-					}
-					continue
+			resolved, err := resolveParams(c.epoch)
+			switch {
+			case err == nil:
+				params = resolved
+			case errors.Is(err, errRewardParamsWindowUnknown):
+				// Registrations are the fallback for pools the snapshot
+				// cannot describe, so losing them is not on its own a reason
+				// to skip the epoch: a snapshot that describes every pool it
+				// delegates to seeds the round without them. Whether that
+				// holds is decided below, by the same gate that decides it
+				// for every other epoch. Vetoing here instead would drop a
+				// round the snapshot could have seeded, which is the failure
+				// this seeding exists to prevent.
+				//
+				// Still logged, because it means the fallback is gone: an
+				// epoch that does need it will be dropped by that gate, and
+				// this is the line that explains why.
+				if logger != nil {
+					logger.Warn(
+						"no pool parameter window for an imported epoch, so the registration fallback is unavailable; the epoch is still seeded if its snapshot describes every pool it delegates to",
+						"component", "ledgerstate",
+						"epoch", c.epoch,
+						"snapshot", c.name,
+						"error", err.Error(),
+					)
 				}
+			default:
 				return fmt.Errorf(
 					"resolving pool parameters for epoch %d: %w",
 					c.epoch, err,

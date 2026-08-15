@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -287,5 +288,108 @@ func importTestPoolRegistration(
 		Cost:      types.Uint64(cost),
 		Owners:    owners,
 		AddedSlot: addedSlot,
+	}
+}
+
+// An epoch whose registration window cannot be placed is not skipped for that
+// reason alone. Registrations are the fallback for pools the snapshot cannot
+// describe, so a snapshot that describes every pool it delegates to seeds the
+// round without them; dropping it here would lose a round that was fully
+// derivable, which is the failure this seeding exists to prevent.
+func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err)
+
+	txn := db.MetadataTxn(true)
+	require.NoError(t, seedImportedRewardInputs(
+		db.Metadata(),
+		txn.Metadata(),
+		snapshots,
+		func(epoch uint64) (map[string]*ParsedPool, error) {
+			return nil, fmt.Errorf(
+				"%w: epoch %d", errRewardParamsWindowUnknown, epoch,
+			)
+		},
+		state.Epoch,
+		state.Tip.Slot,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	require.NoError(t, txn.Commit())
+
+	for _, epoch := range []uint64{
+		state.Epoch, state.Epoch - 1, state.Epoch - 2,
+	} {
+		seeded, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		require.NoError(t, err)
+		require.NotNil(t, seeded,
+			"epoch %d is fully described by its snapshot, so an unplaceable "+
+				"registration window must not cost it its reward round",
+			epoch)
+	}
+}
+
+// The other half: when the snapshot cannot describe its pools either, an
+// unplaceable window leaves nothing to derive from and the epoch is skipped
+// rather than guessed at. It is skipped by the gate, on the same
+// does-not-reconcile grounds as any other underivable basis, and the epochs
+// that can be derived are unaffected.
+func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	snapshots, err := ParseSnapShots(state.SnapShotsData)
+	require.NoError(t, err)
+	certState, err := ParseCertState(state.CertStateData)
+	require.NoError(t, err)
+	// Compact snapshots carry no usable parameters, so the registration
+	// fallback is the only source and its absence is decisive.
+	stripPoolParamsToVrfOnly(snapshots)
+
+	params := make(map[string]*ParsedPool, len(certState.Pools))
+	for i := range certState.Pools {
+		pool := certState.Pools[i]
+		params[hexPoolKey(pool.PoolKeyHash)] = &pool
+	}
+
+	unplaceable := state.Epoch - 2
+	txn := db.MetadataTxn(true)
+	require.NoError(t, seedImportedRewardInputs(
+		db.Metadata(),
+		txn.Metadata(),
+		snapshots,
+		func(epoch uint64) (map[string]*ParsedPool, error) {
+			if epoch == unplaceable {
+				return nil, fmt.Errorf(
+					"%w: epoch %d", errRewardParamsWindowUnknown, epoch,
+				)
+			}
+			return params, nil
+		},
+		state.Epoch,
+		state.Tip.Slot,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	require.NoError(t, txn.Commit())
+
+	skipped, err := db.Metadata().GetRewardSnapshot(unplaceable, "mark", nil)
+	require.NoError(t, err)
+	require.Nil(t, skipped,
+		"with no snapshot parameters and no registration window there is "+
+			"nothing to derive from, so the round must be left uncredited "+
+			"rather than seeded from a guess")
+
+	// One underivable epoch must not cost the others their rounds.
+	for _, epoch := range []uint64{state.Epoch, state.Epoch - 1} {
+		seeded, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		require.NoError(t, err)
+		require.NotNil(t, seeded,
+			"epoch %d is derivable and must still be seeded", epoch)
 	}
 }
