@@ -1061,9 +1061,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 	// Setup event handlers only after startup nonce repair is complete, so a
 	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
-	// stale gap-block nonces. The chainsync/blockfetch/chain-update streams can
-	// burst at bulk-sync rates (#1556 / #1914), so they opt into the large
-	// EventQueueSize buffer. Sparser streams use the default.
+	// stale gap-block nonces. ChainSync and chain-update can burst at bulk-sync
+	// rates (#1556 / #1914), so they opt into the large EventQueueSize buffer.
+	// Blockfetch events retain fully decoded blocks, so keep that lossless queue
+	// to one commit batch and let EventBus backpressure bound decoded CBOR while
+	// the chain store catches up. Sparser streams use the default.
 	if ls.config.EventBus != nil {
 		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			ChainsyncEventType,
@@ -1076,7 +1078,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		)
 		ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			BlockfetchEventType,
-			event.EventQueueSize,
+			blockfetchCommitBatchSize,
 			ls.handleEventBlockfetch,
 		)
 		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
@@ -3050,8 +3052,11 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			return
 		default:
 		}
-		// We chose 500 as an arbitrary max batch size. A "chain extended" message will be logged after each batch
-		nextBatch := make([]ledger.Block, 0, 500)
+		// Keep only one database transaction batch decoded at a time. Dijkstra
+		// bodies retain several canonical-CBOR views while they are live, so
+		// the old arbitrary 500-block read-ahead could amplify a slow metadata
+		// commit into gigabytes of otherwise reclaimable heap.
+		nextBatch := make([]ledger.Block, 0, batchSize)
 		// Gather up next batch of blocks
 		for {
 			if cachedNext != nil {

@@ -382,6 +382,14 @@ the underlying gouroboros protocol send queue to drain. This keeps large Leios
 catch-up ranges from filling the mux pending-message queue and turning a slow
 consumer into a connection-level protocol violation.
 
+On the client path, BlockFetch events carry fully decoded blocks. The ledger
+subscriber therefore buffers one eight-block chain-store commit batch; when it
+fills, lossless EventBus delivery backpressures the protocol receive loop
+instead of retaining the rest of a large decoded range. The subsequent chain
+reader likewise decodes at most one 50-block metadata transaction batch at a
+time. These bounds matter for Dijkstra bodies, whose nested canonical-CBOR
+views make a live decoded block substantially larger than its wire bytes.
+
 Opening that iterator is also what decides whether the range is servable at
 all, so `chain`'s forward and reverse iterator constructors require the start
 point to be a block the chain still holds at that block index, not merely one
@@ -933,7 +941,9 @@ All event types follow the `subsystem.snake_case_name` convention.
 
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
 - Default subscriber buffers of 1024 events, with opt-in 100000-entry burst
-  buffers for high-volume ledger chainsync/blockfetch paths
+  buffers for high-volume ledger chainsync and chain-update paths. The
+  payload-heavy ledger blockfetch path uses an eight-entry buffer and relies
+  on lossless backpressure once one chain-store commit batch is queued
 - Lossless delivery with producer backpressure: when a subscriber buffer or the
   async queue is full, `Publish`, `PublishBlocking`, and `PublishAsync` all wait
   for capacity instead of dropping the event. Waits end on `Stop`, `Close`, or
