@@ -19,6 +19,9 @@
 # Usage:
 #   ./stop.sh               # all-dingo network (default)
 #   ./stop.sh --conformance # dingo + cardano-node reference network
+#   ./stop.sh --accelerated # accepted and ignored; teardown removes the
+#                           # profile's volumes regardless of which network
+#                           # spec generated them
 
 set -euo pipefail
 
@@ -29,6 +32,10 @@ MODE=""
 for arg in "$@"; do
   case "${arg}" in
     --conformance) MODE="conformance" ;;
+    # Teardown is spec-independent, but accept the flag so a --accelerated
+    # bring-up can be torn down with the same arguments it was started
+    # with.
+    --accelerated) ;;
     *)
       echo "Unknown argument: ${arg}" >&2
       exit 1

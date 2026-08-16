@@ -16,8 +16,10 @@ package tlsutil
 
 import (
 	"crypto/tls"
+	"net/http"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -141,4 +143,32 @@ func TestServerConfig_GetConfigForClientNilResult(t *testing.T) {
 	selected, err := config.GetConfigForClient(&tls.ClientHelloInfo{})
 	require.NoError(t, err)
 	require.Nil(t, selected)
+}
+
+// TestConfigureServerTLSReplacesRatherThanAccumulatesCertificates verifies
+// that a server whose TLSConfig.Certificates is already populated (e.g. a
+// reused/reinitialized *http.Server, or one an earlier call already
+// configured) ends up with exactly the newly loaded certificate afterward,
+// not the old one(s) plus the new one. Accumulating stale entries could let
+// Go's SNI cert selection pick the wrong (old) certificate.
+func TestConfigureServerTLSReplacesRatherThanAccumulatesCertificates(
+	t *testing.T,
+) {
+	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
+	staleCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	require.NoError(t, err)
+
+	server := &http.Server{
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{staleCert, staleCert},
+		},
+	}
+
+	require.NoError(t, ConfigureServerTLS(server, certPath, keyPath))
+	require.Len(t, server.TLSConfig.Certificates, 1)
+
+	// A second call (simulating a restart/reinitialization) must still
+	// leave exactly one certificate, not accumulate further.
+	require.NoError(t, ConfigureServerTLS(server, certPath, keyPath))
+	require.Len(t, server.TLSConfig.Certificates, 1)
 }

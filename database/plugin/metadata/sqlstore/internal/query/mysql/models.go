@@ -18,3 +18,10 @@ type NodeSetting struct {
 	StorageMode string
 	Network     string
 }
+
+type NodeSettingsGate struct {
+	Name          string
+	Value         string
+	RecordedEpoch int64
+	RecordedSlot  int64
+}

@@ -27,11 +27,22 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 1)
+	require.Len(t, registry, 2)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
-	require.Contains(t, registry[0].SQL["sqlite"].Expand, "CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`)")
+	require.Contains(
+		t,
+		registry[0].SQL["sqlite"].Expand,
+		"CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`)",
+	)
+	require.Equal(t, 2, registry[1].Version)
+	require.Equal(t, "leios-key-registration", registry[1].Name)
+	require.Contains(
+		t,
+		registry[1].SQL["sqlite"].Expand,
+		"ALTER TABLE `pool` ADD COLUMN `leios_key_public` blob",
+	)
 }
 
 func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
@@ -39,8 +50,12 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 1)
-	require.Contains(t, registry[0].SQL["mysql"].Expand, "CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)")
+	require.Len(t, registry, 2)
+	require.Contains(
+		t,
+		registry[0].SQL["mysql"].Expand,
+		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)",
+	)
 }
 
 func TestMySQLSchemaTranslationPrefixesBlobIndexes(t *testing.T) {

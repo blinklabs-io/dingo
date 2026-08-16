@@ -16,6 +16,8 @@ package config
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -524,6 +526,76 @@ func TestValidatePledgeLeverage(t *testing.T) {
 	}
 }
 
+// TestValidateMidnightEnabled pins the contradiction check: the Midnight
+// indexer needs the api-mode indexes to function, so midnight.enabled
+// requires storageMode "api". Dev mode is exempted because node.Run
+// force-upgrades storage mode to api at startup regardless of what is
+// configured (see TestValidateMidnightEnabledAllowedInDevMode).
+func TestValidateMidnightEnabled(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     bool
+		storageMode string
+		wantErr     string
+	}{
+		{
+			name:        "disabled with core mode",
+			enabled:     false,
+			storageMode: storageModeCore,
+		},
+		{
+			name:        "disabled with api mode",
+			enabled:     false,
+			storageMode: storageModeAPI,
+		},
+		{
+			name:        "enabled with api mode",
+			enabled:     true,
+			storageMode: storageModeAPI,
+		},
+		{
+			name:        "enabled with core mode",
+			enabled:     true,
+			storageMode: storageModeCore,
+			wantErr:     `midnight.enabled requires storageMode "api"`,
+		},
+		{
+			name:        "enabled with unset storage mode",
+			enabled:     true,
+			storageMode: "",
+			wantErr:     `midnight.enabled requires storageMode "api"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Midnight.Enabled = tt.enabled
+			cfg.StorageMode = tt.storageMode
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMidnightEnabledAllowedInDevMode verifies that dev mode's
+// storage-mode force-upgrade (node.Run) is honored the same way it already
+// is for the API listener ports above: midnight.enabled with a configured
+// core storage mode must not be rejected when runMode is dev, because the
+// node will actually start in api mode.
+func TestValidateMidnightEnabledAllowedInDevMode(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.Midnight.Enabled = true
+	assert.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+	assert.NoError(t, cfg.validate(RunModeDev, minUnprivilegedPort))
+}
+
 // TestValidateDelegatorInactivity pins the CIP-0163 range check: the
 // inactivity window is only validated when the gate is enabled, and must
 // fall in [1, 10000] when it is.
@@ -622,6 +694,95 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+// TestValidateDatabaseLifecycleSnapshotDirWritability guards against a raw
+// filesystem permission error surfacing deep inside a snapshot attempt
+// instead of a clean, actionable one at startup -- the failure mode for a
+// --db-snapshot-dir bind-mounted from a host directory the Docker image's
+// non-root user doesn't own (see dingo.yaml.example's snapshotDir entry).
+func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
+	t.Run(
+		"writable directory passes and is created if missing",
+		func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "nested", "snapshots")
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.True(t, info.IsDir())
+		},
+	)
+
+	t.Run(
+		"unwritable directory fails with an actionable error",
+		func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip(
+					"root can write anywhere regardless of mode -- skip when running as root",
+				)
+			}
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "readonly")
+			require.NoError(t, os.Mkdir(dir, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "snapshotDir")
+			assert.Contains(t, err.Error(), "1000:1000")
+		},
+	)
+
+	t.Run(
+		"disabled snapshots skip the writability check when bark is also disabled",
+		func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = false
+			cfg.BarkPort = 0
+			cfg.DatabaseLifecycle.SnapshotDir = filepath.Join(
+				t.TempDir(), "never-created",
+			)
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+		},
+	)
+
+	// TestValidateDatabaseLifecycleSnapshotDirWritability/bark-enabled
+	// guards against a real gap: snapshotDir also backs Bark's
+	// DatabaseService CreateSnapshot/Restore RPCs whenever bark is
+	// enabled (barkPort > 0) with a snapshotDir configured -- regardless
+	// of whether automatic epoch-boundary snapshots (snapshotEnabled) are
+	// on. Checking only snapshotEnabled left that combination (Bark
+	// snapshots without automatic ones) completely unvalidated.
+	t.Run(
+		"unwritable directory fails even with automatic snapshots disabled, when bark is enabled",
+		func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip(
+					"root can write anywhere regardless of mode -- skip when running as root",
+				)
+			}
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "readonly")
+			require.NoError(t, os.Mkdir(dir, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = false
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			cfg.BarkPort = 8091
+			cfg.BarkClientCAFilePath = "/certs/ca.crt"
+			cfg.TlsCertFilePath = "/certs/tls.crt"
+			cfg.TlsKeyFilePath = "/certs/tls.key"
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "snapshotDir")
+			assert.Contains(t, err.Error(), "1000:1000")
+		},
+	)
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {

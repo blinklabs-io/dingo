@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -54,6 +55,7 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
+	betacardano "github.com/utxorpc/go-codegen/utxorpc/v1beta/cardano"
 	betaquery "github.com/utxorpc/go-codegen/utxorpc/v1beta/query"
 	betaqueryconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/query/queryconnect"
 	betasubmit "github.com/utxorpc/go-codegen/utxorpc/v1beta/submit"
@@ -139,7 +141,7 @@ func testUtxorpcHTTPHandler(u *Utxorpc) http.Handler {
 	betaQueryPath := "/" + betaqueryconnect.QueryServiceName + "/"
 	mux.Handle(
 		betaQueryPath,
-		betaVersionedQueryHandler(qp, qh, betaQueryPath, compress1KB),
+		betaVersionedQueryHandler(u, qp, qh, betaQueryPath, compress1KB),
 	)
 	betaSubmitPath := "/" + betasubmitconnect.SubmitServiceName + "/"
 	mux.Handle(betaSubmitPath, rewriteVersionHandler(sh, betaSubmitPath, sp))
@@ -616,6 +618,102 @@ func TestConnect_ReadUtxos(t *testing.T) {
 	require.Equal(t, ref.GetHash(), gotRef.GetHash())
 	require.Equal(t, ref.GetIndex(), gotRef.GetIndex())
 	require.NotNil(t, out.Msg.GetLedgerTip())
+}
+
+// TestConnect_ReadUtxos_MultipleKeys proves ReadUtxos resolves several keys
+// in a single request via the batched UTxO lookup (#392), returning exactly
+// one item per requested key.
+func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	searchOut, err := cli.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 5}),
+	)
+	require.NoError(t, err)
+	require.GreaterOrEqual(
+		t,
+		len(searchOut.Msg.GetItems()),
+		2,
+		"fixture should expose at least two live UTxOs",
+	)
+	keys := make([]*query.TxoRef, 0, len(searchOut.Msg.GetItems()))
+	wantNativeBytes := make([][]byte, 0, len(searchOut.Msg.GetItems()))
+	for _, item := range searchOut.Msg.GetItems() {
+		ref := item.GetTxoRef()
+		require.NotNil(t, ref)
+		nativeBytes := item.GetNativeBytes()
+		require.NotNil(t, nativeBytes)
+		keys = append(keys, ref)
+		wantNativeBytes = append(wantNativeBytes, nativeBytes)
+	}
+	out, err := cli.ReadUtxos(
+		ctx,
+		connect.NewRequest(&query.ReadUtxosRequest{Keys: keys}),
+	)
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetItems(), len(keys))
+	for i, item := range out.Msg.GetItems() {
+		gotRef := item.GetTxoRef()
+		require.NotNil(t, gotRef)
+		require.Equal(t, keys[i].GetHash(), gotRef.GetHash())
+		require.Equal(t, keys[i].GetIndex(), gotRef.GetIndex())
+		// ReadUtxos echoes the requested TxoRef regardless of which UTxO
+		// it resolved, so also compare the resolved content itself
+		// (NativeBytes) against what SearchUtxos independently found for
+		// this same key: a mis-correlated batch lookup would still pass
+		// the ref-only checks above but fail this one.
+		require.NotEmpty(t, item.GetNativeBytes())
+		require.Equal(
+			t,
+			wantNativeBytes[i],
+			item.GetNativeBytes(),
+			"ReadUtxos should return the same UTxO content SearchUtxos found for this key",
+		)
+	}
+}
+
+// TestConnect_ReadUtxos_MissingKey proves a request that includes a ref
+// with no matching live UTxO still errors the whole call, preserving the
+// pre-existing ReadUtxos error-on-miss contract (unlike the ledger-level
+// GetUTxOByTxIn query, which silently omits misses for batch lookups).
+func TestConnect_ReadUtxos_MissingKey(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
+	cli := queryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	searchOut, err := cli.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(
+		t,
+		searchOut.Msg.GetItems(),
+		"fixture should expose at least one live UTxO",
+	)
+	ref := searchOut.Msg.GetItems()[0].GetTxoRef()
+	bogusRef := &query.TxoRef{
+		Hash:  bytes.Repeat([]byte{0}, 32),
+		Index: 9999,
+	}
+	_, err = cli.ReadUtxos(
+		ctx,
+		connect.NewRequest(&query.ReadUtxosRequest{
+			Keys: []*query.TxoRef{ref, bogusRef},
+		}),
+	)
+	require.Error(t, err)
 }
 
 func TestConnect_ReadData_EmptyKeys(t *testing.T) {
@@ -1215,10 +1313,168 @@ func TestConnect_Beta_ReadParams(t *testing.T) {
 	require.Equal(t, tip.BlockNumber, out.Msg.GetLedgerTip().GetHeight())
 }
 
-// TestConnect_Beta_ReadState_Unimplemented exercises the beta-only ReadState
-// routing branch inside betaVersionedQueryHandler, which must not be rewritten
-// onto the alpha handler and must report Unimplemented.
-func TestConnect_Beta_ReadState_Unimplemented(t *testing.T) {
+// seedBetaReadStatePool gives a pool a registration and snapshot stake in the
+// harness database, so ReadState has a real distribution to report rather than
+// an empty one.
+func seedBetaReadStatePool(
+	t *testing.T,
+	h *utxorpcConnectHarness,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	stake uint64,
+	snapshotEpoch uint64,
+) lcommon.PoolKeyHash {
+	t.Helper()
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
+	require.NoError(t, h.DB.Metadata().ImportPool(
+		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  vrfKeyHash,
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+	require.NoError(t, h.DB.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        snapshotEpoch,
+			SnapshotType: "mark",
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(stake),
+			CapturedSlot: 1,
+		},
+		nil,
+	))
+	return pkh
+}
+
+// TestConnect_Beta_ReadState_StakePoolDistribution drives the beta-only
+// ReadState method over a real Connect/gRPC client. It covers the routing
+// branch inside betaVersionedQueryHandler -- which must not be rewritten onto
+// the alpha handler, since alpha has no such method -- and the answer it now
+// serves, over the same ledger the node-to-client GetPoolDistr2 query reads.
+func TestConnect_Beta_ReadState_StakePoolDistribution(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+
+	// The harness chain sits in epoch 0, and leader election reads the
+	// snapshot for the preceding epoch, which at epoch 0 is epoch 0.
+	vrf := bytes.Repeat([]byte{0xA1}, 32)
+	pkh := seedBetaReadStatePool(
+		t, h, bytes.Repeat([]byte{0x5A}, 28), vrf, 3_000_000, 0,
+	)
+	seedBetaReadStatePool(
+		t, h,
+		bytes.Repeat([]byte{0x7B}, 28), bytes.Repeat([]byte{0xB2}, 32),
+		1_000_000, 0,
+	)
+
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	out, err := cli.ReadState(
+		ctx,
+		connect.NewRequest(&betaquery.ReadStateRequest{
+			Query: &betaquery.AnyChainStateQuery{
+				Query: &betaquery.AnyChainStateQuery_Cardano{
+					Cardano: &betacardano.StateQuery{
+						Query: &betacardano.StateQuery_StakePoolDistribution{
+							StakePoolDistribution: &betacardano.GetStakePoolDistribution{},
+						},
+					},
+				},
+			},
+		}),
+	)
+	require.NoError(t, err)
+
+	pools := out.Msg.GetResult().GetCardano().
+		GetStakePoolDistribution().GetPools()
+	require.Len(t, pools, 2)
+	// Ordered by pool key hash, so the reply is a function of the snapshot
+	// rather than of map iteration order.
+	require.Equal(t, pkh.Bytes(), pools[0].GetPoolKeyhash())
+	require.Equal(t, vrf, pools[0].GetVrfKeyhash())
+	require.Equal(t, int32(3), pools[0].GetStakeFraction().GetNumerator())
+	require.Equal(t, uint32(4), pools[0].GetStakeFraction().GetDenominator())
+
+	tip := h.LS.Tip()
+	require.NotNil(t, out.Msg.GetLedgerTip())
+	require.Equal(t, tip.Point.Slot, out.Msg.GetLedgerTip().GetSlot())
+	require.Equal(t, tip.Point.Hash, out.Msg.GetLedgerTip().GetHash())
+	require.Equal(t, tip.BlockNumber, out.Msg.GetLedgerTip().GetHeight())
+}
+
+// TestConnect_Beta_ReadState_PoolFilter covers the bounded request form over
+// the wire, and the rejection of a filter entry that is not a pool key hash.
+func TestConnect_Beta_ReadState_PoolFilter(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
+	pkh := seedBetaReadStatePool(
+		t, h,
+		bytes.Repeat([]byte{0x5A}, 28), bytes.Repeat([]byte{0xA1}, 32),
+		3_000_000, 0,
+	)
+	seedBetaReadStatePool(
+		t, h,
+		bytes.Repeat([]byte{0x7B}, 28), bytes.Repeat([]byte{0xB2}, 32),
+		1_000_000, 0,
+	)
+
+	cli := betaqueryconnect.NewQueryServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	readState := func(
+		poolKeyHashes ...[]byte,
+	) (*connect.Response[betaquery.ReadStateResponse], error) {
+		return cli.ReadState(
+			ctx,
+			connect.NewRequest(&betaquery.ReadStateRequest{
+				Query: &betaquery.AnyChainStateQuery{
+					Query: &betaquery.AnyChainStateQuery_Cardano{
+						Cardano: &betacardano.StateQuery{
+							Query: &betacardano.StateQuery_StakePoolDistribution{
+								StakePoolDistribution: &betacardano.GetStakePoolDistribution{
+									PoolKeyhashes: poolKeyHashes,
+								},
+							},
+						},
+					},
+				},
+			}),
+		)
+	}
+
+	out, err := readState(pkh.Bytes())
+	require.NoError(t, err)
+	pools := out.Msg.GetResult().GetCardano().
+		GetStakePoolDistribution().GetPools()
+	require.Len(t, pools, 1, "only the requested pool is reported")
+	require.Equal(t, pkh.Bytes(), pools[0].GetPoolKeyhash())
+	// The filter selects what is reported, not what it is a share of, so the
+	// fraction is still this pool's share of the whole snapshot.
+	require.Equal(t, int32(3), pools[0].GetStakeFraction().GetNumerator())
+	require.Equal(t, uint32(4), pools[0].GetStakeFraction().GetDenominator())
+
+	_, err = readState([]byte{0x01, 0x02})
+	require.Error(t, err)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+// TestConnect_Beta_ReadState_RejectsEmptyRequest covers a ReadState carrying no
+// query. It still has to reach the beta handler rather than the alpha one,
+// which has no ReadState method at all.
+func TestConnect_Beta_ReadState_RejectsEmptyRequest(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
 	cli := betaqueryconnect.NewQueryServiceClient(
 		h.Client,
@@ -1232,7 +1488,7 @@ func TestConnect_Beta_ReadState_Unimplemented(t *testing.T) {
 		connect.NewRequest(&betaquery.ReadStateRequest{}),
 	)
 	require.Error(t, err)
-	require.Equal(t, connect.CodeUnimplemented, connect.CodeOf(err))
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
 }
 
 // TestConnect_Beta_ReadTip drives a real v1beta SyncService call to confirm a

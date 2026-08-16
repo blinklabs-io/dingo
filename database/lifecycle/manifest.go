@@ -28,15 +28,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 )
 
 // ManifestFormatVersion is the current on-disk schema version of Manifest.
 // Bump it when making a breaking change to the JSON shape so old restore
 // tooling can reject a manifest it doesn't understand instead of silently
-// misreading it.
+// misreading it. Adding the Gates field did not bump this -- see Gates'
+// doc comment for why that is acceptable today.
 const ManifestFormatVersion = 1
 
 // ManifestFileName is the name of the manifest file inside a snapshot
@@ -79,7 +83,7 @@ type Manifest struct {
 
 	// StorageMode/Network mirror types.NodeSettings so a restore can
 	// refuse an incompatible target before opening the restored store;
-	// database.New's own checkNodeSettings then re-validates them for
+	// database.New's own CheckNodeSettings then re-validates them for
 	// free once the restored store is opened for real.
 	StorageMode string `json:"storageMode"`
 	Network     string `json:"network"`
@@ -101,6 +105,28 @@ type Manifest struct {
 	// vice versa) is meaningless, so restore refuses on a mismatch.
 	BlobPlugin     string `json:"blobPlugin"`
 	MetadataPlugin string `json:"metadataPlugin"`
+
+	// Gates mirrors the source database's persisted node settings gates
+	// (database/nodesettings.Gates) at backup time — network_magic,
+	// start_era, the era genesis hashes, the ledger-semantics gates, and
+	// so on — so CheckGateMatch can refuse restoring a snapshot whose
+	// consensus-relevant configuration disagrees with what the caller
+	// intends to run it with (e.g. a snapshot taken with CIP-0163
+	// full-pot rewards enabled, restored onto a node configured without
+	// it, would otherwise silently diverge rewards from that point
+	// forward).
+	//
+	// This field is optional (omitempty), and its addition did not bump
+	// ManifestFormatVersion, but it is not actually backward compatible:
+	// checksum() covers the whole struct, so a build that predates Gates
+	// ignores the unknown "gates" key on unmarshal (ParseManifest decodes
+	// with a plain json.Unmarshal, not DisallowUnknownFields) and then
+	// recomputes the checksum without a field it never saw, getting a
+	// different digest and rejecting an otherwise-valid manifest as
+	// ErrManifestCorrupted. That is acceptable only because this manifest
+	// format is unreleased: no build that predates Gates is deployed
+	// anywhere to hit it.
+	Gates nodesettings.Values `json:"gates,omitempty"`
 
 	// DingoVersion records the dingo build that produced the backup, so
 	// a restore across incompatible dingo versions is at least detectable rather
@@ -151,19 +177,84 @@ func (m Manifest) CheckPluginMatch(blobPlugin, metadataPlugin string) error {
 	return nil
 }
 
+// CheckGateMatch returns an error if any gate present in both m.Gates and
+// configured is incompatible under the registry's own decision policy
+// (nodesettings.Evaluate/Gate.apply) — the same policy startup enforcement
+// applies via evaluateAndPersistGates — rather than raw equality. Raw
+// equality was too strict for a LatchBool gate: restoring a snapshot
+// recorded "off" onto a target configured "on" is exactly the one-way
+// latch upgrade Evaluate permits at startup, and rejecting it here would
+// make offline restore refuse a resume that a live database.New against
+// the same manifest values would accept.
+//
+// A gate present in only one of the two maps is not an error: that is what
+// lets an older snapshot (missing a gate a newer dingo would record)
+// restore under that newer dingo, and a newer snapshot restore when the
+// caller has no way to supply every gate it recorded (e.g. no cardano
+// config loaded, so no genesis hashes). Evaluate already treats a gate
+// absent from configured as skipped, and a gate absent from persisted (the
+// manifest) as an ordinary first-write with no mismatch, so both
+// directions of "only one side has it" fall out of Evaluate for free.
+//
+// blob_store_id is never compared, even when present in both maps: the
+// restored blob store IS the snapshot's, so its identity always differs
+// from whatever the caller had, and comparing it would fail every
+// restore. metadata_plugin and blob_plugin are excluded too, since
+// CheckPluginMatch already reports those — comparing them again here
+// would just report the same mismatch twice. All three are filtered out of
+// configured before Evaluate ever sees them, rather than skipped
+// after-the-fact, so Evaluate cannot mint a Write for them either.
+//
+// Every gate configured supplies is marked explicit for this call, the same
+// as database.New's own strict validation: CheckGateMatch is a
+// compatibility check, not a resume, so OverrideEligible's "fall back to
+// whatever is persisted" behavior must never mask a real mismatch here.
+func (m Manifest) CheckGateMatch(configured nodesettings.Values) error {
+	filtered := make(nodesettings.Values, len(configured))
+	for name, want := range configured {
+		switch name {
+		case "blob_store_id", "metadata_plugin", "blob_plugin":
+			continue
+		}
+		filtered[name] = want
+	}
+	explicit := make(map[string]bool, len(filtered))
+	for name := range filtered {
+		explicit[name] = true
+	}
+	result := nodesettings.Evaluate(m.Gates, filtered, explicit)
+	if len(result.Mismatches) == 0 {
+		return nil
+	}
+	mismatches := make([]string, 0, len(result.Mismatches))
+	for _, mm := range result.Mismatches {
+		mismatches = append(mismatches, fmt.Sprintf(
+			"%s: manifest %q, target %q", mm.Gate, mm.Persisted, mm.Configured,
+		))
+	}
+	// Map iteration order is random; sort so the error message is
+	// deterministic across calls.
+	sort.Strings(mismatches)
+	return fmt.Errorf(
+		"manifest gates do not match target configuration: %s",
+		strings.Join(mismatches, "; "),
+	)
+}
+
 // CheckCompatibility returns an error if the manifest's recorded plugins,
-// storage mode, or network are incompatible with the target values given.
-// Offline restore call sites should call this (directly, or via
+// storage mode, network, or gates are incompatible with the target values
+// given. Offline restore call sites should call this (directly, or via
 // RestoreValidated) before targetDataDir is touched in any way: unlike the
 // live-node restore path, which always opens the restored copy through
 // database.New using the node's own real configured plugins (so
-// checkNodeSettings catches a mismatch immediately), an offline restore
+// CheckNodeSettings catches a mismatch immediately), an offline restore
 // has no such automatic check — Restore's own validateRestoredDatabase
 // only opens the result using the manifest's own recorded plugins, which
 // is a self-consistency check, not a check against what the caller
 // actually intends to run the restored store with.
 func (m Manifest) CheckCompatibility(
 	blobPlugin, metadataPlugin, storageMode, network string,
+	gates nodesettings.Values,
 ) error {
 	if err := m.CheckPluginMatch(blobPlugin, metadataPlugin); err != nil {
 		return err
@@ -181,6 +272,9 @@ func (m Manifest) CheckCompatibility(
 			m.Network,
 			network,
 		)
+	}
+	if err := m.CheckGateMatch(gates); err != nil {
+		return err
 	}
 	return nil
 }

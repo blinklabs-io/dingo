@@ -199,6 +199,37 @@ var flagSpecs = []flagSpec{
 		"cors-allowed-origins",
 		"CORS allowed origins for API servers",
 	),
+
+	// API security (shared TLS/auth defaults for every selected
+	// plugins.api.* provider; see internal/apiconfig and
+	// ARCHITECTURE.md's "API security" section). Explicit
+	// plugins.api.<name>.config.tls/auth fields override these per
+	// provider.
+	stringPtrFlag(
+		"API.TLS.Mode",
+		"api-tls-mode",
+		`shared API TLS mode: "disabled" or "server" (unset: inherit provider setting, else disabled)`,
+	),
+	stringPtrFlag(
+		"API.TLS.CertFilePath",
+		"api-tls-cert-file-path",
+		"shared API TLS certificate file path",
+	),
+	stringPtrFlag(
+		"API.TLS.KeyFilePath",
+		"api-tls-key-file-path",
+		"shared API TLS private key file path",
+	),
+	stringPtrFlag(
+		"API.Auth.Mode",
+		"api-auth-mode",
+		`shared API auth mode: "disabled" or "token" (unset: inherit provider setting, else disabled)`,
+	),
+	stringPtrFlag(
+		"API.Auth.TokenFilePath",
+		"api-auth-token-file-path",
+		"shared API auth bearer token file path",
+	),
 	durationFlag(
 		"OffchainMetadata.Interval",
 		"offchain-metadata-interval",
@@ -235,6 +266,11 @@ var flagSpecs = []flagSpec{
 		"OffchainMetadata.AllowPrivateAddresses",
 		"offchain-metadata-allow-private-addresses",
 		"allow off-chain metadata fetches to private, loopback, and link-local addresses",
+	),
+	boolFlag(
+		"Midnight.Enabled",
+		"midnight-enabled",
+		`enable the Midnight indexer (requires storageMode "api")`,
 	),
 	uintFlag(
 		"Midnight.Port",
@@ -646,6 +682,11 @@ var flagSpecs = []flagSpec{
 		"mithril-verify-certs",
 		"verify Mithril certificate chains",
 	),
+	boolFlag(
+		"Mithril.AllowInsecureHTTP",
+		"mithril-allow-insecure-http",
+		"allow plain-HTTP Mithril aggregator/artifact URLs (local dev/test only)",
+	),
 
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(
@@ -703,6 +744,12 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	for _, spec := range flagSpecs {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
+		}
+		// Only gated fields, per provenance's documented contract: this loop
+		// walks every registered flag, and recording the rest would fill the
+		// map with entries nothing reads.
+		if flags.Changed(spec.name) && isGatedField(spec.field) {
+			cfg.recordProvenance(spec.field, SourceFlag)
 		}
 	}
 	if cfg.Network != previousNetwork {
@@ -893,6 +940,34 @@ func boolPtrFlag(field, name, help string) flagSpec {
 				return nil
 			}
 			v, err := f.GetBool(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			return nil
+		},
+	}
+}
+
+// stringPtrFlag binds a CLI flag to a *string field. The pointer
+// distinguishes "operator did not set this" (nil, inherit from a broader
+// scope or fall back to a disabled default) from an explicit value --
+// needed for the api.tls/api.auth policy fields (internal/apiconfig),
+// where an explicit "disabled" is meaningfully different from never
+// setting a mode at all. We only write to the field when the flag was
+// explicitly passed, matching boolPtrFlag's own contract.
+func stringPtrFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			f.String(name, "", help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetString(name)
 			if err != nil {
 				return err
 			}

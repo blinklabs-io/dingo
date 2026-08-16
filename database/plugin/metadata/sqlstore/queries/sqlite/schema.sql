@@ -9,6 +9,13 @@ CREATE TABLE node_settings (
     network TEXT NOT NULL
 );
 
+CREATE TABLE node_settings_gate (
+    name           TEXT PRIMARY KEY,
+    value          TEXT NOT NULL,
+    recorded_epoch INTEGER NOT NULL,
+    recorded_slot  INTEGER NOT NULL
+);
+
 CREATE TABLE tip (
     hash BLOB,
     id INTEGER PRIMARY KEY,

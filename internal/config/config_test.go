@@ -15,9 +15,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1481,6 +1483,101 @@ midnight:
 	}
 }
 
+// TestReapplyMidnightNetworkDefaults_ResumedNetwork exercises the exported
+// wrapper settingsresolve.Apply calls directly: a caller that changes
+// cfg.Network after LoadConfig/ApplyFlags have already derived Midnight
+// defaults for the old network must see every network-derived constant
+// move to the new network once ReapplyMidnightNetworkDefaults runs.
+func TestReapplyMidnightNetworkDefaults_ResumedNetwork(t *testing.T) {
+	resetGlobalConfig()
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Fatalf("expected initial network preview, got %q", cfg.Network)
+	}
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["preview"].CNightPolicyID {
+		t.Fatalf(
+			"expected preview Midnight default before resume, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	// preview sets CommitteeCandidateAddress but mainnet does not, so this
+	// also proves the stale preview value is cleared, not just left
+	// alongside a filled-in mainnet value.
+	if cfg.Midnight.CommitteeCandidateAddress == "" {
+		t.Fatal(
+			"expected preview Midnight default to set CommitteeCandidateAddress",
+		)
+	}
+
+	previousNetwork := cfg.Network
+	cfg.Network = "mainnet" // simulates a caller resuming Network late
+	ReapplyMidnightNetworkDefaults(cfg, previousNetwork)
+
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["mainnet"].CNightPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight policy default after resume, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight council policy default after resume, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
+	if cfg.Midnight.CommitteeCandidateAddress != "" {
+		t.Fatalf(
+			"expected stale preview CommitteeCandidateAddress to be cleared, got %q",
+			cfg.Midnight.CommitteeCandidateAddress,
+		)
+	}
+}
+
+// TestReapplyMidnightNetworkDefaults_PreservesExplicitYAML mirrors
+// TestApplyFlags_NetworkOverridePreservesExplicitMidnightYAML, but exercises
+// ReapplyMidnightNetworkDefaults directly rather than through ApplyFlags:
+// an operator-set Midnight field must survive a resumed network change even
+// when its value happens to equal the previous network's default (the
+// coincidental case clearMidnightNetworkDefaults must not clear).
+func TestReapplyMidnightNetworkDefaults_PreservesExplicitYAML(t *testing.T) {
+	resetGlobalConfig()
+	previewPolicy := midnightNetworkDefaults["preview"].CNightPolicyID
+	yamlContent := `
+network: "preview"
+midnight:
+  cnightPolicyId: "` + previewPolicy + `"
+`
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	previousNetwork := cfg.Network
+	cfg.Network = "mainnet" // simulates a caller resuming Network late
+	ReapplyMidnightNetworkDefaults(cfg, previousNetwork)
+
+	if cfg.Midnight.CNightPolicyID != previewPolicy {
+		t.Fatalf(
+			"expected explicit Midnight YAML policy to be preserved, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected remaining Midnight defaults to switch to mainnet, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
+}
+
 func TestLoad_OffchainMetadataConfig(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
@@ -1768,4 +1865,104 @@ func TestGetConfigSnapshotDoesNotShareNestedPluginConfig(t *testing.T) {
 		globalConfig.Plugins.Mempool.Config["nested"].(map[string]any)["inner"],
 		"mutating a snapshot must not reach globalConfig",
 	)
+}
+
+// exampleConfigPath returns the path to the repo's bundled
+// dingo.yaml.example, independent of the working directory the test binary
+// runs from.
+func exampleConfigPath() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(
+		filepath.Dir(thisFile),
+		"..",
+		"..",
+		"dingo.yaml.example",
+	)
+}
+
+// TestLoad_ExampleConfigParses guards against regressions like #3169, where
+// a single mis-indented line in dingo.yaml.example (the default config
+// shipped to operators) produced a YAML syntax error on startup with no
+// indication of which field was affected. Any change to dingo.yaml.example
+// must keep it loadable as-is.
+func TestLoad_ExampleConfigParses(t *testing.T) {
+	resetGlobalConfig()
+
+	path := exampleConfigPath()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("dingo.yaml.example not found at %s: %v", path, err)
+	}
+
+	cfg, err := LoadConfig(path)
+	require.NoError(
+		t,
+		err,
+		"dingo.yaml.example must parse cleanly as shipped",
+	)
+	require.NotNil(t, cfg)
+}
+
+// TestLoad_ParseErrorIncludesConfigFilePath guards the error-message
+// behavior introduced alongside TestLoad_ExampleConfigParses: every parse
+// failure path in LoadConfig must name the resolved config file so a
+// regression that drops configFile from one of the error wraps is caught.
+func TestLoad_ParseErrorIncludesConfigFilePath(t *testing.T) {
+	t.Run("invalid YAML syntax", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-syntax.yaml")
+		yamlContent := "network: mainnet\n  badIndent: true\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section decode error", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "bad-wrapped-decode.yaml")
+		yamlContent := `
+config:
+  network: mainnet
+  unknownField: true
+`
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tmpFile)
+	})
+
+	t.Run("wrapped config section is nil", func(t *testing.T) {
+		resetGlobalConfig()
+
+		tmpDir := t.TempDir()
+		tmpFile := filepath.Join(tmpDir, "nil-config-section.yaml")
+		yamlContent := "config:\n"
+
+		err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+		if err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		_, err = LoadConfig(tmpFile)
+		require.Error(t, err)
+		expected := fmt.Sprintf(
+			"config section in %s must be a mapping",
+			tmpFile,
+		)
+		assert.Equal(t, expected, err.Error())
+	})
 }

@@ -63,7 +63,7 @@ func bootstrapV2(
 	cfg BootstrapConfig,
 	aggregatorURL string,
 ) (*BootstrapResult, error) {
-	client := NewClient(aggregatorURL)
+	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
 
 	// Step 1: Fetch latest artifact and verify its self-hash
 	artifact, err := client.GetLatestCardanoDatabaseSnapshot(ctx)
@@ -79,6 +79,11 @@ func bootstrapV2(
 			computed,
 			artifact.Hash,
 		)
+	}
+	if err := validateSnapshotIdentity(
+		cfg.Network, artifact.Network, artifact.Hash,
+	); err != nil {
+		return nil, fmt.Errorf("validating artifact metadata: %w", err)
 	}
 	if cfg.Network != "" && artifact.Network != "" &&
 		cfg.Network != artifact.Network {
@@ -183,7 +188,7 @@ func bootstrapV2(
 
 	extractDir := filepath.Join(
 		downloadDir,
-		"immutable-"+artifact.Hash,
+		filepath.Base("immutable-"+artifact.Hash),
 	)
 	var ancillaryDir string
 	var ancillaryArchivePath string
@@ -202,15 +207,15 @@ func bootstrapV2(
 		ancWg.Go(func() {
 			candidateDir := filepath.Join(
 				downloadDir,
-				"ancillary-"+artifact.Hash,
+				filepath.Base("ancillary-"+artifact.Hash),
 			)
 			candidateArchive := filepath.Join(
 				downloadDir,
-				fmt.Sprintf(
+				filepath.Base(fmt.Sprintf(
 					"%s-%s-ancillary.tar.zst",
 					artifact.Network,
 					truncateDigest(artifact.Hash),
-				),
+				)),
 			)
 			if hasLedgerFiles(candidateDir) {
 				if err := verifyAncillaryExtraction(
@@ -572,12 +577,12 @@ func removeDigestsCache(
 	downloadDir string,
 ) {
 	suffix := truncateDigest(artifact.Hash)
-	_ = os.Remove(filepath.Join(downloadDir, fmt.Sprintf(
+	_ = os.Remove(filepath.Join(downloadDir, filepath.Base(fmt.Sprintf(
 		"digests-%s.tar.zst",
 		suffix,
-	)))
+	))))
 	_ = os.RemoveAll(
-		filepath.Join(downloadDir, "digests-"+suffix),
+		filepath.Join(downloadDir, filepath.Base("digests-"+suffix)),
 	)
 }
 
@@ -594,14 +599,15 @@ func downloadDigestsArchive(
 		ctx, DownloadConfig{
 			URL:     uri,
 			DestDir: downloadDir,
-			Filename: fmt.Sprintf(
+			Filename: filepath.Base(fmt.Sprintf(
 				"digests-%s.tar.zst",
 				truncateDigest(artifact.Hash),
-			),
+			)),
 			Logger:              cfg.Logger,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
 	if err != nil {
@@ -609,7 +615,7 @@ func downloadDigestsArchive(
 	}
 	destDir := filepath.Join(
 		downloadDir,
-		"digests-"+truncateDigest(artifact.Hash),
+		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
 	)
 	if _, err := ExtractArchive(
 		ctx, archivePath, destDir, cfg.Logger,
@@ -666,7 +672,7 @@ func downloadImmutables(
 	}
 	archiveDir := filepath.Join(
 		downloadDir,
-		"immutable-archives-"+truncateDigest(artifact.Hash),
+		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
 	)
 	if err := os.MkdirAll(archiveDir, 0o750); err != nil {
 		return fmt.Errorf("creating archive directory: %w", err)
@@ -974,6 +980,7 @@ func fetchImmutableArchive(
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
 	if err != nil {
@@ -1081,11 +1088,11 @@ func downloadAncillaryV2(
 		"size", artifact.Ancillary.SizeUncompressed,
 	)
 
-	ancillaryFilename := fmt.Sprintf(
+	ancillaryFilename := filepath.Base(fmt.Sprintf(
 		"%s-%s-ancillary.tar.zst",
 		artifact.Network,
 		truncateDigest(artifact.Hash),
-	)
+	))
 
 	var ancillaryPath string
 	var err error
@@ -1103,6 +1110,7 @@ func downloadAncillaryV2(
 				IdleTimeout:         cfg.DownloadIdleTimeout,
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+				AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 			},
 		)
 		if err == nil {
@@ -1128,7 +1136,7 @@ func downloadAncillaryV2(
 
 	ancillaryDir := filepath.Join(
 		downloadDir,
-		"ancillary-"+artifact.Hash,
+		filepath.Base("ancillary-"+artifact.Hash),
 	)
 	if _, extractErr := ExtractArchive(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,

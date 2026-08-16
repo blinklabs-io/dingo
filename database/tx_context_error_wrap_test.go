@@ -48,6 +48,7 @@ func (e *erroringMetadata) SetTransaction(
 	point ocommon.Point,
 	idx uint32,
 	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
 	txn types.Txn,
 ) error {
 	return e.injectErr
@@ -58,6 +59,7 @@ func (e *erroringMetadata) SetTransactionBatched(
 	point ocommon.Point,
 	idx uint32,
 	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
 	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {

@@ -186,14 +186,11 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, closeTestDatabase(db))
 
-	// Attempt downgrade → error
+	// Downgrade to core is a permitted one-way latch
 	db, err = newSettingsTestDB(t, dataDir, "core", "mainnet")
-	require.Error(t, err)
-	var nsErr NodeSettingsError
-	require.True(t, errors.As(err, &nsErr))
-	if db != nil {
-		require.NoError(t, closeTestDatabase(db))
-	}
+	require.NoError(t, err)
+	require.Equal(t, "core", db.StorageMode())
+	require.NoError(t, closeTestDatabase(db))
 }
 
 func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {

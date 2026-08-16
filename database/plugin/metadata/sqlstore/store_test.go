@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	_ "github.com/glebarez/go-sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -294,6 +296,51 @@ func TestImportPoolRegistrationFirstWriteWins(t *testing.T) {
 	require.Len(t, loaded[0].Registration, 1)
 	require.Equal(t, "first", loaded[0].Registration[0].MetadataUrl)
 	require.Equal(t, types.Uint64(1), loaded[0].Registration[0].Pledge)
+}
+
+// TestImportPoolPersistsLeiosKeyRoundTrip covers ImportPool/GetPools for the
+// registered Dijkstra/Leios BLS key columns, including that a later import
+// with no key clears a previously stored one rather than leaving it stale.
+func TestImportPoolPersistsLeiosKeyRoundTrip(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	poolKey := lcommon.PoolKeyHash{}
+	poolKey[0] = 0x71
+	pub := bytes.Repeat([]byte{0xAB}, 96)
+	proof := bytes.Repeat([]byte{0xCD}, 48)
+	pool := &models.Pool{
+		PoolKeyHash:             poolKey.Bytes(),
+		LeiosKeyPublic:          pub,
+		LeiosKeyPossessionProof: proof,
+	}
+	registration := &models.PoolRegistration{
+		PoolKeyHash:             poolKey.Bytes(),
+		AddedSlot:               1,
+		LeiosKeyPublic:          pub,
+		LeiosKeyPossessionProof: proof,
+	}
+	require.NoError(t, store.ImportPool(pool, registration, nil))
+
+	loaded, err := store.GetPools([]lcommon.PoolKeyHash{poolKey}, nil)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, pub, loaded[0].LeiosKeyPublic)
+	assert.Equal(t, proof, loaded[0].LeiosKeyPossessionProof)
+
+	// A registration with no leios_key (e.g. a rotation to no key, or a
+	// key that failed proof-of-possession upstream) must clear the
+	// previously stored key rather than leaving it stale.
+	rotated := &models.Pool{PoolKeyHash: poolKey.Bytes()}
+	rotatedRegistration := &models.PoolRegistration{
+		PoolKeyHash: poolKey.Bytes(),
+		AddedSlot:   2,
+	}
+	require.NoError(t, store.ImportPool(rotated, rotatedRegistration, nil))
+	loaded, err = store.GetPools([]lcommon.PoolKeyHash{poolKey}, nil)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Empty(t, loaded[0].LeiosKeyPublic)
+	assert.Empty(t, loaded[0].LeiosKeyPossessionProof)
 }
 
 func TestTransactionRejectsUnsafeSavepoint(t *testing.T) {

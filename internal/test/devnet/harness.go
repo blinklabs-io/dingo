@@ -14,9 +14,6 @@
 
 //go:build devnet
 
-// Package devnet provides a test harness for running integration tests
-// against a private Cardano DevNet consisting of Dingo and cardano-node
-// instances connected via Docker Compose.
 package devnet
 
 import (
@@ -35,6 +32,14 @@ import (
 // in shelley-genesis.json.
 const DefaultNetworkMagic = 42
 
+// ChainStartTimeout bounds the wait for the network to pass its genesis
+// system start and forge a first block. configurator.sh schedules
+// systemStart 30s after it exits (key generation is too slow for the
+// generator's own systemStartDelay), and the compose health checks pass
+// as soon as a node opens its socket — well before that. This covers the
+// pre-genesis wait plus the first few slot-leader draws.
+const ChainStartTimeout = 90 * time.Second
+
 // NodeEndpoint describes a node that the test harness can connect to
 // using the Ouroboros Node-to-Node mini-protocol over TCP.
 type NodeEndpoint struct {
@@ -43,13 +48,12 @@ type NodeEndpoint struct {
 	Role        string // "producer" or "relay"
 	IsDingo     bool   // node runs Dingo
 	IsReference bool   // node runs the cardano-node reference impl
-}
-
-// ChainTip holds the chain tip information retrieved from a node.
-type ChainTip struct {
-	SlotNumber  uint64
-	BlockNumber uint64
-	Hash        []byte
+	// Container is the compose service name, used by the scenario to
+	// interrupt and restart the node. A disruption step against an
+	// endpoint with no container fails rather than being skipped: a run
+	// that quietly omitted its interruption phases would not be the
+	// release evidence it claims to be.
+	Container string
 }
 
 // TestHarness manages connections to DevNet nodes and provides
@@ -359,6 +363,50 @@ func (h *TestHarness) VerifyChainConsensus(
 		"nodes did not reach consensus within %s (tolerance: %d slots)",
 		timeout, slotTolerance,
 	)
+}
+
+// WaitForChainStart blocks until some node reports a block, i.e. the
+// network has passed its genesis system start and slot leaders have begun
+// forging. It returns the tip that satisfied the wait.
+//
+// Reachability is not chain liveness: a node answers tip queries for
+// ~30s before genesis, reporting slot 0 / block 0 the whole time. Every
+// timeout below is derived from slot counts, which only measure elapsed
+// chain time, so charging one against the pre-genesis wait can expire it
+// before the chain has produced anything at all.
+//
+// Gating here is also what keeps a test independent. Without it, a test
+// only passes because an earlier one in the package happened to absorb
+// the wait first, so it fails the moment it is run on its own with
+// `run-tests.sh -run <name>` — exactly when someone is trying to debug
+// it.
+func (h *TestHarness) WaitForChainStart(timeout time.Duration) ChainTip {
+	h.t.Helper()
+	var started ChainTip
+	require.Eventually(h.t, func() bool {
+		for _, ep := range h.endpoints {
+			tip, err := h.GetChainTip(ep)
+			if err != nil {
+				h.t.Logf(
+					"WaitForChainStart: error querying %s: %v", ep.Name, err,
+				)
+				continue
+			}
+			if tip.BlockNumber > 0 {
+				h.t.Logf(
+					"WaitForChainStart: %s forged through slot %d, block %d",
+					ep.Name, tip.SlotNumber, tip.BlockNumber,
+				)
+				started = tip
+				return true
+			}
+		}
+		return false
+	}, timeout, 2*time.Second,
+		"no node produced a block within %s; the network may not have "+
+			"reached its genesis system start", timeout,
+	)
+	return started
 }
 
 // WaitForAllNodesReady polls all endpoints until each one is reachable

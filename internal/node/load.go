@@ -134,7 +134,12 @@ func ensureDB(
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, Logger: logger,
-		StorageMode: cfg.StorageMode, Network: cfg.Network,
+		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
+		NetworkMagic:   cfg.NetworkMagic,
+		StartEra:       string(cfg.StartEra),
+		BlobPlugin:     cfg.Plugins.Storage.Blob.Provider,
+		MetadataPlugin: cfg.Plugins.Storage.Metadata.Provider,
 	}
 	runtime, err := internalplugins.OpenDatabase(
 		context.Background(),
@@ -549,7 +554,16 @@ func LoadWithDB(
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()
-		<-replayErrCh
+		// A non-nil, non-context.Canceled replayErr here is the real
+		// cause: it's what made ProcessTrustedBlockBatches call
+		// cancelReplay in the first place, which is what unblocked
+		// copyBlocksDirect's channel send and produced err (usually
+		// just "context canceled"). Join both so the operator sees the
+		// actual failure instead of only its downstream symptom.
+		replayErr := <-replayErrCh
+		if replayErr != nil && !errors.Is(replayErr, context.Canceled) {
+			return errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr)
+		}
 		return fmt.Errorf("loading blocks: %w", err)
 	}
 	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
@@ -1521,6 +1535,14 @@ func maybeLogBlockCopyProgress(
 // extractHeaderCbor extracts the header CBOR from a full block's CBOR.
 // All Cardano block eras encode as a CBOR array where the first element
 // is the block header.
+//
+// This uses fxamacker/cbor's package-level UnmarshalFirst directly
+// (bare defaults: 131,072 max array elements/map pairs, 32 max
+// nested levels) rather than gouroboros's raised-limit wrapper,
+// because it only ever extracts a single block header's raw bytes
+// (at most a few KB, with shallow nesting) — not a mainnet-scale
+// map or array, so the fxamacker defaults are already more than
+// sufficient here.
 func extractHeaderCbor(blockCbor []byte) ([]byte, error) {
 	headerLen, err := cborArrayHeaderLen(blockCbor)
 	if err != nil {

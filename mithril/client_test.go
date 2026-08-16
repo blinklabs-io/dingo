@@ -102,7 +102,7 @@ func TestListSnapshots(t *testing.T) {
 		}
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	snapshots, err := client.ListSnapshots(context.Background())
 	require.NoError(t, err)
 	require.Len(t, snapshots, 1)
@@ -159,7 +159,7 @@ func TestGetSnapshot(t *testing.T) {
 		}
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	snapshot, err := client.GetSnapshot(
 		context.Background(),
 		"abc123def456",
@@ -220,7 +220,7 @@ func TestGetCertificate(t *testing.T) {
 		}
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	cert, err := client.GetCertificate(
 		context.Background(),
 		"certhash123",
@@ -262,7 +262,7 @@ func TestGetCertificateGenesis(t *testing.T) {
 		}
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	cert, err := client.GetCertificate(
 		context.Background(),
 		"genesis_cert_hash",
@@ -311,7 +311,7 @@ func TestGetLatestSnapshot(t *testing.T) {
 		}
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	latest, err := client.GetLatestSnapshot(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, latest)
@@ -326,7 +326,7 @@ func TestGetLatestSnapshotEmpty(t *testing.T) {
 		}
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	_, err := client.GetLatestSnapshot(context.Background())
 	require.ErrorIs(t, err, ErrNoSnapshotsAvailable)
 	require.Contains(t, err.Error(), "no snapshots available")
@@ -351,7 +351,7 @@ func TestListMithrilStakeDistributions(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(expected)
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	ret, err := client.ListMithrilStakeDistributions(context.Background())
 	require.NoError(t, err)
 	require.Len(t, ret, 1)
@@ -378,7 +378,7 @@ func TestGetMithrilStakeDistribution(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(expected)
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	ret, err := client.GetMithrilStakeDistribution(
 		context.Background(),
 		"msd123",
@@ -408,7 +408,7 @@ func TestListCardanoStakeDistributions(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(expected)
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	ret, err := client.ListCardanoStakeDistributions(context.Background())
 	require.NoError(t, err)
 	require.Len(t, ret, 1)
@@ -435,7 +435,7 @@ func TestGetCardanoStakeDistribution(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(expected)
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	ret, err := client.GetCardanoStakeDistribution(
 		context.Background(),
 		"csd123",
@@ -451,7 +451,7 @@ func TestClientErrorHandling(t *testing.T) {
 		http.Error(w, "not found", http.StatusNotFound)
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 
 	_, err := client.ListSnapshots(context.Background())
 	require.Error(t, err)
@@ -483,7 +483,7 @@ func TestClientContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	_, err := client.ListSnapshots(ctx)
 	require.Error(t, err)
 }
@@ -778,6 +778,124 @@ func TestWithHTTPClient(t *testing.T) {
 	require.Equal(t, customClient, client.httpClient)
 }
 
+// TestRequireSecureURL covers requireSecureURL directly: HTTPS is always
+// accepted, HTTP is rejected unless allowInsecureHTTP is set, and a
+// malformed URL is rejected regardless (DSA-2026-04-24-03).
+func TestRequireSecureURL(t *testing.T) {
+	tests := []struct {
+		name              string
+		rawURL            string
+		allowInsecureHTTP bool
+		wantErr           bool
+	}{
+		{
+			name:    "https accepted",
+			rawURL:  "https://aggregator.example.com/aggregator",
+			wantErr: false,
+		},
+		{
+			name:    "http rejected by default",
+			rawURL:  "http://aggregator.example.com/aggregator",
+			wantErr: true,
+		},
+		{
+			name:              "http accepted with escape hatch",
+			rawURL:            "http://aggregator.example.com/aggregator",
+			allowInsecureHTTP: true,
+			wantErr:           false,
+		},
+		{
+			name:              "https still accepted with escape hatch set",
+			rawURL:            "https://aggregator.example.com/aggregator",
+			allowInsecureHTTP: true,
+			wantErr:           false,
+		},
+		{
+			name:    "malformed URL rejected",
+			rawURL:  "://not-a-url",
+			wantErr: true,
+		},
+		{
+			name:              "malformed URL rejected even with escape hatch",
+			rawURL:            "://not-a-url",
+			allowInsecureHTTP: true,
+			wantErr:           true,
+		},
+		{
+			name:    "non-http(s) scheme rejected by default",
+			rawURL:  "ftp://aggregator.example.com/aggregator",
+			wantErr: true,
+		},
+		{
+			name: "non-http(s) scheme rejected even with escape hatch " +
+				"(it widens to http, not to any scheme)",
+			rawURL:            "ftp://aggregator.example.com/aggregator",
+			allowInsecureHTTP: true,
+			wantErr:           true,
+		},
+		{
+			name:    "https URL with no host rejected",
+			rawURL:  "https:///aggregator",
+			wantErr: true,
+		},
+		{
+			name:              "https URL with no host rejected even with escape hatch",
+			rawURL:            "https:///aggregator",
+			allowInsecureHTTP: true,
+			wantErr:           true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := requireSecureURL(
+				tt.rawURL, "test URL", tt.allowInsecureHTTP,
+			)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestClientRejectsPlainHTTPAggregatorByDefault proves the client refuses
+// to send a request to a plain-HTTP aggregator unless the caller opts in
+// via WithAllowInsecureHTTP (DSA-2026-04-24-03): a request must be
+// rejected before it ever reaches redirect handling, since a downgrade or
+// SSRF target can be the first hop, not just a subsequent redirect.
+func TestClientRejectsPlainHTTPAggregatorByDefault(t *testing.T) {
+	called := false
+	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	client := NewClient(server.URL)
+	_, err := client.ListSnapshots(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must use https")
+	require.False(
+		t,
+		called,
+		"no request should reach a rejected plain-HTTP aggregator",
+	)
+}
+
+// TestClientAllowsPlainHTTPAggregatorWithEscapeHatch proves
+// WithAllowInsecureHTTP is a working, explicit escape hatch for local
+// development and tests against a plaintext aggregator.
+func TestClientAllowsPlainHTTPAggregatorWithEscapeHatch(t *testing.T) {
+	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]SnapshotListItem{})
+	})
+
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
+	_, err := client.ListSnapshots(context.Background())
+	require.NoError(t, err)
+}
+
 func TestVerifyCertChainGenesis(t *testing.T) {
 	cert := Certificate{
 		Epoch:            0,
@@ -807,7 +925,7 @@ func TestVerifyCertChainGenesis(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -899,7 +1017,7 @@ func TestVerifyCertChainThreeDeep(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -956,7 +1074,7 @@ func TestVerifyCertChainMissingCert(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -999,7 +1117,7 @@ func TestVerifyCertChainEmptyPreviousHash(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -1074,7 +1192,7 @@ func TestVerifyCertChainDigestMismatch(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -1149,7 +1267,7 @@ func TestVerifyCertChainDigestMatch(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -1222,7 +1340,7 @@ func TestVerifyCertChainRejectsStaleHashCrossReferences(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAllowInsecureHTTP())
 	err := VerifyCertificateChain(
 		context.Background(),
 		client,
@@ -1268,7 +1386,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
-				Digest:  "abc123def456789012345678",
+				Digest:  "f123456789abcdef0f123456789abcdef0f123456789abcdef0f123456789abc",
 				Network: "preprod",
 				Beacon: Beacon{
 					Epoch:               270,
@@ -1303,7 +1421,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 			},
 			ProtocolMessage: ProtocolMessage{
 				MessageParts: map[string]string{
-					"snapshot_digest": "abc123def456789012345678",
+					"snapshot_digest": "f123456789abcdef0f123456789abcdef0f123456789abcdef0f123456789abc",
 					"current_epoch":   "270",
 				},
 			},
@@ -1490,6 +1608,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 			Network:                "preprod",
 			Backend:                BackendV1,
 			AggregatorURL:          server.URL,
+			AllowInsecureHTTP:      true,
 			DownloadDir:            downloadDir,
 			GenesisVerificationKey: genesisKeyText,
 			VerifyCertificateChain: true,

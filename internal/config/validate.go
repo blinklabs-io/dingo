@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -72,6 +73,68 @@ func FullPotRewardsStandardNetwork(
 		}
 	}
 	return "", false
+}
+
+// MusashiNetworkIdentityConflict reports whether network/networkMagic mixes the
+// experimental Musashi network (the IOG Leios prototype) with a *different*
+// predefined network, returning the name of the network it collides with.
+//
+// This matters because Musashi is identified by either half of its identity —
+// the name "musashi" or network magic 164 — and that identity switches on
+// consensus/ledger trust bypasses (SkipLeaderStakeThresholdCheck,
+// SkipDijkstraTxValidation). Either half alone is enough to enable them, so a
+// half-matching configuration is dangerous in both directions:
+//
+//   - network "preview" with magic 164 runs the prototype's non-validating
+//     rules on a node the operator configured as preview; and
+//   - network "musashi" with magic 2 is worse still, because the handshake
+//     uses the magic: the node actually joins preview while trusting the
+//     prototype's rules.
+//
+// A custom name or an unregistered magic is not a conflict — those are private
+// prototype deployments (e.g. a Musashi mirror). Devnet is excluded for the
+// same reason it is excluded from FullPotRewardsStandardNetwork: it is a local
+// test network, not a production-like profile.
+func MusashiNetworkIdentityConflict(
+	network string,
+	networkMagic uint32,
+) (string, bool) {
+	nameIsMusashi := network == ouroboros.NetworkCardanoMusashi.Name
+	magicIsMusashi := networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+	if nameIsMusashi && !magicIsMusashi && networkMagic != 0 {
+		if known, ok := ouroboros.NetworkByNetworkMagic(networkMagic); ok &&
+			known.Name != ouroboros.NetworkCardanoMusashi.Name &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	if magicIsMusashi && !nameIsMusashi && network != "" {
+		if known, ok := ouroboros.NetworkByName(network); ok &&
+			known.Name != ouroboros.NetworkCardanoMusashi.Name &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	return "", false
+}
+
+// MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
+// identifies the Musashi prototype network, and is therefore permitted to run
+// with the prototype's consensus/ledger trust bypasses.
+//
+// A conflicting identity (see MusashiNetworkIdentityConflict) is deliberately
+// *not* the prototype network. Startup validation rejects those configurations
+// outright, but returning false here keeps the bypasses off even for an
+// embedder that builds a Config directly and never calls Validate.
+func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
+	if _, conflict := MusashiNetworkIdentityConflict(
+		network,
+		networkMagic,
+	); conflict {
+		return false
+	}
+	return network == ouroboros.NetworkCardanoMusashi.Name ||
+		networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
 // Validate checks the fully merged configuration (defaults, YAML,
@@ -311,6 +374,30 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// The shared api.tls/api.auth mode enums are checked here so a typo is
+	// caught once, with a single clear message, rather than surfacing
+	// identically from every one of the three API providers that inherit
+	// it. Certificate/key (and token) presence is deliberately NOT
+	// checked here: a provider legitimately may supply only its own
+	// certFilePath/keyFilePath while inheriting just `mode: server` from
+	// this shared default (see internal/apiconfig.MergeTLS), so
+	// completeness can only be judged after node.go merges this default
+	// into each provider's own plugins.api.<name>.config.tls/auth --
+	// which is where the full pair-completeness check runs, before that
+	// provider's listener starts.
+	if err := validateAPIMode(
+		"api.tls.mode", c.API.TLS.Mode,
+		string(apiconfig.TLSModeDisabled), string(apiconfig.TLSModeServer),
+	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAPIMode(
+		"api.auth.mode", c.API.Auth.Mode,
+		string(apiconfig.AuthModeDisabled), string(apiconfig.AuthModeToken),
+	); err != nil {
+		errs = append(errs, err)
+	}
+
 	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
 	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
 	// whenever bark is enabled with a snapshot directory configured —
@@ -434,6 +521,29 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
+	// The Musashi prototype network's identity switches on consensus/ledger
+	// trust bypasses, so it must never be half-claimed by a configuration
+	// that also names or addresses a standard network. Rejected outright
+	// rather than defused silently: the operator asked for two mutually
+	// exclusive networks and only one of them can be what they meant.
+	if network, ok := MusashiNetworkIdentityConflict(
+		c.Network,
+		c.NetworkMagic,
+	); ok {
+		errs = append(errs, fmt.Errorf(
+			"network identity conflict: network %q with networkMagic %d "+
+				"identifies both the %q network and the Musashi prototype "+
+				"network (name %q, magic %d); the Musashi prototype disables "+
+				"consensus and ledger validation and must not be reachable "+
+				"from a standard network configuration",
+			c.Network,
+			c.NetworkMagic,
+			network,
+			ouroboros.NetworkCardanoMusashi.Name,
+			ouroboros.NetworkCardanoMusashi.NetworkMagic,
+		))
+	}
+
 	// Network identity
 	if c.Network == "" {
 		if c.NetworkMagic == 0 {
@@ -532,11 +642,48 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// The Midnight indexer needs the api-mode indexes to function, so
+	// midnight.enabled requires storageMode "api". Reject the contradiction
+	// up front rather than letting it start indexer-less/silently. Dev mode
+	// force-upgrades storage mode to api at startup (node.Run), so it is
+	// exempted here the same way apiListeners above is.
+	if c.Midnight.Enabled && c.StorageMode != storageModeAPI &&
+		effectiveMode != RunModeDev && !c.RunMode.IsDevMode() {
+		errs = append(errs, fmt.Errorf(
+			"midnight.enabled requires storageMode %q, got %q: "+
+				"set storageMode to %q or disable midnight.enabled",
+			storageModeAPI, c.StorageMode, storageModeAPI,
+		))
+	}
+
 	if c.DatabaseLifecycle.SnapshotEnabled &&
 		c.DatabaseLifecycle.SnapshotDir == "" {
 		errs = append(errs, errors.New(
 			"databaseLifecycle.snapshotDir is required when databaseLifecycle.snapshotEnabled is true",
 		))
+	}
+	// snapshotDir is only actually live for a run mode that starts the
+	// full node (serving): that's the only path wiring up dblifecycle.
+	// Manager, whose Start reads SnapshotEnabled and whose Bark-triggered
+	// CreateSnapshot/Restore needs barkPort > 0 (matching the
+	// barkClientCaFilePath gate above) -- neither ever runs under a
+	// one-shot load/sync/mithril/database invocation, even if the same
+	// shared config file has snapshotEnabled or Bark turned on for its
+	// normal serve deployment. Gating on serving avoids those one-shot
+	// commands eagerly creating the directory and probe-writing into it
+	// (see checkDirWritable) for a subsystem they never start.
+	if serving &&
+		(c.DatabaseLifecycle.SnapshotEnabled || c.BarkPort > 0) &&
+		c.DatabaseLifecycle.SnapshotDir != "" {
+		if err := checkDirWritable(c.DatabaseLifecycle.SnapshotDir); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"databaseLifecycle.snapshotDir %q is not usable: %w (if "+
+					"running the official Docker image, a directory outside "+
+					"/data/db must be pre-chowned on the host to the "+
+					"container's UID:GID, 1000:1000)",
+				c.DatabaseLifecycle.SnapshotDir, err,
+			))
+		}
 	}
 	if c.DatabaseLifecycle.SnapshotRetention < 0 {
 		errs = append(errs, fmt.Errorf(
@@ -604,6 +751,25 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	return errors.Join(errs...)
 }
 
+// validateAPIMode rejects a mode value that is neither unset (inherit/
+// default) nor one of the two accepted enum values.
+func validateAPIMode(
+	setting string,
+	mode *string,
+	disabled, enabled string,
+) error {
+	if mode == nil || *mode == "" {
+		return nil
+	}
+	if *mode == disabled || *mode == enabled {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s: invalid mode %q (must be %q or %q)",
+		setting, *mode, disabled, enabled,
+	)
+}
+
 // validatePort checks a configured TCP port. Ports are uints, so
 // values above 65535 are representable but unbindable; ports below
 // minBindable are privileged ports the process may not bind; and 0
@@ -659,6 +825,33 @@ func isWildcardAddr(addr string) bool {
 	default:
 		return false
 	}
+}
+
+// checkDirWritable ensures dir exists (creating it if needed) and that this
+// process can actually create files in it, surfacing a clear, actionable
+// error at startup instead of a raw filesystem permission error surfacing
+// later, deep inside a snapshot attempt. This is the common failure mode
+// for a --db-snapshot-dir bind-mounted from a host directory the
+// container's non-root user doesn't own (see the Docker image's pinned
+// UID:GID note in dingo.yaml.example).
+func checkDirWritable(dir string) (err error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+	probe, err := os.CreateTemp(dir, ".dingo-writable-check-*")
+	if err != nil {
+		return fmt.Errorf("directory is not writable: %w", err)
+	}
+	name := probe.Name()
+	// Deferred (rather than a plain call after Close) so the probe file is
+	// still cleaned up on every path, including one a later change might
+	// add between Close and here that returns early.
+	defer func() {
+		if removeErr := os.Remove(name); removeErr != nil && err == nil {
+			err = fmt.Errorf("remove writability probe file: %w", removeErr)
+		}
+	}()
+	return probe.Close()
 }
 
 // validatePathNoTraversal rejects paths containing a ".." component.

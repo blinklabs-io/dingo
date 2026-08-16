@@ -29,7 +29,8 @@ import (
 var migrationSQL embed.FS
 
 const (
-	initialSchemaRelease = "v1alpha1"
+	initialSchemaRelease  = "v1alpha1"
+	leiosKeySchemaRelease = "leios-key-registration"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -39,6 +40,7 @@ var schemaVersions = []struct {
 	Dir     string
 }{
 	{Version: 1, Name: initialSchemaRelease, Dir: "v1"},
+	{Version: 2, Name: leiosKeySchemaRelease, Dir: "v2"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

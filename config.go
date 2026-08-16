@@ -122,11 +122,14 @@ type OffchainMetadataConfig struct {
 }
 
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
-// Indexing is only active in API storage mode. Port 0 disables the gRPC
-// listener while leaving indexing eligible to run.
+// Indexing is only active when Enabled is true AND Dingo is running in API
+// storage mode -- both are required, since the indexer depends on the
+// api-mode indexes to function. Port 0 disables the gRPC listener while
+// leaving indexing eligible to run.
 type MidnightConfig struct {
-	Port uint
-	Host string
+	Enabled bool
+	Port    uint
+	Host    string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -165,11 +168,16 @@ type Config struct {
 	chainsyncStallTimeout time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
-	dataDir                                                                             string
-	bindAddr                                                                            string
-	pluginSelections                                                                    map[hostplugin.Capability]hostplugin.Selection
-	network                                                                             string
-	tlsCertFilePath, tlsKeyFilePath                                                     string
+	dataDir                         string
+	bindAddr                        string
+	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
+	network                         string
+	tlsCertFilePath, tlsKeyFilePath string
+	// apiConfig mirrors cfg.API -- the shared api.tls/api.auth policy
+	// defaults merged into every selected plugins.api.* provider's own
+	// config by node.go before that provider resolves. See
+	// ARCHITECTURE.md's "API security" section.
+	apiConfig                                                                           internalconfig.APIConfig
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
@@ -396,6 +404,32 @@ func (c *Config) isMusashiNetwork() bool {
 		c.cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
+// prototypeTrustBypassesEnabled reports whether this node may run with the
+// Musashi prototype's consensus/ledger trust bypasses —
+// LedgerStateConfig.SkipLeaderStakeThresholdCheck and
+// SkipDijkstraTxValidation. Those two make the node accept blocks and Dijkstra
+// transactions a validating ledger would reject, so they are prototype-only
+// behaviour and must never be reachable from a preview, preprod, or mainnet
+// configuration.
+//
+// This is deliberately stricter than isMusashiNetwork, which treats either
+// half of the identity (name or magic) as Musashi and is used for era and
+// mini-protocol selection where a half-match is merely wrong, not unsafe. Here
+// a half-match that also names or addresses a standard network yields false.
+// configValidate rejects such a configuration outright, so in the normal
+// startup path this can only be reached with an unambiguous identity; the
+// extra check keeps the bypasses off for an embedder that builds a Config
+// directly and never validates it.
+func (c *Config) prototypeTrustBypassesEnabled() bool {
+	if c.cfg == nil {
+		return false
+	}
+	return internalconfig.MusashiPrototypeNetwork(
+		c.cfg.Network,
+		c.cfg.NetworkMagic,
+	)
+}
+
 // experimentalLeiosNetworkingEnabled reports whether the Leios node-to-node
 // mini-protocols (leios-fetch / leios-notify) should be offered on outbound
 // and inbound connections.
@@ -458,6 +492,31 @@ func (n *Node) configValidate() error {
 		return fmt.Errorf(
 			"pledge leverage (%d) must be in [1, 10000] when enabled",
 			n.config.cfg.PledgeLeverage,
+		)
+	}
+	// The Musashi prototype network disables consensus and ledger validation
+	// (see Config.prototypeTrustBypassesEnabled). Its identity is matched on
+	// either the network name or the network magic, so refuse any configuration
+	// that pairs one half of it with a different standard network — otherwise a
+	// node an operator configured as preview/preprod/mainnet would silently run
+	// with those bypasses, or (with `--network musashi --network-magic 2`)
+	// actually join preview while trusting the prototype's rules, since the
+	// handshake uses the magic. There is deliberately no opt-in override.
+	if network, ok := internalconfig.MusashiNetworkIdentityConflict(
+		n.config.cfg.Network,
+		n.config.cfg.NetworkMagic,
+	); ok {
+		return fmt.Errorf(
+			"network identity conflict: network %q with networkMagic %d "+
+				"identifies both the %q network and the Musashi prototype "+
+				"network (name %q, magic %d); the Musashi prototype disables "+
+				"consensus and ledger validation and must not be reachable "+
+				"from a standard network configuration",
+			n.config.cfg.Network,
+			n.config.cfg.NetworkMagic,
+			network,
+			ouroboros.NetworkCardanoMusashi.Name,
+			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}
 	if n.config.cfg.FullPotRewardsEnabled &&
@@ -581,6 +640,7 @@ func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
+	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
@@ -614,6 +674,7 @@ func (c *Config) syncCompatFields() {
 		GraceHours: c.cfg.KoiosParity.GraceHours,
 	}
 	c.midnight = MidnightConfig{
+		Enabled:                     c.cfg.Midnight.Enabled,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -912,6 +973,16 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Utxorpc.Config["port"] = port
+	}
+}
+
+// WithAPIConfig sets the shared api.tls/api.auth policy applied to every
+// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
+// provider's own plugins.api.<name>.config.tls/auth overrides a field.
+// See internal/apiconfig and ARCHITECTURE.md's "API security" section.
+func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.API = cfg
 	}
 }
 
@@ -1399,6 +1470,7 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			*c = NewConfig()
 		}
 		c.cfg.Midnight = internalconfig.MidnightConfig{
+			Enabled:                     cfg.Enabled,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,
@@ -1600,6 +1672,13 @@ func (c *Config) TlsCertFilePath() string {
 // TlsKeyFilePath returns the path to the TLS key for gRPC APIs.
 func (c *Config) TlsKeyFilePath() string {
 	return c.cfg.TlsKeyFilePath
+}
+
+// APIConfig returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider unless overridden. See
+// WithAPIConfig and ARCHITECTURE.md's "API security" section.
+func (c *Config) APIConfig() internalconfig.APIConfig {
+	return c.cfg.API
 }
 
 // IntersectTip returns whether to start chainsync at the current chain tip.
@@ -1892,6 +1971,12 @@ func (c *Config) Midnight() internalconfig.MidnightConfig {
 // CORSAllowedOrigins returns the CORS allowed origins list.
 func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
+}
+
+// API returns the shared api.tls/api.auth policy defaults applied to
+// every selected plugins.api.* provider. See WithAPIConfig.
+func (c *Config) API() internalconfig.APIConfig {
+	return c.cfg.API
 }
 
 // SlotsPerKESPeriod returns the number of slots per KES period.

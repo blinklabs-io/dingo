@@ -139,6 +139,7 @@ func decideCatchUp(
 	backend string,
 	storageMode string,
 	aggregatorURL string,
+	allowInsecureHTTP bool,
 	logger *slog.Logger,
 ) (catchUpDecision, error) {
 	if backend != BackendV2 {
@@ -207,7 +208,7 @@ func decideCatchUp(
 			)
 			return catchUpDecision{engage: true}, nil
 		}
-		target, targetErr := NewClient(aggregatorURL).
+		target, targetErr := newMithrilClient(aggregatorURL, allowInsecureHTTP).
 			GetLatestCardanoDatabaseSnapshot(ctx)
 		if targetErr != nil {
 			return catchUpDecision{}, fmt.Errorf(
@@ -280,6 +281,7 @@ type SyncConfig struct {
 	CardanoConfigPath      string                     // optional explicit config.json path (else "<network>/config.json")
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
 	AggregatorURL          string                     // optional; defaults per-network
+	AllowInsecureHTTP      bool                       // permit plain-HTTP aggregator/artifact URLs; local dev/test only
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
@@ -465,7 +467,8 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
 	}
 	dec, decErr := decideCatchUp(
-		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL, logger,
+		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL,
+		cfg.AllowInsecureHTTP, logger,
 	)
 	if decErr != nil {
 		return SyncResult{}, decErr
@@ -561,6 +564,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			Network:                network,
 			Backend:                cfg.Backend,
 			AggregatorURL:          aggregatorURL,
+			AllowInsecureHTTP:      cfg.AllowInsecureHTTP,
 			DownloadDir:            downloadDir,
 			CleanupAfterLoad:       cfg.CleanupAfterLoad,
 			VerifyCertificateChain: cfg.VerifyCertChain,
@@ -1085,6 +1089,14 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
+		// point with the delegator-inactivity gate enabled
+		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
+		// always elided here. SyncConfig has no gate field to thread through
+		// (Mithril bootstrap and the gate are mutually exclusive by
+		// construction), so this is explicit rather than the zero-value
+		// default.
+		bf.SetDelegatorInactivityEnabled(false)
 		bf.SetEndSlot(ledgerStateSlot)
 		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
 			return SyncResult{}, fmt.Errorf(

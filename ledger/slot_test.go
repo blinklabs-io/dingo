@@ -355,7 +355,7 @@ func slotToTimeBehindHorizonState(
 	// A fixed clock slotsAhead slots past genesis: hermetic, and far enough
 	// ahead that the era's safe zone cannot cover it.
 	now := systemStart.Add(time.Duration(slotsAhead) * slotLength)
-	ls.nowFunc = func() time.Time { return now }
+	ls.timeConv().nowFunc = func() time.Time { return now }
 	ls.publishSnapshotsLocked()
 	return ls, slotsAhead, now
 }

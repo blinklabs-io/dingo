@@ -280,7 +280,10 @@ func (d *Database) SetTransactionWithOpts(
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
-	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
+	if err := d.metadata.SetTransaction(
+		tx, point, idx, certDeposits,
+		opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
 			tx.Hash(), idx, point.Slot, err,
@@ -335,6 +338,12 @@ func (d *Database) SetTransactionMetadataOnly(
 		point,
 		idx,
 		certDeposits,
+		// skipWithdrawalWitness: value is moot since
+		// metadataOnlyTransaction.Withdrawals() is always empty, so the loop
+		// it would gate never runs either way. false (rather than true) for
+		// readability: it reads as the honest "do it normally" default
+		// instead of implying real gate logic applies here.
+		false,
 		metadataTxn,
 	); err != nil {
 		return fmt.Errorf(

@@ -20,7 +20,7 @@ require (
 	github.com/blinklabs-io/bark v0.1.0
 	github.com/blinklabs-io/bursa v0.16.0
 	github.com/blinklabs-io/gouroboros v0.193.0
-	github.com/blinklabs-io/ouroboros-mock v0.15.1
+	github.com/blinklabs-io/ouroboros-mock v0.16.0
 	github.com/blinklabs-io/plutigo v0.3.0
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
@@ -56,6 +56,7 @@ require (
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.23.1
 )
 
 // XXX: uncomment when testing local changes to gouroboros
@@ -215,5 +216,4 @@ require (
 	modernc.org/libc v1.22.5 // indirect
 	modernc.org/mathutil v1.5.0 // indirect
 	modernc.org/memory v1.5.0 // indirect
-	modernc.org/sqlite v1.23.1 // indirect
 )

@@ -51,6 +51,16 @@ plugins:
       provider: "builtin"
       config:
         port: 3000
+        # Per-provider overrides of the shared api.tls/api.auth defaults
+        # below (uncomment to use). Any field left unset here inherits the
+        # corresponding api.tls/api.auth field; mode: disabled explicitly
+        # turns off an inherited policy for this provider only.
+        # tls:
+        #   mode: server
+        #   certFilePath: "/run/secrets/blockfrost.crt"
+        #   keyFilePath: "/run/secrets/blockfrost.key"
+        # auth:
+        #   mode: disabled
     mesh:
       provider: "builtin"
       config:
@@ -59,6 +69,31 @@ plugins:
       provider: "builtin"
       config:
         port: 9090
+
+# Shared TLS and authentication defaults for every selected plugins.api.*
+# provider (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
+# plugins.api.<name>.config.tls/config.auth overrides any field for that
+# provider only (see the commented example above). The default everywhere
+# is "disabled", so leaving this section out changes nothing for an
+# existing deployment.
+#
+# api:
+#   tls:
+#     # "disabled" (default) or "server".
+#     mode: server
+#     certFilePath: "/run/secrets/api.crt"
+#     keyFilePath: "/run/secrets/api.key"
+#   auth:
+#     # "disabled" (default) or "token". Callers present the shared secret
+#     # as "Authorization: Bearer <token>" (HTTP and Connect/gRPC); the
+#     # built-in Blockfrost API also accepts it via its own "project_id"
+#     # header, matching real Blockfrost clients. token and tokenFilePath
+#     # are mutually exclusive; tokenFilePath is preferred (also settable
+#     # via DINGO_API_AUTH_TOKEN_FILE_PATH -- token has no environment
+#     # variable of its own, to avoid encouraging secrets into a
+#     # container's env dump).
+#     mode: token
+#     tokenFilePath: "/run/secrets/api-token"
 
 # Path to the UNIX domain socket file used by the server
 # CLI: --socket-path
@@ -78,14 +113,21 @@ logging:
   format: text
   level: info
 
-# TLS certificate file path for the built-in UTxO RPC listener.
-# Blockfrost and Mesh do not currently consume this setting; place public API
-# listeners behind a TLS-terminating and authenticating reverse proxy.
+# TLS certificate file path. Also used by Bark (bark/) when barkPort is set.
+#
+# For the built-in UTxO RPC listener specifically, this is a compatibility
+# default equivalent to setting plugins.api.utxorpc.config.tls (mode: server,
+# this certFilePath/keyFilePath) -- it is not promoted to Blockfrost or Mesh,
+# since doing so would silently switch a previously plaintext listener to
+# TLS on upgrade. To secure Blockfrost and/or Mesh (or to override UTxO
+# RPC's own certificate independently of this shared one), use the top-level
+# api.tls section or each provider's own plugins.api.<name>.config.tls --
+# see the "api:" section above and README.md's "API TLS and Authentication".
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
 tlsCertFilePath: ""
 
-# TLS private key file path for the built-in UTxO RPC listener.
+# TLS private key file path, paired with tlsCertFilePath above.
 #
 # Can be overridden with the TLS_KEY_FILE_PATH environment variable
 tlsKeyFilePath: ""
@@ -444,12 +486,15 @@ genesisBootstrap:
   corroborationPeers: 0
 
 # Midnight indexer configuration
-# Indexing is active only in API storage mode. Setting port to 0 disables
-# the Midnight gRPC server while leaving indexing eligible to run.
-# CLI: --midnight-port, --midnight-host
-# Env: DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
+# Indexing requires BOTH enabled: true AND API storage mode; either alone is
+# not enough. Setting port to 0 disables the Midnight gRPC server while
+# leaving indexing eligible to run.
+# CLI: --midnight-enabled, --midnight-port, --midnight-host
+# Env: DINGO_MIDNIGHT_ENABLED, DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
 # Address and policy fields are YAML only.
 midnight:
+  # Enable the Midnight indexer. Default: false.
+  enabled: false
   # gRPC listen port
   port: 50051
   # gRPC listen address
@@ -529,6 +574,11 @@ mithril:
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
   aggregatorUrl: ""
+  # Allow the aggregator URL and snapshot artifact locations to use plain
+  # HTTP instead of HTTPS. Default: false. This is an explicit escape
+  # hatch for local development and tests against a plaintext aggregator;
+  # do not enable it in production.
+  allowInsecureHttp: false
   # Mithril artifact backend: "v2" (default) restores from incremental
   # per-immutable-file archives verified against the certified merkle
   # root; "v1" uses the legacy full snapshot tarballs (being phased
@@ -652,6 +702,15 @@ databaseLifecycle:
   # tlsCertFilePath/tlsKeyFilePath) above -- Dingo refuses to start
   # otherwise, since the DatabaseService's destructive RPCs must not be
   # mounted without a way to authenticate callers.
+  #
+  # Docker image note: the container always runs as a non-root user with a
+  # pinned UID:GID of 1000:1000 (see Dockerfile) and never chowns anything
+  # at startup. /data/db is chowned to 1000:1000 at image build time, so a
+  # snapshotDir left under /data/db works with no extra steps. A
+  # snapshotDir bind-mounted from a separate host directory must be
+  # pre-chowned to 1000:1000 on the host before mounting, or dingo will
+  # fail to start with a clear "not writable" error instead of a raw
+  # filesystem permission error surfacing later during a snapshot attempt.
   # CLI: --db-snapshot-dir
   snapshotDir: ""
   # Optional cloud destination to additionally mirror every snapshot to,
