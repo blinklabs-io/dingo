@@ -1321,6 +1321,14 @@ address bytes, because the pointer payload is not represented in the
 
 ### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
+`GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
+SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
+The coordinated `Database.UtxosByAddress` builds one exact-address pattern per
+input address and applies the same exact-address CBOR filtering as the
+single-address case. This backs the Ouroboros local-state-query `GetUTxOByAddress`
+handler (`ledger.queryShelleyUtxoByAddress`), whose wire request already
+carries a set of addresses.
+
 Live UTxOs for a payment key with assets:
 
 ```sql

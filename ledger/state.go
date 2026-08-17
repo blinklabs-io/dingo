@@ -7522,11 +7522,11 @@ func (ls *LedgerState) UtxosByRefs(
 	return ls.db.UtxosByRefs(refs, nil)
 }
 
-// UtxosByAddress returns all UTxOs that belong to the specified address
+// UtxosByAddress returns all UTxOs that belong to any of the specified addresses
 func (ls *LedgerState) UtxosByAddress(
-	addr ledger.Address,
+	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
-	utxos, err := ls.db.UtxosByAddress(addr, nil)
+	utxos, err := ls.db.UtxosByAddress(addrs, nil)
 	if err != nil {
 		return nil, err
 	}
