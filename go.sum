@@ -73,8 +73,8 @@ github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 h1:TngWCqHvy9oXAN6lEV
 github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5/go.mod h1:lmUJ/7eu/Q8D7ML55dXQrVaamCz2vxCfdQBasLZfHKk=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
-github.com/XSAM/otelsql v0.42.0 h1:Li0xF4eJUxG2e0x3D4rvRlys1f27yJKvjTh7ljkUP5o=
-github.com/XSAM/otelsql v0.42.0/go.mod h1:4mOrEv+cS1KmKzrvTktvJnstr5GtKSAK+QHvFR9OcpI=
+github.com/XSAM/otelsql v0.43.0 h1:ZIhXqRoMhILXQwBQoq/Dl6Taap/KEFQXZrWjYV1L8X8=
+github.com/XSAM/otelsql v0.43.0/go.mod h1:DJBGBvbtwf1OCBYRTjpRFxOqi6ONpdfb+htr4ncRWuw=
 github.com/aws/aws-sdk-go-v2 v1.43.6 h1:RrmFcqCBxkJuf7g1axVo5krB4jM/AO8r5e5oujrgdoQ=
 github.com/aws/aws-sdk-go-v2 v1.43.6/go.mod h1:tXpPM+v0D1lndmga+HqqLDIzUFJlEeR21aspVklHF00=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 h1:3IZY0XAJquT3aHzbkHfPzy4ACPcEjVG0x87KOwtpqGY=
