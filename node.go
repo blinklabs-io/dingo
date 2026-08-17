@@ -715,6 +715,9 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical: n.config.validateHistorical,
 			EnableDijkstra:     enableDijkstra,
 			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			// Parallel block-decode pipeline for the chainsync replay loop
+			// (issue #1894 phase 1). Not consensus-affecting; off by default.
+			BlockPipelineEnabled: n.config.blockPipelineEnabled,
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).

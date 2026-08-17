@@ -148,6 +148,8 @@ mithril:
 
 	expectedPlugins := defaultPluginsConfig()
 	expectedPlugins.Mempool.Config["capacity"] = 2097152
+	expectedPlugins.Mempool.Config["evictionWatermark"] = 0.90
+	expectedPlugins.Mempool.Config["rejectionWatermark"] = 0.95
 	expectedPlugins.API.Utxorpc.Config["port"] = 9940
 	expected := &Config{
 		Plugins:              expectedPlugins,
@@ -734,8 +736,9 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 }
 
 // TestWatermarkDefaultingAndValidation covers the post-merge pipeline
-// for the mempool watermarks: ApplyDefaults fills unset (zero) values
-// and validate rejects out-of-range ones. LoadConfig itself no longer
+// for the mempool watermarks: ApplyDefaults fills unset values while
+// preserving an explicit zero eviction watermark, and validate rejects
+// out-of-range values. LoadConfig itself no longer
 // judges watermark values, so a CLI flag can still override a bad YAML
 // value before validation.
 func TestWatermarkDefaultingAndValidation(t *testing.T) {
@@ -747,13 +750,13 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 		errContain string
 	}{
 		{
-			name:      "defaults when both zero",
+			name:      "defaults rejection when both zero",
 			eviction:  0,
 			rejection: 0,
 			wantErr:   false,
 		},
 		{
-			name:      "default eviction when zero with explicit rejection",
+			name:      "preserves disabled eviction with explicit rejection",
 			eviction:  0,
 			rejection: 0.95,
 			wantErr:   false,
@@ -772,7 +775,13 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 		},
 		{
 			name:      "rejection at exactly 1.0",
-			eviction:  0.90,
+			eviction:  0.5,
+			rejection: 1.0,
+			wantErr:   false,
+		},
+		{
+			name:      "eviction disabled",
+			eviction:  0.0,
 			rejection: 1.0,
 			wantErr:   false,
 		},
@@ -785,7 +794,7 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 		},
 		{
 			name:       "rejection negative",
-			eviction:   0.90,
+			eviction:   0.0,
 			rejection:  -0.5,
 			wantErr:    true,
 			errContain: "invalid plugins.mempool.config.rejectionWatermark",
@@ -866,6 +875,20 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyDefaultsPreservesExplicitEvictionDisable(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.Plugins.Mempool.Config["evictionWatermark"] = 0.0
+	globalConfig.Plugins.Mempool.Config["rejectionWatermark"] = 1.0
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	_, evictionWatermark, rejectionWatermark := cfg.MempoolSettings()
+	assert.Zero(t, evictionWatermark)
+	assert.Equal(t, 1.0, rejectionWatermark)
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
 func TestLoad_DatabaseSection(t *testing.T) {

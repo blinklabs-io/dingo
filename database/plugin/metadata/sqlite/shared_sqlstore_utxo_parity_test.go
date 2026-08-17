@@ -36,7 +36,7 @@ type utxoReadStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 	GetUtxosByAddress(
-		models.UtxoAddressPattern,
+		[]models.UtxoAddressPattern,
 		types.Txn,
 	) ([]models.Utxo, error)
 	GetUtxosByAddressAtSlot(
@@ -70,6 +70,18 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
 	_ = exerciseUtxoReadStore(t, store)
+}
+
+// TestGetUtxosByAddressEmptyPatterns proves an empty patterns slice returns
+// (nil, nil) rather than models.ErrEmptyUtxoAddressPattern, matching the
+// coordinated Database.UtxosByAddress's empty-input handling for the same
+// slice-based API.
+func TestGetUtxosByAddressEmptyPatterns(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+	got, err := store.GetUtxosByAddress(nil, nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
 }
 
 func exerciseUtxoReadStore(t *testing.T, store utxoReadStore) utxoReadState {
@@ -135,7 +147,10 @@ func exerciseUtxoReadStore(t *testing.T, store utxoReadStore) utxoReadState {
 	ret.deleted, err = store.GetUtxosDeletedBeforeSlot(25, 1, nil)
 	require.NoError(t, err)
 	pattern := models.UtxoAddressPattern{PaymentPart: paymentKey}
-	ret.byAddress, err = store.GetUtxosByAddress(pattern, nil)
+	ret.byAddress, err = store.GetUtxosByAddress(
+		[]models.UtxoAddressPattern{pattern},
+		nil,
+	)
 	require.NoError(t, err)
 	ret.byAddressAtSlot, err = store.GetUtxosByAddressAtSlot(
 		pattern,

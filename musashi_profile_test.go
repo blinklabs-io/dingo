@@ -230,3 +230,57 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 		)
 	}
 }
+
+// TestBlockPipelineRejectedOnMusashi proves a node cannot be constructed with
+// the block-decode pipeline (issue #1894 phase 1) enabled against the
+// Musashi prototype network. The vendored pipeline decode stage has no hook
+// for dingo's Leios-extended-header Conway fallback
+// (database/models.DecodeConwayBlock), so a Leios-extended block would fail
+// strict decode and silently stall chain replay -- see configValidate's
+// BlockPipelineEnabled/isMusashiNetwork check.
+func TestBlockPipelineRejectedOnMusashi(t *testing.T) {
+	tests := []struct {
+		name                 string
+		network              string
+		blockPipelineEnabled bool
+		wantErr              string
+	}{
+		{
+			name:                 "musashi with pipeline enabled is rejected",
+			network:              "musashi",
+			blockPipelineEnabled: true,
+			wantErr:              "block pipeline is not supported on the Musashi prototype network",
+		},
+		{
+			name:                 "musashi with pipeline disabled is accepted",
+			network:              "musashi",
+			blockPipelineEnabled: false,
+		},
+		{
+			name:                 "preview with pipeline enabled is accepted",
+			network:              "preview",
+			blockPipelineEnabled: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig(
+				WithPrometheusRegistry(prometheus.NewRegistry()),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+				WithNetwork(tt.network),
+			)
+			cfg.cfg.BlockPipelineEnabled = tt.blockPipelineEnabled
+			n, err := New(cfg)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			// New starts the event bus' background goroutines; Stop releases them.
+			t.Cleanup(func() { _ = n.Stop() })
+		})
+	}
+}

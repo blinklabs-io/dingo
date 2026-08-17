@@ -810,6 +810,9 @@ When `Node.Run()` is called, components are initialized in this order:
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
     verification computes an epoch nonce; only then does LedgerState subscribe
     to chainsync/blockfetch/chain-update EventBus events.
+    Fresh genesis initialization persists both genesis UTxOs and the effective
+    Shelley staking declarations, including network-specific `extraConfig`
+    pools and delegations, before snapshot capture.
 10. Snapshot manager creation, then `LedgerState.SetEpochBoundarySnapshotHook`
     wiring (authoritative epoch-boundary capture), then genesis snapshot capture
     (or reuse of an existing post-Mithril Mark snapshot window), then manager
@@ -863,14 +866,21 @@ Phase 1: Stop accepting new work
   Blockfrost API, Mesh API, off-chain metadata fetcher
 
 Phase 2: Drain and close connections
-  Mempool, ConnectionManager
+  Mempool, terminal EventBus close, ConnectionManager
 
 Phase 3: Flush state and close database
   LedgerState, Database
 
 Phase 4: Cleanup resources
-  Registered shutdown functions, EventBus
+  Registered shutdown functions
 ```
+
+The terminal EventBus close occurs after mempool teardown but before
+`ConnectionManager.Stop`. Lossless event delivery can backpressure a network
+protocol callback on a full ledger subscriber; closing the bus at this point
+releases those publishers before connection shutdown waits for their callback
+goroutines. The node context is already cancelled, and later component
+teardown treats the already-closed bus as idempotent.
 
 ## Event-Driven Communication
 
@@ -967,18 +977,15 @@ All event types follow the `subsystem.snake_case_name` convention.
   `LedgerState.chainsyncMutex` and `chainsyncBlockfetchMutex` count:
   `RecoverAfterLocalRollback` takes the first and nests the second inside it,
   so holding either while publishing is enough to deadlock.
-- The rule is not yet fully enforced in `ledger`. Several helpers reachable
-  from a lock holder still publish `ChainsyncResyncEventType` inline; they are
-  pinned in `knownResyncPublishPathsUnderLock`
-  (`ledger/publish_under_lock_test.go`) and tracked for conversion, which has
-  to happen as one change because a helper flushing on its own return still
-  publishes while a parent frame holds the lock. Read the rule as the target
-  state plus an explicit exception list, not as an invariant already holding
-  everywhere in that package. `ledger`'s `pendingPublishes`
-  (`ledger/pending_publish.go`) is the pattern for this — queue the event under
-  the lock and flush after the unlock, registering the flush with `defer`
-  *before* taking the lock so LIFO order runs it last. The invariant is
-  enforced for `chainsyncMutex` by `TestNoEventBusPublishWhileHoldingChainsyncMutex`
+- `ledger` enforces this rule for both `chainsyncMutex` and
+  `chainsyncBlockfetchMutex`. The chainsync and blockfetch call chains thread
+  a `pendingPublishes` queue through every guarded helper and flush it after
+  the outermost lock is released; a helper must not flush its own queue while
+  a parent still holds either mutex. The invariant is checked by
+  `TestNoEventBusPublishWhileHoldingChainsyncMutex` and
+  `TestChainsyncResyncPublishPathsUnderLock` in
+  `ledger/publish_under_lock_test.go`. Register the flush with `defer`
+  *before* taking the lock so LIFO order runs it last.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into
@@ -1623,6 +1630,13 @@ The experimental N2N Leios protocols (`Config.experimentalLeiosNetworkingEnabled
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. The selected-chain `chain.update` path records an announcement only after its ranking block is adopted; merely observing an eligible ChainSync header cannot make a local vote eligible. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
+
+Restrictive Phase 2 validation runs the CEK machine against an enormous internal
+budget and compares the complete measured cost with the redeemer's declared
+ExUnits afterward. The measured cost includes the accumulated trailing
+slippage batch that the Haskell CEK machine spends on a successful return;
+omitting that batch under-reports script cost and can admit a transaction the
+reference node rejects.
 
 Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest, and `ValidateTxConway` already returned early for them. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
 
@@ -2716,7 +2730,9 @@ The selected pool manages pending transactions:
     | Transaction Management                         |
     |   Validation on add (Phase 1 + Phase 2)        |
     |   Capacity limits (configurable)               |
-    |   FIFO eviction / DAG intake backpressure      |
+    |   Optional FIFO eviction and rejection         |
+    |   Default backpressure at full capacity        |
+    |   TTL expiry of stale pending transactions     |
     |   Automatic purging on chain updates           |
     |                                                |
     | Consumer Tracking                              |
@@ -2915,6 +2931,13 @@ Package layout:
 3. `bootstrap.go` verifies the certificate chain, dispatches on the
    configured backend, and orchestrates the v1 snapshot workflow;
    `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
+
+Bootstrap progress is emitted through one callback even though v2 downloads
+the ancillary ledger state and immutable archives concurrently. Each progress
+event carries its artifact kind and snapshot hash; aggregate immutable events
+also carry completed/total archive counts. Bootstrap logs add the phase,
+artifact, snapshot identity, and archive/destination paths so interleaved
+download and extraction output remains attributable to one operation.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
@@ -3540,7 +3563,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
     DSN is assembled from discrete host/port/user/password/database/sslMode/
     timeZone fields, defaulting any field left unset to that provider's own
     `RegisterProvider` descriptor default (e.g. postgres:
-    `host=localhost user=postgres dbname=postgres sslmode=disable`; mysql:
+    `host=localhost user=postgres dbname=postgres sslmode=require`; mysql:
     `host=localhost user=root database=dingo`) and building the connection
     string the same way `database/plugin/metadata/{postgres,mysql}`'s own
     `Start()` does (mysql via `go-sql-driver/mysql`'s own `Config`/
@@ -3559,6 +3582,37 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   its output row is computed), `epoch_summary` (total active stake, pool
   count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
   rewards — Dingo's full AdaPots).
+
+  **Coverage contract.** A `PASS` means only that every **exact-match** and
+  **derived-match** field below matched. It does not claim parity for fields
+  classified as **intentionally-incomparable** or **unsupported**. The same
+  field-level matrix is emitted in every JSON report, and human-readable
+  status output reports the class counts. `internal/koiosparity/coverage_test.go`
+  requires every field in the consumed Koios response structs to remain
+  classified when those structs change. Account rewards are outside this
+  matrix until #3097 and #3099 are implemented.
+
+  | Koios endpoint | Classification | Fields | Dingo mapping / reason |
+  |---|---|---|---|
+  | `/tip` | derived-match | `epoch_no` | `tip - 1` bounds the safely closed epoch range. |
+  | `/pool_list` | derived-match | `pool_id_bech32` | Decode to pool key hash and compare complete pool membership. |
+  | `/pool_updates` | derived-match | `pool_id_bech32`, `active_epoch_no` | Derive each pool's earliest possible history request. These control fetching, not value parity. |
+  | `/epoch_info` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
+  | `/epoch_info` | derived-match | `active_stake` | Exact lovelace match to `epoch_summary.total_active_stake` at K-1. |
+  | `/epoch_info` | derived-match | `end_time` | Establishes closure and the reference-lag window; not a Dingo value assertion. |
+  | `/epoch_info` | unsupported | `era`, `out_sum`, `fees`, `tx_count`, `blk_count`, `start_time`, `first_block_time`, `last_block_time`, `total_rewards`, `avg_blk_reward` | Dingo has no matching persisted per-epoch aggregate. In particular, raw `fees`/`total_rewards` are not AdaPots balances. |
+  | `/epoch_info` | unsupported | `pool_cnt`, `delegator_cnt` | Documented fields are not returned by Koios preview/preprod and are omitted from the response projection. |
+  | `/totals` | exact-match | `epoch_no`, `treasury`, `reserves`, `fees` | Require the requested epoch and exact equality with K's `reward_ada_pots` boundary balances. |
+  | `/totals` | intentionally-incomparable | `reward` | Koios reports a lagged cumulative accumulator; Dingo stores a per-epoch flow. |
+  | `/totals` | unsupported | `circulation`, `supply`, `deposits_stake`, `deposits_drep`, `deposits_proposal`, `treasury_donation`, `treasury_withdrawal`, `reserves_withdrawal` | No matching persisted Dingo network aggregate. |
+  | `/pool_history` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
+  | `/pool_history` | derived-match | `pool_id_bech32` | Request identity is decoded to Dingo's pool key hash for set membership. |
+  | `/pool_history` | derived-match | `active_stake`, `delegator_cnt` | Exact values against `reward_pool_input` at stake epoch K-1. |
+  | `/pool_history` | derived-match | `block_cnt`, `fixed_cost` | Exact values against `reward_pool_input` at parameter epoch K+1. |
+  | `/pool_history` | derived-match | `margin` | K+1 values compared as equivalent rational numbers. |
+  | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with aggregated `reward_pool_output.member_reward_total` at K-1. |
+  | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
+  | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
 
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
@@ -5711,6 +5765,93 @@ On chain rollback past an epoch boundary:
   inputs (mark snapshot, performance block counts, and the pot's
   treasury/reserves/fees) are frozen at or before the retained pot's slot, so the
   recomputed value is numerically identical
+
+### Block Processing Pipeline (Parallel Decode)
+
+`ledgerReadChainIterator` (`ledger/state.go`) reads raw blocks back from the
+primary chain (`chain.Chain`) and decodes them into
+`gouroboros/ledger.Block` values before handing a batch to
+`ledgerProcessBlocksFromSource` for validation and apply, exactly as
+before. When `LedgerStateConfig.BlockPipelineEnabled` is set (config
+`blockPipelineEnabled` / `DINGO_BLOCK_PIPELINE_ENABLED` /
+`--block-pipeline-enabled`; default off), `LedgerState` owns a
+`github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with 2 decode
+workers and validation disabled (`ValidateWorkers: 0`). Each gathered batch
+of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline up
+front and drained back from `Results()` in submission order — the
+pipeline's apply stage guarantees this ordering regardless of which worker
+decodes first — so decode work for multiple blocks can overlap while
+downstream ledger validation/apply remains fully serial and unchanged. The
+pipeline's own apply stage is a no-op here (`ApplyFunc` is nil): its only
+job in this phase is re-sequencing decoded results, not applying ledger
+state. A single decode failure anywhere in a batch discards the whole
+batch, matching the pre-pipeline behavior of never handing a
+partially-decoded batch downstream.
+
+The pipeline is started in `LedgerState.Start` (before the goroutine that
+is its only submitter) and stopped in `Close` (after that goroutine has
+drained), bounded by `CloseBlockPipelineDrainTimeout`, so its worker
+goroutines never outlive the `LedgerState`. `NewLedgerState` does not even
+construct `blockPipeline` when `ManualBlockProcessing` is set: that mode
+(the immutable-load/replay path, `internal/node/load.go`) feeds
+already-decoded batches directly into `ledgerProcessBlocksFromSource` via
+`ProcessTrustedBlockBatches`, bypassing `ledgerReadChainIterator` (the
+pipeline's only submitter) entirely, so a constructed-but-never-started
+pipeline would otherwise sit as dead weight for the `LedgerState`'s whole
+lifetime.
+
+**The pipeline is a single instance shared across every
+`ledgerProcessBlocks` retry attempt, not recreated per attempt** — retries
+happen whenever `ledgerProcessBlocksFromSource` returns
+`errRestartLedgerPipeline` (e.g. `errStaleChainIterator`, a rollback racing
+the read iterator into staleness — a normal occurrence near the tip, not an
+edge case). `ledgerProcessBlocks` runs each attempt through
+`runLedgerReadChainAttempt`, which launches that attempt's `ledgerReadChain`
+goroutine on a child context, hands the result channel to
+`ledgerProcessBlocksFromSource`, and — critically — **blocks until that
+goroutine has fully exited** before returning control to the retry loop, so
+the next attempt's goroutine (and its `Submit` calls) can never start while
+the previous one might still be running. This wait is load-bearing, not
+incidental: the pipeline's apply stage reorders decoded results purely by a
+single global sequence number with no notion of "whose submission is
+whose", so two attempts' reader goroutines submitting concurrently get each
+other's decoded blocks back from `Results()` — misattributing blocks across
+a restart. Without the wait, `completeReadResult()` (called by
+`ledgerProcessBlocksFromSource` right before it returns the restart error)
+wakes the *retiring* attempt's reader goroutine before the retry loop's
+`cancel()` even runs, and that goroutine could keep gathering and
+submitting blocks to the shared pipeline concurrently with the new
+attempt's own submissions (regression test:
+`TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts` in
+`ledger/read_chain_pipeline_test.go`, which fails reliably with the wait
+removed and passes with it in place). `decodeReadChainBatch` compounds this
+by design: once it starts submitting a batch it always runs the
+submit-and-drain to completion using a background context, not the
+per-attempt one, so a mere retry can never abort a submission partway
+through and leave an orphaned, already-sequenced item for a *later*
+attempt's call to mistakenly drain — only genuine pipeline shutdown
+(`Stop()`, which closes the `Results` channel) can still interrupt it.
+
+**Musashi is incompatible and rejected at startup.** The vendored decode
+stage (`gouroboros/pipeline.DecodeStage`) calls `ledger.NewBlockFromCbor`
+directly and has no hook for dingo's Leios-extended-header Conway fallback
+(`database/models.DecodeConwayBlock`), which blocks on the Musashi
+prototype network require. Enabling the pipeline there would not fail
+loudly: a Leios-extended block would fail strict decode,
+`decodeReadChainBatch` would log and return `ok=false`,
+`ledgerReadChainIterator` would return (closing its result channel), and
+`ledgerProcessBlocksFromSource` treats a closed result channel as a clean,
+non-error exit — so chain replay would silently and permanently stall with
+no diagnostic until a full process restart. `configValidate` (`config.go`)
+refuses `BlockPipelineEnabled` combined with the Musashi network identity
+outright (checked with `Config.isMusashiNetwork()`, the same predicate used
+by the other Musashi-only checks), so this can only be reached by an
+embedder that builds a `LedgerStateConfig` directly and skips validation.
+
+This is phase 1 of issue #1894 (decode parallelism only, no ledger
+validation change). Later phases enable VRF/KES validation workers (via an
+`Eta0Provider` for the epoch nonce), pipeline metrics integration, and
+rollback-aware draining of in-flight blocks before a rollback proceeds.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 

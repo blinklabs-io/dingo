@@ -322,7 +322,7 @@ func TestBackendFactorySelection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ImplementationFIFO, pool.Implementation())
 	_, hasHeadroom := pool.(AdmissionHeadroom)
-	assert.False(t, hasHeadroom)
+	assert.True(t, hasHeadroom)
 	require.NoError(t, pool.Stop(context.Background()))
 
 	config.PromRegistry = prometheus.NewRegistry()

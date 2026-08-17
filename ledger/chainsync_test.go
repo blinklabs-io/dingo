@@ -28,6 +28,15 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
+// handleEventChainsyncBlockHeader preserves the direct helper used by focused
+// tests. Production callers use handleEventChainsyncBlockHeaderWithPending so
+// their outer pending-publish queue is threaded through the whole call chain.
+func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
+	var pending pendingPublishes
+	defer pending.flush()
+	return ls.handleEventChainsyncBlockHeaderWithPending(e, &pending)
+}
+
 func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
 	testCases := []struct {
 		name       string

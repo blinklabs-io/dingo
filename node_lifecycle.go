@@ -548,6 +548,11 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 			FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
 			DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
 			DelegatorInactivity:        n.config.delegatorInactivity,
+			// Same class of bug as the six flags above: operator-configured,
+			// not network-derived, and must mirror Run()'s construction so a
+			// live restore/truncate doesn't silently drop back to serial
+			// decode after being explicitly enabled.
+			BlockPipelineEnabled:       n.config.blockPipelineEnabled,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"log/slog"
 	"testing"
 
@@ -28,14 +29,17 @@ import (
 // lines like "45.3% (8.2 GB / 14.2 GB)" where 8.2/14.2 is 57.7%.
 func TestNewImmutableProgressByteBased(t *testing.T) {
 	var last DownloadProgress
+	var logs bytes.Buffer
 	cfg := BootstrapConfig{
-		Logger:     slog.New(slog.DiscardHandler),
+		Logger:     slog.New(slog.NewTextHandler(&logs, nil)),
 		OnProgress: func(p DownloadProgress) { last = p },
 	}
 	// 4 archives of uneven size summing to 1000 bytes.
 	const totalArchives = 4
 	const totalBytes = 1000
-	onDone := newImmutableProgress(cfg, totalArchives, totalBytes)
+	onDone := newImmutableProgressWithContext(
+		cfg, totalArchives, totalBytes, "", "",
+	)
 
 	// 1 of 4 archives carrying 100 of 1000 bytes: archive-count fraction
 	// is 25%, but the byte fraction is 10%. The reported percent must be
@@ -52,6 +56,7 @@ func TestNewImmutableProgressByteBased(t *testing.T) {
 	onDone(400)
 	assert.Equal(t, int64(1000), last.BytesDownloaded)
 	assert.InDelta(t, 100.0, last.Percent, 0.001)
+	assert.Contains(t, logs.String(), "immutable archives:")
 }
 
 // TestNewImmutableProgressClamp verifies the byte-percent is clamped to 100
@@ -62,7 +67,9 @@ func TestNewImmutableProgressClamp(t *testing.T) {
 		Logger:     slog.New(slog.DiscardHandler),
 		OnProgress: func(p DownloadProgress) { last = p },
 	}
-	onDone := newImmutableProgress(cfg, 2, 300) // estimated total 300
+	onDone := newImmutableProgressWithContext(
+		cfg, 2, 300, "", "",
+	) // estimated total 300
 	onDone(200)
 	onDone(200) // actual 400 > estimated 300
 	assert.LessOrEqual(t, last.Percent, 100.0)
@@ -77,8 +84,27 @@ func TestNewImmutableProgressUnknownTotalFallback(t *testing.T) {
 		Logger:     slog.New(slog.DiscardHandler),
 		OnProgress: func(p DownloadProgress) { last = p },
 	}
-	onDone := newImmutableProgress(cfg, 4, 0) // total unknown
+	onDone := newImmutableProgressWithContext(
+		cfg, 4, 0, "", "",
+	) // total unknown
 	onDone(123)
 	assert.InDelta(t, 25.0, last.Percent, 0.001,
 		"with unknown total, percent falls back to archive count")
+}
+
+func TestWithProgressContext(t *testing.T) {
+	var got DownloadProgress
+	progress := withProgressContext(
+		func(p DownloadProgress) { got = p },
+		"ancillary_ledger_state",
+		"snapshot-hash",
+	)
+	progress(DownloadProgress{
+		BytesDownloaded: 42,
+		TotalBytes:      100,
+	})
+
+	assert.Equal(t, int64(42), got.BytesDownloaded)
+	assert.Equal(t, "ancillary_ledger_state", got.Artifact)
+	assert.Equal(t, "snapshot-hash", got.SnapshotHash)
 }

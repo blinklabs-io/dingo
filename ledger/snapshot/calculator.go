@@ -73,18 +73,38 @@ type StakeInput struct {
 func (c *Calculator) CalculateStakeDistribution(
 	ctx context.Context,
 	slot uint64,
-) (*StakeDistribution, error) {
+) (dist *StakeDistribution, err error) {
 	// Read-only transaction so the entire calculation observes a
 	// consistent database snapshot.
 	txn := c.db.Transaction(false)
-	defer func() { _ = txn.Commit() }()
+	defer func() {
+		if commitErr := txn.Commit(); commitErr != nil {
+			if err != nil {
+				// Calculation failed; join cleanup error for diagnostics.
+				c.logger.Warn(
+					"read-only transaction cleanup failed after calculation error",
+					"cleanup_error", commitErr,
+					"calculation_error", err,
+				)
+				err = errors.Join(err, commitErr)
+			} else {
+				// Calculation succeeded but cleanup failed; surface it.
+				c.logger.Warn(
+					"read-only transaction cleanup failed",
+					"error", commitErr,
+				)
+				err = commitErr
+			}
+		}
+	}()
 
 	// Public historical query path: the CIP-0163 inactivity gate is a
 	// consensus concern applied only by the snapshot manager, which supplies a
 	// nonzero expiryEpoch. This query keeps expiryEpoch == 0 (gate off), and
 	// boundarySlot == 0 so it stays a plain "stake at slot" reconstruction with
 	// no epoch-boundary reward semantics.
-	return c.calculateHistoricalStakeDistributionInTxn(ctx, txn, slot, 0, 0, 0)
+	dist, err = c.calculateHistoricalStakeDistributionInTxn(ctx, txn, slot, 0, 0, 0)
+	return dist, err
 }
 
 // boundaryRewardSlot validates the epoch-boundary reward cut before it reaches

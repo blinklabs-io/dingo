@@ -17,6 +17,7 @@ package database
 import (
 	"bytes"
 	"database/sql"
+	"encoding/binary"
 	"strconv"
 	"testing"
 
@@ -181,7 +182,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		{name: "pointer two", addr: pointerTwo, want: [][]byte{seeded[2].TxId}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := db.UtxosByAddress(tc.addr, nil)
+			got, err := db.UtxosByAddress([]lcommon.Address{tc.addr}, nil)
 			require.NoError(t, err)
 			gotIDs := make([][]byte, len(got))
 			for i := range got {
@@ -190,6 +191,26 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 			assert.ElementsMatch(t, tc.want, gotIDs)
 		})
 	}
+
+	t.Run("multiple addresses", func(t *testing.T) {
+		got, err := db.UtxosByAddress(
+			[]lcommon.Address{enterprise, base},
+			nil,
+		)
+		require.NoError(t, err)
+		gotIDs := make([][]byte, len(got))
+		for i := range got {
+			gotIDs[i] = got[i].TxId
+		}
+		assert.ElementsMatch(
+			t,
+			[][]byte{
+				seeded[1].TxId, seeded[3].TxId, seeded[5].TxId,
+				seeded[4].TxId,
+			},
+			gotIDs,
+		)
+	})
 
 	pattern, err := models.ExactUtxoAddressPattern(enterprise)
 	require.NoError(t, err)
@@ -285,4 +306,200 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	hasEnterpriseTx, err := db.HasTransactionsByAddress(enterprise, nil)
 	require.NoError(t, err)
 	assert.True(t, hasEnterpriseTx)
+}
+
+// TestUtxosByAddressLoadsAssets proves GetUtxosByAddress still attaches
+// native assets to its results after candidate selection was split from
+// asset loading (assets are now loaded once on the deduplicated result set
+// instead of once per chunk -- see GetUtxosByAddress).
+func TestUtxosByAddressLoadsAssets(t *testing.T) {
+	db := openTestDB(t)
+
+	payment := bytes.Repeat([]byte{0x55}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	txHash := bytes.Repeat([]byte{0x99}, 32)
+	policyID := bytes.Repeat([]byte{0x33}, 28)
+	assetName := []byte("asset")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId:       txHash,
+		OutputIdx:  0,
+		PaymentKey: addr.PaymentKeyHash().Bytes(),
+		AddedSlot:  1,
+		Amount:     types.Uint64(1_000_000),
+		Assets: []models.Asset{{
+			Name:        assetName,
+			NameHex:     []byte("6173736574"),
+			PolicyId:    policyID,
+			Fingerprint: []byte("fingerprint"),
+			Amount:      5,
+		}},
+	}))
+
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+	}))
+
+	got, err := db.UtxosByAddress([]lcommon.Address{addr}, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Len(t, got[0].Assets, 1)
+	assert.Equal(t, assetName, got[0].Assets[0].Name)
+	assert.Equal(t, policyID, got[0].Assets[0].PolicyId)
+	assert.Equal(t, types.Uint64(5), got[0].Assets[0].Amount)
+}
+
+// seedManyUtxoAddressesAndAssertRoundTrip builds numAddrs addresses via
+// newAddr, seeds a distinct transaction, UTxO row, and blob CBOR for each,
+// then queries GetUtxosByAddress with the full address set in one call and
+// asserts every address's UTxO comes back exactly once. Shared by the
+// chunking-boundary tests below, which differ only in how the address (and
+// therefore its stored payment/staking key columns, which are NULL when the
+// address's credential hash is the zero hash) is constructed.
+func seedManyUtxoAddressesAndAssertRoundTrip(
+	t *testing.T,
+	numAddrs int,
+	newAddr func(i int) lcommon.Address,
+) {
+	t.Helper()
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	zeroHash := lcommon.NewBlake2b224(nil)
+	addrs := make([]lcommon.Address, numAddrs)
+	txIds := make([][]byte, numAddrs)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		for i := range addrs {
+			addr := newAddr(i)
+			addrs[i] = addr
+
+			txID := uint(i + 1)
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			txIds[i] = txHash
+			amount := uint64(i+1) * 1_000_000
+
+			if _, err := raw.Exec(`
+INSERT INTO "transaction" (
+    id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
+) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
+				txID, txHash, uint64(i+1),
+			); err != nil {
+				return err
+			}
+
+			var paymentKey, stakingKey any
+			if pk := addr.PaymentKeyHash(); pk != zeroHash {
+				paymentKey = pk.Bytes()
+			}
+			if sk := addr.StakeKeyHash(); sk != zeroHash {
+				stakingKey = sk.Bytes()
+			}
+			if _, err := raw.Exec(`
+INSERT INTO utxo (
+    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (?, ?, ?, ?, 0, ?, 0, ?, 0, FALSE)`,
+				txID, txHash, paymentKey, stakingKey, uint64(i+1),
+				strconv.FormatUint(amount, 10),
+			); err != nil {
+				return err
+			}
+
+			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: addr,
+				OutputAmount:  amount,
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	got, err := db.UtxosByAddress(addrs, nil)
+	require.NoError(t, err)
+	require.Len(t, got, numAddrs)
+
+	gotIDs := make([][]byte, len(got))
+	for i := range got {
+		gotIDs[i] = got[i].TxId
+	}
+	assert.ElementsMatch(t, txIds, gotIDs)
+}
+
+// TestUtxosByAddressExceedsSQLiteParameterLimit proves GetUtxosByAddress
+// chunks patterns instead of building one statement that can overflow
+// SQLite's limits as the address count grows: without chunking, this test's
+// address count fails with "SQL logic error: Expression tree is too large
+// (maximum depth 1000)" (a single WHERE built from that many OR-branches),
+// and a larger count fails on the 999 bound-parameter limit instead. Every
+// address's UTxO must still come back exactly once from the chunked query.
+func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
+	seedManyUtxoAddressesAndAssertRoundTrip(
+		t, 2000, func(i int) lcommon.Address {
+			payment := make([]byte, lcommon.AddressHashSize)
+			binary.BigEndian.PutUint32(payment, uint32(i)+1)
+			stake := make([]byte, lcommon.AddressHashSize)
+			binary.BigEndian.PutUint32(stake, uint32(i)+1_000_000)
+			addr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyKey,
+				lcommon.AddressNetworkTestnet,
+				payment,
+				stake,
+			)
+			require.NoError(t, err)
+			return addr
+		},
+	)
+}
+
+// TestUtxosByAddressManyZeroArgBranches covers patterns whose coarse SQL
+// branch carries no bind arguments at all: a Byron address whose payment
+// hash bytes happen to be all-zero decodes with both PaymentKeyHash and
+// StakeKeyHash reading as the zero hash, so AppendUtxoAddressPatternOrBranch
+// falls back to a fixed "(payment_key IS NULL...) AND (staking_key IS
+// NULL...)" branch with zero args (see AppendUtxoAddressOrBranchMode).
+// GetUtxosByAddress's chunking must not rely on bind-argument count alone
+// to decide when to flush a chunk, or a long run of these zero-arg branches
+// would never trigger a flush and would overflow SQLite's OR-expression
+// tree depth. Every address's UTxO must still come back exactly once.
+func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
+	zeroPayment := bytes.Repeat([]byte{0x00}, lcommon.AddressHashSize)
+	zeroHash := lcommon.NewBlake2b224(nil)
+	seedManyUtxoAddressesAndAssertRoundTrip(
+		t, 2000, func(i int) lcommon.Address {
+			payload := make([]byte, 4)
+			binary.BigEndian.PutUint32(payload, uint32(i)+1)
+			addr, err := lcommon.NewByronAddressFromParts(
+				0,
+				zeroPayment,
+				lcommon.ByronAddressAttributes{Payload: payload},
+			)
+			require.NoError(t, err)
+			require.Equal(
+				t, zeroHash, addr.PaymentKeyHash(),
+				"fixture invariant: payment hash must be zero",
+			)
+			require.Equal(
+				t, zeroHash, addr.StakeKeyHash(),
+				"fixture invariant: staking hash must be zero",
+			)
+			return addr
+		},
+	)
 }

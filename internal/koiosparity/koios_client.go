@@ -131,9 +131,10 @@ type KoiosTipResp struct {
 //     actually stores. Verified empirically against a live preview node: for
 //     the same epoch, totals.fees matched Dingo's reward_ada_pots.Fees
 //     exactly while epoch_info.fees did not.
-//   - Similarly, totals.reward ("rewards accumulated as of given epoch", the
-//     AdaPots reward-pot value) is compared against reward_ada_pots.Rewards
-//     independently of epoch_info.total_rewards — see CompareEpochTotals.
+//   - totals.reward ("rewards accumulated as of given epoch") is a lagged
+//     cumulative accumulator, while reward_ada_pots.Rewards is a per-epoch
+//     flow. It is cached but intentionally not compared; see
+//     CompareEpochTotals.
 type KoiosTotalsResp struct {
 	EpochNo uint64 `json:"epoch_no"`
 	// Circulation, Supply, DepositsStake, DepositsDRep, DepositsProposal,
@@ -487,6 +488,14 @@ func (k *KoiosClient) GetEpochInfo(
 	if len(items) == 0 {
 		return nil, fmt.Errorf("koios /epoch_info: no data for epoch %d", epoch)
 	}
+	if len(items) != 1 || items[0].EpochNo != epoch {
+		return nil, fmt.Errorf(
+			"koios /epoch_info: requested epoch %d, got %d row(s) beginning with epoch %d",
+			epoch,
+			len(items),
+			items[0].EpochNo,
+		)
+	}
 	return &items[0], nil
 }
 
@@ -514,6 +523,14 @@ func (k *KoiosClient) GetTotals(
 	}
 	if len(items) == 0 {
 		return nil, fmt.Errorf("koios /totals: no data for epoch %d", epoch)
+	}
+	if len(items) != 1 || items[0].EpochNo != epoch {
+		return nil, fmt.Errorf(
+			"koios /totals: requested epoch %d, got %d row(s) beginning with epoch %d",
+			epoch,
+			len(items),
+			items[0].EpochNo,
+		)
 	}
 	return &items[0], nil
 }
@@ -671,6 +688,15 @@ func (k *KoiosClient) GetPoolEpochHistory(
 	}
 	if len(items) == 0 {
 		return nil, nil
+	}
+	if len(items) != 1 || items[0].EpochNo != epoch {
+		return nil, fmt.Errorf(
+			"koios /pool_history: pool %s requested epoch %d, got %d row(s) beginning with epoch %d",
+			poolBech32,
+			epoch,
+			len(items),
+			items[0].EpochNo,
+		)
 	}
 	return &items[0], nil
 }

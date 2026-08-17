@@ -45,11 +45,40 @@ type DownloadProgress struct {
 	TotalBytes      int64
 	Percent         float64
 	BytesPerSecond  float64
+	// Artifact identifies the artifact whose progress is being reported.
+	// It is populated by the bootstrap orchestration layer so concurrent
+	// downloads can be distinguished by callers consuming one callback.
+	Artifact string
+	// SnapshotHash identifies the Mithril snapshot or Cardano database
+	// artifact that owns the download.
+	SnapshotHash string
+	// ArtifactsCompleted and ArtifactsTotal are populated for aggregate
+	// progress, such as the v2 immutable archive worker pool.
+	ArtifactsCompleted uint64
+	ArtifactsTotal     uint64
 }
 
 // ProgressFunc is a callback invoked periodically during download
 // to report progress.
 type ProgressFunc func(DownloadProgress)
+
+// withProgressContext labels progress emitted by a nested download. A
+// single BootstrapConfig.OnProgress callback is shared by the v2 ancillary
+// and immutable download paths, which may run concurrently.
+func withProgressContext(
+	onProgress ProgressFunc,
+	artifact string,
+	snapshotHash string,
+) ProgressFunc {
+	if onProgress == nil {
+		return nil
+	}
+	return func(p DownloadProgress) {
+		p.Artifact = artifact
+		p.SnapshotHash = snapshotHash
+		onProgress(p)
+	}
+}
 
 const (
 	defaultDownloadIdleTimeout = 2 * time.Minute
@@ -802,7 +831,7 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
-			cfg.Logger.Info(
+			cfg.Logger.Debug(
 				"resuming download",
 				"component", "mithril",
 				"existing_bytes", existingSize,
@@ -846,7 +875,7 @@ func downloadSnapshotOnce(
 				destPath,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download already complete",
 			"component", "mithril",
 			"path", destPath,
@@ -877,7 +906,7 @@ func downloadSnapshotOnce(
 		}
 	}() // safety net for panics/early returns
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
 		"url", cfg.URL,
@@ -934,7 +963,7 @@ func downloadSnapshotOnce(
 		})
 	}
 
-	cfg.Logger.Info(
+	cfg.Logger.Debug(
 		"download complete",
 		"component", "mithril",
 		"bytes", pw.written,
@@ -960,7 +989,7 @@ func downloadSnapshotOnce(
 				fi.Size(), cfg.ExpectedSize,
 			)
 		}
-		cfg.Logger.Info(
+		cfg.Logger.Debug(
 			"download size verified",
 			"component", "mithril",
 			"bytes", fi.Size(),
@@ -995,6 +1024,10 @@ func ExtractArchive(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	logger = logger.With(
+		"archive", archivePath,
+		"destination", destDir,
+	)
 
 	// Create destination directory
 	if err := os.MkdirAll(destDir, 0o750); err != nil {

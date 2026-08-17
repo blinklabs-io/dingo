@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +35,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type captureSlogHandler struct {
+	records []slog.Record
+}
+
+func (h *captureSlogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *captureSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+
+func (h *captureSlogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *captureSlogHandler) WithGroup(string) slog.Handler {
+	return h
+}
 
 func TestDownloadSnapshot(t *testing.T) {
 	content := []byte("fake-snapshot-archive-data-for-testing")
@@ -81,6 +103,46 @@ func TestDownloadSnapshot(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, content, data)
+}
+
+func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
+	content := []byte("snapshot")
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+			_, _ = w.Write(content)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	handler := &captureSlogHandler{}
+	logger := slog.New(handler)
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:               server.URL + "/snapshot.tar.zst",
+		AllowInsecureHTTP: true,
+		DestDir:           t.TempDir(),
+		Filename:          "snapshot.tar.zst",
+		ExpectedSize:      int64(len(content)),
+		Logger:            logger,
+	})
+	require.NoError(t, err)
+
+	for _, message := range []string{
+		"downloading snapshot",
+		"download complete",
+		"download size verified",
+	} {
+		found := false
+		for _, record := range handler.records {
+			if record.Message != message {
+				continue
+			}
+			assert.Equal(t, slog.LevelDebug, record.Level, message)
+			found = true
+			break
+		}
+		require.True(t, found, "missing log record %q", message)
+	}
 }
 
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {

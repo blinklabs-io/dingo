@@ -35,6 +35,12 @@ Dingo stores chain state in two sibling stores:
   `poolMaxOpenConns`, `poolMaxIdleConns`, and `poolConnMaxLifetime`.
 - The blob store is a key/value object store managed by the blob plugins in `database/plugin/blob/`. The always-built plugin is `badger`; `gcs` and `s3` are optional and are built only with the `dingo_extra_plugins` build tag.
 
+The PostgreSQL metadata provider defaults `sslMode` to `require`, so new
+connections negotiate TLS unless an operator explicitly selects another mode
+(for example, `disable` for a loopback-only database). This is an intentional
+security-sensitive default change for existing deployments that omit
+`sslMode`; remote PostgreSQL deployments must support TLS before upgrading.
+
 The providers open their direct database/sql drivers and return the shared
 `database/plugin/metadata/sqlstore.Store`. Schema ownership is explicit:
 versioned DDL lives under `database/plugin/metadata/sqlstore/migrations`,
@@ -1320,6 +1326,14 @@ address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
 ### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
+
+`GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
+SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
+The coordinated `Database.UtxosByAddress` builds one exact-address pattern per
+input address and applies the same exact-address CBOR filtering as the
+single-address case. This backs the Ouroboros local-state-query `GetUTxOByAddress`
+handler (`ledger.queryShelleyUtxoByAddress`), whose wire request already
+carries a set of addresses.
 
 Live UTxOs for a payment key with assets:
 

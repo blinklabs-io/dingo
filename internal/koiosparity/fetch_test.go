@@ -41,12 +41,12 @@ func withTestKoiosBaseURL(t *testing.T, url string) {
 	t.Cleanup(func() { koiosBaseURLs["preview"] = orig })
 }
 
-const validEpochInfoTmpl = `[{"epoch_no":%d,"era":"conway","out_sum":"100","fees":"10",` +
+const validEpochInfoTmpl = `[{"epoch_no":%s,"era":"conway","out_sum":"100","fees":"10",` +
 	`"tx_count":1,"blk_count":1,"start_time":1000,"end_time":2000,` +
 	`"first_block_time":1000,"last_block_time":1999,"active_stake":"12345",` +
 	`"total_rewards":"100","avg_blk_reward":"1"}]`
 
-const validTotalsTmpl = `[{"epoch_no":%d,"treasury":"1","reserves":"1","fees":"1","reward":"1"}]`
+const validTotalsTmpl = `[{"epoch_no":%s,"treasury":"1","reserves":"1","fees":"1","reward":"1"}]`
 
 // TestFetchAbortsOnPermanentEpochInfoError guards against the bug where every
 // Koios client error was wrapped as transient regardless of cause: a
@@ -73,10 +73,10 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 					return
 				}
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, r.URL.Query().Get("_epoch_no"))
 			default:
 				t.Errorf("unexpected request path %s", r.URL.Path)
 				w.WriteHeader(http.StatusNotFound)
@@ -136,10 +136,10 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 					return
 				}
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, r.URL.Query().Get("_epoch_no"))
 			default:
 				t.Errorf("unexpected request path %s", r.URL.Path)
 				w.WriteHeader(http.StatusNotFound)
@@ -198,10 +198,10 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 				_, _ = w.Write([]byte(`[]`))
 			case r.URL.Path == "/epoch_info":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, 0)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, r.URL.Query().Get("_epoch_no"))
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, validTotalsTmpl, 0)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, r.URL.Query().Get("_epoch_no"))
 			case r.URL.Path == "/pool_history":
 				poolHistoryAttempts.Add(1)
 				if r.URL.Query().Get("_pool_bech32") == "pool0" {

@@ -83,8 +83,10 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
-	DefaultEvictionWatermark           = 0.90
-	DefaultRejectionWatermark          = 0.95
+	DefaultBlobPlugin                  = "badger"
+	DefaultMetadataPlugin              = "sqlite"
+	DefaultEvictionWatermark           = 0.0
+	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
@@ -508,6 +510,13 @@ type Config struct {
 	DatabaseWorkers   int `yaml:"databaseWorkers"        envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"      envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
 	BackfillBatchSize int `yaml:"backfillBatchSize"      envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
+	// BlockPipelineEnabled turns on parallel block decode in the chainsync
+	// replay loop that reads blocks back from the primary chain and applies
+	// them to the ledger. Not consensus-affecting -- it only changes how
+	// CBOR decode work is scheduled, not validation or apply behavior -- but
+	// defaults off until throughput and stability are proven (issue #1894
+	// phase 1). See ARCHITECTURE.md ("Block Processing Pipeline").
+	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"   envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
@@ -1351,11 +1360,13 @@ func (c *Config) ApplyDefaults() {
 			c.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 		}
 	}
-	// Unset float64 fields are 0, which is indistinguishable from an
-	// explicit 0; both select the standard watermark
-	if pluginFloat64(c.Plugins.Mempool.Config["evictionWatermark"]) == 0 {
+	// The presence of evictionWatermark distinguishes an explicit zero (which
+	// disables FIFO eviction) from an unset value.
+	if _, ok := c.Plugins.Mempool.Config["evictionWatermark"]; !ok {
 		c.Plugins.Mempool.Config["evictionWatermark"] = DefaultEvictionWatermark
 	}
+	// Zero is not a valid rejection watermark, so retain the historical
+	// zero-as-unset behavior for this field.
 	if pluginFloat64(c.Plugins.Mempool.Config["rejectionWatermark"]) == 0 {
 		c.Plugins.Mempool.Config["rejectionWatermark"] = DefaultRejectionWatermark
 	}
