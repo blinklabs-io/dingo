@@ -23,72 +23,26 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// buildDecodableConwayBlockBytes constructs a minimal, valid (10-field
-// header) Conway block with a correct block body hash, distinguished by slot
-// and block number. Mirrors database/models' buildStandardConwayBlock.
-func buildDecodableConwayBlockBytes(
-	t *testing.T,
-	slot, blockNumber uint64,
-) []byte {
-	t.Helper()
-	block := &conway.ConwayBlock{
-		BlockHeader: &conway.ConwayBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: blockNumber,
-					Slot:        slot,
-					VrfKey:      make([]byte, 32),
-					VrfResult: lcommon.VrfResult{
-						Output: make([]byte, 32),
-						Proof:  make([]byte, 80),
-					},
-					OpCert: babbage.BabbageOpCert{
-						HotVkey:   make([]byte, 32),
-						Signature: make([]byte, 64),
-					},
-					ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
-				},
-				Signature: make([]byte, 448),
-			},
-		},
-	}
-	tmp, err := cbor.Encode(block)
-	require.NoError(t, err)
-	var comps []cbor.RawMessage
-	_, err = cbor.Decode(tmp, &comps)
-	require.NoError(t, err)
-	require.Len(t, comps, 5)
-	var concat []byte
-	for i := 1; i < 5; i++ {
-		h := lcommon.Blake2b256Hash(comps[i])
-		concat = append(concat, h.Bytes()...)
-	}
-	block.BlockHeader.Body.BlockBodyHash = lcommon.Blake2b256Hash(concat)
-	raw, err := cbor.Encode(block)
-	require.NoError(t, err)
-	return raw
-}
-
 // buildDecodableTestBlock returns a models.Block wrapping a real, decodable
 // Conway block at the given slot/block number, along with its canonical
-// point.
+// point. The block bytes themselves come from the shared
+// testutil.BuildDecodableConwayBlockBytes helper (also used by
+// database/models' buildStandardConwayBlock) so this construction isn't
+// duplicated across packages.
 func buildDecodableTestBlock(
 	t *testing.T,
 	slot, blockNumber uint64,
 ) (models.Block, ocommon.Point) {
 	t.Helper()
-	raw := buildDecodableConwayBlockBytes(t, slot, blockNumber)
+	raw := testutil.BuildDecodableConwayBlockBytes(t, slot, blockNumber)
 	decoded, err := gledger.NewBlockFromCbor(gledger.BlockTypeConway, raw)
 	require.NoError(t, err)
 	hash := decoded.Hash().Bytes()
@@ -373,4 +327,210 @@ func TestBlockPipelineLifecycleNoGoroutineLeak(t *testing.T) {
 		after,
 		iterations,
 	)
+}
+
+// buildTaggedRawBlocks returns count individually-valid, decodable Conway
+// models.Block values with distinct slots starting at baseSlot, so a caller
+// can tell which batch a decoded result came from purely from its
+// SlotNumber().
+func buildTaggedRawBlocks(
+	t *testing.T,
+	baseSlot uint64,
+	count int,
+) []models.Block {
+	t.Helper()
+	blocks := make([]models.Block, 0, count)
+	for i := range count {
+		block, _ := buildDecodableTestBlock(
+			t,
+			baseSlot+uint64(i), //nolint:gosec
+			uint64(i+1),        //nolint:gosec
+		)
+		blocks = append(blocks, block)
+	}
+	return blocks
+}
+
+// TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts is a regression
+// test for a confirmed cross-attempt race in the block-decode pipeline
+// (blinklabs-io/dingo#3178 review, human reviewer arepala-uml): the retry
+// loop in ledgerProcessBlocks -- exercised here through
+// runLedgerReadChainAttempt, the exact goroutine-lifecycle primitive that
+// loop uses -- previously started a new attempt's reader goroutine without
+// waiting for the previous attempt's reader goroutine to fully exit. Since
+// every attempt submits to and drains from the SAME shared,
+// whole-LedgerState-lifetime blockPipeline, and the pipeline's apply stage
+// reorders decoded results purely by a global sequence number with no
+// notion of "whose submission is whose", two attempts' reader goroutines
+// submitting concurrently can -- and, per the reviewer's own stress test,
+// reliably do -- get each other's decoded blocks back from Results().
+//
+// This reproduces the exact race the reviewer identified: a restart racing
+// a rollback wakes the OLD attempt's reader goroutine (via
+// completeReadResult(), in ledgerProcessBlocksFromSource) before the retry
+// loop's cancel() takes effect, and that goroutine's gather loop had no
+// cancellation check, so it could keep submitting more blocks to the shared
+// pipeline. Attempt 1's fake reader below reproduces this directly: after
+// delivering its first (legitimate) batch and being told to restart, it
+// submits a second, disjoint "straggler" batch using a background context
+// (bypassing any cancellation check entirely, exactly like the pre-fix
+// gather loop). Attempt 2's fake reader submits its own, disjoint,
+// uniquely-identifiable batch. Every block is tagged with a distinct slot
+// range (attempt1 / straggler / attempt2), so any cross-attempt
+// misattribution shows up directly as an out-of-range slot in attempt 2's
+// own result.
+//
+// With the fix, runLedgerReadChainAttempt does not return from attempt 1
+// until its reader goroutine (including the straggler submission) has fully
+// exited, so attempt 2 can never start submitting while attempt 1's
+// straggler submission is still in flight -- this is deterministic, not
+// probabilistic, given the fix. The iteration count and batch sizes here
+// exist for the *pre-fix* validation described in the fix's PR: with
+// runLedgerReadChainAttempt's final wait removed, these two attempts' reader
+// goroutines really do run concurrently, and this loop reproduces
+// misattribution reliably (matching the reviewer's own 200-iteration stress
+// test methodology) rather than depending on a single lucky (or unlucky)
+// scheduling outcome.
+func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
+	const iterations = 25
+	const attempt1Base, attempt1Size = 100_000, 150
+	const stragglerBase, stragglerSize = 200_000, 300
+	const attempt2Base, attempt2Size = 300_000, 150
+
+	attempt1Blocks := buildTaggedRawBlocks(t, attempt1Base, attempt1Size)
+	stragglerBlocks := buildTaggedRawBlocks(t, stragglerBase, stragglerSize)
+	attempt2Blocks := buildTaggedRawBlocks(t, attempt2Base, attempt2Size)
+
+	inRange := func(slot, base uint64, count int) bool {
+		return slot >= base && slot < base+uint64(count) //nolint:gosec
+	}
+
+	for iter := range iterations {
+		ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithDecodeWorkers(2),
+		)
+		require.NoError(t, ls.blockPipeline.Start(t.Context()))
+
+		// reader1 mimics ledgerReadChain for a first attempt that gets
+		// told to restart, then -- like the pre-fix gather loop -- keeps
+		// submitting to the shared pipeline regardless.
+		reader1 := func(ctx context.Context, resultCh chan readChainResult) {
+			defer close(resultCh)
+			decoded, ok := ls.decodeReadChainBatch(ctx, attempt1Blocks)
+			if !ok {
+				return
+			}
+			done := make(chan struct{})
+			select {
+			case resultCh <- readChainResult{blocks: decoded, done: done}:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return
+			}
+			// Simulate the race this fix closes: submit a further batch
+			// using a background context, exactly like a gather loop with
+			// no cancellation check would after being woken by
+			// completeReadResult(), regardless of ctx's state.
+			_, _ = ls.decodeReadChainBatch(
+				context.Background(),
+				stragglerBlocks,
+			)
+		}
+		processFromSource1 := func(
+			_ context.Context,
+			resultCh <-chan readChainResult,
+		) error {
+			result, ok := <-resultCh
+			require.True(t, ok, "attempt 1 result channel closed early")
+			for _, block := range result.blocks {
+				require.True(
+					t,
+					inRange(block.SlotNumber(), attempt1Base, attempt1Size),
+					"iteration %d: attempt 1 delivered an unexpected "+
+						"block at slot %d",
+					iter,
+					block.SlotNumber(),
+				)
+			}
+			if result.done != nil {
+				close(result.done)
+			}
+			// Simulates errStaleChainIterator/errRestartLedgerPipeline
+			// triggering a retry.
+			return errRestartLedgerPipeline
+		}
+
+		err := ls.runLedgerReadChainAttempt(
+			t.Context(),
+			reader1,
+			processFromSource1,
+		)
+		require.ErrorIs(t, err, errRestartLedgerPipeline)
+
+		var attempt2Decoded []gledger.Block
+		reader2 := func(ctx context.Context, resultCh chan readChainResult) {
+			defer close(resultCh)
+			decoded, ok := ls.decodeReadChainBatch(ctx, attempt2Blocks)
+			if !ok {
+				return
+			}
+			done := make(chan struct{})
+			select {
+			case resultCh <- readChainResult{blocks: decoded, done: done}:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+			}
+		}
+		processFromSource2 := func(
+			_ context.Context,
+			resultCh <-chan readChainResult,
+		) error {
+			result, ok := <-resultCh
+			require.True(t, ok, "attempt 2 result channel closed early")
+			attempt2Decoded = result.blocks
+			if result.done != nil {
+				close(result.done)
+			}
+			return nil
+		}
+
+		err = ls.runLedgerReadChainAttempt(
+			t.Context(),
+			reader2,
+			processFromSource2,
+		)
+		require.NoError(t, err)
+
+		require.Len(
+			t,
+			attempt2Decoded,
+			attempt2Size,
+			"iteration %d: attempt 2's decoded batch length changed -- "+
+				"contamination altered its size",
+			iter,
+		)
+		for _, block := range attempt2Decoded {
+			assert.True(
+				t,
+				inRange(block.SlotNumber(), attempt2Base, attempt2Size),
+				"iteration %d: attempt 2 received a block at slot %d "+
+					"that does not belong to its own batch -- "+
+					"cross-attempt contamination from the shared "+
+					"block-decode pipeline",
+				iter,
+				block.SlotNumber(),
+			)
+		}
+
+		require.NoError(t, ls.blockPipeline.Stop())
+	}
 }

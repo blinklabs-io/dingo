@@ -5632,13 +5632,46 @@ partially-decoded batch downstream.
 The pipeline is started in `LedgerState.Start` (before the goroutine that
 is its only submitter) and stopped in `Close` (after that goroutine has
 drained), bounded by `CloseBlockPipelineDrainTimeout`, so its worker
-goroutines never outlive the `LedgerState`. `Start` skips starting the
-pipeline entirely when `ManualBlockProcessing` is set: that mode (the
-immutable-load/replay path, `internal/node/load.go`) feeds already-decoded
-batches directly into `ledgerProcessBlocksFromSource` via
+goroutines never outlive the `LedgerState`. `NewLedgerState` does not even
+construct `blockPipeline` when `ManualBlockProcessing` is set: that mode
+(the immutable-load/replay path, `internal/node/load.go`) feeds
+already-decoded batches directly into `ledgerProcessBlocksFromSource` via
 `ProcessTrustedBlockBatches`, bypassing `ledgerReadChainIterator` (the
-pipeline's only submitter) entirely, so the pipeline would otherwise sit
-idle with its workers running for no reason until `Close`.
+pipeline's only submitter) entirely, so a constructed-but-never-started
+pipeline would otherwise sit as dead weight for the `LedgerState`'s whole
+lifetime.
+
+**The pipeline is a single instance shared across every
+`ledgerProcessBlocks` retry attempt, not recreated per attempt** — retries
+happen whenever `ledgerProcessBlocksFromSource` returns
+`errRestartLedgerPipeline` (e.g. `errStaleChainIterator`, a rollback racing
+the read iterator into staleness — a normal occurrence near the tip, not an
+edge case). `ledgerProcessBlocks` runs each attempt through
+`runLedgerReadChainAttempt`, which launches that attempt's `ledgerReadChain`
+goroutine on a child context, hands the result channel to
+`ledgerProcessBlocksFromSource`, and — critically — **blocks until that
+goroutine has fully exited** before returning control to the retry loop, so
+the next attempt's goroutine (and its `Submit` calls) can never start while
+the previous one might still be running. This wait is load-bearing, not
+incidental: the pipeline's apply stage reorders decoded results purely by a
+single global sequence number with no notion of "whose submission is
+whose", so two attempts' reader goroutines submitting concurrently get each
+other's decoded blocks back from `Results()` — misattributing blocks across
+a restart. Without the wait, `completeReadResult()` (called by
+`ledgerProcessBlocksFromSource` right before it returns the restart error)
+wakes the *retiring* attempt's reader goroutine before the retry loop's
+`cancel()` even runs, and that goroutine could keep gathering and
+submitting blocks to the shared pipeline concurrently with the new
+attempt's own submissions (regression test:
+`TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts` in
+`ledger/read_chain_pipeline_test.go`, which fails reliably with the wait
+removed and passes with it in place). `decodeReadChainBatch` compounds this
+by design: once it starts submitting a batch it always runs the
+submit-and-drain to completion using a background context, not the
+per-attempt one, so a mere retry can never abort a submission partway
+through and leave an orphaned, already-sequenced item for a *later*
+attempt's call to mistakenly drain — only genuine pipeline shutdown
+(`Stop()`, which closes the `Results` channel) can still interrupt it.
 
 **Musashi is incompatible and rejected at startup.** The vendored decode
 stage (`gouroboros/pipeline.DecodeStage`) calls `ledger.NewBlockFromCbor`

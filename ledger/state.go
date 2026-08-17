@@ -749,13 +749,20 @@ type LedgerState struct {
 	// rewardPrecomputeWG already do for the others.
 	processBlocksWG sync.WaitGroup
 
-	// blockPipeline, when non-nil (LedgerStateConfig.BlockPipelineEnabled),
-	// decodes blocks read back from the primary chain in parallel during
+	// blockPipeline, when non-nil (LedgerStateConfig.BlockPipelineEnabled
+	// and not ManualBlockProcessing -- see NewLedgerState), decodes blocks
+	// read back from the primary chain in parallel during
 	// ledgerReadChainIterator. It is started in Start (before
 	// processBlocksWG's goroutine, which is its only submitter) and stopped
 	// in Close (after that goroutine has drained), so its own worker
 	// goroutines never outlive the LedgerState. Nil means decode stays
 	// fully serial, matching pre-pipeline behavior exactly.
+	//
+	// It is a single instance shared across every ledgerProcessBlocks retry
+	// attempt (see errRestartLedgerPipeline), not recreated per attempt.
+	// ledgerProcessBlocks's retry loop is responsible for making sure only
+	// one attempt's reader goroutine ever submits to it at a time -- see the
+	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
 
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
@@ -894,7 +901,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
 	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	if cfg.BlockPipelineEnabled {
+	// ManualBlockProcessing feeds already-decoded batches directly into
+	// ledgerProcessBlocksFromSource via ProcessTrustedBlockBatches,
+	// bypassing ledgerReadChainIterator (the pipeline's only submitter)
+	// altogether, so no pipeline is constructed for that mode -- leaving
+	// blockPipeline non-nil but permanently unstarted otherwise.
+	if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing {
 		// Validation stays disabled (ValidateWorkers defaults to 0) for
 		// phase 1: only decode is parallelized. ApplyFunc is left nil --
 		// actual ledger apply continues to happen downstream in
@@ -1176,13 +1188,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// ledgerProcessBlocks). Close stops it explicitly after that goroutine
 	// drains -- like processBlocksCancel, this does not rely on ctx itself
 	// being cancelled, since ctx is the node's long-lived context that a
-	// live database restore/truncate never cancels. Skipped entirely under
-	// ManualBlockProcessing: that mode feeds already-decoded batches
-	// directly into ledgerProcessBlocksFromSource via
-	// ProcessTrustedBlockBatches, bypassing ledgerReadChainIterator (the
-	// pipeline's only submitter) altogether, so starting it here would just
-	// leave its workers idle until Close.
-	if ls.blockPipeline != nil && !ls.config.ManualBlockProcessing {
+	// live database restore/truncate never cancels. blockPipeline is nil
+	// under ManualBlockProcessing (see NewLedgerState), so this is a plain
+	// nil check rather than also re-checking that mode here.
+	if ls.blockPipeline != nil {
 		if err := ls.blockPipeline.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start block-decode pipeline: %w", err)
 		}
@@ -3136,6 +3145,17 @@ func (ls *LedgerState) ledgerReadChainIterator(
 		var rollbackNext *chain.ChainIteratorResult
 		// Gather up next batch of raw blocks
 		for {
+			// Check cancellation on every iteration, not just once per
+			// outer batch: without this, a restart racing this goroutine
+			// (see ledgerProcessBlocks's doc comment on why it waits for
+			// this goroutine to fully exit) could keep gathering and
+			// submitting up to a full extra batch to the shared
+			// blockPipeline after cancellation before ever noticing.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			if cachedNext != nil {
 				next = cachedNext
 				cachedNext = nil
@@ -3145,7 +3165,8 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				if err != nil {
 					if !errors.Is(err, chain.ErrIteratorChainTip) {
 						ls.config.Logger.Error(
-							"failed to get next block from chain iterator: " + err.Error(),
+							"failed to get next block from chain iterator",
+							"error", err,
 						)
 						return
 					}
@@ -3227,6 +3248,21 @@ func (ls *LedgerState) ledgerReadChainIterator(
 // handing a partially-decoded batch downstream; the caller should return
 // immediately in that case. All errors are logged here so callers don't need
 // to log again.
+//
+// Once a pipeline submission has started, it always runs to completion --
+// submit-and-drain is all-or-nothing, using a background context for the
+// Submit calls and the results drain regardless of ctx. ctx is only checked
+// up front, before anything has been submitted. blockPipeline is a single
+// instance shared across every ledgerProcessBlocks retry attempt (see that
+// method's doc comment): its apply stage reorders decoded results by a
+// single global sequence number with no notion of "whose submission is
+// whose", so a submission that aborted partway through ctx cancellation
+// would leave already-sequenced, already-submitted items in that shared
+// state for a *later* attempt's own call here to mistakenly drain --
+// misattributing decoded blocks across a restart. Bailing out only before
+// the first Submit call is safe because nothing has been submitted yet;
+// once started, only genuine pipeline shutdown (Stop(), which closes the
+// Results channel) can still interrupt the drain.
 func (ls *LedgerState) decodeReadChainBatch(
 	ctx context.Context,
 	rawBatch []models.Block,
@@ -3240,7 +3276,8 @@ func (ls *LedgerState) decodeReadChainBatch(
 			block, err := raw.Decode()
 			if err != nil {
 				ls.config.Logger.Error(
-					"failed to decode block: " + err.Error(),
+					"failed to decode block",
+					"error", err,
 				)
 				return nil, false
 			}
@@ -3248,14 +3285,26 @@ func (ls *LedgerState) decodeReadChainBatch(
 		}
 		return decoded, true
 	}
+	select {
+	case <-ctx.Done():
+		return nil, false
+	default:
+	}
+	// submitCtx is deliberately not ctx (attemptCtx) -- see the doc comment
+	// above.
+	submitCtx := context.Background()
 	for _, raw := range rawBatch {
 		tip := ocommon.Tip{
 			Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
 			BlockNumber: raw.Number,
 		}
-		if err := ls.blockPipeline.Submit(ctx, raw.Type, raw.Cbor, tip); err != nil {
+		//nolint:contextcheck // deliberately not derived from ctx; see the
+		// doc comment above -- a submission must run to completion once
+		// started, not abort partway through a mere per-attempt cancel.
+		if err := ls.blockPipeline.Submit(submitCtx, raw.Type, raw.Cbor, tip); err != nil {
 			ls.config.Logger.Error(
-				"failed to submit block to decode pipeline: " + err.Error(),
+				"failed to submit block to decode pipeline",
+				"error", err,
 			)
 			return nil, false
 		}
@@ -3263,24 +3312,21 @@ func (ls *LedgerState) decodeReadChainBatch(
 	results := ls.blockPipeline.Results()
 	decoded = make([]ledger.Block, 0, len(rawBatch))
 	for range rawBatch {
-		select {
-		case item, chOk := <-results:
-			if !chOk {
-				ls.config.Logger.Error(
-					"decode pipeline results channel closed unexpectedly",
-				)
-				return nil, false
-			}
-			if decodeErr := item.DecodeError(); decodeErr != nil {
-				ls.config.Logger.Error(
-					"failed to decode block: " + decodeErr.Error(),
-				)
-				return nil, false
-			}
-			decoded = append(decoded, item.Block())
-		case <-ctx.Done():
+		item, chOk := <-results
+		if !chOk {
+			ls.config.Logger.Error(
+				"decode pipeline results channel closed unexpectedly",
+			)
 			return nil, false
 		}
+		if decodeErr := item.DecodeError(); decodeErr != nil {
+			ls.config.Logger.Error(
+				"failed to decode block",
+				"error", decodeErr,
+			)
+			return nil, false
+		}
+		decoded = append(decoded, item.Block())
 	}
 	return decoded, true
 }
@@ -3301,6 +3347,63 @@ const (
 	noProgressBackoffMax  = 2 * time.Second
 )
 
+// runLedgerReadChainAttempt runs one read+process attempt: it launches
+// readChain on a fresh child context of ctx, hands the result channel to
+// processFromSource, and -- regardless of how processFromSource finishes --
+// cancels that child context and waits for readChain to have fully returned
+// before returning processFromSource's error to the caller.
+//
+// Every attempt's readChain goroutine is the only submitter to the shared,
+// whole-LedgerState-lifetime blockPipeline (see its doc comment on the
+// struct). A caller that loops on this method to retry (ledgerProcessBlocks)
+// MUST NOT start a new attempt until the previous call has returned: the
+// pipeline's apply stage reorders decoded results strictly by a single global
+// sequence counter, with no notion of "whose submission is whose", so two
+// attempts' readChain goroutines submitting concurrently can and do get each
+// other's decoded blocks back from Results() (misattributing blocks across a
+// restart -- verified by a targeted regression test; see
+// TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts). This method's
+// wait for readChainDone is what gives callers that guarantee: it does not
+// return until the retiring attempt's goroutine can no longer touch the
+// pipeline, so the next call's own goroutine (and its Submit calls) never
+// overlaps with it.
+//
+// This matters because a restart racing a rollback (the errStaleChainIterator
+// path in tryRecoverFromTxValidationError, which wakes the old reader
+// goroutine via completeReadResult() before this method's cancel() even
+// runs) could otherwise let the old goroutine's gather loop keep pulling and
+// submitting blocks to the pipeline concurrently with the new attempt's own
+// submissions. Waiting for readChainDone closes that window: cancel() (which
+// cascades to the chain iterator's own context, promptly unblocking any
+// in-flight blocking Next() call -- see chain.ChainIterator's cancel
+// watcher) is guaranteed to have taken full effect on the retiring goroutine
+// before the next attempt's goroutine -- and its own Submit calls -- ever
+// starts.
+func (ls *LedgerState) runLedgerReadChainAttempt(
+	ctx context.Context,
+	readChain func(context.Context, chan readChainResult),
+	processFromSource func(context.Context, <-chan readChainResult) error,
+) error {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	readChainResultCh := make(chan readChainResult)
+	readChainDone := make(chan struct{})
+	go func() {
+		defer close(readChainDone)
+		readChain(attemptCtx, readChainResultCh)
+	}()
+	err := processFromSource(attemptCtx, readChainResultCh)
+	cancel()
+	// Block until the retiring attempt's reader goroutine has fully
+	// exited -- see the doc comment above for why this must happen before
+	// any later attempt's goroutine is started.
+	<-readChainDone
+	return err
+}
+
+// ledgerProcessBlocks drives ledgerProcessBlocksFromSource against a fresh
+// chain-reader goroutine on each attempt (via runLedgerReadChainAttempt),
+// restarting whenever that attempt returns a recoverable error (see
+// errRestartLedgerPipeline/errStaleChainIterator in replay_recovery.go).
 func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 	var (
 		consecutiveNoProgress int
@@ -3309,14 +3412,11 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		lastTipHash           []byte
 	)
 	for {
-		attemptCtx, cancel := context.WithCancel(ctx)
-		readChainResultCh := make(chan readChainResult)
-		go ls.ledgerReadChain(attemptCtx, readChainResultCh)
-		err := ls.ledgerProcessBlocksFromSource(
-			attemptCtx,
-			readChainResultCh,
+		err := ls.runLedgerReadChainAttempt(
+			ctx,
+			ls.ledgerReadChain,
+			ls.ledgerProcessBlocksFromSource,
 		)
-		cancel()
 		if err == nil || ctx.Err() != nil {
 			return
 		}
