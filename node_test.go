@@ -352,6 +352,51 @@ func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
 	require.Equal(t, firstErr, secondErr)
 }
 
+func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
+	const eventType event.EventType = "test.shutdown.order"
+
+	bus := event.NewEventBus(nil, nil)
+	_, _ = bus.SubscribeWithBuffer(eventType, 1)
+	bus.Publish(eventType, event.NewEvent(eventType, "fill"))
+
+	publishDone := make(chan struct{})
+	go func() {
+		defer close(publishDone)
+		bus.Publish(eventType, event.NewEvent(eventType, "blocked"))
+	}()
+	testutil.RequireNoReceive(
+		t,
+		publishDone,
+		50*time.Millisecond,
+		"event publisher should be backpressured before shutdown",
+	)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		eventBus: bus,
+		shutdownFuncs: []func(context.Context) error{
+			func(context.Context) error {
+				select {
+				case <-publishDone:
+					return nil
+				case <-time.After(time.Second):
+					return errors.New("event bus was not closed before final cleanup")
+				}
+			},
+		},
+	}
+
+	require.NoError(t, n.Stop())
+	testutil.RequireReceive(
+		t,
+		publishDone,
+		time.Second,
+		"backpressured publisher did not exit after node shutdown",
+	)
+}
+
 func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 	n := &Node{
 		config: Config{

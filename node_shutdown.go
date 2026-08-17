@@ -227,6 +227,20 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	// Close the EventBus before draining network connections. Since v0.68,
+	// event delivery applies backpressure instead of dropping events. A
+	// chainsync callback can therefore be blocked waiting for a full ledger
+	// subscriber while ConnectionManager.Stop waits for that callback to
+	// finish. Closing the terminal bus here releases those blocked publishers
+	// before connection teardown begins. The node context is already cancelled
+	// and mempool has stopped, so no component should produce useful work after
+	// this point; later component teardown treats an already-closed bus as
+	// harmless and idempotent.
+	if n.eventBus != nil {
+		n.config.logger.Info("closing event bus before connection drain")
+		n.eventBus.Close()
+	}
+
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
 			err = errors.Join(
@@ -321,12 +335,6 @@ func (n *Node) shutdown() error {
 		}
 	}
 	n.shutdownFuncs = nil
-
-	if n.eventBus != nil {
-		// Close (not Stop): this is a terminal shutdown, and Stop restarts the
-		// async-worker pool, leaking those goroutines past node teardown.
-		n.eventBus.Close()
-	}
 
 	n.config.logger.Info(
 		"graceful shutdown complete",
