@@ -68,7 +68,7 @@ func TestCheckResultErrNilResult(t *testing.T) {
 // all) and an empty-but-non-nil map must both resolve to that same working
 // default DSN.
 func TestDsnFromMetadataConfigPostgresProviderOnly(t *testing.T) {
-	want := "host=localhost user=postgres password= dbname=postgres port=5432 sslmode=disable TimeZone=UTC"
+	want := "host=localhost user=postgres password= dbname=postgres port=5432 sslmode=require TimeZone=UTC"
 
 	require.Equal(t, want, dsnFromMetadataConfig("postgres", nil))
 	require.Equal(t, want, dsnFromMetadataConfig("postgres", map[string]any{}))
@@ -84,7 +84,7 @@ func TestDsnFromMetadataConfigPostgresPartialOverride(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		"host=db.example.com user=postgres password= dbname=postgres port=5432 sslmode=disable TimeZone=UTC",
+		"host=db.example.com user=postgres password= dbname=postgres port=5432 sslmode=require TimeZone=UTC",
 		dsn,
 	)
 }
