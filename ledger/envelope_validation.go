@@ -38,6 +38,25 @@ type envelopeParent struct {
 	byronEbb    bool
 }
 
+// envelopeParentFromTip reconstructs the envelope metadata for a persisted
+// chain tip. A Tip contains only the point and block number, so callers must
+// provide the stored block type to preserve the Byron EBB exception across
+// ledger-processing batches.
+func envelopeParentFromTip(
+	slot uint64,
+	blockNumber uint64,
+	hash []byte,
+	blockType uint,
+) envelopeParent {
+	origin := len(hash) == 0
+	return envelopeParent{
+		slot:        slot,
+		blockNumber: blockNumber,
+		origin:      origin,
+		byronEbb:    !origin && blockType == uint(gledger.BlockTypeByronEbb),
+	}
+}
+
 func envelopeParentFromBlock(block gledger.Block) envelopeParent {
 	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
 	return envelopeParent{

@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -260,6 +261,28 @@ func TestValidateBlockOrderAllowsByronMainBlockAfterEbb(t *testing.T) {
 		byronEbb:    true,
 	}
 
+	require.NoError(t, validateBlockOrder(block, parent))
+}
+
+// TestEnvelopeParentFromTipPreservesByronEbb verifies that reconstructing a
+// parent from persisted tip metadata keeps the same-slot Byron main-block
+// exception after the EBB has already been committed.
+func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
+	parent := envelopeParentFromTip(
+		byron.ByronSlotsPerEpoch,
+		5,
+		[]byte{1},
+		uint(gledger.BlockTypeByronEbb),
+	)
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   byron.ByronSlotsPerEpoch,
+			number: 6,
+			era:    byron.EraByron,
+		},
+	}
+
+	require.True(t, parent.byronEbb)
 	require.NoError(t, validateBlockOrder(block, parent))
 }
 

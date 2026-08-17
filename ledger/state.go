@@ -4197,11 +4197,28 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
 			if !parentEnvelopeSet {
-				parentEnvelope = envelopeParent{
-					slot:        snapshotTip.Point.Slot,
-					blockNumber: snapshotTip.BlockNumber,
-					origin:      len(snapshotTip.Point.Hash) == 0,
+				var parentBlockType uint
+				if len(snapshotTip.Point.Hash) > 0 {
+					if storedBlock, err := database.BlockByPoint(
+						ls.db,
+						snapshotTip.Point,
+					); err == nil {
+						parentBlockType = storedBlock.Type
+					} else {
+						ls.config.Logger.Debug(
+							"could not load persisted parent block type for envelope validation",
+							"component", "ledger",
+							"slot", snapshotTip.Point.Slot,
+							"error", err,
+						)
+					}
 				}
+				parentEnvelope = envelopeParentFromTip(
+					snapshotTip.Point.Slot,
+					snapshotTip.BlockNumber,
+					snapshotTip.Point.Hash,
+					parentBlockType,
+				)
 				parentEnvelopeSet = true
 			}
 			// Flag to enable validation after transaction commits (set inside callback,
