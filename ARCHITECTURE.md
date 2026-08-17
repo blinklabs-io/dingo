@@ -2927,6 +2927,13 @@ Package layout:
    configured backend, and orchestrates the v1 snapshot workflow;
    `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
 
+Bootstrap progress is emitted through one callback even though v2 downloads
+the ancillary ledger state and immutable archives concurrently. Each progress
+event carries its artifact kind and snapshot hash; aggregate immutable events
+also carry completed/total archive counts. Bootstrap logs add the phase,
+artifact, snapshot identity, and archive/destination paths so interleaved
+download and extraction output remains attributable to one operation.
+
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
 everything downstream of `Bootstrap()` is backend-agnostic.

@@ -600,15 +600,23 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 						(p.Percent-lastLoggedPercent) < progressLogPercentStep {
 						return
 					}
+					artifact := p.Artifact
+					if artifact == "" {
+						artifact = "unknown"
+					}
 					logger.Info(
-						fmt.Sprintf(
-							"download progress: %.1f%% (%s / %s) at %s/s",
-							p.Percent,
-							HumanBytes(p.BytesDownloaded),
-							HumanBytes(p.TotalBytes),
-							HumanBytes(int64(p.BytesPerSecond)),
-						),
+						"download progress",
 						"component", "mithril",
+						"network", network,
+						"phase", "download",
+						"artifact", artifact,
+						"snapshot_hash", p.SnapshotHash,
+						"bytes_downloaded", p.BytesDownloaded,
+						"total_bytes", p.TotalBytes,
+						"percent", p.Percent,
+						"bytes_per_second", p.BytesPerSecond,
+						"artifacts_completed", p.ArtifactsCompleted,
+						"artifacts_total", p.ArtifactsTotal,
 					)
 					lastLogTime = now
 					lastLoggedPercent = p.Percent
