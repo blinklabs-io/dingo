@@ -89,6 +89,16 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 	}
 	poolKeyHash, err := hex.DecodeString(poolID)
 	require.NoError(t, err)
+	delegators, ok := poolDelegators[poolID]
+	require.True(t, ok)
+	require.Len(t, delegators, 1)
+	delegatorHash := delegators[0].StakeKeyHash()
+	expectedStakeDelegations := map[string]string{
+		hex.EncodeToString(delegatorHash[:]): poolID,
+	}
+	actualStakeDelegations, err := genesisStakeDelegations(poolDelegators)
+	require.NoError(t, err)
+	require.Equal(t, expectedStakeDelegations, actualStakeDelegations)
 
 	ls := &LedgerState{
 		db: db,
@@ -108,6 +118,22 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 	_, delegatorCount, err := db.Metadata().GetStakeByPool(poolKeyHash, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), delegatorCount)
+}
+
+func TestGenesisStakeDelegationsRejectsConflictingPools(t *testing.T) {
+	delegator, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+
+	_, err = genesisStakeDelegations(map[string][]lcommon.Address{
+		"01": {delegator},
+		"02": {delegator},
+	})
+	require.ErrorContains(t, err, "delegated to multiple genesis pools")
 }
 
 func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {

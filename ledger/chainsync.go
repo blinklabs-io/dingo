@@ -3431,15 +3431,33 @@ func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
 // sync.
 func genesisStakeDelegations(
 	poolDelegators map[string][]lcommon.Address,
-) map[string]string {
+) (map[string]string, error) {
 	ret := make(map[string]string)
-	for poolID, delegators := range poolDelegators {
+	poolIDs := make([]string, 0, len(poolDelegators))
+	for poolID := range poolDelegators {
+		poolIDs = append(poolIDs, poolID)
+	}
+	slices.Sort(poolIDs)
+	for _, poolID := range poolIDs {
+		delegators := poolDelegators[poolID]
 		for _, delegator := range delegators {
 			stakeKeyHash := (&delegator).StakeKeyHash()
-			ret[hex.EncodeToString(stakeKeyHash[:])] = poolID
+			stakeKeyHex := hex.EncodeToString(stakeKeyHash[:])
+			if existingPoolID, ok := ret[stakeKeyHex]; ok {
+				if existingPoolID == poolID {
+					continue
+				}
+				return nil, fmt.Errorf(
+					"stake key hash %s delegated to multiple genesis pools %s and %s",
+					stakeKeyHex,
+					existingPoolID,
+					poolID,
+				)
+			}
+			ret[stakeKeyHex] = poolID
 		}
 	}
-	return ret
+	return ret, nil
 }
 
 func (ls *LedgerState) createGenesisBlock() error {
@@ -3633,7 +3651,10 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
 		}
-		genesisStake := genesisStakeDelegations(poolDelegators)
+		genesisStake, err := genesisStakeDelegations(poolDelegators)
+		if err != nil {
+			return fmt.Errorf("parse genesis stake delegations: %w", err)
+		}
 		if len(genesisPools) > 0 ||
 			len(genesisStake) > 0 {
 			ls.config.Logger.Info(
