@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"testing"
@@ -62,6 +63,51 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 		uint64(14_999_999_100_000_000),
 		uint64(state.Reserves),
 	)
+}
+
+func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	genesisPools, poolDelegators, err := nodeCfg.ShelleyGenesis().InitialPools()
+	require.NoError(t, err)
+	require.Len(t, genesisPools, 1)
+	require.Len(t, poolDelegators, 1)
+
+	var poolID string
+	for id := range genesisPools {
+		poolID = id
+	}
+	poolKeyHash, err := hex.DecodeString(poolID)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	require.NoError(t, ls.createGenesisBlock())
+
+	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pool)
+	_, delegatorCount, err := db.Metadata().GetStakeByPool(poolKeyHash, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), delegatorCount)
 }
 
 func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
