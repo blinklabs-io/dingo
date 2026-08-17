@@ -3424,6 +3424,42 @@ func GenesisBlockHash(cfg *cardano.CardanoNodeConfig) ([32]byte, error) {
 	return hash, nil
 }
 
+// genesisStakeDelegations converts the delegators returned by the Shelley
+// genesis parser into the metadata representation used by SetGenesisStaking.
+// InitialPools includes both the legacy staking fields and the Musashi
+// extraConfig fields, so using its result keeps those bootstrap formats in
+// sync.
+func genesisStakeDelegations(
+	poolDelegators map[string][]lcommon.Address,
+) (map[string]string, error) {
+	ret := make(map[string]string)
+	poolIDs := make([]string, 0, len(poolDelegators))
+	for poolID := range poolDelegators {
+		poolIDs = append(poolIDs, poolID)
+	}
+	slices.Sort(poolIDs)
+	for _, poolID := range poolIDs {
+		delegators := poolDelegators[poolID]
+		for _, delegator := range delegators {
+			stakeKeyHash := (&delegator).StakeKeyHash()
+			stakeKeyHex := hex.EncodeToString(stakeKeyHash[:])
+			if existingPoolID, ok := ret[stakeKeyHex]; ok {
+				if existingPoolID == poolID {
+					continue
+				}
+				return nil, fmt.Errorf(
+					"stake key hash %s delegated to multiple genesis pools %s and %s",
+					stakeKeyHex,
+					existingPoolID,
+					poolID,
+				)
+			}
+			ret[stakeKeyHex] = poolID
+		}
+	}
+	return ret, nil
+}
+
 func (ls *LedgerState) createGenesisBlock() error {
 	// Get the Byron genesis hash to use as the synthetic block hash.
 	// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
@@ -3611,23 +3647,27 @@ func (ls *LedgerState) createGenesisBlock() error {
 		)
 
 		// Load genesis staking data (pool registrations + delegations)
-		genesisPools, _, err := shelleyGenesis.InitialPools()
+		genesisPools, poolDelegators, err := shelleyGenesis.InitialPools()
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
 		}
+		genesisStake, err := genesisStakeDelegations(poolDelegators)
+		if err != nil {
+			return fmt.Errorf("parse genesis stake delegations: %w", err)
+		}
 		if len(genesisPools) > 0 ||
-			len(shelleyGenesis.Staking.Stake) > 0 {
+			len(genesisStake) > 0 {
 			ls.config.Logger.Info(
 				fmt.Sprintf(
 					"loading genesis staking: %d pools, %d delegations",
 					len(genesisPools),
-					len(shelleyGenesis.Staking.Stake),
+					len(genesisStake),
 				),
 				"component", "ledger",
 			)
 			if err := ls.db.SetGenesisStaking(
 				genesisPools,
-				shelleyGenesis.Staking.Stake,
+				genesisStake,
 				genesisHash[:],
 				txn,
 			); err != nil {

@@ -810,6 +810,9 @@ When `Node.Run()` is called, components are initialized in this order:
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
     verification computes an epoch nonce; only then does LedgerState subscribe
     to chainsync/blockfetch/chain-update EventBus events.
+    Fresh genesis initialization persists both genesis UTxOs and the effective
+    Shelley staking declarations, including network-specific `extraConfig`
+    pools and delegations, before snapshot capture.
 10. Snapshot manager creation, then `LedgerState.SetEpochBoundarySnapshotHook`
     wiring (authoritative epoch-boundary capture), then genesis snapshot capture
     (or reuse of an existing post-Mithril Mark snapshot window), then manager

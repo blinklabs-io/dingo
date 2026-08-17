@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"testing"
@@ -62,6 +63,77 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 		uint64(14_999_999_100_000_000),
 		uint64(state.Reserves),
 	)
+}
+
+func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	genesisPools, poolDelegators, err := nodeCfg.ShelleyGenesis().InitialPools()
+	require.NoError(t, err)
+	require.Len(t, genesisPools, 1)
+	require.Len(t, poolDelegators, 1)
+
+	var poolID string
+	for id := range genesisPools {
+		poolID = id
+	}
+	poolKeyHash, err := hex.DecodeString(poolID)
+	require.NoError(t, err)
+	delegators, ok := poolDelegators[poolID]
+	require.True(t, ok)
+	require.Len(t, delegators, 1)
+	delegatorHash := delegators[0].StakeKeyHash()
+	expectedStakeDelegations := map[string]string{
+		hex.EncodeToString(delegatorHash[:]): poolID,
+	}
+	actualStakeDelegations, err := genesisStakeDelegations(poolDelegators)
+	require.NoError(t, err)
+	require.Equal(t, expectedStakeDelegations, actualStakeDelegations)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	require.NoError(t, ls.createGenesisBlock())
+
+	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pool)
+	_, delegatorCount, err := db.Metadata().GetStakeByPool(poolKeyHash, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), delegatorCount)
+}
+
+func TestGenesisStakeDelegationsRejectsConflictingPools(t *testing.T) {
+	delegator, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		make([]byte, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+
+	_, err = genesisStakeDelegations(map[string][]lcommon.Address{
+		"01": {delegator},
+		"02": {delegator},
+	})
+	require.ErrorContains(t, err, "delegated to multiple genesis pools")
 }
 
 func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
