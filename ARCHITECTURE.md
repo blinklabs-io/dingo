@@ -986,6 +986,15 @@ All event types follow the `subsystem.snake_case_name` convention.
   `TestChainsyncResyncPublishPathsUnderLock` in
   `ledger/publish_under_lock_test.go`. Register the flush with `defer`
   *before* taking the lock so LIFO order runs it last.
+- `ledger` also must not invoke an external `BlockfetchRequestRangeFunc` while
+  holding `chainsyncBlockfetchMutex`. The blockfetch client can wait in
+  `acquireBusy` for the previous request's receive callback to return, while
+  that callback is publishing `ledger.blockfetch` and its subscriber is
+  waiting for the ledger mutex. `startQueuedBlockfetchLocked` reserves the
+  batch and arms its timer under the mutex, releases the mutex for the primary
+  and shadow requests, then reacquires it before inspecting state. If a
+  callback completed or replaced the batch while the request was outside the
+  lock, the stale request result is ignored.
 - The blast radius of such a stall is not local. `LedgerState.handleConnectionClosedEvent`
   takes `chainsyncMutex`, so a stall there stops `ledger.conn_closed` draining;
   the `node.go` handler translating `connmanager.conn_closed` into

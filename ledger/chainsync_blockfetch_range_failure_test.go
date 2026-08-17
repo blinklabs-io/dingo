@@ -43,6 +43,88 @@ var errBlockfetchNoBlocks = errors.New(
 	"request block range: block(s) not found",
 )
 
+// The production helpers named *Locked require their caller to own the
+// blockfetch mutex. Keep direct unit-test calls honest now that the helper
+// briefly releases that mutex around the external request callback.
+func startQueuedBlockfetchForTest(
+	ls *LedgerState,
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) error {
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	return ls.startQueuedBlockfetchLocked(connId, pending)
+}
+
+func restartQueuedBlockfetchAfterForkForTest(
+	ls *LedgerState,
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) error {
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	return ls.restartQueuedBlockfetchAfterForkLocked(connId, pending)
+}
+
+func handleEventBlockfetchBatchDoneForTest(
+	ls *LedgerState,
+	e BlockfetchEvent,
+	pending *pendingPublishes,
+) error {
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	return ls.handleEventBlockfetchBatchDone(e, pending)
+}
+
+func handleBlockfetchTimeoutForTest(
+	ls *LedgerState,
+	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) {
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	ls.handleBlockfetchTimeoutLocked(connId, pending)
+}
+
+// TestStartQueuedBlockfetchReleasesMutexAroundRequest models the receive-side
+// half of the production deadlock. The real blockfetch callback publishes a
+// ledger.blockfetch event, whose subscriber needs chainsyncBlockfetchMutex;
+// the request callback must therefore be able to run while that mutex is
+// available even when the caller started the batch under the lock.
+func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
+	ls, _, _ := newNoBlocksLedgerState(t, "hdr-lock-cycle")
+	defer ls.config.EventBus.Stop()
+	ls.config.BlockfetchRequestRangeFunc = func(
+		_ ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ ocommon.Point,
+	) error {
+		acquired := make(chan struct{})
+		go func() {
+			ls.chainsyncBlockfetchMutex.Lock()
+			close(acquired)
+			ls.chainsyncBlockfetchMutex.Unlock()
+		}()
+		select {
+		case <-acquired:
+			return nil
+		case <-time.After(time.Second):
+			return errors.New("blockfetch request ran while blockfetch mutex was held")
+		}
+	}
+
+	connId := testChainsyncConnId(6111, 3001)
+	ls.chainsyncBlockfetchMutex.Lock()
+	err := ls.startQueuedBlockfetchLocked(connId, nil)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, err)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
 // newNoBlocksLedgerState builds a LedgerState with one queued header whose
 // range every peer refuses with a NoBlocks error, and returns it alongside the
 // request counter and a channel of published resync events.
@@ -113,7 +195,7 @@ func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
 	for range attempts {
 		// Callers treat this error as advisory (several only log it), so
 		// the recovery cannot depend on any caller acting on it.
-		_ = ls.startQueuedBlockfetchLocked(connId, nil)
+		_ = startQueuedBlockfetchForTest(ls, connId, nil)
 	}
 
 	assert.LessOrEqual(
@@ -187,7 +269,7 @@ func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
 
 			connId := testChainsyncConnId(6110, 3001)
 			for range blockfetchMaxSameRangeFailures * 3 {
-				err := ls.startQueuedBlockfetchLocked(connId, nil)
+				err := startQueuedBlockfetchForTest(ls, connId, nil)
 				require.Error(t, err)
 			}
 
@@ -229,7 +311,7 @@ func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	for range attempts {
 		// Mirrors the fork-resolution call sites, which discard the error
 		// after logging it.
-		_ = ls.restartQueuedBlockfetchAfterForkLocked(connId, nil)
+		_ = restartQueuedBlockfetchAfterForkForTest(ls, connId, nil)
 	}
 
 	assert.LessOrEqual(
@@ -263,7 +345,7 @@ func TestBlockfetchRangeFailureClearedWhenRangeIsDelivered(t *testing.T) {
 	stuckStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
 
 	for range blockfetchMaxSameRangeFailures * 3 {
-		_ = ls.startQueuedBlockfetchLocked(connId, nil)
+		_ = startQueuedBlockfetchForTest(ls, connId, nil)
 		require.Positive(
 			t,
 			ls.chain.HeaderCount(),
@@ -313,7 +395,7 @@ func TestBlockfetchRangeFailuresAccumulatePerRangeDespiteInterleavedActivity(
 			"stuck header must be queued for attempt %d",
 			attempt,
 		)
-		_ = ls.startQueuedBlockfetchLocked(connId, nil)
+		_ = startQueuedBlockfetchForTest(ls, connId, nil)
 		if attempt == blockfetchMaxSameRangeFailures {
 			break
 		}
@@ -359,7 +441,7 @@ func TestBlockfetchRangeFailuresDoNotAccumulateAcrossDifferentRanges(
 	connId := testChainsyncConnId(6106, 3001)
 
 	for attempt := range blockfetchMaxSameRangeFailures * 3 {
-		_ = ls.startQueuedBlockfetchLocked(connId, nil)
+		_ = startQueuedBlockfetchForTest(ls, connId, nil)
 		// Each attempt is against a different queued header, as happens
 		// when the chain keeps moving and every miss is a one-off.
 		ls.clearQueuedHeaders()
@@ -457,7 +539,7 @@ func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 	for i := range emptyBatchAttempts {
 		require.NoError(
 			t,
-			ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+			handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 				ConnectionId: connId,
 				BatchDone:    true,
 			}, nil),
@@ -534,7 +616,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 	for range blockfetchMaxSameRangeFailures * 3 {
 		require.NoError(
 			t,
-			ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+			handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 				ConnectionId: connId,
 				BatchDone:    true,
 			}, nil),
@@ -545,7 +627,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 		ls.noteBlockfetchRangeProgress(queuedStart)
 		require.NoError(
 			t,
-			ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+			handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 				ConnectionId: connId,
 				BatchDone:    true,
 			}, nil),

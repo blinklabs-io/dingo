@@ -474,7 +474,7 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 		},
 	))
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -525,7 +525,7 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
 	}, nil)
@@ -1325,7 +1325,7 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		},
 	}
 
-	err := ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -1785,7 +1785,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
 		BatchDone:    true,
 	}, nil)
@@ -1833,7 +1833,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+	err = handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		BatchDone:    true,
 	}, nil)
@@ -1889,7 +1889,7 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1, nil)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	assert.Equal(t, connId2, requestedConn)
 	assert.Equal(t, connId2, ls.activeBlockfetchConnId)
@@ -1913,7 +1913,7 @@ func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId, nil)
+	handleBlockfetchTimeoutForTest(ls, connId, nil)
 
 	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
 	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
@@ -1972,7 +1972,7 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 		},
 	}
 
-	ls.handleBlockfetchTimeoutLocked(connId1, nil)
+	handleBlockfetchTimeoutForTest(ls, connId1, nil)
 
 	require.Equal(
 		t,
